@@ -37,56 +37,28 @@ function formatInput(input: unknown): string {
 }
 
 function ToolCallRow({ tool }: { tool: ToolCallItem }) {
-  const [expanded, setExpanded] = useState(false);
   const hasInput = hasInputContent(tool.input);
 
   return (
     <div className="flex flex-col">
-      <button
-        type="button"
-        onClick={() => hasInput && setExpanded((prev) => !prev)}
-        disabled={!hasInput}
-        className={cn(
-          'flex items-center gap-1.5 text-left text-[11px] text-muted-foreground',
-          hasInput ? 'hover:text-foreground' : 'cursor-default'
-        )}
-      >
-        {hasInput ? (
-          <motion.span
-            animate={{ rotate: expanded ? 90 : 0 }}
-            transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
-            className="inline-flex shrink-0"
-          >
-            <HugeiconsIcon icon={ArrowRight01Icon} size={10} />
-          </motion.span>
-        ) : (
-          <span className="inline-block size-2.5 shrink-0" />
-        )}
+      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
         <span
           className={cn(
             'size-1.5 shrink-0 rounded-full',
             tool.success === false ? 'bg-red-400' : 'bg-emerald-400'
           )}
         />
-        <span className="truncate">{tool.name}</span>
-      </button>
-
-      <AnimatePresence initial={false}>
-        {expanded && hasInput && (
-          <motion.div
-            key="tool-input"
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
-            className="overflow-hidden"
-          >
-            <pre className="mt-1 ml-4 overflow-x-auto rounded bg-muted/40 p-2 text-[10px] font-mono text-muted-foreground whitespace-pre-wrap break-words">
-              {formatInput(tool.input)}
-            </pre>
-          </motion.div>
-        )}
-      </AnimatePresence>
+        <span className="truncate font-mono">{tool.name}</span>
+      </div>
+      {hasInput ? (
+        <pre className="mt-0.5 ml-3.5 overflow-x-auto rounded bg-muted/40 p-2 text-[10px] font-mono text-muted-foreground whitespace-pre-wrap break-words">
+          {formatInput(tool.input)}
+        </pre>
+      ) : (
+        <span className="mt-0.5 ml-3.5 text-[10px] italic text-muted-foreground/70">
+          (no arguments)
+        </span>
+      )}
     </div>
   );
 }
@@ -171,7 +143,7 @@ export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
                   transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
                   className="overflow-hidden"
                 >
-                  <div className="flex flex-col gap-0.5 px-2 pb-2">
+                  <div className="flex flex-col gap-2 px-2 pb-2">
                     {message.toolCalls.map((tool, idx) => (
                       <ToolCallRow key={`${tool.name}-${idx}`} tool={tool} />
                     ))}

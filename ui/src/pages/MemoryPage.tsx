@@ -1,10 +1,17 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { callMcpTool } from '@/api/mcpClient';
-import { useSelectedProject, useIsAllProjects } from '@/stores/useProjectStore';
+import {
+  useProjectStore,
+  useProjects,
+  useSelectedProject,
+  useSelectedProjectId,
+  useIsAllProjects,
+} from '@/stores/useProjectStore';
 import { MemoryExplorer } from '@/components/memory/MemoryExplorer';
 import { MemoryNoteDetail } from '@/components/memory/MemoryNoteDetail';
 import { HugeiconsIcon } from '@hugeicons/react';
 import { Brain01Icon } from '@hugeicons/core-free-icons';
+import { cn } from '@/lib/utils';
 import type {
   MemoryListOutputSchema,
   MemorySearchOutputSchema,
@@ -144,39 +151,80 @@ export function MemoryPage() {
     [projectSlug],
   );
 
-  if (isAll || !project) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-3 text-muted-foreground">
-        <HugeiconsIcon icon={Brain01Icon} size={32} className="opacity-40" />
-        <p className="text-sm">Select a project to view its knowledge base</p>
-      </div>
-    );
-  }
+  const showEmpty = isAll || !project;
 
-  if (loading) {
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <MemoryProjectPicker />
+      {showEmpty ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 text-muted-foreground">
+          <HugeiconsIcon icon={Brain01Icon} size={32} className="opacity-40" />
+          <p className="text-sm">Select a project to view its knowledge base</p>
+        </div>
+      ) : loading ? (
+        <div className="flex flex-1 items-center justify-center">
+          <div className="h-5 w-5 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
+        </div>
+      ) : (
+        <div className="flex min-h-0 flex-1">
+          <MemoryExplorer
+            notes={notes}
+            searchQuery={searchQuery}
+            onSearchChange={handleSearchChange}
+            searchResults={searchResults}
+            selectedNoteId={selectedNoteId}
+            onSelectNote={handleSelectNote}
+            health={health}
+          />
+          <MemoryNoteDetail
+            note={selectedNote}
+            loading={detailLoading}
+            onNavigateToNote={handleNavigateToNote}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MemoryProjectPicker() {
+  const projects = useProjects();
+  const selectedProjectId = useSelectedProjectId();
+  const setSelectedProjectId = useProjectStore((state) => state.setSelectedProjectId);
+
+  if (projects.length === 0) {
     return (
-      <div className="flex h-full items-center justify-center">
-        <div className="h-5 w-5 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
+      <div className="border-b border-border/60 bg-background/40 px-4 py-2.5 text-sm text-muted-foreground">
+        No projects yet. Add one from the Repositories page.
       </div>
     );
   }
 
   return (
-    <div className="flex min-h-0 flex-1">
-      <MemoryExplorer
-        notes={notes}
-        searchQuery={searchQuery}
-        onSearchChange={handleSearchChange}
-        searchResults={searchResults}
-        selectedNoteId={selectedNoteId}
-        onSelectNote={handleSelectNote}
-        health={health}
-      />
-      <MemoryNoteDetail
-        note={selectedNote}
-        loading={detailLoading}
-        onNavigateToNote={handleNavigateToNote}
-      />
+    <div className="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-border/60 bg-background/40 px-4 py-2.5">
+      <span className="shrink-0 text-xs uppercase tracking-wide text-muted-foreground/70">Project</span>
+      <div className="flex items-center gap-1.5">
+        {projects.map((project) => {
+          const isSelected = project.id === selectedProjectId;
+          return (
+            <button
+              key={project.id}
+              type="button"
+              onClick={() => setSelectedProjectId(project.id)}
+              className={cn(
+                'group flex shrink-0 items-center gap-2 rounded-full border px-3 py-1 text-sm transition-colors',
+                isSelected
+                  ? 'border-border bg-white/[0.06] text-foreground'
+                  : 'border-border/60 bg-background text-muted-foreground hover:border-border hover:bg-white/[0.03] hover:text-foreground',
+              )}
+              aria-pressed={isSelected}
+              title={project.name}
+            >
+              <span className="truncate max-w-[12rem]">{project.name}</span>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }

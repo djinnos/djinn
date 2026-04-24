@@ -4,7 +4,7 @@ import { useTaskStore } from "@/stores/useTaskStore";
 import { useEpicStore } from "@/stores/useEpicStore";
 import { useProjects, useSelectedProjectId } from "@/stores/useProjectStore";
 import { taskStore } from "@/stores/taskStore";
-import type { Epic, Task } from "@/api/types";
+import type { Epic, Project, Task } from "@/api/types";
 import { TaskCard, DoneTaskRow } from "@/components/TaskCard";
 import { TaskDetailPanel } from "@/components/TaskDetailPanel";
 import { BoardHealthBanner } from "@/components/BoardHealthBanner";
@@ -137,6 +137,83 @@ const EPIC_STATUS_GROUPS: Array<{ key: string; label: string }> = [
   { key: "drafting", label: "Drafting" },
   { key: "closed", label: "Closed" },
 ];
+
+function ProjectFilter({
+  projects,
+  selected,
+  onChange,
+}: {
+  projects: Project[];
+  selected: string[];
+  onChange: (ids: string[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  const sorted = useMemo(
+    () =>
+      [...projects].sort((a, b) =>
+        (a.name ?? "").localeCompare(b.name ?? ""),
+      ),
+    [projects],
+  );
+
+  const toggle = (id: string) => {
+    onChange(
+      selected.includes(id)
+        ? selected.filter((s) => s !== id)
+        : [...selected, id],
+    );
+  };
+
+  const label =
+    selected.length > 0
+      ? `${selected.length} project${selected.length > 1 ? "s" : ""}`
+      : "All projects";
+
+  return (
+    <SelectorRoot open={open} onOpenChange={setOpen}>
+      <ModelSelectorTrigger
+        className={cn(
+          "flex h-8 items-center gap-1.5 rounded-lg border border-input px-3 text-sm transition-colors dark:bg-input/30",
+          selected.length > 0 ? "text-foreground" : "text-muted-foreground",
+        )}
+      >
+        {label}
+        <HugeiconsIcon
+          icon={ArrowDown01Icon}
+          size={12}
+          className="shrink-0 text-muted-foreground"
+        />
+      </ModelSelectorTrigger>
+
+      <ModelSelectorContent title="Filter by project">
+        <ModelSelectorInput placeholder="Search projects…" />
+        <ModelSelectorList>
+          <ModelSelectorEmpty>No projects found.</ModelSelectorEmpty>
+          {sorted.map((project) => (
+            <ModelSelectorItem
+              key={project.id}
+              searchValue={`${project.name} ${project.github_owner}/${project.github_repo}`}
+              onSelect={() => toggle(project.id)}
+            >
+              <ModelSelectorName>{project.name}</ModelSelectorName>
+              <span className="shrink-0 text-xs text-muted-foreground">
+                {project.github_owner}/{project.github_repo}
+              </span>
+              {selected.includes(project.id) && (
+                <HugeiconsIcon
+                  icon={Tick02Icon}
+                  size={14}
+                  className="shrink-0 text-primary"
+                />
+              )}
+            </ModelSelectorItem>
+          ))}
+        </ModelSelectorList>
+      </ModelSelectorContent>
+    </SelectorRoot>
+  );
+}
 
 function EpicFilter({
   epics,
@@ -313,6 +390,9 @@ export function KanbanBoard({
     return unsubscribe;
   }, [tasksProp]);
 
+  const [projectFilters, setProjectFilters] = useState<string[]>(
+    (searchParams.get("project") ?? "").split(",").filter(Boolean),
+  );
   const [epicFilters, setEpicFilters] = useState<string[]>(
     (searchParams.get("epic") ?? "").split(",").filter(Boolean),
   );
@@ -359,8 +439,9 @@ export function KanbanBoard({
     }
   }, [selectedProject, refreshing]);
 
-  // Reset epic filters when project changes (epic IDs are project-specific)
+  // Reset epic/project filters when global project selection changes
   useEffect(() => {
+    setProjectFilters([]);
     setEpicFilters([]);
     setSelectedTask(null);
   }, [selectedProjectId]);
@@ -374,6 +455,10 @@ export function KanbanBoard({
     if (disableSearchParamSync) return;
 
     const next = new URLSearchParams(searchParams);
+
+    if (projectFilters.length > 0)
+      next.set("project", projectFilters.join(","));
+    else next.delete("project");
 
     if (epicFilters.length > 0) next.set("epic", epicFilters.join(","));
     else next.delete("epic");
@@ -390,6 +475,7 @@ export function KanbanBoard({
 
     setSearchParams(next, { replace: true });
   }, [
+    projectFilters,
     epicFilters,
     ownerFilters,
     issueTypeFilters,
@@ -419,6 +505,11 @@ export function KanbanBoard({
     const q = textFilter.trim().toLowerCase();
 
     return tasks.filter((task) => {
+      if (
+        projectFilters.length > 0 &&
+        !projectFilters.includes(task.project_id ?? "")
+      )
+        return false;
       if (epicFilters.length > 0 && !epicFilters.includes(task.epic_id ?? ""))
         return false;
       if (ownerFilters.length > 0 && !ownerFilters.includes(task.owner ?? ""))
@@ -433,6 +524,7 @@ export function KanbanBoard({
     });
   }, [
     tasks,
+    projectFilters,
     epicFilters,
     ownerFilters,
     issueTypeFilters,
@@ -498,6 +590,12 @@ export function KanbanBoard({
   return (
     <div className="flex h-full min-h-0 flex-col gap-5 overflow-hidden px-4 pt-5 pb-2">
       <div className="flex flex-wrap items-center gap-3 border-b border-white/[0.04] px-4 pb-5">
+        <ProjectFilter
+          projects={projects}
+          selected={projectFilters}
+          onChange={setProjectFilters}
+        />
+
         <EpicFilter
           epics={epicOptions}
           selected={epicFilters}
