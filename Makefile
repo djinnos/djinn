@@ -33,7 +33,26 @@ dev: ## Start the Vite web client standalone (Tilt also runs it — this is for 
 sqlx-prepare: ## Regenerate server/.sqlx/ offline cache (uses test Dolt on :3307 via .cargo/config.toml)
 	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features mysql,rustls"; exit 1; }
 	@$(MAKE) --no-print-directory test-db-migrate
-	cd $(SERVER_DIR) && cargo sqlx prepare --workspace
+	@# Use `cargo check --all-targets --all-features` instead of `cargo sqlx prepare --workspace`:
+	@# the latter (as of sqlx-cli 0.8.6) skips test targets, so queries inside
+	@# `#[cfg(test)]` blocks silently miss the cache and break CI's offline build.
+	@rm -rf /tmp/sqlx-prepare && mkdir -p /tmp/sqlx-prepare
+	@# Force macro re-execution: touch every file with a sqlx::query call so
+	@# cargo re-runs the proc-macro. A plain `cargo check` after a clean build
+	@# would be a no-op and leave SQLX_OFFLINE_DIR empty.
+	@grep -rl --include='*.rs' 'sqlx::query' $(SERVER_DIR)/crates/ 2>/dev/null | xargs -r touch
+	@cd $(SERVER_DIR) && SQLX_OFFLINE_DIR=/tmp/sqlx-prepare cargo check --workspace --all-targets --all-features
+	@if [ -z "$$(ls -A /tmp/sqlx-prepare 2>/dev/null)" ]; then \
+		echo "ERROR: /tmp/sqlx-prepare is empty — refusing to replace .sqlx/."; \
+		echo "       Try 'cargo clean -p djinn-db' and rerun."; \
+		exit 1; \
+	fi
+	@# Replace only the query-*.json files; preserve README.md and anything
+	@# else a human committed into .sqlx/.
+	@find $(SERVER_DIR)/.sqlx -maxdepth 1 -name 'query-*.json' -delete
+	@mv /tmp/sqlx-prepare/query-*.json $(SERVER_DIR)/.sqlx/
+	@rm -rf /tmp/sqlx-prepare
+	@echo "server/.sqlx/ regenerated ($$(ls $(SERVER_DIR)/.sqlx/query-*.json | wc -l) entries) — run 'git add server/.sqlx' and commit."
 
 sqlx-check: ## Fail if server/.sqlx/ is stale vs. current queries (CI)
 	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features mysql,rustls"; exit 1; }

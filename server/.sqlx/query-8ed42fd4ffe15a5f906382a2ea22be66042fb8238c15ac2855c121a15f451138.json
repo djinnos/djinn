@@ -1,6 +1,6 @@
 {
   "db_name": "MySQL",
-  "query": "SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,\n                    s.started_at, s.ended_at,\n                    s.`status` AS \"status!\", s.tokens_in, s.tokens_out,\n                    s.task_run_id\n             FROM sessions s\n             INNER JOIN tasks t ON t.id = s.task_id\n             WHERE s.`status` = 'running' AND s.agent_type = 'planner' AND t.epic_id = ?\n             ORDER BY s.started_at DESC",
+  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                `status` AS \"status!\", tokens_in, tokens_out, task_run_id, title\n             FROM sessions\n             WHERE `status` = 'running' ORDER BY started_at DESC",
   "describe": {
     "columns": [
       {
@@ -101,10 +101,19 @@
           "flags": "",
           "max_size": 144
         }
+      },
+      {
+        "ordinal": 11,
+        "name": "title",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 1020
+        }
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 0
     },
     "nullable": [
       false,
@@ -117,8 +126,9 @@
       false,
       false,
       false,
+      true,
       true
     ]
   },
-  "hash": "f94e692b9b58e52c34cc70a0874241be7749828b89ba4df22fc9120765a0186b"
+  "hash": "8ed42fd4ffe15a5f906382a2ea22be66042fb8238c15ac2855c121a15f451138"
 }

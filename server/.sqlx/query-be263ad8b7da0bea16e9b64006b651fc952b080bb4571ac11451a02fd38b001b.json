@@ -1,6 +1,6 @@
 {
   "db_name": "MySQL",
-  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                `status` AS \"status!\", tokens_in, tokens_out, task_run_id\n             FROM sessions\n             WHERE task_id = ? AND `status` = 'running' ORDER BY started_at DESC LIMIT 1",
+  "query": "SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,\n                    s.started_at, s.ended_at,\n                    s.`status` AS \"status!\", s.tokens_in, s.tokens_out,\n                    s.task_run_id, s.title\n             FROM sessions s\n             LEFT JOIN (\n                SELECT session_id, MAX(created_at) AS last_at\n                FROM session_messages\n                GROUP BY session_id\n             ) m ON m.session_id = s.id\n             WHERE s.agent_type = 'chat'\n             ORDER BY COALESCE(m.last_at, s.started_at) DESC",
   "describe": {
     "columns": [
       {
@@ -101,10 +101,19 @@
           "flags": "",
           "max_size": 144
         }
+      },
+      {
+        "ordinal": 11,
+        "name": "title",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 1020
+        }
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 0
     },
     "nullable": [
       false,
@@ -117,8 +126,9 @@
       false,
       false,
       false,
+      true,
       true
     ]
   },
-  "hash": "4f61e844cd18ae961d11ecc990f3ff9075f54716b6b3be9f37ae035f90680d0c"
+  "hash": "be263ad8b7da0bea16e9b64006b651fc952b080bb4571ac11451a02fd38b001b"
 }

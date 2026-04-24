@@ -163,6 +163,7 @@ impl MirrorManager {
     ///   - `extensions.partialClone = origin`
     ///   - `remote.origin.promisor = true`
     ///   - `remote.origin.partialclonefilter = blob:none`
+    ///
     /// Plus an `objects/info/promisor` marker file on disk. Different
     /// mirrors on a single server can have different subsets set.
     ///

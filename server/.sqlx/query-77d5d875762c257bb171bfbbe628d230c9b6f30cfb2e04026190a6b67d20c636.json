@@ -1,6 +1,6 @@
 {
   "db_name": "MySQL",
-  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                `status` AS \"status!\", tokens_in, tokens_out, task_run_id\n             FROM sessions WHERE task_id = ? ORDER BY started_at DESC",
+  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                `status` AS \"status!\", tokens_in, tokens_out, task_run_id, title\n             FROM sessions WHERE `status` = 'running'",
   "describe": {
     "columns": [
       {
@@ -101,10 +101,19 @@
           "flags": "",
           "max_size": 144
         }
+      },
+      {
+        "ordinal": 11,
+        "name": "title",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 1020
+        }
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 0
     },
     "nullable": [
       false,
@@ -117,8 +126,9 @@
       false,
       false,
       false,
+      true,
       true
     ]
   },
-  "hash": "c83a4c0220cd6f98568f1a567f018365e5bfd58e108869afc5e02fc76adb657a"
+  "hash": "77d5d875762c257bb171bfbbe628d230c9b6f30cfb2e04026190a6b67d20c636"
 }

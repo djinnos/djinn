@@ -244,9 +244,7 @@ fn extract_tool_calls(content: &Value) -> Vec<ChatToolCallDTO> {
 /// optional `attachments` field.  Text and tool_use blocks stay in
 /// `content`.
 fn extract_attachments(content: &Value) -> Option<Value> {
-    let Some(arr) = content.as_array() else {
-        return None;
-    };
+    let arr = content.as_array()?;
     let filtered: Vec<Value> = arr
         .iter()
         .filter(|b| {
@@ -268,14 +266,12 @@ fn extract_attachments(content: &Value) -> Option<Value> {
 /// * Single text block → plain string.
 /// * Anything else → pass the array through verbatim.
 fn surface_content(content: &Value) -> Value {
-    if let Some(arr) = content.as_array() {
-        if arr.len() == 1
-            && arr[0].get("type").and_then(Value::as_str) == Some("text")
-        {
-            if let Some(t) = arr[0].get("text").and_then(Value::as_str) {
-                return Value::String(t.to_string());
-            }
-        }
+    if let Some(arr) = content.as_array()
+        && arr.len() == 1
+        && arr[0].get("type").and_then(Value::as_str) == Some("text")
+        && let Some(t) = arr[0].get("text").and_then(Value::as_str)
+    {
+        return Value::String(t.to_string());
     }
     content.clone()
 }

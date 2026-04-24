@@ -8,25 +8,9 @@ This cleanup pass stays focused on the pre-existing extracted `case` / `pattern`
 
 ## Reproducible procedure
 
-From the repo root:
-
-```bash
-python server/scripts/adr054_extracted_note_cleanup.py \
-  --db ~/.djinn/djinn.db \
-  --project /home/fernando/git/djinnos/djinn \
-  --dry-run
-```
-
-To apply the same manifest against a writable maintenance database:
-
-```bash
-python server/scripts/adr054_extracted_note_cleanup.py \
-  --db /path/to/writable/djinn.db \
-  --project /home/fernando/git/djinnos/djinn \
-  --apply
-```
-
-If the selected database is mounted read-only, the script exits non-zero and emits the same before/projected-after evidence plus a writable-database hint.
+The manifest-driven cleanup script (`server/scripts/adr054_extracted_note_cleanup.py`)
+was removed after the pass landed on 2026-04-14. Restore from git history if you
+need to re-run the same shape of cleanup against a new corpus.
 
 ## Cleanup categories reconciled in this pass
 

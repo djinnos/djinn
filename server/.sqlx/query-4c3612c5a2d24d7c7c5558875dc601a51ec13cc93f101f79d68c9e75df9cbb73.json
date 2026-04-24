@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "UPDATE sessions SET title = ? WHERE id = ? AND agent_type = 'chat'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "4c3612c5a2d24d7c7c5558875dc601a51ec13cc93f101f79d68c9e75df9cbb73"
+}

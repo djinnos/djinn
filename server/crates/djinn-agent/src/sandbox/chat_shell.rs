@@ -258,13 +258,13 @@ impl ChatShellSandbox {
             .spawn()
             .map_err(ChatShellError::SpawnFailed)?;
 
-        if let Some(stdin_bytes) = req.stdin {
-            if let Some(mut stdin) = child.stdin.take() {
-                use tokio::io::AsyncWriteExt;
-                // Best-effort: a read-only child might close stdin early.
-                let _ = stdin.write_all(&stdin_bytes).await;
-                let _ = stdin.shutdown().await;
-            }
+        if let Some(stdin_bytes) = req.stdin
+            && let Some(mut stdin) = child.stdin.take()
+        {
+            use tokio::io::AsyncWriteExt;
+            // Best-effort: a read-only child might close stdin early.
+            let _ = stdin.write_all(&stdin_bytes).await;
+            let _ = stdin.shutdown().await;
         }
 
         let stdout = child.stdout.take().expect("stdout piped");
@@ -397,7 +397,7 @@ fn validate_git(argv: &[String]) -> Result<(), ChatShellError> {
 fn validate_find(argv: &[String]) -> Result<(), ChatShellError> {
     for a in &argv[1..] {
         let a = a.as_str();
-        if FIND_ARG_DENYLIST.iter().any(|bad| a == *bad) {
+        if FIND_ARG_DENYLIST.contains(&a) {
             return Err(ChatShellError::DisallowedCommand(format!("find {a}")));
         }
         // `-fprint`, `-fprintf`, `-fprint0` all start with `-fprint` — catch
@@ -542,7 +542,7 @@ fn apply_seccomp() -> io::Result<()> {
     let arch: seccompiler::TargetArch = std::env::consts::ARCH
         .try_into()
         .map_err(|e: seccompiler::BackendError| {
-            io::Error::new(io::ErrorKind::Other, format!("seccomp arch: {e}"))
+            io::Error::other(format!("seccomp arch: {e}"))
         })?;
 
     let filter = SeccompFilter::new(
@@ -553,12 +553,12 @@ fn apply_seccomp() -> io::Result<()> {
         SeccompAction::Errno(libc::EPERM as u32),
         arch,
     )
-    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("seccomp filter: {e}")))?;
+    .map_err(|e| io::Error::other(format!("seccomp filter: {e}")))?;
 
     let program: BpfProgram = filter
         .try_into()
         .map_err(|e: seccompiler::BackendError| {
-            io::Error::new(io::ErrorKind::Other, format!("seccomp compile: {e}"))
+            io::Error::other(format!("seccomp compile: {e}"))
         })?;
 
     seccompiler::apply_filter(&program)

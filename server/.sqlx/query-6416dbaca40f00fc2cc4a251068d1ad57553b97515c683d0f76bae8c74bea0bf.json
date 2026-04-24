@@ -1,6 +1,6 @@
 {
   "db_name": "MySQL",
-  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                `status` AS \"status!\", tokens_in, tokens_out, task_run_id\n             FROM sessions\n             WHERE task_id = ? AND `status` = 'paused' ORDER BY started_at DESC LIMIT 1",
+  "query": "SELECT id, name,\n                  github_owner AS \"github_owner!: String\",\n                  github_repo AS \"github_repo!: String\",\n                  created_at, target_branch,\n                  auto_merge AS \"auto_merge!: bool\",\n                  sync_enabled AS \"sync_enabled!: bool\",\n                  sync_remote\n           FROM projects WHERE id = ?",
   "describe": {
     "columns": [
       {
@@ -14,25 +14,25 @@
       },
       {
         "ordinal": 1,
-        "name": "project_id",
+        "name": "name",
         "type_info": {
           "type": "VarString",
-          "flags": "",
-          "max_size": 144
+          "flags": "NOT_NULL",
+          "max_size": 1020
         }
       },
       {
         "ordinal": 2,
-        "name": "task_id",
+        "name": "github_owner!: String",
         "type_info": {
           "type": "VarString",
-          "flags": "",
-          "max_size": 144
+          "flags": "NOT_NULL",
+          "max_size": 1020
         }
       },
       {
         "ordinal": 3,
-        "name": "model_id",
+        "name": "github_repo!: String",
         "type_info": {
           "type": "VarString",
           "flags": "NOT_NULL",
@@ -41,7 +41,7 @@
       },
       {
         "ordinal": 4,
-        "name": "agent_type",
+        "name": "created_at",
         "type_info": {
           "type": "VarString",
           "flags": "NOT_NULL",
@@ -50,56 +50,38 @@
       },
       {
         "ordinal": 5,
-        "name": "started_at",
+        "name": "target_branch",
         "type_info": {
           "type": "VarString",
           "flags": "NOT_NULL",
-          "max_size": 256
+          "max_size": 1020
         }
       },
       {
         "ordinal": 6,
-        "name": "ended_at",
+        "name": "auto_merge!: bool",
         "type_info": {
-          "type": "VarString",
-          "flags": "",
-          "max_size": 256
+          "type": "Tiny",
+          "flags": "NOT_NULL",
+          "max_size": 4
         }
       },
       {
         "ordinal": 7,
-        "name": "status!",
+        "name": "sync_enabled!: bool",
         "type_info": {
-          "type": "VarString",
+          "type": "Tiny",
           "flags": "NOT_NULL",
-          "max_size": 256
+          "max_size": 4
         }
       },
       {
         "ordinal": 8,
-        "name": "tokens_in",
-        "type_info": {
-          "type": "LongLong",
-          "flags": "NOT_NULL",
-          "max_size": 20
-        }
-      },
-      {
-        "ordinal": 9,
-        "name": "tokens_out",
-        "type_info": {
-          "type": "LongLong",
-          "flags": "NOT_NULL",
-          "max_size": 20
-        }
-      },
-      {
-        "ordinal": 10,
-        "name": "task_run_id",
+        "name": "sync_remote",
         "type_info": {
           "type": "VarString",
           "flags": "",
-          "max_size": 144
+          "max_size": 2048
         }
       }
     ],
@@ -108,17 +90,15 @@
     },
     "nullable": [
       false,
-      true,
-      true,
       false,
       false,
       false,
-      true,
+      false,
       false,
       false,
       false,
       true
     ]
   },
-  "hash": "82bc8e0cfbfc6dc1ce4c729202a543135a13e60fc3b87e788c2c771e637782a2"
+  "hash": "6416dbaca40f00fc2cc4a251068d1ad57553b97515c683d0f76bae8c74bea0bf"
 }

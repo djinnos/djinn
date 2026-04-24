@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "DELETE FROM sessions WHERE id = ? AND agent_type = 'chat'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "2bdc9b00ff52872e11e877c3aa1e3b5fe7d4cb063495e8e031c6b52f5806ae0d"
+}

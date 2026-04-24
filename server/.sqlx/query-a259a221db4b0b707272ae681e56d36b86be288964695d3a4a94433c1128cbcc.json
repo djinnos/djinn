@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT IGNORE INTO sessions\n                (id, project_id, task_id, model_id, agent_type, `status`,\n                 created_by_user_id, task_run_id, title)\n             VALUES (?, NULL, NULL, ?, 'chat', 'running', ?, NULL, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "a259a221db4b0b707272ae681e56d36b86be288964695d3a4a94433c1128cbcc"
+}

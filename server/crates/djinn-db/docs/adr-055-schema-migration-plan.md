@@ -100,45 +100,9 @@ Given a SQLite database path, the helper:
 
 ### Typical usage
 
-From `server/`:
-
-```bash
-python3 scripts/adr055_sqlite_to_dolt_import.py \
-  --sqlite /path/to/djinn.db \
-  --output-dir tmp/adr055-migration \
-  --force
-```
-
-If you want the generated SQL to include the staged schema snapshot for a fresh scratch database:
-
-```bash
-python3 scripts/adr055_sqlite_to_dolt_import.py \
-  --sqlite /path/to/djinn.db \
-  --output-dir tmp/adr055-migration \
-  --force \
-  --initialize-schema
-```
-
-To run the rollback-backed verification directly against a disposable MySQL/Dolt database:
-
-```bash
-MYSQL_PWD=secret python3 scripts/adr055_sqlite_to_dolt_import.py \
-  --sqlite /path/to/djinn.db \
-  --output-dir tmp/adr055-migration \
-  --force \
-  --validate-live \
-  --mysql-database djinn_adr055_scratch \
-  --mysql-host 127.0.0.1 \
-  --mysql-port 3306 \
-  --mysql-user root
-```
-
-The helper exits non-zero if:
-
-- a required source table is missing from SQLite
-- the mysql client cannot be invoked for live validation
-- any `VERIFY_COUNT` expected/actual values differ
-- the target does not emit verification rows for all tracked tables
+The SQLite→Dolt export/import helper (`server/scripts/adr055_sqlite_to_dolt_import.py`)
+was removed after the migration landed. Restore from git history if you need to
+re-run the same flow.
 
 ### Dry-run and rollback guidance
 
