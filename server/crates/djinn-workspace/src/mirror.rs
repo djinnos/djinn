@@ -157,33 +157,34 @@ impl MirrorManager {
 
     /// Promote a pre-existing blobless mirror to a full mirror.
     ///
-    /// Old mirrors were cloned with `--filter=blob:none`, which leaves
-    /// `extensions.partialClone` set in the repo config and a
-    /// `objects/info/promisor` file pointing at `origin`. Ephemeral
-    /// clones of such a mirror still work, but they're no longer
-    /// hardlink-and-alternates-only — any missing blob triggers a
-    /// lazy fetch at read time. The chat shell runs with
-    /// `CLONE_NEWNET`, so a lazy fetch inside the sandbox fails with
-    /// network-unreachable and the tool call errors out.
+    /// Old mirrors were cloned with `--filter=blob:none`. Git records
+    /// partialness across THREE different places in repo config
+    /// depending on version/client:
+    ///   - `extensions.partialClone = origin`
+    ///   - `remote.origin.promisor = true`
+    ///   - `remote.origin.partialclonefilter = blob:none`
+    /// Plus an `objects/info/promisor` marker file on disk. Different
+    /// mirrors on a single server can have different subsets set.
     ///
     /// The backfill strategy is:
-    ///   1. Detect partial-clone state via `git config --get
-    ///      extensions.partialClone`. Unset → already full → no-op.
-    ///   2. `git fetch --refetch` with an explicit
+    ///   1. Probe every partialness signal. If ALL are clear → already
+    ///      full → no-op. Otherwise proceed.
+    ///   2. Unset all three config keys BEFORE the refetch — leaving
+    ///      `remote.origin.partialclonefilter` set would make
+    ///      `git fetch --refetch` itself apply `blob:none`, so the
+    ///      refetch would be a no-op with respect to blobs.
+    ///   3. `git fetch --refetch` with an explicit
     ///      `+refs/heads/*:refs/heads/* +refs/tags/*:refs/tags/*`
-    ///      refspec so every branch and tag is re-fetched with
-    ///      promisor blobs materialised locally.
-    ///   3. Unset `extensions.partialClone` and remove the
-    ///      `objects/info/promisor` marker so subsequent fetches
-    ///      don't re-enter partial-clone semantics. Bare repos put
-    ///      the marker at `objects/info/promisor`; non-bare repos
-    ///      put it at `.git/objects/info/promisor`. Handle both
-    ///      layouts; missing files are ignored.
+    ///      refspec so every branch and tag is re-fetched with all
+    ///      blobs materialised locally.
+    ///   4. Remove the `objects/info/promisor` marker. Bare and
+    ///      non-bare repos put it in different locations; handle both.
     ///
-    /// Idempotent: running twice on an already-full mirror is a
-    /// fast no-op (step 1 short-circuits). `git fetch --refetch` is
-    /// itself idempotent so a partial run (e.g. process killed
-    /// mid-fetch) is safe to retry.
+    /// Idempotent: running twice on an already-full mirror is a fast
+    /// no-op (step 1 short-circuits). `git config --unset` on an
+    /// already-unset key exits 5; that's treated as success.
+    /// `git fetch --refetch` is itself idempotent so a partial run
+    /// (e.g. process killed mid-fetch) is safe to retry.
     pub async fn ensure_full_mirror(&self, project_id: &str) -> Result<(), MirrorError> {
         let mirror = self.mirror_path(project_id);
         if !mirror.exists() {
@@ -193,26 +194,45 @@ impl MirrorManager {
         let lock = self.lock_for(project_id).await;
         let _held = lock.lock().await;
 
-        // `git config --get` exits 1 when the key is unset; treat
-        // that specifically as "already full, nothing to do" rather
-        // than a hard error.
-        let partial_clone = run_git_command(
-            mirror.clone(),
-            vec![
-                "config".into(),
-                "--get".into(),
-                "extensions.partialClone".into(),
-            ],
-        )
-        .await;
-        match partial_clone {
-            Ok(out) if out.stdout.trim().is_empty() => return Ok(()),
-            Ok(_) => { /* value present — fall through and backfill */ }
-            Err(djinn_git::GitError::CommandFailed { code: 1, .. }) => return Ok(()),
-            Err(e) => return Err(git_err_to_mirror("git config --get", e)),
+        let partial_keys = [
+            "extensions.partialClone",
+            "remote.origin.promisor",
+            "remote.origin.partialclonefilter",
+        ];
+        let promisor_markers = [
+            mirror.join(".git/objects/info/promisor"),
+            mirror.join("objects/info/promisor"),
+        ];
+
+        // Probe every signal. If all config keys are unset AND no
+        // promisor marker exists, the mirror is fully hydrated.
+        let mut any_partial_signal = false;
+        for key in partial_keys {
+            if config_key_is_set(&mirror, key).await? {
+                any_partial_signal = true;
+                break;
+            }
+        }
+        if !any_partial_signal {
+            for marker in &promisor_markers {
+                if tokio::fs::try_exists(marker).await.unwrap_or(false) {
+                    any_partial_signal = true;
+                    break;
+                }
+            }
+        }
+        if !any_partial_signal {
+            return Ok(());
         }
 
         info!(project_id, path = ?mirror, "backfilling full mirror");
+
+        // Unset partial-clone config FIRST so the refetch isn't
+        // itself filtered. `--unset` exits 5 when the key doesn't
+        // exist; treat that as success.
+        for key in partial_keys {
+            unset_config_key(&mirror, key).await?;
+        }
 
         run_git_command(
             mirror.clone(),
@@ -227,26 +247,10 @@ impl MirrorManager {
         .await
         .map_err(|e| git_err_to_mirror("git fetch --refetch", e))?;
 
-        run_git_command(
-            mirror.clone(),
-            vec![
-                "config".into(),
-                "--unset".into(),
-                "extensions.partialClone".into(),
-            ],
-        )
-        .await
-        .map_err(|e| git_err_to_mirror("git config --unset", e))?;
-
-        // Bare and non-bare repos place the promisor marker in
-        // different locations; neither is required to exist once
-        // `extensions.partialClone` is gone, so NotFound on either
-        // path is a success case.
-        for candidate in [
-            mirror.join(".git/objects/info/promisor"),
-            mirror.join("objects/info/promisor"),
-        ] {
-            match tokio::fs::remove_file(&candidate).await {
+        // Remove the promisor marker last so an interrupted backfill
+        // (marker still present) would re-enter on next call.
+        for marker in promisor_markers {
+            match tokio::fs::remove_file(&marker).await {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(MirrorError::Io(e)),
@@ -358,6 +362,38 @@ impl MirrorManager {
         .map_err(|e| git_err_to_mirror("git clone --local", e))?;
 
         Ok(Workspace::new(dir, branch.to_string()))
+    }
+}
+
+/// Is `key` set in the repo config at `mirror`? `git config --get`
+/// exits 1 when the key is unset — treat that as "not set" rather
+/// than an error.
+async fn config_key_is_set(mirror: &Path, key: &str) -> Result<bool, MirrorError> {
+    let out = run_git_command(
+        mirror.to_path_buf(),
+        vec!["config".into(), "--get".into(), key.to_string()],
+    )
+    .await;
+    match out {
+        Ok(o) => Ok(!o.stdout.trim().is_empty()),
+        Err(djinn_git::GitError::CommandFailed { code: 1, .. }) => Ok(false),
+        Err(e) => Err(git_err_to_mirror("git config --get", e)),
+    }
+}
+
+/// Unset `key` in the repo config at `mirror`. `git config --unset`
+/// exits 5 when the key doesn't exist — treat that as success so
+/// this function is idempotent on already-clean repos.
+async fn unset_config_key(mirror: &Path, key: &str) -> Result<(), MirrorError> {
+    let out = run_git_command(
+        mirror.to_path_buf(),
+        vec!["config".into(), "--unset".into(), key.to_string()],
+    )
+    .await;
+    match out {
+        Ok(_) => Ok(()),
+        Err(djinn_git::GitError::CommandFailed { code: 5, .. }) => Ok(()),
+        Err(e) => Err(git_err_to_mirror("git config --unset", e)),
     }
 }
 
