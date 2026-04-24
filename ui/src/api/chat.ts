@@ -44,7 +44,7 @@ export interface SendChatMessageOptions {
 export async function sendChatMessage(
   messages: ChatMessage[],
   model: string,
-  projectSlug: string | null,
+  _projectSlug: string | null,
   onDelta: (text: string) => void,
   onToolCall: (name: string) => void,
   onDone: () => void,
@@ -55,6 +55,9 @@ export async function sendChatMessage(
     const baseUrl = await getBaseUrl();
     let completedText = "";
 
+    // Chat is user-scoped, globally multi-project (chat-user-global refactor).
+    // The request body no longer carries a `project` field — per-tool calls
+    // specify their target project via the tool's `project` argument.
     const response = await fetch(`${baseUrl}/api/chat/completions`, {
       method: "POST",
       headers: {
@@ -67,7 +70,6 @@ export async function sendChatMessage(
           content: messageToContent(message),
         })),
         model,
-        project: projectSlug,
       }),
       signal: options?.signal,
     });

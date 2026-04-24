@@ -21,34 +21,51 @@
 //! must name its target.  Worker/architect schemas are unchanged — their
 //! project context comes from the pinned task worktree, not a tool arg.
 
-use std::path::Path;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
 use rmcp::model::Tool as RmcpTool;
 use rmcp::object;
 
 use crate::context::AgentContext;
+#[cfg(target_os = "linux")]
+use crate::sandbox::chat_shell::{ChatShellError, ChatShellRequest, ChatShellSandbox};
 
 // ─── Chat-specific tool schemas ──────────────────────────────────────────
 
 /// Chat-facing `shell`.  Adds a required `project` argument; worker/architect
 /// schema (`extension::tool_defs::tool_shell`) keeps the task-worktree
 /// signature unchanged.
+///
+/// `argv` is an array; `/bin/sh -c` is deliberately not available.  The
+/// first token must be on the
+/// [`crate::sandbox::chat_shell`] command allowlist.
 fn tool_chat_shell() -> RmcpTool {
     RmcpTool::new(
         "shell".to_string(),
         "Execute a read-only shell command against the named project's \
-         ephemeral clone. Commands run from the clone root."
+         ephemeral clone. `argv` is an array of strings: the first element \
+         is matched against a fixed allowlist (cat, ls, find, grep, rg, head, \
+         tail, wc, sort, uniq, tr, awk, sed, jq, file, stat, du, tree, git, \
+         env, echo, printf, pwd, basename, dirname, realpath, readlink, \
+         test, xargs, date). No shell interpreter is available. Commands \
+         run from the clone root."
             .to_string(),
         object!({
             "type": "object",
-            "required": ["project", "command"],
+            "required": ["project", "argv"],
             "properties": {
                 "project": {
                     "type": "string",
                     "description": "Project slug (owner/repo) or UUID. Required on every call — chat sessions are not pinned to a project."
                 },
-                "command": {"type": "string", "description": "Shell command to execute"},
-                "timeout_ms": {"type": "integer", "description": "Timeout in milliseconds (default 120000)"}
+                "argv": {
+                    "type": "array",
+                    "description": "Argv vector. First element is the command; remaining elements are arguments.",
+                    "items": { "type": "string" },
+                    "minItems": 1
+                }
             }
         }),
     )
@@ -131,17 +148,87 @@ pub fn is_chat_extension_tool(name: &str) -> bool {
 
 // ─── Chat-specific handlers ──────────────────────────────────────────────
 
-/// Chat-facing `shell`.  Thin wrapper over
-/// [`crate::extension::handlers::call_shell`].
-///
-/// TODO(commit 6): wrap the spawn in [`djinn_agent::sandbox::chat_shell::ChatShellSandbox::run`]
-/// once the chat handler supplies the sandbox instance.  For now the call
-/// runs unsandboxed; commit 6 flips it.
+/// Parse + validate the `argv` tool argument.  Shared by every platform.
+fn parse_chat_shell_argv(
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<Vec<String>, String> {
+    let argv: Vec<String> = match arguments.as_ref().and_then(|m| m.get("argv")) {
+        Some(serde_json::Value::Array(items)) => {
+            let mut out = Vec::with_capacity(items.len());
+            for v in items {
+                let Some(s) = v.as_str() else {
+                    return Err("shell: every `argv` element must be a string".to_owned());
+                };
+                out.push(s.to_owned());
+            }
+            out
+        }
+        Some(_) => {
+            return Err("shell: `argv` must be an array of strings".to_owned());
+        }
+        None => return Err("shell: missing required `argv` array".to_owned()),
+    };
+    if argv.is_empty() {
+        return Err("shell: `argv` must not be empty".to_owned());
+    }
+    Ok(argv)
+}
+
+/// Chat-facing `shell`.  Runs every invocation inside a
+/// [`ChatShellSandbox`] (landlock + netns + pid-ns + seccomp + rlimits +
+/// env scrub + argv allowlist + stdout cap).  No shell interpreter is
+/// reachable; callers pass `argv` as an array and the first element is
+/// matched against the sandbox's command allowlist.
+#[cfg(target_os = "linux")]
 pub async fn call_chat_shell(
     clone_path: &Path,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    crate::extension::handlers::call_shell(arguments, clone_path).await
+    let argv = parse_chat_shell_argv(arguments)?;
+
+    let sandbox = ChatShellSandbox::new(clone_path.to_path_buf());
+    let request = ChatShellRequest {
+        argv,
+        cwd: None,
+        stdin: None,
+    };
+
+    let result = sandbox.run(request).await.map_err(|err| match err {
+        ChatShellError::DisallowedCommand(name) => format!("disallowed command: {name}"),
+        ChatShellError::InvalidArgv => "shell: invalid argv".to_owned(),
+        ChatShellError::CwdOutsideClone => {
+            "shell: cwd escaped clone root".to_owned()
+        }
+        ChatShellError::SpawnFailed(e) => format!("shell: spawn failed: {e}"),
+        ChatShellError::Interrupted => "shell: interrupted".to_owned(),
+    })?;
+
+    let stdout = String::from_utf8_lossy(&result.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&result.stderr).into_owned();
+    Ok(serde_json::json!({
+        "ok": result.exit_code == Some(0),
+        "exit_code": result.exit_code,
+        "stdout": stdout,
+        "stderr": stderr,
+        "truncated": result.truncated,
+        "timed_out": result.timed_out,
+        "elapsed_ms": result.elapsed.as_millis() as u64,
+    }))
+}
+
+/// Non-Linux stub: the chat shell sandbox requires Linux-only primitives
+/// (Landlock, namespaces, seccomp).  On other platforms we refuse every
+/// invocation instead of silently falling through to an unsandboxed
+/// bash.
+#[cfg(not(target_os = "linux"))]
+pub async fn call_chat_shell(
+    _clone_path: &Path,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    // Still validate argv so the schema error path is exercised on every
+    // platform.
+    let _argv = parse_chat_shell_argv(arguments)?;
+    Err("shell: chat sandbox is only available on Linux".to_owned())
 }
 
 /// Chat-facing `read`.  Thin wrapper over
@@ -176,49 +263,109 @@ pub async fn call_project_list(state: &AgentContext) -> Result<serde_json::Value
 
 // ─── Dispatcher ──────────────────────────────────────────────────────────
 
+/// A resolved project — produced by the server-side `ProjectResolver`
+/// and handed into [`dispatch_chat_tool`] per tool call.
+#[derive(Debug, Clone)]
+pub struct ChatResolvedProject {
+    pub id: String,
+    pub clone_path: PathBuf,
+}
+
+/// Async callback that turns a `project` tool-arg into a resolved
+/// `(id, clone_path)` tuple.  Implemented on the server side by the
+/// `ProjectResolver` + `ChatCloneCache` + authz check combo; kept as a
+/// boxed future here so `djinn-agent` stays free of a `djinn-server`
+/// dependency.
+pub type ChatProjectResolveFn<'a> = &'a (dyn Fn(
+    String,
+) -> Pin<
+    Box<dyn Future<Output = Result<ChatResolvedProject, String>> + Send + 'a>,
+> + Send
+              + Sync
+              + 'a);
+
 /// Dispatch a chat extension tool call.
 ///
-/// `project_root` is the clone path for the project named in
-/// `args["project"]`.  Commit 6 will wire a real `ChatProjectResolver` into
-/// the chat handler that resolves the tool-arg project per call against
-/// the session's `user_id`, authz-checks it, and produces the
-/// `(project_id, clone_path)` tuple passed here.
+/// For tools that need a project (shell, read, code_graph,
+/// pr_review_context), we extract `args["project"]` (a slug or UUID),
+/// call `resolve` to turn it into a `ChatResolvedProject`, and pass the
+/// resulting `(project_id, clone_path)` into the handler.  For tools
+/// that don't need a project (github_search with no `project`,
+/// project_list), the resolver is skipped.
 ///
-/// `project_id` is the resolved UUID — forwarded to tools that need it
-/// (e.g. `code_graph`, `github_search`).
-pub async fn dispatch_chat_tool(
+/// A missing `project` argument on a project-required tool produces a
+/// tool-level error — never a panic and never a session-level failure.
+pub async fn dispatch_chat_tool<'a>(
     state: &AgentContext,
     name: &str,
     args: serde_json::Value,
-    project_root: &Path,
-    project_id: &str,
+    resolve: ChatProjectResolveFn<'a>,
 ) -> Result<serde_json::Value, String> {
     use crate::extension::handlers;
 
     let arguments = args.as_object().cloned();
-    // ADR-050 Chunk C: respect `working_root` if the caller installed one on
-    // the AgentContext (e.g. the chat first-use hook resolves the canonical
-    // index-tree path).  Falls back to the supplied `project_root`.
-    let effective_root = state.working_root_for(project_root);
-    let effective_root_str = effective_root.to_string_lossy().into_owned();
+
+    // Pluck out the `project` arg once; tools that don't need it ignore
+    // the result.
+    let project_arg = arguments
+        .as_ref()
+        .and_then(|m| m.get("project"))
+        .and_then(|v| v.as_str())
+        .map(ToOwned::to_owned);
+
+    // Helper to resolve lazily — only tools that need a project pay the cost.
+    async fn require_project<'a>(
+        name: &str,
+        project_arg: &Option<String>,
+        resolve: ChatProjectResolveFn<'a>,
+    ) -> Result<ChatResolvedProject, String> {
+        let Some(project) = project_arg.as_ref() else {
+            return Err(format!(
+                "tool '{name}' requires a 'project' argument (slug or UUID)"
+            ));
+        };
+        if project.trim().is_empty() {
+            return Err(format!(
+                "tool '{name}' requires a non-empty 'project' argument"
+            ));
+        }
+        resolve(project.clone()).await
+    }
+
     match name {
-        "shell" => call_chat_shell(&effective_root, &arguments).await,
-        "read" => call_chat_read(state, &effective_root, &arguments).await,
+        "shell" => {
+            let resolved = require_project(name, &project_arg, resolve).await?;
+            call_chat_shell(&resolved.clone_path, &arguments).await
+        }
+        "read" => {
+            let resolved = require_project(name, &project_arg, resolve).await?;
+            call_chat_read(state, &resolved.clone_path, &arguments).await
+        }
         "code_graph" => {
-            handlers::call_code_graph(state, &arguments, project_id, &effective_root_str).await
+            let resolved = require_project(name, &project_arg, resolve).await?;
+            let clone_path_str = resolved.clone_path.to_string_lossy().into_owned();
+            handlers::call_code_graph(state, &arguments, &resolved.id, &clone_path_str).await
         }
         "pr_review_context" => {
-            // Route through the MCP server so chat and architect share one
-            // implementation — the meta-tool lives in djinn-control-plane.
-            let server =
-                djinn_control_plane::server::DjinnMcpServer::new(state.to_mcp_state());
+            // `pr_review_context` takes `project` already; route through
+            // the MCP server so chat and architect share one implementation.
+            // We do NOT acquire an ephemeral clone here — the meta-tool
+            // reads from Dolt + the bare mirror directly.
+            let server = djinn_control_plane::server::DjinnMcpServer::new(state.to_mcp_state());
             let args_value = arguments
                 .map(serde_json::Value::Object)
                 .unwrap_or(serde_json::Value::Object(Default::default()));
             server.dispatch_tool("pr_review_context", args_value).await
         }
         "github_search" => {
-            handlers::call_github_search(state, &arguments, Some(project_id)).await
+            // `project` is optional on github_search (cross-repo search is
+            // a legitimate use); only resolve when supplied.
+            let resolved = if project_arg.is_some() {
+                Some(require_project(name, &project_arg, resolve).await?)
+            } else {
+                None
+            };
+            handlers::call_github_search(state, &arguments, resolved.as_ref().map(|r| r.id.as_str())).await
         }
         "project_list" => call_project_list(state).await,
         _ => Err(format!("unknown chat extension tool: {name}")),

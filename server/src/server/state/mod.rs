@@ -25,7 +25,7 @@ use djinn_k8s::{K8sGraphWarmer, KubernetesConfig};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_provider::github_app::AppConfig as GitHubAppConfig;
 use djinn_runtime::GraphWarmerService;
-use djinn_workspace::{MirrorManager, mirrors_root};
+use djinn_workspace::{ChatCloneCache, DEFAULT_CHAT_CLONE_ROOT, MirrorManager, mirrors_root};
 
 mod canonical_graph_refresh_planner;
 mod settings;
@@ -129,14 +129,12 @@ struct Inner {
     /// mutex.  Combined with the `CARGO_BUILD_JOBS` cap this prevents
     /// the parallel-indexer cc-fanout meltdown.
     pub indexer_lock: Arc<tokio::sync::Mutex<()>>,
-    /// Per-chat-session cache of canonical working roots, keyed by
-    /// `(session_id, project_id)`.  The first chat completion request for
-    /// a session calls `ensure_canonical_graph` and stores the returned
-    /// index-tree path here; subsequent requests in the same session reuse
-    /// the cached path and skip the warming call entirely (avoiding the
-    /// per-request `git fetch` probe and worktree-add probe).  ADR-050
-    /// Chunk C cleanup.
-    pub chat_warmed_sessions: Arc<std::sync::Mutex<HashMap<(String, String), PathBuf>>>,
+    /// Ephemeral-clone cache for the chat subsystem (chat-user-global §3).
+    /// Keyed by `(chat_session_id, project_id)`; each entry is a
+    /// `git clone --local --shared` of the project's bare mirror rooted
+    /// under `/var/tmp/djinn-chat/`.  Acquired per tool call by the
+    /// [`ProjectResolver`]; released wholesale on session end.
+    pub chat_clone_cache: Arc<ChatCloneCache>,
     /// Single-flight gate for background canonical-graph warm tasks spawned
     /// by the in-process graph warmer (`build_in_process_graph_warmer`).
     /// Keyed by `project_id`: membership means a detached warm task is
@@ -214,6 +212,11 @@ impl AppState {
         cancel: CancellationToken,
     ) -> Self {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        let mirror = Arc::new(MirrorManager::new(mirrors_root()));
+        let chat_clone_cache = Arc::new(ChatCloneCache::new(
+            Arc::clone(&mirror),
+            PathBuf::from(DEFAULT_CHAT_CLONE_ROOT),
+        ));
         Self {
             inner: Arc::new(Inner {
                 db,
@@ -232,11 +235,11 @@ impl AppState {
                 active_tasks: djinn_agent::context::ActivityTracker::default(),
                 embedding_service: EmbeddingService::new(default_embedding_cache_dir()),
                 indexer_lock: Arc::new(tokio::sync::Mutex::new(())),
-                chat_warmed_sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                chat_clone_cache,
                 canonical_warm_inflight: Arc::new(std::sync::Mutex::new(HashSet::new())),
                 memory_mount: Mutex::new(None),
                 app_config: tokio::sync::RwLock::new(None),
-                mirror: Arc::new(MirrorManager::new(mirrors_root())),
+                mirror,
                 rpc_server: tokio::sync::Mutex::new(None),
                 rpc_registry: Arc::new(ConnectionRegistry::new()),
                 image_controller: tokio::sync::RwLock::new(None),
@@ -539,35 +542,11 @@ impl AppState {
             .remove(project_id);
     }
 
-    /// Look up a previously cached canonical working root for a chat
-    /// session, if one was already warmed this process lifetime.  ADR-050
-    /// Chunk C cleanup.
-    pub fn chat_session_warmed_root(&self, session_id: &str, project_id: &str) -> Option<PathBuf> {
-        self.inner
-            .chat_warmed_sessions
-            .lock()
-            .expect("poisoned")
-            .get(&(session_id.to_string(), project_id.to_string()))
-            .cloned()
-    }
-
-    /// Record the canonical working root for a chat session so subsequent
-    /// requests on the same session can skip the warming call entirely.
-    /// ADR-050 Chunk C cleanup.
-    pub fn chat_session_record_warmed(
-        &self,
-        session_id: &str,
-        project_id: &str,
-        working_root: PathBuf,
-    ) {
-        self.inner
-            .chat_warmed_sessions
-            .lock()
-            .expect("poisoned")
-            .insert(
-                (session_id.to_string(), project_id.to_string()),
-                working_root,
-            );
+    /// Shared ephemeral-clone cache for chat sessions.  The resolver
+    /// (`ProjectResolver`) `.acquire`s per tool call; the chat handler
+    /// `.release_session`s on session end.
+    pub fn chat_clone_cache(&self) -> Arc<ChatCloneCache> {
+        self.inner.chat_clone_cache.clone()
     }
 
     pub fn db(&self) -> &Database {
@@ -1094,6 +1073,25 @@ impl AppState {
         tokio::spawn(async move {
             backfill_self.backfill_full_mirrors_on_startup().await;
         });
+
+        // chat-user-global: nuke leftover ephemeral chat clones from a
+        // prior process lifetime before wiring the reaper.  Clones are
+        // free to recreate on first tool call; leaving them around on
+        // startup is just stale disk.
+        djinn_workspace::boot_sweep(std::path::Path::new(
+            djinn_workspace::DEFAULT_CHAT_CLONE_ROOT,
+        ))
+        .await;
+        let reaper_cache = self.inner.chat_clone_cache.clone();
+        let _reaper_handle = reaper_cache.spawn_reaper(
+            djinn_workspace::DEFAULT_IDLE,
+            djinn_workspace::DEFAULT_REAPER_PERIOD,
+        );
+        tracing::info!(
+            root = djinn_workspace::DEFAULT_CHAT_CLONE_ROOT,
+            idle_mins = djinn_workspace::DEFAULT_IDLE.as_secs() / 60,
+            "chat_clone_cache: boot sweep complete, reaper spawned"
+        );
 
         // Watch .djinn/ directories for KB note changes and auto-reindex.
         djinn_db::background::watchers::spawn_kb_watchers(
@@ -1628,44 +1626,4 @@ fn build_in_process_graph_warmer(
         project_root,
         is_fresh,
     })
-}
-
-#[cfg(test)]
-mod chat_warmed_session_tests {
-    use super::*;
-    use crate::test_helpers::create_test_db;
-
-    /// Recording a warmed working_root for a `(session_id, project_id)`
-    /// pair makes subsequent lookups return the cached path, and a
-    /// different session_id misses.  This is the storage primitive the
-    /// chat first-use hook relies on to call `ensure_canonical_graph`
-    /// exactly once per chat session (ADR-050 Chunk C cleanup).
-    #[tokio::test]
-    async fn record_then_lookup_per_session() {
-        let db = create_test_db();
-        let cancel = CancellationToken::new();
-        let state = AppState::new(db, cancel);
-
-        let session_a = "session-a";
-        let session_b = "session-b";
-        let project = "proj-1";
-
-        assert!(state.chat_session_warmed_root(session_a, project).is_none());
-
-        let root = PathBuf::from("/tmp/canonical-index");
-        state.chat_session_record_warmed(session_a, project, root.clone());
-
-        // Same session: hit.
-        assert_eq!(
-            state.chat_session_warmed_root(session_a, project),
-            Some(root.clone())
-        );
-        // Same session twice: still a hit, value unchanged.
-        assert_eq!(
-            state.chat_session_warmed_root(session_a, project),
-            Some(root)
-        );
-        // Different session: miss — would trigger a fresh warming call.
-        assert!(state.chat_session_warmed_root(session_b, project).is_none());
-    }
 }

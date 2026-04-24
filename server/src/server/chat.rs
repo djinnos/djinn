@@ -5,57 +5,38 @@ use axum::response::sse::Sse;
 use serde::{Deserialize, Serialize};
 
 use crate::server::AppState;
-mod context;
 mod handler;
+mod project_resolver;
 mod prompt;
 
-use djinn_agent::verification::environment::environment_config_for_path;
-use djinn_agent::verification::settings::{effective_mcp_server_names, effective_skill_names};
-use djinn_db::Database;
-use djinn_provider::message::{ContentBlock, Message, Role};
+use djinn_provider::message::Message;
+
+pub(super) use project_resolver::{ProjectResolver, ProjectResolverError};
 
 pub(super) const DJINN_CHAT_SYSTEM_PROMPT: &str =
     include_str!("../../crates/djinn-agent/src/prompts/chat.md");
 
-async fn apply_chat_skills(
-    base_message: Message,
-    project_path: Option<&std::path::Path>,
-    db: &Database,
-) -> (Message, ResolvedChatConfig) {
-    let Some(project_path) = project_path else {
-        return (base_message, ResolvedChatConfig::default());
-    };
-
-    let env_cfg = environment_config_for_path(db, project_path).await;
-    let effective_skills = effective_skill_names(&env_cfg.global_skills, &[]);
-    let effective_mcp_servers =
-        effective_mcp_server_names(&env_cfg.agent_mcp_defaults, "chat", None);
-    let resolved_skills = djinn_agent::skills::load_skills(project_path, &effective_skills);
-
-    let text = djinn_agent::prompts::apply_skills(&base_message.text_content(), &resolved_skills);
-    (
-        Message {
-            role: Role::System,
-            content: vec![ContentBlock::text(text)],
-            metadata: base_message.metadata.clone(),
-        },
-        ResolvedChatConfig {
-            mcp_servers: effective_mcp_servers,
-        },
-    )
+/// Apply globally-configured chat skills to the base system message.
+///
+/// Chat is user-scoped and globally multi-project (the chat-user-global
+/// refactor) — skills no longer resolve against a per-project environment
+/// config.  Until a user-scoped `environment_config` surface lands we
+/// pass through the base message untouched and return an empty resolved
+/// config.  The per-project MCP-server inheritance was dropped at the
+/// same cut-over; chat tool dispatch runs only the in-process chat
+/// extension tools.
+// TODO(multiuser): resolve `global_skills` + `agent_mcp_defaults`
+// against a user/installation-level `environment_config` once the
+// user-scoped env surface exists.  For now chat operates without
+// skills or per-project MCP stdio stacks.
+async fn apply_chat_skills(base_message: Message) -> (Message, ResolvedChatConfig) {
+    (base_message, ResolvedChatConfig::default())
 }
 
 #[derive(Debug, Clone, Default)]
 struct ResolvedChatConfig {
+    #[allow(dead_code)]
     mcp_servers: Vec<String>,
-}
-
-#[cfg(test)]
-async fn chat_effective_config(project_path: &std::path::Path, db: &Database) -> ResolvedChatConfig {
-    let env_cfg = environment_config_for_path(db, project_path).await;
-    ResolvedChatConfig {
-        mcp_servers: effective_mcp_server_names(&env_cfg.agent_mcp_defaults, "chat", None),
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,8 +45,6 @@ pub(super) struct ChatCompletionRequest {
     pub messages: Vec<ChatMessage>,
     #[serde(default)]
     pub system: Option<String>,
-    #[serde(default)]
-    pub project: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

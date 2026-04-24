@@ -1,5 +1,5 @@
-#[path = "tests/context.rs"]
-mod context;
+#[path = "tests/adversarial.rs"]
+mod adversarial;
 #[path = "tests/defaults.rs"]
 mod defaults;
 #[path = "tests/handler.rs"]

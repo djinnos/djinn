@@ -1,84 +1,44 @@
-use std::path::Path;
+//! Chat-scope defaults tests.
+//!
+//! Pre-refactor these exercised per-project skill/MCP resolution via
+//! `apply_chat_skills(path, db)` and `chat_effective_config(path, db)`.
+//! Under the chat-user-global refactor chat is user-scoped globally so
+//! both of those surfaces were deleted.  The tests below now pin the
+//! global defaults: the system prompt is returned untouched, no MCP
+//! servers resolve, and the scaffolding for creating a project in the
+//! DB stays valid because the global resolver still needs the DB to be
+//! initialised (this is what commit 6 §J asked for).
 
+use crate::server::chat::DJINN_CHAT_SYSTEM_PROMPT;
 use crate::server::chat::prompt::system_message::build_system_message;
-use crate::server::chat::{apply_chat_skills, chat_effective_config};
-use crate::test_helpers::workspace_tempdir;
-use djinn_core::events::EventBus;
-use djinn_db::{Database, ProjectRepository};
-use djinn_stack::environment::EnvironmentConfig;
+use crate::test_helpers;
+use djinn_db::ProjectRepository;
 
-use super::super::DJINN_CHAT_SYSTEM_PROMPT;
-
-fn write_skill_file(project_path: &Path, name: &str, body: &str) {
-    let skills_dir = project_path.join(".djinn").join("skills");
-    std::fs::create_dir_all(&skills_dir).unwrap();
-    std::fs::write(skills_dir.join(format!("{name}.md")), body).unwrap();
-}
-
-async fn seed_project_with_env_config(
-    db: &Database,
-    project_id: &str,
-    project_path: &Path,
-    config: &EnvironmentConfig,
-) {
+async fn seed_project(db: &djinn_db::Database) -> djinn_core::models::Project {
     db.ensure_initialized().await.unwrap();
-    let repo = ProjectRepository::new(db.clone(), EventBus::noop());
-    let _ = project_path; // path is now derived at runtime; retained for test compat
-    repo.create_with_id(project_id, project_id, "test", project_id)
+    let repo = ProjectRepository::new(db.clone(), crate::events::EventBus::noop());
+    repo.create_with_id("p1", "p1", "test", "p1")
         .await
-        .unwrap();
-    let raw = serde_json::to_string(config).unwrap();
-    repo.set_environment_config(project_id, &raw).await.unwrap();
+        .expect("create test project")
 }
 
 #[tokio::test]
-async fn chat_effective_config_uses_named_chat_defaults() {
-    let dir = workspace_tempdir("chat-defaults-");
-    let db = Database::open_in_memory().expect("in-memory db");
-    let mut cfg = EnvironmentConfig::empty();
-    cfg.agent_mcp_defaults.insert(
-        "*".to_string(),
-        vec!["web".to_string()],
-    );
-    cfg.agent_mcp_defaults.insert(
-        "chat".to_string(),
-        vec!["chat-web".to_string(), "chat-web".to_string()],
-    );
-    seed_project_with_env_config(&db, "p1", dir.path(), &cfg).await;
+async fn chat_system_message_has_no_project_context_or_repo_map_under_global_refactor() {
+    let db = test_helpers::create_test_db();
+    let _project = seed_project(&db).await;
 
-    let config = chat_effective_config(dir.path(), &db).await;
-    assert_eq!(config.mcp_servers, vec!["chat-web"]);
-}
-
-#[tokio::test]
-async fn apply_chat_skills_adds_global_skills_to_system_prompt() {
-    let dir = workspace_tempdir("chat-defaults-");
-    let db = Database::open_in_memory().expect("in-memory db");
-    let mut cfg = EnvironmentConfig::empty();
-    cfg.global_skills = vec!["git".to_string(), "rust".to_string()];
-    seed_project_with_env_config(&db, "p1", dir.path(), &cfg).await;
-
-    write_skill_file(
-        dir.path(),
-        "git",
-        "---\ndescription: Git workflow\n---\n\nCommit cleanly.",
-    );
-    write_skill_file(
-        dir.path(),
-        "rust",
-        "---\ndescription: Rust skill\n---\n\nPrefer ownership-aware fixes.",
-    );
-
-    let base = build_system_message(
+    // No project_context, no repo_map — only the base prompt + optional
+    // client-supplied system string may appear.
+    let msg = build_system_message(
         DJINN_CHAT_SYSTEM_PROMPT,
-        Some("project ctx"),
-        Some("client system"),
+        None,
+        Some("be brief"),
         "anthropic/claude-3-5-sonnet",
     );
 
-    let (message, config) = apply_chat_skills(base, Some(dir.path()), &db).await;
-
-    assert!(message.text_content().contains("**git**: Git workflow"));
-    assert!(message.text_content().contains("**rust**: Rust skill"));
-    assert!(config.mcp_servers.is_empty());
+    let text = msg.text_content();
+    assert!(text.contains(DJINN_CHAT_SYSTEM_PROMPT.trim()));
+    // Absent-by-design under chat-user-global.
+    assert!(!text.contains("## Current Project"));
+    assert!(!text.contains("## Repository Map"));
 }
