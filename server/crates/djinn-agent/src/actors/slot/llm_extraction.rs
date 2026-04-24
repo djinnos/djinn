@@ -352,13 +352,26 @@ async fn run_llm_extraction_inner(
     };
 
     // ── Load project ───────────────────────────────────────────────────────
+    // Since migration 14, `sessions.project_id` is NULL for chat sessions.
+    // This extractor only runs for task-scoped (non-chat) sessions, but guard
+    // defensively: without a project_id there's nothing to extract against.
+    let session_project_id = match session.project_id.as_deref() {
+        Some(p) => p,
+        None => {
+            tracing::debug!(
+                session_id = %session_id,
+                "llm_extraction: session has no project_id (chat?); skipping"
+            );
+            return;
+        }
+    };
     let project_repo = ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let project = match project_repo.get(&session.project_id).await {
+    let project = match project_repo.get(session_project_id).await {
         Ok(Some(p)) => p,
         Ok(None) => {
             tracing::debug!(
                 session_id = %session_id,
-                project_id = %session.project_id,
+                project_id = %session_project_id,
                 "llm_extraction: project not found; skipping"
             );
             return;
@@ -366,7 +379,7 @@ async fn run_llm_extraction_inner(
         Err(e) => {
             tracing::warn!(
                 session_id = %session_id,
-                project_id = %session.project_id,
+                project_id = %session_project_id,
                 error = %e,
                 "llm_extraction: failed to load project; skipping"
             );

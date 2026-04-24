@@ -27,7 +27,10 @@ impl SessionStatus {
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 pub struct SessionRecord {
     pub id: String,
-    pub project_id: String,
+    /// `NULL` for `agent_type = 'chat'` (global user-scoped sessions); required
+    /// for every other agent type. Enforced at the schema level via the
+    /// `sessions_project_scope_by_agent_type` CHECK constraint (migration 14).
+    pub project_id: Option<String>,
     pub task_id: Option<String>,
     pub model_id: String,
     pub agent_type: String,

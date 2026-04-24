@@ -405,7 +405,9 @@ impl schemars::JsonSchema for ActiveSessionSummary {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct SessionRecordResponse {
     pub id: String,
-    pub project_id: String,
+    /// `None` for chat sessions (global, user-scoped); `Some(_)` for every
+    /// other agent type. See `SessionRecord::project_id`.
+    pub project_id: Option<String>,
     pub task_id: String,
     pub model_id: String,
     pub agent_type: String,

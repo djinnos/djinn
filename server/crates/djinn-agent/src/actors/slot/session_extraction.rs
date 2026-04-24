@@ -393,13 +393,26 @@ async fn flush_co_access(session_id: &str, notes_read: &[String], app_state: &Ag
         }
     };
 
+    // Chat sessions (migration 14) carry no project_id, so they can't
+    // participate in project-scoped note resolution. Skip cleanly.
+    let session_project_id = match session.project_id.as_deref() {
+        Some(p) => p,
+        None => {
+            tracing::debug!(
+                session_id = %session_id,
+                "structural_extraction: session has no project_id; skipping co-access flush"
+            );
+            return;
+        }
+    };
+
     let note_repo =
         djinn_db::NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
 
     // Resolve note identifiers → note IDs (UUID strings)
     let mut resolved_ids: Vec<String> = Vec::new();
     for identifier in notes_read {
-        match note_repo.resolve(&session.project_id, identifier).await {
+        match note_repo.resolve(session_project_id, identifier).await {
             Ok(Some(note)) => resolved_ids.push(note.id),
             Ok(None) => {
                 tracing::debug!(

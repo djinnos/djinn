@@ -537,7 +537,7 @@ async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
         Some(report.task_run_id.as_str()),
         "session.task_run_id FK must point at the run we just drove"
     );
-    assert_eq!(architect_session.project_id, project.id);
+    assert_eq!(architect_session.project_id.as_deref(), Some(project.id.as_str()));
     assert_eq!(
         architect_session.task_id.as_deref(),
         Some(task.id.as_str())
