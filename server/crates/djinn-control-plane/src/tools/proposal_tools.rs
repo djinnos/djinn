@@ -1,12 +1,14 @@
 // ADR-051 Epic C — Proposal pipeline backend.
 //
-// Manages architect-drafted ADRs under `.djinn/decisions/proposed/` and
-// their promotion to `.djinn/decisions/` on acceptance.
+// Manages architect-drafted ADRs as Dolt-backed notes with
+// `note_type = "proposed_adr"` and promotes them to `note_type = "adr"`
+// on acceptance.
 //
-// The architect (and chat) produce ADR drafts into `proposed/`.  Humans
-// (or a conversion planner) then either accept them (moves the file out
-// of `proposed/`, optionally creating an Epic shell threaded with
-// `originating_adr_id`) or reject them (removes the file).
+// The architect (and chat) produce ADR drafts via `memory_write` with
+// `type=proposed_adr`. Humans (or a conversion planner) then either
+// accept them (changes the note's type to `adr`, optionally creating an
+// Epic shell threaded with `originating_adr_id`) or reject them
+// (deletes the note).
 //
 // ### Live-coordinator safety rule
 // Epics created by `propose_adr_accept` are written with
@@ -16,61 +18,29 @@
 // instead.
 
 use std::collections::BTreeMap;
-use std::fs;
-use std::path::{Path, PathBuf};
 
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 
 use crate::server::DjinnMcpServer;
 use crate::tools::epic_ops::EpicModel;
 use crate::tools::task_tools::ErrorOr;
 use crate::tools::task_tools::ops::{CommentTaskRequest, add_task_comment};
-use djinn_db::{EpicRepository, ProjectRepository};
+use djinn_core::events::EventBus;
+use djinn_db::{Database, EpicRepository, NoteRepository, ProjectRepository, folder_for_type};
+use djinn_memory::Note;
 
-// ── Filesystem layout ────────────────────────────────────────────────────────
+// ── Permalink layout ─────────────────────────────────────────────────────────
 
-const DECISIONS_SUBDIR: &str = ".djinn/decisions";
-const PROPOSED_SUBDIR: &str = ".djinn/decisions/proposed";
+const PROPOSED_FOLDER: &str = "decisions/proposed";
 
-/// Resolve a `project` argument (UUID or `owner/repo` slug) to the
-/// synthesized `project_dir(owner, repo)` filesystem root. Errors
-/// with a stable "project not found: <ref>" message so callers can
-/// surface it straight through.
-async fn resolve_project_root(
-    server: &DjinnMcpServer,
-    project_ref: &str,
-) -> Result<PathBuf, String> {
-    let repo = ProjectRepository::new(server.state.db().clone(), server.state.event_bus());
-    let id = repo
-        .resolve(project_ref)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("project not found: {project_ref}"))?;
-    let proj = repo
-        .get(&id)
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("project not found: {project_ref}"))?;
-    Ok(djinn_core::paths::project_dir(
-        &proj.github_owner,
-        &proj.github_repo,
-    ))
+fn proposed_permalink(id: &str) -> String {
+    format!("{PROPOSED_FOLDER}/{id}")
 }
 
-fn decisions_dir(project_root: &Path) -> PathBuf {
-    project_root.join(DECISIONS_SUBDIR)
-}
-
-fn proposed_dir(project_root: &Path) -> PathBuf {
-    project_root.join(PROPOSED_SUBDIR)
-}
-
-fn proposed_file_for(project_root: &Path, id: &str) -> PathBuf {
-    proposed_dir(project_root).join(format!("{id}.md"))
+fn note_repository(db: &Database, events: &EventBus) -> NoteRepository {
+    NoteRepository::new(db.clone(), events.clone())
 }
 
 // ── Frontmatter parser ───────────────────────────────────────────────────────
@@ -138,45 +108,30 @@ fn parse_frontmatter(text: &str) -> (BTreeMap<String, String>, String) {
     (map, body)
 }
 
-/// Extract a title from the frontmatter (`title:`) or, failing that,
-/// the first markdown H1 in the body.  Returns the empty string when
-/// neither source is available.
-fn extract_title(front: &BTreeMap<String, String>, body: &str) -> String {
-    if let Some(t) = front.get("title")
-        && !t.is_empty()
-    {
-        return t.clone();
-    }
-    for line in body.lines() {
-        if let Some(rest) = line.strip_prefix("# ") {
-            return rest.trim().to_string();
-        }
-    }
-    String::new()
-}
-
 // ── Models ───────────────────────────────────────────────────────────────────
 
 /// A parsed proposed ADR.  Serialized back to the MCP client.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct ProposedAdr {
-    /// File stem, e.g. `"adr-052-new-pipeline"`.
+    /// Slug — the part of the permalink after `decisions/proposed/`.
+    /// e.g. `"adr-052-new-pipeline"` for permalink
+    /// `"decisions/proposed/adr-052-new-pipeline"`.
     pub id: String,
-    /// Absolute filesystem path of the source file (under `proposed/`).
+    /// Canonical permalink of the proposed-ADR note in Dolt.
     pub path: String,
-    /// Title pulled from frontmatter or the first H1.
+    /// Note title (from `memory_write` `title=`).
     pub title: String,
-    /// Work shape hint (`"task"` | `"epic"` | `"architectural"` | `"spike"`).
+    /// Work shape hint (`"task"` | `"epic"` | `"architectural"` | `"spike"`),
+    /// parsed from the note content's leading YAML frontmatter when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_shape: Option<String>,
-    /// Optional short_id of the originating spike task.
+    /// Optional short_id of the originating spike task — frontmatter-sourced.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub originating_spike_id: Option<String>,
-    /// Last filesystem modified time for the proposal draft, encoded as RFC 3339.
+    /// Last update timestamp on the underlying note, RFC 3339.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mtime: Option<String>,
-    /// Raw markdown body (frontmatter stripped).  Omitted in list
-    /// responses to keep them small.
+    /// Raw note content. Omitted in list responses to keep them small.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     /// Djinn project UUID that owns this proposal.  Populated by the
@@ -189,43 +144,42 @@ pub struct ProposedAdr {
     /// registry.  Used by the Proposals page to render per-row project
     /// chips when the "All projects" filter is active.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub project_name: Option<String>,
-    /// Absolute filesystem root of the owning project, so clients can
-    /// call `propose_adr_show`/`accept`/`reject` without a second
-    /// project-lookup round-trip.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub project_path: Option<String>,
+    /// Display name of the owning project — kept separate from
+    /// `project_path` since the Proposals UI shows the human name in
+    /// per-row chips.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
 }
 
 impl ProposedAdr {
-    fn from_file(path: &Path, include_body: bool) -> Result<Self, String> {
-        let mtime = fs::metadata(path)
-            .ok()
-            .and_then(|metadata| metadata.modified().ok())
-            .and_then(|modified| OffsetDateTime::from(modified).format(&Rfc3339).ok());
-        let content = fs::read_to_string(path)
-            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        let (front, body) = parse_frontmatter(&content);
-        let id = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
+    /// Build a `ProposedAdr` from a Dolt-stored note. The note's
+    /// `note_type` should be `"proposed_adr"`. `include_body` controls
+    /// whether the full content is returned (set to `false` for list
+    /// responses).
+    fn from_note(note: &Note, include_body: bool) -> Self {
+        let (front, _body) = parse_frontmatter(&note.content);
+        let id = note
+            .permalink
+            .strip_prefix(&format!("{PROPOSED_FOLDER}/"))
+            .unwrap_or(&note.permalink)
             .to_string();
-        let title = extract_title(&front, &body);
-        let work_shape = front.get("work_shape").cloned();
-        let originating_spike_id = front.get("originating_spike_id").cloned();
-        Ok(Self {
+        Self {
             id,
-            path: path.display().to_string(),
-            title,
-            work_shape,
-            originating_spike_id,
-            mtime,
-            body: if include_body { Some(body) } else { None },
+            path: note.permalink.clone(),
+            title: note.title.clone(),
+            work_shape: front.get("work_shape").cloned(),
+            originating_spike_id: front.get("originating_spike_id").cloned(),
+            mtime: Some(note.updated_at.clone()),
+            body: if include_body {
+                Some(note.content.clone())
+            } else {
+                None
+            },
             project_id: None,
             project_name: None,
             project_path: None,
-        })
+        }
     }
 }
 
@@ -333,32 +287,28 @@ pub struct ProposeAdrRejectResponse {
 
 #[tool_router(router = proposal_tool_router, vis = "pub")]
 impl DjinnMcpServer {
-    /// List all ADR drafts under `.djinn/decisions/proposed/`.
+    /// List all ADR drafts (notes with `note_type = "proposed_adr"`).
     #[tool(
-        description = "ADR-051 Epic C: list ADR drafts under .djinn/decisions/proposed/. Omit `project` to aggregate proposals across every registered project; each item is tagged with project_id/project_name/project_path for cross-project rendering. Returns frontmatter-parsed metadata (id, title, work_shape, originating_spike_id) plus filesystem modified time in `mtime` (RFC 3339). Body text is omitted; use propose_adr_show to read a single draft in full."
+        description = "ADR-051 Epic C: list architect-drafted ADRs (notes with type=proposed_adr). Omit `project` to aggregate proposals across every registered project; each item is tagged with project_id/project_name/project_path for cross-project rendering. Returns parsed metadata (id, title, work_shape, originating_spike_id) plus the note's `updated_at` in `mtime` (RFC 3339). Body text is omitted; use propose_adr_show to read a single draft in full."
     )]
     pub async fn propose_adr_list(
         &self,
         Parameters(p): Parameters<ProposeAdrListParams>,
     ) -> Json<ProposeAdrListResponse> {
-        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+        let project_repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
 
-        // Build the scan set: one entry per project to walk.  The single-
-        // project branch still does a registry lookup so the response
-        // shape is identical regardless of scope — the UI always gets
+        // Build the scan set: one entry per project. The single-project
+        // branch still does a registry lookup so the response shape is
+        // identical regardless of scope — the UI always gets
         // project_name / project_id when they're knowable.
-        let scan_targets: Vec<(Option<String>, Option<String>, PathBuf)> = match &p.project {
+        let scan_targets: Vec<(String, String)> = match &p.project {
             Some(project_ref) => {
-                let found = match repo.resolve(project_ref).await.ok().flatten() {
-                    Some(id) => repo.get(&id).await.ok().flatten(),
+                let found = match project_repo.resolve(project_ref).await.ok().flatten() {
+                    Some(id) => project_repo.get(&id).await.ok().flatten(),
                     None => None,
                 };
                 match found {
-                    Some(proj) => vec![(
-                        Some(proj.id.clone()),
-                        Some(proj.name.clone()),
-                        djinn_core::paths::project_dir(&proj.github_owner, &proj.github_repo),
-                    )],
+                    Some(proj) => vec![(proj.id, proj.name)],
                     None => {
                         return Json(ProposeAdrListResponse {
                             items: None,
@@ -367,14 +317,8 @@ impl DjinnMcpServer {
                     }
                 }
             }
-            None => match repo.list().await {
-                Ok(list) => list
-                    .into_iter()
-                    .map(|proj| {
-                        let path = djinn_core::paths::project_dir(&proj.github_owner, &proj.github_repo);
-                        (Some(proj.id), Some(proj.name), path)
-                    })
-                    .collect(),
+            None => match project_repo.list().await {
+                Ok(list) => list.into_iter().map(|proj| (proj.id, proj.name)).collect(),
                 Err(e) => {
                     return Json(ProposeAdrListResponse {
                         items: None,
@@ -384,34 +328,26 @@ impl DjinnMcpServer {
             },
         };
 
+        let note_repo = note_repository(self.state.db(), &self.state.event_bus());
         let mut items: Vec<ProposedAdr> = Vec::new();
-        for (project_id, project_name, root) in scan_targets {
-            let dir = proposed_dir(&root);
-            if !dir.exists() {
-                continue;
-            }
-            let entries = match fs::read_dir(&dir) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(path = %dir.display(), error = %e, "skipping unreadable proposed dir");
-                    continue;
-                }
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) != Some("md") {
-                    continue;
-                }
-                match ProposedAdr::from_file(&path, false) {
-                    Ok(mut adr) => {
-                        adr.project_id = project_id.clone();
-                        adr.project_name = project_name.clone();
-                        adr.project_path = Some(root.display().to_string());
+        for (project_id, project_name) in scan_targets {
+            match note_repo
+                .list(&project_id, Some(folder_for_type("proposed_adr")))
+                .await
+            {
+                Ok(notes) => {
+                    for note in notes {
+                        if note.note_type != "proposed_adr" {
+                            continue;
+                        }
+                        let mut adr = ProposedAdr::from_note(&note, false);
+                        adr.project_id = Some(project_id.clone());
+                        adr.project_name = Some(project_name.clone());
                         items.push(adr);
                     }
-                    Err(e) => {
-                        tracing::warn!(path = %path.display(), error = %e, "skipping unreadable proposed ADR");
-                    }
+                }
+                Err(e) => {
+                    tracing::warn!(project_id = %project_id, error = %e, "skipping unreadable proposed-adr listing");
                 }
             }
         }
@@ -422,16 +358,16 @@ impl DjinnMcpServer {
         })
     }
 
-    /// Read a single proposed ADR draft in full (frontmatter + body).
+    /// Read a single proposed ADR in full.
     #[tool(
-        description = "ADR-051 Epic C: read the full contents of a single proposed ADR draft by its file stem (e.g. \"adr-052-foo\")."
+        description = "ADR-051 Epic C: read the full contents of a single proposed ADR by its slug (the part of the permalink after `decisions/proposed/`, e.g. \"adr-052-foo\")."
     )]
     pub async fn propose_adr_show(
         &self,
         Parameters(p): Parameters<ProposeAdrShowParams>,
     ) -> Json<ProposeAdrShowResponse> {
-        let root = match resolve_project_root(self, &p.project).await {
-            Ok(root) => root,
+        let project_id = match self.resolve_project_id(&p.project).await {
+            Ok(id) => id,
             Err(e) => {
                 return Json(ProposeAdrShowResponse {
                     adr: None,
@@ -439,125 +375,79 @@ impl DjinnMcpServer {
                 });
             }
         };
-        let path = proposed_file_for(&root, &p.id);
-        if !path.exists() {
-            return Json(ProposeAdrShowResponse {
-                adr: None,
-                error: Some(format!("proposed ADR not found: {}", p.id)),
-            });
-        }
-        match ProposedAdr::from_file(&path, true) {
-            Ok(adr) => Json(ProposeAdrShowResponse {
-                adr: Some(adr),
-                error: None,
-            }),
-            Err(e) => Json(ProposeAdrShowResponse {
-                adr: None,
-                error: Some(e),
-            }),
-        }
+        let note_repo = note_repository(self.state.db(), &self.state.event_bus());
+        let note = match note_repo
+            .get_by_permalink(&project_id, &proposed_permalink(&p.id))
+            .await
+        {
+            Ok(Some(note)) if note.note_type == "proposed_adr" => note,
+            Ok(_) => {
+                return Json(ProposeAdrShowResponse {
+                    adr: None,
+                    error: Some(format!("proposed ADR not found: {}", p.id)),
+                });
+            }
+            Err(e) => {
+                return Json(ProposeAdrShowResponse {
+                    adr: None,
+                    error: Some(e.to_string()),
+                });
+            }
+        };
+        Json(ProposeAdrShowResponse {
+            adr: Some(ProposedAdr::from_note(&note, true)),
+            error: None,
+        })
     }
 
-    /// Accept a proposed ADR: atomically moves the file out of
-    /// `proposed/` into `.djinn/decisions/`, and (for non-architectural
-    /// work shapes) creates an Epic shell threaded with
+    /// Accept a proposed ADR: changes its `note_type` from
+    /// `proposed_adr` to `adr` (which moves it from
+    /// `decisions/proposed/` to `decisions/`), and, for non-architectural
+    /// work shapes, creates an Epic shell threaded with
     /// `originating_adr_id`.
     #[tool(
-        description = "ADR-051 Epic C: accept a proposed ADR. Moves the draft from .djinn/decisions/proposed/ to .djinn/decisions/ and, unless create_epic=false or the ADR's work_shape is \"architectural\", creates an Epic shell (status=open, originating_adr_id=<id>, auto_breakdown default true) so the normal breakdown Planner can decompose it."
+        description = "ADR-051 Epic C: accept a proposed ADR. Changes its note_type from proposed_adr to adr (permalink moves from decisions/proposed/<slug> to decisions/<slug>) and, unless create_epic=false or the ADR's work_shape is \"architectural\", creates an Epic shell (status=open, originating_adr_id=<id>, auto_breakdown default true) so the normal breakdown Planner can decompose it."
     )]
     pub async fn propose_adr_accept(
         &self,
         Parameters(p): Parameters<ProposeAdrAcceptParams>,
     ) -> Json<ProposeAdrAcceptResponse> {
-        let root = match resolve_project_root(self, &p.project).await {
-            Ok(root) => root,
-            Err(e) => {
-                return Json(ProposeAdrAcceptResponse {
-                    accepted_path: None,
-                    epic: None,
-                    error: Some(e),
-                });
-            }
-        };
-        let src = proposed_file_for(&root, &p.id);
-        if !src.exists() {
-            return Json(ProposeAdrAcceptResponse {
-                accepted_path: None,
-                epic: None,
-                error: Some(format!("proposed ADR not found: {}", p.id)),
-            });
-        }
-
-        // Parse before moving so we can use the metadata to build the
-        // epic shell even if the file is later gone from its original
-        // location.
-        let adr = match ProposedAdr::from_file(&src, true) {
-            Ok(adr) => adr,
-            Err(e) => {
-                return Json(ProposeAdrAcceptResponse {
-                    accepted_path: None,
-                    epic: None,
-                    error: Some(e),
-                });
-            }
-        };
-
-        let decisions = decisions_dir(&root);
-        if let Err(e) = fs::create_dir_all(&decisions) {
-            return Json(ProposeAdrAcceptResponse {
-                accepted_path: None,
-                epic: None,
-                error: Some(format!("failed to create {}: {e}", decisions.display())),
-            });
-        }
-        let dst = decisions.join(format!("{}.md", adr.id));
-        if dst.exists() {
-            return Json(ProposeAdrAcceptResponse {
-                accepted_path: None,
-                epic: None,
-                error: Some(format!(
-                    "destination already exists: {} (remove or rename before accepting)",
-                    dst.display()
-                )),
-            });
-        }
-        if let Err(e) = fs::rename(&src, &dst) {
-            return Json(ProposeAdrAcceptResponse {
-                accepted_path: None,
-                epic: None,
-                error: Some(format!(
-                    "failed to move {} → {}: {e}",
-                    src.display(),
-                    dst.display()
-                )),
-            });
-        }
-
-        // Architectural ADRs (pure design decisions) never spawn epics.
-        // Neither do callers who explicitly opt out via create_epic=false.
-        let create_epic =
-            p.create_epic.unwrap_or(true) && adr.work_shape.as_deref() != Some("architectural");
-        if !create_epic {
-            return Json(ProposeAdrAcceptResponse {
-                accepted_path: Some(dst.display().to_string()),
-                epic: None,
-                error: None,
-            });
-        }
-
-        // Resolve project ID for the epic create.
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => {
                 return Json(ProposeAdrAcceptResponse {
-                    accepted_path: Some(dst.display().to_string()),
+                    accepted_path: None,
                     epic: None,
-                    error: Some(format!("file accepted, but epic creation failed: {e}")),
+                    error: Some(e),
                 });
             }
         };
 
-        let title = p
+        let note_repo = note_repository(self.state.db(), &self.state.event_bus());
+        let proposed = match note_repo
+            .get_by_permalink(&project_id, &proposed_permalink(&p.id))
+            .await
+        {
+            Ok(Some(note)) if note.note_type == "proposed_adr" => note,
+            Ok(_) => {
+                return Json(ProposeAdrAcceptResponse {
+                    accepted_path: None,
+                    epic: None,
+                    error: Some(format!("proposed ADR not found: {}", p.id)),
+                });
+            }
+            Err(e) => {
+                return Json(ProposeAdrAcceptResponse {
+                    accepted_path: None,
+                    epic: None,
+                    error: Some(e.to_string()),
+                });
+            }
+        };
+
+        let adr = ProposedAdr::from_note(&proposed, true);
+
+        let new_title = p
             .title
             .as_deref()
             .map(str::trim)
@@ -570,25 +460,75 @@ impl DjinnMcpServer {
                     adr.title.clone()
                 }
             });
+
+        // Collision check: refuse to overwrite an existing accepted ADR
+        // with the same target permalink.
+        let target_permalink =
+            djinn_db::permalink_for("adr", &new_title);
+        if note_repo
+            .get_by_permalink(&project_id, &target_permalink)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return Json(ProposeAdrAcceptResponse {
+                accepted_path: None,
+                epic: None,
+                error: Some(format!(
+                    "destination already exists: {target_permalink} (remove or rename before accepting)"
+                )),
+            });
+        }
+
+        // Promote: change note_type from proposed_adr → adr. The
+        // permalink folder moves from `decisions/proposed/` to
+        // `decisions/` automatically via folder_for_type.
+        let accepted = match note_repo
+            .move_note(&proposed.id, std::path::Path::new(""), &new_title, "adr")
+            .await
+        {
+            Ok(note) => note,
+            Err(e) => {
+                return Json(ProposeAdrAcceptResponse {
+                    accepted_path: None,
+                    epic: None,
+                    error: Some(format!("failed to promote proposed ADR: {e}")),
+                });
+            }
+        };
+
+        // Architectural ADRs (pure design decisions) never spawn epics.
+        // Neither do callers who explicitly opt out via create_epic=false.
+        let create_epic =
+            p.create_epic.unwrap_or(true) && adr.work_shape.as_deref() != Some("architectural");
+        if !create_epic {
+            return Json(ProposeAdrAcceptResponse {
+                accepted_path: Some(accepted.permalink.clone()),
+                epic: None,
+                error: None,
+            });
+        }
+
         let description = format!(
             "Epic shell spawned from accepted ADR `{}`.\n\n\
              Work shape: {}\n\
              Originating spike: {}\n\n\
-             Read `{}` for the full architectural rationale before planning.",
+             Read [[{}]] for the full architectural rationale before planning.",
             adr.id,
             adr.work_shape.as_deref().unwrap_or("<unspecified>"),
             adr.originating_spike_id.as_deref().unwrap_or("<none>"),
-            dst.display(),
+            accepted.permalink,
         );
-        let memory_refs_json =
-            serde_json::to_string(&vec![dst.display().to_string()]).unwrap_or_else(|_| "[]".into());
+        let memory_refs_json = serde_json::to_string(&vec![accepted.permalink.clone()])
+            .unwrap_or_else(|_| "[]".into());
 
-        let repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
-        match repo
+        let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
+        match epic_repo
             .create_for_project(
                 &project_id,
                 djinn_db::EpicCreateInput {
-                    title: &title,
+                    title: &new_title,
                     description: &description,
                     emoji: "",
                     color: "",
@@ -602,21 +542,25 @@ impl DjinnMcpServer {
             .await
         {
             Ok(epic) => Json(ProposeAdrAcceptResponse {
-                accepted_path: Some(dst.display().to_string()),
+                accepted_path: Some(accepted.permalink.clone()),
                 epic: Some(EpicModel::from(&epic)),
                 error: None,
             }),
             Err(e) => Json(ProposeAdrAcceptResponse {
-                accepted_path: Some(dst.display().to_string()),
+                accepted_path: Some(accepted.permalink.clone()),
                 epic: None,
-                error: Some(format!("file accepted, but epic creation failed: {e}")),
+                error: Some(format!(
+                    "promotion succeeded, but epic creation failed: {e}"
+                )),
             }),
         }
     }
 
-    /// Reject a proposed ADR: deletes the draft file.
+    /// Reject a proposed ADR: deletes the underlying note. Posts the
+    /// rejection reason as a comment on the originating spike when one
+    /// is referenced in the proposal's frontmatter.
     #[tool(
-        description = "ADR-051 Epic C: reject a proposed ADR by deleting its draft file from .djinn/decisions/proposed/. No epic or audit record is created."
+        description = "ADR-051 Epic C: reject a proposed ADR by deleting the underlying note. When the proposal's frontmatter references an `originating_spike_id`, the rejection reason is persisted as a comment on that task before deletion."
     )]
     pub async fn propose_adr_reject(
         &self,
@@ -629,26 +573,8 @@ impl DjinnMcpServer {
                 error: Some("rejection reason is required".to_string()),
             });
         }
-        let root = match resolve_project_root(self, &p.project).await {
-            Ok(root) => root,
-            Err(e) => {
-                return Json(ProposeAdrRejectResponse {
-                    ok: false,
-                    feedback_target: None,
-                    error: Some(e),
-                });
-            }
-        };
-        let path = proposed_file_for(&root, &p.id);
-        if !path.exists() {
-            return Json(ProposeAdrRejectResponse {
-                ok: false,
-                feedback_target: None,
-                error: Some(format!("proposed ADR not found: {}", p.id)),
-            });
-        }
-        let adr = match ProposedAdr::from_file(&path, true) {
-            Ok(adr) => adr,
+        let project_id = match self.resolve_project_id(&p.project).await {
+            Ok(id) => id,
             Err(e) => {
                 return Json(ProposeAdrRejectResponse {
                     ok: false,
@@ -658,19 +584,32 @@ impl DjinnMcpServer {
             }
         };
 
+        let note_repo = note_repository(self.state.db(), &self.state.event_bus());
+        let note = match note_repo
+            .get_by_permalink(&project_id, &proposed_permalink(&p.id))
+            .await
+        {
+            Ok(Some(note)) if note.note_type == "proposed_adr" => note,
+            Ok(_) => {
+                return Json(ProposeAdrRejectResponse {
+                    ok: false,
+                    feedback_target: None,
+                    error: Some(format!("proposed ADR not found: {}", p.id)),
+                });
+            }
+            Err(e) => {
+                return Json(ProposeAdrRejectResponse {
+                    ok: false,
+                    feedback_target: None,
+                    error: Some(e.to_string()),
+                });
+            }
+        };
+        let adr = ProposedAdr::from_note(&note, true);
+
         let feedback_target = if let Some(originating_spike_id) =
             adr.originating_spike_id.as_deref()
         {
-            let project_id = match self.require_project_id_public(&p.project).await {
-                Ok(id) => id,
-                Err(e) => {
-                    return Json(ProposeAdrRejectResponse {
-                        ok: false,
-                        feedback_target: None,
-                        error: Some(e.error),
-                    });
-                }
-            };
             let body = format!(
                 "Proposal `{}` rejected.\n\nReason: {}",
                 adr.id,
@@ -705,7 +644,7 @@ impl DjinnMcpServer {
             None
         };
 
-        match fs::remove_file(&path) {
+        match note_repo.delete(&note.id).await {
             Ok(()) => Json(ProposeAdrRejectResponse {
                 ok: true,
                 feedback_target,
@@ -714,7 +653,7 @@ impl DjinnMcpServer {
             Err(e) => Json(ProposeAdrRejectResponse {
                 ok: false,
                 feedback_target: None,
-                error: Some(format!("failed to remove {}: {e}", path.display())),
+                error: Some(format!("failed to delete proposed ADR: {e}")),
             }),
         }
     }
@@ -724,17 +663,30 @@ impl DjinnMcpServer {
 
 #[cfg(test)]
 mod tests {
-
-    fn workspace_tempdir() -> tempfile::TempDir {
-        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("target")
-            .join("test-tmp");
-        std::fs::create_dir_all(&base).expect("create server crate test tempdir base");
-        tempfile::tempdir_in(base).expect("create server crate tempdir")
-    }
     use super::*;
+
+    fn fake_note(permalink: &str, title: &str, content: &str) -> Note {
+        Note {
+            id: "note-id".to_string(),
+            project_id: "project-id".to_string(),
+            permalink: permalink.to_string(),
+            title: title.to_string(),
+            file_path: String::new(),
+            storage: "db".to_string(),
+            note_type: "proposed_adr".to_string(),
+            folder: PROPOSED_FOLDER.to_string(),
+            tags: "[]".to_string(),
+            content: content.to_string(),
+            created_at: "2026-04-24T12:00:00.000Z".to_string(),
+            updated_at: "2026-04-24T12:30:00.000Z".to_string(),
+            last_accessed: "2026-04-24T12:30:00.000Z".to_string(),
+            access_count: 0,
+            confidence: 1.0,
+            abstract_: None,
+            overview: None,
+            scope_paths: "[]".to_string(),
+        }
+    }
 
     #[test]
     fn frontmatter_parses_simple_scalars() {
@@ -765,33 +717,35 @@ mod tests {
     }
 
     #[test]
-    fn extract_title_falls_back_to_first_h1() {
-        let front = BTreeMap::new();
-        let body = "Some intro\n# Real Title\nmore";
-        assert_eq!(extract_title(&front, body), "Real Title");
-    }
-
-    #[test]
-    fn proposed_adr_from_file_reads_metadata() {
-        let tmp = workspace_tempdir();
-        let dir = proposed_dir(tmp.path());
-        fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("adr-999-demo.md");
-        fs::write(
-            &file,
-            "---\ntitle: Demo ADR\nwork_shape: epic\n---\n\n# Demo ADR\n\nBody\n",
-        )
-        .unwrap();
-
-        let adr = ProposedAdr::from_file(&file, true).unwrap();
+    fn proposed_adr_from_note_extracts_metadata_and_strips_folder_prefix() {
+        let note = fake_note(
+            "decisions/proposed/adr-999-demo",
+            "Demo ADR",
+            "---\nwork_shape: epic\noriginating_spike_id: spk7\n---\n\n# Demo ADR\n\nBody\n",
+        );
+        let adr = ProposedAdr::from_note(&note, true);
         assert_eq!(adr.id, "adr-999-demo");
         assert_eq!(adr.title, "Demo ADR");
         assert_eq!(adr.work_shape.as_deref(), Some("epic"));
+        assert_eq!(adr.originating_spike_id.as_deref(), Some("spk7"));
+        assert_eq!(adr.path, "decisions/proposed/adr-999-demo");
         assert!(
             adr.mtime
                 .as_deref()
                 .is_some_and(|value| value.contains('T'))
         );
         assert!(adr.body.as_ref().unwrap().contains("Body"));
+    }
+
+    #[test]
+    fn proposed_adr_from_note_omits_body_in_list_view() {
+        let note = fake_note(
+            "decisions/proposed/adr-1-skinny",
+            "Skinny",
+            "no frontmatter, just body\n",
+        );
+        let adr = ProposedAdr::from_note(&note, false);
+        assert!(adr.body.is_none());
+        assert!(adr.work_shape.is_none());
     }
 }

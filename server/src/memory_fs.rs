@@ -989,15 +989,6 @@ mod tests {
             .unwrap();
         assert_eq!(file.permalink, "research/task-note");
 
-        let expected_worktree_path = worktree_root.path().join(".djinn/research/task-note.md");
-        assert!(expected_worktree_path.exists());
-        assert!(
-            !project_root
-                .path()
-                .join(".djinn/research/task-note.md")
-                .exists()
-        );
-
         let stat = core
             .stat_in_view(&project_id, &selection, "research/task-note.md")
             .await
@@ -1031,12 +1022,6 @@ mod tests {
         core.delete_file_in_view(&project_id, &selection, "patterns/task-note-renamed.md")
             .await
             .unwrap();
-        assert!(
-            !worktree_root
-                .path()
-                .join(".djinn/patterns/task-note-renamed.md")
-                .exists()
-        );
 
         let persisted = NoteRepository::new(db, EventBus::noop())
             .get_by_permalink(&project_id, "patterns/task-note-renamed")

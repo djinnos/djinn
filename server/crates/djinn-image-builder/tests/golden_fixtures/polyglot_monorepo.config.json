@@ -1,7 +1,6 @@
 {
   "schema_version": 1,
   "source": "auto-detected",
-  "base": { "distro": "debian", "variant": "bookworm-slim" },
   "languages": {
     "rust":   { "default_toolchain": "stable", "components": ["rust-analyzer"], "targets": [] },
     "node":   { "default_version": "22", "default_package_manager": "pnpm", "scip_indexer": "scip-typescript" },
@@ -12,8 +11,8 @@
     { "slug": "tools-codegen", "root": "tools/codegen", "language": "rust", "toolchain": "1.85.0" },
     { "slug": "ui",            "root": "ui",            "language": "node", "version": "20", "package_manager": "pnpm" }
   ],
-  "system_packages": { "apt": ["postgresql-client"], "apk": [] },
+  "system_packages": ["postgresql-client"],
   "env": { "RUST_LOG": "info" },
   "lifecycle": { "post_build": [], "pre_warm": [], "pre_task": [] },
-  "verification": { "setup": [], "rules": [] }
+  "verification": { "rules": [] }
 }

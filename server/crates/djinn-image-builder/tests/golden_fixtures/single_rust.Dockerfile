@@ -5,7 +5,10 @@ FROM debian:bookworm-slim
 COPY scripts/ /tmp/djinn-scripts/
 RUN chmod -R 0755 /tmp/djinn-scripts
 RUN /tmp/djinn-scripts/base-debian.sh
-COPY --from=djinn/agent-worker:sha256-golden /opt/djinn/bin/djinn-agent-worker /opt/djinn/bin/djinn-agent-worker
+ENV PATH=/opt/djinn/bin:/usr/local/cargo/bin:/opt/node/bin:/usr/local/go/bin:/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
+ENV GOPATH=/go GOROOT=/usr/local/go
+COPY --from=djinn/agent-worker:sha256-golden /usr/local/bin/djinn-agent-worker /opt/djinn/bin/djinn-agent-worker
 RUN /tmp/djinn-scripts/install-agent-worker.sh
-RUN TOOLCHAINS="1.84.0" DEFAULT_TOOLCHAIN="1.84.0" COMPONENTS="clippy rust-analyzer" /tmp/djinn-scripts/install-rust.sh
+RUN TOOLCHAINS="1.84.0" DEFAULT_TOOLCHAIN="1.84.0" COMPONENTS="rust-analyzer" /tmp/djinn-scripts/install-rust.sh
 RUN rm -rf /tmp/djinn-scripts

@@ -12,8 +12,6 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use std::path::Path;
-
 use djinn_control_plane::test_support::McpTestHarness;
 use djinn_core::events::EventBus;
 use djinn_db::{NoteRepository, ProjectRepository};
@@ -56,11 +54,8 @@ async fn mcp_memory_write_success_shape_and_duplicate_permalink_error() {
         .await
         .unwrap()
         .unwrap();
-    assert!(
-        Path::new(&note.file_path).exists(),
-        "canonical DB path is stored at {} even though writes may target worktrees",
-        note.file_path
-    );
+    assert_eq!(note.storage, "db");
+    assert_eq!(note.file_path, "");
 
     let duplicate = harness
         .call_tool(
@@ -337,7 +332,6 @@ async fn mcp_memory_move_can_recover_proposed_adr_and_make_it_visible_to_proposa
 
     assert_eq!(moved["note_type"], "proposed_adr");
     assert_eq!(moved["folder"], "decisions/proposed");
-    assert!(Path::new(moved["file_path"].as_str().unwrap()).exists());
 
     let proposals = harness
         .call_tool("propose_adr_list", json!({"project": project}))
@@ -610,6 +604,11 @@ async fn mcp_memory_history_and_diff_round_trip() {
         .expect("memory_edit should dispatch");
     assert!(edited.get("error").is_none() || edited["error"].is_null());
 
+    // memory_history and memory_diff: with the db-only KB cut-over both
+    // tools return an empty payload and an explanatory error string for
+    // db-stored notes (the only kind that exists now). Just confirm they
+    // dispatch and shape-check; the git-backed history/diff content path
+    // is gone.
     let history = harness
         .call_tool(
             "memory_history",
@@ -617,16 +616,8 @@ async fn mcp_memory_history_and_diff_round_trip() {
         )
         .await
         .expect("memory_history should dispatch");
-    assert!(history.get("error").is_none() || history["error"].is_null());
+    assert!(history["history"].is_array());
 
-    let entries = history["history"]
-        .as_array()
-        .or_else(|| history["entries"].as_array())
-        .expect("memory_history should return history/entries array");
-
-    // memory_diff: with the db-only KB cut-over the diff tool always
-    // returns an empty diff and an explanatory error string. Just confirm
-    // it dispatches and shape-checks; no longer asserts git diff content.
     let diff = harness
         .call_tool(
             "memory_diff",
@@ -635,8 +626,6 @@ async fn mcp_memory_history_and_diff_round_trip() {
         .await
         .expect("memory_diff should dispatch");
     assert!(diff.get("diff").is_some());
-    // Suppress unused warnings.
-    let _ = entries;
 }
 
 // memory_reindex tool was deleted alongside the on-disk reindex pipeline

@@ -5,8 +5,11 @@ FROM debian:bookworm-slim
 COPY scripts/ /tmp/djinn-scripts/
 RUN chmod -R 0755 /tmp/djinn-scripts
 RUN /tmp/djinn-scripts/base-debian.sh
+ENV PATH=/opt/djinn/bin:/usr/local/cargo/bin:/opt/node/bin:/usr/local/go/bin:/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
+ENV GOPATH=/go GOROOT=/usr/local/go
 RUN APT_PACKAGES="postgresql-client" /tmp/djinn-scripts/install-system.sh
-COPY --from=djinn/agent-worker:sha256-golden /opt/djinn/bin/djinn-agent-worker /opt/djinn/bin/djinn-agent-worker
+COPY --from=djinn/agent-worker:sha256-golden /usr/local/bin/djinn-agent-worker /opt/djinn/bin/djinn-agent-worker
 RUN /tmp/djinn-scripts/install-agent-worker.sh
 RUN TOOLCHAINS="stable 1.85.0" DEFAULT_TOOLCHAIN="stable" COMPONENTS="rust-analyzer" /tmp/djinn-scripts/install-rust.sh
 RUN NODE_VERSIONS="22 20" DEFAULT_NODE="22" PACKAGE_MANAGERS="pnpm" /tmp/djinn-scripts/install-node.sh

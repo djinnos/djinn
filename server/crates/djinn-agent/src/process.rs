@@ -178,6 +178,10 @@ mod tests {
 
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg("printf '%d' \"$(ps -o pgid= -p $$)\"");
+        // output_with_kill drains stdout/stderr from the child's pipe handles;
+        // those handles only exist when the caller opted into piping.
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
         isolate_process_group(&mut cmd);
 
         let output = output_with_kill(cmd, Duration::from_secs(10))

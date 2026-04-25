@@ -416,19 +416,9 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
 
     assert_eq!(note.note_type, "roadmap");
     assert_eq!(note.permalink, "roadmap");
-    assert_eq!(
-        Path::new(&note.file_path),
-        Path::new(&project_path).join(".djinn/roadmap.md")
-    );
-
-    let canonical_contents =
-        std::fs::read_to_string(Path::new(&project_path).join(".djinn/roadmap.md"))
-            .expect("read canonical roadmap");
-    let worktree_contents =
-        std::fs::read_to_string(worktree.join(".djinn/roadmap.md")).expect("read worktree roadmap");
-    assert!(canonical_contents.contains("ADR-043 Repo Graph"));
-    assert!(canonical_contents.contains("next wave"));
-    assert_eq!(canonical_contents, worktree_contents);
+    assert_eq!(note.storage, "db");
+    assert!(note.content.contains("ADR-043 Repo Graph"));
+    assert!(note.content.contains("next wave"));
 
     assert!(
         note_repo
@@ -439,11 +429,6 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
             .await
             .expect("check duplicate roadmap note")
             .is_none()
-    );
-    assert!(
-        !Path::new(&project_path)
-            .join(".djinn/reference/adr-043-roadmap-active-decomposition-status.md")
-            .exists()
     );
 }
 
@@ -524,19 +509,9 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
 
     assert_eq!(note.note_type, "brief");
     assert_eq!(note.permalink, "brief");
-    assert_eq!(
-        Path::new(&note.file_path),
-        Path::new(&project_path).join(".djinn/brief.md")
-    );
-
-    let canonical_contents =
-        std::fs::read_to_string(Path::new(&project_path).join(".djinn/brief.md"))
-            .expect("read canonical brief");
-    let worktree_contents =
-        std::fs::read_to_string(worktree.join(".djinn/brief.md")).expect("read worktree brief");
-    assert!(canonical_contents.contains("adr-008-agent-harness"));
-    assert!(canonical_contents.contains("next wave"));
-    assert_eq!(canonical_contents, worktree_contents);
+    assert_eq!(note.storage, "db");
+    assert!(note.content.contains("adr-008-agent-harness"));
+    assert!(note.content.contains("next wave"));
 
     assert!(
         note_repo
@@ -544,11 +519,6 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
             .await
             .expect("check duplicate brief note")
             .is_none()
-    );
-    assert!(
-        !Path::new(&project_path)
-            .join(".djinn/reference/project-brief.md")
-            .exists()
     );
 }
 
@@ -666,20 +636,8 @@ async fn call_tool_memory_current_requirement_targets_canonical_project_root_fro
 
     assert_eq!(note.note_type, "requirement");
     assert_eq!(note.permalink, "requirements/v1-requirements");
-    assert_eq!(
-        Path::new(&note.file_path),
-        Path::new(&project_path).join(".djinn/requirements/v1-requirements.md")
-    );
-
-    let canonical_contents = std::fs::read_to_string(
-        Path::new(&project_path).join(".djinn/requirements/v1-requirements.md"),
-    )
-    .expect("read canonical requirements");
-    let worktree_contents =
-        std::fs::read_to_string(worktree.join(".djinn/requirements/v1-requirements.md"))
-            .expect("read worktree requirements");
-    assert!(canonical_contents.contains("[[reference/cognitive-memory-scope]]"));
-    assert_eq!(canonical_contents, worktree_contents);
+    assert_eq!(note.storage, "db");
+    assert!(note.content.contains("[[reference/cognitive-memory-scope]]"));
 
     assert!(
         note_repo
@@ -687,11 +645,6 @@ async fn call_tool_memory_current_requirement_targets_canonical_project_root_fro
             .await
             .expect("check duplicate requirements note")
             .is_none()
-    );
-    assert!(
-        !Path::new(&project_path)
-            .join(".djinn/reference/v1-requirements.md")
-            .exists()
     );
 }
 

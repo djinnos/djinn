@@ -253,27 +253,38 @@ mod tests {
     // proposal_pipeline_regression_worktree_draft_survives_sync_and_is_listed
     // was deleted: it exercised `sync_worktree_notes_to_canonical` and
     // `with_worktree_root`, both removed by the db-only knowledge-base
-    // cut-over. The propose_adr_list tool itself still scans the canonical
-    // project dir on disk for proposed ADR markdown files (a separate
-    // workflow from the KB notes table); see the next two tests.
+    // cut-over. The propose_adr_* tools now query Dolt notes with
+    // `note_type=proposed_adr` directly — see the next four tests.
+
+    /// Seed a `proposed_adr` note for the given project and return it.
+    /// Mirrors what an architect agent would do via `memory_write` with
+    /// `type=proposed_adr`: the title slug becomes the proposal id.
+    async fn seed_proposed_adr(
+        db: &Database,
+        project_id: &str,
+        title: &str,
+        content: &str,
+    ) -> djinn_memory::Note {
+        NoteRepository::new(db.clone(), EventBus::noop())
+            .create(project_id, title, content, "proposed_adr", "[]")
+            .await
+            .expect("seed proposed_adr note")
+    }
 
     #[tokio::test]
     async fn dispatch_tool_routes_propose_adr_list() {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, std::path::Path::new("")).await;
-        let canonical =
-            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
-        let _guard = PathCleanupGuard::new(canonical.clone());
         let server = DjinnMcpServer::new(state);
 
-        let proposed_dir = canonical.join(".djinn/decisions/proposed");
-        std::fs::create_dir_all(&proposed_dir).unwrap();
-        std::fs::write(
-            proposed_dir.join("adr-999-routing.md"),
-            "---\ntitle: Routed ADR\nwork_shape: epic\noriginating_spike_id: spk1\n---\n\n# Routed ADR\n",
+        seed_proposed_adr(
+            &db,
+            &project.id,
+            "ADR 999 Routing",
+            "---\nwork_shape: epic\noriginating_spike_id: spk1\n---\n\n# ADR 999 Routing\n",
         )
-        .unwrap();
+        .await;
 
         let response = server
             .dispatch_tool(
@@ -293,6 +304,16 @@ mod tests {
             items[0].get("id").and_then(|value| value.as_str()),
             Some("adr-999-routing")
         );
+        assert_eq!(
+            items[0].get("work_shape").and_then(|value| value.as_str()),
+            Some("epic")
+        );
+        assert_eq!(
+            items[0]
+                .get("originating_spike_id")
+                .and_then(|value| value.as_str()),
+            Some("spk1")
+        );
         assert!(
             items[0]
                 .get("mtime")
@@ -306,18 +327,15 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, std::path::Path::new("")).await;
-        let canonical =
-            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
-        let _guard = PathCleanupGuard::new(canonical.clone());
         let server = DjinnMcpServer::new(state);
 
-        let proposed_dir = canonical.join(".djinn/decisions/proposed");
-        std::fs::create_dir_all(&proposed_dir).unwrap();
-        std::fs::write(
-            proposed_dir.join("adr-999-routing.md"),
-            "---\ntitle: Routed ADR\nwork_shape: epic\n---\n\n# Routed ADR\n\nBody text\n",
+        seed_proposed_adr(
+            &db,
+            &project.id,
+            "ADR 999 Routing",
+            "---\nwork_shape: epic\n---\n\n# ADR 999 Routing\n\nBody text\n",
         )
-        .unwrap();
+        .await;
 
         let response = server
             .dispatch_tool(
@@ -348,18 +366,15 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, std::path::Path::new("")).await;
-        let canonical =
-            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
-        let _guard = PathCleanupGuard::new(canonical.clone());
         let server = DjinnMcpServer::new(state);
 
-        let proposed_dir = canonical.join(".djinn/decisions/proposed");
-        std::fs::create_dir_all(&proposed_dir).unwrap();
-        std::fs::write(
-            proposed_dir.join("adr-999-routing.md"),
-            "---\ntitle: Routed ADR\nwork_shape: architectural\n---\n\n# Routed ADR\n",
+        seed_proposed_adr(
+            &db,
+            &project.id,
+            "ADR 999 Routing",
+            "---\nwork_shape: architectural\n---\n\n# ADR 999 Routing\n",
         )
-        .unwrap();
+        .await;
 
         let response = server
             .dispatch_tool(
@@ -378,16 +393,24 @@ mod tests {
             .get("accepted_path")
             .and_then(|value| value.as_str())
             .expect("accepted path");
-        assert!(accepted_path.ends_with(".djinn/decisions/adr-999-routing.md"));
+        // After the cut-over, accepted_path is the new permalink (note
+        // moved from `decisions/proposed/<slug>` to `decisions/<slug>`).
+        assert_eq!(accepted_path, "decisions/adr-999-routing");
+
+        let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
+        let promoted = note_repo
+            .get_by_permalink(&project.id, "decisions/adr-999-routing")
+            .await
+            .unwrap()
+            .expect("accepted note exists");
+        assert_eq!(promoted.note_type, "adr");
         assert!(
-            canonical
-                .join(".djinn/decisions/adr-999-routing.md")
-                .exists()
-        );
-        assert!(
-            !canonical
-                .join(".djinn/decisions/proposed/adr-999-routing.md")
-                .exists()
+            note_repo
+                .get_by_permalink(&project.id, "decisions/proposed/adr-999-routing")
+                .await
+                .unwrap()
+                .is_none(),
+            "old proposed permalink should no longer resolve"
         );
     }
 
@@ -396,18 +419,15 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, std::path::Path::new("")).await;
-        let canonical =
-            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
-        let _guard = PathCleanupGuard::new(canonical.clone());
         let server = DjinnMcpServer::new(state);
 
-        let proposed_dir = canonical.join(".djinn/decisions/proposed");
-        std::fs::create_dir_all(&proposed_dir).unwrap();
-        std::fs::write(
-            proposed_dir.join("adr-999-routing.md"),
-            "---\ntitle: Routed ADR\n---\n\n# Routed ADR\n",
+        seed_proposed_adr(
+            &db,
+            &project.id,
+            "ADR 999 Routing",
+            "# ADR 999 Routing\n",
         )
-        .unwrap();
+        .await;
 
         let response = server
             .dispatch_tool(
@@ -427,9 +447,12 @@ mod tests {
             Some(true)
         );
         assert!(
-            !canonical
-                .join(".djinn/decisions/proposed/adr-999-routing.md")
-                .exists()
+            NoteRepository::new(db.clone(), EventBus::noop())
+                .get_by_permalink(&project.id, "decisions/proposed/adr-999-routing")
+                .await
+                .unwrap()
+                .is_none(),
+            "rejected note should be deleted"
         );
     }
 

@@ -4140,55 +4140,6 @@ expression: signatures
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
-        "project": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "project"
-      ],
-      "title": "ReindexParams",
-      "type": "object"
-    },
-    "name": "memory_reindex",
-    "output_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "created": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "deleted": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "error": {
-          "nullable": true,
-          "type": "string"
-        },
-        "unchanged": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "updated": {
-          "format": "int64",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "updated",
-        "created",
-        "deleted",
-        "unchanged"
-      ],
-      "title": "MemoryReindexResponse",
-      "type": "object"
-    }
-  },
-  {
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
         "folder": {
           "nullable": true,
           "type": "string"
@@ -5496,26 +5447,26 @@ expression: signatures
           "description": "A parsed proposed ADR.  Serialized back to the MCP client.",
           "properties": {
             "body": {
-              "description": "Raw markdown body (frontmatter stripped).  Omitted in list\nresponses to keep them small.",
+              "description": "Raw note content. Omitted in list responses to keep them small.",
               "nullable": true,
               "type": "string"
             },
             "id": {
-              "description": "File stem, e.g. `\"adr-052-new-pipeline\"`.",
+              "description": "Slug — the part of the permalink after `decisions/proposed/`.\ne.g. `\"adr-052-new-pipeline\"` for permalink\n`\"decisions/proposed/adr-052-new-pipeline\"`.",
               "type": "string"
             },
             "mtime": {
-              "description": "Last filesystem modified time for the proposal draft, encoded as RFC 3339.",
+              "description": "Last update timestamp on the underlying note, RFC 3339.",
               "nullable": true,
               "type": "string"
             },
             "originating_spike_id": {
-              "description": "Optional short_id of the originating spike task.",
+              "description": "Optional short_id of the originating spike task — frontmatter-sourced.",
               "nullable": true,
               "type": "string"
             },
             "path": {
-              "description": "Absolute filesystem path of the source file (under `proposed/`).",
+              "description": "Canonical permalink of the proposed-ADR note in Dolt.",
               "type": "string"
             },
             "project_id": {
@@ -5524,21 +5475,21 @@ expression: signatures
               "type": "string"
             },
             "project_name": {
-              "description": "Display name of the owning project, sourced from the Dolt\nregistry.  Used by the Proposals page to render per-row project\nchips when the \"All projects\" filter is active.",
+              "description": "Display name of the owning project — kept separate from\n`project_path` since the Proposals UI shows the human name in\nper-row chips.",
               "nullable": true,
               "type": "string"
             },
             "project_path": {
-              "description": "Absolute filesystem root of the owning project, so clients can\ncall `propose_adr_show`/`accept`/`reject` without a second\nproject-lookup round-trip.",
+              "description": "Display name of the owning project, sourced from the Dolt\nregistry.  Used by the Proposals page to render per-row project\nchips when the \"All projects\" filter is active.",
               "nullable": true,
               "type": "string"
             },
             "title": {
-              "description": "Title pulled from frontmatter or the first H1.",
+              "description": "Note title (from `memory_write` `title=`).",
               "type": "string"
             },
             "work_shape": {
-              "description": "Work shape hint (`\"task\"` | `\"epic\"` | `\"architectural\"` | `\"spike\"`).",
+              "description": "Work shape hint (`\"task\"` | `\"epic\"` | `\"architectural\"` | `\"spike\"`),\nparsed from the note content's leading YAML frontmatter when present.",
               "nullable": true,
               "type": "string"
             }
@@ -5644,26 +5595,26 @@ expression: signatures
           "description": "A parsed proposed ADR.  Serialized back to the MCP client.",
           "properties": {
             "body": {
-              "description": "Raw markdown body (frontmatter stripped).  Omitted in list\nresponses to keep them small.",
+              "description": "Raw note content. Omitted in list responses to keep them small.",
               "nullable": true,
               "type": "string"
             },
             "id": {
-              "description": "File stem, e.g. `\"adr-052-new-pipeline\"`.",
+              "description": "Slug — the part of the permalink after `decisions/proposed/`.\ne.g. `\"adr-052-new-pipeline\"` for permalink\n`\"decisions/proposed/adr-052-new-pipeline\"`.",
               "type": "string"
             },
             "mtime": {
-              "description": "Last filesystem modified time for the proposal draft, encoded as RFC 3339.",
+              "description": "Last update timestamp on the underlying note, RFC 3339.",
               "nullable": true,
               "type": "string"
             },
             "originating_spike_id": {
-              "description": "Optional short_id of the originating spike task.",
+              "description": "Optional short_id of the originating spike task — frontmatter-sourced.",
               "nullable": true,
               "type": "string"
             },
             "path": {
-              "description": "Absolute filesystem path of the source file (under `proposed/`).",
+              "description": "Canonical permalink of the proposed-ADR note in Dolt.",
               "type": "string"
             },
             "project_id": {
@@ -5672,21 +5623,21 @@ expression: signatures
               "type": "string"
             },
             "project_name": {
-              "description": "Display name of the owning project, sourced from the Dolt\nregistry.  Used by the Proposals page to render per-row project\nchips when the \"All projects\" filter is active.",
+              "description": "Display name of the owning project — kept separate from\n`project_path` since the Proposals UI shows the human name in\nper-row chips.",
               "nullable": true,
               "type": "string"
             },
             "project_path": {
-              "description": "Absolute filesystem root of the owning project, so clients can\ncall `propose_adr_show`/`accept`/`reject` without a second\nproject-lookup round-trip.",
+              "description": "Display name of the owning project, sourced from the Dolt\nregistry.  Used by the Proposals page to render per-row project\nchips when the \"All projects\" filter is active.",
               "nullable": true,
               "type": "string"
             },
             "title": {
-              "description": "Title pulled from frontmatter or the first H1.",
+              "description": "Note title (from `memory_write` `title=`).",
               "type": "string"
             },
             "work_shape": {
-              "description": "Work shape hint (`\"task\"` | `\"epic\"` | `\"architectural\"` | `\"spike\"`).",
+              "description": "Work shape hint (`\"task\"` | `\"epic\"` | `\"architectural\"` | `\"spike\"`),\nparsed from the note content's leading YAML frontmatter when present.",
               "nullable": true,
               "type": "string"
             }

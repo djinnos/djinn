@@ -1,15 +1,14 @@
 {
   "schema_version": 1,
   "source": "auto-detected",
-  "base": { "distro": "debian", "variant": "bookworm-slim" },
   "languages": {
     "rust": { "default_toolchain": "1.84.0", "components": ["rust-analyzer", "clippy"], "targets": [] }
   },
   "workspaces": [
     { "slug": "root", "root": "", "language": "rust", "toolchain": "1.84.0" }
   ],
-  "system_packages": { "apt": [], "apk": [] },
+  "system_packages": [],
   "env": {},
   "lifecycle": { "post_build": [], "pre_warm": [], "pre_task": [] },
-  "verification": { "setup": [], "rules": [] }
+  "verification": { "rules": [] }
 }
