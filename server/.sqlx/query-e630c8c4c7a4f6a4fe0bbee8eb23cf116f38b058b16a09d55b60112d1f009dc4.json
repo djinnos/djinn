@@ -1,6 +1,6 @@
 {
   "db_name": "MySQL",
-  "query": "SELECT n.id, n.title, n.note_type, n.tags, n.content,\n                      m.content_hash AS \"content_hash?\",\n                      m.model_version AS \"model_version?\"\n                 FROM notes n\n            LEFT JOIN note_embedding_meta m ON m.note_id = n.id\n                WHERE n.project_id = ?",
+  "query": "SELECT n.id, n.title, n.note_type, n.tags, n.content,\n                      m.content_hash AS \"content_hash?\",\n                      m.model_version AS \"model_version?\",\n                      m.extension_state AS \"extension_state?\"\n                 FROM notes n\n            LEFT JOIN note_embedding_meta m ON m.note_id = n.id\n                WHERE n.project_id = ?",
   "describe": {
     "columns": [
       {
@@ -65,6 +65,15 @@
           "flags": "NOT_NULL",
           "max_size": 1020
         }
+      },
+      {
+        "ordinal": 7,
+        "name": "extension_state?",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
       }
     ],
     "parameters": {
@@ -77,8 +86,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "5dd7161c99443d784e2655f2a8670e2446c9428bb1dbf1618499fcbb822f6224"
+  "hash": "e630c8c4c7a4f6a4fe0bbee8eb23cf116f38b058b16a09d55b60112d1f009dc4"
 }

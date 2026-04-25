@@ -62,6 +62,19 @@ async fn repair_embeddings(
 
     let force = params.force.unwrap_or(false);
 
+    // When the vector store can actually accept embeddings (e.g. Qdrant is
+    // reachable), treat `extension_state="pending"` as stale — that state
+    // means the metadata write succeeded but the vector store call did
+    // not, so the point is missing and re-embedding will populate it.
+    // When the vector store cannot index (Noop, or Qdrant unreachable),
+    // every meta row is "pending" by design and re-embedding would just
+    // loop, so fall back to the hash+version-only freshness check.
+    let vector_store_active = repo
+        .vector_store()
+        .can_index(&repo)
+        .await
+        .unwrap_or(false);
+
     let rows = match repo.list_repair_embedding_rows(&project_id).await {
         Ok(rows) => rows,
         Err(error) => {
@@ -82,7 +95,16 @@ async fn repair_embeddings(
             embedding_content_hash(&row.title, &row.note_type, &row.tags, &row.content);
 
         let is_stale = match (row.content_hash.as_deref(), row.model_version.as_deref()) {
-            (Some(hash), Some(version)) => hash != expected_hash || version != model_version,
+            (Some(hash), Some(version)) => {
+                let content_or_model_drifted =
+                    hash != expected_hash || version != model_version;
+                // Only let `extension_state` invalidate freshness when the
+                // vector store can actually index. Otherwise every Noop /
+                // unreachable-Qdrant meta row reads as stale forever.
+                let vector_missing = vector_store_active
+                    && row.extension_state.as_deref().unwrap_or("pending") != "ready";
+                content_or_model_drifted || vector_missing
+            }
             // No meta row at all → definitely needs embedding.
             _ => true,
         };
@@ -126,6 +148,14 @@ mod tests {
         Database, EmbeddedNote, NoopNoteVectorStore, NoteEmbeddingProvider, NoteRepository,
         NoteVectorStore, ProjectRepository,
     };
+    // Embeddings types not surfaced at `djinn_db::*` are reached via the
+    // module path. `NoteVectorBackend` in particular collides with a
+    // database/config enum at the crate root, so pull from the embeddings
+    // module explicitly.
+    use djinn_db::repositories::note::{
+        EmbeddingQueryContext, NoteEmbeddingMatch, NoteEmbeddingRecord, NoteVectorBackend,
+        UpsertNoteEmbedding,
+    };
     use rmcp::handler::server::wrapper::Parameters;
 
     use crate::{
@@ -147,6 +177,56 @@ mod tests {
                 values: vec![0.0_f32; 768],
                 model_version: "test-zero-embedding-v1".to_string(),
             })
+        }
+    }
+
+    /// Vector-store stub that reports `can_index=true` (so the repair tool's
+    /// vector-presence check engages) but persists meta with the
+    /// `"pending"` extension state, simulating a Qdrant deployment whose
+    /// upsert call silently failed (today's scenario: collection missing
+    /// at the time the row was first written). Subsequent repair runs
+    /// must observe `pending` + `can_index=true` and treat the row as
+    /// stale even when the content hash matches.
+    #[derive(Default)]
+    struct ActiveButPendingVectorStub;
+
+    #[async_trait]
+    impl NoteVectorStore for ActiveButPendingVectorStub {
+        fn backend(&self) -> NoteVectorBackend {
+            NoteVectorBackend::Qdrant
+        }
+
+        async fn can_index(&self, _repo: &NoteRepository) -> djinn_db::Result<bool> {
+            Ok(true)
+        }
+
+        async fn upsert_embedding(
+            &self,
+            repo: &NoteRepository,
+            input: UpsertNoteEmbedding<'_>,
+        ) -> djinn_db::Result<NoteEmbeddingRecord> {
+            // Delegate to Noop's path which records the meta row with
+            // `extension_state="pending"` — the exact failure mode we're
+            // exercising.
+            NoopNoteVectorStore.upsert_embedding(repo, input).await
+        }
+
+        async fn delete_embedding(
+            &self,
+            repo: &NoteRepository,
+            note_id: &str,
+        ) -> djinn_db::Result<()> {
+            NoopNoteVectorStore.delete_embedding(repo, note_id).await
+        }
+
+        async fn query_similar_embeddings(
+            &self,
+            _repo: &NoteRepository,
+            _query_embedding: &[f32],
+            _query: EmbeddingQueryContext<'_>,
+            _limit: usize,
+        ) -> djinn_db::Result<Vec<NoteEmbeddingMatch>> {
+            Ok(vec![])
         }
     }
 
@@ -287,4 +367,60 @@ mod tests {
     // Re-export of the no-provider stub helper from the memory_tools test
     // suite so this test module doesn't need a separate `pub use`.
     use crate::state::stubs::test_mcp_state;
+
+    /// Regression for the correctness gap in the initial implementation:
+    /// when the vector store CAN index but the previous upsert failed
+    /// (meta row written with `extension_state="pending"`), the repair
+    /// tool used to incorrectly report the note as `up_to_date` because
+    /// the content hash and model_version still matched. With the fix,
+    /// `pending` is treated as stale whenever the vector store is active,
+    /// so a follow-up repair re-runs the embed and brings Qdrant in sync.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repair_treats_pending_state_as_stale_when_vector_store_active() {
+        let tmp = workspace_tempdir();
+        let _path = tmp.keep();
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state_with_embedding(
+            db.clone(),
+            Some(Arc::new(ZeroEmbedding) as Arc<dyn NoteEmbeddingProvider>),
+            Some(Arc::new(ActiveButPendingVectorStub) as Arc<dyn NoteVectorStore>),
+        );
+        let project = ProjectRepository::new(db.clone(), EventBus::noop())
+            .create("pending-project", "test", "pending-project")
+            .await
+            .unwrap();
+        let server = DjinnMcpServer::new(state);
+        make_note(&db, &project.id, "Pending Vector").await;
+
+        // First run: embeds via the stub, leaving meta in `pending`.
+        let first = server
+            .memory_repair_embeddings(Parameters(RepairEmbeddingsParams {
+                project: project.id.clone(),
+                force: None,
+            }))
+            .await
+            .0;
+        assert_eq!(first.repaired, 1, "first run should embed the new note");
+        assert_eq!(first.up_to_date, 0);
+
+        // Second run WITHOUT force: with the old logic this would have
+        // returned `up_to_date=1` because the hash + model_version still
+        // match. With the fix, `pending` + `can_index=true` correctly
+        // marks the row as stale and triggers another embed attempt.
+        let second = server
+            .memory_repair_embeddings(Parameters(RepairEmbeddingsParams {
+                project: project.id.clone(),
+                force: None,
+            }))
+            .await
+            .0;
+        assert_eq!(
+            second.repaired, 1,
+            "pending row should be re-repaired without force when vector store is active"
+        );
+        assert_eq!(second.up_to_date, 0);
+        assert_eq!(second.failed, 0);
+
+        let _ = db; // keep db alive for the duration of the test
+    }
 }

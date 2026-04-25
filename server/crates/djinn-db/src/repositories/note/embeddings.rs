@@ -942,7 +942,8 @@ impl NoteRepository {
         let rows = sqlx::query!(
             r#"SELECT n.id, n.title, n.note_type, n.tags, n.content,
                       m.content_hash AS "content_hash?",
-                      m.model_version AS "model_version?"
+                      m.model_version AS "model_version?",
+                      m.extension_state AS "extension_state?"
                  FROM notes n
             LEFT JOIN note_embedding_meta m ON m.note_id = n.id
                 WHERE n.project_id = ?"#,
@@ -961,14 +962,20 @@ impl NoteRepository {
                 content: r.content,
                 content_hash: r.content_hash,
                 model_version: r.model_version,
+                extension_state: r.extension_state,
             })
             .collect())
     }
 }
 
 /// Per-note state surfaced by [`NoteRepository::list_repair_embedding_rows`].
-/// `content_hash` / `model_version` are `None` when no embedding meta row
-/// exists for the note yet (i.e. it has never been embedded).
+/// `content_hash` / `model_version` / `extension_state` are `None` when no
+/// embedding meta row exists for the note yet (i.e. it has never been
+/// embedded). `extension_state` is `"ready"` when the qdrant upsert
+/// succeeded and `"pending"` when only the local metadata was written
+/// because the qdrant call failed — the latter must be treated as stale
+/// even if the content_hash still matches, since the vector store does
+/// not actually have a point for the note.
 #[derive(Debug, Clone)]
 pub struct NoteRepairEmbeddingRow {
     pub id: String,
@@ -978,4 +985,5 @@ pub struct NoteRepairEmbeddingRow {
     pub content: String,
     pub content_hash: Option<String>,
     pub model_version: Option<String>,
+    pub extension_state: Option<String>,
 }
