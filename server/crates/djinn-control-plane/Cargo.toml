@@ -42,7 +42,6 @@ test-support = []
 # `#[cfg(test)]` gating on `test_support` doesn't apply).
 djinn-control-plane = { path = ".", features = ["test-support"] }
 tempfile = "3"
-sqlx = { version = "0.8", features = ["mysql", "runtime-tokio-rustls", "macros"] }
 anyhow = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 insta = { version = "1", features = ["json", "redactions"] }

@@ -469,4 +469,28 @@ pub mod stubs {
             Arc::new(StubRepoGraphOps),
         )
     }
+
+    /// Same as [`test_mcp_state`] but lets the test plug in a concrete
+    /// `NoteEmbeddingProvider` / `NoteVectorStore`. Used by the
+    /// `memory_repair_embeddings` tests, which need a working embedding path.
+    pub fn test_mcp_state_with_embedding(
+        db: Database,
+        embedding_provider: Option<Arc<dyn NoteEmbeddingProvider>>,
+        vector_store: Option<Arc<dyn NoteVectorStore>>,
+    ) -> McpState {
+        McpState::new(
+            db,
+            EventBus::noop(),
+            CatalogService::new(),
+            HealthTracker::new(),
+            None,
+            None,
+            embedding_provider,
+            vector_store,
+            Arc::new(StubLspOps),
+            Arc::new(StubRuntimeOps),
+            Arc::new(StubGitOps),
+            Arc::new(StubRepoGraphOps),
+        )
+    }
 }

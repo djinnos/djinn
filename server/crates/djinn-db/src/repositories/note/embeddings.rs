@@ -264,7 +264,7 @@ fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
         .collect()
 }
 
-pub(super) fn embedding_document_text(
+pub fn embedding_document_text(
     title: &str,
     note_type: &str,
     tags: &str,
@@ -273,7 +273,7 @@ pub(super) fn embedding_document_text(
     format!("title: {title}\ntype: {note_type}\ntags: {tags}\n\n{content}")
 }
 
-pub(super) fn embedding_content_hash(
+pub fn embedding_content_hash(
     title: &str,
     note_type: &str,
     tags: &str,
@@ -384,6 +384,74 @@ impl NoteVectorStore for NoopNoteVectorStore {
 
 #[cfg(feature = "qdrant")]
 impl QdrantNoteVectorStore {
+    /// Bootstrap-time collection creation. Idempotent.
+    ///
+    /// * If the collection doesn't exist → create it with `(vector_size, Cosine)`
+    ///   and seed the `branch` payload keyword index.
+    /// * If it exists with matching dimensions → no-op (still ensures the
+    ///   payload index, which is also idempotent).
+    /// * If it exists with **different** dimensions → returns an `Err` so the
+    ///   caller can fail startup loudly instead of silently mismatching.
+    pub async fn ensure_collection(
+        &self,
+        vector_size: u64,
+    ) -> std::result::Result<(), String> {
+        use qdrant_client::qdrant::{CreateCollectionBuilder, Distance, VectorParamsBuilder};
+
+        let client = self.client()?;
+
+        let exists = client
+            .collection_exists(self.config.collection.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+
+        if exists {
+            // Verify dimensions match. If not, fail loudly.
+            let info = client
+                .collection_info(self.config.collection.clone())
+                .await
+                .map_err(|error| error.to_string())?;
+            if let Some(actual) = info
+                .result
+                .as_ref()
+                .and_then(|r| r.config.as_ref())
+                .and_then(|c| c.params.as_ref())
+                .and_then(|p| p.vectors_config.as_ref())
+                .and_then(|v| v.config.as_ref())
+                .and_then(|cfg| match cfg {
+                    qdrant_client::qdrant::vectors_config::Config::Params(p) => Some(p.size),
+                    qdrant_client::qdrant::vectors_config::Config::ParamsMap(_) => None,
+                })
+                && actual != vector_size
+            {
+                return Err(format!(
+                    "qdrant collection '{}' exists with vector size {} but server expects {}; \
+                     drop the collection or fix DJINN_VECTOR_BACKEND/embedding model",
+                    self.config.collection, actual, vector_size
+                ));
+            }
+        } else {
+            client
+                .create_collection(
+                    CreateCollectionBuilder::new(self.config.collection.clone())
+                        .vectors_config(VectorParamsBuilder::new(vector_size, Distance::Cosine)),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            tracing::info!(
+                collection = %self.config.collection,
+                vector_size,
+                "created qdrant collection"
+            );
+        }
+
+        // Always ensure the branch payload index. `create_field_index` is
+        // idempotent on the server side — it returns OK when the index
+        // already exists.
+        self.ensure_branch_index(&client).await;
+        Ok(())
+    }
+
     async fn ensure_branch_index(&self, client: &qdrant_client::Qdrant) {
         use qdrant_client::qdrant::{CreateFieldIndexCollectionBuilder, FieldType};
 
@@ -493,6 +561,13 @@ impl QdrantNoteVectorStore {
 
 #[cfg(not(feature = "qdrant"))]
 impl QdrantNoteVectorStore {
+    pub async fn ensure_collection(
+        &self,
+        _vector_size: u64,
+    ) -> std::result::Result<(), String> {
+        Err("qdrant support not compiled in; enable the 'qdrant' feature".to_owned())
+    }
+
     async fn qdrant_upsert(
         &self,
         _input: &UpsertNoteEmbedding<'_>,
@@ -731,6 +806,36 @@ impl NoteRepository {
         }
     }
 
+    /// Synchronously embed and persist a note. Returns the upserted record on
+    /// success, an error string on failure. Used by the
+    /// `memory_repair_embeddings` MCP tool, which needs success/failure
+    /// signaling that the fire-and-forget [`sync_note_embedding`] swallows.
+    pub async fn embed_note_now(
+        &self,
+        note_id: &str,
+        title: &str,
+        note_type: &str,
+        tags: &str,
+        content: &str,
+    ) -> std::result::Result<NoteEmbeddingRecord, String> {
+        let provider = self
+            .embedding_provider()
+            .ok_or_else(|| "embedding provider not configured".to_string())?;
+
+        let semantic_text = embedding_document_text(title, note_type, tags, content);
+        let content_hash = embedding_content_hash(title, note_type, tags, content);
+        let embedded = provider.embed_note(&semantic_text).await?;
+        self.upsert_embedding(UpsertNoteEmbedding {
+            note_id,
+            content_hash: &content_hash,
+            model_version: &embedded.model_version,
+            embedding: &embedded.values,
+            branch: self.embedding_branch(),
+        })
+        .await
+        .map_err(|e| e.to_string())
+    }
+
     pub async fn upsert_embedding(
         &self,
         input: UpsertNoteEmbedding<'_>,
@@ -824,4 +929,53 @@ impl NoteRepository {
         .fetch_optional(self.db.pool())
         .await?)
     }
+
+    /// Fetch the per-note state needed by the `memory_repair_embeddings`
+    /// tool: the note text payload + the current `note_embedding_meta` hash
+    /// & model_version (both nullable — a missing meta row means the note
+    /// has never been embedded). Single LEFT JOIN, scoped to one project.
+    pub async fn list_repair_embedding_rows(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<NoteRepairEmbeddingRow>> {
+        self.db.ensure_initialized().await?;
+        let rows = sqlx::query!(
+            r#"SELECT n.id, n.title, n.note_type, n.tags, n.content,
+                      m.content_hash AS "content_hash?",
+                      m.model_version AS "model_version?"
+                 FROM notes n
+            LEFT JOIN note_embedding_meta m ON m.note_id = n.id
+                WHERE n.project_id = ?"#,
+            project_id
+        )
+        .fetch_all(self.db.pool())
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| NoteRepairEmbeddingRow {
+                id: r.id,
+                title: r.title,
+                note_type: r.note_type,
+                tags: r.tags,
+                content: r.content,
+                content_hash: r.content_hash,
+                model_version: r.model_version,
+            })
+            .collect())
+    }
+}
+
+/// Per-note state surfaced by [`NoteRepository::list_repair_embedding_rows`].
+/// `content_hash` / `model_version` are `None` when no embedding meta row
+/// exists for the note yet (i.e. it has never been embedded).
+#[derive(Debug, Clone)]
+pub struct NoteRepairEmbeddingRow {
+    pub id: String,
+    pub title: String,
+    pub note_type: String,
+    pub tags: String,
+    pub content: String,
+    pub content_hash: Option<String>,
+    pub model_version: Option<String>,
 }

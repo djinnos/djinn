@@ -4140,6 +4140,95 @@ expression: signatures
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "force": {
+          "description": "If true, re-embed every note even if its content hash already matches.\nDefault false: only notes with missing or stale embeddings are repaired.",
+          "nullable": true,
+          "type": "boolean"
+        },
+        "project": {
+          "description": "Project path, slug, or id (same forms accepted by other memory tools).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "RepairEmbeddingsParams",
+      "type": "object"
+    },
+    "name": "memory_repair_embeddings",
+    "output_schema": {
+      "$defs": {
+        "MemoryRepairEmbeddingFailure": {
+          "properties": {
+            "note_id": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "note_id",
+            "reason"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "description": "Top-level failure: project not found, embedding provider unavailable, etc.",
+          "nullable": true,
+          "type": "string"
+        },
+        "failed": {
+          "description": "Notes whose re-embed attempt failed (Qdrant down, model error, …).",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failures": {
+          "description": "First-N failures (capped to keep the response small).",
+          "items": {
+            "$ref": "#/$defs/MemoryRepairEmbeddingFailure"
+          },
+          "type": "array"
+        },
+        "repaired": {
+          "description": "Notes that received a fresh embedding during this run.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total": {
+          "description": "Total notes scanned for the project.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "up_to_date": {
+          "description": "Notes whose embedding meta was already current; no work performed.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total",
+        "repaired",
+        "up_to_date",
+        "failed",
+        "failures"
+      ],
+      "title": "MemoryRepairEmbeddingsResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
         "folder": {
           "nullable": true,
           "type": "string"

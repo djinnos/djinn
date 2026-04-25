@@ -186,6 +186,37 @@ pub struct OrphansParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct RepairEmbeddingsParams {
+    /// Project path, slug, or id (same forms accepted by other memory tools).
+    pub project: String,
+    /// If true, re-embed every note even if its content hash already matches.
+    /// Default false: only notes with missing or stale embeddings are repaired.
+    pub force: Option<bool>,
+}
+
+#[derive(Serialize, schemars::JsonSchema, Default)]
+pub struct MemoryRepairEmbeddingFailure {
+    pub note_id: String,
+    pub reason: String,
+}
+
+#[derive(Serialize, schemars::JsonSchema, Default)]
+pub struct MemoryRepairEmbeddingsResponse {
+    /// Total notes scanned for the project.
+    pub total: usize,
+    /// Notes that received a fresh embedding during this run.
+    pub repaired: usize,
+    /// Notes whose embedding meta was already current; no work performed.
+    pub up_to_date: usize,
+    /// Notes whose re-embed attempt failed (Qdrant down, model error, …).
+    pub failed: usize,
+    /// First-N failures (capped to keep the response small).
+    pub failures: Vec<MemoryRepairEmbeddingFailure>,
+    /// Top-level failure: project not found, embedding provider unavailable, etc.
+    pub error: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct AssociationsParams {
     pub project: String,
     /// Note ID or permalink (e.g. "decisions/my-adr").

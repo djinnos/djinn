@@ -42,8 +42,9 @@ pub use djinn_memory::{
 };
 pub use embeddings::{
     EmbeddedNote, EmbeddingQueryContext, NoopNoteVectorStore, NoteEmbeddingMatch,
-    NoteEmbeddingProvider, NoteEmbeddingRecord, NoteVectorBackend, NoteVectorStore, QdrantConfig,
-    QdrantNoteVectorStore, UpsertNoteEmbedding, infer_embedding_branch_from_worktree,
+    NoteEmbeddingProvider, NoteEmbeddingRecord, NoteRepairEmbeddingRow, NoteVectorBackend,
+    NoteVectorStore, QdrantConfig, QdrantNoteVectorStore, UpsertNoteEmbedding,
+    embedding_content_hash, embedding_document_text, infer_embedding_branch_from_worktree,
     task_branch_name,
 };
 pub use lexical_search::{
