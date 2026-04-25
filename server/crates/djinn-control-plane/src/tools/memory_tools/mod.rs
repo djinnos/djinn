@@ -22,6 +22,7 @@ mod lifecycle;
 mod move_ops;
 pub mod ops;
 mod reads;
+mod repair_embeddings;
 mod search;
 pub(crate) mod summaries;
 mod write_dedup;
@@ -56,6 +57,7 @@ impl DjinnMcpServer {
             + Self::memory_writes_router()
             + Self::memory_search_router()
             + Self::memory_associations_router()
+            + Self::memory_repair_embeddings_router()
     }
 }
 

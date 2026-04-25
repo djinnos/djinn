@@ -20,7 +20,7 @@ use crate::tools::memory_tools::{
     AssociationsParams, BrokenLinksParams, BuildContextParams, CatalogParams, DeleteParams,
     DiffParams, EditParams, ExtractedAuditParams, GraphParams, HealthParams, HistoryParams,
     ListParams, MemoryConfirmParams, MoveParams, OrphansParams, ReadParams, RecentParams,
-    SearchParams, TaskRefsParams, WriteParams,
+    RepairEmbeddingsParams, SearchParams, TaskRefsParams, WriteParams,
 };
 use crate::tools::project_tools::{
     GetProjectDevcontainerStatusParams, GetProjectStackParams, GithubListReposParams,
@@ -420,6 +420,13 @@ impl DjinnMcpServer {
                 name,
                 self.memory_move(Parameters(decode_args::<MoveParams>(name, args)?))
                     .await,
+            ),
+            "memory_repair_embeddings" => map_json(
+                name,
+                self.memory_repair_embeddings(Parameters(decode_args::<RepairEmbeddingsParams>(
+                    name, args,
+                )?))
+                .await,
             ),
             "memory_associations" => map_json(
                 name,

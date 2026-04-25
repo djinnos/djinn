@@ -40,6 +40,25 @@ const EVENT_CHANNEL_CAPACITY: usize = 1024;
 const SETTINGS_RAW_KEY: &str = "settings.raw";
 const MODEL_HEALTH_STATE_KEY: &str = "model_health.state";
 
+/// Build a `QdrantConfig` from `QDRANT_URL` (and friends), falling back to
+/// the library default (`http://127.0.0.1:6334`, no API key, collection
+/// `notes`). Centralized so the per-call `note_vector_store()` and the
+/// startup-time `initialize_vector_store()` agree on configuration.
+fn qdrant_config_from_env() -> QdrantConfig {
+    let mut config = QdrantConfig::default();
+    if let Ok(url) = std::env::var("QDRANT_URL")
+        && !url.is_empty()
+    {
+        config.url = url;
+    }
+    if let Ok(key) = std::env::var("QDRANT_API_KEY")
+        && !key.is_empty()
+    {
+        config.api_key = Some(key);
+    }
+    config
+}
+
 /// Report which `GITHUB_APP_*` env vars are unset or empty, so `init_app_config`
 /// can surface a useful diagnosis when `GitHubAppConfig::load()` returns `None`.
 fn missing_github_app_env_vars() -> Vec<&'static str> {
@@ -821,13 +840,8 @@ impl AppState {
     pub fn note_vector_store(&self) -> Arc<dyn NoteVectorStore> {
         match std::env::var("DJINN_VECTOR_BACKEND") {
             Ok(value) if value.eq_ignore_ascii_case("qdrant") => {
-                let mut config = QdrantConfig::default();
-                if let Ok(url) = std::env::var("QDRANT_URL")
-                    && !url.is_empty()
-                {
-                    config.url = url;
-                }
-                Arc::new(QdrantNoteVectorStore::new(config)) as Arc<dyn NoteVectorStore>
+                Arc::new(QdrantNoteVectorStore::new(qdrant_config_from_env()))
+                    as Arc<dyn NoteVectorStore>
             }
             Ok(value) if value.eq_ignore_ascii_case("noop") => {
                 Arc::new(NoopNoteVectorStore) as Arc<dyn NoteVectorStore>
@@ -837,6 +851,19 @@ impl AppState {
             // DJINN_VECTOR_BACKEND=qdrant.
             _ => Arc::new(NoopNoteVectorStore) as Arc<dyn NoteVectorStore>,
         }
+    }
+
+    /// Bootstrap-time call: ensure the configured Qdrant collection exists
+    /// with the expected vector dimensions before the server starts taking
+    /// embed-upsert traffic. No-op when `DJINN_VECTOR_BACKEND` isn't `qdrant`.
+    pub async fn initialize_vector_store(&self) -> Result<(), String> {
+        let backend = std::env::var("DJINN_VECTOR_BACKEND").unwrap_or_default();
+        if !backend.eq_ignore_ascii_case("qdrant") {
+            return Ok(());
+        }
+        let store = QdrantNoteVectorStore::new(qdrant_config_from_env());
+        let dim = djinn_provider::embeddings::DEFAULT_EMBEDDING_DIMENSION as u64;
+        store.ensure_collection(dim).await
     }
 
     /// Register a task as having an in-flight verification pipeline.
@@ -1058,6 +1085,15 @@ impl AppState {
         // KB note storage is db-only: there is no on-disk reindex on startup
         // and no .djinn/ filesystem watcher. Notes are written directly to
         // Dolt by the MCP write path; embeddings catch up asynchronously.
+
+        // Bootstrap the Qdrant `notes` collection so the very first embed
+        // upsert doesn't tombstone with `Collection 'notes' doesn't exist!`.
+        // Idempotent: a second boot finds the collection and only verifies
+        // its dimensions match. If they don't, surface a loud startup error
+        // rather than silently writing to a wrongly-shaped collection.
+        if let Err(error) = self.initialize_vector_store().await {
+            tracing::error!(%error, "failed to bootstrap qdrant collection on startup");
+        }
 
         // One-shot backfill of pre-existing blobless mirrors to full
         // mirrors. Mirrors cloned before the chat-user-global cut-over
