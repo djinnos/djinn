@@ -259,9 +259,41 @@ pub fn parse_scip_bytes(bytes: &[u8]) -> Result<ParsedScipIndex> {
 
 fn parse_index(index: Index) -> Result<ParsedScipIndex> {
     let metadata = normalize_metadata(index.metadata.as_ref());
-    let mut dropped_locals: usize = 0;
-    let files = index
+
+    // First gate: drop SCIP documents whose `relative_path` escapes the
+    // project root (e.g. Go build cache files the indexer picks up inside
+    // a containerized warm). These show up as ~80-char hash-named file
+    // nodes with FileReference edges fanning out — un-clickable noise.
+    let total_documents = index.documents.len();
+    let kept_documents: Vec<Document> = index
         .documents
+        .into_iter()
+        .filter(|document| {
+            if is_repo_relative(&document.relative_path) {
+                true
+            } else {
+                tracing::debug!(
+                    path = %document.relative_path,
+                    "dropping non-repo-relative SCIP document"
+                );
+                false
+            }
+        })
+        .collect();
+    let dropped_files = total_documents.saturating_sub(kept_documents.len());
+    if dropped_files > 0 {
+        tracing::info!(
+            dropped = dropped_files,
+            total = total_documents,
+            "dropped {dropped_files} non-repo-relative files",
+        );
+    }
+
+    // Second gate: per-document, drop SCIP `local …` occurrences /
+    // definitions / symbols (counted into `dropped_locals` by
+    // `normalize_document`) so they never reach the graph builder.
+    let mut dropped_locals: usize = 0;
+    let files = kept_documents
         .into_iter()
         .map(|doc| normalize_document(doc, &mut dropped_locals))
         .collect::<Result<Vec<_>>>()?;
@@ -300,6 +332,51 @@ fn parse_index(index: Index) -> Result<ParsedScipIndex> {
         files,
         external_symbols,
     })
+}
+
+/// Returns `true` when `path` plausibly lives inside the project root and
+/// should be admitted to the repo graph. Returns `false` for paths that
+/// escape the root, are absolute, or sit in well-known cache / temp /
+/// system directories that some SCIP indexers (notably scip-go) pull in
+/// when run inside a container.
+///
+/// The predicate is intentionally a single small function so future
+/// indexer quirks (npm cache, gradle cache, etc.) can extend the rule
+/// list in one place. SCIP `Document.relative_path` is supposed to be
+/// repo-relative; anything that doesn't look that way is either an
+/// indexer bug or a build-cache leak, and the resulting file nodes have
+/// terrible labels (typically a content hash) that drown out real code
+/// in the visualization.
+pub(crate) fn is_repo_relative(path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    // Escapes the project root (`../foo`).
+    if path.starts_with("../") || path == ".." {
+        return false;
+    }
+    // Absolute paths (`/usr/include/foo.h`) are never repo-relative.
+    if path.starts_with('/') {
+        return false;
+    }
+    // Defensive: well-known cache / generated-out-of-tree path segments.
+    // We check `/.cache/` as an embedded segment so a legitimate file
+    // named `cache.go` or `internal/cachelib/foo.go` is unaffected.
+    if path.contains("/.cache/") {
+        return false;
+    }
+    // System-style path prefixes that occasionally appear when the SCIP
+    // indexer is fed a working directory it doesn't fully understand.
+    // These are checked as anchored prefixes, again so an in-repo path
+    // like `internal/tmpfile/foo.go` is left alone.
+    const FORBIDDEN_PREFIXES: &[&str] = &["tmp/", "var/", "root/", "home/"];
+    if FORBIDDEN_PREFIXES
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+    {
+        return false;
+    }
+    true
 }
 
 fn normalize_metadata(metadata: Option<&Metadata>) -> ScipMetadata {
@@ -824,6 +901,79 @@ mod tests {
             parsed.files[0].occurrences.is_empty(),
             "malformed occurrence should be dropped, got {:?}",
             parsed.files[0].occurrences
+        );
+    }
+
+    #[test]
+    fn is_repo_relative_predicate_admits_real_paths_and_drops_junk() {
+        // Legitimate in-repo files are kept.
+        assert!(is_repo_relative("internal/worker/page_worker.go"));
+        assert!(is_repo_relative("src/lib.rs"));
+
+        // The defensive `.cache` substring check is anchored on the
+        // `/.cache/` segment so a file *named* like a cache (or living
+        // in a directory whose name merely contains the string `cache`)
+        // is admitted.
+        assert!(is_repo_relative("internal/cachelib/foo.go"));
+
+        // Path that escapes the project root — this is the exact shape
+        // scip-go emits for Go build-cache files when it runs in a
+        // container.
+        assert!(!is_repo_relative(
+            "../../root/.cache/go-build/f6/f6234ef685a72df4b7dcad95c6bd38311bdfa76e073f868a339949d7e3afe2a4-d"
+        ));
+
+        // Absolute path — never repo-relative.
+        assert!(!is_repo_relative("/usr/include/foo.h"));
+
+        // Direct hit on the `/.cache/` segment without a `../` prefix
+        // (defensive against indexers that strip the leading dotdots
+        // but leave the cache path intact).
+        assert!(!is_repo_relative("foo/.cache/bar.go"));
+
+        // System-style prefixes get rejected.
+        assert!(!is_repo_relative("tmp/scratch/foo.go"));
+        assert!(!is_repo_relative("root/.cache/go-build/abc-d"));
+
+        // Empty path — also not admitted; an upstream `normalize_document`
+        // would have errored on this anyway.
+        assert!(!is_repo_relative(""));
+    }
+
+    #[test]
+    fn parse_index_drops_non_repo_relative_documents() {
+        let mut index = Index::new();
+
+        // One legitimate document.
+        index.documents.push(Document {
+            language: "go".to_string(),
+            relative_path: "internal/worker/page_worker.go".to_string(),
+            ..Document::new()
+        });
+        // Two junk documents that escape the project root.
+        index.documents.push(Document {
+            language: "go".to_string(),
+            relative_path:
+                "../../root/.cache/go-build/f6/f6234ef685a72df4b7dcad95c6bd38311bdfa76e073f868a339949d7e3afe2a4-d"
+                    .to_string(),
+            ..Document::new()
+        });
+        index.documents.push(Document {
+            language: "c".to_string(),
+            relative_path: "/usr/include/foo.h".to_string(),
+            ..Document::new()
+        });
+
+        let bytes = index.write_to_bytes().expect("encode index");
+        let parsed = parse_scip_bytes(&bytes).expect("parse should succeed");
+        assert_eq!(
+            parsed.files.len(),
+            1,
+            "only the in-repo document should survive the path filter"
+        );
+        assert_eq!(
+            parsed.files[0].relative_path,
+            PathBuf::from("internal/worker/page_worker.go"),
         );
     }
 
