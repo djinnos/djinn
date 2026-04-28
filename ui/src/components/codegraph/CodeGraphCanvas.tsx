@@ -1,13 +1,20 @@
 /**
- * CodeGraphCanvas — main D2 view: fetch → adapt → render.
+ * CodeGraphCanvas — main D2/D3 view: fetch → adapt → render → interact.
  *
  * Owns the round-trip from project id to a fully-laid-out Sigma
  * canvas. State machine has three terminal states (loading / error /
  * ready) plus an empty-graph fallback for projects that haven't been
  * warmed yet.
  *
- * Interactions, citation highlighting, Mermaid impact, Cmd-K — all
- * intentionally deferred to PR D3-D6 per the scope rules in the plan.
+ * D3 layers selection / hover / citation / blast-radius highlights via
+ * the Zustand `codeGraphStore` and the `useGraphReducers` hook —
+ * Sigma's `nodeReducer` / `edgeReducer` callbacks read the latest view
+ * on every frame, so toggles are flicker-free without re-mounting.
+ *
+ * The canvas itself stays thin: click handlers write `selectionId` to
+ * the store, the right-rail (`SymbolDetailPanel`) and Cmd-K palette
+ * (`QueryPalette`) live in the page shell so they survive across
+ * project switches via the store.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -21,6 +28,8 @@ import {
   type SnapshotPayload,
 } from "@/lib/codeGraphAdapter";
 import { useSigmaGraph } from "@/hooks/useSigmaGraph";
+import { useGraphReducers } from "@/hooks/useGraphReducers";
+import { useCodeGraphStore } from "@/stores/codeGraphStore";
 import { cn } from "@/lib/utils";
 
 type FetchState =
@@ -87,8 +96,59 @@ export function CodeGraphCanvas({
     return buildGraphFromSnapshot(state.snapshot);
   }, [state]);
 
+  // ── Reducers — wired before Sigma so the constructor sees them ────────
+  // We build the hook with `null` Sigma initially; the second pass
+  // (after `useSigmaGraph` mounts) re-runs with the live handle so the
+  // animation loop and `refresh` calls plug in correctly.
+  const [sigmaHandle, setSigmaHandle] = useState<
+    ReturnType<typeof useSigmaGraph>["sigma"]
+  >(null);
+  const { reducers } = useGraphReducers(graph, sigmaHandle);
+
   // ── Sigma + ForceAtlas2 lifecycle ─────────────────────────────────────
-  const { layoutRunning } = useSigmaGraph(containerRef, graph);
+  const { layoutRunning, sigma } = useSigmaGraph(containerRef, graph, reducers);
+
+  // Keep `sigmaHandle` in lockstep so the reducer hook can call refresh.
+  useEffect(() => {
+    setSigmaHandle(sigma);
+  }, [sigma]);
+
+  // ── Click + hover wiring ──────────────────────────────────────────────
+  const setSelection = useCodeGraphStore((s) => s.setSelection);
+  const setHover = useCodeGraphStore((s) => s.setHover);
+  useEffect(() => {
+    if (!sigma) return;
+    const offClick = sigma.on("clickNode", ({ node }) => {
+      if (node) setSelection(node);
+    });
+    // Click on the empty stage (the canvas background) — Sigma emits
+    // `clickStage` with no node payload. Clear the selection so the
+    // right-rail closes cleanly.
+    const offStage = sigma.on("clickStage", () => {
+      setSelection(null);
+    });
+    const offEnter = sigma.on("enterNode", ({ node }) => {
+      if (node) setHover(node);
+    });
+    const offLeave = sigma.on("leaveNode", () => {
+      setHover(null);
+    });
+    return () => {
+      offClick();
+      offStage();
+      offEnter();
+      offLeave();
+    };
+  }, [sigma, setSelection, setHover]);
+
+  // Reset highlight state on project switch so a stale selection
+  // doesn't leak across projects (the page itself remounts via `key`,
+  // but the store survives — call `reset()` defensively).
+  const resetHighlights = useCodeGraphStore((s) => s.reset);
+  useEffect(() => {
+    resetHighlights();
+    return () => resetHighlights();
+  }, [projectId, resetHighlights]);
 
   return (
     <div className="absolute inset-0 bg-background">
