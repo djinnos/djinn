@@ -18,7 +18,8 @@ use djinn_control_plane::bridge::{
     LspOps, LspWarning, MetricsAtResult, ModelPoolStatus, NeighborsResult, OrphanEntry,
     PagerankTier, PathHop, PathResult, PoolStatus, ProjectCtx, RankedNode, RelatedSymbol,
     RepoGraphOps, ResolveOutcome, RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding,
-    SlotPoolOps, SymbolAtHit, SymbolContext, SymbolDescription, SymbolNode, TouchedSymbol,
+    SlotPoolOps, SnapshotEdge, SnapshotNode, SnapshotPayload, SymbolAtHit, SymbolContext,
+    SymbolDescription, SymbolNode, TouchedSymbol,
 };
 use petgraph::visit::EdgeRef;
 use djinn_agent::actors::coordinator::CoordinatorHandle;
@@ -910,6 +911,57 @@ impl RepoGraphOps for RepoGraphBridge {
             pinned_commit: Some(row.commit_sha),
             commits_since_pin,
         })
+    }
+
+    async fn snapshot(
+        &self,
+        ctx: &ProjectCtx,
+        node_cap: usize,
+        exclusions: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
+    ) -> Result<SnapshotPayload, String> {
+        use djinn_db::RepoGraphCacheRepository;
+
+        // Pull the warmed graph + cached PageRank ranking. We deliberately
+        // use `load_canonical_graph` (not `_only`) so the same warm step
+        // that backs `ranked` / `cycles` is reused — recomputing PageRank
+        // on every snapshot call would dominate the latency budget on
+        // large repos.
+        let (graph, ranking, _sccs) = djinn_graph::canonical_graph::load_canonical_graph(
+            &self.state,
+            &ctx.id,
+            &ctx.clone_path,
+        )
+        .await?;
+
+        // Look up the pinned commit SHA the warmer recorded. We treat
+        // `git_head` as authoritative — there's no point asking the
+        // worktree because the warmed graph is built from the pinned
+        // commit, not HEAD.
+        let cache_repo = RepoGraphCacheRepository::new(self.state.db().clone());
+        let cache_row = cache_repo
+            .latest_for_project(&ctx.id)
+            .await
+            .map_err(|e| format!("read repo_graph_cache: {e}"))?;
+        let git_head = cache_row
+            .as_ref()
+            .map(|r| r.commit_sha.clone())
+            .unwrap_or_default();
+
+        // ISO8601 UTC. Reuse the same `OffsetDateTime` path the rest of
+        // the bridge takes (e.g. `built_at` in `repo_graph_cache`).
+        let generated_at = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_else(|_| String::new());
+
+        Ok(build_snapshot_payload(
+            &graph,
+            &ranking,
+            ctx.id.clone(),
+            git_head,
+            generated_at,
+            node_cap,
+            exclusions,
+        ))
     }
 
     async fn symbols_at(
@@ -2265,6 +2317,152 @@ impl AppState {
     }
 }
 
+/// PR D2: pure helper that builds a `SnapshotPayload` from an already-
+/// loaded canonical graph + ranking, applying the project's
+/// `graph_excluded_paths` filter and capping the surviving population
+/// at `node_cap` (top-PageRank tier wins).
+///
+/// Extracted from `RepoGraphBridge::snapshot` so unit tests can exercise
+/// the truncation / exclusion / wire-shape logic without spinning up
+/// the full bridge (which needs `AppState`, a Dolt connection, and a
+/// warmed K8s job).
+fn build_snapshot_payload(
+    graph: &djinn_graph::repo_graph::RepoDependencyGraph,
+    ranking: &djinn_graph::repo_graph::RepoGraphRanking,
+    project_id: String,
+    git_head: String,
+    generated_at: String,
+    node_cap: usize,
+    exclusions: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
+) -> SnapshotPayload {
+    use std::collections::{HashMap, HashSet};
+
+    // Tally totals against the post-exclusion graph so the
+    // truncation decision lines up with what the UI actually sees.
+    let mut total_nodes_post_excl: usize = 0;
+    let mut surviving: HashSet<petgraph::graph::NodeIndex> = HashSet::new();
+    let mut pagerank_lookup: HashMap<petgraph::graph::NodeIndex, f64> = HashMap::new();
+    for ranked_node in &ranking.nodes {
+        let node = graph.node(ranked_node.node_index);
+        let key = format_node_key(&node.id);
+        let display_name = node.display_name.as_str();
+        let file_hint = node.file_path.as_ref().map(|p| p.display().to_string());
+        if exclusions.excludes(&key, file_hint.as_deref(), display_name) {
+            continue;
+        }
+        total_nodes_post_excl += 1;
+        pagerank_lookup.insert(ranked_node.node_index, ranked_node.page_rank);
+        // `ranking.nodes` is pagerank-sorted; collecting the first
+        // `node_cap` survivors gives the top tier.
+        if surviving.len() < node_cap {
+            surviving.insert(ranked_node.node_index);
+        }
+    }
+
+    // The ranking is built only from indexed nodes; if the graph
+    // contains nodes that didn't make it into `ranking.nodes` (rare —
+    // typically file nodes without symbols), fall back to a direct
+    // walk. PageRank for those nodes is 0.0.
+    for idx in graph.graph().node_indices() {
+        if pagerank_lookup.contains_key(&idx) {
+            continue;
+        }
+        let node = graph.node(idx);
+        let key = format_node_key(&node.id);
+        let file_hint = node.file_path.as_ref().map(|p| p.display().to_string());
+        if exclusions.excludes(&key, file_hint.as_deref(), &node.display_name) {
+            continue;
+        }
+        total_nodes_post_excl += 1;
+        pagerank_lookup.insert(idx, 0.0);
+        if surviving.len() < node_cap {
+            surviving.insert(idx);
+        }
+    }
+
+    let truncated = total_nodes_post_excl > surviving.len();
+
+    // Materialize snapshot nodes in pagerank-sorted order so the wire
+    // payload is deterministic and the UI can render
+    // highest-importance nodes first if it streams.
+    let mut snapshot_nodes: Vec<SnapshotNode> = surviving
+        .iter()
+        .map(|&idx| {
+            let node = graph.node(idx);
+            let pagerank = pagerank_lookup.get(&idx).copied().unwrap_or(0.0);
+            SnapshotNode {
+                id: format_node_key(&node.id),
+                kind: format!("{:?}", node.kind).to_lowercase(),
+                label: node.display_name.clone(),
+                symbol_kind: node
+                    .symbol_kind
+                    .as_ref()
+                    .map(|k| format!("{k:?}").to_lowercase()),
+                file_path: node.file_path.as_ref().map(|p| p.display().to_string()),
+                pagerank,
+                community_id: None,
+            }
+        })
+        .collect();
+    snapshot_nodes.sort_by(|a, b| {
+        b.pagerank
+            .partial_cmp(&a.pagerank)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    // Walk every edge in the underlying petgraph; keep only those
+    // whose source AND target survived the cap. `total_edges` is
+    // the post-exclusion count (we drop edges that touch excluded
+    // nodes so the totals match the visible graph).
+    let mut total_edges_post_excl: usize = 0;
+    let mut snapshot_edges: Vec<SnapshotEdge> = Vec::new();
+    for edge_ref in graph.graph().edge_references() {
+        let src_in = pagerank_lookup.contains_key(&edge_ref.source());
+        let dst_in = pagerank_lookup.contains_key(&edge_ref.target());
+        if !src_in || !dst_in {
+            continue;
+        }
+        total_edges_post_excl += 1;
+        if !surviving.contains(&edge_ref.source())
+            || !surviving.contains(&edge_ref.target())
+        {
+            continue;
+        }
+        let from_node = graph.node(edge_ref.source());
+        let to_node = graph.node(edge_ref.target());
+        let weight = edge_ref.weight();
+        snapshot_edges.push(SnapshotEdge {
+            from: format_node_key(&from_node.id),
+            to: format_node_key(&to_node.id),
+            kind: format!("{:?}", weight.kind),
+            confidence: weight.confidence,
+            reason: weight.reason.clone(),
+        });
+    }
+
+    // Sort edges deterministically (kind > from > to) so test snapshots
+    // stay stable across runs.
+    snapshot_edges.sort_by(|a, b| {
+        a.kind
+            .cmp(&b.kind)
+            .then_with(|| a.from.cmp(&b.from))
+            .then_with(|| a.to.cmp(&b.to))
+    });
+
+    SnapshotPayload {
+        project_id,
+        git_head,
+        generated_at,
+        truncated,
+        total_nodes: total_nodes_post_excl,
+        total_edges: total_edges_post_excl,
+        node_cap,
+        nodes: snapshot_nodes,
+        edges: snapshot_edges,
+    }
+}
+
 /// Quartile thresholds for PageRank tiering, computed once per
 /// `detect_changes` call.
 ///
@@ -3473,6 +3671,144 @@ pub(crate) mod graph_bridge_tests {
             signature: Some("pub async fn list_items(...) -> Result<...>".into()),
             documentation: vec![],
             signature_parts: None,
+        }
+    }
+
+    // ── PR D2: snapshot op tests ─────────────────────────────────────────
+
+    #[test]
+    fn snapshot_payload_returns_full_graph_under_cap_pr_d2() {
+        // Tiny fixture (3 file nodes + 3 symbol nodes + edges between
+        // them) — way under the 2000 default cap, so the snapshot must
+        // emit every node and `truncated` must be `false`.
+        use djinn_control_plane::tools::graph_exclusions::GraphExclusions;
+        let graph = build_test_graph();
+        let ranking = graph.rank();
+        let payload = build_snapshot_payload(
+            &graph,
+            &ranking,
+            "proj-test".to_string(),
+            "deadbeef".to_string(),
+            "2026-04-28T00:00:00Z".to_string(),
+            2_000,
+            &GraphExclusions::empty(),
+        );
+        assert_eq!(payload.project_id, "proj-test");
+        assert_eq!(payload.git_head, "deadbeef");
+        assert_eq!(payload.generated_at, "2026-04-28T00:00:00Z");
+        assert_eq!(payload.node_cap, 2_000);
+        assert!(!payload.truncated, "tiny graph should not truncate");
+        assert!(
+            payload.total_nodes == payload.nodes.len(),
+            "total_nodes should match emitted node count when uncapped: \
+             total={} emitted={}",
+            payload.total_nodes,
+            payload.nodes.len()
+        );
+        assert!(
+            payload.total_edges == payload.edges.len(),
+            "total_edges should match emitted edge count when uncapped"
+        );
+
+        // Every node must carry the canonical RepoNodeKey prefix.
+        for node in &payload.nodes {
+            assert!(
+                node.id.starts_with("file:") || node.id.starts_with("symbol:"),
+                "node id missing prefix: {}",
+                node.id
+            );
+            assert!(
+                matches!(node.kind.as_str(), "file" | "symbol"),
+                "unexpected node.kind {}",
+                node.kind
+            );
+        }
+
+        // Nodes must be in pagerank-desc order.
+        for window in payload.nodes.windows(2) {
+            assert!(
+                window[0].pagerank >= window[1].pagerank,
+                "nodes not sorted by pagerank desc: {} < {}",
+                window[0].pagerank,
+                window[1].pagerank
+            );
+        }
+
+        // Every emitted edge endpoint must be a node we emitted (no
+        // dangling references) — D2 acceptance criterion.
+        let node_ids: std::collections::HashSet<&str> =
+            payload.nodes.iter().map(|n| n.id.as_str()).collect();
+        for edge in &payload.edges {
+            assert!(
+                node_ids.contains(edge.from.as_str()),
+                "edge.from {} not in node set",
+                edge.from
+            );
+            assert!(
+                node_ids.contains(edge.to.as_str()),
+                "edge.to {} not in node set",
+                edge.to
+            );
+            assert!(
+                edge.confidence >= 0.0 && edge.confidence <= 1.0,
+                "edge confidence out of range: {}",
+                edge.confidence
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_payload_truncates_when_node_cap_smaller_than_graph_pr_d2() {
+        // Cap below the graph's node count — `truncated` must be true,
+        // emitted nodes must equal cap, and every emitted edge's
+        // endpoints must be among the survivors.
+        use djinn_control_plane::tools::graph_exclusions::GraphExclusions;
+        let graph = build_test_graph();
+        let ranking = graph.rank();
+        let cap = 2_usize;
+        let payload = build_snapshot_payload(
+            &graph,
+            &ranking,
+            "proj-test".to_string(),
+            "deadbeef".to_string(),
+            "2026-04-28T00:00:00Z".to_string(),
+            cap,
+            &GraphExclusions::empty(),
+        );
+        assert_eq!(
+            payload.node_cap, cap,
+            "node_cap echoed back unchanged"
+        );
+        assert!(
+            payload.truncated,
+            "should be truncated when total_nodes={} > cap={}",
+            payload.total_nodes,
+            cap
+        );
+        assert!(
+            payload.nodes.len() <= cap,
+            "emitted {} nodes, exceeds cap {}",
+            payload.nodes.len(),
+            cap
+        );
+        assert!(
+            payload.total_nodes >= payload.nodes.len(),
+            "total_nodes {} should be ≥ emitted {} on a truncating snapshot",
+            payload.total_nodes,
+            payload.nodes.len()
+        );
+
+        // No dangling edge endpoints — UI rendering depends on this.
+        let node_ids: std::collections::HashSet<&str> =
+            payload.nodes.iter().map(|n| n.id.as_str()).collect();
+        for edge in &payload.edges {
+            assert!(
+                node_ids.contains(edge.from.as_str())
+                    && node_ids.contains(edge.to.as_str()),
+                "truncated snapshot leaked an edge {} → {} into the wire",
+                edge.from,
+                edge.to
+            );
         }
     }
 }

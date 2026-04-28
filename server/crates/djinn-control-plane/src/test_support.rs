@@ -275,6 +275,24 @@ impl RepoGraphOps for StubRepoGraph {
             commits_since_pin: None,
         })
     }
+    async fn snapshot(
+        &self,
+        ctx: &ProjectCtx,
+        node_cap: usize,
+        _exclusions: &crate::tools::graph_exclusions::GraphExclusions,
+    ) -> std::result::Result<crate::bridge::SnapshotPayload, String> {
+        Ok(crate::bridge::SnapshotPayload {
+            project_id: ctx.id.clone(),
+            git_head: String::new(),
+            generated_at: String::new(),
+            truncated: false,
+            total_nodes: 0,
+            total_edges: 0,
+            node_cap,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        })
+    }
     async fn symbols_at(
         &self,
         _ctx: &ProjectCtx,

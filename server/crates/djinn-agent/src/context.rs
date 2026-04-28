@@ -324,6 +324,14 @@ impl RepoGraphOps for StubRepoGraphOps {
     async fn status(&self, _: &ProjectCtx) -> Result<bridge::GraphStatus, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
+    async fn snapshot(
+        &self,
+        _: &ProjectCtx,
+        _: usize,
+        _: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
+    ) -> Result<bridge::SnapshotPayload, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
     async fn symbols_at(
         &self,
         _: &ProjectCtx,

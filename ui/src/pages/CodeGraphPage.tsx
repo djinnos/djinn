@@ -1,18 +1,17 @@
 /**
- * CodeGraphPage — PR D1 scaffolding.
+ * CodeGraphPage — top-level shell for `/code-graph`.
  *
- * This is the empty shell for the new `/code-graph` view. It mounts a Sigma
- * instance over an empty graphology graph so D2 can swap in real data
- * without touching the lifecycle wiring. There is intentionally no fetch,
- * no layout worker, no interactions yet — those land in D2-D6.
+ * D1 stood up an empty Sigma canvas and a project picker. D2 swaps
+ * the empty canvas for `<CodeGraphCanvas>`, which fetches the
+ * `code_graph snapshot` payload and renders it through Sigma +
+ * ForceAtlas2. Interactions, citation highlighting, Mermaid impact,
+ * and Cmd-K all land in D3-D6 — this file is intentionally thin.
  */
 
-import { useEffect, useRef } from "react";
-import Graph from "graphology";
-import Sigma from "sigma";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ConnectIcon } from "@hugeicons/core-free-icons";
 
+import { CodeGraphCanvas } from "@/components/codegraph/CodeGraphCanvas";
 import {
   useProjectStore,
   useProjects,
@@ -61,46 +60,6 @@ function ProjectPicker() {
   );
 }
 
-interface SigmaCanvasProps {
-  /** Used as a remount key so the Sigma instance is rebuilt when the
-   *  selected project changes. D2 will swap in a graph fetch here. */
-  resetKey: string;
-}
-
-function SigmaCanvas({ resetKey }: SigmaCanvasProps) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const sigmaRef = useRef<Sigma | null>(null);
-
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-
-    // PR D1: empty graph. PR D2 hydrates this from `code_graph snapshot`.
-    const graph = new Graph();
-    const sigma = new Sigma(graph, container, {
-      // Sigma 3 picks WebGL by default; keep the call site explicit so D3's
-      // node/edge reducers have a known baseline to extend.
-      renderEdgeLabels: false,
-    });
-    sigmaRef.current = sigma;
-
-    return () => {
-      sigma.kill();
-      sigmaRef.current = null;
-    };
-    // `resetKey` is intentionally part of the dep list so changing projects
-    // tears down + rebuilds Sigma instead of leaking the old instance.
-  }, [resetKey]);
-
-  return (
-    <div
-      ref={containerRef}
-      data-testid="code-graph-canvas"
-      className="absolute inset-0 bg-background"
-    />
-  );
-}
-
 function EmptyHint({ message }: { message: string }) {
   return (
     <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
@@ -122,11 +81,16 @@ export function CodeGraphPage() {
     <div className="flex h-full min-h-0 flex-col">
       <ProjectPicker />
       <div className={cn("relative min-h-0 flex-1")}>
-        {project ? (
-          <>
-            <SigmaCanvas resetKey={selectedProjectId ?? "none"} />
-            <EmptyHint message="Graph rendering lands in PR D2." />
-          </>
+        {project && selectedProjectId ? (
+          // The `key` forces a fresh canvas + fetch when the project
+          // changes. The hook contract treats remount as the
+          // canonical "reset" path — D3 will revisit this if we add
+          // a per-project highlight store that survives across
+          // selections.
+          <CodeGraphCanvas
+            key={selectedProjectId}
+            projectId={selectedProjectId}
+          />
         ) : (
           <EmptyHint message="Select a project to view its code graph." />
         )}

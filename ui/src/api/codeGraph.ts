@@ -39,7 +39,8 @@ export type CodeGraphOperation =
   | "edges"
   | "symbols_at"
   | "diff_touches"
-  | "detect_changes";
+  | "detect_changes"
+  | "snapshot";
 
 /**
  * Per-call extras. The autogen'd `CodeGraphInput` is one big union with an
@@ -150,6 +151,17 @@ export function fetchSymbolsAt(
     file,
     start_line,
     ...(end_line !== undefined ? { end_line } : {}),
+  });
+}
+
+/**
+ * PR D2: full-graph snapshot capped by PageRank tier. Drives the
+ * `/code-graph` UI render (Sigma + ForceAtlas2). The cap is applied
+ * server-side; pass `nodeCap` to override the default of 2000.
+ */
+export function fetchSnapshot(project: string, nodeCap?: number) {
+  return callCodeGraph(project, "snapshot", {
+    ...(nodeCap !== undefined ? { limit: nodeCap } : {}),
   });
 }
 
