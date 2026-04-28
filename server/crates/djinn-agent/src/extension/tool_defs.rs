@@ -513,6 +513,11 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
                     "type": "array",
                     "description": "Queried symbol keys for touches_hot_path",
                     "items": {"type": "string"}
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["name", "hybrid"],
+                    "description": "Search mode for the `search` op (PR B4). `name` runs the canonical-graph name index only (fast path); `hybrid` blends lexical + semantic + structural via RRF k=60 and stamps each hit with a `match_kind` tag for debug surfaces. Default reads `DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE` (env var; defaults to `name`)."
                 }
             }
         }),

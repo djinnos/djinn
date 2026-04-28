@@ -20,7 +20,7 @@ mod graph;
 mod housekeeping;
 mod indexing;
 mod lexical_search;
-pub(crate) mod rrf;
+pub mod rrf;
 mod scoring;
 mod search;
 
@@ -52,6 +52,7 @@ pub use lexical_search::{
     executable_lexical_search_sql, lexical_search_threshold, normalize_lexical_score,
     sanitize_mysql_boolean_query, sanitize_sqlite_fts5_query, validate_mysql_fulltext_threshold,
 };
+pub use rrf::rrf_fuse;
 pub use scoring::{
     CO_ACCESS_HIGH, CONFIDENCE_CEILING, CONFIDENCE_FLOOR, CONTRADICTION, STALE_CITATION,
     USER_CONFIRM, bayesian_update,

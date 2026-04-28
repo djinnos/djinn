@@ -312,9 +312,31 @@ pub(crate) async fn call_code_graph(
                 .filter(|q| !q.is_empty())
                 .ok_or("'query' is required for 'search'")?;
             let limit = p.limit.unwrap_or(20);
-            let hits = graph_ops
-                .search(&ctx, query, p.kind_filter.as_deref(), limit)
-                .await?;
+            // PR B4: dispatch on `mode`. The default lives in
+            // `DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE` (env var), which
+            // ships as `"name"` until the hybrid soak window closes.
+            let mode = match p.mode.as_deref() {
+                Some(value) => value.to_string(),
+                None => std::env::var("DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE")
+                    .unwrap_or_else(|_| "name".to_string()),
+            };
+            let hits = match mode.as_str() {
+                "name" => {
+                    graph_ops
+                        .search(&ctx, query, p.kind_filter.as_deref(), limit)
+                        .await?
+                }
+                "hybrid" => {
+                    graph_ops
+                        .hybrid_search(&ctx, query, p.kind_filter.as_deref(), limit)
+                        .await?
+                }
+                other => {
+                    return Err(format!(
+                        "invalid search mode '{other}': expected 'name' or 'hybrid'"
+                    ));
+                }
+            };
             serde_json::to_value(&hits).map_err(|e| format!("serialize error: {e}"))?
         }
         "cycles" => {

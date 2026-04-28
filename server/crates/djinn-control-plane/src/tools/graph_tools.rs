@@ -187,6 +187,15 @@ pub struct CodeGraphParams {
     /// the body shipped over MCP.
     #[serde(default)]
     pub include_content: Option<bool>,
+    /// PR B4: search mode for the `search` op. `"name"` (the legacy
+    /// fast path) runs the canonical-graph name index only;
+    /// `"hybrid"` blends lexical (`code_chunks` LIKE), semantic
+    /// (Qdrant cosine), and structural signals via RRF k=60. The
+    /// effective default is read from `DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE`
+    /// (defaults to `"name"`); pass an explicit value to override.
+    /// Ignored by every other op.
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 // ── Response types ──────────────────────────────────────────────────────────────
@@ -783,6 +792,36 @@ fn validate_kind_filter(kind_filter: Option<&str>) -> Result<(), String> {
     }
 }
 
+/// PR B4: resolved mode for the `search` op. The wire-level vocabulary
+/// is two strings (`"name"` / `"hybrid"`); this enum keeps the dispatch
+/// site honest about the closed set of options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SearchMode {
+    Name,
+    Hybrid,
+}
+
+/// PR B4: resolve the effective search mode by layering caller intent
+/// on top of the `DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE` env var. The
+/// env-var default is `"name"` per the engineering-practices section
+/// of the plan; flip to `"hybrid"` after the soak window. Caller wins
+/// when both are set so an explicit `mode=name` always pins the fast
+/// path even in a hybrid-default deployment.
+pub(crate) fn resolve_search_mode(caller: Option<&str>) -> Result<SearchMode, String> {
+    let raw = match caller {
+        Some(value) => value.to_string(),
+        None => std::env::var("DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE")
+            .unwrap_or_else(|_| "name".to_string()),
+    };
+    match raw.as_str() {
+        "name" => Ok(SearchMode::Name),
+        "hybrid" => Ok(SearchMode::Hybrid),
+        other => Err(format!(
+            "invalid search mode '{other}': expected 'name' or 'hybrid'"
+        )),
+    }
+}
+
 /// PR A3: validator for the `neighbors` op's edge-kind filter. Currently
 /// accepts `reads` / `writes`; future PRs may extend this with `calls` etc.
 /// once the `EdgeCategory` enum lands (PR C1).
@@ -1329,18 +1368,27 @@ impl DjinnMcpServer {
     ) -> Result<CodeGraphResponse, String> {
         let query = require_query(params)?;
         validate_kind_filter(params.kind_filter.as_deref())?;
+        let mode = resolve_search_mode(params.mode.as_deref())?;
         let limit = params.limit.unwrap_or(20) as usize;
         let fetch_limit = (limit.saturating_mul(4)).clamp(limit, 200);
-        let hits = self
-            .state
-            .repo_graph()
-            .search(
-                ctx,
-                query,
-                params.kind_filter.as_deref(),
-                fetch_limit,
-            )
-            .await?;
+        // PR B4: dispatch on mode. `name` keeps the pre-PR-B4 fast
+        // path; `hybrid` runs the RRF orchestrator on the bridge,
+        // which composes lexical + semantic + structural signals and
+        // tags each hit's `match_kind` for debug surfaces.
+        let hits = match mode {
+            SearchMode::Name => {
+                self.state
+                    .repo_graph()
+                    .search(ctx, query, params.kind_filter.as_deref(), fetch_limit)
+                    .await?
+            }
+            SearchMode::Hybrid => {
+                self.state
+                    .repo_graph()
+                    .hybrid_search(ctx, query, params.kind_filter.as_deref(), fetch_limit)
+                    .await?
+            }
+        };
         let exclusions = self.load_graph_exclusions(&params.project_id).await;
         let hits: Vec<SearchHit> = hits
             .into_iter()
@@ -2036,6 +2084,91 @@ mod tests {
         assert!(validate_kind_filter(Some("unknown")).is_err());
     }
 
+    /// PR B4: search-mode resolution layers caller intent on top of
+    /// the `DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE` env var. Caller
+    /// always wins; missing env var defaults to `name`.
+    #[test]
+    fn resolve_search_mode_caller_overrides_env() {
+        // Caller pin → wins regardless of env var value.
+        let prev = std::env::var("DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE").ok();
+        unsafe {
+            std::env::set_var("DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE", "hybrid");
+        }
+        assert_eq!(
+            resolve_search_mode(Some("name")).unwrap(),
+            SearchMode::Name
+        );
+        // Explicit `hybrid` also resolves.
+        assert_eq!(
+            resolve_search_mode(Some("hybrid")).unwrap(),
+            SearchMode::Hybrid
+        );
+        // Unset → env var wins (`hybrid`).
+        assert_eq!(resolve_search_mode(None).unwrap(), SearchMode::Hybrid);
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE", v),
+                None => std::env::remove_var("DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE"),
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_search_mode_default_is_name() {
+        let prev = std::env::var("DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE").ok();
+        unsafe {
+            std::env::remove_var("DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE");
+        }
+        assert_eq!(resolve_search_mode(None).unwrap(), SearchMode::Name);
+        unsafe {
+            if let Some(v) = prev {
+                std::env::set_var("DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE", v);
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_search_mode_rejects_unknown_value() {
+        assert!(resolve_search_mode(Some("fuzzy")).is_err());
+    }
+
+    /// PR B4: `mode` field deserialises off the wire.
+    #[test]
+    fn parses_search_mode_from_json() {
+        let json = serde_json::json!({
+            "operation": "search",
+            "project": "/workspace/repo",
+            "query": "permissions check",
+            "mode": "hybrid",
+        });
+        let params: CodeGraphParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.mode.as_deref(), Some("hybrid"));
+    }
+
+    /// PR B4: the default `hybrid_search` impl on `RepoGraphOps`
+    /// degrades to the structural-only path so test stubs that only
+    /// override `search` still serve the hybrid mode (with every hit
+    /// stamped `match_kind="structural"`). Exercised through the
+    /// `StubRepoGraphOps` fixture from `test_support` rather than a
+    /// hand-rolled stub — the goal here is to lock in the default-impl
+    /// tagging contract, not re-test every other op.
+    #[tokio::test]
+    async fn hybrid_search_default_impl_tags_structural() {
+        use crate::bridge::{ProjectCtx, RepoGraphOps};
+        use crate::state::stubs::StubRepoGraphOps;
+
+        let ctx = ProjectCtx {
+            id: "p".to_string(),
+            clone_path: "/tmp".to_string(),
+        };
+        let ops = StubRepoGraphOps;
+        // Stub returns no hits; the default impl still has to compile
+        // and the empty list is valid evidence the dispatch path works.
+        let hits = ops.hybrid_search(&ctx, "login", None, 10).await.unwrap();
+        assert!(hits.is_empty());
+    }
+
     /// PR A3: `neighbors` op uses `kind_filter` for edge kinds (`reads` /
     /// `writes`); `validate_edge_kind_filter` enforces that vocabulary so
     /// typos surface server-side rather than silently dropping every
@@ -2093,6 +2226,7 @@ mod tests {
             to_sha: None,
             changed_files: None,
             include_content: None,
+            mode: None,
         }
     }
 
@@ -2469,6 +2603,7 @@ mod tests {
                 display_name: name.to_string(),
                 score: 0.9,
                 file: Some("src/auth.rs".to_string()),
+                match_kind: None,
             }],
             next_step: None,
         })

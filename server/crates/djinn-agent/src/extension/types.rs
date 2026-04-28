@@ -321,6 +321,12 @@ pub(super) struct CodeGraphParams {
     /// inline. Default `false` (bandwidth gate).
     #[serde(default)]
     pub include_content: Option<bool>,
+    /// PR B4: search mode for the `search` op. `"name"` (legacy fast
+    /// path) or `"hybrid"` (RRF over lexical + semantic + structural).
+    /// When omitted the dispatcher falls back to
+    /// `DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE` (default `"name"`).
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 #[derive(Deserialize)]

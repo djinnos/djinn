@@ -888,6 +888,12 @@ expression: signatures
           "nullable": true,
           "type": "integer"
         },
+        "mode": {
+          "default": null,
+          "description": "PR B4: search mode for the `search` op. `\"name\"` (the legacy\nfast path) runs the canonical-graph name index only;\n`\"hybrid\"` blends lexical (`code_chunks` LIKE), semantic\n(Qdrant cosine), and structural signals via RRF k=60. The\neffective default is read from `DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE`\n(defaults to `\"name\"`); pass an explicit value to override.\nIgnored by every other op.",
+          "nullable": true,
+          "type": "string"
+        },
         "module_glob": {
           "default": null,
           "description": "Optional module-path glob for `api_surface` (filter symbols by\n`file_path`).",
