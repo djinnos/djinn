@@ -20,6 +20,30 @@ import { Streamdown } from 'streamdown';
 
 type ToolCallItem = NonNullable<ChatMessage['toolCalls']>[number];
 
+/**
+ * Strip leftover `[[file:...]]` / `[[symbol:Type:Name]]` tokens from the
+ * model's output. The chat prompt no longer asks for them, but in-flight
+ * sessions and habit-echo from the model still emit them; without this
+ * fallback they render as bare bracket text or as fractured inline-code
+ * chips that wreck list / table layout.
+ *
+ * `[[file:path/to/foo.go:42-58]]`  →  `path/to/foo.go:42-58`
+ * `[[symbol:Function:check]]`      →  `check`
+ *
+ * Surrounding inline-code backticks are left in place — when the model
+ * wrote `` `[[file:foo.go]]` `` we keep the backticks so the path still
+ * renders as inline code.
+ */
+function stripCitationTokens(text: string): string {
+  return text.replace(/\[\[(file|symbol):([^\]]+)\]\]/g, (_, kind, body) => {
+    if (kind === "symbol") {
+      const segments = body.split(":");
+      return segments[segments.length - 1] ?? body;
+    }
+    return body;
+  });
+}
+
 function hasInputContent(input: unknown): boolean {
   if (input === undefined || input === null) return false;
   if (typeof input === 'string') return input.length > 0;
@@ -203,7 +227,7 @@ export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
           <p className="whitespace-pre-wrap break-words">{message.content}</p>
         ) : (
           <Streamdown className="prose prose-sm max-w-none break-words dark:prose-invert">
-            {message.content}
+            {stripCitationTokens(message.content)}
           </Streamdown>
         )}
 
