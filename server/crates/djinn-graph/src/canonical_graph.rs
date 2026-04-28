@@ -522,7 +522,18 @@ pub async fn load_canonical_graph<C: WarmContext>(
         .map_err(|e| format!("read repo_graph_cache for '{project_id}': {e}"))?
         .ok_or_else(|| GRAPH_NOT_WARMED_ERR.to_string())?;
 
-    let (graph, pagerank, sccs) = load_cached_artifact(row.graph_blob).await?;
+    // Treat unreadable blobs (artifact-version drift, schema migration,
+    // partial writes) the same as "not warmed yet". The architect warm pass
+    // will rewrite the row; surfacing the raw bincode error to the user is
+    // never useful.
+    let (graph, pagerank, sccs) = load_cached_artifact(row.graph_blob).await.map_err(|e| {
+        tracing::warn!(
+            project_id = %project_id,
+            error = %e,
+            "load_canonical_graph: stale or unreadable graph_blob; reporting as not-warmed"
+        );
+        GRAPH_NOT_WARMED_ERR.to_string()
+    })?;
     install_as_canonical(
         ctx,
         project_id,
