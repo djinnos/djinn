@@ -16,11 +16,15 @@ pub mod text_generator;
 use crate::database::Database;
 use crate::error::DbResult as Result;
 
-pub use chunker::CodeChunk;
+pub use chunker::{
+    ChunkConfig, CodeChunk, DEFAULT_CHUNK_OVERLAP, DEFAULT_CHUNK_SIZE, FileInput, RepoMetadata,
+    SymbolChunkKind, SymbolInput, chunk_file,
+};
 pub use embeddings::{
     CodeChunkVectorBackend, CodeChunkVectorStore, NoopCodeChunkVectorStore, QdrantCodeChunkConfig,
     QdrantCodeChunkVectorStore,
 };
+pub use text_generator::{EMBEDDING_TEXT_VERSION, RenderInput, content_hash, render_chunk_text};
 
 /// Per-chunk state surfaced by [`CodeChunkRepository::list_repair_embedding_rows`].
 /// Mirror of `NoteRepairEmbeddingRow` for the new tables. `content_hash` /
