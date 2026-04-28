@@ -26,8 +26,8 @@ use djinn_core::models::Task;
 
 use crate::actors::slot::MergeConflictMetadata;
 use crate::actors::slot::helpers::{
-    build_planner_patrol_context, derive_task_scope_paths, extract_worker_context,
-    format_knowledge_notes, recent_feedback,
+    build_planner_patrol_context, build_role_code_graph_context, derive_task_scope_paths,
+    extract_worker_context, format_knowledge_notes, recent_feedback,
 };
 use crate::context::AgentContext;
 use crate::prompts::{TaskContext, apply_role_extensions, apply_skills};
@@ -64,6 +64,11 @@ pub(crate) struct PromptContext {
     pub knowledge_context: Option<String>,
     /// Planner-patrol-only code-graph diff summary.
     pub planner_patrol_context: Option<String>,
+    /// PR E2: auto-injected `code_graph context` summary for the dispatch
+    /// role. `None` when the role is not in the
+    /// `DJINN_AUTO_CODE_CONTEXT_ROLES` allowlist or no scope-path symbols
+    /// resolved.
+    pub code_graph_context: Option<String>,
     /// Base system prompt rendered from the role template + `TaskContext`.
     pub base_system_prompt: String,
     /// Base prompt with role-level `system_prompt_extensions` + `learned_prompt`
@@ -279,6 +284,19 @@ pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> Pro
     let planner_patrol_context =
         build_planner_patrol_context(task, app_state, project_path).await;
 
+    // PR E2: auto-include `code_graph context` for worker / reviewer roles
+    // when `DJINN_AUTO_CODE_CONTEXT_ROLES` enables this role. Reuses the
+    // task-scope-path inference already used by the knowledge context block.
+    let task_paths_for_code_graph = derive_task_scope_paths(task, epic_context.as_deref());
+    let code_graph_context = build_role_code_graph_context(
+        runtime_role.config().name,
+        task,
+        app_state,
+        project_path,
+        &task_paths_for_code_graph,
+    )
+    .await;
+
     let base_system_prompt = runtime_role.render_prompt(
         task,
         &TaskContext {
@@ -302,6 +320,7 @@ pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> Pro
             epic_context: epic_context.clone(),
             knowledge_context: knowledge_context.clone(),
             planner_patrol_context: planner_patrol_context.clone(),
+            code_graph_context: code_graph_context.clone(),
         },
     );
     // Apply role-level prompt extensions from DB (system_prompt_extensions + learned_prompt).
@@ -319,6 +338,7 @@ pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> Pro
         epic_context,
         knowledge_context,
         planner_patrol_context,
+        code_graph_context,
         base_system_prompt,
         system_prompt_with_extensions,
         system_prompt,

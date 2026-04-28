@@ -89,6 +89,14 @@ pub struct TaskContext {
     // ── Planner patrol context ───────────────────────────────────────────
     /// Planner-patrol-only summary of code-graph diffs and undocumented hotspots.
     pub planner_patrol_context: Option<String>,
+
+    // ── Code graph context (PR E2) ───────────────────────────────────────
+    /// Auto-injected `code_graph context` summary for worker / reviewer roles
+    /// whose tasks touch known files in the canonical graph. `None` when the
+    /// role is not in the `DJINN_AUTO_CODE_CONTEXT_ROLES` allowlist or when
+    /// the task has no resolvable scope-path symbols. Capped at 2000 chars
+    /// via `truncate::smart_truncate`.
+    pub code_graph_context: Option<String>,
 }
 
 // ─── Renderer ─────────────────────────────────────────────────────────────────
@@ -190,6 +198,17 @@ pub(crate) fn render_prompt_for_role(
         _ => String::new(),
     };
     out = out.replace("{{knowledge_context_section}}", &knowledge_context_section);
+
+    // PR E2: auto-injected `code_graph context` summary for worker/reviewer
+    // roles. Emits an empty string when `None` (per inter-PR contract).
+    let code_graph_context_section = match &ctx.code_graph_context {
+        Some(text) if !text.trim().is_empty() => format!("## Code Graph Context\n\n{text}\n"),
+        _ => String::new(),
+    };
+    out = out.replace(
+        "{{code_graph_context_section}}",
+        &code_graph_context_section,
+    );
 
     let planner_patrol_context_section = match &ctx.planner_patrol_context {
         Some(text) if !text.trim().is_empty() => format!("## Planner Patrol Context\n\n{text}\n"),
@@ -457,6 +476,7 @@ mod tests {
             epic_context: None,
             knowledge_context: None,
             planner_patrol_context: None,
+            code_graph_context: None,
         }
     }
 

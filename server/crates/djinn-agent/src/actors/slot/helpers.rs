@@ -27,6 +27,31 @@ const DEFAULT_PATROL_KNOWLEDGE_TASK_BUDGET: usize = 2;
 /// Environment variable for overriding the patrol knowledge-task budget.
 const PATROL_KNOWLEDGE_TASK_BUDGET_ENV: &str = "DJINN_PLANNER_PATROL_KNOWLEDGE_TASK_BUDGET";
 
+/// PR E2 feature flag: comma-separated list of role names (matching
+/// `RoleConfig::name`) that opt-in to auto-injected `code_graph context`
+/// summaries. Empty / unset → no roles get auto-injection.
+///
+/// Example: `DJINN_AUTO_CODE_CONTEXT_ROLES=worker,reviewer`.
+const AUTO_CODE_CONTEXT_ROLES_ENV: &str = "DJINN_AUTO_CODE_CONTEXT_ROLES";
+
+/// Char budget for the auto-injected `code_graph context` block. Mirrors
+/// the existing 2000-char knowledge-context cap and is enforced via
+/// `truncate::smart_truncate` so we keep both head + tail of the block.
+const AUTO_CODE_CONTEXT_BUDGET_CHARS: usize = 2000;
+
+/// Cap on the number of high-PageRank symbols we pull from `ranked` before
+/// filtering by scope-path overlap. Bounds the worst-case `context()`
+/// fan-out per dispatch.
+const AUTO_CODE_CONTEXT_RANKED_POOL: usize = 60;
+
+/// Per-file cap on auto-included symbols. The plan calls for "top 3 by
+/// PageRank in F".
+const AUTO_CODE_CONTEXT_PER_FILE: usize = 3;
+
+/// Outer cap on emitted bullets — prevents runaway expansion when many
+/// scope-path files match. Soft cap; the char budget is the hard cap.
+const AUTO_CODE_CONTEXT_MAX_BULLETS: usize = 9;
+
 fn planner_patrol_knowledge_task_budget() -> usize {
     std::env::var(PATROL_KNOWLEDGE_TASK_BUDGET_ENV)
         .ok()
@@ -825,6 +850,189 @@ fn note_scope_covers_path(note_scope_paths: &[String], path: &str) -> bool {
     })
 }
 
+// ─── PR E2: auto-injected `code_graph context` for worker / reviewer ──────
+
+/// Returns true when the given role name is opted-in to auto-injected
+/// `code_graph context` blocks via `DJINN_AUTO_CODE_CONTEXT_ROLES`.
+///
+/// Empty / unset env var → false for every role (the safe default).
+/// Whitespace + case are tolerated so `Worker, REVIEWER` works as expected.
+pub(crate) fn is_role_auto_code_context_enabled(role_name: &str) -> bool {
+    let Ok(raw) = std::env::var(AUTO_CODE_CONTEXT_ROLES_ENV) else {
+        return false;
+    };
+    let target = role_name.trim().to_ascii_lowercase();
+    if target.is_empty() {
+        return false;
+    }
+    raw.split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .any(|s| s == target)
+}
+
+/// Map a PageRank value to a human-readable tier string. Thresholds align
+/// with the rough buckets used elsewhere in the code-graph UI: top 5%
+/// hotspots are `high`, next 20% `medium`, the long tail `low`.
+fn pagerank_tier(pagerank: f64) -> &'static str {
+    if pagerank >= 0.5 {
+        "high"
+    } else if pagerank >= 0.1 {
+        "medium"
+    } else {
+        "low"
+    }
+}
+
+/// Returns true when `path` is equal to or nested under any directory in
+/// `scope_paths`. The `scope_paths` here come from
+/// [`derive_task_scope_paths`] and are already directory-prefix shapes
+/// (no trailing slashes).
+fn path_under_any_scope(path: &str, scope_paths: &[String]) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    scope_paths.iter().any(|scope| {
+        path == scope || path.starts_with(&format!("{scope}/"))
+    })
+}
+
+/// Format the inline `calls: a, b, c` style sub-bullet from a
+/// `RelatedSymbol` bucket. Returns `"none"` when empty so the prompt is
+/// readable instead of trailing whitespace.
+fn format_related_names(syms: &[djinn_control_plane::bridge::RelatedSymbol], max: usize) -> String {
+    if syms.is_empty() {
+        return "none".to_string();
+    }
+    syms.iter()
+        .take(max)
+        .map(|s| s.name.clone())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Build the auto-injected `code_graph context` block for `role_name`.
+///
+/// Returns `None` when the role is not enabled, no scope paths could be
+/// inferred, the canonical graph is unavailable, or no high-PageRank
+/// symbol's `file_path` falls under one of the task's scope paths.
+///
+/// Emits one bullet per selected symbol. Per file we take up to
+/// [`AUTO_CODE_CONTEXT_PER_FILE`] symbols, in PageRank order. The whole
+/// block is truncated via `truncate::smart_truncate` to
+/// [`AUTO_CODE_CONTEXT_BUDGET_CHARS`].
+pub(crate) async fn build_role_code_graph_context(
+    role_name: &str,
+    task: &Task,
+    app_state: &AgentContext,
+    project_path: &str,
+    task_paths: &[String],
+) -> Option<String> {
+    if !is_role_auto_code_context_enabled(role_name) {
+        return None;
+    }
+    if task_paths.is_empty() {
+        return None;
+    }
+
+    let graph_ops = app_state.repo_graph_ops.clone()?;
+    let ctx = djinn_control_plane::bridge::ProjectCtx {
+        id: task.project_id.clone(),
+        clone_path: project_path.to_string(),
+    };
+
+    let ranked = match graph_ops
+        .ranked(
+            &ctx,
+            Some("symbol"),
+            Some("pagerank"),
+            AUTO_CODE_CONTEXT_RANKED_POOL,
+        )
+        .await
+    {
+        Ok(nodes) => nodes,
+        Err(e) => {
+            tracing::debug!(
+                role = role_name,
+                task_id = %task.short_id,
+                error = %e,
+                "build_role_code_graph_context: ranked() failed; skipping auto-injection"
+            );
+            return None;
+        }
+    };
+    if ranked.is_empty() {
+        return None;
+    }
+
+    let mut per_file_count: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut bullets: Vec<String> = Vec::new();
+
+    for node in ranked {
+        if bullets.len() >= AUTO_CODE_CONTEXT_MAX_BULLETS {
+            break;
+        }
+        let symbol_ctx = match graph_ops.context(&ctx, &node.key, false).await {
+            Ok(Some(c)) => c,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::debug!(
+                    role = role_name,
+                    key = %node.key,
+                    error = %e,
+                    "build_role_code_graph_context: context() failed; skipping symbol"
+                );
+                continue;
+            }
+        };
+
+        let file_path = symbol_ctx.symbol.file_path.clone();
+        if !path_under_any_scope(&file_path, task_paths) {
+            continue;
+        }
+        let count = per_file_count.entry(file_path.clone()).or_insert(0);
+        if *count >= AUTO_CODE_CONTEXT_PER_FILE {
+            continue;
+        }
+        *count += 1;
+
+        let callers: usize = symbol_ctx.incoming.values().map(|v| v.len()).sum();
+        let callees: usize = symbol_ctx.outgoing.values().map(|v| v.len()).sum();
+        let tier = pagerank_tier(node.page_rank);
+
+        // Outgoing calls (function-like edges) and writes give the worker
+        // a quick read on what this symbol *does*; reads give a quick read
+        // on its inputs.
+        use djinn_control_plane::bridge::EdgeCategory;
+        let calls = symbol_ctx
+            .outgoing
+            .get(&EdgeCategory::Calls)
+            .map(|v| format_related_names(v, 5))
+            .unwrap_or_else(|| "none".to_string());
+        let reads = symbol_ctx
+            .outgoing
+            .get(&EdgeCategory::Reads)
+            .map(|v| format_related_names(v, 5))
+            .unwrap_or_else(|| "none".to_string());
+
+        bullets.push(format!(
+            "- `{file_path}::{name}` (callers: {callers}, callees: {callees}, pagerank-tier: {tier})\n  - calls: {calls}\n  - reads: {reads}",
+            name = symbol_ctx.symbol.name,
+        ));
+    }
+
+    if bullets.is_empty() {
+        return None;
+    }
+
+    let body = bullets.join("\n");
+    Some(crate::truncate::smart_truncate(
+        &body,
+        AUTO_CODE_CONTEXT_BUDGET_CHARS,
+    ))
+}
+
 pub(crate) async fn build_planner_patrol_context(
     task: &Task,
     app_state: &AgentContext,
@@ -1025,16 +1233,19 @@ mod tests {
     use djinn_db::{Database, NoteRepository, ProjectRepository};
     use djinn_control_plane::bridge::{
         ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangedRange, CycleGroup,
-        DeadSymbolEntry, DeprecatedHit, DiffTouchesResult, EdgeEntry, GraphStatus, HotPathHit,
-        HotspotEntry, ImpactResult, MetricsAtResult, NeighborsResult, OrphanEntry, PathResult,
-        ProjectCtx, RankedNode, RepoGraphOps, SearchHit, SymbolAtHit, SymbolDescription,
+        DeadSymbolEntry, DeprecatedHit, DiffTouchesResult, EdgeCategory, EdgeEntry, GraphStatus,
+        HotPathHit, HotspotEntry, ImpactResult, MetricsAtResult, NeighborsResult, OrphanEntry,
+        PathResult, ProjectCtx, RankedNode, RelatedSymbol, RepoGraphOps, SearchHit, SymbolAtHit,
+        SymbolContext, SymbolDescription, SymbolNode,
     };
+    use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
-    #[derive(Clone)]
+    #[derive(Clone, Default)]
     struct FakeRepoGraphOps {
         ranked: Vec<RankedNode>,
+        contexts: HashMap<String, SymbolContext>,
     }
 
     #[async_trait]
@@ -1136,10 +1347,10 @@ mod tests {
         async fn context(
             &self,
             _: &ProjectCtx,
-            _: &str,
+            key: &str,
             _: bool,
         ) -> Result<Option<djinn_control_plane::bridge::SymbolContext>, String> {
-            Err("unused in test".into())
+            Ok(self.contexts.get(key).cloned())
         }
 
         async fn status(&self, _: &ProjectCtx) -> Result<GraphStatus, String> {
@@ -1393,6 +1604,7 @@ mod tests {
                     outbound_edge_weight: 1.0,
                 },
             ],
+            contexts: HashMap::new(),
         }));
 
         let project_path =
@@ -1422,7 +1634,7 @@ mod tests {
         let (db, mut ctx, project, _tmp) = setup_project().await;
         let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
 
-        ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps { ranked: vec![] }));
+        ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps::default()));
 
         task_repo
             .create_in_project(
@@ -1471,5 +1683,329 @@ mod tests {
         assert!(summary.contains(
             "If a relevant hygiene or exploration task is already open for the same area/problem, suppress creating another one"
         ));
+    }
+
+    // ── PR E2: auto-injected `code_graph context` ────────────────────────
+
+    /// Mutex serializing tests that mutate `DJINN_AUTO_CODE_CONTEXT_ROLES`.
+    /// Tests run in parallel by default and the env var is process-global.
+    static AUTO_CODE_CONTEXT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn worker_task(project_id: &str) -> Task {
+        Task {
+            id: uuid::Uuid::now_v7().to_string(),
+            project_id: project_id.to_string(),
+            short_id: "wtst".to_string(),
+            epic_id: None,
+            title: "Refactor server/src/new_area.rs".to_string(),
+            description:
+                "Touch server/src/new_area.rs to clean up the helpers in there."
+                    .to_string(),
+            design: String::new(),
+            issue_type: "task".to_string(),
+            status: "open".to_string(),
+            priority: 1,
+            owner: "dev".to_string(),
+            labels: "[]".to_string(),
+            acceptance_criteria: "[]".to_string(),
+            reopen_count: 0,
+            continuation_count: 0,
+            verification_failure_count: 0,
+            total_reopen_count: 0,
+            total_verification_failure_count: 0,
+            intervention_count: 0,
+            last_intervention_at: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            closed_at: None,
+            close_reason: None,
+            merge_commit_sha: None,
+            pr_url: None,
+            merge_conflict_metadata: None,
+            memory_refs: "[]".to_string(),
+            agent_type: None,
+            unresolved_blocker_count: 0,
+        }
+    }
+
+    fn make_symbol_context(name: &str, file_path: &str) -> SymbolContext {
+        let mut outgoing: BTreeMap<EdgeCategory, Vec<RelatedSymbol>> = BTreeMap::new();
+        outgoing.insert(
+            EdgeCategory::Calls,
+            vec![
+                RelatedSymbol {
+                    uid: "symbol:foo".to_string(),
+                    name: "foo".to_string(),
+                    kind: "function".to_string(),
+                    file_path: Some("server/src/new_area.rs".to_string()),
+                    confidence: 0.9,
+                },
+                RelatedSymbol {
+                    uid: "symbol:bar".to_string(),
+                    name: "bar".to_string(),
+                    kind: "function".to_string(),
+                    file_path: Some("server/src/new_area.rs".to_string()),
+                    confidence: 0.9,
+                },
+                RelatedSymbol {
+                    uid: "symbol:baz".to_string(),
+                    name: "baz".to_string(),
+                    kind: "function".to_string(),
+                    file_path: Some("server/src/new_area.rs".to_string()),
+                    confidence: 0.9,
+                },
+            ],
+        );
+        outgoing.insert(
+            EdgeCategory::Reads,
+            vec![
+                RelatedSymbol {
+                    uid: "symbol:my_field".to_string(),
+                    name: "my_field".to_string(),
+                    kind: "field".to_string(),
+                    file_path: Some("server/src/new_area.rs".to_string()),
+                    confidence: 0.9,
+                },
+                RelatedSymbol {
+                    uid: "symbol:other_field".to_string(),
+                    name: "other_field".to_string(),
+                    kind: "field".to_string(),
+                    file_path: Some("server/src/new_area.rs".to_string()),
+                    confidence: 0.9,
+                },
+            ],
+        );
+
+        // 5 callers across two categories — 5 total.
+        let mut incoming: BTreeMap<EdgeCategory, Vec<RelatedSymbol>> = BTreeMap::new();
+        incoming.insert(
+            EdgeCategory::Calls,
+            (0..5)
+                .map(|i| RelatedSymbol {
+                    uid: format!("symbol:caller_{i}"),
+                    name: format!("caller_{i}"),
+                    kind: "function".to_string(),
+                    file_path: None,
+                    confidence: 0.9,
+                })
+                .collect(),
+        );
+
+        SymbolContext {
+            symbol: SymbolNode {
+                uid: format!("symbol:{name}"),
+                name: name.to_string(),
+                kind: "function".to_string(),
+                file_path: file_path.to_string(),
+                start_line: 1,
+                end_line: 10,
+                content: None,
+                method_metadata: None,
+            },
+            incoming,
+            outgoing,
+            processes: vec![],
+        }
+    }
+
+    #[test]
+    fn auto_code_context_role_flag_parses_csv() {
+        let _guard = AUTO_CODE_CONTEXT_ENV_LOCK.lock().unwrap();
+        // SAFETY: single-threaded section guarded by env-lock mutex.
+        unsafe {
+            std::env::remove_var(AUTO_CODE_CONTEXT_ROLES_ENV);
+        }
+        assert!(!is_role_auto_code_context_enabled("worker"));
+        assert!(!is_role_auto_code_context_enabled(""));
+
+        unsafe {
+            std::env::set_var(AUTO_CODE_CONTEXT_ROLES_ENV, "");
+        }
+        assert!(!is_role_auto_code_context_enabled("worker"));
+
+        unsafe {
+            std::env::set_var(AUTO_CODE_CONTEXT_ROLES_ENV, "worker, REVIEWER");
+        }
+        assert!(is_role_auto_code_context_enabled("worker"));
+        assert!(is_role_auto_code_context_enabled("reviewer"));
+        assert!(!is_role_auto_code_context_enabled("planner"));
+
+        unsafe {
+            std::env::remove_var(AUTO_CODE_CONTEXT_ROLES_ENV);
+        }
+    }
+
+    #[tokio::test]
+    async fn build_role_code_graph_context_returns_none_when_role_not_enabled() {
+        let _guard = AUTO_CODE_CONTEXT_ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var(AUTO_CODE_CONTEXT_ROLES_ENV);
+        }
+
+        let (_db, mut ctx, project, _tmp) = setup_project().await;
+        ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps::default()));
+        let project_path = "/tmp/proj".to_string();
+        let task = worker_task(&project.id);
+
+        let scope_paths = vec!["server/src/new_area.rs".to_string()];
+        let result = build_role_code_graph_context(
+            "worker",
+            &task,
+            &ctx,
+            &project_path,
+            &scope_paths,
+        )
+        .await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn build_role_code_graph_context_emits_bullets_for_enabled_role() {
+        let _guard = AUTO_CODE_CONTEXT_ENV_LOCK.lock().unwrap();
+        // SAFETY: env mutation guarded by AUTO_CODE_CONTEXT_ENV_LOCK.
+        unsafe {
+            std::env::set_var(AUTO_CODE_CONTEXT_ROLES_ENV, "worker,reviewer");
+        }
+
+        let (_db, mut ctx, project, _tmp) = setup_project().await;
+
+        let bar_key = "symbol:rust pkg server/src/new_area.rs `Bar`#";
+        let qux_key = "symbol:rust pkg server/src/new_area.rs `Qux`#";
+        let unrelated_key = "symbol:rust pkg other/path.rs `Other`#";
+
+        let mut contexts = HashMap::new();
+        contexts.insert(
+            bar_key.to_string(),
+            make_symbol_context("Bar", "server/src/new_area.rs"),
+        );
+        contexts.insert(
+            qux_key.to_string(),
+            make_symbol_context("Qux", "server/src/new_area.rs"),
+        );
+        contexts.insert(
+            unrelated_key.to_string(),
+            make_symbol_context("Other", "other/path.rs"),
+        );
+
+        ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps {
+            ranked: vec![
+                RankedNode {
+                    key: bar_key.to_string(),
+                    kind: "symbol".to_string(),
+                    display_name: "Bar".to_string(),
+                    score: 0.9,
+                    page_rank: 0.91,
+                    structural_weight: 1.0,
+                    inbound_edge_weight: 1.0,
+                    outbound_edge_weight: 1.0,
+                },
+                RankedNode {
+                    key: unrelated_key.to_string(),
+                    kind: "symbol".to_string(),
+                    display_name: "Other".to_string(),
+                    score: 0.85,
+                    page_rank: 0.4,
+                    structural_weight: 1.0,
+                    inbound_edge_weight: 1.0,
+                    outbound_edge_weight: 1.0,
+                },
+                RankedNode {
+                    key: qux_key.to_string(),
+                    kind: "symbol".to_string(),
+                    display_name: "Qux".to_string(),
+                    score: 0.8,
+                    page_rank: 0.3,
+                    structural_weight: 1.0,
+                    inbound_edge_weight: 1.0,
+                    outbound_edge_weight: 1.0,
+                },
+            ],
+            contexts,
+        }));
+
+        let project_path = "/tmp/proj".to_string();
+        let task = worker_task(&project.id);
+        let scope_paths = vec!["server/src/new_area.rs".to_string()];
+
+        let body = build_role_code_graph_context(
+            "worker",
+            &task,
+            &ctx,
+            &project_path,
+            &scope_paths,
+        )
+        .await
+        .expect("worker code-graph context should be present");
+
+        // Bar bullet — top symbol in scope file.
+        assert!(
+            body.contains(
+                "- `server/src/new_area.rs::Bar` (callers: 5, callees: 5, pagerank-tier: high)"
+            ),
+            "expected Bar bullet, got: {body}"
+        );
+        // Qux bullet — also in scope file.
+        assert!(
+            body.contains("`server/src/new_area.rs::Qux`"),
+            "expected Qux bullet, got: {body}"
+        );
+        // Other (out of scope) must be excluded.
+        assert!(
+            !body.contains("Other"),
+            "out-of-scope symbol leaked into bullets: {body}"
+        );
+        // Sub-bullets render the call / read targets.
+        assert!(body.contains("calls: foo, bar, baz"));
+        assert!(body.contains("reads: my_field, other_field"));
+
+        // Same role enabled for reviewer too.
+        let body_reviewer = build_role_code_graph_context(
+            "reviewer",
+            &task,
+            &ctx,
+            &project_path,
+            &scope_paths,
+        )
+        .await;
+        assert!(body_reviewer.is_some());
+
+        // Lead role is not in the allowlist → no auto-injection.
+        let body_lead = build_role_code_graph_context(
+            "lead",
+            &task,
+            &ctx,
+            &project_path,
+            &scope_paths,
+        )
+        .await;
+        assert!(body_lead.is_none());
+
+        unsafe {
+            std::env::remove_var(AUTO_CODE_CONTEXT_ROLES_ENV);
+        }
+    }
+
+    #[tokio::test]
+    async fn build_role_code_graph_context_skips_when_no_scope_paths() {
+        let _guard = AUTO_CODE_CONTEXT_ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var(AUTO_CODE_CONTEXT_ROLES_ENV, "worker");
+        }
+        let (_db, mut ctx, project, _tmp) = setup_project().await;
+        ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps::default()));
+        let task = worker_task(&project.id);
+
+        let result = build_role_code_graph_context(
+            "worker",
+            &task,
+            &ctx,
+            "/tmp/proj",
+            &[],
+        )
+        .await;
+        assert!(result.is_none());
+        unsafe {
+            std::env::remove_var(AUTO_CODE_CONTEXT_ROLES_ENV);
+        }
     }
 }
