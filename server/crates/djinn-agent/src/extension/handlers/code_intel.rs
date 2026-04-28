@@ -477,16 +477,188 @@ pub(crate) async fn call_code_graph(
             // can't otherwise discover. Cheap — no graph load.
             code_graph_capabilities()
         }
+        "blast_radius" => {
+            // v8: first-class "what breaks if I change this" op.
+            // Bundles `neighbors(incoming, group_by=file)` for direct
+            // dependents and `impact(group_by=file)` for transitive,
+            // then categorises each file path into runtime / test /
+            // e2e buckets. Defaults: depth=2 (matches the impact
+            // default; depth-3 compounds through hub files into the
+            // whole runtime), no kind/edge filters.
+            let key = p
+                .key
+                .as_deref()
+                .filter(|k| !k.is_empty())
+                .ok_or("'key' is required for 'blast_radius'")?;
+            let depth = p.max_depth.unwrap_or(2);
+
+            let (direct_result, transitive_result) = tokio::join!(
+                graph_ops.neighbors(&ctx, key, Some("incoming"), Some("file"), None),
+                graph_ops.impact(&ctx, key, depth, Some("file"), None),
+            );
+            let direct_groups = match direct_result? {
+                djinn_control_plane::bridge::NeighborsResult::Grouped(g) => g,
+                djinn_control_plane::bridge::NeighborsResult::Detailed(_) => {
+                    // Unreachable: we passed group_by=file. Defensive
+                    // fallback so a contract change doesn't panic.
+                    Vec::new()
+                }
+            };
+            let transitive_groups = match transitive_result? {
+                djinn_control_plane::bridge::ImpactResult::Grouped(g) => g,
+                djinn_control_plane::bridge::ImpactResult::Detailed(_) => Vec::new(),
+            };
+
+            // Hide the queried target itself from the transitive set —
+            // depth=0 is the source node and shouldn't show up as its
+            // own dependent. Also hide it from direct (defensive).
+            let target_key_norm = key.trim_start_matches("file:").to_string();
+            let direct_filtered: Vec<_> = direct_groups
+                .into_iter()
+                .filter(|g| g.file != target_key_norm)
+                .collect();
+            // Subtract direct dependents from transitive so the second
+            // section is genuinely "deeper than depth-1".
+            let direct_files: std::collections::HashSet<String> =
+                direct_filtered.iter().map(|g| g.file.clone()).collect();
+            let transitive_filtered: Vec<_> = transitive_groups
+                .into_iter()
+                .filter(|g| g.file != target_key_norm && !direct_files.contains(&g.file))
+                .collect();
+
+            serde_json::json!({
+                "target": key,
+                "direct": categorize_blast_groups(direct_filtered),
+                "transitive": categorize_blast_groups(transitive_filtered),
+                "depth": depth,
+                "next_steps": [
+                    "run the tests listed in `direct.tests` and `direct.e2e_tests`",
+                    "review `direct.runtime` for behavioural compatibility",
+                    "treat `transitive.runtime` as a deeper-review hint, not a hard breakage list",
+                ],
+            })
+        }
         other => {
             return Err(format!(
                 "unknown code_graph operation '{other}': expected one of \
                  'neighbors', 'ranked', 'impact', 'implementations', \
                  'search', 'cycles', 'orphans', 'path', 'edges', \
-                 'describe', 'context', 'capabilities'"
+                 'describe', 'context', 'capabilities', 'blast_radius'"
             ));
         }
     };
     Ok(result)
+}
+
+/// v8: classify a [`djinn_control_plane::bridge::FileGroupEntry`] list
+/// into runtime / test / e2e buckets for the `blast_radius` op.
+///
+/// Heuristics (file-path conventional, language-aware):
+/// - **e2e_test**: file is a test (see below) AND path contains
+///   `/e2e/`, `/integration/`, `/system/`, or matches `tests/e2e/**` /
+///   `tests/integration/**`. Run e2e separately because they're slow.
+/// - **test**: basename matches `*_test.{go,rs,py,kt,scala}` OR
+///   `*.test.{ts,tsx,js,jsx}` OR `*_spec.{rb,ts,tsx,js,jsx}` OR path
+///   contains `/tests/` segment OR `/test/` segment OR Rust
+///   `#[cfg(test)] mod tests` symbols (already filtered to file
+///   `tests.rs` here). Run before merge.
+/// - **runtime**: everything else. Behavioural-compatibility review
+///   target.
+///
+/// Returns a JSON object with three keys (`runtime`, `tests`,
+/// `e2e_tests`) each holding an array of `{file, occurrence_count,
+/// max_depth, sample_keys}`. Order within each bucket follows input
+/// order — typically pagerank-ish from the upstream impact/neighbor
+/// ranking.
+fn categorize_blast_groups(
+    groups: Vec<djinn_control_plane::bridge::FileGroupEntry>,
+) -> serde_json::Value {
+    let mut runtime = Vec::new();
+    let mut tests = Vec::new();
+    let mut e2e_tests = Vec::new();
+
+    for g in groups {
+        let path = g.file.as_str();
+        let entry = serde_json::json!({
+            "file": g.file,
+            "occurrence_count": g.occurrence_count,
+            "max_depth": g.max_depth,
+            "sample_keys": g.sample_keys,
+        });
+        if is_e2e_test_path(path) {
+            e2e_tests.push(entry);
+        } else if is_test_path(path) {
+            tests.push(entry);
+        } else {
+            runtime.push(entry);
+        }
+    }
+
+    serde_json::json!({
+        "runtime": runtime,
+        "tests": tests,
+        "e2e_tests": e2e_tests,
+        "totals": {
+            "runtime": runtime.len(),
+            "tests": tests.len(),
+            "e2e_tests": e2e_tests.len(),
+        },
+    })
+}
+
+/// True for test files by file-naming and directory convention.
+/// Conservative — when unsure, return false so the file falls into
+/// `runtime` (which is the user's review-required bucket).
+fn is_test_path(path: &str) -> bool {
+    let basename = path.rsplit('/').next().unwrap_or(path);
+    // Basename suffixes per language convention.
+    if basename.ends_with("_test.go")
+        || basename.ends_with("_test.rs")
+        || basename.ends_with("_test.py")
+        || basename.ends_with("_test.kt")
+        || basename.ends_with("_test.scala")
+        || basename.ends_with(".test.ts")
+        || basename.ends_with(".test.tsx")
+        || basename.ends_with(".test.js")
+        || basename.ends_with(".test.jsx")
+        || basename.ends_with(".test.mjs")
+        || basename.ends_with("_spec.rb")
+        || basename.ends_with(".spec.ts")
+        || basename.ends_with(".spec.tsx")
+        || basename.ends_with(".spec.js")
+        || basename.ends_with(".spec.jsx")
+        || basename == "tests.rs"
+    {
+        return true;
+    }
+    // Conventional dir segments. Anchored on slash so a file
+    // legitimately named `protests.rs` outside such a dir passes.
+    if path.contains("/tests/")
+        || path.starts_with("tests/")
+        || path.contains("/test/")
+        || path.starts_with("test/")
+        || path.contains("/__tests__/")
+    {
+        return true;
+    }
+    false
+}
+
+/// True for tests likely to be slow / require external services. e2e
+/// usually runs separately from unit; surfacing it as its own bucket
+/// helps reviewers plan their verification (run unit first, e2e on a
+/// real env). Always also passes [`is_test_path`].
+fn is_e2e_test_path(path: &str) -> bool {
+    if !is_test_path(path) {
+        return false;
+    }
+    path.contains("/e2e/")
+        || path.starts_with("e2e/")
+        || path.contains("/integration/")
+        || path.starts_with("integration/")
+        || path.contains("/system/")
+        || path.contains("tests/integration/")
+        || path.contains("tests/e2e/")
 }
 
 /// v8: explain why a hybrid search returned no hits. Hybrid fans out
@@ -560,7 +732,7 @@ fn code_graph_capabilities() -> serde_json::Value {
         "operations": [
             "neighbors", "ranked", "impact", "implementations",
             "search", "cycles", "orphans", "path", "edges",
-            "describe", "context", "capabilities",
+            "describe", "context", "capabilities", "blast_radius",
         ],
         "default_search_mode": std::env::var("DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE")
             .unwrap_or_else(|_| "name".to_string()),
@@ -665,5 +837,110 @@ async fn resolve_installation_id(
         Err(e) => Err(format!(
             "failed to read installation_id for project {project_id}: {e}"
         )),
+    }
+}
+
+#[cfg(test)]
+mod blast_radius_categorize_tests {
+    use super::*;
+
+    #[test]
+    fn classifies_unit_tests_per_language_convention() {
+        // Go.
+        assert!(is_test_path("internal/worker/page_worker_test.go"));
+        // Rust.
+        assert!(is_test_path("crates/foo/src/lib_test.rs"));
+        assert!(is_test_path("crates/foo/src/tests.rs"));
+        // Python.
+        assert!(is_test_path("backend/handlers_test.py"));
+        // Kotlin / Scala.
+        assert!(is_test_path("src/main/kotlin/foo_test.kt"));
+        // TS / JS.
+        assert!(is_test_path("ui/src/components/Button.test.tsx"));
+        assert!(is_test_path("ui/src/utils/parser.test.ts"));
+        assert!(is_test_path("ui/src/utils/parser.spec.tsx"));
+        assert!(is_test_path("scripts/util.test.mjs"));
+        // Ruby.
+        assert!(is_test_path("app/models/user_spec.rb"));
+        // Conventional test dirs.
+        assert!(is_test_path("tests/integration/foo.go"));
+        assert!(is_test_path("crates/foo/tests/integration.rs"));
+        assert!(is_test_path("test/unit/foo.py"));
+        assert!(is_test_path("ui/src/__tests__/parser.ts"));
+    }
+
+    #[test]
+    fn does_not_misclassify_legitimate_source_as_tests() {
+        // Words containing "test" that aren't tests.
+        assert!(!is_test_path("internal/handler/protests_handler.go"));
+        assert!(!is_test_path("crates/contest/src/lib.rs"));
+        assert!(!is_test_path("internal/util/testify_helper.go"));
+        // Files literally named like a test pattern but in a non-test dir.
+        // (tests.rs is a Rust convention, so it IS a test — covered above.)
+        assert!(!is_test_path("internal/handler/handler.go"));
+        assert!(!is_test_path("crates/foo/src/lib.rs"));
+    }
+
+    #[test]
+    fn separates_e2e_from_unit_tests() {
+        // E2E directory variants.
+        assert!(is_e2e_test_path("tests/integration/e2e/cw_polling_e2e_test.go"));
+        assert!(is_e2e_test_path("tests/e2e/auth_flow_test.go"));
+        assert!(is_e2e_test_path("e2e/page_lifecycle_test.go"));
+        assert!(is_e2e_test_path("integration/billing_test.go"));
+        assert!(is_e2e_test_path("backend/system/system_test.py"));
+        // A test that's NOT in e2e dir → not e2e (would be `test`).
+        assert!(!is_e2e_test_path("internal/worker/page_worker_test.go"));
+        assert!(!is_e2e_test_path("ui/src/components/Button.test.tsx"));
+        // Non-test files outside any tests/ dir → not e2e (would be runtime).
+        assert!(!is_e2e_test_path("internal/worker/page_worker.go"));
+        assert!(!is_e2e_test_path("cmd/dispatcher.go"));
+        // Note: a fixture file like `tests/e2e/fixtures.go` IS classified
+        // as e2e here — it lives under `tests/` so is_test_path fires,
+        // and it lives under `/e2e/` so is_e2e_test_path fires too. That's
+        // the intentional behavior: fixtures shipped alongside e2e tests
+        // should be in the same bucket as the e2e tests for "what should
+        // I re-run" purposes.
+    }
+
+    #[test]
+    fn categorize_buckets_each_path_correctly() {
+        use djinn_control_plane::bridge::FileGroupEntry;
+        let groups = vec![
+            FileGroupEntry {
+                file: "cmd/worker.go".to_string(),
+                occurrence_count: 3,
+                max_depth: 1,
+                sample_keys: vec!["scip-go . . . StartPageWorker().".to_string()],
+            },
+            FileGroupEntry {
+                file: "internal/worker/page_worker_test.go".to_string(),
+                occurrence_count: 5,
+                max_depth: 1,
+                sample_keys: vec![],
+            },
+            FileGroupEntry {
+                file: "tests/integration/e2e/cw_polling_e2e_test.go".to_string(),
+                occurrence_count: 2,
+                max_depth: 2,
+                sample_keys: vec![],
+            },
+        ];
+        let result = categorize_blast_groups(groups);
+        assert_eq!(result["totals"]["runtime"], 1);
+        assert_eq!(result["totals"]["tests"], 1);
+        assert_eq!(result["totals"]["e2e_tests"], 1);
+        assert_eq!(
+            result["runtime"][0]["file"].as_str().unwrap(),
+            "cmd/worker.go"
+        );
+        assert_eq!(
+            result["tests"][0]["file"].as_str().unwrap(),
+            "internal/worker/page_worker_test.go"
+        );
+        assert_eq!(
+            result["e2e_tests"][0]["file"].as_str().unwrap(),
+            "tests/integration/e2e/cw_polling_e2e_test.go"
+        );
     }
 }

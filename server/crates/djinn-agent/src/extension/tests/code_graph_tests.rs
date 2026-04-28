@@ -419,6 +419,56 @@ async fn code_graph_dispatch_describe_reaches_graph_ops() {
     );
 }
 
+/// v8 blast_radius op: aggregates `neighbors(incoming, group_by=file)`
+/// + `impact(group_by=file)`, categorises each file path into
+/// runtime/tests/e2e_tests buckets. The agent bridge stub still short-
+/// circuits before reaching graph_ops, so this test asserts the op is
+/// wired (reaches the bridge) rather than the categorizer logic — the
+/// path-classification logic is exercised by direct unit tests in
+/// `code_intel.rs`.
+#[tokio::test]
+async fn code_graph_dispatch_blast_radius_reaches_graph_ops() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-blast-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let err = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "blast_radius",
+            "project_path": worktree.path().to_string_lossy(),
+            "key": "file:internal/worker/page_worker.go",
+        }),
+        worktree.path(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("code_graph not available"),
+        "blast_radius should reach graph ops layer, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_blast_radius_requires_key() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-blast-no-key-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let err = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "blast_radius",
+            "project_path": worktree.path().to_string_lossy(),
+        }),
+        worktree.path(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("'key' is required"),
+        "blast_radius without key should fail with arg-validation error, got: {err}"
+    );
+}
+
 /// v8 capability introspection: returns metadata about what's actually
 /// wired in this binary — does NOT load the canonical graph, so it
 /// works against a fresh tempdir with no warm cache. Asserts the
