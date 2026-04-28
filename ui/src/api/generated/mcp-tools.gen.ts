@@ -364,6 +364,14 @@ export namespace CodeGraphInputSchema {
    */
   kind_filter?: string
   /**
+   * PR C2: optional kind hint biasing the C2 disambiguation score
+   * when `key` is a short identifier (e.g. `"User"`) and the
+   * resolver hits multiple candidates. Accepts the same labels the
+   * resolver emits: `"file"`, `"class"`, `"interface"`, `"function"`,
+   * `"method"`, `"struct"`, `"enum"`, etc.
+   */
+  kind_hint?: string
+  /**
    * Maximum results for `ranked`/`search`/`orphans`/`edges`/`neighbors`
    * (default 20) or max traversal depth for `impact` (default 3).
    */
@@ -372,6 +380,14 @@ export namespace CodeGraphInputSchema {
    * Optional max depth for `path`.
    */
   max_depth?: number
+  /**
+   * Max files per commit before a commit is skipped in the
+   * `coupling_hotspots` / `coupling_hubs` aggregation. Default 15.
+   * Protects the pair-count signal from lockfile refreshes,
+   * codemods, and similar bulk rewrites that contribute `N^2`
+   * pairs with essentially zero real coupling information.
+   */
+  max_files_per_commit?: number
   /**
    * Minimum SCC size for `cycles` (default 2).
    */
@@ -413,6 +429,11 @@ export namespace CodeGraphInputSchema {
    * `touches_hot_path`.
    */
   seed_sinks?: string[]
+  /**
+   * Time-window (in days) for the `churn` op. Omit for all-time.
+   * Clamped to `[1, 3650]` server-side.
+   */
+  since_days?: number
   /**
    * Sort key for `ranked`: `pagerank` (default), `in_degree`, `out_degree`,
    * or `total_degree`.
@@ -2037,26 +2058,58 @@ export namespace MemoryRecentOutputSchema {
 
 }
 export type MemoryRecentOutput = MemoryRecentOutputSchema.MemoryRecentOutput;
-export namespace MemoryReindexInputSchema {
-  export interface MemoryReindexInput {
+export namespace MemoryRepairEmbeddingsInputSchema {
+  export interface MemoryRepairEmbeddingsInput {
+  /**
+   * If true, re-embed every note even if its content hash already matches.
+   * Default false: only notes with missing or stale embeddings are repaired.
+   */
+  force?: boolean
+  /**
+   * Project path, slug, or id (same forms accepted by other memory tools).
+   */
   project: string
   [k: string]: any
   }
 
 }
-export type MemoryReindexInput = MemoryReindexInputSchema.MemoryReindexInput;
-export namespace MemoryReindexOutputSchema {
-  export interface MemoryReindexOutput {
-  created: number
-  deleted: number
+export type MemoryRepairEmbeddingsInput = MemoryRepairEmbeddingsInputSchema.MemoryRepairEmbeddingsInput;
+export namespace MemoryRepairEmbeddingsOutputSchema {
+  export interface MemoryRepairEmbeddingsOutput {
+  /**
+   * Top-level failure: project not found, embedding provider unavailable, etc.
+   */
   error?: string
-  unchanged: number
-  updated: number
+  /**
+   * Notes whose re-embed attempt failed (Qdrant down, model error, …).
+   */
+  failed: number
+  /**
+   * First-N failures (capped to keep the response small).
+   */
+  failures: MemoryRepairEmbeddingFailure[]
+  /**
+   * Notes that received a fresh embedding during this run.
+   */
+  repaired: number
+  /**
+   * Total notes scanned for the project.
+   */
+  total: number
+  /**
+   * Notes whose embedding meta was already current; no work performed.
+   */
+  up_to_date: number
+  [k: string]: any
+  }
+  export interface MemoryRepairEmbeddingFailure {
+  note_id: string
+  reason: string
   [k: string]: any
   }
 
 }
-export type MemoryReindexOutput = MemoryReindexOutputSchema.MemoryReindexOutput;
+export type MemoryRepairEmbeddingsOutput = MemoryRepairEmbeddingsOutputSchema.MemoryRepairEmbeddingsOutput;
 export namespace MemorySearchInputSchema {
   export interface MemorySearchInput {
   folder?: string
@@ -2732,24 +2785,25 @@ export namespace ProposeAdrListOutputSchema {
    */
   export interface ProposedAdr {
   /**
-   * Raw markdown body (frontmatter stripped).  Omitted in list
-   * responses to keep them small.
+   * Raw note content. Omitted in list responses to keep them small.
    */
   body?: string
   /**
-   * File stem, e.g. `"adr-052-new-pipeline"`.
+   * Slug — the part of the permalink after `decisions/proposed/`.
+   * e.g. `"adr-052-new-pipeline"` for permalink
+   * `"decisions/proposed/adr-052-new-pipeline"`.
    */
   id: string
   /**
-   * Last filesystem modified time for the proposal draft, encoded as RFC 3339.
+   * Last update timestamp on the underlying note, RFC 3339.
    */
   mtime?: string
   /**
-   * Optional short_id of the originating spike task.
+   * Optional short_id of the originating spike task — frontmatter-sourced.
    */
   originating_spike_id?: string
   /**
-   * Absolute filesystem path of the source file (under `proposed/`).
+   * Canonical permalink of the proposed-ADR note in Dolt.
    */
   path: string
   /**
@@ -2760,23 +2814,24 @@ export namespace ProposeAdrListOutputSchema {
    */
   project_id?: string
   /**
+   * Display name of the owning project — kept separate from
+   * `project_path` since the Proposals UI shows the human name in
+   * per-row chips.
+   */
+  project_name?: string
+  /**
    * Display name of the owning project, sourced from the Dolt
    * registry.  Used by the Proposals page to render per-row project
    * chips when the "All projects" filter is active.
    */
-  project_name?: string
-  /**
-   * Absolute filesystem root of the owning project, so clients can
-   * call `propose_adr_show`/`accept`/`reject` without a second
-   * project-lookup round-trip.
-   */
   project_path?: string
   /**
-   * Title pulled from frontmatter or the first H1.
+   * Note title (from `memory_write` `title=`).
    */
   title: string
   /**
-   * Work shape hint (`"task"` | `"epic"` | `"architectural"` | `"spike"`).
+   * Work shape hint (`"task"` | `"epic"` | `"architectural"` | `"spike"`),
+   * parsed from the note content's leading YAML frontmatter when present.
    */
   work_shape?: string
   [k: string]: any
@@ -2839,24 +2894,25 @@ export namespace ProposeAdrShowOutputSchema {
    */
   export interface ProposedAdr {
   /**
-   * Raw markdown body (frontmatter stripped).  Omitted in list
-   * responses to keep them small.
+   * Raw note content. Omitted in list responses to keep them small.
    */
   body?: string
   /**
-   * File stem, e.g. `"adr-052-new-pipeline"`.
+   * Slug — the part of the permalink after `decisions/proposed/`.
+   * e.g. `"adr-052-new-pipeline"` for permalink
+   * `"decisions/proposed/adr-052-new-pipeline"`.
    */
   id: string
   /**
-   * Last filesystem modified time for the proposal draft, encoded as RFC 3339.
+   * Last update timestamp on the underlying note, RFC 3339.
    */
   mtime?: string
   /**
-   * Optional short_id of the originating spike task.
+   * Optional short_id of the originating spike task — frontmatter-sourced.
    */
   originating_spike_id?: string
   /**
-   * Absolute filesystem path of the source file (under `proposed/`).
+   * Canonical permalink of the proposed-ADR note in Dolt.
    */
   path: string
   /**
@@ -2867,23 +2923,24 @@ export namespace ProposeAdrShowOutputSchema {
    */
   project_id?: string
   /**
+   * Display name of the owning project — kept separate from
+   * `project_path` since the Proposals UI shows the human name in
+   * per-row chips.
+   */
+  project_name?: string
+  /**
    * Display name of the owning project, sourced from the Dolt
    * registry.  Used by the Proposals page to render per-row project
    * chips when the "All projects" filter is active.
    */
-  project_name?: string
-  /**
-   * Absolute filesystem root of the owning project, so clients can
-   * call `propose_adr_show`/`accept`/`reject` without a second
-   * project-lookup round-trip.
-   */
   project_path?: string
   /**
-   * Title pulled from frontmatter or the first H1.
+   * Note title (from `memory_write` `title=`).
    */
   title: string
   /**
-   * Work shape hint (`"task"` | `"epic"` | `"architectural"` | `"spike"`).
+   * Work shape hint (`"task"` | `"epic"` | `"architectural"` | `"spike"`),
+   * parsed from the note content's leading YAML frontmatter when present.
    */
   work_shape?: string
   [k: string]: any
@@ -3225,7 +3282,11 @@ export namespace SessionActiveOutputSchema {
   ended_at?: string
   id: string
   model_id: string
-  project_id: string
+  /**
+   * `None` for chat sessions (global, user-scoped); `Some(_)` for every
+   * other agent type. See `SessionRecord::project_id`.
+   */
+  project_id?: string
   started_at: string
   status: string
   task_id?: string
@@ -3303,7 +3364,11 @@ export namespace SessionListOutputSchema {
   ended_at?: string
   id: string
   model_id: string
-  project_id: string
+  /**
+   * `None` for chat sessions (global, user-scoped); `Some(_)` for every
+   * other agent type. See `SessionRecord::project_id`.
+   */
+  project_id?: string
   started_at: string
   status: string
   task_id?: string
@@ -3377,6 +3442,10 @@ export namespace SessionShowOutputSchema {
   error?: string
   id?: string
   model_id?: string
+  /**
+   * `None` for chat sessions (global, user-scoped); `Some(_)` for every
+   * other agent type. See `SessionRecord::project_id`.
+   */
   project_id?: string
   started_at?: string
   status?: string
@@ -3975,7 +4044,11 @@ export namespace TaskTimelineOutputSchema {
   ended_at?: string
   id: string
   model_id: string
-  project_id: string
+  /**
+   * `None` for chat sessions (global, user-scoped); `Some(_)` for every
+   * other agent type. See `SessionRecord::project_id`.
+   */
+  project_id?: string
   started_at: string
   status: string
   task_id?: string
@@ -4122,7 +4195,7 @@ export namespace TaskUpdateOutputSchema {
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_reindex" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -4170,7 +4243,7 @@ export interface McpToolMap {
   "memory_orphans": { input: MemoryOrphansInput; output: MemoryOrphansOutput };
   "memory_read": { input: MemoryReadInput; output: MemoryReadOutput };
   "memory_recent": { input: MemoryRecentInput; output: MemoryRecentOutput };
-  "memory_reindex": { input: MemoryReindexInput; output: MemoryReindexOutput };
+  "memory_repair_embeddings": { input: MemoryRepairEmbeddingsInput; output: MemoryRepairEmbeddingsOutput };
   "memory_search": { input: MemorySearchInput; output: MemorySearchOutput };
   "memory_task_refs": { input: MemoryTaskRefsInput; output: MemoryTaskRefsOutput };
   "memory_write": { input: MemoryWriteInput; output: MemoryWriteOutput };

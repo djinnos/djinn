@@ -305,6 +305,12 @@ pub(super) struct CodeGraphParams {
     pub max_depth: Option<usize>,
     #[serde(default)]
     pub edge_kind: Option<String>,
+    /// PR C2: optional kind hint biasing the disambiguation score when
+    /// `key` is a short identifier and the resolver hits multiple
+    /// candidates. Accepts the same labels the resolver emits:
+    /// `"file"`, `"class"`, `"function"`, `"method"`, etc.
+    #[serde(default)]
+    pub kind_hint: Option<String>,
 }
 
 #[derive(Deserialize)]

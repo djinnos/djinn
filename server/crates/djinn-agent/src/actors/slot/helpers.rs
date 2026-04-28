@@ -1249,6 +1249,15 @@ mod tests {
         ) -> Result<Vec<djinn_control_plane::bridge::CouplingHubEntry>, String> {
             Err("unused in test".into())
         }
+
+        async fn resolve(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<djinn_control_plane::bridge::ResolveOutcome, String> {
+            Err("unused in test".into())
+        }
     }
 
     async fn setup_project() -> (Database, AgentContext, Project, tempfile::TempDir) {

@@ -476,6 +476,46 @@ pub struct ChurnEntry {
     pub last_commit_at: String,
 }
 
+/// A ranked disambiguation candidate emitted by the `code_graph`
+/// `resolve` op (PR C2). When `code_graph` cannot resolve a caller-supplied
+/// key (`User`, `helper`, `MyClass`) to a single graph node, the dispatcher
+/// falls back to `search_by_name` and returns up to 8 ranked `Candidate`s
+/// instead of a hard error.
+///
+/// `uid` is the stable `RepoNodeKey` (`"symbol:..."` or `"file:..."`) — a
+/// follow-up call with `key=<uid>` resolves uniquely.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Candidate {
+    /// Stable RepoNodeKey, e.g. `"symbol:scip-rust pkg src/foo.rs `User`#"`.
+    /// Pass back as `key` for an unambiguous follow-up.
+    pub uid: String,
+    /// Display name (typically the unqualified identifier).
+    pub name: String,
+    /// `"file"`, `"function"`, `"class"`, `"method"`, `"interface"`, etc.
+    pub kind: String,
+    /// Repository-relative file path, when known. Empty string for
+    /// symbol nodes that don't carry a `file_path`.
+    pub file_path: String,
+    /// Composite ranking score from PR C2's formula:
+    /// `0.5 + 0.4 * file-path-match + 0.2 * kind-hint-match + tiebreaker`.
+    pub score: f64,
+}
+
+/// Outcome of pre-resolving a `code_graph` key against the live graph.
+/// Surfaces multi-match cases as `Ambiguous` so callers can show a
+/// disambiguation UI instead of failing the whole tool call.
+#[derive(Debug, Clone)]
+pub enum ResolveOutcome {
+    /// Exact match landed on a unique node. The contained `String` is
+    /// the canonical RepoNodeKey (`"symbol:..."` or `"file:..."`).
+    Found(String),
+    /// Exact match failed; `search_by_name` returned multiple plausible
+    /// targets. Up to 8, ranked by the PR C2 formula.
+    Ambiguous(Vec<Candidate>),
+    /// No exact match and no name-index hits.
+    NotFound,
+}
+
 /// A single hot-path hit emitted by `touches_hot_path`.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct HotPathHit {
@@ -744,4 +784,21 @@ pub trait RepoGraphOps: Send + Sync {
         since_days: Option<u32>,
         max_files_per_commit: usize,
     ) -> Result<Vec<CouplingHubEntry>, String>;
+
+    /// Pre-resolve a caller-supplied `key` (file path, SCIP symbol
+    /// string, or short identifier) into either a single canonical node
+    /// (`Found`), a ranked candidate list (`Ambiguous`), or a hard miss
+    /// (`NotFound`). Powers the PR C2 ambiguity response — the
+    /// `code_graph` dispatcher and the chat tool both call this before
+    /// the heavier op so they can surface a candidate list instead of a
+    /// generic `not found` error string.
+    ///
+    /// `kind_hint` (e.g. `"class"`, `"function"`) feeds into the score
+    /// formula and lets the caller bias the disambiguation list.
+    async fn resolve(
+        &self,
+        ctx: &ProjectCtx,
+        key: &str,
+        kind_hint: Option<&str>,
+    ) -> Result<ResolveOutcome, String>;
 }

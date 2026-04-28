@@ -449,6 +449,14 @@ pub mod stubs {
         ) -> Result<Vec<crate::bridge::CouplingHubEntry>, String> {
             Ok(vec![])
         }
+        async fn resolve(
+            &self,
+            _: &crate::bridge::ProjectCtx,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<crate::bridge::ResolveOutcome, String> {
+            Ok(crate::bridge::ResolveOutcome::NotFound)
+        }
     }
 
     /// Build a McpState backed only by an in-memory database (no live actors).

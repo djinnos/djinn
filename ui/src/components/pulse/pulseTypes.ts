@@ -55,6 +55,27 @@ export interface GraphNeighbor {
   edge_weight: number;
 }
 
+/**
+ * PR C2 disambiguation candidate emitted by `code_graph` when a
+ * short-name lookup (`User`, `helper`) hits more than one node. The
+ * `uid` is a stable RepoNodeKey — pass it back as `key` for an
+ * unambiguous follow-up.
+ */
+export interface Candidate {
+  uid: string;
+  name: string;
+  kind: string;
+  file_path: string;
+  score: number;
+}
+
+/** PR C2: structured "no match" body. The `not_found` object disambiguates
+ *  this variant from every other `code_graph` response. */
+export interface NotFound {
+  query: string;
+  kind_hint: string | null;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object";
 }
@@ -171,6 +192,44 @@ export function parseNeighbors(value: unknown): GraphNeighbor[] {
       edge_weight: Number(r.edge_weight ?? 0),
     }))
     .filter((r) => r.key.length > 0);
+}
+
+/**
+ * PR C2: parse the `Ambiguous` variant.  Discriminator field is
+ * `candidates` — every other `CodeGraphResponse` variant uses a
+ * different top-level field name, so a value carrying `candidates` is
+ * unambiguously this branch.  Returns `[]` when the value isn't an
+ * `Ambiguous` payload.
+ */
+export function parseAmbiguous(value: unknown): Candidate[] {
+  return unwrapList(value, "candidates")
+    .filter(isRecord)
+    .map((r) => ({
+      uid: String(r.uid ?? ""),
+      name: String(r.name ?? ""),
+      kind: String(r.kind ?? ""),
+      file_path: String(r.file_path ?? ""),
+      score: Number(r.score ?? 0),
+    }))
+    .filter((c) => c.uid.length > 0);
+}
+
+/**
+ * PR C2: parse the `NotFound` variant.  Discriminator field is
+ * `not_found` (an object with `{query, kind_hint?}`).  Returns `null`
+ * when the value isn't a `NotFound` payload.
+ */
+export function parseNotFound(value: unknown): NotFound | null {
+  if (!isRecord(value)) return null;
+  const inner = (value as Record<string, unknown>)["not_found"];
+  if (!isRecord(inner)) return null;
+  const query = inner.query;
+  if (typeof query !== "string") return null;
+  return {
+    query,
+    kind_hint:
+      typeof inner.kind_hint === "string" ? inner.kind_hint : null,
+  };
 }
 
 // ── Display helpers ─────────────────────────────────────────────────────────

@@ -416,6 +416,14 @@ impl RepoGraphOps for StubRepoGraphOps {
     ) -> Result<Vec<bridge::CouplingHubEntry>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
+    async fn resolve(
+        &self,
+        _: &ProjectCtx,
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<bridge::ResolveOutcome, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
 }
 
 struct AgentGitOps {

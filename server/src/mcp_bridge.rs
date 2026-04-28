@@ -16,18 +16,19 @@ use djinn_control_plane::bridge::{
     EdgeEntry, GitOps, GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry, ImpactEntry,
     ImpactResult, LspOps, LspWarning, MetricsAtResult, ModelPoolStatus, NeighborsResult,
     OrphanEntry, PathHop, PathResult, PoolStatus, ProjectCtx, RankedNode, RepoGraphOps,
-    RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding, SlotPoolOps, SymbolAtHit,
-    SymbolDescription, TouchedSymbol,
+    ResolveOutcome, RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding, SlotPoolOps,
+    SymbolAtHit, SymbolDescription, TouchedSymbol,
 };
 use petgraph::visit::EdgeRef;
 use djinn_agent::actors::coordinator::CoordinatorHandle;
 use djinn_agent::actors::slot::SlotPoolHandle;
 use djinn_agent::lsp::LspManager;
 
-mod graph_neighbors;
+pub(crate) mod graph_neighbors;
 
 use self::graph_neighbors::{
-    format_node_key, group_impact_by_file, group_neighbors_by_file, resolve_node,
+    format_node_key, group_impact_by_file, group_neighbors_by_file, resolve_node_or_err,
+    resolve_node_with_hint,
 };
 
 // ── Newtype wrappers ───────────────────────────────────────────────────────────
@@ -243,7 +244,7 @@ impl RepoGraphOps for RepoGraphBridge {
             &ctx.clone_path,
         )
         .await?;
-        let node_index = resolve_node(&graph, key)?;
+        let node_index = resolve_node_or_err(&graph, key)?;
         let directions: Vec<Direction> = match direction {
             Some("incoming") => vec![Direction::Incoming],
             Some("outgoing") => vec![Direction::Outgoing],
@@ -404,7 +405,7 @@ impl RepoGraphOps for RepoGraphBridge {
             &ctx.clone_path,
         )
         .await?;
-        let start = resolve_node(&graph, key)?;
+        let start = resolve_node_or_err(&graph, key)?;
         let mut visited = std::collections::HashSet::new();
         visited.insert(start);
         let mut queue = std::collections::VecDeque::new();
@@ -596,8 +597,8 @@ impl RepoGraphOps for RepoGraphBridge {
             &ctx.clone_path,
         )
         .await?;
-        let from_idx = resolve_node(&graph, from)?;
-        let to_idx = resolve_node(&graph, to)?;
+        let from_idx = resolve_node_or_err(&graph, from)?;
+        let to_idx = resolve_node_or_err(&graph, to)?;
         let path = match graph.shortest_path(from_idx, to_idx, max_depth) {
             Some(p) => p,
             None => return Ok(None),
@@ -698,7 +699,7 @@ impl RepoGraphOps for RepoGraphBridge {
             &ctx.clone_path,
         )
         .await?;
-        let node_index = match resolve_node(&graph, key) {
+        let node_index = match resolve_node_or_err(&graph, key) {
             Ok(idx) => idx,
             Err(_) => return Ok(None),
         };
@@ -1577,7 +1578,7 @@ impl RepoGraphOps for RepoGraphBridge {
 
         // Resolve all keys once.
         let resolve = |key: &str| -> Option<petgraph::graph::NodeIndex> {
-            resolve_node(&graph, key).ok()
+            resolve_node_or_err(&graph, key).ok()
         };
         let entry_ix: Vec<petgraph::graph::NodeIndex> =
             seed_entries.iter().filter_map(|k| resolve(k)).collect();
@@ -1773,6 +1774,34 @@ impl RepoGraphOps for RepoGraphBridge {
                 partner_count: row.partner_count.max(0) as usize,
             })
             .collect())
+    }
+
+    async fn resolve(
+        &self,
+        ctx: &ProjectCtx,
+        key: &str,
+        kind_hint: Option<&str>,
+    ) -> Result<ResolveOutcome, String> {
+        // Pre-resolve the caller's key against the live graph. We honour
+        // `DJINN_CODE_GRAPH_AMBIGUITY` inside `resolve_node_with_hint` so
+        // the bridge layer doesn't need to gate the variant separately.
+        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
+            &self.state,
+            &ctx.id,
+            &ctx.clone_path,
+        )
+        .await?;
+        let outcome = match resolve_node_with_hint(&graph, key, kind_hint) {
+            self::graph_neighbors::ResolveOutcome::Found(idx) => {
+                let node = graph.node(idx);
+                ResolveOutcome::Found(format_node_key(&node.id))
+            }
+            self::graph_neighbors::ResolveOutcome::Ambiguous(candidates) => {
+                ResolveOutcome::Ambiguous(candidates)
+            }
+            self::graph_neighbors::ResolveOutcome::NotFound => ResolveOutcome::NotFound,
+        };
+        Ok(outcome)
     }
 }
 
@@ -1980,6 +2009,11 @@ mod helper_tests {
 #[cfg(test)]
 pub(crate) mod graph_bridge_tests {
     use super::*;
+    // PR C2: import the inner `ResolveOutcome` (NodeIndex) under the
+    // unqualified name so the existing test patterns keep compiling.
+    // The bridge crate's `ResolveOutcome` (String) is different — we
+    // never use it directly in these tests.
+    use crate::mcp_bridge::graph_neighbors::{resolve_node, ResolveOutcome};
     use djinn_graph::repo_graph::{RepoDependencyGraph, RepoNodeKey};
     use djinn_graph::scip_parser::{
         ParsedScipIndex, ScipFile, ScipMetadata, ScipOccurrence, ScipRange, ScipRelationship,
@@ -1987,6 +2021,15 @@ pub(crate) mod graph_bridge_tests {
     };
     use std::collections::BTreeSet;
     use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    /// Serialize tests that mutate `DJINN_CODE_GRAPH_AMBIGUITY` against
+    /// every other test that calls `resolve_node` — cargo runs tests in
+    /// parallel, so an env var set in one test would otherwise race with
+    /// peer threads reading it. The mutex is held for the duration of
+    /// the env mutation; tests that don't touch the env var still
+    /// acquire the lock so they can't see a transient `false`.
+    static AMBIGUITY_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn fixture_index() -> ParsedScipIndex {
         let helper_symbol_name = "scip-rust pkg src/helper.rs `helper`().".to_string();
@@ -2087,22 +2130,233 @@ pub(crate) mod graph_bridge_tests {
     #[test]
     fn resolve_node_finds_file_by_path() {
         let graph = build_test_graph();
-        assert!(resolve_node(&graph, "src/app.rs").is_ok());
-        assert!(resolve_node(&graph, "file:src/app.rs").is_ok());
+        assert!(matches!(
+            resolve_node(&graph, "src/app.rs"),
+            ResolveOutcome::Found(_)
+        ));
+        assert!(matches!(
+            resolve_node(&graph, "file:src/app.rs"),
+            ResolveOutcome::Found(_)
+        ));
     }
 
     #[test]
     fn resolve_node_finds_symbol_by_name() {
         let graph = build_test_graph();
-        assert!(resolve_node(&graph, "scip-rust pkg src/helper.rs `helper`().").is_ok());
-        assert!(resolve_node(&graph, "symbol:scip-rust pkg src/helper.rs `helper`().").is_ok());
+        assert!(matches!(
+            resolve_node(&graph, "scip-rust pkg src/helper.rs `helper`()."),
+            ResolveOutcome::Found(_)
+        ));
+        assert!(matches!(
+            resolve_node(&graph, "symbol:scip-rust pkg src/helper.rs `helper`()."),
+            ResolveOutcome::Found(_)
+        ));
     }
 
     #[test]
-    fn resolve_node_returns_error_for_unknown() {
+    fn resolve_node_returns_not_found_for_unknown() {
         let graph = build_test_graph();
-        let err = resolve_node(&graph, "nonexistent").unwrap_err();
-        assert!(err.contains("not found"));
+        // The fixture has `helper`/`main` and `HelperTrait` symbols, but
+        // none with a name index entry for "totally_absent".
+        assert!(matches!(
+            resolve_node(&graph, "totally_absent_zzz"),
+            ResolveOutcome::NotFound
+        ));
+    }
+
+    /// Build a fixture with three distinct symbols all named `User`,
+    /// each in a different file. Used by the ambiguity / uid follow-up
+    /// / feature-flag tests below.
+    fn user_ambiguity_index() -> ParsedScipIndex {
+        let mk_user_file = |path: &str, sym: &str, kind: ScipSymbolKind| ScipFile {
+            language: "rust".to_string(),
+            relative_path: PathBuf::from(path),
+            definitions: vec![ScipOccurrence {
+                symbol: sym.to_string(),
+                range: ScipRange {
+                    start_line: 0,
+                    start_character: 0,
+                    end_line: 0,
+                    end_character: 4,
+                },
+                enclosing_range: None,
+                roles: BTreeSet::from([ScipSymbolRole::Definition]),
+                syntax_kind: None,
+                override_documentation: vec![],
+            }],
+            references: vec![],
+            occurrences: vec![],
+            symbols: vec![ScipSymbol {
+                symbol: sym.to_string(),
+                kind: Some(kind),
+                display_name: Some("User".to_string()),
+                signature: None,
+                documentation: vec![],
+                relationships: vec![],
+                visibility: Some(djinn_graph::scip_parser::ScipVisibility::Public),
+            }],
+        };
+        ParsedScipIndex {
+            metadata: ScipMetadata::default(),
+            files: vec![
+                mk_user_file(
+                    "src/auth/User.rs",
+                    "scip-rust pkg src/auth/User.rs `User`#",
+                    ScipSymbolKind::Type,
+                ),
+                mk_user_file(
+                    "src/billing/Account.rs",
+                    "scip-rust pkg src/billing/Account.rs `User`#",
+                    ScipSymbolKind::Function,
+                ),
+                mk_user_file(
+                    "src/admin/Roles.rs",
+                    "scip-rust pkg src/admin/Roles.rs `User`#",
+                    ScipSymbolKind::Method,
+                ),
+            ],
+            external_symbols: vec![],
+        }
+    }
+
+    #[test]
+    fn resolve_node_returns_ambiguous_when_multi_match() {
+        // Three distinct symbols share display name `User`. The
+        // file-path-substring signal dominates the score formula, so
+        // candidates whose path contains the lowercased query rank
+        // ahead of the others. The fixture also yields a file node for
+        // `src/auth/User.rs` (its relative path is its display name and
+        // contains "user") — so the candidate count is 3 symbols + 1
+        // file = 4. Cap at 8 per the C2 spec.
+        let _guard = AMBIGUITY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let graph = RepoDependencyGraph::build(&[user_ambiguity_index()]);
+        let outcome = resolve_node(&graph, "User");
+        match outcome {
+            ResolveOutcome::Ambiguous(candidates) => {
+                assert!(
+                    candidates.len() >= 3 && candidates.len() <= 8,
+                    "expected 3..=8 User candidates, got {}: {:?}",
+                    candidates.len(),
+                    candidates
+                );
+                assert!(
+                    candidates[0].file_path.to_lowercase().contains("user"),
+                    "highest-ranked candidate should match query in file path: {:?}",
+                    candidates
+                );
+                // Verify the three symbol-kind candidates are present.
+                let symbol_count = candidates
+                    .iter()
+                    .filter(|c| c.uid.starts_with("symbol:"))
+                    .count();
+                assert_eq!(
+                    symbol_count, 3,
+                    "expected exactly 3 symbol candidates"
+                );
+            }
+            ResolveOutcome::Found(_) => panic!("expected Ambiguous, got Found"),
+            ResolveOutcome::NotFound => panic!("expected Ambiguous, got NotFound"),
+        }
+    }
+
+    #[test]
+    fn resolve_node_after_uid_lookup_returns_unique() {
+        // Once we have a candidate's `uid` (`"symbol:..."`), passing it
+        // back as `key` resolves uniquely via the symbol index — that's
+        // the C2 disambiguation handshake.
+        let _guard = AMBIGUITY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let graph = RepoDependencyGraph::build(&[user_ambiguity_index()]);
+        let candidates = match resolve_node(&graph, "User") {
+            ResolveOutcome::Ambiguous(c) => c,
+            _ => panic!("expected Ambiguous"),
+        };
+        let uid = candidates[0].uid.clone();
+        match resolve_node(&graph, &uid) {
+            ResolveOutcome::Found(_) => {}
+            _ => panic!("uid follow-up should resolve to Found"),
+        }
+    }
+
+    #[test]
+    fn ambiguity_disabled_returns_not_found() {
+        // With the feature flag off, a multi-match must collapse to
+        // NotFound — preserving pre-PR-C2 semantics for callers that
+        // haven't been updated to handle Ambiguous.
+        //
+        // SAFETY: env mutation races with parallel tests; AMBIGUITY_ENV_LOCK
+        // serializes against every other resolver test in this module.
+        let _guard = AMBIGUITY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let graph = RepoDependencyGraph::build(&[user_ambiguity_index()]);
+        unsafe {
+            std::env::set_var("DJINN_CODE_GRAPH_AMBIGUITY", "false");
+        }
+        let outcome = resolve_node(&graph, "User");
+        unsafe {
+            std::env::remove_var("DJINN_CODE_GRAPH_AMBIGUITY");
+        }
+        assert!(
+            matches!(outcome, ResolveOutcome::NotFound),
+            "with DJINN_CODE_GRAPH_AMBIGUITY=false a multi-match must collapse to NotFound"
+        );
+    }
+
+    #[test]
+    fn score_formula_components() {
+        // Verifies the C2 score formula:
+        //   0.5 + 0.4*file_path_substring + 0.2*kind_hint + tiebreaker.
+        // Spot-check a Type-kind node where both signals fire and the
+        // tiebreaker contributes 0.05.
+        use djinn_graph::repo_graph::*;
+        use djinn_graph::scip_parser::ScipSymbolKind;
+        use std::path::PathBuf;
+
+        let node = RepoGraphNode {
+            id: RepoNodeKey::Symbol("scip-rust pkg src/auth/User.rs `User`#".into()),
+            kind: RepoGraphNodeKind::Symbol,
+            display_name: "User".into(),
+            language: Some("rust".into()),
+            file_path: Some(PathBuf::from("src/auth/User.rs")),
+            symbol: Some("scip-rust pkg src/auth/User.rs `User`#".into()),
+            symbol_kind: Some(ScipSymbolKind::Type),
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: vec![],
+        };
+        // Both file-path match (User in path) and kind hint ("class")
+        // fire. Tiebreaker for Type/Class is 0.05.
+        let s = crate::mcp_bridge::graph_neighbors::score_candidate(
+            &node,
+            "User",
+            Some("class"),
+        );
+        let expected = 0.5 + 0.4 * 1.0 + 0.2 * 1.0 + 0.05;
+        assert!(
+            (s - expected).abs() < 1e-9,
+            "score {s} != expected {expected}"
+        );
+
+        // Same node, no kind hint: drop the 0.2 component.
+        let s_no_hint = crate::mcp_bridge::graph_neighbors::score_candidate(
+            &node, "User", None,
+        );
+        let expected_no_hint = 0.5 + 0.4 * 1.0 + 0.05;
+        assert!(
+            (s_no_hint - expected_no_hint).abs() < 1e-9,
+            "score {s_no_hint} != expected {expected_no_hint}"
+        );
+
+        // Query that doesn't appear in path: drop the 0.4 component.
+        let s_no_path = crate::mcp_bridge::graph_neighbors::score_candidate(
+            &node,
+            "Account",
+            Some("class"),
+        );
+        let expected_no_path = 0.5 + 0.2 * 1.0 + 0.05;
+        assert!(
+            (s_no_path - expected_no_path).abs() < 1e-9,
+            "score {s_no_path} != expected {expected_no_path}"
+        );
     }
 
     #[test]
@@ -2120,7 +2374,10 @@ pub(crate) mod graph_bridge_tests {
     #[tokio::test]
     async fn neighbors_returns_connected_nodes() {
         let graph = build_test_graph();
-        let node_index = resolve_node(&graph, "src/app.rs").unwrap();
+        let node_index = match resolve_node(&graph, "src/app.rs") {
+            ResolveOutcome::Found(idx) => idx,
+            _ => panic!("expected Found"),
+        };
         let mut neighbors = Vec::new();
         for dir in [petgraph::Direction::Incoming, petgraph::Direction::Outgoing] {
             let dir_label = match dir {
@@ -2206,7 +2463,10 @@ pub(crate) mod graph_bridge_tests {
     #[tokio::test]
     async fn impact_returns_transitive_dependents() {
         let graph = build_test_graph();
-        let start = resolve_node(&graph, "scip-rust pkg src/helper.rs `helper`().").unwrap();
+        let start = match resolve_node(&graph, "scip-rust pkg src/helper.rs `helper`().") {
+            ResolveOutcome::Found(idx) => idx,
+            _ => panic!("expected Found"),
+        };
         let mut visited = std::collections::HashSet::new();
         visited.insert(start);
         let mut queue = std::collections::VecDeque::new();
