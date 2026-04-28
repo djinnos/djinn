@@ -542,12 +542,14 @@ pub(crate) async fn call_code_graph(
             })
         }
         "boundary_check" => {
-            // v8: enforce architectural layering rules. Each rule
-            // says "files matching `from_glob` must not depend on
-            // any file matching any of `forbid_to`". We reuse the
-            // existing `edges` op per (from_glob, forbid_to_glob)
-            // pair so we don't need a new trait method — keeps
-            // bridge surface stable.
+            // v8: enforce architectural layering rules. Routes through
+            // `RepoGraphOps::boundary_check` (single graph walk over
+            // all rules, vs. one per rule the iter-11 implementation
+            // did). The trait's BoundaryRule is {from_glob, to_glob}
+            // — we explode each user-supplied rule's `forbid_to` list
+            // into multiple BoundaryRule entries + track a mapping
+            // back to the original rule for output grouping.
+            use djinn_control_plane::bridge::BoundaryRule as TraitRule;
             let rules = p.rules.as_deref().unwrap_or(&[]);
             if rules.is_empty() {
                 return Err(
@@ -556,51 +558,59 @@ pub(crate) async fn call_code_graph(
                         .to_string(),
                 );
             }
-            // Per-rule cap on returned violations to keep the wire
-            // size bounded; the count is reported separately so the
-            // user knows when output was truncated.
-            const PER_RULE_LIMIT: usize = 100;
-            let mut report_rules: Vec<serde_json::Value> = Vec::new();
-            let mut total_violations: usize = 0;
-            for rule in rules {
-                let mut rule_violations: Vec<serde_json::Value> = Vec::new();
-                let mut rule_count: usize = 0;
-                let mut truncated = false;
+            // Build the flat trait-rule list + the index → user-rule
+            // mapping so we can regroup violations afterwards.
+            let mut flat: Vec<TraitRule> = Vec::new();
+            // Maps trait-rule index → (user-rule index, matched forbid_to glob).
+            let mut origin: Vec<(usize, String)> = Vec::new();
+            for (rule_i, rule) in rules.iter().enumerate() {
                 for forbid in &rule.forbid_to {
-                    let edges_for_pair = graph_ops
-                        .edges(
-                            &ctx,
-                            &rule.from_glob,
-                            forbid,
-                            None, // no edge_kind filter — any dependency counts
-                            PER_RULE_LIMIT,
-                        )
-                        .await?;
-                    for edge in edges_for_pair {
-                        rule_count += 1;
-                        if rule_violations.len() >= PER_RULE_LIMIT {
-                            truncated = true;
-                            continue;
-                        }
-                        rule_violations.push(serde_json::json!({
-                            "from": edge.from,
-                            "to": edge.to,
-                            "matched_forbid_glob": forbid,
-                            "edge_kind": edge.edge_kind,
-                        }));
-                    }
+                    flat.push(TraitRule {
+                        from_glob: rule.from_glob.clone(),
+                        to_glob: forbid.clone(),
+                    });
+                    origin.push((rule_i, forbid.clone()));
                 }
-                total_violations += rule_count;
-                report_rules.push(serde_json::json!({
-                    "name": rule.name,
-                    "from_glob": rule.from_glob,
-                    "forbid_to": rule.forbid_to,
-                    "violation_count": rule_count,
-                    "violations": rule_violations,
-                    "truncated": truncated,
-                    "passed": rule_count == 0,
+            }
+            let violations = graph_ops.boundary_check(&ctx, &flat).await?;
+            // Regroup violations by original user rule.
+            const PER_RULE_LIMIT: usize = 100;
+            let mut by_user_rule: Vec<(usize, bool, Vec<serde_json::Value>)> =
+                rules.iter().map(|_| (0, false, Vec::new())).collect();
+            for v in &violations {
+                let (rule_i, ref forbid_glob) = origin[v.rule_index];
+                let entry = &mut by_user_rule[rule_i];
+                entry.0 += 1; // total count
+                if entry.2.len() >= PER_RULE_LIMIT {
+                    entry.1 = true; // truncated
+                    continue;
+                }
+                entry.2.push(serde_json::json!({
+                    "from": v.from_key,
+                    "to": v.to_key,
+                    "matched_forbid_glob": forbid_glob,
+                    "edge_kind": v.edge_kind,
+                    "from_file": v.from_file,
+                    "to_file": v.to_file,
                 }));
             }
+            let mut total_violations: usize = 0;
+            let report_rules: Vec<serde_json::Value> = rules
+                .iter()
+                .zip(by_user_rule.iter())
+                .map(|(rule, (count, truncated, vs))| {
+                    total_violations += count;
+                    serde_json::json!({
+                        "name": rule.name,
+                        "from_glob": rule.from_glob,
+                        "forbid_to": rule.forbid_to,
+                        "violation_count": count,
+                        "violations": vs,
+                        "truncated": truncated,
+                        "passed": *count == 0,
+                    })
+                })
+                .collect();
             serde_json::json!({
                 "rules_evaluated": rules.len(),
                 "total_violations": total_violations,
