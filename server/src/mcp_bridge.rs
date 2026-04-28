@@ -421,6 +421,13 @@ impl RepoGraphOps for RepoGraphBridge {
                     ImpactEntry {
                         key: format_node_key(&node.id),
                         depth,
+                        // PR C3: surface file_path so the response-shaping
+                        // layer can bucket entries into modules for risk
+                        // classification.
+                        file_path: node
+                            .file_path
+                            .as_ref()
+                            .map(|p| p.display().to_string()),
                     },
                 ));
             }
@@ -2489,6 +2496,10 @@ pub(crate) mod graph_bridge_tests {
                 result.push(ImpactEntry {
                     key: format_node_key(&node.id),
                     depth,
+                    file_path: node
+                        .file_path
+                        .as_ref()
+                        .map(|p| p.display().to_string()),
                 });
             }
             if depth < max_depth {

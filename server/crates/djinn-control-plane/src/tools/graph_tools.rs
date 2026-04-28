@@ -194,8 +194,50 @@ pub struct ImplementationsResponse {
     pub next_step: Option<String>,
 }
 
+/// PR C3 risk bucket for an `impact` query, derived from `direct_count`,
+/// `total_impacted`, and `module_count`. Serialized in SCREAMING_SNAKE
+/// (`"LOW" | "MEDIUM" | "HIGH" | "CRITICAL"`) so reviewer prompts and
+/// dashboards can string-match without round-tripping through the enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ImpactRisk {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+impl ImpactRisk {
+    /// PR C3 thresholds. The `direct`/`total`/`modules` triple is
+    /// OR-combined within each tier, then evaluated top-down (critical
+    /// first) so the highest matching bucket wins.
+    pub(crate) fn classify(direct: usize, total: usize, modules: usize) -> Self {
+        if direct >= 20 || total >= 200 || modules >= 10 {
+            ImpactRisk::Critical
+        } else if direct >= 10 || total >= 80 || modules >= 5 {
+            ImpactRisk::High
+        } else if direct >= 3 || total >= 20 || modules >= 2 {
+            ImpactRisk::Medium
+        } else {
+            ImpactRisk::Low
+        }
+    }
+
+    /// PR C3 hint gating: HIGH/CRITICAL impacts deserve a follow-up
+    /// nudge toward `dead_symbols` + `deprecated_callers` so reviewers
+    /// pre-clean the blast radius before the change lands.
+    pub(crate) fn is_high_or_critical(self) -> bool {
+        matches!(self, ImpactRisk::High | ImpactRisk::Critical)
+    }
+}
+
 // See NeighborsResponse above — same flatten-on-sequence bug. Impact emits
 // its detailed list under `impact` and its file rollup under `file_groups`.
+//
+// PR C3 additions (`risk`, `summary`) are skipped when `None` so the wire
+// stays additive: callers that don't ask for risk classification (e.g.
+// `group_by=file` rollup with no risk computation) still serialize as
+// before.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ImpactResponse {
     pub key: String,
@@ -203,6 +245,16 @@ pub struct ImpactResponse {
     pub impact: Option<Vec<ImpactEntry>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_groups: Option<Vec<FileGroupEntry>>,
+    /// PR C3: blast-radius bucket (`LOW`/`MEDIUM`/`HIGH`/`CRITICAL`).
+    /// Populated for both detailed and grouped responses; absent when
+    /// classification was skipped (e.g. fixture-only test paths).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk: Option<ImpactRisk>,
+    /// PR C3: 1-line human summary, e.g. `"12 direct caller(s) across
+    /// 3 module(s)"`. Stable phrasing so chat UIs and reviewer prompts
+    /// can lift it verbatim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
 }
@@ -439,6 +491,12 @@ pub enum CodeGraphResponse {
 const FALLBACK_NEXT_STEP: &str =
     "Use `code_graph status` to inspect the current graph state.";
 
+/// PR C3: emitted when an `impact` query lands on a HIGH or CRITICAL
+/// risk bucket. Steers the caller toward the cleanup ops they should
+/// run before the change ships.
+const HIGH_IMPACT_NEXT_STEP: &str =
+    "Consider running `dead_symbols` and `deprecated_callers` before the change.";
+
 /// Returns whether next-step hints should be appended. Toggled via the
 /// `DJINN_CODE_GRAPH_NEXT_STEP_HINTS` env var; default is `true` (only
 /// `0` / `false` / `off` / `no` suppress).
@@ -492,10 +550,15 @@ fn compute_next_step_hint(op: &str, response: &CodeGraphResponse) -> String {
             "Each cycle entry is a tuple of mutually-reaching nodes; resolve with `path`."
                 .to_string()
         }
-        // C3 introduces a `risk` field on ImpactDetailed. Until that
-        // ships we cannot gate on HIGH/CRITICAL, so we emit the generic
-        // hint for `impact`. Post-C3 this arm should branch on risk.
-        ("impact", CodeGraphResponse::Impact(_)) => FALLBACK_NEXT_STEP.to_string(),
+        // PR C3: gate on the freshly-computed `risk` bucket so HIGH /
+        // CRITICAL blast radii steer reviewers toward the cleanup ops
+        // (`dead_symbols` + `deprecated_callers`). LOW / MEDIUM (and
+        // legacy responses without classification) keep the generic
+        // fallback hint.
+        ("impact", CodeGraphResponse::Impact(r)) => match r.risk {
+            Some(risk) if risk.is_high_or_critical() => HIGH_IMPACT_NEXT_STEP.to_string(),
+            _ => FALLBACK_NEXT_STEP.to_string(),
+        },
         _ => FALLBACK_NEXT_STEP.to_string(),
     }
 }
@@ -534,6 +597,103 @@ fn next_step_slot(response: &mut CodeGraphResponse) -> &mut Option<String> {
         CodeGraphResponse::Ambiguous(r) => &mut r.next_step,
         CodeGraphResponse::NotFound(r) => &mut r.next_step,
     }
+}
+
+// ── Risk classification (PR C3) ─────────────────────────────────────────────────
+
+/// PR C3: bucket a file path into a "module" key by taking its first
+/// two path segments. The plan calls for "first 2 segments after repo
+/// root"; the file paths returned by the graph layer are already
+/// repo-relative, so we slice them as-is.
+///
+/// - `src/auth/User.rs` → `"src/auth"`
+/// - `crates/djinn-control-plane/src/lib.rs` → `"crates/djinn-control-plane"`
+/// - `Cargo.toml` (single segment) → `"Cargo.toml"` (degenerate; the
+///   single-file repo case still counts as one module)
+fn module_bucket(file_path: &str) -> String {
+    let normalized = file_path.replace('\\', "/");
+    let mut iter = normalized.split('/').filter(|s| !s.is_empty());
+    let first = iter.next();
+    let second = iter.next();
+    match (first, second) {
+        (Some(a), Some(b)) => format!("{a}/{b}"),
+        (Some(a), None) => a.to_string(),
+        _ => file_path.to_string(),
+    }
+}
+
+/// PR C3 metrics tuple — `(direct_count, total_impacted, module_count)`.
+/// Computed once and shared between risk classification and the summary
+/// string so the two never disagree.
+#[derive(Debug, Clone, Copy)]
+struct ImpactMetrics {
+    direct: usize,
+    total: usize,
+    modules: usize,
+}
+
+/// Compute risk metrics from a detailed `ImpactEntry` slice. `direct`
+/// counts entries at depth 1 (BFS root has depth 0 and isn't emitted),
+/// `total` is the full impacted set, `modules` is the unique module
+/// bucket count over all entries that carry a `file_path`. Entries
+/// without a `file_path` (external/virtual symbols) don't contribute
+/// to the module count — the plan treats them as "no module signal".
+fn metrics_from_detailed(entries: &[ImpactEntry]) -> ImpactMetrics {
+    use std::collections::HashSet;
+    let direct = entries.iter().filter(|e| e.depth == 1).count();
+    let total = entries.len();
+    let mut buckets: HashSet<String> = HashSet::new();
+    for entry in entries {
+        if let Some(path) = entry.file_path.as_deref() {
+            buckets.insert(module_bucket(path));
+        }
+    }
+    ImpactMetrics {
+        direct,
+        total,
+        modules: buckets.len(),
+    }
+}
+
+/// Compute risk metrics from the per-file rollup (`group_by=file`).
+/// `total` is the sum of `occurrence_count` across groups; `direct` is
+/// the count of entries with `max_depth == 1` aggregated across groups
+/// — but since the rollup loses per-entry depth granularity, we
+/// approximate `direct` as the sum of `occurrence_count` over groups
+/// whose `max_depth == 1`, which is exact iff the only depth-1 entries
+/// land in single-direct-only files (rare). For the wider (multi-depth)
+/// case the approximation under-counts; the detailed path remains the
+/// authoritative source. `modules` is the unique two-segment bucket
+/// count across the listed files.
+fn metrics_from_grouped(groups: &[FileGroupEntry]) -> ImpactMetrics {
+    use std::collections::HashSet;
+    let total: usize = groups.iter().map(|g| g.occurrence_count).sum();
+    let direct: usize = groups
+        .iter()
+        .filter(|g| g.max_depth == 1)
+        .map(|g| g.occurrence_count)
+        .sum();
+    let mut buckets: HashSet<String> = HashSet::new();
+    for g in groups {
+        buckets.insert(module_bucket(&g.file));
+    }
+    ImpactMetrics {
+        direct,
+        total,
+        modules: buckets.len(),
+    }
+}
+
+/// Format the 1-line plan-mandated summary. Stable phrasing —
+/// reviewer prompts in PR E3 lift this verbatim.
+fn impact_summary(metrics: ImpactMetrics) -> String {
+    if metrics.direct == 0 && metrics.total == 0 {
+        return "no direct callers in current graph snapshot".to_string();
+    }
+    format!(
+        "{} direct caller(s) across {} module(s)",
+        metrics.direct, metrics.modules
+    )
 }
 
 // ── Validation ──────────────────────────────────────────────────────────────────
@@ -1019,24 +1179,34 @@ impl DjinnMcpServer {
             )
             .await?;
         let exclusions = self.load_graph_exclusions(&params.project_id).await;
-        let (impact, file_groups) = match result {
+        let (impact, file_groups, metrics) = match result {
             ImpactResult::Detailed(mut v) => {
                 // ImpactEntry has no display_name; match key only (Tier
                 // 1 still catches module artifacts; Tier 2 globs bound
                 // against the SCIP key, matching the old client-side
                 // behaviour).
                 v.retain(|e| !exclusions.excludes(&e.key, None, &e.key));
-                (Some(v), None)
+                let metrics = metrics_from_detailed(&v);
+                (Some(v), None, metrics)
             }
             ImpactResult::Grouped(mut v) => {
                 v.retain(|g| !exclusions.excludes(&g.file, Some(&g.file), &g.file));
-                (None, Some(v))
+                let metrics = metrics_from_grouped(&v);
+                (None, Some(v), metrics)
             }
         };
+        // PR C3: classify the post-exclusion blast radius and ship
+        // both the structured bucket (`risk`) and a human-readable
+        // 1-line summary so chat UIs / reviewer prompts / dashboards
+        // can each pick the form they want.
+        let risk = ImpactRisk::classify(metrics.direct, metrics.total, metrics.modules);
+        let summary = impact_summary(metrics);
         Ok(CodeGraphResponse::Impact(ImpactResponse {
             key: key.to_string(),
             impact,
             file_groups,
+            risk: Some(risk),
+            summary: Some(summary),
             next_step: None,
         }))
     }
@@ -2104,6 +2274,35 @@ mod tests {
             key: "Foo".to_string(),
             impact: Some(vec![]),
             file_groups: None,
+            risk: Some(ImpactRisk::Low),
+            summary: Some("no direct callers in current graph snapshot".to_string()),
+            next_step: None,
+        })
+    }
+
+    /// PR C3 helper: build an ImpactResponse with N synthetic direct
+    /// callers spread across `modules` two-segment buckets. Used to
+    /// exercise risk thresholds without a full graph fixture.
+    fn impact_with_callers(direct: usize, modules: usize) -> CodeGraphResponse {
+        let entries: Vec<ImpactEntry> = (0..direct)
+            .map(|i| {
+                let bucket = i % modules.max(1);
+                ImpactEntry {
+                    key: format!("symbol:scip-rust pkg src/m{bucket}/f{i}.rs `caller{i}`()."),
+                    depth: 1,
+                    file_path: Some(format!("src/m{bucket}/f{i}.rs")),
+                }
+            })
+            .collect();
+        let metrics = metrics_from_detailed(&entries);
+        let risk = ImpactRisk::classify(metrics.direct, metrics.total, metrics.modules);
+        let summary = impact_summary(metrics);
+        CodeGraphResponse::Impact(ImpactResponse {
+            key: "Foo".to_string(),
+            impact: Some(entries),
+            file_groups: None,
+            risk: Some(risk),
+            summary: Some(summary),
             next_step: None,
         })
     }
@@ -2192,14 +2391,54 @@ mod tests {
     }
 
     #[test]
-    fn impact_hint_uses_fallback_pre_c3() {
-        // Pre-C3: no risk field on ImpactResponse, so we emit the
-        // generic hint. Once C3 lands, this test must shift to
-        // exercising the HIGH/CRITICAL branch.
+    fn impact_hint_low_risk_uses_fallback() {
+        // PR C3: LOW-risk impact stays on the generic fallback hint —
+        // no need to nudge the agent toward `dead_symbols` for a
+        // 0-caller change.
         let mut response = empty_impact();
         attach_next_step_hint("impact", &mut response);
         let hint = read_next_step(&response).expect("hint set");
         assert_eq!(hint, FALLBACK_NEXT_STEP);
+    }
+
+    #[test]
+    fn impact_hint_high_risk_recommends_cleanup_ops() {
+        // PR C3: HIGH (>=10 direct callers) flips the hint to the
+        // dead_symbols / deprecated_callers cleanup nudge.
+        let mut response = impact_with_callers(12, 3);
+        // Sanity-check the synthetic fixture lands on HIGH.
+        match &response {
+            CodeGraphResponse::Impact(r) => {
+                assert_eq!(r.risk, Some(ImpactRisk::High), "fixture risk: {:?}", r.risk);
+            }
+            other => panic!("expected Impact, got {other:?}"),
+        }
+        attach_next_step_hint("impact", &mut response);
+        let hint = read_next_step(&response).expect("hint set");
+        assert!(
+            hint.contains("dead_symbols"),
+            "high-risk hint should mention dead_symbols: {hint}"
+        );
+        assert!(
+            hint.contains("deprecated_callers"),
+            "high-risk hint should mention deprecated_callers: {hint}"
+        );
+    }
+
+    #[test]
+    fn impact_hint_critical_risk_recommends_cleanup_ops() {
+        // PR C3: CRITICAL (>=20 direct callers) also emits the
+        // cleanup hint.
+        let mut response = impact_with_callers(25, 6);
+        match &response {
+            CodeGraphResponse::Impact(r) => {
+                assert_eq!(r.risk, Some(ImpactRisk::Critical));
+            }
+            other => panic!("expected Impact, got {other:?}"),
+        }
+        attach_next_step_hint("impact", &mut response);
+        let hint = read_next_step(&response).expect("hint set");
+        assert_eq!(hint, HIGH_IMPACT_NEXT_STEP);
     }
 
     #[test]
@@ -2308,6 +2547,187 @@ mod tests {
                 Some(v) => std::env::set_var("DJINN_CODE_GRAPH_NEXT_STEP_HINTS", v),
                 None => std::env::remove_var("DJINN_CODE_GRAPH_NEXT_STEP_HINTS"),
             }
+        }
+    }
+
+    // ── PR C3 risk classification ──────────────────────────────────────────
+
+    #[test]
+    fn module_bucket_takes_first_two_path_segments() {
+        // Per PR C3 plan: bucket on the first two segments after the
+        // repo root.
+        assert_eq!(module_bucket("src/auth/User.rs"), "src/auth");
+        assert_eq!(
+            module_bucket("crates/djinn-control-plane/src/lib.rs"),
+            "crates/djinn-control-plane"
+        );
+        // Single-segment path stays as-is so the count remains 1.
+        assert_eq!(module_bucket("Cargo.toml"), "Cargo.toml");
+        // Backslashes get normalized so Windows-formatted paths still
+        // bucket the same way.
+        assert_eq!(module_bucket("src\\auth\\User.rs"), "src/auth");
+    }
+
+    #[test]
+    fn module_bucket_collapses_two_paths_in_same_dir() {
+        assert_eq!(
+            module_bucket("src/auth/User.rs"),
+            module_bucket("src/auth/Session.rs")
+        );
+    }
+
+    #[test]
+    fn risk_thresholds_critical_at_20_direct() {
+        // Boundary: direct == 20 lands in CRITICAL.
+        assert_eq!(ImpactRisk::classify(20, 0, 0), ImpactRisk::Critical);
+        assert_eq!(ImpactRisk::classify(19, 0, 0), ImpactRisk::High);
+        // Boundary: total == 200, modules == 10 also push to CRITICAL.
+        assert_eq!(ImpactRisk::classify(0, 200, 0), ImpactRisk::Critical);
+        assert_eq!(ImpactRisk::classify(0, 0, 10), ImpactRisk::Critical);
+    }
+
+    #[test]
+    fn risk_thresholds_high_at_10_direct() {
+        // Boundary: direct == 10 lands in HIGH.
+        assert_eq!(ImpactRisk::classify(10, 0, 0), ImpactRisk::High);
+        assert_eq!(ImpactRisk::classify(9, 0, 0), ImpactRisk::Medium);
+        // Other axes too.
+        assert_eq!(ImpactRisk::classify(0, 80, 0), ImpactRisk::High);
+        assert_eq!(ImpactRisk::classify(0, 0, 5), ImpactRisk::High);
+    }
+
+    #[test]
+    fn risk_thresholds_medium_at_3_direct() {
+        // Boundary: direct == 3 lands in MEDIUM.
+        assert_eq!(ImpactRisk::classify(3, 0, 0), ImpactRisk::Medium);
+        assert_eq!(ImpactRisk::classify(2, 0, 0), ImpactRisk::Low);
+        // Other axes.
+        assert_eq!(ImpactRisk::classify(0, 20, 0), ImpactRisk::Medium);
+        assert_eq!(ImpactRisk::classify(0, 0, 2), ImpactRisk::Medium);
+    }
+
+    #[test]
+    fn risk_thresholds_low_for_zero() {
+        assert_eq!(ImpactRisk::classify(0, 0, 0), ImpactRisk::Low);
+        assert_eq!(ImpactRisk::classify(1, 1, 1), ImpactRisk::Low);
+    }
+
+    #[test]
+    fn metrics_from_detailed_counts_direct_only_at_depth_one() {
+        // depth-1 entries are "direct callers"; deeper entries roll up
+        // into `total` only. Modules dedupe by two-segment bucket.
+        let entries = vec![
+            ImpactEntry {
+                key: "symbol:a".into(),
+                depth: 1,
+                file_path: Some("src/auth/A.rs".into()),
+            },
+            ImpactEntry {
+                key: "symbol:b".into(),
+                depth: 1,
+                file_path: Some("src/auth/B.rs".into()),
+            },
+            ImpactEntry {
+                key: "symbol:c".into(),
+                depth: 2,
+                file_path: Some("src/billing/C.rs".into()),
+            },
+        ];
+        let m = metrics_from_detailed(&entries);
+        assert_eq!(m.direct, 2);
+        assert_eq!(m.total, 3);
+        assert_eq!(m.modules, 2, "src/auth + src/billing => 2 buckets");
+    }
+
+    #[test]
+    fn metrics_skip_entries_without_file_path() {
+        // External symbols with no file_path don't contribute to the
+        // module count but still hit `direct`/`total`.
+        let entries = vec![
+            ImpactEntry {
+                key: "symbol:a".into(),
+                depth: 1,
+                file_path: Some("src/auth/A.rs".into()),
+            },
+            ImpactEntry {
+                key: "symbol:ext".into(),
+                depth: 1,
+                file_path: None,
+            },
+        ];
+        let m = metrics_from_detailed(&entries);
+        assert_eq!(m.direct, 2);
+        assert_eq!(m.total, 2);
+        assert_eq!(m.modules, 1);
+    }
+
+    #[test]
+    fn impact_summary_uses_plan_phrasing() {
+        let m = ImpactMetrics {
+            direct: 12,
+            total: 30,
+            modules: 3,
+        };
+        assert_eq!(
+            impact_summary(m),
+            "12 direct caller(s) across 3 module(s)"
+        );
+    }
+
+    #[test]
+    fn impact_summary_zero_callers_uses_snapshot_phrasing() {
+        let m = ImpactMetrics {
+            direct: 0,
+            total: 0,
+            modules: 0,
+        };
+        assert_eq!(
+            impact_summary(m),
+            "no direct callers in current graph snapshot"
+        );
+    }
+
+    #[test]
+    fn impact_response_serializes_risk_screaming_snake() {
+        // Plan acceptance: `risk: "HIGH"` on the wire — confirm
+        // SCREAMING_SNAKE_CASE serialization survives the untagged
+        // CodeGraphResponse envelope.
+        let response = impact_with_callers(12, 3);
+        let json = serde_json::to_value(&response).expect("serialize");
+        assert_eq!(
+            json.get("risk").and_then(|v| v.as_str()),
+            Some("HIGH"),
+            "risk should serialize as 'HIGH': {json}"
+        );
+        let summary = json
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .expect("summary present");
+        assert!(
+            summary.contains("12 direct caller"),
+            "summary phrasing: {summary}"
+        );
+    }
+
+    #[test]
+    fn impact_acceptance_twelve_direct_callers_three_modules() {
+        // The plan's literal acceptance test: a 12-direct-caller change
+        // returns risk == HIGH and a summary like the example string.
+        let response = impact_with_callers(12, 3);
+        match response {
+            CodeGraphResponse::Impact(r) => {
+                assert_eq!(r.risk, Some(ImpactRisk::High));
+                let summary = r.summary.expect("summary set");
+                assert!(
+                    summary.starts_with("12 direct caller"),
+                    "summary: {summary}"
+                );
+                assert!(
+                    summary.contains("3 module"),
+                    "summary should report 3 modules: {summary}"
+                );
+            }
+            other => panic!("expected Impact, got {other:?}"),
         }
     }
 }

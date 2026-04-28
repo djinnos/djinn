@@ -313,10 +313,18 @@ pub struct FileGroupEntry {
 }
 
 /// An impact-set entry: a node transitively dependent on the queried node.
+///
+/// `file_path` (PR C3): the relative file path of the impacted node when
+/// it is known. Carried alongside the SCIP key so the response-shaping
+/// layer can bucket entries into modules for risk classification without
+/// re-resolving the graph node. `None` for nodes that lack a `file_path`
+/// (e.g. external/virtual symbols).
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ImpactEntry {
     pub key: String,
     pub depth: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
 }
 
 /// Either symbol-level neighbors/impact or per-file rollup.
