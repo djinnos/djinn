@@ -113,7 +113,7 @@ describe("CodeGraphPage", () => {
     expect(screen.getByTestId("code-graph-canvas")).toBeInTheDocument();
     expect(screen.getByLabelText(/select project/i)).toBeInTheDocument();
     await waitFor(() => {
-      expect(fetchSnapshotMock).toHaveBeenCalledWith("project-a", undefined);
+      expect(fetchSnapshotMock).toHaveBeenCalledWith("project-a", 10_000);
     });
   });
 

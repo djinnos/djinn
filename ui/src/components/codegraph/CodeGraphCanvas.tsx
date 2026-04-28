@@ -41,19 +41,27 @@ type FetchState =
 interface CodeGraphCanvasProps {
   projectId: string;
   /**
-   * Maximum number of nodes to fetch. Default 2000. Useful to drop
-   * lower for tests or raise for debugging.
+   * Maximum number of nodes to fetch. Default 10,000 — the server's
+   * own clamp ceiling so we render the full repo on every project that
+   * fits under it. Reference: GitNexus comfortably renders 6.5k nodes
+   * with Sigma + WebGL; Sigma 3 starts to slow at ~5k *with all edges
+   * shown*, but the toolbar defaults already strip
+   * Contains/Declared/FileRef/Reads/Calls/MemberOf so the live edge count
+   * is one-third of `total_edges`. Drop this for tests, raise it once
+   * the server clamp ceiling moves.
    */
   nodeCap?: number;
   /** Bumping this re-issues the snapshot fetch without unmounting. */
   reloadKey?: number;
 }
 
+const DEFAULT_NODE_CAP = 10_000;
+
 const CANVAS_BACKGROUND = `radial-gradient(circle at 50% 50%, rgba(124, 58, 237, 0.05) 0%, transparent 70%), linear-gradient(to bottom, #06060a, #0a0a10)`;
 
 export function CodeGraphCanvas({
   projectId,
-  nodeCap,
+  nodeCap = DEFAULT_NODE_CAP,
   reloadKey,
 }: CodeGraphCanvasProps) {
   const [state, setState] = useState<FetchState>({ status: "loading" });
