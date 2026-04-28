@@ -1,5 +1,6 @@
 ---
 source: src/server/tests/tool_schemas.rs
+assertion_line: 175
 expression: signatures
 ---
 [
@@ -846,6 +847,13 @@ expression: signatures
           "format": "int64",
           "nullable": true,
           "type": "integer"
+        },
+        "min_confidence": {
+          "default": null,
+          "description": "Minimum edge confidence in `[0, 1]` for the `impact` BFS frontier\n(PR A2). Edges below this threshold are skipped — useful for\nexcluding `local`-prefixed references and other low-confidence SCIP\nsignals from the blast radius. Omit to keep every edge regardless of\nconfidence (default behaviour).",
+          "format": "double",
+          "nullable": true,
+          "type": "number"
         },
         "min_size": {
           "default": null,

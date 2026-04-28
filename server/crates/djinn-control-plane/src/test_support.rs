@@ -198,6 +198,7 @@ impl RepoGraphOps for StubRepoGraph {
         _key: &str,
         _depth: usize,
         _group_by: Option<&str>,
+        _min_confidence: Option<f64>,
     ) -> std::result::Result<ImpactResult, String> {
         Ok(ImpactResult::Detailed(Vec::new()))
     }

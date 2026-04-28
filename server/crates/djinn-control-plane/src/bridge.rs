@@ -551,12 +551,19 @@ pub trait RepoGraphOps: Send + Sync {
     /// Transitive impact set — nodes that depend on the queried node. When
     /// `group_by` is `Some("file")`, results are collapsed into per-file
     /// rollups.
+    ///
+    /// `min_confidence` filters the BFS frontier: edges whose
+    /// [`djinn_graph::repo_graph::RepoGraphEdge::confidence`] falls below the
+    /// threshold are skipped, so weak SCIP signals (e.g. `local`-prefixed
+    /// references that took the visibility-heuristic penalty) drop out of the
+    /// blast radius. `None` keeps every edge — the pre-PR-A2 behaviour.
     async fn impact(
         &self,
         ctx: &ProjectCtx,
         key: &str,
         depth: usize,
         group_by: Option<&str>,
+        min_confidence: Option<f64>,
     ) -> Result<ImpactResult, String>;
 
     /// Name-based symbol search.

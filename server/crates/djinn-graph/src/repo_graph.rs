@@ -13,6 +13,35 @@ use crate::scip_parser::{
 
 const PAGE_RANK_DAMPING_FACTOR: f64 = 0.85;
 const PAGE_RANK_ITERATIONS: usize = 25;
+
+/// Repo-graph artifact schema version.
+///
+/// Bumped when the on-disk shape (struct fields, enum variants) changes in
+/// ways that would silently corrupt a bincode load. Old blobs that do not
+/// carry this field — or carry a lower value — are rejected by
+/// [`RepoDependencyGraph::from_artifact`] (via bincode failure on the new
+/// field set) and force a re-warm.
+///
+/// Bump history:
+/// - v1 (initial): added `confidence` and `reason` to every edge (PR A2).
+pub const REPO_GRAPH_ARTIFACT_VERSION: u32 = 1;
+
+// ── Edge confidence floor table (PR A2) ────────────────────────────────────
+//
+// Initial confidence assigned to every edge of a given kind. The visibility
+// heuristic (a `local `-prefixed source or target symbol) lowers the floor by
+// `EDGE_CONFIDENCE_LOCAL_PENALTY` and stamps `reason="local-prefix"` on the
+// edge so downstream filters can explain themselves.
+
+const EDGE_CONFIDENCE_CONTAINS_DEFINITION: f64 = 0.95;
+const EDGE_CONFIDENCE_DECLARED_IN_FILE: f64 = 0.95;
+const EDGE_CONFIDENCE_FILE_REFERENCE: f64 = 0.85;
+const EDGE_CONFIDENCE_SYMBOL_REFERENCE: f64 = 0.90;
+const EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_REFERENCE: f64 = 0.80;
+const EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_IMPLEMENTATION: f64 = 0.85;
+const EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_TYPE_DEFINITION: f64 = 0.85;
+const EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_DEFINITION: f64 = 0.85;
+const EDGE_CONFIDENCE_LOCAL_PENALTY: f64 = 0.15;
 const EDGE_WEIGHT_DEFINITION_TO_FILE: f64 = 4.0;
 const EDGE_WEIGHT_FILE_TO_DEFINITION: f64 = 1.5;
 const EDGE_WEIGHT_FILE_REFERENCE: f64 = 2.5;
@@ -516,6 +545,42 @@ pub struct RepoGraphEdge {
     pub kind: RepoGraphEdgeKind,
     pub weight: f64,
     pub evidence_count: usize,
+    /// Edge confidence in [0, 1]. Comes from a per-kind floor (PR A2 plan)
+    /// optionally adjusted by the visibility heuristic. `min_confidence`
+    /// filters in `code_graph.impact` use this value.
+    pub confidence: f64,
+    /// Optional human-readable explanation for the confidence value
+    /// (e.g. `"local-prefix"` when one of the involved symbols is
+    /// document-local). `None` means "default floor for kind, no
+    /// adjustments applied".
+    pub reason: Option<String>,
+}
+
+/// Initial confidence floor for an edge of the given kind.
+///
+/// See the constants block at the top of this module for the table; the
+/// values are tuned to put high-trust SCIP-derived edges (definitions,
+/// declarations) above 0.9 and looser cross-symbol relationship edges in
+/// the 0.8 band.
+pub fn edge_confidence_floor(kind: RepoGraphEdgeKind) -> f64 {
+    match kind {
+        RepoGraphEdgeKind::ContainsDefinition => EDGE_CONFIDENCE_CONTAINS_DEFINITION,
+        RepoGraphEdgeKind::DeclaredInFile => EDGE_CONFIDENCE_DECLARED_IN_FILE,
+        RepoGraphEdgeKind::FileReference => EDGE_CONFIDENCE_FILE_REFERENCE,
+        RepoGraphEdgeKind::SymbolReference => EDGE_CONFIDENCE_SYMBOL_REFERENCE,
+        RepoGraphEdgeKind::SymbolRelationshipReference => {
+            EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_REFERENCE
+        }
+        RepoGraphEdgeKind::SymbolRelationshipImplementation => {
+            EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_IMPLEMENTATION
+        }
+        RepoGraphEdgeKind::SymbolRelationshipTypeDefinition => {
+            EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_TYPE_DEFINITION
+        }
+        RepoGraphEdgeKind::SymbolRelationshipDefinition => {
+            EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_DEFINITION
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -843,6 +908,8 @@ impl RepoDependencyGraphBuilder {
 
     fn finish(mut self) -> RepoDependencyGraph {
         for ((source, target, kind), evidence_count) in self.edge_accumulator {
+            let (confidence, reason) =
+                derive_edge_confidence(&self.graph, source, target, kind);
             self.graph.add_edge(
                 source,
                 target,
@@ -850,6 +917,8 @@ impl RepoDependencyGraphBuilder {
                     kind,
                     weight: edge_weight(kind) * (evidence_count as f64),
                     evidence_count,
+                    confidence,
+                    reason,
                 },
             );
         }
@@ -889,8 +958,16 @@ fn build_name_index(
 /// This is persisted alongside the rendered repo-map cache so that later
 /// operations can recover the dependency graph without re-parsing raw SCIP
 /// outputs.
+///
+/// The `version` field is mandatory in PR A2+. Old blobs that pre-date this
+/// field will fail to bincode-deserialize (positional encoding) and trigger
+/// a re-warm via the `load_cached_artifact` "stale or unreadable" branch in
+/// `canonical_graph.rs`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RepoGraphArtifact {
+    /// Schema version stamp. See [`REPO_GRAPH_ARTIFACT_VERSION`] for the
+    /// current value and the bump history.
+    pub version: u32,
     pub nodes: Vec<RepoGraphNode>,
     pub edges: Vec<RepoGraphArtifactEdge>,
 }
@@ -904,6 +981,12 @@ pub struct RepoGraphArtifactEdge {
     pub kind: RepoGraphEdgeKind,
     pub weight: f64,
     pub evidence_count: usize,
+    /// Edge confidence in [0, 1]; mirrors [`RepoGraphEdge::confidence`].
+    /// New in artifact v1 (PR A2).
+    pub confidence: f64,
+    /// Optional reason explaining the confidence value; mirrors
+    /// [`RepoGraphEdge::reason`]. New in artifact v1 (PR A2).
+    pub reason: Option<String>,
 }
 
 impl RepoDependencyGraph {
@@ -928,10 +1011,16 @@ impl RepoDependencyGraph {
                 kind: w.kind,
                 weight: w.weight,
                 evidence_count: w.evidence_count,
+                confidence: w.confidence,
+                reason: w.reason.clone(),
             });
         }
 
-        RepoGraphArtifact { nodes, edges }
+        RepoGraphArtifact {
+            version: REPO_GRAPH_ARTIFACT_VERSION,
+            nodes,
+            edges,
+        }
     }
 
     /// Rebuild a `RepoDependencyGraph` from a previously persisted artifact.
@@ -954,6 +1043,8 @@ impl RepoDependencyGraph {
                     kind: edge.kind,
                     weight: edge.weight,
                     evidence_count: edge.evidence_count,
+                    confidence: edge.confidence,
+                    reason: edge.reason.clone(),
                 },
             );
         }
@@ -1034,10 +1125,13 @@ impl RepoDependencyGraph {
                 kind: edge.kind,
                 weight: edge.weight,
                 evidence_count: edge.evidence_count,
+                confidence: edge.confidence,
+                reason: edge.reason.clone(),
             })
             .collect();
 
         let filtered_artifact = RepoGraphArtifact {
+            version: REPO_GRAPH_ARTIFACT_VERSION,
             nodes: surviving_nodes,
             edges: surviving_edges,
         };
@@ -1101,6 +1195,46 @@ fn is_owned_by_changed_file(node: &RepoGraphNode, changed_files: &BTreeSet<PathB
                     .is_some_and(|p| changed_files.contains(p))
         }
     }
+}
+
+/// True when the node represents a SCIP symbol whose identifier is
+/// document-local (`local …`). File nodes and globally-scoped symbols
+/// return `false`.
+fn node_is_local_symbol(node: &RepoGraphNode) -> bool {
+    if !matches!(node.kind, RepoGraphNodeKind::Symbol) {
+        return false;
+    }
+    matches!(node.visibility, Some(ScipVisibility::Private))
+        || node
+            .symbol
+            .as_deref()
+            .is_some_and(|s| s.starts_with("local "))
+}
+
+/// Compute the confidence/reason pair for a freshly-built edge.
+///
+/// Starts from the per-kind floor (see [`edge_confidence_floor`]). When
+/// either the source or target node is a `local`-prefixed symbol, lowers
+/// the confidence by [`EDGE_CONFIDENCE_LOCAL_PENALTY`] and stamps the
+/// edge with `reason="local-prefix"` so callers can tell why the value
+/// dropped.
+fn derive_edge_confidence(
+    graph: &DiGraph<RepoGraphNode, RepoGraphEdge>,
+    source: NodeIndex,
+    target: NodeIndex,
+    kind: RepoGraphEdgeKind,
+) -> (f64, Option<String>) {
+    let mut confidence = edge_confidence_floor(kind);
+    let mut reason: Option<String> = None;
+
+    let source_local = node_is_local_symbol(&graph[source]);
+    let target_local = node_is_local_symbol(&graph[target]);
+    if source_local || target_local {
+        confidence = (confidence - EDGE_CONFIDENCE_LOCAL_PENALTY).clamp(0.0, 1.0);
+        reason = Some("local-prefix".to_string());
+    }
+
+    (confidence, reason)
 }
 
 fn edge_weight(kind: RepoGraphEdgeKind) -> f64 {
@@ -1406,6 +1540,7 @@ mod tests {
     #[test]
     fn empty_artifact_round_trip() {
         let empty = RepoGraphArtifact {
+            version: REPO_GRAPH_ARTIFACT_VERSION,
             nodes: vec![],
             edges: vec![],
         };
@@ -1413,6 +1548,170 @@ mod tests {
         let restored = RepoDependencyGraph::deserialize_artifact(&json).expect("deserialize empty");
         assert_eq!(restored.node_count(), 0);
         assert_eq!(restored.edge_count(), 0);
+    }
+
+    // ── PR A2: edge confidence + reason ───────────────────────────────────
+
+    /// Every edge kind emitted by the builder gets a confidence value within
+    /// `(0, 1]`. Sweeping the fixture is the cheapest way to assert "no kind
+    /// silently slipped through with the default 0.0".
+    #[test]
+    fn every_edge_kind_carries_a_confidence_value_pr_a2() {
+        let graph = RepoDependencyGraph::build(&[fixture_index()]);
+        assert!(graph.edge_count() > 0, "fixture must produce edges");
+
+        let mut seen_kinds: BTreeSet<RepoGraphEdgeKind> = BTreeSet::new();
+        for edge_ref in graph.graph().edge_references() {
+            let edge = edge_ref.weight();
+            seen_kinds.insert(edge.kind);
+            assert!(
+                edge.confidence > 0.0 && edge.confidence <= 1.0,
+                "edge {:?} has out-of-range confidence {}",
+                edge.kind,
+                edge.confidence
+            );
+            // Confidence must equal the floor for the kind, optionally
+            // dropped by exactly the local-prefix penalty when the reason
+            // says so.
+            let floor = edge_confidence_floor(edge.kind);
+            match edge.reason.as_deref() {
+                None => assert_eq!(edge.confidence, floor),
+                Some("local-prefix") => {
+                    let expected = (floor - EDGE_CONFIDENCE_LOCAL_PENALTY).clamp(0.0, 1.0);
+                    assert!(
+                        (edge.confidence - expected).abs() < 1e-9,
+                        "local-prefix edge confidence {} != expected {} for kind {:?}",
+                        edge.confidence,
+                        expected,
+                        edge.kind
+                    );
+                }
+                Some(other) => panic!("unexpected reason {other:?} on edge {:?}", edge.kind),
+            }
+        }
+        // The fixture exercises Contains/DeclaredIn/FileRef/SymbolRef and
+        // an Implementation relationship — every code path that can mint
+        // an edge today.
+        assert!(seen_kinds.contains(&RepoGraphEdgeKind::ContainsDefinition));
+        assert!(seen_kinds.contains(&RepoGraphEdgeKind::DeclaredInFile));
+        assert!(seen_kinds.contains(&RepoGraphEdgeKind::FileReference));
+        assert!(seen_kinds.contains(&RepoGraphEdgeKind::SymbolReference));
+        assert!(seen_kinds.contains(&RepoGraphEdgeKind::SymbolRelationshipImplementation));
+    }
+
+    /// Bincode round-trip preserves `confidence` and `reason` on every edge.
+    /// This is the core "artifact v1" guarantee — old blobs without these
+    /// fields will fail to deserialize and trigger a warm rebuild.
+    #[test]
+    fn bincode_round_trip_preserves_edge_confidence_and_reason_pr_a2() {
+        let graph = RepoDependencyGraph::build(&[fixture_index()]);
+        let artifact = graph.to_artifact();
+        assert_eq!(artifact.version, REPO_GRAPH_ARTIFACT_VERSION);
+
+        // Snapshot original (kind, confidence, reason) tuples by sorting on
+        // (kind, confidence, reason) — edge_count is small so a Vec<_> is
+        // fine.
+        let mut original: Vec<(RepoGraphEdgeKind, f64, Option<String>)> = artifact
+            .edges
+            .iter()
+            .map(|e| (e.kind, e.confidence, e.reason.clone()))
+            .collect();
+        original.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .then(a.2.cmp(&b.2))
+        });
+
+        let encoded = bincode::serialize(&artifact).expect("bincode serialize");
+        let decoded: RepoGraphArtifact =
+            bincode::deserialize(&encoded).expect("bincode deserialize");
+        assert_eq!(decoded.version, REPO_GRAPH_ARTIFACT_VERSION);
+
+        let mut round_tripped: Vec<(RepoGraphEdgeKind, f64, Option<String>)> = decoded
+            .edges
+            .iter()
+            .map(|e| (e.kind, e.confidence, e.reason.clone()))
+            .collect();
+        round_tripped.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .then(a.2.cmp(&b.2))
+        });
+
+        assert_eq!(round_tripped, original);
+
+        // And that survives the `from_artifact` rebuild path that powers
+        // `load_canonical_graph`.
+        let restored = RepoDependencyGraph::from_artifact(&decoded);
+        for edge_ref in restored.graph().edge_references() {
+            let edge = edge_ref.weight();
+            assert!(edge.confidence > 0.0 && edge.confidence <= 1.0);
+        }
+    }
+
+    /// A `local`-prefixed symbol triggers `reason="local-prefix"` and a
+    /// confidence drop of exactly `EDGE_CONFIDENCE_LOCAL_PENALTY` from the
+    /// kind's floor. This is the only signal the visibility heuristic
+    /// surfaces today.
+    #[test]
+    fn local_prefix_symbol_triggers_local_prefix_reason_pr_a2() {
+        // Build a tiny synthetic index where one of the symbols is local.
+        let local_symbol_name = "local 42".to_string();
+        let local_sym = ScipSymbol {
+            symbol: local_symbol_name.clone(),
+            kind: Some(ScipSymbolKind::Variable),
+            display_name: Some("local_var".to_string()),
+            signature: None,
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Private),
+        };
+        let pub_sym = ScipSymbol {
+            symbol: "scip-rust pkg src/main.rs `caller`().".to_string(),
+            kind: Some(ScipSymbolKind::Function),
+            display_name: Some("caller".to_string()),
+            signature: None,
+            documentation: vec![],
+            relationships: vec![ScipRelationship {
+                source_symbol: "scip-rust pkg src/main.rs `caller`().".to_string(),
+                target_symbol: local_symbol_name.clone(),
+                kinds: BTreeSet::from([ScipRelationshipKind::Reference]),
+            }],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        };
+        let index = ParsedScipIndex {
+            metadata: ScipMetadata::default(),
+            files: vec![ScipFile {
+                language: "rust".to_string(),
+                relative_path: PathBuf::from("src/main.rs"),
+                definitions: vec![definition_occurrence(&pub_sym.symbol)],
+                references: vec![],
+                occurrences: vec![definition_occurrence(&pub_sym.symbol)],
+                symbols: vec![pub_sym, local_sym],
+            }],
+            external_symbols: vec![],
+        };
+
+        let graph = RepoDependencyGraph::build(&[index]);
+        let mut saw_local_prefix = false;
+        for edge_ref in graph.graph().edge_references() {
+            let edge = edge_ref.weight();
+            if edge.reason.as_deref() == Some("local-prefix") {
+                saw_local_prefix = true;
+                let floor = edge_confidence_floor(edge.kind);
+                let expected = (floor - EDGE_CONFIDENCE_LOCAL_PENALTY).clamp(0.0, 1.0);
+                assert!(
+                    (edge.confidence - expected).abs() < 1e-9,
+                    "expected confidence {expected}, got {} for kind {:?}",
+                    edge.confidence,
+                    edge.kind
+                );
+            }
+        }
+        assert!(
+            saw_local_prefix,
+            "expected at least one edge involving the `local 42` symbol to be flagged"
+        );
     }
 
     // ---- patch_changed_files tests ----

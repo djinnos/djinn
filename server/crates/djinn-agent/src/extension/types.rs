@@ -305,6 +305,12 @@ pub(super) struct CodeGraphParams {
     pub max_depth: Option<usize>,
     #[serde(default)]
     pub edge_kind: Option<String>,
+    /// Minimum edge confidence in `[0, 1]` for the `impact` BFS frontier
+    /// (PR A2). Mirrors the MCP-side
+    /// `djinn_control_plane::tools::graph_tools::CodeGraphParams::min_confidence`
+    /// — see there for the full doc string.
+    #[serde(default)]
+    pub min_confidence: Option<f64>,
 }
 
 #[derive(Deserialize)]

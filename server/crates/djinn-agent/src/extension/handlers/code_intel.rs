@@ -202,8 +202,24 @@ pub(crate) async fn call_code_graph(
                 .filter(|k| !k.is_empty())
                 .ok_or("'key' is required for 'impact'")?;
             let depth = p.limit.unwrap_or(3);
+            // PR A2: validate `min_confidence` in `[0, 1]` before forwarding
+            // so chat-tool callers get a clear error instead of silent zero
+            // results.
+            if let Some(c) = p.min_confidence
+                && !(0.0..=1.0).contains(&c)
+            {
+                return Err(format!(
+                    "invalid min_confidence {c}: must be in [0.0, 1.0]"
+                ));
+            }
             let impact = graph_ops
-                .impact(&ctx, key, depth, p.group_by.as_deref())
+                .impact(
+                    &ctx,
+                    key,
+                    depth,
+                    p.group_by.as_deref(),
+                    p.min_confidence,
+                )
                 .await?;
             serde_json::to_value(&impact).map_err(|e| format!("serialize error: {e}"))?
         }

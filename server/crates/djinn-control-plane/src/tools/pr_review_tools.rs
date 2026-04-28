@@ -321,7 +321,7 @@ impl DjinnMcpServer {
             let impact = self
                 .state
                 .repo_graph()
-                .impact(&ctx, &ts.key, 3, None)
+                .impact(&ctx, &ts.key, 3, None, None)
                 .await?;
             if let ImpactResult::Detailed(mut entries) = impact {
                 let total = entries.len();

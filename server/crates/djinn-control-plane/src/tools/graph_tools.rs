@@ -144,6 +144,13 @@ pub struct CodeGraphParams {
     /// pairs with essentially zero real coupling information.
     #[serde(default)]
     pub max_files_per_commit: Option<i64>,
+    /// Minimum edge confidence in `[0, 1]` for the `impact` BFS frontier
+    /// (PR A2). Edges below this threshold are skipped — useful for
+    /// excluding `local`-prefixed references and other low-confidence SCIP
+    /// signals from the blast radius. Omit to keep every edge regardless of
+    /// confidence (default behaviour).
+    #[serde(default)]
+    pub min_confidence: Option<f64>,
 }
 
 // ── Response types ──────────────────────────────────────────────────────────────
@@ -677,10 +684,26 @@ impl DjinnMcpServer {
         let key = require_key(params)?;
         validate_group_by(params.group_by.as_deref())?;
         let depth = params.limit.unwrap_or(3) as usize;
+        // PR A2: validate `min_confidence` lives in `[0, 1]` before letting
+        // it loose on the BFS frontier; out-of-range values would silently
+        // collapse the impact set to zero or do nothing.
+        if let Some(c) = params.min_confidence
+            && !(0.0..=1.0).contains(&c)
+        {
+            return Err(format!(
+                "invalid min_confidence {c}: must be in [0.0, 1.0]"
+            ));
+        }
         let result = self
             .state
             .repo_graph()
-            .impact(ctx, key, depth, params.group_by.as_deref())
+            .impact(
+                ctx,
+                key,
+                depth,
+                params.group_by.as_deref(),
+                params.min_confidence,
+            )
             .await?;
         let exclusions = self.load_graph_exclusions(&params.project_id).await;
         let (impact, file_groups) = match result {
@@ -1317,6 +1340,7 @@ mod tests {
             symbols: None,
             since_days: None,
             max_files_per_commit: None,
+            min_confidence: None,
         }
     }
 
