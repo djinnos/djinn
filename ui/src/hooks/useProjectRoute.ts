@@ -18,7 +18,7 @@ function parseViewFromPath(pathname: string): ProjectView | null {
   if (pathname.includes("/metrics")) return "metrics";
   if (pathname.includes("/roadmap")) return "roadmap";
   if (pathname.includes("/memory")) return "memory";
-  if (pathname.includes("/pulse")) return "pulse";
+  if (pathname.includes("/code-graph")) return "code-graph";
   if (pathname.includes("/proposals")) return "proposals";
   if (pathname.includes("/kanban") || pathname === "/") return "kanban";
   return null;
