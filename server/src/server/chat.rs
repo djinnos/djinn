@@ -52,6 +52,13 @@ pub(super) struct ChatCompletionRequest {
     /// streaming, and persists both the incoming user turn and the
     /// assistant reply against it.
     pub session_id: String,
+    /// Optional active project (slug or UUID).  When supplied AND the
+    /// `DJINN_CHAT_AUTO_CODEBASE_HEADER` flag is on, the handler appends
+    /// a `📦 CURRENT CODEBASE` block to the chat system prompt summarizing
+    /// the warmed canonical graph + a depth-2 folder tree.  Skipped
+    /// silently when omitted; never required.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
