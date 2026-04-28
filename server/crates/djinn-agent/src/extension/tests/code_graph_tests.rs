@@ -418,3 +418,57 @@ async fn code_graph_dispatch_describe_reaches_graph_ops() {
         "describe should reach graph ops layer, got: {err}"
     );
 }
+
+/// v8 capability introspection: returns metadata about what's actually
+/// wired in this binary — does NOT load the canonical graph, so it
+/// works against a fresh tempdir with no warm cache. Asserts the
+/// payload shape so client agents can rely on the keys being present.
+#[tokio::test]
+async fn code_graph_dispatch_capabilities_returns_introspection_payload() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-capabilities-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let result = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "capabilities",
+            "project_path": worktree.path().to_string_lossy(),
+        }),
+        worktree.path(),
+    )
+    .await
+    .expect("capabilities should not error");
+
+    // Top-level keys clients depend on:
+    let obj = result.as_object().expect("payload must be a JSON object");
+    assert!(obj.contains_key("operations"), "missing operations: {result}");
+    assert!(obj.contains_key("default_search_mode"), "missing default_search_mode");
+    assert!(obj.contains_key("available_search_modes"), "missing available_search_modes");
+    assert!(obj.contains_key("env_features"), "missing env_features");
+    assert!(obj.contains_key("access_classifier_languages"), "missing access_classifier_languages");
+    assert!(obj.contains_key("repo_graph_artifact_version"), "missing repo_graph_artifact_version");
+    assert!(obj.contains_key("filter_tiers"), "missing filter_tiers");
+    assert!(obj.contains_key("default_filters"), "missing default_filters");
+
+    // capabilities itself must list itself, otherwise clients can't
+    // discover the op via probing.
+    let ops = obj["operations"].as_array().expect("operations must be array");
+    assert!(
+        ops.iter().any(|o| o.as_str() == Some("capabilities")),
+        "capabilities op must list itself in `operations`"
+    );
+
+    // Artifact version stamp matches the v8 bump.
+    assert_eq!(obj["repo_graph_artifact_version"], 8);
+
+    // Languages we ship a tree-sitter classifier for.
+    let langs = obj["access_classifier_languages"]
+        .as_array()
+        .expect("languages must be array");
+    for required in ["rust", "go", "python", "typescript", "javascript"] {
+        assert!(
+            langs.iter().any(|l| l.as_str() == Some(required)),
+            "missing language {required} in access_classifier_languages"
+        );
+    }
+}

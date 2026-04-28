@@ -50,6 +50,73 @@ pub fn is_scip_module_artifact(key: &str) -> bool {
     key.ends_with('/') || key.ends_with("/MODULE.")
 }
 
+/// Tier 1.5: high-confidence noise patterns matched against the file
+/// path of a node. Generated code, lockstep mocks, and snapshot
+/// fixtures — files no human would call architecturally meaningful.
+/// Always-on so first-time queries on a fresh project return clean
+/// output without the user having to configure
+/// `graph_excluded_paths`.
+///
+/// Test files are intentionally NOT in this set. Whether a test counts
+/// as noise is project-specific (a user asking "who tests this?" wants
+/// tests in the result), so they belong in per-project config.
+///
+/// Match is anchored on the FULL path (not the basename) so a file
+/// legitimately named `mock.go` outside a `mock_*` / `*_mock.go` shape
+/// is unaffected.
+pub fn is_generated_or_mock_path(file: &str) -> bool {
+    // Cheap basename extraction — last `/`-separated segment.
+    let basename = file.rsplit('/').next().unwrap_or(file);
+
+    // Generated suffixes — by convention these files are emitted by a
+    // build step and editing them by hand is prohibited.
+    if basename.ends_with(".pb.go")
+        || basename.ends_with(".gen.go")
+        || basename.ends_with(".gen.ts")
+        || basename.ends_with(".gen.tsx")
+        || basename.ends_with(".gen.rs")
+        || basename.ends_with("_generated.go")
+        || basename.ends_with("_generated.rs")
+        || basename.ends_with(".g.dart")
+        || basename.ends_with(".freezed.dart")
+        || basename == "generated.ts"
+        || basename == "schema.gen.ts"
+    {
+        return true;
+    }
+
+    // Mock conventions — both common Go forms and TS / Java patterns.
+    if basename.ends_with("_mock.go")
+        || basename.starts_with("mock_")
+        || basename.ends_with("_mocks.go")
+        || basename.ends_with(".mock.ts")
+        || basename.ends_with(".mock.tsx")
+    {
+        return true;
+    }
+
+    // Snapshot fixtures — `cargo insta` and Jest both write `.snap`
+    // files that capture stable JSON / structured output. They're
+    // never source code; surfacing them as graph nodes is pure noise.
+    if basename.ends_with(".snap") || basename.ends_with(".snap.new") {
+        return true;
+    }
+
+    // Embedded path segments — covers the conventional generated /
+    // mocks dirs whose contents the indexer otherwise picks up.
+    if file.contains("/__mocks__/")
+        || file.starts_with("__mocks__/")
+        || file.contains("/__generated__/")
+        || file.starts_with("__generated__/")
+        || file.contains("/generated/")
+        || file.starts_with("generated/")
+    {
+        return true;
+    }
+
+    false
+}
+
 /// Compiled predicate used by the `code_graph` MCP handler to filter
 /// cycles / orphans / ranked results.
 ///
@@ -117,6 +184,13 @@ impl GraphExclusions {
     /// and display name to catch symbol nodes whose file is unset.
     pub fn excludes(&self, key: &str, file: Option<&str>, display_name: &str) -> bool {
         if is_scip_module_artifact(key) {
+            return true;
+        }
+        // Tier 1.5: high-confidence noise (generated, mocks, snapshots).
+        // Always-on, no per-project config needed for fresh projects.
+        if let Some(f) = file
+            && is_generated_or_mock_path(f)
+        {
             return true;
         }
         if self.globs.is_empty() {
@@ -326,6 +400,73 @@ mod tests {
             "file:crates/foo/src/lib.rs",
             Some("crates/foo/src/lib.rs"),
             "lib.rs",
+        ));
+    }
+
+    /// v8 Tier 1.5: high-confidence noise patterns matched against the
+    /// file path. Always-on (no project config required) for
+    /// generated, mocks, and snapshot fixtures.
+    #[test]
+    fn tier_1_5_drops_generated_and_mock_files() {
+        // Generated.
+        assert!(is_generated_or_mock_path("internal/proto/billing.pb.go"));
+        assert!(is_generated_or_mock_path("api/handler.gen.go"));
+        assert!(is_generated_or_mock_path("ui/src/api/client.gen.ts"));
+        assert!(is_generated_or_mock_path("crates/foo/src/proto.gen.rs"));
+        assert!(is_generated_or_mock_path("internal/types/types_generated.go"));
+        assert!(is_generated_or_mock_path("lib/models/user.g.dart"));
+        assert!(is_generated_or_mock_path("lib/models/user.freezed.dart"));
+        assert!(is_generated_or_mock_path("ui/generated/index.ts"));
+        assert!(is_generated_or_mock_path("ui/src/__generated__/queries.ts"));
+        assert!(is_generated_or_mock_path("__generated__/api.ts"));
+        // Mocks.
+        assert!(is_generated_or_mock_path("internal/strategies/mocks/strategy_mock.go"));
+        assert!(is_generated_or_mock_path("internal/strategies/mocks/mock_strategy.go"));
+        assert!(is_generated_or_mock_path("internal/repository/sync_mocks.go"));
+        assert!(is_generated_or_mock_path("ui/src/services/auth.mock.ts"));
+        assert!(is_generated_or_mock_path("ui/src/__mocks__/api.ts"));
+        // Snapshot fixtures.
+        assert!(is_generated_or_mock_path(
+            "server/crates/foo/src/snapshots/foo__tests__bar.snap"
+        ));
+        assert!(is_generated_or_mock_path(
+            "server/crates/foo/src/snapshots/foo__tests__bar.snap.new"
+        ));
+    }
+
+    /// v8 Tier 1.5: source files with "mock" or "generated" in their
+    /// name as a normal word are NOT dropped. Match is intentionally
+    /// strict on convention — a file legitimately named `mockable.go`
+    /// or `generator.go` should pass.
+    #[test]
+    fn tier_1_5_preserves_legitimate_source_files() {
+        // Words in the name but not the convention.
+        assert!(!is_generated_or_mock_path("internal/util/mockable.go"));
+        assert!(!is_generated_or_mock_path("internal/util/generator.go"));
+        assert!(!is_generated_or_mock_path("internal/util/generation_status.go"));
+        // `mock` as standalone basename without the `_mock`/`mock_` prefix.
+        assert!(!is_generated_or_mock_path("internal/test_helpers/mock.go"));
+        // `.proto` source files (the .pb.go is generated FROM these).
+        assert!(!is_generated_or_mock_path("api/billing.proto"));
+        // Tests are NOT in Tier 1.5 — that's a per-project decision.
+        assert!(!is_generated_or_mock_path("internal/worker/page_worker_test.go"));
+        assert!(!is_generated_or_mock_path("crates/foo/src/tests.rs"));
+    }
+
+    /// v8 Tier 1.5: integration with the public `excludes` predicate.
+    /// Tier 1.5 fires WITHOUT the user configuring any globs.
+    #[test]
+    fn tier_1_5_excludes_without_project_config() {
+        let ex = GraphExclusions::empty();
+        assert!(ex.excludes(
+            "file:internal/proto/billing.pb.go",
+            Some("internal/proto/billing.pb.go"),
+            "billing.pb.go",
+        ));
+        assert!(ex.excludes(
+            "symbol:scip-go . pkg internal/strategies/mocks/strategy_mock.go MockStrategy#",
+            Some("internal/strategies/mocks/strategy_mock.go"),
+            "MockStrategy",
         ));
     }
 }

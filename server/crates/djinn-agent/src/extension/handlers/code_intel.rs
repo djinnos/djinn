@@ -357,7 +357,21 @@ pub(crate) async fn call_code_graph(
                     ));
                 }
             };
-            serde_json::to_value(&hits).map_err(|e| format!("serialize error: {e}"))?
+            // v8: when hybrid returns nothing, wrap with a diagnostic
+            // payload explaining WHY (semantic index unavailable, etc.)
+            // instead of an opaque `[]`. Empty `name` results don't get
+            // wrapped because the failure mode is just "no name match"
+            // — clients understand that. The UI's `unwrapList(value,
+            // 'hits')` handles both the array shape and the wrapped
+            // `{ hits: [...] }` shape, so this is non-breaking.
+            if hits.is_empty() && mode == "hybrid" {
+                serde_json::json!({
+                    "hits": [],
+                    "diagnostic": hybrid_search_diagnostic(query),
+                })
+            } else {
+                serde_json::to_value(&hits).map_err(|e| format!("serialize error: {e}"))?
+            }
         }
         "cycles" => {
             let min_size = p.min_size.unwrap_or(2);
@@ -456,16 +470,133 @@ pub(crate) async fn call_code_graph(
                 }),
             }
         }
+        "capabilities" => {
+            // v8: introspection. Lets clients plan workflows without
+            // trial-and-error against a deployment whose set of wired
+            // ops, env-gated features, and indexed languages they
+            // can't otherwise discover. Cheap — no graph load.
+            code_graph_capabilities()
+        }
         other => {
             return Err(format!(
                 "unknown code_graph operation '{other}': expected one of \
                  'neighbors', 'ranked', 'impact', 'implementations', \
                  'search', 'cycles', 'orphans', 'path', 'edges', \
-                 'describe', 'context'"
+                 'describe', 'context', 'capabilities'"
             ));
         }
     };
     Ok(result)
+}
+
+/// v8: explain why a hybrid search returned no hits. Hybrid fans out
+/// to lexical (Dolt LIKE), semantic (Qdrant vector cosine), and
+/// structural (canonical-graph name index) signals — when all three
+/// are empty, the user otherwise sees `[]` with no signal about
+/// whether the codebase is mis-indexed, the query is just unmatched,
+/// or a backend (typically Qdrant) is unreachable.
+///
+/// We can't easily distinguish the failure modes from this layer
+/// without re-running the signals, so the diagnostic is a structured
+/// hint rather than a definitive cause. Surfaces:
+/// - the resolved query string
+/// - the hybrid-mode fan-out the search uses
+/// - the most common reasons each signal returns nothing
+/// - actionable next steps
+fn hybrid_search_diagnostic(query: &str) -> serde_json::Value {
+    serde_json::json!({
+        "reason": "no hits across lexical + semantic + structural signals",
+        "query": query,
+        "fan_out": ["lexical (LIKE on code_chunks)", "semantic (Qdrant cosine)", "structural (canonical-graph name index)"],
+        "common_causes": [
+            "semantic index not built — code_chunk_embeddings warm pass hasn't run for this project",
+            "Qdrant unreachable or empty for this project",
+            "embedding service degraded — query embedding failed",
+            "canonical graph not warmed for this project (call code_graph status to check)",
+            "query genuinely has no matches",
+        ],
+        "next_steps": [
+            "fall back to mode=name with the same query",
+            "check code_graph status for warmed=true",
+            "broaden the query (single keyword instead of natural language)",
+        ],
+    })
+}
+
+/// v8 capability-introspection payload. Returns JSON describing what
+/// THIS binary actually supports — distinct from what the tool schema
+/// might advertise. Cheap (no DB / graph load); safe to call from any
+/// agent at any time.
+///
+/// Fields:
+/// - `operations`: list of `operation` strings the dispatcher accepts.
+/// - `default_search_mode`: the `mode` that bare `search` calls use.
+/// - `available_search_modes`: every `mode` value the dispatcher routes.
+/// - `env_features`: env-flag-controlled passes and their on/off state.
+/// - `access_classifier_languages`: tree-sitter languages the read/write
+///   classifier (v8 PR) can resolve when SCIP roles are absent.
+/// - `repo_graph_artifact_version`: bincode schema stamp; mismatches
+///   force a re-warm.
+fn code_graph_capabilities() -> serde_json::Value {
+    // env-flag readers — kept inline so this crate doesn't take a
+    // dep on djinn-graph just for capability introspection.
+    fn env_on(var: &str, default: bool) -> bool {
+        match std::env::var(var) {
+            Ok(v) => !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            ),
+            Err(_) => default,
+        }
+    }
+    fn env_opt_in(var: &str) -> bool {
+        matches!(
+            std::env::var(var).ok().as_deref().map(str::trim).map(str::to_ascii_lowercase),
+            Some(ref v) if matches!(v.as_str(), "1" | "true" | "on" | "yes")
+        )
+    }
+
+    serde_json::json!({
+        "operations": [
+            "neighbors", "ranked", "impact", "implementations",
+            "search", "cycles", "orphans", "path", "edges",
+            "describe", "context", "capabilities",
+        ],
+        "default_search_mode": std::env::var("DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE")
+            .unwrap_or_else(|_| "name".to_string()),
+        "available_search_modes": ["name", "hybrid"],
+        "env_features": {
+            // Defaults match the on-by-default behavior in djinn-graph.
+            "entry_point_detection": env_on("DJINN_ENTRY_POINT_DETECTION", true),
+            "process_detection": env_on("DJINN_PROCESS_DETECTION", true),
+            "community_detection": env_on("DJINN_COMMUNITY_DETECTION", true),
+            // Opt-in by design.
+            "db_access_detection": env_opt_in("DJINN_DB_ACCESS_DETECTION"),
+        },
+        "access_classifier_languages": ["rust", "go", "python", "typescript", "javascript"],
+        "repo_graph_artifact_version": 8,
+        "filter_tiers": {
+            "tier_1_module_artifacts": "always-on; SCIP module-tree synthetic nodes (`crate/`, `…/MODULE.`)",
+            "tier_1_5_generated_and_mocks": "always-on; *.pb.go, *.gen.*, *_mock.go, mock_*.go, **/__mocks__/**, *.snap",
+            "tier_2_project_globs": "from project config: graph_excluded_paths + graph_orphan_ignore",
+        },
+        "default_filters": {
+            "ranked_excludes_externals": true,
+            "neighbors_excludes_externals": true,
+            "implementations_excludes_externals": true,
+            "context_excludes_externals": true,
+            "snapshot_excludes_externals": true,
+            "impact_excludes_externals": true,
+            "impact_default_max_depth": 2,
+            "impact_default_min_confidence": 0.85,
+            "impact_behavioral_edge_whitelist": [
+                "Reads", "Writes", "SymbolReference", "FileReference",
+                "Implements", "Extends", "TypeDefines", "Defines"
+            ],
+            "cycles_default_kind_filter": "symbol",
+            "ranked_default_sort_by": "fused"
+        },
+    })
 }
 
 // ---------------------------------------------------------------------------
