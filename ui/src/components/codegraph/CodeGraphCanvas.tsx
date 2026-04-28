@@ -21,6 +21,7 @@ import {
   type SnapshotPayload,
 } from "@/lib/codeGraphAdapter";
 import { useSigmaGraph } from "@/hooks/useSigmaGraph";
+import { useCodeGraphStore } from "@/stores/codeGraphStore";
 import { cn } from "@/lib/utils";
 
 type FetchState =
@@ -98,6 +99,39 @@ export function CodeGraphCanvas({
         className="absolute inset-0"
       />
       <CanvasOverlay state={state} layoutRunning={layoutRunning} />
+      {/*
+       * D3's reducer will own the actual Sigma node-pulse animation.
+       * Until D3 lands, this badge gives D5's chat round-trip an
+       * observable signal — when a citation lands, the user sees the
+       * pinned node id render in the corner so the navigation isn't
+       * silent.
+       */}
+      <CitationStatusBadge />
+    </div>
+  );
+}
+
+function CitationStatusBadge() {
+  const selectionId = useCodeGraphStore((s) => s.selectionId);
+  const citationCount = useCodeGraphStore((s) => s.citationIds.size);
+  const clear = useCodeGraphStore((s) => s.clearCitations);
+  if (!selectionId && citationCount === 0) return null;
+  return (
+    <div className="pointer-events-auto absolute right-3 top-3 flex items-center gap-1.5 rounded-full border border-blue-400/40 bg-blue-500/15 px-3 py-1 text-[11px] text-blue-200 shadow-sm backdrop-blur">
+      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-300" />
+      <span data-testid="citation-status">
+        {citationCount > 1
+          ? `${citationCount} citations pinned`
+          : `Pinned: ${selectionId ?? ""}`}
+      </span>
+      <button
+        type="button"
+        onClick={clear}
+        className="ml-1 text-blue-300/80 hover:text-blue-100"
+        aria-label="Clear citations"
+      >
+        ×
+      </button>
     </div>
   );
 }
