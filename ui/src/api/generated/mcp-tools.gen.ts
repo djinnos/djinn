@@ -360,7 +360,13 @@ export namespace CodeGraphInputSchema {
    */
   key?: string
   /**
-   * Node kind filter for `ranked`/`search`/`cycles`/`orphans`: `file` or `symbol`.
+   * Kind filter, op-specific:
+   * - `ranked` / `search` / `cycles` / `orphans`: node kind — `file` or
+   *   `symbol`.
+   * - `neighbors`: edge kind — `reads` or `writes` (PR A3). Restricts
+   *   the response to neighbors connected by `Reads` / `Writes` edges
+   *   only, so callers can ask for "who writes to field X" without
+   *   post-filtering.
    */
   kind_filter?: string
   /**
@@ -2084,6 +2090,23 @@ export namespace MemoryRepairEmbeddingsInputSchema {
 export type MemoryRepairEmbeddingsInput = MemoryRepairEmbeddingsInputSchema.MemoryRepairEmbeddingsInput;
 export namespace MemoryRepairEmbeddingsOutputSchema {
   export interface MemoryRepairEmbeddingsOutput {
+  /**
+   * Code chunks whose re-embed attempt failed.
+   */
+  code_chunks_failed: number
+  /**
+   * Code chunks that received a fresh embedding during this run.
+   */
+  code_chunks_repaired: number
+  /**
+   * Total code chunks scanned for the project. Always `0` until the
+   * chunker (PR B2) and embedding pipeline (PR B3) ship.
+   */
+  code_chunks_total: number
+  /**
+   * Code chunks whose embedding meta was already current.
+   */
+  code_chunks_up_to_date: number
   /**
    * Top-level failure: project not found, embedding provider unavailable, etc.
    */

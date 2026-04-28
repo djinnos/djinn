@@ -251,6 +251,7 @@ pub(crate) async fn call_code_graph(
                     key,
                     p.direction.as_deref(),
                     p.group_by.as_deref(),
+                    p.kind_filter.as_deref(),
                 )
                 .await?;
             serde_json::to_value(&neighbors).map_err(|e| format!("serialize error: {e}"))?

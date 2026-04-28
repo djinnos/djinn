@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::scip_parser::{
     ParsedScipIndex, ScipFile, ScipOccurrence, ScipRelationship, ScipRelationshipKind, ScipSymbol,
-    ScipSymbolKind, ScipVisibility,
+    ScipSymbolKind, ScipSymbolRole, ScipVisibility,
 };
 
 const PAGE_RANK_DAMPING_FACTOR: f64 = 0.85;
@@ -24,7 +24,11 @@ const PAGE_RANK_ITERATIONS: usize = 25;
 ///
 /// Bump history:
 /// - v1 (initial): added `confidence` and `reason` to every edge (PR A2).
-pub const REPO_GRAPH_ARTIFACT_VERSION: u32 = 1;
+/// - v2: split `SymbolReference` into `Reads` / `Writes` based on SCIP
+///   `SymbolRole::ReadAccess` / `WriteAccess` flags (PR A3). Old blobs
+///   bincode-deserialize but their edges are stamped with the legacy
+///   `SymbolReference` kind only — next warm rebuilds with the split.
+pub const REPO_GRAPH_ARTIFACT_VERSION: u32 = 2;
 
 // ── Edge confidence floor table (PR A2) ────────────────────────────────────
 //
@@ -41,6 +45,16 @@ const EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_REFERENCE: f64 = 0.80;
 const EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_IMPLEMENTATION: f64 = 0.85;
 const EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_TYPE_DEFINITION: f64 = 0.85;
 const EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_DEFINITION: f64 = 0.85;
+// PR A3: split confidences for `Reads` / `Writes` (carved out of
+// `SymbolReference`). Writes are the more reliable signal because SCIP's
+// `WriteAccess` flag is set deterministically by the indexer at the
+// assignment site; reads cover both load/use sites and method-call
+// receivers, so they sit slightly lower. The plan didn't pin numbers —
+// we use 0.90 / 0.85 so `Writes` matches the old `SymbolReference`
+// floor (no regression for write-detection downstream) and `Reads` takes
+// a one-tier penalty.
+const EDGE_CONFIDENCE_READS: f64 = 0.85;
+const EDGE_CONFIDENCE_WRITES: f64 = 0.90;
 const EDGE_CONFIDENCE_LOCAL_PENALTY: f64 = 0.15;
 const EDGE_WEIGHT_DEFINITION_TO_FILE: f64 = 4.0;
 const EDGE_WEIGHT_FILE_TO_DEFINITION: f64 = 1.5;
@@ -525,7 +539,19 @@ pub enum RepoGraphEdgeKind {
     ContainsDefinition,
     DeclaredInFile,
     FileReference,
+    /// Generic symbol reference. PR A3 carves out `Reads` and `Writes`
+    /// from this kind based on SCIP `SymbolRole::ReadAccess` /
+    /// `WriteAccess`; this catch-all variant is still emitted for
+    /// occurrences that carry neither role (e.g. `Import`, type-only
+    /// references). Matches the `references` `EdgeCategory` per the
+    /// inter-PR contract.
     SymbolReference,
+    /// PR A3: SCIP `SymbolRole::ReadAccess` reference. Occurrences
+    /// where the symbol is loaded/used without being written.
+    Reads,
+    /// PR A3: SCIP `SymbolRole::WriteAccess` reference. Occurrences
+    /// where the symbol is assigned to or otherwise mutated.
+    Writes,
     SymbolRelationshipReference,
     SymbolRelationshipImplementation,
     SymbolRelationshipTypeDefinition,
@@ -560,6 +586,8 @@ pub fn edge_confidence_floor(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::DeclaredInFile => EDGE_CONFIDENCE_DECLARED_IN_FILE,
         RepoGraphEdgeKind::FileReference => EDGE_CONFIDENCE_FILE_REFERENCE,
         RepoGraphEdgeKind::SymbolReference => EDGE_CONFIDENCE_SYMBOL_REFERENCE,
+        RepoGraphEdgeKind::Reads => EDGE_CONFIDENCE_READS,
+        RepoGraphEdgeKind::Writes => EDGE_CONFIDENCE_WRITES,
         RepoGraphEdgeKind::SymbolRelationshipReference => {
             EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_REFERENCE
         }
@@ -694,12 +722,17 @@ impl RepoDependencyGraphBuilder {
                 RepoGraphEdgeKind::FileReference,
                 1,
             );
-            self.bump_edge(
-                symbol_index,
-                target_file_index,
-                RepoGraphEdgeKind::SymbolReference,
-                1,
-            );
+            // PR A3: split symbol-to-file references on SCIP role flags so
+            // `code_graph neighbors --kind_filter=writes` can pick out
+            // mutators of a field. SCIP can stamp both `ReadAccess` and
+            // `WriteAccess` on the same occurrence (e.g. `x += 1`); when
+            // both flags are present we treat it as a write since the
+            // mutation is the more load-bearing signal for callers asking
+            // "who changes X". Fall back to the generic `SymbolReference`
+            // when neither flag is set (imports, type-only refs, indexers
+            // that don't populate role bits).
+            let edge_kind = symbol_reference_edge_kind(&occurrence.roles);
+            self.bump_edge(symbol_index, target_file_index, edge_kind, 1);
         }
     }
 
@@ -1309,12 +1342,38 @@ fn derive_edge_confidence(
     (confidence, reason)
 }
 
+/// PR A3: classify a symbol→target_file reference edge from the SCIP
+/// `SymbolRole` bitset on the occurrence.
+///
+/// Precedence:
+/// 1. `WriteAccess` → [`RepoGraphEdgeKind::Writes`] (mutation wins; SCIP
+///    stamps both bits on read-modify-write occurrences such as `x += 1`).
+/// 2. `ReadAccess` → [`RepoGraphEdgeKind::Reads`].
+/// 3. neither → [`RepoGraphEdgeKind::SymbolReference`] (imports, type-only
+///    references, indexers that don't populate role bits).
+fn symbol_reference_edge_kind(
+    roles: &std::collections::BTreeSet<ScipSymbolRole>,
+) -> RepoGraphEdgeKind {
+    if roles.contains(&ScipSymbolRole::WriteAccess) {
+        RepoGraphEdgeKind::Writes
+    } else if roles.contains(&ScipSymbolRole::ReadAccess) {
+        RepoGraphEdgeKind::Reads
+    } else {
+        RepoGraphEdgeKind::SymbolReference
+    }
+}
+
 fn edge_weight(kind: RepoGraphEdgeKind) -> f64 {
     match kind {
         RepoGraphEdgeKind::ContainsDefinition => EDGE_WEIGHT_DEFINITION_TO_FILE,
         RepoGraphEdgeKind::DeclaredInFile => EDGE_WEIGHT_FILE_TO_DEFINITION,
         RepoGraphEdgeKind::FileReference => EDGE_WEIGHT_FILE_REFERENCE,
-        RepoGraphEdgeKind::SymbolReference => EDGE_WEIGHT_SYMBOL_REFERENCE,
+        // PR A3: `Reads` and `Writes` are refinements of `SymbolReference`;
+        // they reuse the same structural weight so PageRank / shortest-path
+        // results are stable across the split.
+        RepoGraphEdgeKind::SymbolReference
+        | RepoGraphEdgeKind::Reads
+        | RepoGraphEdgeKind::Writes => EDGE_WEIGHT_SYMBOL_REFERENCE,
         RepoGraphEdgeKind::SymbolRelationshipReference => EDGE_WEIGHT_SYMBOL_RELATIONSHIP_REFERENCE,
         RepoGraphEdgeKind::SymbolRelationshipImplementation => {
             EDGE_WEIGHT_SYMBOL_RELATIONSHIP_IMPLEMENTATION
@@ -1662,13 +1721,14 @@ mod tests {
                 Some(other) => panic!("unexpected reason {other:?} on edge {:?}", edge.kind),
             }
         }
-        // The fixture exercises Contains/DeclaredIn/FileRef/SymbolRef and
-        // an Implementation relationship — every code path that can mint
-        // an edge today.
+        // The fixture exercises Contains/DeclaredIn/FileRef/Reads (post-A3
+        // the helper-call read-access reference is classified as `Reads`
+        // rather than the generic `SymbolReference`) and an Implementation
+        // relationship — every code path that can mint an edge today.
         assert!(seen_kinds.contains(&RepoGraphEdgeKind::ContainsDefinition));
         assert!(seen_kinds.contains(&RepoGraphEdgeKind::DeclaredInFile));
         assert!(seen_kinds.contains(&RepoGraphEdgeKind::FileReference));
-        assert!(seen_kinds.contains(&RepoGraphEdgeKind::SymbolReference));
+        assert!(seen_kinds.contains(&RepoGraphEdgeKind::Reads));
         assert!(seen_kinds.contains(&RepoGraphEdgeKind::SymbolRelationshipImplementation));
     }
 
@@ -1784,6 +1844,327 @@ mod tests {
         assert!(
             saw_local_prefix,
             "expected at least one edge involving the `local 42` symbol to be flagged"
+        );
+    }
+
+    // ── PR A3: SymbolReference read/write split ───────────────────────────
+
+    /// Build a fixture project with a struct field that is read in one file
+    /// and written in another. Assert the role-aware split classifies the
+    /// edges as `Reads` / `Writes`. This is the core behaviour callers rely
+    /// on for `code_graph neighbors --kind_filter=writes` (PR A3 acceptance).
+    #[test]
+    fn read_write_split_classifies_field_accesses_pr_a3() {
+        // Field `Counter#value`. Lives in src/counter.rs; is written from
+        // src/writer.rs (mutator) and read from src/reader.rs (observer).
+        let field_symbol = "scip-rust pkg src/counter.rs `Counter`#`value`.".to_string();
+        let counter_struct = ScipSymbol {
+            symbol: "scip-rust pkg src/counter.rs `Counter`#".to_string(),
+            kind: Some(ScipSymbolKind::Struct),
+            display_name: Some("Counter".to_string()),
+            signature: None,
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        };
+        let value_field = ScipSymbol {
+            symbol: field_symbol.clone(),
+            kind: Some(ScipSymbolKind::Field),
+            display_name: Some("value".to_string()),
+            signature: None,
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        };
+
+        let writer_sym = ScipSymbol {
+            symbol: "scip-rust pkg src/writer.rs `bump`().".to_string(),
+            kind: Some(ScipSymbolKind::Function),
+            display_name: Some("bump".to_string()),
+            signature: None,
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        };
+        let reader_sym = ScipSymbol {
+            symbol: "scip-rust pkg src/reader.rs `peek`().".to_string(),
+            kind: Some(ScipSymbolKind::Function),
+            display_name: Some("peek".to_string()),
+            signature: None,
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        };
+
+        // Helper: build an occurrence with explicit roles, since the
+        // existing `definition_occurrence` / `reference_occurrence` helpers
+        // hardcode their role sets.
+        fn role_occurrence(symbol: &str, roles: BTreeSet<ScipSymbolRole>) -> ScipOccurrence {
+            ScipOccurrence {
+                symbol: symbol.to_string(),
+                range: ScipRange {
+                    start_line: 1,
+                    start_character: 4,
+                    end_line: 1,
+                    end_character: 10,
+                },
+                enclosing_range: None,
+                roles,
+                syntax_kind: None,
+                override_documentation: vec![],
+            }
+        }
+
+        let index = ParsedScipIndex {
+            metadata: ScipMetadata::default(),
+            files: vec![
+                ScipFile {
+                    language: "rust".to_string(),
+                    relative_path: PathBuf::from("src/counter.rs"),
+                    definitions: vec![
+                        definition_occurrence(&counter_struct.symbol),
+                        definition_occurrence(&field_symbol),
+                    ],
+                    references: vec![],
+                    occurrences: vec![
+                        definition_occurrence(&counter_struct.symbol),
+                        definition_occurrence(&field_symbol),
+                    ],
+                    symbols: vec![counter_struct, value_field],
+                },
+                ScipFile {
+                    language: "rust".to_string(),
+                    relative_path: PathBuf::from("src/writer.rs"),
+                    definitions: vec![definition_occurrence(&writer_sym.symbol)],
+                    references: vec![role_occurrence(
+                        &field_symbol,
+                        BTreeSet::from([ScipSymbolRole::WriteAccess]),
+                    )],
+                    occurrences: vec![
+                        definition_occurrence(&writer_sym.symbol),
+                        role_occurrence(
+                            &field_symbol,
+                            BTreeSet::from([ScipSymbolRole::WriteAccess]),
+                        ),
+                    ],
+                    symbols: vec![writer_sym],
+                },
+                ScipFile {
+                    language: "rust".to_string(),
+                    relative_path: PathBuf::from("src/reader.rs"),
+                    definitions: vec![definition_occurrence(&reader_sym.symbol)],
+                    references: vec![role_occurrence(
+                        &field_symbol,
+                        BTreeSet::from([ScipSymbolRole::ReadAccess]),
+                    )],
+                    occurrences: vec![
+                        definition_occurrence(&reader_sym.symbol),
+                        role_occurrence(
+                            &field_symbol,
+                            BTreeSet::from([ScipSymbolRole::ReadAccess]),
+                        ),
+                    ],
+                    symbols: vec![reader_sym],
+                },
+            ],
+            external_symbols: vec![],
+        };
+
+        let graph = RepoDependencyGraph::build(&[index]);
+
+        // The role-aware classification fires on the symbol→target_file
+        // edge minted in `add_reference`. Locate the field-defining file
+        // and the writer/reader source files.
+        let counter_file = graph
+            .file_node("src/counter.rs")
+            .expect("counter file node");
+        let writer_file = graph
+            .file_node("src/writer.rs")
+            .expect("writer file node");
+        let reader_file = graph
+            .file_node("src/reader.rs")
+            .expect("reader file node");
+        let field_node = graph.symbol_node(&field_symbol).expect("field node");
+
+        // From the WRITE site, the field's symbol→counter_file edge should
+        // be tagged `Writes`. The field has *both* a writer site and a
+        // reader site, so to attribute the right kind to the right source
+        // we sweep edges *out of the field node* — there is one
+        // SymbolReference-class edge per occurrence kind into
+        // `src/counter.rs`. We expect exactly one `Writes` and one `Reads`
+        // edge from the field node into the counter file.
+        let mut writes_count = 0;
+        let mut reads_count = 0;
+        let mut bare_ref_count = 0;
+        for edge in graph
+            .graph()
+            .edges_directed(field_node, petgraph::Direction::Outgoing)
+        {
+            if edge.target() != counter_file {
+                continue;
+            }
+            match edge.weight().kind {
+                RepoGraphEdgeKind::Writes => writes_count += 1,
+                RepoGraphEdgeKind::Reads => reads_count += 1,
+                RepoGraphEdgeKind::SymbolReference => bare_ref_count += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            writes_count, 1,
+            "expected exactly one Writes edge from field to counter file"
+        );
+        assert_eq!(
+            reads_count, 1,
+            "expected exactly one Reads edge from field to counter file"
+        );
+        assert_eq!(
+            bare_ref_count, 0,
+            "no bare SymbolReference edge should remain after the split when SCIP roles are populated"
+        );
+
+        // And the confidence floors land on the values pinned in this PR.
+        for edge in graph.graph().edge_references() {
+            let edge = edge.weight();
+            match edge.kind {
+                RepoGraphEdgeKind::Writes => {
+                    assert!(
+                        (edge.confidence - EDGE_CONFIDENCE_WRITES).abs() < 1e-9,
+                        "Writes edge confidence {} != floor {}",
+                        edge.confidence,
+                        EDGE_CONFIDENCE_WRITES
+                    );
+                }
+                RepoGraphEdgeKind::Reads => {
+                    assert!(
+                        (edge.confidence - EDGE_CONFIDENCE_READS).abs() < 1e-9,
+                        "Reads edge confidence {} != floor {}",
+                        edge.confidence,
+                        EDGE_CONFIDENCE_READS
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        // The unused vars silence "fields never read" without dropping
+        // the assertions.
+        let _ = (writer_file, reader_file);
+    }
+
+    /// `kind_filter=writes` on the field's neighbors picks out the file
+    /// that *writes* it; `reads` picks out the *reader*. This is the
+    /// acceptance criterion in the PR A3 plan: "fixture project with a
+    /// struct field; assert `kind_filter=writes` returns only writers,
+    /// `reads` only readers".
+    ///
+    /// The `neighbors` op itself lives in the bridge; here we exercise the
+    /// underlying graph the bridge filters over.
+    #[test]
+    fn neighbors_kind_filter_writes_returns_only_writers_pr_a3() {
+        // Reuse the multi-file fixture set up by the previous test by
+        // inlining a smaller variant focused on just the field node.
+        let field_symbol = "scip-rust pkg src/counter.rs `f`#`v`.".to_string();
+        let value_field = ScipSymbol {
+            symbol: field_symbol.clone(),
+            kind: Some(ScipSymbolKind::Field),
+            display_name: Some("v".to_string()),
+            signature: None,
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        };
+        fn role_occurrence(symbol: &str, roles: BTreeSet<ScipSymbolRole>) -> ScipOccurrence {
+            ScipOccurrence {
+                symbol: symbol.to_string(),
+                range: ScipRange {
+                    start_line: 1,
+                    start_character: 4,
+                    end_line: 1,
+                    end_character: 10,
+                },
+                enclosing_range: None,
+                roles,
+                syntax_kind: None,
+                override_documentation: vec![],
+            }
+        }
+
+        let index = ParsedScipIndex {
+            metadata: ScipMetadata::default(),
+            files: vec![
+                ScipFile {
+                    language: "rust".to_string(),
+                    relative_path: PathBuf::from("src/counter.rs"),
+                    definitions: vec![definition_occurrence(&field_symbol)],
+                    references: vec![],
+                    occurrences: vec![definition_occurrence(&field_symbol)],
+                    symbols: vec![value_field],
+                },
+                ScipFile {
+                    language: "rust".to_string(),
+                    relative_path: PathBuf::from("src/writer.rs"),
+                    definitions: vec![],
+                    references: vec![role_occurrence(
+                        &field_symbol,
+                        BTreeSet::from([ScipSymbolRole::WriteAccess]),
+                    )],
+                    occurrences: vec![role_occurrence(
+                        &field_symbol,
+                        BTreeSet::from([ScipSymbolRole::WriteAccess]),
+                    )],
+                    symbols: vec![],
+                },
+                ScipFile {
+                    language: "rust".to_string(),
+                    relative_path: PathBuf::from("src/reader.rs"),
+                    definitions: vec![],
+                    references: vec![role_occurrence(
+                        &field_symbol,
+                        BTreeSet::from([ScipSymbolRole::ReadAccess]),
+                    )],
+                    occurrences: vec![role_occurrence(
+                        &field_symbol,
+                        BTreeSet::from([ScipSymbolRole::ReadAccess]),
+                    )],
+                    symbols: vec![],
+                },
+            ],
+            external_symbols: vec![],
+        };
+
+        let graph = RepoDependencyGraph::build(&[index]);
+        let counter_file = graph
+            .file_node("src/counter.rs")
+            .expect("counter file node");
+
+        // Mirror the bridge-side filter: walk outgoing edges from the
+        // field node into `src/counter.rs` and partition by edge kind.
+        let field_node = graph.symbol_node(&field_symbol).expect("field node");
+        let writes: Vec<_> = graph
+            .graph()
+            .edges_directed(field_node, petgraph::Direction::Outgoing)
+            .filter(|e| {
+                e.target() == counter_file && e.weight().kind == RepoGraphEdgeKind::Writes
+            })
+            .collect();
+        let reads: Vec<_> = graph
+            .graph()
+            .edges_directed(field_node, petgraph::Direction::Outgoing)
+            .filter(|e| e.target() == counter_file && e.weight().kind == RepoGraphEdgeKind::Reads)
+            .collect();
+
+        assert_eq!(writes.len(), 1, "expected one Writes edge");
+        assert_eq!(reads.len(), 1, "expected one Reads edge");
+
+        // Confidence floors propagate from the table in this module.
+        assert!(
+            (writes[0].weight().confidence - EDGE_CONFIDENCE_WRITES).abs() < 1e-9,
+            "Writes confidence floor mismatch"
+        );
+        assert!(
+            (reads[0].weight().confidence - EDGE_CONFIDENCE_READS).abs() < 1e-9,
+            "Reads confidence floor mismatch"
         );
     }
 

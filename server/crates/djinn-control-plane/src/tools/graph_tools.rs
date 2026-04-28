@@ -49,7 +49,13 @@ pub struct CodeGraphParams {
     /// Edge direction filter for `neighbors`: `incoming`, `outgoing`, or omit for both.
     #[serde(default)]
     pub direction: Option<String>,
-    /// Node kind filter for `ranked`/`search`/`cycles`/`orphans`: `file` or `symbol`.
+    /// Kind filter, op-specific:
+    /// - `ranked` / `search` / `cycles` / `orphans`: node kind — `file` or
+    ///   `symbol`.
+    /// - `neighbors`: edge kind — `reads` or `writes` (PR A3). Restricts
+    ///   the response to neighbors connected by `Reads` / `Writes` edges
+    ///   only, so callers can ask for "who writes to field X" without
+    ///   post-filtering.
     #[serde(default)]
     pub kind_filter: Option<String>,
     /// Maximum results for `ranked`/`search`/`orphans`/`edges`/`neighbors`
@@ -564,6 +570,22 @@ fn validate_kind_filter(kind_filter: Option<&str>) -> Result<(), String> {
     }
 }
 
+/// PR A3: validator for the `neighbors` op's edge-kind filter. Currently
+/// accepts `reads` / `writes`; future PRs may extend this with `calls` etc.
+/// once the `EdgeCategory` enum lands (PR C1).
+fn validate_edge_kind_filter(kind_filter: Option<&str>) -> Result<(), String> {
+    if let Some(k) = kind_filter {
+        match k {
+            "reads" | "writes" => Ok(()),
+            _ => Err(format!(
+                "invalid kind_filter '{k}' for neighbors: expected 'reads' or 'writes'"
+            )),
+        }
+    } else {
+        Ok(())
+    }
+}
+
 fn require_key(params: &CodeGraphParams) -> Result<&str, String> {
     params
         .key
@@ -888,6 +910,12 @@ impl DjinnMcpServer {
         let key = require_key(params)?;
         validate_direction(params.direction.as_deref())?;
         validate_group_by(params.group_by.as_deref())?;
+        // PR A3: `neighbors` repurposes `kind_filter` for an *edge* kind
+        // (`reads` / `writes`); other ops use it for the node kind
+        // (`file` / `symbol`). Validate against the edge-kind set here so
+        // a typo surfaces server-side rather than silently dropping every
+        // neighbor.
+        validate_edge_kind_filter(params.kind_filter.as_deref())?;
         let result = self
             .state
             .repo_graph()
@@ -896,6 +924,7 @@ impl DjinnMcpServer {
                 key,
                 params.direction.as_deref(),
                 params.group_by.as_deref(),
+                params.kind_filter.as_deref(),
             )
             .await?;
         // Bound the wire size — the underlying neighbors() call returns every
@@ -1657,6 +1686,22 @@ mod tests {
         assert!(validate_kind_filter(Some("symbol")).is_ok());
         assert!(validate_kind_filter(None).is_ok());
         assert!(validate_kind_filter(Some("unknown")).is_err());
+    }
+
+    /// PR A3: `neighbors` op uses `kind_filter` for edge kinds (`reads` /
+    /// `writes`); `validate_edge_kind_filter` enforces that vocabulary so
+    /// typos surface server-side rather than silently dropping every
+    /// neighbor.
+    #[test]
+    fn validates_edge_kind_filter_pr_a3() {
+        assert!(validate_edge_kind_filter(Some("reads")).is_ok());
+        assert!(validate_edge_kind_filter(Some("writes")).is_ok());
+        assert!(validate_edge_kind_filter(None).is_ok());
+        // Node-kind labels are NOT valid for the neighbors op — they
+        // belong to the other ops' validator.
+        assert!(validate_edge_kind_filter(Some("file")).is_err());
+        assert!(validate_edge_kind_filter(Some("symbol")).is_err());
+        assert!(validate_edge_kind_filter(Some("unknown")).is_err());
     }
 
     fn test_params(op: &str) -> CodeGraphParams {
