@@ -153,7 +153,11 @@ pub struct RankedNode {
     pub outbound_edge_weight: f64,
 }
 
-/// A search hit from the name-index lookup. Returned by `search`.
+/// A search hit from the name-index lookup or hybrid RRF fusion. Returned
+/// by `search`. PR B4 added `match_kind` (which signal contributed the
+/// hit — `"name"` / `"lexical"` / `"semantic"` / `"structural"` / `"hybrid"`)
+/// for debug / Pulse-panel surfaces; old clients that don't read it stay
+/// unaffected because the field is `skip_serializing_if = "Option::is_none"`.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SearchHit {
     pub key: String,
@@ -161,6 +165,11 @@ pub struct SearchHit {
     pub display_name: String,
     pub score: f64,
     pub file: Option<String>,
+    /// PR B4: tags the signal that surfaced this hit (or `"hybrid"` when
+    /// it was promoted by RRF fusion across multiple signals). `None` for
+    /// the legacy `mode=name` fast path so the schema stays additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_kind: Option<String>,
 }
 
 /// A member of a strongly-connected component.
@@ -825,6 +834,35 @@ pub trait RepoGraphOps: Send + Sync {
         kind_filter: Option<&str>,
         limit: usize,
     ) -> Result<Vec<SearchHit>, String>;
+
+    /// PR B4: hybrid lexical + semantic + structural search via RRF
+    /// fusion (k=60). The bridge implementation orchestrates the three
+    /// signals (lexical = SQL `LIKE` over `code_chunks.embedded_text`,
+    /// semantic = Qdrant cosine over the `code_chunks` collection,
+    /// structural = `search_by_name` against the canonical graph),
+    /// caps each signal at top-3 chunks per file, fuses the resulting
+    /// rankings, and stamps each hit's `match_kind` for debug surfaces.
+    ///
+    /// Default impl falls back to [`Self::search`] so test stubs that
+    /// only care about the structural signal don't have to plumb the
+    /// hybrid pipeline. Production wires this on the server side via
+    /// `RepoGraphBridge` (`server/src/mcp_bridge.rs`).
+    async fn hybrid_search(
+        &self,
+        ctx: &ProjectCtx,
+        query: &str,
+        kind_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>, String> {
+        // Default: degrade to the structural-only path. This keeps the
+        // trait surface backwards-compatible for stubs while letting
+        // production override with the full RRF orchestrator.
+        let mut hits = self.search(ctx, query, kind_filter, limit).await?;
+        for hit in hits.iter_mut() {
+            hit.match_kind = Some("structural".to_string());
+        }
+        Ok(hits)
+    }
 
     /// Strongly-connected components of size >= `min_size`.
     async fn cycles(

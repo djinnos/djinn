@@ -67,7 +67,7 @@ pub(super) fn group_impact_by_file(
     by_file.into_values().collect()
 }
 
-pub(super) fn format_node_key(key: &RepoNodeKey) -> String {
+pub(crate) fn format_node_key(key: &RepoNodeKey) -> String {
     match key {
         RepoNodeKey::File(path) => format!("file:{}", path.display()),
         RepoNodeKey::Symbol(sym) => format!("symbol:{sym}"),

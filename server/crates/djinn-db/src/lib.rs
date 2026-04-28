@@ -28,9 +28,10 @@ pub use repositories::{
     },
     code_chunk::{
         ChunkAndEmbedReport, CodeChunk, CodeChunkEmbeddingProvider, CodeChunkRepairEmbeddingRow,
-        CodeChunkRepository, CodeChunkVectorBackend, CodeChunkVectorStore, EmbeddedCodeChunk,
-        InflightGuard, NoopCodeChunkVectorStore, QdrantCodeChunkConfig,
-        QdrantCodeChunkVectorStore, UpsertCodeChunkEmbedding, chunk_and_embed_files,
+        CodeChunkRepository, CodeChunkSearchHit, CodeChunkVectorBackend, CodeChunkVectorMatch,
+        CodeChunkVectorStore, EmbeddedCodeChunk, InflightGuard, NoopCodeChunkVectorStore,
+        QdrantCodeChunkConfig, QdrantCodeChunkVectorStore, UpsertCodeChunkEmbedding,
+        cap_per_file, chunk_and_embed_files, hydrate_chunk_ids, lexical_search_chunks,
         qdrant_code_chunk_point_id_hex, try_claim_project,
     },
     commit_file_changes::{
@@ -69,9 +70,9 @@ pub use repositories::{
         infer_embedding_branch_from_worktree, infer_note_type, is_singleton,
         lexical_search_threshold, normalize_lexical_score, normalize_virtual_note_path,
         permalink_for, permalink_for_with_status, permalink_from_virtual_note_path,
-        render_note_markdown, sanitize_mysql_boolean_query, sanitize_sqlite_fts5_query, slugify,
-        task_branch_name, title_from_permalink, validate_mysql_fulltext_threshold,
-        virtual_note_path_for_permalink,
+        render_note_markdown, rrf_fuse, sanitize_mysql_boolean_query,
+        sanitize_sqlite_fts5_query, slugify, task_branch_name, title_from_permalink,
+        validate_mysql_fulltext_threshold, virtual_note_path_for_permalink,
     },
     org_config::{NewOrgConfig, OrgConfig, OrgConfigRepository},
     project::{

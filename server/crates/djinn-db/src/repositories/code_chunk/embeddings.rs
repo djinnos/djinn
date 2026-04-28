@@ -35,6 +35,16 @@ pub struct UpsertCodeChunkEmbedding<'a> {
     pub embedding: &'a [f32],
 }
 
+/// One semantic-search match returned by [`CodeChunkVectorStore::query_similar`].
+/// `chunk_id` is the SQL row id (also the Qdrant payload key) — callers join
+/// against `code_chunks` to materialize a full hit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CodeChunkVectorMatch {
+    pub chunk_id: String,
+    /// Cosine similarity in `[-1, 1]`. Larger = better.
+    pub score: f64,
+}
+
 #[async_trait::async_trait]
 pub trait CodeChunkVectorStore: Send + Sync {
     fn backend(&self) -> CodeChunkVectorBackend;
@@ -47,6 +57,24 @@ pub trait CodeChunkVectorStore: Send + Sync {
     /// written). The SQL row is written by the caller (the pipeline)
     /// regardless — keeping the DB authoritative on row presence.
     async fn upsert_vector(&self, input: &UpsertCodeChunkEmbedding<'_>) -> Result<&'static str>;
+
+    /// PR B4: cosine-similarity search against the configured backing
+    /// store, scoped to `project_id` (so a tenant's hits never leak
+    /// across project boundaries). Default impl returns an empty list
+    /// — `NoopCodeChunkVectorStore` doesn't index, so it has nothing
+    /// to retrieve.
+    ///
+    /// Failure modes are logged and folded into an empty result set —
+    /// the hybrid orchestrator treats semantic as a soft signal and
+    /// keeps lexical + structural alive when Qdrant is degraded.
+    async fn query_similar(
+        &self,
+        _project_id: &str,
+        _query_embedding: &[f32],
+        _limit: usize,
+    ) -> Result<Vec<CodeChunkVectorMatch>> {
+        Ok(vec![])
+    }
 }
 
 #[derive(Debug, Default)]
@@ -66,6 +94,17 @@ impl CodeChunkVectorStore for NoopCodeChunkVectorStore {
         // Noop store: nothing to do; the pipeline still records the SQL
         // row but the meta state stays `pending` because no point exists.
         Ok("pending")
+    }
+
+    async fn query_similar(
+        &self,
+        _project_id: &str,
+        _query_embedding: &[f32],
+        _limit: usize,
+    ) -> Result<Vec<CodeChunkVectorMatch>> {
+        // Noop store has no points to retrieve. The hybrid pipeline
+        // tolerates an empty semantic signal.
+        Ok(vec![])
     }
 }
 
@@ -238,6 +277,52 @@ impl QdrantCodeChunkVectorStore {
         }
     }
 
+    /// PR B4: cosine similarity search scoped to one project. Returns
+    /// `(chunk_id, score)` pairs, score in `[-1, 1]` from Qdrant's
+    /// inner-product output (we configured Distance::Cosine on the
+    /// collection).
+    async fn qdrant_query_similar(
+        &self,
+        project_id: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> std::result::Result<Vec<CodeChunkVectorMatch>, String> {
+        use qdrant_client::qdrant::{Condition, Filter, SearchPointsBuilder};
+
+        let limit = u64::try_from(limit).map_err(|_| "search limit exceeds u64".to_owned())?;
+        let client = self.client()?;
+
+        let filter = Filter::must([Condition::matches("project_id", project_id.to_string())]);
+
+        let response = client
+            .search_points(
+                SearchPointsBuilder::new(
+                    &self.config.collection,
+                    query_embedding.to_vec(),
+                    limit,
+                )
+                .filter(filter)
+                .with_payload(true),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+        Ok(response
+            .result
+            .into_iter()
+            .filter_map(|point| {
+                let chunk_id = match point.payload.get("chunk_id").and_then(|v| v.kind.as_ref()) {
+                    Some(qdrant_client::qdrant::value::Kind::StringValue(s)) => s.clone(),
+                    _ => return None,
+                };
+                Some(CodeChunkVectorMatch {
+                    chunk_id,
+                    score: point.score as f64,
+                })
+            })
+            .collect())
+    }
+
     async fn qdrant_upsert(
         &self,
         input: &UpsertCodeChunkEmbedding<'_>,
@@ -303,6 +388,15 @@ impl QdrantCodeChunkVectorStore {
     ) -> std::result::Result<(), String> {
         Err("qdrant support not compiled in; enable the 'qdrant' feature".to_owned())
     }
+
+    async fn qdrant_query_similar(
+        &self,
+        _project_id: &str,
+        _query_embedding: &[f32],
+        _limit: usize,
+    ) -> std::result::Result<Vec<CodeChunkVectorMatch>, String> {
+        Err("qdrant support not compiled in; enable the 'qdrant' feature".to_owned())
+    }
 }
 
 #[async_trait::async_trait]
@@ -343,6 +437,29 @@ impl CodeChunkVectorStore for QdrantCodeChunkVectorStore {
                     "qdrant code-chunk upsert unavailable; meta will stay pending"
                 );
                 Ok("pending")
+            }
+        }
+    }
+
+    async fn query_similar(
+        &self,
+        project_id: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<CodeChunkVectorMatch>> {
+        match self
+            .qdrant_query_similar(project_id, query_embedding, limit)
+            .await
+        {
+            Ok(matches) => Ok(matches),
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    project_id,
+                    collection = %self.config.collection,
+                    "qdrant code-chunk semantic search unavailable; returning empty matches"
+                );
+                Ok(vec![])
             }
         }
     }

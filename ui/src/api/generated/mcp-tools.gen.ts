@@ -429,6 +429,16 @@ export namespace CodeGraphInputSchema {
    */
   min_size?: number
   /**
+   * PR B4: search mode for the `search` op. `"name"` (the legacy
+   * fast path) runs the canonical-graph name index only;
+   * `"hybrid"` blends lexical (`code_chunks` LIKE), semantic
+   * (Qdrant cosine), and structural signals via RRF k=60. The
+   * effective default is read from `DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE`
+   * (defaults to `"name"`); pass an explicit value to override.
+   * Ignored by every other op.
+   */
+  mode?: string
+  /**
    * Optional module-path glob for `api_surface` (filter symbols by
    * `file_path`).
    */

@@ -12,6 +12,7 @@
 pub mod chunker;
 pub mod embeddings;
 pub mod pipeline;
+pub mod search;
 pub mod text_generator;
 
 use crate::database::Database;
@@ -22,12 +23,16 @@ pub use chunker::{
     SymbolChunkKind, SymbolInput, chunk_file,
 };
 pub use embeddings::{
-    CodeChunkVectorBackend, CodeChunkVectorStore, NoopCodeChunkVectorStore, QdrantCodeChunkConfig,
-    QdrantCodeChunkVectorStore, UpsertCodeChunkEmbedding, qdrant_code_chunk_point_id_hex,
+    CodeChunkVectorBackend, CodeChunkVectorMatch, CodeChunkVectorStore, NoopCodeChunkVectorStore,
+    QdrantCodeChunkConfig, QdrantCodeChunkVectorStore, UpsertCodeChunkEmbedding,
+    qdrant_code_chunk_point_id_hex,
 };
 pub use pipeline::{
     ChunkAndEmbedReport, CodeChunkEmbeddingProvider, EmbeddedCodeChunk, InflightGuard,
     chunk_and_embed_files, try_claim_project,
+};
+pub use search::{
+    CodeChunkSearchHit, cap_per_file, hydrate_chunk_ids, lexical_search_chunks,
 };
 pub use text_generator::{EMBEDDING_TEXT_VERSION, RenderInput, content_hash, render_chunk_text};
 

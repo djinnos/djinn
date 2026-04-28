@@ -26,6 +26,7 @@ use djinn_agent::actors::slot::SlotPoolHandle;
 use djinn_agent::lsp::LspManager;
 
 pub(crate) mod graph_neighbors;
+pub(crate) mod hybrid_search;
 
 use self::graph_neighbors::{
     build_method_metadata, build_related_symbol, classify_edge_category, format_node_key,
@@ -515,9 +516,23 @@ impl RepoGraphOps for RepoGraphBridge {
                     display_name: node.display_name.clone(),
                     score: hit.score,
                     file: node.file_path.as_ref().map(|p| p.display().to_string()),
+                    match_kind: None,
                 }
             })
             .collect())
+    }
+
+    async fn hybrid_search(
+        &self,
+        ctx: &ProjectCtx,
+        query: &str,
+        kind_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>, String> {
+        // PR B4: cache-first orchestrator entrypoint. The actual three-
+        // signal RRF fusion lives in `hybrid_search::run` so the
+        // RepoGraphBridge stays thin.
+        self::hybrid_search::run(&self.state, ctx, query, kind_filter, limit).await
     }
 
     async fn cycles(

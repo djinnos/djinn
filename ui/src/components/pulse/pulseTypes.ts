@@ -38,6 +38,16 @@ export interface SearchHit {
   display_name: string;
   score: number;
   file: string | null;
+  /**
+   * PR B4: tags the signal that surfaced this hit when the caller
+   * asked for `mode=hybrid`. One of `"lexical"`, `"semantic"`,
+   * `"structural"`, or `"hybrid"` (when RRF fused the hit across
+   * multiple signals). `null` for the legacy `mode=name` fast path —
+   * old client builds that don't read this field stay backwards-
+   * compatible because the server omits it via
+   * `skip_serializing_if = "Option::is_none"`.
+   */
+  match_kind: string | null;
 }
 
 export interface FileGroupEntry {
@@ -165,6 +175,10 @@ export function parseSearchHits(value: unknown): SearchHit[] {
       display_name: String(r.display_name ?? ""),
       score: Number(r.score ?? 0),
       file: typeof r.file === "string" ? r.file : null,
+      // PR B4: hybrid-mode hits carry a `match_kind` tag for debug
+      // surfaces. Absent on legacy `mode=name` responses → null.
+      match_kind:
+        typeof r.match_kind === "string" ? r.match_kind : null,
     }))
     .filter((r) => r.key.length > 0);
 }
