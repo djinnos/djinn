@@ -36,9 +36,9 @@ pub struct RepoDependencyGraph {
     /// Populated at build time so `search` is O(log N + k).
     name_index: BTreeMap<String, Vec<NodeIndex>>,
     /// Per-file list of symbol-definition enclosing ranges, sorted by
-    /// `start_line`. Populated only when the graph is freshly built from
-    /// parsed SCIP input (see [`RepoDependencyGraph::symbols_enclosing`] for
-    /// the limitation on graphs restored from artifacts).
+    /// `start_line`. Populated by [`RepoDependencyGraph::build`] from parsed
+    /// SCIP input, and round-tripped through the artifact so cache-hit
+    /// reloads via [`RepoDependencyGraph::from_artifact`] retain it.
     symbol_ranges: BTreeMap<PathBuf, Vec<SymbolRange>>,
 }
 
@@ -372,14 +372,6 @@ impl RepoDependencyGraph {
     /// range overlaps `[start_line, end_line]` in `file`.
     ///
     /// Lines are 1-indexed inclusive.
-    ///
-    /// **Limitation**: the sidecar `symbol_ranges` map is populated only when
-    /// the graph is freshly built from parsed SCIP input via
-    /// [`RepoDependencyGraph::build`]. Graphs restored via
-    /// [`RepoDependencyGraph::from_artifact`] — the DB cache-hit path —
-    /// have an empty map because per-occurrence ranges are not persisted in
-    /// the artifact. On a cache hit this method therefore returns an empty
-    /// `Vec` until the next rebuild repopulates the sidecar.
     pub fn symbols_enclosing(
         &self,
         file: &Path,
@@ -893,6 +885,11 @@ fn build_name_index(
 pub struct RepoGraphArtifact {
     pub nodes: Vec<RepoGraphNode>,
     pub edges: Vec<RepoGraphArtifactEdge>,
+    /// Per-file enclosing-range sidecar, keyed by file path. Each range refers
+    /// to a node by its position in `nodes`. Persisting this here is what
+    /// keeps `symbols_enclosing` non-empty after a cache-hit reload.
+    #[serde(default)]
+    pub symbol_ranges: BTreeMap<PathBuf, Vec<RepoGraphArtifactSymbolRange>>,
 }
 
 /// A serializable directed edge between two graph nodes, identified by their
@@ -904,6 +901,15 @@ pub struct RepoGraphArtifactEdge {
     pub kind: RepoGraphEdgeKind,
     pub weight: f64,
     pub evidence_count: usize,
+}
+
+/// A serializable enclosing range for a symbol definition, identified by the
+/// symbol node's position in the parent [`RepoGraphArtifact::nodes`] vec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoGraphArtifactSymbolRange {
+    pub start_line: u32,
+    pub end_line: u32,
+    pub node: usize,
 }
 
 impl RepoDependencyGraph {
@@ -931,7 +937,33 @@ impl RepoDependencyGraph {
             });
         }
 
-        RepoGraphArtifact { nodes, edges }
+        let mut symbol_ranges: BTreeMap<PathBuf, Vec<RepoGraphArtifactSymbolRange>> =
+            BTreeMap::new();
+        for (file, ranges) in &self.symbol_ranges {
+            let mut translated = Vec::with_capacity(ranges.len());
+            for range in ranges {
+                // Skip ranges whose node isn't in the artifact's node table —
+                // shouldn't happen in practice, but guards against bookkeeping
+                // drift between the petgraph and the sidecar.
+                let Some(&node_pos) = index_map.get(&range.node) else {
+                    continue;
+                };
+                translated.push(RepoGraphArtifactSymbolRange {
+                    start_line: range.start_line,
+                    end_line: range.end_line,
+                    node: node_pos,
+                });
+            }
+            if !translated.is_empty() {
+                symbol_ranges.insert(file.clone(), translated);
+            }
+        }
+
+        RepoGraphArtifact {
+            nodes,
+            edges,
+            symbol_ranges,
+        }
     }
 
     /// Rebuild a `RepoDependencyGraph` from a previously persisted artifact.
@@ -959,14 +991,31 @@ impl RepoDependencyGraph {
         }
 
         let name_index = build_name_index(&graph);
+
+        let mut symbol_ranges: BTreeMap<PathBuf, Vec<SymbolRange>> = BTreeMap::new();
+        for (file, ranges) in &artifact.symbol_ranges {
+            let mut translated = Vec::with_capacity(ranges.len());
+            for range in ranges {
+                let Some(&node) = index_map.get(range.node) else {
+                    continue;
+                };
+                translated.push(SymbolRange {
+                    start_line: range.start_line,
+                    end_line: range.end_line,
+                    node,
+                });
+            }
+            translated.sort_by_key(|r| (r.start_line, r.end_line));
+            if !translated.is_empty() {
+                symbol_ranges.insert(file.clone(), translated);
+            }
+        }
+
         RepoDependencyGraph {
             graph,
             node_lookup,
             name_index,
-            // Artifacts do not carry per-occurrence ranges, so the
-            // `symbols_enclosing` sidecar is empty on cache-restore paths;
-            // see that method's doc comment.
-            symbol_ranges: BTreeMap::new(),
+            symbol_ranges,
         }
     }
 
@@ -1037,9 +1086,34 @@ impl RepoDependencyGraph {
             })
             .collect();
 
+        let mut surviving_symbol_ranges: BTreeMap<
+            PathBuf,
+            Vec<RepoGraphArtifactSymbolRange>,
+        > = BTreeMap::new();
+        for (file, ranges) in &artifact.symbol_ranges {
+            if changed_files.contains(file) {
+                continue;
+            }
+            let mut translated = Vec::with_capacity(ranges.len());
+            for range in ranges {
+                let Some(&new_node) = position_map.get(&range.node) else {
+                    continue;
+                };
+                translated.push(RepoGraphArtifactSymbolRange {
+                    start_line: range.start_line,
+                    end_line: range.end_line,
+                    node: new_node,
+                });
+            }
+            if !translated.is_empty() {
+                surviving_symbol_ranges.insert(file.clone(), translated);
+            }
+        }
+
         let filtered_artifact = RepoGraphArtifact {
             nodes: surviving_nodes,
             edges: surviving_edges,
+            symbol_ranges: surviving_symbol_ranges,
         };
 
         // Step 2: Rebuild the base graph from the filtered artifact.
@@ -1050,6 +1124,7 @@ impl RepoDependencyGraph {
         let mut builder = RepoDependencyGraphBuilder {
             graph: base.graph,
             node_lookup: base.node_lookup,
+            symbol_ranges: base.symbol_ranges,
             ..Default::default()
         };
         // Reconstruct declared_symbols and symbol_file from the surviving nodes.
@@ -1408,6 +1483,7 @@ mod tests {
         let empty = RepoGraphArtifact {
             nodes: vec![],
             edges: vec![],
+            symbol_ranges: BTreeMap::new(),
         };
         let json = serde_json::to_string(&empty).expect("serialize empty");
         let restored = RepoDependencyGraph::deserialize_artifact(&json).expect("deserialize empty");
@@ -1915,16 +1991,58 @@ mod tests {
     }
 
     #[test]
-    fn symbols_enclosing_restored_from_artifact_is_empty() {
-        // Ranges are not serialized in the artifact; a cache-restore path
-        // therefore yields an empty map. Documented limitation.
+    fn symbols_enclosing_round_trips_through_artifact() {
+        // PR A1: `symbol_ranges` must be persisted in the artifact so that
+        // `code_graph symbols_at` / `diff_touches` keep working after a
+        // cache-hit reload (DB-restored graph).
         let graph = RepoDependencyGraph::build(&[nested_ranges_fixture()]);
+        let baseline = graph.symbols_enclosing(Path::new("src/lib.rs"), 9, 9);
+        assert!(
+            !baseline.is_empty(),
+            "fixture must produce ranges before round-trip"
+        );
+
         let artifact = graph.to_artifact();
+        assert!(
+            !artifact.symbol_ranges.is_empty(),
+            "artifact must carry symbol_ranges"
+        );
         let restored = RepoDependencyGraph::from_artifact(&artifact);
+
         let hits = restored.symbols_enclosing(Path::new("src/lib.rs"), 9, 9);
         assert!(
-            hits.is_empty(),
-            "artifact-restored graph must yield no range hits"
+            !hits.is_empty(),
+            "artifact-restored graph must preserve enclosing-range hits"
+        );
+
+        let mut names: Vec<_> = hits
+            .iter()
+            .map(|idx| restored.node(*idx).display_name.clone())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "Inner".to_string(),
+                "inner_method".to_string(),
+                "outer".to_string()
+            ],
+            "restored ranges must match the freshly-built graph's hits"
+        );
+    }
+
+    #[test]
+    fn symbol_ranges_round_trip_through_json_artifact() {
+        // Belt-and-suspenders coverage of the JSON path used by
+        // `serialize_artifact` / `deserialize_artifact`, which is what the
+        // cache-hit reload exercises end-to-end.
+        let graph = RepoDependencyGraph::build(&[nested_ranges_fixture()]);
+        let json = graph.serialize_artifact().expect("serialize");
+        let restored = RepoDependencyGraph::deserialize_artifact(&json).expect("deserialize");
+        let hits = restored.symbols_enclosing(Path::new("src/other.rs"), 1, 5);
+        assert!(
+            !hits.is_empty(),
+            "JSON-round-tripped graph must preserve symbol_ranges"
         );
     }
 }
