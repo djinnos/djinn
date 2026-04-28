@@ -378,6 +378,22 @@ impl RepoGraphOps for RepoGraphBridge {
                 if exclusions.excludes(&key, file_hint.as_deref(), &graph_node.display_name) {
                     return None;
                 }
+                // v8: drop test files from `ranked` centrality output.
+                // User feedback: tests with high out-degree (test
+                // files reference many production symbols) dominated
+                // out_degree-sorted rankings without being
+                // "architecturally meaningful". Conservative: only
+                // skips file paths that match the per-language test
+                // convention (`is_test_path`); test SYMBOLS in a
+                // production file pass through. Tests that ARE in
+                // a `tests/` directory or `*_test.go`-named file
+                // also drop their symbol nodes (the file path on the
+                // symbol matches).
+                if let Some(path) = file_hint.as_deref()
+                    && djinn_control_plane::tools::graph_exclusions::is_test_path(path)
+                {
+                    return None;
+                }
                 // PR F4: pick the lowest-ordinal step's process when the
                 // node belongs to multiple — that's the "most upstream"
                 // membership, which makes the bucket label the entry
@@ -678,23 +694,66 @@ impl RepoGraphOps for RepoGraphBridge {
                 ));
             }
         };
-        let nodes = graph.orphans(filter, vis, limit);
-        Ok(nodes
-            .into_iter()
-            .map(|idx| {
-                let node = graph.node(idx);
-                OrphanEntry {
-                    key: format_node_key(&node.id),
-                    kind: format!("{:?}", node.kind).to_lowercase(),
-                    display_name: node.display_name.clone(),
-                    file: node.file_path.as_ref().map(|p| p.display().to_string()),
-                    visibility: node
-                        .visibility
-                        .map(|v| v.as_str().to_string())
-                        .unwrap_or_else(|| "unknown".to_string()),
-                }
-            })
-            .collect())
+        // v8: over-fetch from the graph layer so we can post-filter
+        // entry-points / tests / framework hooks without under-filling
+        // `limit`. Cheap — graph.orphans is O(V) anyway.
+        let raw_nodes = graph.orphans(filter, vis, limit.saturating_mul(4).clamp(limit, 1000));
+        // Pre-collect EntryPointOf incoming-edge targets so we can
+        // skip framework-invoked entry points without re-walking the
+        // graph for each candidate.
+        use djinn_graph::repo_graph::RepoGraphEdgeKind;
+        let mut entry_set: std::collections::HashSet<petgraph::graph::NodeIndex> =
+            std::collections::HashSet::new();
+        for idx in graph.graph().node_indices() {
+            if graph
+                .graph()
+                .edges_directed(idx, petgraph::Direction::Incoming)
+                .any(|e| e.weight().kind == RepoGraphEdgeKind::EntryPointOf)
+            {
+                entry_set.insert(idx);
+            }
+        }
+        let mut out: Vec<OrphanEntry> = Vec::new();
+        for idx in raw_nodes {
+            let node = graph.node(idx);
+            // v8: framework-invoked entry points are not dead code.
+            // The detector covers `fn main`, route handlers, tests,
+            // python `__main__`, etc. via EntryPointOf edges; SCIP-
+            // marked tests via is_test. Defensive name check for
+            // Go's `init()` (often missed by detectors because
+            // every Go file may have one).
+            if entry_set.contains(&idx) || node.is_test {
+                continue;
+            }
+            if matches!(node.display_name.as_str(), "main" | "init" | "_start" | "TestMain") {
+                continue;
+            }
+            // v8: also skip test files (file-path heuristic) — they
+            // legitimately have no incoming production references but
+            // aren't "dead". Symbols inside a test file flagged
+            // is_test handle the symbol case; this catches FILE nodes.
+            if let Some(path) = node.file_path.as_ref()
+                && djinn_control_plane::tools::graph_exclusions::is_test_path(
+                    &path.display().to_string(),
+                )
+            {
+                continue;
+            }
+            out.push(OrphanEntry {
+                key: format_node_key(&node.id),
+                kind: format!("{:?}", node.kind).to_lowercase(),
+                display_name: node.display_name.clone(),
+                file: node.file_path.as_ref().map(|p| p.display().to_string()),
+                visibility: node
+                    .visibility
+                    .map(|v| v.as_str().to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+            });
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     async fn path(
