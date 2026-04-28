@@ -27,9 +27,11 @@ pub use repositories::{
         WindowedRoleMetrics,
     },
     code_chunk::{
-        CodeChunk, CodeChunkRepairEmbeddingRow, CodeChunkRepository, CodeChunkVectorBackend,
-        CodeChunkVectorStore, NoopCodeChunkVectorStore, QdrantCodeChunkConfig,
-        QdrantCodeChunkVectorStore,
+        ChunkAndEmbedReport, CodeChunk, CodeChunkEmbeddingProvider, CodeChunkRepairEmbeddingRow,
+        CodeChunkRepository, CodeChunkVectorBackend, CodeChunkVectorStore, EmbeddedCodeChunk,
+        InflightGuard, NoopCodeChunkVectorStore, QdrantCodeChunkConfig,
+        QdrantCodeChunkVectorStore, UpsertCodeChunkEmbedding, chunk_and_embed_files,
+        qdrant_code_chunk_point_id_hex, try_claim_project,
     },
     commit_file_changes::{
         CommitFileChange, CommitFileChangeRepository, CoupledFile, CoupledPair, CouplingHub,

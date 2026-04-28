@@ -11,6 +11,7 @@
 
 pub mod chunker;
 pub mod embeddings;
+pub mod pipeline;
 pub mod text_generator;
 
 use crate::database::Database;
@@ -22,15 +23,20 @@ pub use chunker::{
 };
 pub use embeddings::{
     CodeChunkVectorBackend, CodeChunkVectorStore, NoopCodeChunkVectorStore, QdrantCodeChunkConfig,
-    QdrantCodeChunkVectorStore,
+    QdrantCodeChunkVectorStore, UpsertCodeChunkEmbedding, qdrant_code_chunk_point_id_hex,
+};
+pub use pipeline::{
+    ChunkAndEmbedReport, CodeChunkEmbeddingProvider, EmbeddedCodeChunk, InflightGuard,
+    chunk_and_embed_files, try_claim_project,
 };
 pub use text_generator::{EMBEDDING_TEXT_VERSION, RenderInput, content_hash, render_chunk_text};
 
 /// Per-chunk state surfaced by [`CodeChunkRepository::list_repair_embedding_rows`].
 /// Mirror of `NoteRepairEmbeddingRow` for the new tables. `content_hash` /
-/// `model_version` are `None` when no `code_chunk_meta` row exists yet
-/// (i.e. the chunk has never been embedded). Filled in by PR B3; the
-/// scaffolding exists today so `repair_embeddings` has a stable shape.
+/// `model_version` / `extension_state` are `None` when no `code_chunk_meta`
+/// row exists yet (i.e. the chunk has never been embedded). Filled in by
+/// PR B3; the scaffolding exists today so `repair_embeddings` has a stable
+/// shape.
 #[derive(Debug, Clone)]
 pub struct CodeChunkRepairEmbeddingRow {
     pub id: String,
@@ -42,6 +48,7 @@ pub struct CodeChunkRepairEmbeddingRow {
     pub embedded_text: String,
     pub meta_content_hash: Option<String>,
     pub meta_model_version: Option<String>,
+    pub meta_extension_state: Option<String>,
 }
 
 /// Thin repository handle for the `code_chunks` / `code_chunk_meta` tables.
@@ -76,7 +83,8 @@ impl CodeChunkRepository {
             r#"SELECT c.id, c.project_id, c.file_path, c.symbol_key, c.kind,
                       c.content_hash, c.embedded_text,
                       m.content_hash AS "meta_content_hash?",
-                      m.model_version AS "meta_model_version?"
+                      m.model_version AS "meta_model_version?",
+                      m.extension_state AS "meta_extension_state?"
                  FROM code_chunks c
             LEFT JOIN code_chunk_meta m ON m.id = c.id
                 WHERE c.project_id = ?"#,
@@ -97,6 +105,7 @@ impl CodeChunkRepository {
                 embedded_text: r.embedded_text,
                 meta_content_hash: r.meta_content_hash,
                 meta_model_version: r.meta_model_version,
+                meta_extension_state: r.meta_extension_state,
             })
             .collect())
     }
@@ -151,13 +160,14 @@ mod tests {
 
         sqlx::query!(
             r#"INSERT INTO code_chunk_meta
-                (id, project_id, content_hash, model_version, embedded_at)
-               VALUES (?, ?, ?, ?, ?)"#,
+                (id, project_id, content_hash, model_version, embedded_at, extension_state)
+               VALUES (?, ?, ?, ?, ?, ?)"#,
             "chunk-1",
             "proj-1",
             "deadbeef",
             "test-model-v1",
             "2026-04-28T00:00:00Z",
+            "ready",
         )
         .execute(db.pool())
         .await
@@ -174,6 +184,7 @@ mod tests {
         assert_eq!(row.content_hash, "deadbeef");
         assert_eq!(row.meta_content_hash.as_deref(), Some("deadbeef"));
         assert_eq!(row.meta_model_version.as_deref(), Some("test-model-v1"));
+        assert_eq!(row.meta_extension_state.as_deref(), Some("ready"));
     }
 
     /// Bootstrap-time idempotency: building two `QdrantCodeChunkVectorStore`s
