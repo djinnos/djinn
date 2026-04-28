@@ -2403,10 +2403,20 @@ fn build_snapshot_payload(
         .map(|&idx| {
             let node = graph.node(idx);
             let pagerank = pagerank_lookup.get(&idx).copied().unwrap_or(0.0);
+            // 2026-04-28: prettify SCIP descriptors at the wire boundary so
+            // external/cross-package symbols (`scip-go gomod ...`) reach the
+            // UI as the trailing identifier (`Context`, `Errorf()`, …)
+            // instead of the raw 100-char descriptor. Pure display names
+            // (already-resolved symbols, file paths) pass through unchanged.
+            // The UI keeps a defensive `prettifyLabel` mirror in case a
+            // future snapshot path forgets to call this — see
+            // `djinn_graph::scip_parser::prettify_scip_descriptor`.
+            let label =
+                djinn_graph::scip_parser::prettify_scip_descriptor(&node.display_name);
             SnapshotNode {
                 id: format_node_key(&node.id),
                 kind: format!("{:?}", node.kind).to_lowercase(),
-                label: node.display_name.clone(),
+                label,
                 symbol_kind: node
                     .symbol_kind
                     .as_ref()

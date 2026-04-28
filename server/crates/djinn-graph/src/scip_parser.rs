@@ -126,6 +126,24 @@ impl Default for ScipSymbol {
     }
 }
 
+/// True for SCIP `local` identifiers (descriptor prefix `local `, e.g.
+/// `local 0`, `local 42`).
+///
+/// SCIP scopes locals per-document, so an index that names a function-internal
+/// variable as `local 0` in `dispatcher.go` and another as `local 0` in
+/// `backfill.go` is referring to two distinct entities. Our graph keys symbols
+/// by their raw SCIP id, which means those distinct entities collapse into a
+/// single super-node and accumulate fan-in across the whole repository.
+///
+/// Locals carry no architectural signal at the project graph level, so the
+/// parser drops them entirely (see [`parse_index`]) and the snapshot/ranking
+/// tier never sees them. This helper centralizes the prefix check so callers
+/// (visibility classification, the parse-time filter, downstream defenses)
+/// stay in sync.
+pub fn is_local_symbol(symbol: &str) -> bool {
+    symbol.starts_with("local ")
+}
+
 /// Symbol visibility, derived from the SCIP symbol identifier shape.
 ///
 /// SCIP 0.7 does not carry a dedicated visibility flag on `SymbolInformation`,
@@ -133,6 +151,12 @@ impl Default for ScipSymbol {
 /// (treated as `Private`); all other global identifiers are reachable across
 /// documents and treated as `Public`. Anything we cannot classify falls back to
 /// `Unknown`.
+///
+/// Locals are filtered out at parse time (see [`is_local_symbol`] and
+/// [`parse_index`]), so in practice the `Private` arm is unreachable for
+/// parser output today; the variant is kept because downstream code
+/// (`mcp_bridge`) accepts user-provided visibility filters that include
+/// `private`, and the API surface stays stable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScipVisibility {
@@ -145,7 +169,7 @@ impl ScipVisibility {
     pub fn from_symbol_identifier(symbol: &str) -> Self {
         if symbol.is_empty() {
             ScipVisibility::Unknown
-        } else if symbol.starts_with("local ") {
+        } else if is_local_symbol(symbol) {
             ScipVisibility::Private
         } else {
             ScipVisibility::Public
@@ -235,16 +259,41 @@ pub fn parse_scip_bytes(bytes: &[u8]) -> Result<ParsedScipIndex> {
 
 fn parse_index(index: Index) -> Result<ParsedScipIndex> {
     let metadata = normalize_metadata(index.metadata.as_ref());
+    let mut dropped_locals: usize = 0;
     let files = index
         .documents
         .into_iter()
-        .map(normalize_document)
+        .map(|doc| normalize_document(doc, &mut dropped_locals))
         .collect::<Result<Vec<_>>>()?;
-    let external_symbols = index
+    let external_symbols_raw = index
         .external_symbols
         .into_iter()
         .map(normalize_symbol)
         .collect::<Result<Vec<_>>>()?;
+    // Drop any external symbols that are SCIP locals. Externals are
+    // expected to be cross-package globals, but indexers occasionally
+    // leak locals into the external set; filter defensively so the
+    // downstream graph builder never sees `symbol:local 0` from any
+    // path.
+    let external_symbols: Vec<ScipSymbol> = external_symbols_raw
+        .into_iter()
+        .filter(|sym| {
+            if is_local_symbol(&sym.symbol) {
+                dropped_locals += 1;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    if dropped_locals > 0 {
+        tracing::info!(
+            target: "djinn_graph::scip_parser",
+            dropped_locals,
+            "filtered SCIP local symbols from parsed index"
+        );
+    }
 
     Ok(ParsedScipIndex {
         metadata,
@@ -271,7 +320,7 @@ fn normalize_metadata(metadata: Option<&Metadata>) -> ScipMetadata {
     }
 }
 
-fn normalize_document(document: Document) -> Result<ScipFile> {
+fn normalize_document(document: Document, dropped_locals: &mut usize) -> Result<ScipFile> {
     if document.relative_path.is_empty() {
         return Err(anyhow!("SCIP document missing relative_path"));
     }
@@ -279,10 +328,24 @@ fn normalize_document(document: Document) -> Result<ScipFile> {
     // scip-go emits some occurrences with an empty range field — e.g.
     // synthetic references to generated code. Skip those rather than failing
     // the entire index parse, matching the tolerance scip-go itself shows.
+    //
+    // Drop SCIP `local` occurrences here too: they get scoped per-document
+    // by the indexer, but our graph keys symbols by raw id, so identical
+    // local indices would otherwise collapse across files (`local 0` in
+    // dispatcher.go and `local 0` in backfill.go become a single super-node
+    // with hundreds of inbound edges). See [`is_local_symbol`].
     let occurrences: Vec<_> = document
         .occurrences
         .into_iter()
         .filter_map(normalize_occurrence)
+        .filter(|occurrence| {
+            if is_local_symbol(&occurrence.symbol) {
+                *dropped_locals += 1;
+                false
+            } else {
+                true
+            }
+        })
         .collect();
 
     let definitions = occurrences
@@ -298,11 +361,26 @@ fn normalize_document(document: Document) -> Result<ScipFile> {
         .cloned()
         .collect();
 
-    let symbols = document
+    // Filter local symbols out of the per-document symbol table. Also strip
+    // any relationship whose target is a local — those would otherwise
+    // generate dangling edges to a node that never gets created.
+    let symbols_raw = document
         .symbols
         .into_iter()
         .map(normalize_symbol)
         .collect::<Result<Vec<_>>>()?;
+    let symbols: Vec<ScipSymbol> = symbols_raw
+        .into_iter()
+        .filter_map(|mut sym| {
+            if is_local_symbol(&sym.symbol) {
+                *dropped_locals += 1;
+                return None;
+            }
+            sym.relationships
+                .retain(|rel| !is_local_symbol(&rel.target_symbol));
+            Some(sym)
+        })
+        .collect();
 
     Ok(ScipFile {
         language: document.language,
@@ -452,6 +530,104 @@ fn last_descriptor_name(symbol: &str) -> Option<String> {
         .rev()
         .find(|descriptor| !descriptor.name.is_empty())
         .map(|descriptor| descriptor.name)
+}
+
+/// Best-effort SCIP-descriptor → human-readable label.
+///
+/// External / cross-package symbols that the parser cannot resolve to a
+/// `display_name` flow through to the snapshot wire as raw SCIP descriptors
+/// (e.g. `scip-go gomod github.com/golang/go/src . context/Context#`). The
+/// UI renders these verbatim, drowning the canvas in 100-character URLs.
+///
+/// SCIP symbol grammar (best-effort):
+/// ```text
+/// <scheme> <manager> <package_name> <package_version> <descriptor>
+/// ```
+/// where `<descriptor>` uses `/` separators and ends with one of:
+///
+/// | Suffix       | Meaning                                  |
+/// |--------------|------------------------------------------|
+/// | `#`          | type                                     |
+/// | `().`        | method                                   |
+/// | `.`          | term / value                             |
+/// | `[]` / `[…]` | typeparam                                |
+///
+/// We extract the trailing identifier of the descriptor (last `/`-separated
+/// segment) and strip the suffix. Backticks are removed before splitting so
+/// quoted package paths like `` `github.com/google/uuid`/UUID# `` collapse
+/// to `UUID`.
+///
+/// Falls back to the original input on any parse mismatch — better to emit
+/// something than nothing. Empty input passes through unchanged.
+///
+/// Mirrors the UI's `prettifyLabel` (in `ui/src/lib/codeGraphAdapter.ts`).
+/// The UI keeps its copy as a defense-in-depth guard; the snapshot wire
+/// should already carry pretty labels post-2026-04-28.
+pub fn prettify_scip_descriptor(raw: &str) -> String {
+    if raw.is_empty() {
+        return String::new();
+    }
+    // Only engage on what looks like a SCIP descriptor — anything else is
+    // likely already a display name and must pass through unchanged.
+    if !is_scip_descriptor_prefix(raw) {
+        return raw.to_string();
+    }
+    let stripped: String = raw.chars().filter(|c| *c != '`').collect();
+    let tokens: Vec<&str> = stripped.split_whitespace().collect();
+    let descriptor = match tokens.last() {
+        Some(d) => *d,
+        None => return raw.to_string(),
+    };
+    // Strip trailing suffix marker(s). Method `().` → `()`; type/term/typeparam
+    // → bare identifier. Order matters: handle `().` before `.` so we don't
+    // accidentally chew off the parens.
+    let tail = if let Some(without_method) = descriptor.strip_suffix("().") {
+        format!("{without_method}()")
+    } else {
+        let mut t = descriptor.to_string();
+        while let Some(last) = t.chars().last() {
+            if matches!(last, '#' | '.' | '[' | ']') {
+                t.pop();
+            } else {
+                break;
+            }
+        }
+        t
+    };
+    // SCIP descriptors nest with two separators: `/` between path-like
+    // namespace segments (`crate/foo/Bar`) and `#` between a parent type
+    // and its member (`Bar#baz()`). The visible label is the deepest leaf —
+    // walk past both.
+    let segments: Vec<&str> = tail
+        .split(|c| c == '/' || c == '#')
+        .filter(|s| !s.is_empty())
+        .collect();
+    match segments.last() {
+        Some(seg) if !seg.is_empty() => seg.to_string(),
+        _ => raw.to_string(),
+    }
+}
+
+/// True when `raw` starts with a SCIP scheme token (`scip-` followed by one
+/// or more identifier chars and a space). Pure-display names like
+/// `internal/repository/jobs.go` slip through unchanged.
+fn is_scip_descriptor_prefix(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    if !raw.starts_with("scip-") || bytes.len() < 6 {
+        return false;
+    }
+    let mut saw_word_char = false;
+    for (i, c) in raw.chars().enumerate().skip(5) {
+        if c == ' ' {
+            return saw_word_char && i > 5;
+        }
+        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            saw_word_char = true;
+            continue;
+        }
+        return false;
+    }
+    false
 }
 
 fn map_symbol_kind(kind: Option<symbol_information::Kind>) -> Option<ScipSymbolKind> {
@@ -675,5 +851,182 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         let _ = fs::remove_file(first);
         let _ = fs::remove_file(second);
+    }
+
+    /// Synthetic SCIP index that mixes a global symbol with several
+    /// per-document `local …` entries. The parser must drop every
+    /// `local` symbol from `symbols`, `definitions`, `references`,
+    /// `occurrences`, and `external_symbols`, AND must strip
+    /// `local`-target relationships off the surviving global so the
+    /// graph builder never sees a dangling local edge.
+    #[test]
+    fn parse_index_filters_scip_local_symbols() {
+        let mut index = Index::new();
+        let mut document = Document::new();
+        document.language = "go".to_string();
+        document.relative_path = "internal/dispatcher.go".to_string();
+        document.occurrences = vec![
+            // Global definition — must survive.
+            Occurrence {
+                range: vec![1, 0, 10],
+                symbol: "scip-go gomod example.com/svc . dispatcher/Run().".to_string(),
+                symbol_roles: 1,
+                ..Occurrence::new()
+            },
+            // Local definition — must be filtered.
+            Occurrence {
+                range: vec![2, 4, 8],
+                symbol: "local 0".to_string(),
+                symbol_roles: 1,
+                ..Occurrence::new()
+            },
+            // Local read — must be filtered.
+            Occurrence {
+                range: vec![3, 8, 11],
+                symbol: "local 0".to_string(),
+                symbol_roles: 8,
+                ..Occurrence::new()
+            },
+            // Reference to a global — must survive.
+            Occurrence {
+                range: vec![4, 4, 9],
+                symbol: "scip-go gomod example.com/svc . dispatcher/helper().".to_string(),
+                symbol_roles: 8,
+                ..Occurrence::new()
+            },
+        ];
+        document.symbols = vec![
+            // Global symbol with relationships — keep, but drop the
+            // local-targeted relationship.
+            SymbolInformation {
+                symbol: "scip-go gomod example.com/svc . dispatcher/Run().".to_string(),
+                display_name: "Run".to_string(),
+                relationships: vec![
+                    Relationship {
+                        symbol: "local 5".to_string(),
+                        is_reference: true,
+                        ..Relationship::new()
+                    },
+                    Relationship {
+                        symbol: "scip-go gomod example.com/svc . dispatcher/helper()."
+                            .to_string(),
+                        is_reference: true,
+                        ..Relationship::new()
+                    },
+                ],
+                kind: EnumOrUnknown::new(symbol_information::Kind::Function),
+                ..SymbolInformation::new()
+            },
+            // Local — must be filtered out of the symbol table.
+            SymbolInformation {
+                symbol: "local 0".to_string(),
+                display_name: "cmd".to_string(),
+                kind: EnumOrUnknown::new(symbol_information::Kind::Variable),
+                ..SymbolInformation::new()
+            },
+        ];
+        index.documents.push(document);
+        // Defensively check the external-symbol filter too: an indexer
+        // that leaks a `local` into the external set must still be
+        // sanitized.
+        index.external_symbols.push(SymbolInformation {
+            symbol: "local 999".to_string(),
+            display_name: "ctx".to_string(),
+            kind: EnumOrUnknown::new(symbol_information::Kind::Variable),
+            ..SymbolInformation::new()
+        });
+        index.external_symbols.push(SymbolInformation {
+            symbol: "scip-go gomod example.com/lib v1.0 lib/Helper#".to_string(),
+            display_name: "Helper".to_string(),
+            kind: EnumOrUnknown::new(symbol_information::Kind::Class),
+            ..SymbolInformation::new()
+        });
+
+        let bytes = index.write_to_bytes().expect("encode fixture index");
+        let parsed = parse_scip_bytes(&bytes).expect("parse synthetic index");
+
+        assert_eq!(parsed.files.len(), 1);
+        let file = &parsed.files[0];
+
+        // No local occurrences anywhere in the file.
+        for bucket_name in ["occurrences", "definitions", "references"] {
+            let bucket: &[ScipOccurrence] = match bucket_name {
+                "occurrences" => &file.occurrences,
+                "definitions" => &file.definitions,
+                "references" => &file.references,
+                _ => unreachable!(),
+            };
+            assert!(
+                bucket.iter().all(|o| !is_local_symbol(&o.symbol)),
+                "{bucket_name} bucket leaked a local: {:?}",
+                bucket
+            );
+        }
+
+        // Symbols must contain only the global `Run` (the local was filtered).
+        assert_eq!(file.symbols.len(), 1, "expected only the global symbol");
+        assert_eq!(file.symbols[0].symbol, "scip-go gomod example.com/svc . dispatcher/Run().");
+        // The local-targeted relationship was stripped — only the global one
+        // survives.
+        assert_eq!(
+            file.symbols[0].relationships.len(),
+            1,
+            "expected exactly one relationship after local-target stripping"
+        );
+        assert_eq!(
+            file.symbols[0].relationships[0].target_symbol,
+            "scip-go gomod example.com/svc . dispatcher/helper()."
+        );
+
+        // External symbols must contain only the global `Helper`.
+        assert_eq!(parsed.external_symbols.len(), 1);
+        assert_eq!(parsed.external_symbols[0].display_name.as_deref(), Some("Helper"));
+    }
+
+    // ── prettify_scip_descriptor (Fix 2) ───────────────────────────────
+
+    #[test]
+    fn prettify_strips_type_descriptor_to_trailing_identifier() {
+        assert_eq!(
+            prettify_scip_descriptor("scip-go gomod github.com/golang/go/src . context/Context#"),
+            "Context"
+        );
+    }
+
+    #[test]
+    fn prettify_strips_method_descriptor_keeping_parens() {
+        assert_eq!(
+            prettify_scip_descriptor("scip-go gomod github.com/golang/go/src . fmt/Errorf()."),
+            "Errorf()"
+        );
+    }
+
+    #[test]
+    fn prettify_handles_backticked_package_paths() {
+        assert_eq!(
+            prettify_scip_descriptor(
+                "scip-go gomod github.com/google/uuid v1.6.0 `github.com/google/uuid`/UUID#"
+            ),
+            "UUID"
+        );
+    }
+
+    #[test]
+    fn prettify_strips_term_descriptor_to_trailing_identifier() {
+        assert_eq!(
+            prettify_scip_descriptor("scip-rust . . . crate/foo/Bar#baz()."),
+            "baz()"
+        );
+    }
+
+    #[test]
+    fn prettify_passes_through_non_scip_inputs() {
+        assert_eq!(prettify_scip_descriptor(""), "");
+        // Plain identifiers and file paths must round-trip unchanged.
+        assert_eq!(prettify_scip_descriptor("Client"), "Client");
+        assert_eq!(
+            prettify_scip_descriptor("internal/repository/jobs.go"),
+            "internal/repository/jobs.go"
+        );
     }
 }
