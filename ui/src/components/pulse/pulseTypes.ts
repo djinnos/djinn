@@ -246,6 +246,103 @@ export function parseNotFound(value: unknown): NotFound | null {
   };
 }
 
+// ── path (PR D6 raw-query FAB) ──────────────────────────────────────────────
+
+/** A single hop in a `code_graph path` result. */
+export interface PathHop {
+  key: string;
+  edge_kind: string;
+}
+
+/**
+ * Result of a `code_graph path` query — the shortest dependency path
+ * between two RepoNodeKeys. Mirrors the Rust `PathResult` struct.
+ *
+ * `length` may be 0 when `from === to` (server still returns a single-hop
+ * payload) and the server returns `null` under the `path` field when the
+ * two nodes are disconnected — handled by the parser by returning `null`.
+ */
+export interface PathResult {
+  from: string;
+  to: string;
+  hops: PathHop[];
+  length: number;
+}
+
+/**
+ * Narrow a `code_graph path` response. The server wraps the result as
+ * `{ path: PathResult | null }`; returns `null` for both the "no path
+ * found" branch and any malformed payload so callers can branch off a
+ * single nullish check.
+ */
+export function parsePath(value: unknown): PathResult | null {
+  if (!isRecord(value)) return null;
+  const inner = (value as Record<string, unknown>).path;
+  if (!isRecord(inner)) return null;
+  const from = String(inner.from ?? "");
+  const to = String(inner.to ?? "");
+  if (from.length === 0 || to.length === 0) return null;
+  const hops = asArray(inner.hops)
+    .filter(isRecord)
+    .map((h) => ({
+      key: String(h.key ?? ""),
+      edge_kind: String(h.edge_kind ?? ""),
+    }))
+    .filter((h) => h.key.length > 0);
+  return {
+    from,
+    to,
+    hops,
+    length: Number(inner.length ?? hops.length),
+  };
+}
+
+// ── impact (detailed; PR D6 raw-query FAB → ImpactFlowModal) ────────────────
+
+/**
+ * Detailed `code_graph impact` payload, narrowed to the shape the
+ * `ImpactFlowModal` (`impactMermaid.ts`) consumes. The server emits
+ * `{ key, impact: [{key, depth, file_path?}], risk?, summary? }`; we
+ * return `null` when the wire body is for a different variant (e.g.
+ * `group_by=file` rolled response with `file_groups`).
+ */
+export function parseImpactDetailed(
+  value: unknown,
+): {
+  key: string;
+  entries: Array<{ key: string; depth: number; display_name?: string }>;
+  risk: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" | null;
+  summary: string | null;
+} | null {
+  if (!isRecord(value)) return null;
+  const key = String((value as Record<string, unknown>).key ?? "");
+  if (key.length === 0) return null;
+  const rawImpact = (value as Record<string, unknown>).impact;
+  if (!Array.isArray(rawImpact)) return null;
+  const entries = rawImpact
+    .filter(isRecord)
+    .map((e) => ({
+      key: String(e.key ?? ""),
+      depth: Number(e.depth ?? 0),
+    }))
+    .filter((e) => e.key.length > 0);
+  const rawRisk = (value as Record<string, unknown>).risk;
+  const risk =
+    rawRisk === "LOW" ||
+    rawRisk === "MEDIUM" ||
+    rawRisk === "HIGH" ||
+    rawRisk === "CRITICAL"
+      ? rawRisk
+      : null;
+  const rawSummary = (value as Record<string, unknown>).summary;
+  return {
+    key,
+    entries,
+    risk,
+    summary: typeof rawSummary === "string" ? rawSummary : null,
+  };
+}
+
 // ── detect_changes (PR C4) ──────────────────────────────────────────────────
 
 export type PagerankTier = "high" | "medium" | "low";
