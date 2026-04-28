@@ -16,7 +16,7 @@ import { ArrowRight01Icon, Copy01Icon, Tick02Icon } from '@hugeicons/core-free-i
 import { HugeiconsIcon } from '@hugeicons/react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useState } from 'react';
-import { CitationText } from './CitationText';
+import { Streamdown } from 'streamdown';
 
 type ToolCallItem = NonNullable<ChatMessage['toolCalls']>[number];
 
@@ -202,15 +202,9 @@ export function ChatMessageBubble({ message }: ChatMessageBubbleProps) {
         {isUser ? (
           <p className="whitespace-pre-wrap break-words">{message.content}</p>
         ) : (
-          // CitationText falls back to a plain Streamdown render when no
-          // [[file:...]] / [[symbol:...]] citations are present, so the
-          // non-cited path is unchanged. When citations *are* present, the
-          // text is segmented and each citation becomes a clickable
-          // `<CitationLink>` that pins the matching node in `/code-graph`.
-          <CitationText
-            text={message.content}
-            className="prose prose-sm max-w-none break-words dark:prose-invert"
-          />
+          <Streamdown className="prose prose-sm max-w-none break-words dark:prose-invert">
+            {message.content}
+          </Streamdown>
         )}
 
         {!isUser && (
