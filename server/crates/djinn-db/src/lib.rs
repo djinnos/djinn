@@ -26,6 +26,11 @@ pub use repositories::{
         AgentUpdateInput, LearnedPromptHistoryEntry, PendingAmendmentEvaluation, VALID_BASE_ROLES,
         WindowedRoleMetrics,
     },
+    code_chunk::{
+        CodeChunk, CodeChunkRepairEmbeddingRow, CodeChunkRepository, CodeChunkVectorBackend,
+        CodeChunkVectorStore, NoopCodeChunkVectorStore, QdrantCodeChunkConfig,
+        QdrantCodeChunkVectorStore,
+    },
     commit_file_changes::{
         CommitFileChange, CommitFileChangeRepository, CoupledFile, CoupledPair, CouplingHub,
         FileChurn,

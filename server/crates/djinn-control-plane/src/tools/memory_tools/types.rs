@@ -202,18 +202,30 @@ pub struct MemoryRepairEmbeddingFailure {
 
 #[derive(Serialize, schemars::JsonSchema, Default)]
 pub struct MemoryRepairEmbeddingsResponse {
+    // Counters are `i64` rather than `usize` so the generated MCP JSON
+    // schema lands on `format: int64` instead of the nonstandard `uint`
+    // pinned by `tool_schemas::mcp_tools_list_schemas_do_not_use_nonstandard_uint_…`.
     /// Total notes scanned for the project.
-    pub total: usize,
+    pub total: i64,
     /// Notes that received a fresh embedding during this run.
-    pub repaired: usize,
+    pub repaired: i64,
     /// Notes whose embedding meta was already current; no work performed.
-    pub up_to_date: usize,
+    pub up_to_date: i64,
     /// Notes whose re-embed attempt failed (Qdrant down, model error, …).
-    pub failed: usize,
+    pub failed: i64,
     /// First-N failures (capped to keep the response small).
     pub failures: Vec<MemoryRepairEmbeddingFailure>,
     /// Top-level failure: project not found, embedding provider unavailable, etc.
     pub error: Option<String>,
+    /// Total code chunks scanned for the project. Always `0` until the
+    /// chunker (PR B2) and embedding pipeline (PR B3) ship.
+    pub code_chunks_total: i64,
+    /// Code chunks that received a fresh embedding during this run.
+    pub code_chunks_repaired: i64,
+    /// Code chunks whose embedding meta was already current.
+    pub code_chunks_up_to_date: i64,
+    /// Code chunks whose re-embed attempt failed.
+    pub code_chunks_failed: i64,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]

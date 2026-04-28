@@ -4185,6 +4185,26 @@ expression: signatures
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "code_chunks_failed": {
+          "description": "Code chunks whose re-embed attempt failed.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "code_chunks_repaired": {
+          "description": "Code chunks that received a fresh embedding during this run.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "code_chunks_total": {
+          "description": "Total code chunks scanned for the project. Always `0` until the\nchunker (PR B2) and embedding pipeline (PR B3) ship.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "code_chunks_up_to_date": {
+          "description": "Code chunks whose embedding meta was already current.",
+          "format": "int64",
+          "type": "integer"
+        },
         "error": {
           "description": "Top-level failure: project not found, embedding provider unavailable, etc.",
           "nullable": true,
@@ -4192,8 +4212,7 @@ expression: signatures
         },
         "failed": {
           "description": "Notes whose re-embed attempt failed (Qdrant down, model error, …).",
-          "format": "uint",
-          "minimum": 0,
+          "format": "int64",
           "type": "integer"
         },
         "failures": {
@@ -4205,20 +4224,17 @@ expression: signatures
         },
         "repaired": {
           "description": "Notes that received a fresh embedding during this run.",
-          "format": "uint",
-          "minimum": 0,
+          "format": "int64",
           "type": "integer"
         },
         "total": {
           "description": "Total notes scanned for the project.",
-          "format": "uint",
-          "minimum": 0,
+          "format": "int64",
           "type": "integer"
         },
         "up_to_date": {
           "description": "Notes whose embedding meta was already current; no work performed.",
-          "format": "uint",
-          "minimum": 0,
+          "format": "int64",
           "type": "integer"
         }
       },
@@ -4227,7 +4243,11 @@ expression: signatures
         "repaired",
         "up_to_date",
         "failed",
-        "failures"
+        "failures",
+        "code_chunks_total",
+        "code_chunks_repaired",
+        "code_chunks_up_to_date",
+        "code_chunks_failed"
       ],
       "title": "MemoryRepairEmbeddingsResponse",
       "type": "object"
