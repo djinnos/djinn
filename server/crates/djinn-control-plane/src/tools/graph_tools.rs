@@ -161,17 +161,23 @@ pub struct NeighborsResponse {
     pub neighbors: Option<Vec<GraphNeighbor>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_groups: Option<Vec<FileGroupEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct RankedResponse {
     pub nodes: Vec<RankedNode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ImplementationsResponse {
     pub symbol: String,
     pub implementations: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 // See NeighborsResponse above — same flatten-on-sequence bug. Impact emits
@@ -183,43 +189,59 @@ pub struct ImpactResponse {
     pub impact: Option<Vec<ImpactEntry>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_groups: Option<Vec<FileGroupEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SearchResponse {
     pub query: String,
     pub hits: Vec<SearchHit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CyclesResponse {
     pub cycles: Vec<CycleGroup>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct OrphansResponse {
     pub orphans: Vec<OrphanEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct PathResponse {
     pub path: Option<PathResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct EdgesResponse {
     pub edges: Vec<EdgeEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DescribeResponse {
     pub description: Option<SymbolDescription>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct StatusResponse {
     #[serde(flatten)]
     pub status: GraphStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 /// Response for the `symbols_at` op — the queried file and every symbol
@@ -228,6 +250,8 @@ pub struct StatusResponse {
 pub struct SymbolsAtResponse {
     pub file: String,
     pub hits: Vec<SymbolAtHit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 /// Response for the `diff_touches` op — touched-symbol rollup plus the
@@ -237,24 +261,32 @@ pub struct DiffTouchesResponse {
     pub touched_symbols: Vec<TouchedSymbol>,
     pub affected_files: Vec<String>,
     pub unknown_files: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 /// Response for the `api_surface` op.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ApiSurfaceResponse {
     pub symbols: Vec<ApiSurfaceEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 /// Response for the `boundary_check` op.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct BoundaryCheckResponse {
     pub violations: Vec<BoundaryViolation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 /// Response for the `hotspots` op.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct HotspotsResponse {
     pub hotspots: Vec<HotspotEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 /// Response for the `metrics_at` op.
@@ -262,24 +294,32 @@ pub struct HotspotsResponse {
 pub struct MetricsAtResponse {
     #[serde(flatten)]
     pub metrics: MetricsAtResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 /// Response for the `dead_symbols` op.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DeadSymbolsResponse {
     pub symbols: Vec<DeadSymbolEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 /// Response for the `deprecated_callers` op.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DeprecatedCallersResponse {
     pub hits: Vec<DeprecatedHit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 /// Response for the `touches_hot_path` op.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct TouchesHotPathResponse {
     pub hits: Vec<HotPathHit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 /// Response for the `coupling` op.
@@ -287,12 +327,16 @@ pub struct TouchesHotPathResponse {
 pub struct CouplingResponse {
     pub file: String,
     pub coupled: Vec<CouplingEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 /// Response for the `churn` op.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ChurnResponse {
     pub files: Vec<ChurnEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 /// Response for the `coupling_hotspots` op — top file pairs ranked by
@@ -300,6 +344,8 @@ pub struct ChurnResponse {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CouplingHotspotsResponse {
     pub pairs: Vec<CoupledPairEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 /// Response for the `coupling_hubs` op — files by cumulative coupling
@@ -307,6 +353,8 @@ pub struct CouplingHotspotsResponse {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CouplingHubsResponse {
     pub hubs: Vec<CouplingHubEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -336,6 +384,106 @@ pub enum CodeGraphResponse {
     Churn(ChurnResponse),
     CouplingHotspots(CouplingHotspotsResponse),
     CouplingHubs(CouplingHubsResponse),
+}
+
+// ── Next-step hints ─────────────────────────────────────────────────────────────
+
+const FALLBACK_NEXT_STEP: &str =
+    "Use `code_graph status` to inspect the current graph state.";
+
+/// Returns whether next-step hints should be appended. Toggled via the
+/// `DJINN_CODE_GRAPH_NEXT_STEP_HINTS` env var; default is `true` (only
+/// `0` / `false` / `off` / `no` suppress).
+fn next_step_hints_enabled() -> bool {
+    match std::env::var("DJINN_CODE_GRAPH_NEXT_STEP_HINTS") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        Err(_) => true,
+    }
+}
+
+/// Pick the right hint for the operation and write it into the response
+/// envelope. Returns the populated hint string for telemetry.
+///
+/// The 5 op-specific hints come from the PR A4 plan; everything else
+/// gets [`FALLBACK_NEXT_STEP`] so the contract "every response carries
+/// a non-empty `next_step`" holds.
+fn attach_next_step_hint(op: &str, response: &mut CodeGraphResponse) -> String {
+    let hint = compute_next_step_hint(op, response);
+    set_next_step_hint(response, hint.clone());
+    tracing::debug!(
+        op,
+        hint = hint.as_str(),
+        "code_graph: next_step_hint emitted"
+    );
+    hint
+}
+
+fn compute_next_step_hint(op: &str, response: &CodeGraphResponse) -> String {
+    match (op, response) {
+        ("search", CodeGraphResponse::Search(s)) => match s.hits.first() {
+            Some(hit) => format!(
+                "Call `code_graph context name={}` to see full incoming/outgoing.",
+                hit.display_name
+            ),
+            None => FALLBACK_NEXT_STEP.to_string(),
+        },
+        // PR C1 introduces a dedicated `context` op; until then map onto
+        // the existing `describe` arm so the hint chain still nudges the
+        // agent toward the impact view.
+        ("context" | "describe", _) => {
+            "Call `code_graph impact target=<symbol>` to see blast radius.".to_string()
+        }
+        ("ranked", CodeGraphResponse::Ranked(_)) => {
+            "Files at top of PageRank are likely entry points; explore with `context`."
+                .to_string()
+        }
+        ("cycles", CodeGraphResponse::Cycles(_)) => {
+            "Each cycle entry is a tuple of mutually-reaching nodes; resolve with `path`."
+                .to_string()
+        }
+        // C3 introduces a `risk` field on ImpactDetailed. Until that
+        // ships we cannot gate on HIGH/CRITICAL, so we emit the generic
+        // hint for `impact`. Post-C3 this arm should branch on risk.
+        ("impact", CodeGraphResponse::Impact(_)) => FALLBACK_NEXT_STEP.to_string(),
+        _ => FALLBACK_NEXT_STEP.to_string(),
+    }
+}
+
+fn set_next_step_hint(response: &mut CodeGraphResponse, hint: String) {
+    let slot = next_step_slot(response);
+    *slot = Some(hint);
+}
+
+fn next_step_slot(response: &mut CodeGraphResponse) -> &mut Option<String> {
+    match response {
+        CodeGraphResponse::Neighbors(r) => &mut r.next_step,
+        CodeGraphResponse::Ranked(r) => &mut r.next_step,
+        CodeGraphResponse::Implementations(r) => &mut r.next_step,
+        CodeGraphResponse::Impact(r) => &mut r.next_step,
+        CodeGraphResponse::Search(r) => &mut r.next_step,
+        CodeGraphResponse::Cycles(r) => &mut r.next_step,
+        CodeGraphResponse::Orphans(r) => &mut r.next_step,
+        CodeGraphResponse::Path(r) => &mut r.next_step,
+        CodeGraphResponse::Edges(r) => &mut r.next_step,
+        CodeGraphResponse::Describe(r) => &mut r.next_step,
+        CodeGraphResponse::Status(r) => &mut r.next_step,
+        CodeGraphResponse::SymbolsAt(r) => &mut r.next_step,
+        CodeGraphResponse::DiffTouches(r) => &mut r.next_step,
+        CodeGraphResponse::ApiSurface(r) => &mut r.next_step,
+        CodeGraphResponse::BoundaryCheck(r) => &mut r.next_step,
+        CodeGraphResponse::Hotspots(r) => &mut r.next_step,
+        CodeGraphResponse::MetricsAt(r) => &mut r.next_step,
+        CodeGraphResponse::DeadSymbols(r) => &mut r.next_step,
+        CodeGraphResponse::DeprecatedCallers(r) => &mut r.next_step,
+        CodeGraphResponse::TouchesHotPath(r) => &mut r.next_step,
+        CodeGraphResponse::Coupling(r) => &mut r.next_step,
+        CodeGraphResponse::Churn(r) => &mut r.next_step,
+        CodeGraphResponse::CouplingHotspots(r) => &mut r.next_step,
+        CodeGraphResponse::CouplingHubs(r) => &mut r.next_step,
+    }
 }
 
 // ── Validation ──────────────────────────────────────────────────────────────────
@@ -538,7 +686,12 @@ impl DjinnMcpServer {
         };
 
         Json(match result {
-            Ok(response) => ErrorOr::Ok(response),
+            Ok(mut response) => {
+                if next_step_hints_enabled() {
+                    attach_next_step_hint(params.operation.as_str(), &mut response);
+                }
+                ErrorOr::Ok(response)
+            }
             Err(error) => ErrorOr::Error(ErrorResponse { error }),
         })
     }
@@ -611,6 +764,7 @@ impl DjinnMcpServer {
             key: key.to_string(),
             neighbors,
             file_groups,
+            next_step: None,
         }))
     }
 
@@ -647,7 +801,10 @@ impl DjinnMcpServer {
             .collect();
         // The bridge already returns ranked-order; `filter` preserves it.
         nodes.truncate(limit);
-        Ok(CodeGraphResponse::Ranked(RankedResponse { nodes }))
+        Ok(CodeGraphResponse::Ranked(RankedResponse {
+            nodes,
+            next_step: None,
+        }))
     }
 
     async fn code_graph_implementations(
@@ -665,6 +822,7 @@ impl DjinnMcpServer {
             ImplementationsResponse {
                 symbol: key.to_string(),
                 implementations,
+                next_step: None,
             },
         ))
     }
@@ -701,6 +859,7 @@ impl DjinnMcpServer {
             key: key.to_string(),
             impact,
             file_groups,
+            next_step: None,
         }))
     }
 
@@ -734,6 +893,7 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::Search(SearchResponse {
             query: query.to_string(),
             hits,
+            next_step: None,
         }))
     }
 
@@ -777,7 +937,10 @@ impl DjinnMcpServer {
                 }
             })
             .collect();
-        Ok(CodeGraphResponse::Cycles(CyclesResponse { cycles }))
+        Ok(CodeGraphResponse::Cycles(CyclesResponse {
+            cycles,
+            next_step: None,
+        }))
     }
 
     async fn code_graph_orphans(
@@ -807,7 +970,10 @@ impl DjinnMcpServer {
             })
             .take(limit)
             .collect();
-        Ok(CodeGraphResponse::Orphans(OrphansResponse { orphans }))
+        Ok(CodeGraphResponse::Orphans(OrphansResponse {
+            orphans,
+            next_step: None,
+        }))
     }
 
     async fn code_graph_path(
@@ -822,7 +988,10 @@ impl DjinnMcpServer {
             .repo_graph()
             .path(ctx, from, to, max_depth)
             .await?;
-        Ok(CodeGraphResponse::Path(PathResponse { path }))
+        Ok(CodeGraphResponse::Path(PathResponse {
+            path,
+            next_step: None,
+        }))
     }
 
     async fn code_graph_edges(
@@ -860,7 +1029,10 @@ impl DjinnMcpServer {
             })
             .take(limit)
             .collect();
-        Ok(CodeGraphResponse::Edges(EdgesResponse { edges }))
+        Ok(CodeGraphResponse::Edges(EdgesResponse {
+            edges,
+            next_step: None,
+        }))
     }
 
     async fn code_graph_describe(
@@ -876,6 +1048,7 @@ impl DjinnMcpServer {
             .await?;
         Ok(CodeGraphResponse::Describe(DescribeResponse {
             description,
+            next_step: None,
         }))
     }
 
@@ -885,7 +1058,10 @@ impl DjinnMcpServer {
         _params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         let status = self.state.repo_graph().status(ctx).await?;
-        Ok(CodeGraphResponse::Status(StatusResponse { status }))
+        Ok(CodeGraphResponse::Status(StatusResponse {
+            status,
+            next_step: None,
+        }))
     }
 
     /// Handler for `operation = "symbols_at"`.
@@ -919,6 +1095,7 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::SymbolsAt(SymbolsAtResponse {
             file: file.to_string(),
             hits,
+            next_step: None,
         }))
     }
 
@@ -961,6 +1138,7 @@ impl DjinnMcpServer {
             touched_symbols,
             affected_files: result.affected_files,
             unknown_files: result.unknown_files,
+            next_step: None,
         }))
     }
 
@@ -994,6 +1172,7 @@ impl DjinnMcpServer {
             .collect();
         Ok(CodeGraphResponse::ApiSurface(ApiSurfaceResponse {
             symbols,
+            next_step: None,
         }))
     }
 
@@ -1022,6 +1201,7 @@ impl DjinnMcpServer {
             .await?;
         Ok(CodeGraphResponse::BoundaryCheck(BoundaryCheckResponse {
             violations,
+            next_step: None,
         }))
     }
 
@@ -1045,7 +1225,10 @@ impl DjinnMcpServer {
                 limit,
             )
             .await?;
-        Ok(CodeGraphResponse::Hotspots(HotspotsResponse { hotspots }))
+        Ok(CodeGraphResponse::Hotspots(HotspotsResponse {
+            hotspots,
+            next_step: None,
+        }))
     }
 
     /// Handler for `operation = "metrics_at"`.
@@ -1059,7 +1242,10 @@ impl DjinnMcpServer {
             .repo_graph()
             .metrics_at(ctx)
             .await?;
-        Ok(CodeGraphResponse::MetricsAt(MetricsAtResponse { metrics }))
+        Ok(CodeGraphResponse::MetricsAt(MetricsAtResponse {
+            metrics,
+            next_step: None,
+        }))
     }
 
     /// Handler for `operation = "dead_symbols"`.
@@ -1082,6 +1268,7 @@ impl DjinnMcpServer {
             .await?;
         Ok(CodeGraphResponse::DeadSymbols(DeadSymbolsResponse {
             symbols,
+            next_step: None,
         }))
     }
 
@@ -1098,7 +1285,10 @@ impl DjinnMcpServer {
             .deprecated_callers(ctx, limit)
             .await?;
         Ok(CodeGraphResponse::DeprecatedCallers(
-            DeprecatedCallersResponse { hits },
+            DeprecatedCallersResponse {
+                hits,
+                next_step: None,
+            },
         ))
     }
 
@@ -1133,6 +1323,7 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::Coupling(CouplingResponse {
             file: file.to_string(),
             coupled,
+            next_step: None,
         }))
     }
 
@@ -1164,7 +1355,10 @@ impl DjinnMcpServer {
             .take(limit)
             .collect();
         Ok(CodeGraphResponse::CouplingHotspots(
-            CouplingHotspotsResponse { pairs },
+            CouplingHotspotsResponse {
+                pairs,
+                next_step: None,
+            },
         ))
     }
 
@@ -1195,6 +1389,7 @@ impl DjinnMcpServer {
             .collect();
         Ok(CodeGraphResponse::CouplingHubs(CouplingHubsResponse {
             hubs,
+            next_step: None,
         }))
     }
 
@@ -1214,7 +1409,10 @@ impl DjinnMcpServer {
             .repo_graph()
             .churn(ctx, limit, since_days_u32)
             .await?;
-        Ok(CodeGraphResponse::Churn(ChurnResponse { files }))
+        Ok(CodeGraphResponse::Churn(ChurnResponse {
+            files,
+            next_step: None,
+        }))
     }
 
     /// Handler for `operation = "touches_hot_path"`.
@@ -1251,6 +1449,7 @@ impl DjinnMcpServer {
             .await?;
         Ok(CodeGraphResponse::TouchesHotPath(TouchesHotPathResponse {
             hits,
+            next_step: None,
         }))
     }
 }
@@ -1680,5 +1879,253 @@ mod tests {
         assert_eq!(ranges[1].file, "src/b.rs");
         assert_eq!(ranges[1].start_line, 5);
         assert!(ranges[1].end_line.is_none());
+    }
+
+    // ── Next-step hint tests (PR A4) ────────────────────────────────────────
+
+    fn search_with_top_hit(name: &str) -> CodeGraphResponse {
+        CodeGraphResponse::Search(SearchResponse {
+            query: "auth".to_string(),
+            hits: vec![SearchHit {
+                key: format!("scip-rust . . . {name}#"),
+                kind: "function".to_string(),
+                display_name: name.to_string(),
+                score: 0.9,
+                file: Some("src/auth.rs".to_string()),
+            }],
+            next_step: None,
+        })
+    }
+
+    fn empty_search() -> CodeGraphResponse {
+        CodeGraphResponse::Search(SearchResponse {
+            query: "auth".to_string(),
+            hits: vec![],
+            next_step: None,
+        })
+    }
+
+    fn empty_ranked() -> CodeGraphResponse {
+        CodeGraphResponse::Ranked(RankedResponse {
+            nodes: vec![],
+            next_step: None,
+        })
+    }
+
+    fn empty_cycles() -> CodeGraphResponse {
+        CodeGraphResponse::Cycles(CyclesResponse {
+            cycles: vec![],
+            next_step: None,
+        })
+    }
+
+    fn empty_impact() -> CodeGraphResponse {
+        CodeGraphResponse::Impact(ImpactResponse {
+            key: "Foo".to_string(),
+            impact: Some(vec![]),
+            file_groups: None,
+            next_step: None,
+        })
+    }
+
+    fn empty_describe() -> CodeGraphResponse {
+        CodeGraphResponse::Describe(DescribeResponse {
+            description: None,
+            next_step: None,
+        })
+    }
+
+    fn empty_orphans() -> CodeGraphResponse {
+        CodeGraphResponse::Orphans(OrphansResponse {
+            orphans: vec![],
+            next_step: None,
+        })
+    }
+
+    /// Reads the `next_step` slot regardless of variant.
+    fn read_next_step(response: &CodeGraphResponse) -> Option<&str> {
+        match response {
+            CodeGraphResponse::Neighbors(r) => r.next_step.as_deref(),
+            CodeGraphResponse::Ranked(r) => r.next_step.as_deref(),
+            CodeGraphResponse::Implementations(r) => r.next_step.as_deref(),
+            CodeGraphResponse::Impact(r) => r.next_step.as_deref(),
+            CodeGraphResponse::Search(r) => r.next_step.as_deref(),
+            CodeGraphResponse::Cycles(r) => r.next_step.as_deref(),
+            CodeGraphResponse::Orphans(r) => r.next_step.as_deref(),
+            CodeGraphResponse::Path(r) => r.next_step.as_deref(),
+            CodeGraphResponse::Edges(r) => r.next_step.as_deref(),
+            CodeGraphResponse::Describe(r) => r.next_step.as_deref(),
+            CodeGraphResponse::Status(r) => r.next_step.as_deref(),
+            CodeGraphResponse::SymbolsAt(r) => r.next_step.as_deref(),
+            CodeGraphResponse::DiffTouches(r) => r.next_step.as_deref(),
+            CodeGraphResponse::ApiSurface(r) => r.next_step.as_deref(),
+            CodeGraphResponse::BoundaryCheck(r) => r.next_step.as_deref(),
+            CodeGraphResponse::Hotspots(r) => r.next_step.as_deref(),
+            CodeGraphResponse::MetricsAt(r) => r.next_step.as_deref(),
+            CodeGraphResponse::DeadSymbols(r) => r.next_step.as_deref(),
+            CodeGraphResponse::DeprecatedCallers(r) => r.next_step.as_deref(),
+            CodeGraphResponse::TouchesHotPath(r) => r.next_step.as_deref(),
+            CodeGraphResponse::Coupling(r) => r.next_step.as_deref(),
+            CodeGraphResponse::Churn(r) => r.next_step.as_deref(),
+            CodeGraphResponse::CouplingHotspots(r) => r.next_step.as_deref(),
+            CodeGraphResponse::CouplingHubs(r) => r.next_step.as_deref(),
+        }
+    }
+
+    #[test]
+    fn search_hint_uses_top_hit_display_name() {
+        let mut response = search_with_top_hit("authenticate_user");
+        attach_next_step_hint("search", &mut response);
+        let hint = read_next_step(&response).expect("hint set");
+        assert!(
+            hint.contains("authenticate_user"),
+            "hint should reference top hit name: {hint}"
+        );
+        assert!(hint.contains("code_graph context"), "hint: {hint}");
+    }
+
+    #[test]
+    fn search_hint_falls_back_when_no_hits() {
+        let mut response = empty_search();
+        attach_next_step_hint("search", &mut response);
+        let hint = read_next_step(&response).expect("hint set");
+        assert_eq!(hint, FALLBACK_NEXT_STEP);
+    }
+
+    #[test]
+    fn ranked_hint_mentions_pagerank() {
+        let mut response = empty_ranked();
+        attach_next_step_hint("ranked", &mut response);
+        let hint = read_next_step(&response).expect("hint set");
+        assert!(hint.contains("PageRank"), "hint: {hint}");
+        assert!(hint.contains("context"), "hint: {hint}");
+    }
+
+    #[test]
+    fn cycles_hint_mentions_path() {
+        let mut response = empty_cycles();
+        attach_next_step_hint("cycles", &mut response);
+        let hint = read_next_step(&response).expect("hint set");
+        assert!(hint.contains("path"), "hint: {hint}");
+    }
+
+    #[test]
+    fn impact_hint_uses_fallback_pre_c3() {
+        // Pre-C3: no risk field on ImpactResponse, so we emit the
+        // generic hint. Once C3 lands, this test must shift to
+        // exercising the HIGH/CRITICAL branch.
+        let mut response = empty_impact();
+        attach_next_step_hint("impact", &mut response);
+        let hint = read_next_step(&response).expect("hint set");
+        assert_eq!(hint, FALLBACK_NEXT_STEP);
+    }
+
+    #[test]
+    fn context_hint_points_to_impact() {
+        let mut response = empty_describe();
+        attach_next_step_hint("context", &mut response);
+        let hint = read_next_step(&response).expect("hint set");
+        assert!(hint.contains("impact"), "hint: {hint}");
+    }
+
+    #[test]
+    fn describe_hint_points_to_impact_until_c1() {
+        let mut response = empty_describe();
+        attach_next_step_hint("describe", &mut response);
+        let hint = read_next_step(&response).expect("hint set");
+        assert!(hint.contains("impact"), "hint: {hint}");
+    }
+
+    #[test]
+    fn unknown_op_gets_fallback_hint() {
+        let mut response = empty_orphans();
+        attach_next_step_hint("orphans", &mut response);
+        let hint = read_next_step(&response).expect("hint set");
+        assert_eq!(hint, FALLBACK_NEXT_STEP);
+    }
+
+    #[test]
+    fn next_step_hint_always_non_empty() {
+        // Plan acceptance criterion: every code_graph.* op response
+        // ends with a non-empty `next_step` field.
+        let cases: Vec<(&str, CodeGraphResponse)> = vec![
+            ("search", empty_search()),
+            ("ranked", empty_ranked()),
+            ("cycles", empty_cycles()),
+            ("impact", empty_impact()),
+            ("orphans", empty_orphans()),
+            ("describe", empty_describe()),
+            ("metrics_at", CodeGraphResponse::MetricsAt(MetricsAtResponse {
+                metrics: MetricsAtResult {
+                    commit: "abc123".to_string(),
+                    node_count: 0,
+                    edge_count: 0,
+                    cycle_count: 0,
+                    cycles_by_size_histogram: Default::default(),
+                    god_object_count: 0,
+                    orphan_count: 0,
+                    public_api_count: 0,
+                    doc_coverage_pct: 0.0,
+                },
+                next_step: None,
+            })),
+        ];
+        for (op, mut response) in cases {
+            attach_next_step_hint(op, &mut response);
+            let hint = read_next_step(&response).unwrap_or("");
+            assert!(!hint.is_empty(), "op={op} produced empty hint");
+        }
+    }
+
+    #[test]
+    fn search_response_serializes_next_step() {
+        let mut response = search_with_top_hit("login");
+        attach_next_step_hint("search", &mut response);
+        let json = serde_json::to_value(&response).expect("serialize");
+        let next_step = json.get("next_step").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            next_step.contains("login"),
+            "serialized next_step missing top hit: {json}"
+        );
+        // Untagged-enum discriminator field stays intact.
+        assert!(json.get("hits").is_some(), "discriminator dropped: {json}");
+    }
+
+    #[test]
+    fn next_step_omitted_when_none_via_skip_serializing() {
+        // When the hint is not attached the field is `None` and the
+        // serde `skip_serializing_if` rule keeps it out of the wire
+        // payload entirely — important so the additive change
+        // doesn't pollute every existing snapshot.
+        let response = empty_ranked();
+        let json = serde_json::to_value(&response).expect("serialize");
+        assert!(
+            json.get("next_step").is_none(),
+            "next_step should be omitted when None: {json}"
+        );
+    }
+
+    #[test]
+    fn flag_disabled_suppresses_emission_path() {
+        // Direct env-var test: setting the flag to "0" must short-circuit
+        // the dispatcher's `next_step_hints_enabled()` gate. Use a unique
+        // value-restore to keep this hermetic across other tests in the
+        // module that read the same env var.
+        let prev = std::env::var("DJINN_CODE_GRAPH_NEXT_STEP_HINTS").ok();
+        // SAFETY: the test binary is single-threaded for env mutations
+        // here; cargo runs each `#[test]` in its own thread but env is
+        // process-global. The matched `prev` restore at the end keeps
+        // the test idempotent for the assertion we care about: when
+        // *we* set "0", the helper returns false.
+        unsafe {
+            std::env::set_var("DJINN_CODE_GRAPH_NEXT_STEP_HINTS", "0");
+        }
+        assert!(!next_step_hints_enabled());
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("DJINN_CODE_GRAPH_NEXT_STEP_HINTS", v),
+                None => std::env::remove_var("DJINN_CODE_GRAPH_NEXT_STEP_HINTS"),
+            }
+        }
     }
 }
