@@ -73,17 +73,26 @@ export function parseSnapshotResponse(value: unknown): SnapshotPayload | null {
     total_edges: Number(inner.total_edges ?? edges.length),
     node_cap: Number(inner.node_cap ?? nodes.length),
     nodes: nodes
-      .map((n) => ({
-        id: String(n.id ?? ""),
-        kind: normalizeKind(n.kind),
-        label: String(n.label ?? ""),
-        symbol_kind:
-          typeof n.symbol_kind === "string" ? n.symbol_kind : undefined,
-        file_path: typeof n.file_path === "string" ? n.file_path : undefined,
-        pagerank: Number(n.pagerank ?? 0),
-        community_id:
-          typeof n.community_id === "string" ? n.community_id : undefined,
-      }))
+      .map((n) => {
+        const kind = normalizeKind(n.kind);
+        const rawLabel = String(n.label ?? "");
+        const rawSymbolKind =
+          typeof n.symbol_kind === "string" ? n.symbol_kind : null;
+        return {
+          id: String(n.id ?? ""),
+          kind,
+          label: prettifyLabel(rawLabel),
+          symbol_kind:
+            kind === "symbol"
+              ? (rawSymbolKind ?? "other")
+              : (rawSymbolKind ?? undefined),
+          file_path:
+            typeof n.file_path === "string" ? n.file_path : undefined,
+          pagerank: Number(n.pagerank ?? 0),
+          community_id:
+            typeof n.community_id === "string" ? n.community_id : undefined,
+        };
+      })
       .filter((n) => n.id.length > 0),
     edges: edges
       .map((e) => ({
@@ -104,6 +113,37 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function normalizeKind(value: unknown): SnapshotNodeKind {
   if (value === "folder" || value === "file" || value === "symbol") return value;
   return "symbol";
+}
+
+/**
+ * Strip SCIP descriptors down to the human-readable trailing identifier.
+ *
+ * The server occasionally surfaces external/cross-package symbols with
+ * the raw SCIP descriptor as the label, e.g.
+ *   `scip-go gomod github.com/golang/go/src . context/Context#`
+ * Sigma renders these verbatim and the canvas drowns in 100-char URLs.
+ *
+ * SCIP grammar (best-effort): `<scheme> <manager> <pkg> <version> <descriptor>`
+ * where the descriptor uses `/` as a path separator and one of the suffixes
+ * `#` (type), `().` (method), `.` (term), `[]` (typeparam) on the final segment.
+ *
+ * We pull the last `/`-separated segment of the descriptor and strip the
+ * SCIP suffix. Falls back to the original on any parse mismatch — better
+ * to render something than nothing.
+ */
+const SCIP_LABEL_RE = /^scip-\w+\s/;
+
+export function prettifyLabel(raw: string): string {
+  if (!raw) return raw;
+  if (!SCIP_LABEL_RE.test(raw)) return raw;
+  const stripped = raw.replace(/`/g, "");
+  const tokens = stripped.split(/\s+/);
+  const descriptor = tokens[tokens.length - 1] ?? raw;
+  const tail = descriptor
+    .replace(/\(\)\.$/, "()")
+    .replace(/[#.[\]]+$/, "");
+  const segments = tail.split("/").filter((s) => s.length > 0);
+  return segments.length > 0 ? segments[segments.length - 1] : raw;
 }
 
 // ── Mass scaling ────────────────────────────────────────────────────────────

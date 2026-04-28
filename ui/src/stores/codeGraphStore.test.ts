@@ -27,11 +27,18 @@ describe("codeGraphStore", () => {
       expect(state.blastRadiusFrontier.size).toBe(0);
     });
 
-    it("starts with non-noisy edge kinds enabled and SymbolReference/MemberOf off", () => {
+    it("ships only the high-signal semantic spine on by default", () => {
       const filters = useCodeGraphStore.getState().edgeKindFilters;
+      const noisy = new Set([
+        "ContainsDefinition",
+        "DeclaredInFile",
+        "FileReference",
+        "SymbolReference",
+        "Reads",
+        "MemberOf",
+      ]);
       for (const kind of EDGE_KINDS) {
-        const expected = !(kind === "SymbolReference" || kind === "MemberOf");
-        expect(filters[kind]).toBe(expected);
+        expect(filters[kind]).toBe(!noisy.has(kind));
       }
     });
 
@@ -42,12 +49,14 @@ describe("codeGraphStore", () => {
       expect(filters.symbol).toBe(true);
     });
 
-    it("starts with noisy symbol kinds (variable/import) hidden", () => {
+    it("starts with noisy symbol kinds (variable/import/field/other) hidden", () => {
       const filters = useCodeGraphStore.getState().symbolKindFilters;
       expect(filters.function).toBe(true);
       expect(filters.class).toBe(true);
       expect(filters.variable).toBe(false);
       expect(filters.import).toBe(false);
+      expect(filters.field).toBe(false);
+      expect(filters.other).toBe(false);
     });
 
     it("starts at the default (max) depth", () => {
@@ -124,10 +133,10 @@ describe("codeGraphStore", () => {
 
   describe("edgeKindFilters", () => {
     it("toggleEdgeKind flips a kind on/off", () => {
-      useCodeGraphStore.getState().toggleEdgeKind("Reads");
-      expect(useCodeGraphStore.getState().edgeKindFilters.Reads).toBe(false);
-      useCodeGraphStore.getState().toggleEdgeKind("Reads");
-      expect(useCodeGraphStore.getState().edgeKindFilters.Reads).toBe(true);
+      useCodeGraphStore.getState().toggleEdgeKind("Implements");
+      expect(useCodeGraphStore.getState().edgeKindFilters.Implements).toBe(false);
+      useCodeGraphStore.getState().toggleEdgeKind("Implements");
+      expect(useCodeGraphStore.getState().edgeKindFilters.Implements).toBe(true);
     });
 
     it("toggleEdgeKind treats missing keys as enabled", () => {
@@ -171,7 +180,7 @@ describe("codeGraphStore", () => {
       s.setToolHighlight(["b"]);
       s.setBlastRadiusFrontier(["c"]);
       s.setHover("foo");
-      s.toggleEdgeKind("Reads");
+      s.toggleEdgeKind("Implements");
       s.setDepthFilter(1);
 
       useCodeGraphStore.getState().reset();
@@ -182,7 +191,9 @@ describe("codeGraphStore", () => {
       expect(after.toolHighlightIds.size).toBe(0);
       expect(after.blastRadiusFrontier.size).toBe(0);
       expect(after.depthFilter).toBe(DEFAULT_DEPTH);
-      expect(after.edgeKindFilters.Reads).toBe(true);
+      expect(after.edgeKindFilters.Implements).toBe(true);
+      expect(after.edgeKindFilters.Reads).toBe(false);
+      expect(after.edgeKindFilters.FileReference).toBe(false);
     });
   });
 });

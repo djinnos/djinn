@@ -46,9 +46,20 @@ export const EDGE_KINDS = [
 
 export type EdgeKind = (typeof EDGE_KINDS)[number];
 
-/** Edges that ship OFF — too dense to render at full repo scale. */
+/**
+ * Edges that ship OFF. The default view shows only the *semantic spine*
+ * (Implements, Extends, Defines, TypeDefines, EntryPointOf, Writes,
+ * StepInProcess) — everything else is firehose noise on a 12k-node repo
+ * (FileReference alone is ~33% of edges, Contains/Declared are
+ * inverse duplicates of each other at ~23% each, Reads is per-query
+ * useful but globally meaningless). User toggles on demand.
+ */
 const NOISY_EDGE_KINDS: ReadonlySet<string> = new Set([
+  "ContainsDefinition",
+  "DeclaredInFile",
+  "FileReference",
   "SymbolReference",
+  "Reads",
   "MemberOf",
 ]);
 
@@ -60,7 +71,12 @@ const NOISY_EDGE_KINDS: ReadonlySet<string> = new Set([
 export const NODE_KINDS = ["folder", "file", "symbol"] as const;
 export type NodeKind = (typeof NODE_KINDS)[number];
 
-/** Symbol-level filter. Mirrors GitNexus's DEFAULT_VISIBLE_LABELS. */
+/**
+ * Symbol-level filter. `other` catches every symbol the SCIP indexer
+ * left without a recognized kind — in practice that's the
+ * `symbol:local N` bucket (function-locals like `ctx`, `args`, `logger`)
+ * which dominate in volume but carry no architectural signal.
+ */
 export const SYMBOL_KIND_FILTERS = [
   "class",
   "struct",
@@ -71,11 +87,14 @@ export const SYMBOL_KIND_FILTERS = [
   "method",
   "constructor",
   "impl",
+  "type",
+  "field",
   "variable",
   "const",
   "static",
   "property",
   "import",
+  "other",
 ] as const;
 export type SymbolKindFilter = (typeof SYMBOL_KIND_FILTERS)[number];
 
@@ -86,6 +105,8 @@ const NOISY_SYMBOL_KINDS: ReadonlySet<string> = new Set([
   "static",
   "property",
   "import",
+  "field",
+  "other",
 ]);
 
 export const MIN_DEPTH = 1;

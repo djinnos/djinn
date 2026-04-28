@@ -56,11 +56,14 @@ const SYMBOL_KIND_LABEL: Record<string, string> = {
   method: "Method",
   constructor: "Ctor",
   impl: "Impl",
+  type: "Type",
+  field: "Field",
   variable: "Var",
   const: "Const",
   static: "Static",
   property: "Prop",
   import: "Import",
+  other: "Other",
 };
 
 interface GraphToolbarProps {

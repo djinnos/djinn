@@ -7,6 +7,7 @@ import {
   edgeStyleFor,
   massForNode,
   parseSnapshotResponse,
+  prettifyLabel,
   type SnapshotNode,
   type SnapshotPayload,
 } from "@/lib/codeGraphAdapter";
@@ -104,6 +105,26 @@ describe("parseSnapshotResponse", () => {
     expect(parsed?.edges).toHaveLength(3);
   });
 
+  it("coerces null symbol_kind on symbol nodes to 'other' so the filter catches them", () => {
+    const wire = {
+      snapshot: {
+        ...fixtureSnapshot,
+        nodes: [
+          {
+            id: "symbol:scip-go gomod github.com/golang/go/src . context/Context#",
+            kind: "symbol",
+            label: "scip-go gomod github.com/golang/go/src . context/Context#",
+            symbol_kind: null,
+            pagerank: 0.1,
+          },
+        ],
+      },
+    };
+    const parsed = parseSnapshotResponse(wire);
+    expect(parsed?.nodes[0]?.symbol_kind).toBe("other");
+    expect(parsed?.nodes[0]?.label).toBe("Context");
+  });
+
   it("preserves community_id on nodes when present", () => {
     const wire = {
       snapshot: {
@@ -118,6 +139,46 @@ describe("parseSnapshotResponse", () => {
     };
     const parsed = parseSnapshotResponse(wire);
     expect(parsed?.nodes[0]?.community_id).toBe("cluster-7");
+  });
+});
+
+describe("prettifyLabel", () => {
+  it("passes through plain identifiers", () => {
+    expect(prettifyLabel("Client")).toBe("Client");
+    expect(prettifyLabel("internal/repository/jobs.go")).toBe(
+      "internal/repository/jobs.go",
+    );
+  });
+
+  it("strips a SCIP type descriptor down to the type name", () => {
+    expect(
+      prettifyLabel(
+        "scip-go gomod github.com/golang/go/src . context/Context#",
+      ),
+    ).toBe("Context");
+  });
+
+  it("strips a SCIP method descriptor and keeps the parens", () => {
+    expect(
+      prettifyLabel(
+        "scip-go gomod github.com/golang/go/src . fmt/Errorf().",
+      ),
+    ).toBe("Errorf()");
+  });
+
+  it("handles backticked package paths", () => {
+    expect(
+      prettifyLabel(
+        "scip-go gomod github.com/google/uuid v1.6.0 `github.com/google/uuid`/UUID#",
+      ),
+    ).toBe("UUID");
+  });
+
+  it("returns the original on any parse mismatch", () => {
+    expect(prettifyLabel("")).toBe("");
+    // Trailing whitespace is preserved by `split` — fine, this code path only
+    // fires on real SCIP descriptors which always carry a non-empty descriptor.
+    expect(prettifyLabel("scip-go ")).toBe("scip-go ");
   });
 });
 
