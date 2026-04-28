@@ -256,6 +256,18 @@ impl RepoGraphOps for RepoGraphBridge {
         // queries — same as ranked / search / cycles / impact / dead.
         let exclusions = self.state.mcp_state_graph_exclusions(&ctx.id).await;
         let node_index = resolve_node_or_err(&graph, key)?;
+        // v8: pre-compute the queried node's identity so we can filter
+        // out self-referential neighbors. User feedback: querying a
+        // file's outgoing neighbors returns the file itself (because
+        // the file's own symbols reach back via DeclaredInFile/
+        // FileReference) — same file path as the source, no useful
+        // signal. Same for a symbol whose declaring file shows up.
+        let self_node = graph.node(node_index);
+        let self_key = format_node_key(&self_node.id);
+        let self_file = self_node
+            .file_path
+            .as_ref()
+            .map(|p| p.display().to_string());
         let directions: Vec<Direction> = match direction {
             Some("incoming") => vec![Direction::Incoming],
             Some("outgoing") => vec![Direction::Outgoing],
@@ -302,6 +314,23 @@ impl RepoGraphOps for RepoGraphBridge {
                     .as_ref()
                     .map(|p| p.display().to_string());
                 if exclusions.excludes(&other_key, other_file.as_deref(), &other_node.display_name)
+                {
+                    continue;
+                }
+                // v8: drop self-references. Two flavours:
+                //   1. Other node IS the queried node (rare — would
+                //      require a self-loop edge).
+                //   2. Other node lives in the SAME file as the queried
+                //      node (very common: querying file:foo.rs returns
+                //      its own symbols via FileReference; querying a
+                //      symbol returns its declaring file via
+                //      DeclaredInFile, which is the same file the
+                //      symbol lives in).
+                if other_index == node_index || other_key == self_key {
+                    continue;
+                }
+                if let (Some(sf), Some(of)) = (self_file.as_deref(), other_file.as_deref())
+                    && sf == of
                 {
                     continue;
                 }
