@@ -16,10 +16,10 @@ use djinn_control_plane::bridge::{
     DetectedChangesResult, DetectedTouchedSymbol, DiffTouchesResult, EdgeCategory, EdgeEntry,
     GitOps, GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry, ImpactEntry, ImpactResult,
     LspOps, LspWarning, MetricsAtResult, ModelPoolStatus, NeighborsResult, OrphanEntry,
-    PagerankTier, PathHop, PathResult, PoolStatus, ProjectCtx, RankedNode, RelatedSymbol,
-    RepoGraphOps, ResolveOutcome, RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding,
-    SlotPoolOps, SnapshotEdge, SnapshotNode, SnapshotPayload, SymbolAtHit, SymbolContext,
-    SymbolDescription, SymbolNode, TouchedSymbol,
+    PagerankTier, PathHop, PathResult, PoolStatus, ProcessRef, ProjectCtx, RankedNode,
+    RelatedSymbol, RepoGraphOps, ResolveOutcome, RunningTaskInfo, RuntimeOps, SearchHit,
+    SemanticQueryEmbedding, SlotPoolOps, SnapshotEdge, SnapshotNode, SnapshotPayload,
+    SymbolAtHit, SymbolContext, SymbolDescription, SymbolNode, TouchedSymbol,
 };
 use petgraph::visit::EdgeRef;
 use djinn_agent::actors::coordinator::CoordinatorHandle;
@@ -865,11 +865,26 @@ impl RepoGraphOps for RepoGraphBridge {
             method_metadata,
         };
 
+        // PR F2: populate process memberships from the per-graph
+        // sidecar. Empty when process detection is disabled
+        // (`DJINN_PROCESS_DETECTION=false`), when the cached artifact
+        // pre-dates v4, or when the queried node doesn't appear in
+        // any traced flow.
+        let processes: Vec<ProcessRef> = graph
+            .processes_for_node(node_index)
+            .into_iter()
+            .map(|p| ProcessRef {
+                id: p.id.clone(),
+                label: p.label.clone(),
+                role: "step".to_string(),
+            })
+            .collect();
+
         Ok(Some(SymbolContext {
             symbol,
             incoming,
             outgoing,
-            processes: Vec::new(),
+            processes,
         }))
     }
 
@@ -3357,6 +3372,7 @@ pub(crate) mod graph_bridge_tests {
             evidence_count: 1,
             confidence: 0.9,
             reason: None,
+            step: None,
         };
         let mk_node = |kind: Option<ScipSymbolKind>| djinn_graph::repo_graph::RepoGraphNode {
             id: djinn_graph::repo_graph::RepoNodeKey::Symbol("x".into()),
@@ -3602,6 +3618,135 @@ pub(crate) mod graph_bridge_tests {
     }
 
     #[test]
+    fn context_emits_processes_for_step_node_pr_f2() {
+        // Build a 5-symbol linear chain (`main → a → b → c → d`) so the
+        // F2 process detector emits one process. Then assert that the
+        // C1 context-op-style construction populates the `processes`
+        // field on a node that's a step in that flow.
+        use djinn_graph::repo_graph::*;
+        use djinn_graph::scip_parser::*;
+        use std::collections::BTreeSet;
+        use std::path::PathBuf;
+
+        fn def_occ(symbol: &str) -> ScipOccurrence {
+            ScipOccurrence {
+                symbol: symbol.to_string(),
+                range: ScipRange {
+                    start_line: 0,
+                    start_character: 0,
+                    end_line: 0,
+                    end_character: 4,
+                },
+                enclosing_range: None,
+                roles: BTreeSet::from([ScipSymbolRole::Definition]),
+                syntax_kind: None,
+                override_documentation: vec![],
+            }
+        }
+        fn ref_occ(symbol: &str) -> ScipOccurrence {
+            ScipOccurrence {
+                symbol: symbol.to_string(),
+                range: ScipRange {
+                    start_line: 0,
+                    start_character: 0,
+                    end_line: 0,
+                    end_character: 4,
+                },
+                enclosing_range: None,
+                roles: BTreeSet::new(),
+                syntax_kind: None,
+                override_documentation: vec![],
+            }
+        }
+        fn rust_function(symbol: &str, name: &str) -> ScipSymbol {
+            ScipSymbol {
+                symbol: symbol.to_string(),
+                kind: Some(ScipSymbolKind::Function),
+                display_name: Some(name.to_string()),
+                signature: Some(format!("fn {name}()")),
+                documentation: vec![],
+                relationships: vec![],
+                visibility: Some(ScipVisibility::Public),
+                signature_parts: None,
+            }
+        }
+
+        let main_sym = "scip-rust pkg src/main.rs `main`().";
+        let a_sym = "scip-rust pkg src/a.rs `a`().";
+        let b_sym = "scip-rust pkg src/b.rs `b`().";
+
+        let parsed = ParsedScipIndex {
+            metadata: ScipMetadata::default(),
+            files: vec![
+                ScipFile {
+                    language: "rust".into(),
+                    relative_path: PathBuf::from("src/main.rs"),
+                    definitions: vec![def_occ(main_sym)],
+                    references: vec![ref_occ(a_sym)],
+                    occurrences: vec![],
+                    symbols: vec![rust_function(main_sym, "main")],
+                },
+                ScipFile {
+                    language: "rust".into(),
+                    relative_path: PathBuf::from("src/a.rs"),
+                    definitions: vec![def_occ(a_sym)],
+                    references: vec![ref_occ(b_sym)],
+                    occurrences: vec![],
+                    symbols: vec![rust_function(a_sym, "a")],
+                },
+                ScipFile {
+                    language: "rust".into(),
+                    relative_path: PathBuf::from("src/b.rs"),
+                    definitions: vec![def_occ(b_sym)],
+                    references: vec![],
+                    occurrences: vec![],
+                    symbols: vec![rust_function(b_sym, "b")],
+                },
+            ],
+            external_symbols: vec![],
+        };
+        let graph = RepoDependencyGraph::build(&[parsed]);
+
+        // Sanity: the detector ran and produced at least one process.
+        assert!(
+            !graph.processes().is_empty(),
+            "linear chain should produce a process; got {:?}",
+            graph.processes()
+        );
+
+        // The `b` symbol is a step in the `main` process.
+        let b_idx = graph
+            .symbol_node(b_sym)
+            .expect("b symbol should be in the graph");
+        let memberships = graph.processes_for_node(b_idx);
+        assert!(
+            !memberships.is_empty(),
+            "node `b` must have process memberships"
+        );
+
+        // Mirror the wire-shape construction the bridge does.
+        let process_refs: Vec<ProcessRef> = memberships
+            .iter()
+            .map(|p| ProcessRef {
+                id: p.id.clone(),
+                label: p.label.clone(),
+                role: "step".to_string(),
+            })
+            .collect();
+        assert!(
+            process_refs.iter().any(|r| r.role == "step"),
+            "every process_ref must carry role=\"step\""
+        );
+        assert!(
+            process_refs
+                .iter()
+                .any(|r| r.label.contains("main") && r.label.contains("process")),
+            "expected a process labeled `\"main process\"`: {:?}",
+            process_refs.iter().map(|r| &r.label).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn context_method_metadata_none_when_signature_parts_absent_pr_c1() {
         // SCIP 0.7 ships only the markdown signature blob, so
         // `signature_parts` is None on every fixture. Per the plan
@@ -3716,14 +3861,18 @@ pub(crate) mod graph_bridge_tests {
         );
 
         // Every node must carry the canonical RepoNodeKey prefix.
+        // PR F2 added a third kind, `process`, for synthetic
+        // execution-flow nodes.
         for node in &payload.nodes {
             assert!(
-                node.id.starts_with("file:") || node.id.starts_with("symbol:"),
+                node.id.starts_with("file:")
+                    || node.id.starts_with("symbol:")
+                    || node.id.starts_with("process:"),
                 "node id missing prefix: {}",
                 node.id
             );
             assert!(
-                matches!(node.kind.as_str(), "file" | "symbol"),
+                matches!(node.kind.as_str(), "file" | "symbol" | "process"),
                 "unexpected node.kind {}",
                 node.kind
             );
@@ -3865,6 +4014,7 @@ pub(crate) mod graph_bridge_tests {
             evidence_count: 1,
             confidence: 0.9,
             reason: None,
+            step: None,
         };
         // Two tight triangles + a thin bridge between clusters.
         let mut edges = vec![
@@ -3892,6 +4042,7 @@ pub(crate) mod graph_bridge_tests {
             edges,
             symbol_ranges: std::collections::BTreeMap::new(),
             communities: vec![],
+            processes: vec![],
         };
         // `from_artifact` does NOT run community detection (it
         // restores the persisted sidecar — empty here). To exercise

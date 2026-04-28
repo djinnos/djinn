@@ -25,6 +25,7 @@ pub mod entry_points;
 pub mod git_diff;
 pub mod index_tree;
 pub mod process;
+pub mod processes;
 pub mod repo_graph;
 pub mod scip_indexer;
 pub mod scip_parser;

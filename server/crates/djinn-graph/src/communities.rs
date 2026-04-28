@@ -416,6 +416,10 @@ fn format_member_uid(key: &RepoNodeKey) -> String {
     match key {
         RepoNodeKey::File(p) => format!("file:{}", p.display()),
         RepoNodeKey::Symbol(s) => format!("symbol:{s}"),
+        // Synthetic process nodes (PR F2) shouldn't normally appear in a
+        // community member list — they're added post-detection — but
+        // surface a stable uid if one slips through.
+        RepoNodeKey::Process(id) => format!("process:{id}"),
     }
 }
 
@@ -495,6 +499,9 @@ fn derive_keywords(graph: &RepoDependencyGraph, members: &[usize], top_k: usize)
                 .as_ref()
                 .and_then(|p| p.file_stem().and_then(|s| s.to_str().map(str::to_string)))
                 .unwrap_or_else(|| node.display_name.clone()),
+            // Synthetic process nodes (PR F2) shouldn't normally appear
+            // here, but fall back to the label if one does.
+            RepoGraphNodeKind::Process => node.display_name.clone(),
         };
         let mut seen: BTreeSet<String> = BTreeSet::new();
         for token in tokenize_identifier(&raw) {
@@ -608,6 +615,7 @@ mod tests {
             evidence_count: 1,
             confidence: 0.9,
             reason: None,
+            step: None,
         };
         let edges = vec![
             // auth cluster: 0 ↔ 1, 1 ↔ 2, 0 ↔ 2 (triangle, heavy)
@@ -635,6 +643,7 @@ mod tests {
             edges,
             symbol_ranges: BTreeMap::new(),
             communities: Vec::new(),
+            processes: Vec::new(),
         };
         RepoDependencyGraph::from_artifact(&artifact)
     }
@@ -648,6 +657,7 @@ mod tests {
             edges: vec![],
             symbol_ranges: BTreeMap::new(),
             communities: Vec::new(),
+            processes: Vec::new(),
         };
         let graph = RepoDependencyGraph::from_artifact(&artifact);
         assert!(detect_communities(&graph).is_empty());

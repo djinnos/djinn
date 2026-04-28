@@ -411,6 +411,7 @@ mod tests {
             evidence_count: 1,
             confidence: 0.9,
             reason: None,
+            step: None,
         };
         let edges = vec![
             // auth: tight triangle
@@ -438,6 +439,7 @@ mod tests {
             edges,
             symbol_ranges: BTreeMap::new(),
             communities: Vec::new(),
+            processes: Vec::new(),
         };
         RepoDependencyGraph::from_artifact(&artifact)
     }

@@ -23,6 +23,11 @@ pub(super) fn group_neighbors_by_file(
             .unwrap_or_else(|| match &node.id {
                 RepoNodeKey::File(p) => p.display().to_string(),
                 RepoNodeKey::Symbol(s) => s.clone(),
+                // PR F2: synthetic process nodes carry no file path;
+                // bucket them under a synthetic "<process>" label so
+                // file-grouped views can still render them without
+                // panicking.
+                RepoNodeKey::Process(_) => "<process>".to_string(),
             });
         let entry = by_file.entry(file_label.clone()).or_insert(FileGroupEntry {
             file: file_label,
@@ -71,6 +76,10 @@ pub(crate) fn format_node_key(key: &RepoNodeKey) -> String {
     match key {
         RepoNodeKey::File(path) => format!("file:{}", path.display()),
         RepoNodeKey::Symbol(sym) => format!("symbol:{sym}"),
+        // PR F2: synthetic process nodes get a `process:<id>` uid so
+        // callers can round-trip them through the same key channel as
+        // file/symbol nodes.
+        RepoNodeKey::Process(id) => format!("process:{id}"),
     }
 }
 
@@ -110,6 +119,9 @@ fn ambiguity_enabled() -> bool {
 fn kind_label(node: &RepoGraphNode) -> String {
     match node.kind {
         RepoGraphNodeKind::File => "file".to_string(),
+        // PR F2: synthetic process nodes carry the kind label
+        // `"process"` so the UI / chooser can branch on it.
+        RepoGraphNodeKind::Process => "process".to_string(),
         RepoGraphNodeKind::Symbol => match &node.symbol_kind {
             Some(ScipSymbolKind::Type) => "class".to_string(),
             Some(ScipSymbolKind::Struct) => "struct".to_string(),
@@ -166,6 +178,9 @@ fn file_path_substring_match(node: &RepoGraphNode, query: &str) -> f64 {
         .or_else(|| match &node.id {
             RepoNodeKey::File(p) => Some(p.display().to_string()),
             RepoNodeKey::Symbol(_) => None,
+            // PR F2: process nodes carry no file affinity — refuse to
+            // contribute to file-path scoring.
+            RepoNodeKey::Process(_) => None,
         });
     match candidate_path {
         Some(path) if path.to_lowercase().contains(&q) => 1.0,
@@ -215,6 +230,8 @@ fn build_candidate(node: &RepoGraphNode, score: f64) -> Candidate {
         .unwrap_or_else(|| match &node.id {
             RepoNodeKey::File(p) => p.display().to_string(),
             RepoNodeKey::Symbol(_) => String::new(),
+            // PR F2: synthetic process nodes have no file_path.
+            RepoNodeKey::Process(_) => String::new(),
         });
     Candidate {
         uid,
@@ -388,6 +405,11 @@ pub(super) fn classify_edge_category(
         // category — consumers asking "who imports/calls X" should
         // not see community membership in their answers.
         RepoGraphEdgeKind::MemberOf => EdgeCategory::References,
+        // PR F2: `StepInProcess` is the synthetic process-membership
+        // edge. Symbols receive these as incoming from a `Process`
+        // node; expose under its own category so UI groupers can
+        // separate process membership from real calls / references.
+        RepoGraphEdgeKind::StepInProcess => EdgeCategory::Process,
     }
 }
 
@@ -413,6 +435,8 @@ pub(super) fn build_related_symbol(node: &RepoGraphNode, confidence: f64) -> Rel
         .or_else(|| match &node.id {
             RepoNodeKey::File(p) => Some(p.display().to_string()),
             RepoNodeKey::Symbol(_) => None,
+            // PR F2: synthetic process nodes have no file affinity.
+            RepoNodeKey::Process(_) => None,
         });
     RelatedSymbol {
         uid: format_node_key(&node.id),
