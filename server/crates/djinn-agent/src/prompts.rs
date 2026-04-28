@@ -97,6 +97,16 @@ pub struct TaskContext {
     /// the task has no resolvable scope-path symbols. Capped at 2000 chars
     /// via `truncate::smart_truncate`.
     pub code_graph_context: Option<String>,
+
+    // ── Reviewer diff context (PR E3) ────────────────────────────────────
+    /// Auto-injected `code_graph detect_changes` summary for reviewer roles.
+    /// One bullet per touched symbol with `impact`-derived risk + direct
+    /// caller / module counts; sorted CRITICAL → HIGH → MEDIUM → LOW. `None`
+    /// when the reviewer role is not in the `DJINN_AUTO_CODE_CONTEXT_ROLES`
+    /// allowlist, when no base/head SHAs could be resolved, or when the
+    /// detected change set is empty. Capped at 2000 chars via
+    /// `truncate::smart_truncate`.
+    pub reviewer_diff_context: Option<String>,
 }
 
 // ─── Renderer ─────────────────────────────────────────────────────────────────
@@ -208,6 +218,19 @@ pub(crate) fn render_prompt_for_role(
     out = out.replace(
         "{{code_graph_context_section}}",
         &code_graph_context_section,
+    );
+
+    // PR E3: auto-injected `code_graph detect_changes` summary for reviewer
+    // roles. Emits an empty string when `None` so reviewer prompts that
+    // don't have base/head SHAs (or aren't in the allowlist) don't show a
+    // dangling section header.
+    let reviewer_diff_context_section = match &ctx.reviewer_diff_context {
+        Some(text) if !text.trim().is_empty() => format!("## Changed Symbols\n\n{text}\n"),
+        _ => String::new(),
+    };
+    out = out.replace(
+        "{{reviewer_diff_context_section}}",
+        &reviewer_diff_context_section,
     );
 
     let planner_patrol_context_section = match &ctx.planner_patrol_context {
@@ -477,6 +500,7 @@ mod tests {
             knowledge_context: None,
             planner_patrol_context: None,
             code_graph_context: None,
+            reviewer_diff_context: None,
         }
     }
 
@@ -516,6 +540,46 @@ mod tests {
         // Reviewer uses AC state for verdict.
         assert!(prompt.contains("task_update"));
         assert!(!prompt.contains("{{"));
+    }
+
+    #[test]
+    fn reviewer_prompt_renders_diff_context_section_when_present() {
+        let task = make_task();
+        let ctx = TaskContext {
+            reviewer_diff_context: Some(
+                "## Changed symbols (HIGH risk first)\n\n- `foo::bar` (HIGH risk, 12 direct callers, 3 modules)\n  - file: src/foo.rs"
+                    .into(),
+            ),
+            ..make_ctx()
+        };
+        let prompt = render_prompt(AgentType::Reviewer, &task, &ctx);
+
+        assert!(
+            prompt.contains("## Changed Symbols"),
+            "reviewer prompt should include the Changed Symbols section heading"
+        );
+        assert!(
+            prompt.contains("`foo::bar` (HIGH risk, 12 direct callers, 3 modules)"),
+            "reviewer prompt should include the diff bullet body"
+        );
+        assert!(
+            !prompt.contains("{{reviewer_diff_context_section}}"),
+            "slot should be substituted"
+        );
+        assert!(!prompt.contains("{{"));
+    }
+
+    #[test]
+    fn reviewer_prompt_omits_diff_context_section_when_absent() {
+        let task = make_task();
+        let ctx = make_ctx(); // reviewer_diff_context: None
+        let prompt = render_prompt(AgentType::Reviewer, &task, &ctx);
+
+        assert!(
+            !prompt.contains("## Changed Symbols"),
+            "reviewer prompt should not include the Changed Symbols section when absent"
+        );
+        assert!(!prompt.contains("{{reviewer_diff_context_section}}"));
     }
 
     #[test]

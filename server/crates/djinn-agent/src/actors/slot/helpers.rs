@@ -52,6 +52,20 @@ const AUTO_CODE_CONTEXT_PER_FILE: usize = 3;
 /// scope-path files match. Soft cap; the char budget is the hard cap.
 const AUTO_CODE_CONTEXT_MAX_BULLETS: usize = 9;
 
+/// PR E3: char budget for the auto-injected `code_graph detect_changes`
+/// reviewer block. Mirrors the E2 cap so the two slots never collectively
+/// blow past 4k chars in a reviewer prompt.
+const REVIEWER_DIFF_CONTEXT_BUDGET_CHARS: usize = 2000;
+
+/// PR E3: outer cap on emitted touched-symbol bullets in the reviewer
+/// diff context. Soft cap; the char budget is the hard cap.
+const REVIEWER_DIFF_CONTEXT_MAX_BULLETS: usize = 30;
+
+/// PR E3: BFS depth for the per-symbol `impact` lookup that drives risk
+/// classification. Matches the `code_graph impact` default
+/// (`graph_tools.rs:1346`).
+const REVIEWER_DIFF_IMPACT_DEPTH: usize = 3;
+
 fn planner_patrol_knowledge_task_budget() -> usize {
     std::env::var(PATROL_KNOWLEDGE_TASK_BUDGET_ENV)
         .ok()
@@ -1033,6 +1047,232 @@ pub(crate) async fn build_role_code_graph_context(
     ))
 }
 
+// ─── PR E3: diff-aware reviewer context (`detect_changes` + `impact`) ───────
+
+/// Risk bucket for a touched symbol — mirrors PR C3's `ImpactRisk`
+/// classification (`crates/djinn-control-plane/src/tools/graph_tools.rs:242`).
+/// Re-implemented here because the C3 type is crate-private; the
+/// classification thresholds are the binding contract, not the type
+/// identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ReviewerDiffRisk {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+impl ReviewerDiffRisk {
+    fn label(self) -> &'static str {
+        match self {
+            ReviewerDiffRisk::Critical => "CRITICAL",
+            ReviewerDiffRisk::High => "HIGH",
+            ReviewerDiffRisk::Medium => "MEDIUM",
+            ReviewerDiffRisk::Low => "LOW",
+        }
+    }
+
+    /// PR C3 thresholds (top-down: critical first wins). `direct` /
+    /// `total` / `modules` are OR-combined within each tier.
+    fn classify(direct: usize, total: usize, modules: usize) -> Self {
+        if direct >= 20 || total >= 200 || modules >= 10 {
+            ReviewerDiffRisk::Critical
+        } else if direct >= 10 || total >= 80 || modules >= 5 {
+            ReviewerDiffRisk::High
+        } else if direct >= 3 || total >= 20 || modules >= 2 {
+            ReviewerDiffRisk::Medium
+        } else {
+            ReviewerDiffRisk::Low
+        }
+    }
+
+    /// Sort key — descending (Critical first). `Reverse` would also
+    /// work; this avoids importing an extra type for one call site.
+    fn rank(self) -> u8 {
+        match self {
+            ReviewerDiffRisk::Critical => 3,
+            ReviewerDiffRisk::High => 2,
+            ReviewerDiffRisk::Medium => 1,
+            ReviewerDiffRisk::Low => 0,
+        }
+    }
+}
+
+/// Bucket a file path into a "module" key (first two path segments).
+/// Mirrors the PR C3 `module_bucket` helper. Repo-relative paths come
+/// in pre-stripped, so we slice them as-is.
+fn reviewer_module_bucket(file_path: &str) -> String {
+    let normalized = file_path.replace('\\', "/");
+    let mut iter = normalized.split('/').filter(|s| !s.is_empty());
+    let first = iter.next();
+    let second = iter.next();
+    match (first, second) {
+        (Some(a), Some(b)) => format!("{a}/{b}"),
+        (Some(a), None) => a.to_string(),
+        _ => file_path.to_string(),
+    }
+}
+
+/// Compute (direct, total, modules) for a detailed `ImpactResult` slice
+/// — the inputs to PR C3 risk classification.
+fn reviewer_impact_metrics(
+    entries: &[djinn_control_plane::bridge::ImpactEntry],
+) -> (usize, usize, usize) {
+    use std::collections::HashSet;
+    let direct = entries.iter().filter(|e| e.depth == 1).count();
+    let total = entries.len();
+    let mut buckets: HashSet<String> = HashSet::new();
+    for entry in entries {
+        if let Some(path) = entry.file_path.as_deref() {
+            buckets.insert(reviewer_module_bucket(path));
+        }
+    }
+    (direct, total, buckets.len())
+}
+
+/// One row of the reviewer diff bullet list, pre-sort.
+struct ReviewerDiffRow {
+    name: String,
+    file_path: String,
+    risk: ReviewerDiffRisk,
+    direct: usize,
+    modules: usize,
+}
+
+/// Build the auto-injected `code_graph detect_changes` block for the
+/// reviewer role.
+///
+/// Returns `None` when the reviewer role is not in the
+/// `DJINN_AUTO_CODE_CONTEXT_ROLES` allowlist, when both `from_sha` and
+/// `to_sha` are missing (and there are no `changed_files` to fall back
+/// on), when the canonical graph is unavailable, or when the detected
+/// change set is empty.
+///
+/// For each touched symbol, calls `impact` (depth =
+/// [`REVIEWER_DIFF_IMPACT_DEPTH`]) to derive PR C3-style risk, direct
+/// caller count, and module count. Bullets are sorted CRITICAL → HIGH
+/// → MEDIUM → LOW, then by descending direct caller count, capped at
+/// [`REVIEWER_DIFF_CONTEXT_MAX_BULLETS`] entries and
+/// [`REVIEWER_DIFF_CONTEXT_BUDGET_CHARS`] characters via
+/// `truncate::smart_truncate`.
+pub(crate) async fn build_reviewer_diff_context(
+    role_name: &str,
+    task: &Task,
+    app_state: &AgentContext,
+    project_path: &str,
+    from_sha: Option<&str>,
+    to_sha: Option<&str>,
+) -> Option<String> {
+    if !is_role_auto_code_context_enabled(role_name) {
+        return None;
+    }
+    // SHA range is required — the `detect_changes` op accepts a
+    // changed_files fallback, but that lives outside the reviewer
+    // dispatch flow today. If we don't have at least one of from/to,
+    // skip silently.
+    if from_sha.is_none() && to_sha.is_none() {
+        return None;
+    }
+
+    let graph_ops = app_state.repo_graph_ops.clone()?;
+    let ctx = djinn_control_plane::bridge::ProjectCtx {
+        id: task.project_id.clone(),
+        clone_path: project_path.to_string(),
+    };
+
+    let detected = match graph_ops
+        .detect_changes(&ctx, from_sha, to_sha, &[])
+        .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::debug!(
+                role = role_name,
+                task_id = %task.short_id,
+                from = ?from_sha,
+                to = ?to_sha,
+                error = %e,
+                "build_reviewer_diff_context: detect_changes() failed; skipping"
+            );
+            return None;
+        }
+    };
+    if detected.touched_symbols.is_empty() {
+        return None;
+    }
+
+    let mut rows: Vec<ReviewerDiffRow> = Vec::new();
+    for sym in detected.touched_symbols.iter() {
+        if rows.len() >= REVIEWER_DIFF_CONTEXT_MAX_BULLETS {
+            break;
+        }
+        // `impact` is BFS-bound; ask for the detailed shape (no group_by)
+        // so we can compute (direct, total, modules) ourselves.
+        let impact = match graph_ops
+            .impact(&ctx, &sym.uid, REVIEWER_DIFF_IMPACT_DEPTH, None, None)
+            .await
+        {
+            Ok(djinn_control_plane::bridge::ImpactResult::Detailed(v)) => v,
+            // Grouped path: shouldn't happen with `group_by=None` but
+            // defensively skip — the metrics derivation below assumes
+            // detailed entries.
+            Ok(djinn_control_plane::bridge::ImpactResult::Grouped(_)) => Vec::new(),
+            Err(e) => {
+                tracing::debug!(
+                    role = role_name,
+                    uid = %sym.uid,
+                    error = %e,
+                    "build_reviewer_diff_context: impact() failed; \
+                     using zero-impact fallback"
+                );
+                Vec::new()
+            }
+        };
+        let (direct, total, modules) = reviewer_impact_metrics(&impact);
+        let risk = ReviewerDiffRisk::classify(direct, total, modules);
+
+        rows.push(ReviewerDiffRow {
+            name: sym.name.clone(),
+            file_path: sym.file_path.clone(),
+            risk,
+            direct,
+            modules,
+        });
+    }
+
+    if rows.is_empty() {
+        return None;
+    }
+
+    // Sort: highest risk first; tie-break on direct caller count desc.
+    rows.sort_by(|a, b| {
+        b.risk
+            .rank()
+            .cmp(&a.risk.rank())
+            .then_with(|| b.direct.cmp(&a.direct))
+    });
+
+    let mut lines: Vec<String> = Vec::new();
+    lines.push("## Changed symbols (HIGH risk first)".to_string());
+    lines.push(String::new());
+    for row in &rows {
+        lines.push(format!(
+            "- `{name}` ({risk} risk, {direct} direct callers, {modules} modules)\n  - file: {file}",
+            name = row.name,
+            risk = row.risk.label(),
+            direct = row.direct,
+            modules = row.modules,
+            file = row.file_path,
+        ));
+    }
+
+    let body = lines.join("\n");
+    Some(crate::truncate::smart_truncate(
+        &body,
+        REVIEWER_DIFF_CONTEXT_BUDGET_CHARS,
+    ))
+}
+
 pub(crate) async fn build_planner_patrol_context(
     task: &Task,
     app_state: &AgentContext,
@@ -1232,9 +1472,10 @@ mod tests {
     use djinn_core::models::Project;
     use djinn_db::{Database, NoteRepository, ProjectRepository};
     use djinn_control_plane::bridge::{
-        ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangedRange, CycleGroup,
-        DeadSymbolEntry, DeprecatedHit, DiffTouchesResult, EdgeCategory, EdgeEntry, GraphStatus,
-        HotPathHit, HotspotEntry, ImpactResult, MetricsAtResult, NeighborsResult, OrphanEntry,
+        ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangeKind, ChangedRange, CycleGroup,
+        DeadSymbolEntry, DeprecatedHit, DetectedChangesResult, DetectedTouchedSymbol,
+        DiffTouchesResult, EdgeCategory, EdgeEntry, GraphStatus, HotPathHit, HotspotEntry,
+        ImpactEntry, ImpactResult, MetricsAtResult, NeighborsResult, OrphanEntry, PagerankTier,
         PathResult, ProjectCtx, RankedNode, RelatedSymbol, RepoGraphOps, SearchHit, SymbolAtHit,
         SymbolContext, SymbolDescription, SymbolNode,
     };
@@ -1246,6 +1487,12 @@ mod tests {
     struct FakeRepoGraphOps {
         ranked: Vec<RankedNode>,
         contexts: HashMap<String, SymbolContext>,
+        /// PR E3: canned `detect_changes` response. Any non-empty slice
+        /// is returned verbatim with the from/to shas echoed back.
+        detect_changes_touched: Vec<DetectedTouchedSymbol>,
+        /// PR E3: canned `impact` responses keyed by symbol uid. Each
+        /// entry yields an `ImpactResult::Detailed`.
+        impacts: HashMap<String, Vec<ImpactEntry>>,
     }
 
     #[async_trait]
@@ -1278,12 +1525,22 @@ mod tests {
         async fn impact(
             &self,
             _: &ProjectCtx,
-            _: &str,
+            key: &str,
             _: usize,
             _: Option<&str>,
             _: Option<f64>,
         ) -> Result<ImpactResult, String> {
-            Err("unused in test".into())
+            // PR E3: return the canned impact entries for the queried
+            // key (or an empty detailed list when nothing is canned).
+            // Tests that exercise other surfaces leave `impacts` empty,
+            // so the previous `unused in test` error is preserved iff
+            // they explicitly key off an empty result.
+            let entries = self
+                .impacts
+                .get(key)
+                .cloned()
+                .unwrap_or_default();
+            Ok(ImpactResult::Detailed(entries))
         }
 
         async fn search(
@@ -1378,11 +1635,28 @@ mod tests {
         async fn detect_changes(
             &self,
             _: &ProjectCtx,
-            _: Option<&str>,
-            _: Option<&str>,
+            from_sha: Option<&str>,
+            to_sha: Option<&str>,
             _: &[String],
-        ) -> Result<djinn_control_plane::bridge::DetectedChangesResult, String> {
-            Err("unused in test".into())
+        ) -> Result<DetectedChangesResult, String> {
+            // PR E3: replay the canned touched-symbols list. Tests that
+            // exercise other surfaces leave the list empty, which is a
+            // valid `detect_changes` shape (the helper treats empty as
+            // "no diff signal" and returns None).
+            let mut by_file: std::collections::BTreeMap<String, Vec<DetectedTouchedSymbol>> =
+                std::collections::BTreeMap::new();
+            for sym in &self.detect_changes_touched {
+                by_file
+                    .entry(sym.file_path.clone())
+                    .or_default()
+                    .push(sym.clone());
+            }
+            Ok(DetectedChangesResult {
+                from_sha: from_sha.unwrap_or("").to_string(),
+                to_sha: to_sha.unwrap_or("").to_string(),
+                touched_symbols: self.detect_changes_touched.clone(),
+                by_file,
+            })
         }
 
         async fn api_surface(
@@ -1605,6 +1879,7 @@ mod tests {
                 },
             ],
             contexts: HashMap::new(),
+            ..FakeRepoGraphOps::default()
         }));
 
         let project_path =
@@ -1921,6 +2196,7 @@ mod tests {
                 },
             ],
             contexts,
+            ..FakeRepoGraphOps::default()
         }));
 
         let project_path = "/tmp/proj".to_string();
@@ -2004,6 +2280,243 @@ mod tests {
         )
         .await;
         assert!(result.is_none());
+        unsafe {
+            std::env::remove_var(AUTO_CODE_CONTEXT_ROLES_ENV);
+        }
+    }
+
+    // ── PR E3: diff-aware reviewer context ──────────────────────────────
+
+    fn touched_symbol(
+        uid: &str,
+        name: &str,
+        file_path: &str,
+        tier: PagerankTier,
+    ) -> DetectedTouchedSymbol {
+        DetectedTouchedSymbol {
+            uid: uid.to_string(),
+            name: name.to_string(),
+            kind: "function".to_string(),
+            file_path: file_path.to_string(),
+            start_line: 1,
+            end_line: 10,
+            pagerank_tier: tier,
+            change_kind: ChangeKind::Modified,
+        }
+    }
+
+    /// Synthesize an `impact` result yielding the requested `(direct,
+    /// extra_total, modules)` triple. `direct` entries land at depth 1
+    /// in distinct dummy files spread across `modules` two-segment
+    /// buckets; `extra_total` entries land at depth 2 in the same
+    /// buckets to inflate the total impacted set without affecting
+    /// `direct`.
+    fn synth_impact(direct: usize, extra_total: usize, modules: usize) -> Vec<ImpactEntry> {
+        let mut entries = Vec::with_capacity(direct + extra_total);
+        let modules = modules.max(1);
+        for i in 0..direct {
+            let bucket = i % modules;
+            entries.push(ImpactEntry {
+                key: format!("symbol:caller_{i}"),
+                depth: 1,
+                file_path: Some(format!("crate{bucket}/src/file_{i}.rs")),
+            });
+        }
+        for i in 0..extra_total {
+            let bucket = i % modules;
+            entries.push(ImpactEntry {
+                key: format!("symbol:transitive_{i}"),
+                depth: 2,
+                file_path: Some(format!("crate{bucket}/src/transitive_{i}.rs")),
+            });
+        }
+        entries
+    }
+
+    #[tokio::test]
+    async fn build_reviewer_diff_context_returns_none_when_role_not_enabled() {
+        let _guard = AUTO_CODE_CONTEXT_ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var(AUTO_CODE_CONTEXT_ROLES_ENV);
+        }
+        let (_db, mut ctx, project, _tmp) = setup_project().await;
+        ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps {
+            detect_changes_touched: vec![touched_symbol(
+                "symbol:foo::bar",
+                "foo::bar",
+                "src/foo.rs",
+                PagerankTier::High,
+            )],
+            ..FakeRepoGraphOps::default()
+        }));
+        let task = worker_task(&project.id);
+
+        let result = build_reviewer_diff_context(
+            "reviewer",
+            &task,
+            &ctx,
+            "/tmp/proj",
+            Some("base-sha"),
+            Some("head-sha"),
+        )
+        .await;
+        assert!(result.is_none(), "no allowlist entry should skip");
+    }
+
+    #[tokio::test]
+    async fn build_reviewer_diff_context_skips_without_shas() {
+        let _guard = AUTO_CODE_CONTEXT_ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var(AUTO_CODE_CONTEXT_ROLES_ENV, "reviewer");
+        }
+        let (_db, mut ctx, project, _tmp) = setup_project().await;
+        ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps::default()));
+        let task = worker_task(&project.id);
+
+        let result = build_reviewer_diff_context(
+            "reviewer",
+            &task,
+            &ctx,
+            "/tmp/proj",
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_none(), "no shas → no injection");
+        unsafe {
+            std::env::remove_var(AUTO_CODE_CONTEXT_ROLES_ENV);
+        }
+    }
+
+    #[tokio::test]
+    async fn build_reviewer_diff_context_emits_sorted_bullets() {
+        let _guard = AUTO_CODE_CONTEXT_ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var(AUTO_CODE_CONTEXT_ROLES_ENV, "reviewer");
+        }
+
+        let (_db, mut ctx, project, _tmp) = setup_project().await;
+
+        // High-risk: 12 direct callers across 3 modules → HIGH bucket.
+        let high_uid = "symbol:auth::middleware::verify_token";
+        // Low-risk: 1 direct caller → LOW bucket.
+        let low_uid = "symbol:utils::tiny_helper";
+        // Critical: 25 direct callers → CRITICAL bucket.
+        let critical_uid = "symbol:db::User::from_session";
+
+        let mut impacts: HashMap<String, Vec<ImpactEntry>> = HashMap::new();
+        impacts.insert(high_uid.to_string(), synth_impact(12, 0, 3));
+        impacts.insert(low_uid.to_string(), synth_impact(1, 0, 1));
+        impacts.insert(critical_uid.to_string(), synth_impact(25, 0, 4));
+
+        ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps {
+            detect_changes_touched: vec![
+                touched_symbol(
+                    low_uid,
+                    "utils::tiny_helper",
+                    "src/utils/mod.rs",
+                    PagerankTier::Low,
+                ),
+                touched_symbol(
+                    high_uid,
+                    "auth::middleware::verify_token",
+                    "src/auth/middleware.rs",
+                    PagerankTier::High,
+                ),
+                touched_symbol(
+                    critical_uid,
+                    "db::User::from_session",
+                    "src/db/user.rs",
+                    PagerankTier::High,
+                ),
+            ],
+            impacts,
+            ..FakeRepoGraphOps::default()
+        }));
+
+        let task = worker_task(&project.id);
+        let body = build_reviewer_diff_context(
+            "reviewer",
+            &task,
+            &ctx,
+            "/tmp/proj",
+            Some("base-sha"),
+            Some("head-sha"),
+        )
+        .await
+        .expect("reviewer diff context should be present");
+
+        // Header is rendered.
+        assert!(
+            body.contains("## Changed symbols (HIGH risk first)"),
+            "expected header, got: {body}"
+        );
+
+        // Each touched symbol's bullet is rendered with its risk + counts.
+        assert!(
+            body.contains("`db::User::from_session` (CRITICAL risk, 25 direct callers, 4 modules)"),
+            "expected critical bullet, got: {body}"
+        );
+        assert!(
+            body.contains(
+                "`auth::middleware::verify_token` (HIGH risk, 12 direct callers, 3 modules)"
+            ),
+            "expected high bullet, got: {body}"
+        );
+        assert!(
+            body.contains("`utils::tiny_helper` (LOW risk, 1 direct callers, 1 modules)"),
+            "expected low bullet, got: {body}"
+        );
+
+        // File paths are surfaced on the sub-bullet.
+        assert!(
+            body.contains("file: src/auth/middleware.rs"),
+            "expected file sub-bullet, got: {body}"
+        );
+
+        // CRITICAL must come before HIGH must come before LOW.
+        let crit_idx = body
+            .find("`db::User::from_session`")
+            .expect("critical bullet present");
+        let high_idx = body
+            .find("`auth::middleware::verify_token`")
+            .expect("high bullet present");
+        let low_idx = body
+            .find("`utils::tiny_helper`")
+            .expect("low bullet present");
+        assert!(crit_idx < high_idx, "CRITICAL should sort before HIGH");
+        assert!(high_idx < low_idx, "HIGH should sort before LOW");
+
+        unsafe {
+            std::env::remove_var(AUTO_CODE_CONTEXT_ROLES_ENV);
+        }
+    }
+
+    #[tokio::test]
+    async fn build_reviewer_diff_context_returns_none_when_no_touched_symbols() {
+        let _guard = AUTO_CODE_CONTEXT_ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var(AUTO_CODE_CONTEXT_ROLES_ENV, "reviewer");
+        }
+
+        let (_db, mut ctx, project, _tmp) = setup_project().await;
+        ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps::default()));
+        let task = worker_task(&project.id);
+
+        let result = build_reviewer_diff_context(
+            "reviewer",
+            &task,
+            &ctx,
+            "/tmp/proj",
+            Some("base-sha"),
+            Some("head-sha"),
+        )
+        .await;
+        assert!(
+            result.is_none(),
+            "empty detect_changes → no injection"
+        );
+
         unsafe {
             std::env::remove_var(AUTO_CODE_CONTEXT_ROLES_ENV);
         }

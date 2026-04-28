@@ -26,8 +26,8 @@ use djinn_core::models::Task;
 
 use crate::actors::slot::MergeConflictMetadata;
 use crate::actors::slot::helpers::{
-    build_planner_patrol_context, build_role_code_graph_context, derive_task_scope_paths,
-    extract_worker_context, format_knowledge_notes, recent_feedback,
+    build_planner_patrol_context, build_reviewer_diff_context, build_role_code_graph_context,
+    derive_task_scope_paths, extract_worker_context, format_knowledge_notes, recent_feedback,
 };
 use crate::context::AgentContext;
 use crate::prompts::{TaskContext, apply_role_extensions, apply_skills};
@@ -69,6 +69,12 @@ pub(crate) struct PromptContext {
     /// `DJINN_AUTO_CODE_CONTEXT_ROLES` allowlist or no scope-path symbols
     /// resolved.
     pub code_graph_context: Option<String>,
+    /// PR E3: auto-injected `code_graph detect_changes` summary for
+    /// reviewer roles. `None` when the role is not in the
+    /// `DJINN_AUTO_CODE_CONTEXT_ROLES` allowlist, when no base/head SHAs
+    /// could be resolved from the worktree, or when the detected change
+    /// set is empty.
+    pub reviewer_diff_context: Option<String>,
     /// Base system prompt rendered from the role template + `TaskContext`.
     pub base_system_prompt: String,
     /// Base prompt with role-level `system_prompt_extensions` + `learned_prompt`
@@ -297,6 +303,36 @@ pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> Pro
     )
     .await;
 
+    // PR E3: auto-include `code_graph detect_changes` summary for the
+    // reviewer role. Resolves base/head SHAs by running `git merge-base
+    // <target> HEAD` and `git rev-parse HEAD` against the task worktree
+    // — the reviewer's worktree is the post-image of the task branch, so
+    // HEAD is the head SHA. The merge target is the project's configured
+    // target branch (defaulting to "main"). Failures resolving the SHAs
+    // are non-fatal: we just skip injection.
+    let reviewer_diff_context = {
+        let role_name = runtime_role.config().name;
+        if crate::actors::slot::helpers::is_role_auto_code_context_enabled(role_name) {
+            let (from_sha, to_sha) =
+                resolve_reviewer_diff_shas(worktree_path, &task.project_id, app_state).await;
+            if from_sha.is_some() || to_sha.is_some() {
+                build_reviewer_diff_context(
+                    role_name,
+                    task,
+                    app_state,
+                    project_path,
+                    from_sha.as_deref(),
+                    to_sha.as_deref(),
+                )
+                .await
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
     let base_system_prompt = runtime_role.render_prompt(
         task,
         &TaskContext {
@@ -321,6 +357,7 @@ pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> Pro
             knowledge_context: knowledge_context.clone(),
             planner_patrol_context: planner_patrol_context.clone(),
             code_graph_context: code_graph_context.clone(),
+            reviewer_diff_context: reviewer_diff_context.clone(),
         },
     );
     // Apply role-level prompt extensions from DB (system_prompt_extensions + learned_prompt).
@@ -339,6 +376,7 @@ pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> Pro
         knowledge_context,
         planner_patrol_context,
         code_graph_context,
+        reviewer_diff_context,
         base_system_prompt,
         system_prompt_with_extensions,
         system_prompt,
@@ -346,4 +384,70 @@ pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> Pro
         prompt_verification_commands,
         prompt_verification_rules,
     }
+}
+
+/// Resolve `(from_sha, to_sha)` for PR E3's reviewer diff context by
+/// shelling out to `git` against the task's worktree.
+///
+/// `to_sha` = `git rev-parse HEAD` in the worktree.
+/// `from_sha` = `git merge-base <target> HEAD` where `<target>` is the
+/// project's configured target branch (default `main`). The merge-base
+/// is what the reviewer would actually see if they ran `git diff
+/// <target>..HEAD` themselves, so it's the right anchor for "what
+/// changed in this PR".
+///
+/// Both SHAs are returned best-effort. Either value may be `None` if
+/// the underlying git command fails — the caller skips injection
+/// silently when both are missing.
+async fn resolve_reviewer_diff_shas(
+    worktree_path: &Path,
+    project_id: &str,
+    app_state: &AgentContext,
+) -> (Option<String>, Option<String>) {
+    let target_branch = {
+        let repo = djinn_db::ProjectRepository::new(
+            app_state.db.clone(),
+            app_state.event_bus.clone(),
+        );
+        match repo.get_config(project_id).await {
+            Ok(Some(config)) => config.target_branch,
+            _ => "main".to_string(),
+        }
+    };
+
+    let head_sha = git_rev_parse(worktree_path, "HEAD").ok();
+    let base_sha = git_merge_base(worktree_path, &target_branch, "HEAD").ok();
+
+    (base_sha, head_sha)
+}
+
+fn git_rev_parse(worktree_path: &Path, rev: &str) -> std::io::Result<String> {
+    let output = std::process::Command::new("git")
+        .arg("rev-parse")
+        .arg(rev)
+        .current_dir(worktree_path)
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "git rev-parse {rev} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn git_merge_base(worktree_path: &Path, a: &str, b: &str) -> std::io::Result<String> {
+    let output = std::process::Command::new("git")
+        .arg("merge-base")
+        .arg(a)
+        .arg(b)
+        .current_dir(worktree_path)
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "git merge-base {a} {b} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
