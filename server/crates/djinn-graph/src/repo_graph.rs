@@ -28,7 +28,10 @@ const PAGE_RANK_ITERATIONS: usize = 25;
 ///   `SymbolRole::ReadAccess` / `WriteAccess` flags (PR A3). Old blobs
 ///   bincode-deserialize but their edges are stamped with the legacy
 ///   `SymbolReference` kind only — next warm rebuilds with the split.
-pub const REPO_GRAPH_ARTIFACT_VERSION: u32 = 2;
+/// - v3: entry-point detection (PR F1) — adds `EntryPointOf` edge kind
+///   and `is_test` flag on `RepoGraphNode`. Old v2 blobs bincode-fail on
+///   the new edge variant / extra node field and trigger a re-warm.
+pub const REPO_GRAPH_ARTIFACT_VERSION: u32 = 3;
 
 // ── Edge confidence floor table (PR A2) ────────────────────────────────────
 //
@@ -55,6 +58,14 @@ const EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_DEFINITION: f64 = 0.85;
 // a one-tier penalty.
 const EDGE_CONFIDENCE_READS: f64 = 0.85;
 const EDGE_CONFIDENCE_WRITES: f64 = 0.90;
+// PR F1: floor for `EntryPointOf` edges. The detector itself records
+// per-hit confidence in [0.6, 0.95] depending on signal strength
+// (`fn main`, SCIP `Test` role → 0.95; file-path heuristics → 0.7;
+// import-shape heuristics → 0.6). The floor only matters when the edge
+// is added with a confidence below 0.5 — we set it to 0.5 so the table
+// stays consistent with the rest of the file. Per-hit confidences
+// override the floor in [`detect_entry_points`].
+const EDGE_CONFIDENCE_ENTRY_POINT_OF: f64 = 0.5;
 const EDGE_CONFIDENCE_LOCAL_PENALTY: f64 = 0.15;
 const EDGE_WEIGHT_DEFINITION_TO_FILE: f64 = 4.0;
 const EDGE_WEIGHT_FILE_TO_DEFINITION: f64 = 1.5;
@@ -64,6 +75,10 @@ const EDGE_WEIGHT_SYMBOL_RELATIONSHIP_REFERENCE: f64 = 2.0;
 const EDGE_WEIGHT_SYMBOL_RELATIONSHIP_IMPLEMENTATION: f64 = 2.5;
 const EDGE_WEIGHT_SYMBOL_RELATIONSHIP_TYPE_DEFINITION: f64 = 1.75;
 const EDGE_WEIGHT_SYMBOL_RELATIONSHIP_DEFINITION: f64 = 2.25;
+// PR F1: keep `EntryPointOf` light — the edge is metadata, not a
+// dependency signal, so it should not perturb PageRank or shortest-path
+// scoring.
+const EDGE_WEIGHT_ENTRY_POINT_OF: f64 = 0.5;
 const SYMBOL_KIND_TYPE_MULTIPLIER: f64 = 1.15;
 const SYMBOL_KIND_METHOD_MULTIPLIER: f64 = 1.05;
 const SYMBOL_KIND_FUNCTION_MULTIPLIER: f64 = 1.0;
@@ -194,11 +209,31 @@ impl RepoDependencyGraph {
         for index in indices {
             builder.add_index(index);
         }
-        builder.finish()
+        let mut graph = builder.finish();
+        // PR F1: post-build entry-point detection. Stamps `EntryPointOf`
+        // edges from file → symbol so `dead_symbols` (and downstream
+        // F2 process tracing) can ask "is this an entry point?" via a
+        // single edge query. Off-by-default escape hatch via the
+        // `DJINN_ENTRY_POINT_DETECTION` env var.
+        if crate::entry_points::entry_point_detection_enabled() {
+            let _ = crate::entry_points::detect_entry_points(&mut graph);
+        }
+        graph
     }
 
     pub fn graph(&self) -> &DiGraph<RepoGraphNode, RepoGraphEdge> {
         &self.graph
+    }
+
+    /// PR F1: mutable graph access scoped to the crate. Used by
+    /// [`crate::entry_points::detect_entry_points`] to stamp
+    /// `EntryPointOf` edges after the SCIP-driven build pass. Not
+    /// exposed publicly because callers outside the crate should never
+    /// need to mutate edge structure directly.
+    pub(crate) fn graph_mut_unchecked(
+        &mut self,
+    ) -> &mut DiGraph<RepoGraphNode, RepoGraphEdge> {
+        &mut self.graph
     }
 
     pub fn node(&self, index: NodeIndex) -> &RepoGraphNode {
@@ -525,6 +560,16 @@ pub struct RepoGraphNode {
     /// surfaces this as `method_metadata: None` rather than regexing.
     #[serde(default)]
     pub signature_parts: Option<crate::scip_parser::ScipSignatureParts>,
+    /// PR F1: SCIP-derived test marker. `true` when at least one of the
+    /// symbol's definition occurrences carries the SCIP `Test` role
+    /// (`SymbolRole::Test`, bit 32). Used by
+    /// [`crate::entry_points::detect_entry_points`] as the high-confidence
+    /// signal for `EntryPointKind::Test` (0.95) before falling back to
+    /// the file-path / name-prefix heuristics. `false` for file nodes,
+    /// for symbols whose indexer doesn't stamp the role bit, and for
+    /// symbols restored from pre-PR-F1 (v2 or earlier) artifacts.
+    #[serde(default)]
+    pub is_test: bool,
 }
 
 impl RepoGraphNode {
@@ -581,6 +626,16 @@ pub enum RepoGraphEdgeKind {
     SymbolRelationshipImplementation,
     SymbolRelationshipTypeDefinition,
     SymbolRelationshipDefinition,
+    /// PR F1: synthetic edge marking that the *target* symbol is an
+    /// entry point of the *source* file (e.g. `src/main.rs ─EntryPointOf→
+    /// fn main`). Stamped by [`crate::entry_points::detect_entry_points`]
+    /// during graph build. `dead_symbols` excludes any node with an
+    /// incoming `EntryPointOf` edge so test/main/HTTP-route symbols
+    /// don't get false-positive flagged as dead. The edge carries the
+    /// detector's per-hit confidence (0.6 – 0.95) and a `reason` string
+    /// describing the matching heuristic (e.g. `"rust-main"`,
+    /// `"scip-test-role"`, `"py-dunder-main"`).
+    EntryPointOf,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -625,6 +680,7 @@ pub fn edge_confidence_floor(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::SymbolRelationshipDefinition => {
             EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_DEFINITION
         }
+        RepoGraphEdgeKind::EntryPointOf => EDGE_CONFIDENCE_ENTRY_POINT_OF,
     }
 }
 
@@ -717,6 +773,17 @@ impl RepoDependencyGraphBuilder {
                     1,
                 );
                 self.record_symbol_range(symbol_index, file, definition);
+                // PR F1: propagate the SCIP `Test` role from the
+                // definition occurrence onto the symbol node so the
+                // entry-point detector can use it as the high-confidence
+                // signal for test detection. SCIP `Test` is bit 32 on
+                // `SymbolRole`; not every indexer stamps it (the Rust
+                // scip-rust shipped as of 2026-04 does not), which is
+                // why we keep the file-path / name-prefix heuristics in
+                // [`crate::entry_points`] as a fallback.
+                if definition.roles.contains(&ScipSymbolRole::Test) {
+                    self.graph[symbol_index].is_test = true;
+                }
             }
         }
 
@@ -803,6 +870,7 @@ impl RepoDependencyGraphBuilder {
             signature: None,
             documentation: Vec::new(),
             signature_parts: None,
+            is_test: false,
         };
         let node_index = self.graph.add_node(node);
         self.node_lookup.insert(key, node_index);
@@ -837,6 +905,7 @@ impl RepoDependencyGraphBuilder {
             signature: symbol.signature.clone(),
             documentation: symbol.documentation.clone(),
             signature_parts: symbol.signature_parts.clone(),
+            is_test: false,
         };
         let node_index = self.graph.add_node(node);
         self.node_lookup.insert(key, node_index);
@@ -911,6 +980,7 @@ impl RepoDependencyGraphBuilder {
             signature: None,
             documentation: Vec::new(),
             signature_parts: None,
+            is_test: false,
         };
         let key = node.id.clone();
         let node_index = self.graph.add_node(node);
@@ -1392,6 +1462,14 @@ fn symbol_reference_edge_kind(
     }
 }
 
+/// PR F1: public wrapper around the per-kind weight table so the
+/// entry-point detector (which lives in a sibling module and assembles
+/// `EntryPointOf` edges by hand) can stay in sync with the build-time
+/// weight assignments.
+pub(crate) fn edge_weight_for(kind: RepoGraphEdgeKind) -> f64 {
+    edge_weight(kind)
+}
+
 fn edge_weight(kind: RepoGraphEdgeKind) -> f64 {
     match kind {
         RepoGraphEdgeKind::ContainsDefinition => EDGE_WEIGHT_DEFINITION_TO_FILE,
@@ -1413,6 +1491,7 @@ fn edge_weight(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::SymbolRelationshipDefinition => {
             EDGE_WEIGHT_SYMBOL_RELATIONSHIP_DEFINITION
         }
+        RepoGraphEdgeKind::EntryPointOf => EDGE_WEIGHT_ENTRY_POINT_OF,
     }
 }
 
@@ -1736,7 +1815,12 @@ mod tests {
             );
             // Confidence must equal the floor for the kind, optionally
             // dropped by exactly the local-prefix penalty when the reason
-            // says so.
+            // says so. PR F1: `EntryPointOf` edges set their own
+            // confidence (per-detector, 0.6 – 0.95) so the floor check
+            // doesn't apply — we just bound them in (0, 1].
+            if edge.kind == RepoGraphEdgeKind::EntryPointOf {
+                continue;
+            }
             let floor = edge_confidence_floor(edge.kind);
             match edge.reason.as_deref() {
                 None => assert_eq!(edge.confidence, floor),

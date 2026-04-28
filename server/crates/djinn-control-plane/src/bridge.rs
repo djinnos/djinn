@@ -641,6 +641,11 @@ pub enum EdgeCategory {
     Reads,
     /// PR A3: SymbolRole::WriteAccess split-out.
     Writes,
+    /// PR F1: `EntryPointOf` — file → symbol metadata edge stamped by
+    /// the entry-point detector. Surfaced as its own category so the UI
+    /// can render an "entry point" badge on the symbol panel without
+    /// confusing it with structural call / reference edges.
+    EntryPoint,
 }
 
 /// PR C1: a neighbor of the queried symbol, grouped under its
