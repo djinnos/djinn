@@ -1700,18 +1700,17 @@ impl RepoGraphOps for RepoGraphBridge {
         })
     }
 
-    /// Symbols with zero incoming edges from the entry-point set
-    /// (`main` functions, test/bench heuristics, public symbols in
-    /// crate-root files).
+    /// Symbols with zero incoming edges from the entry-point set.
     ///
-    /// **V1 approximations** (documented for future parser work):
-    /// * Test entry points are inferred heuristically from file paths
-    ///   (`**/tests/**`, `**/*_test.rs`, `**/*_test.go`) and display
-    ///   names (`test_*`, `*_test`) because the SCIP parser does not
-    ///   yet surface `#[test]` / `#[tokio::test]` / `#[bench]`
-    ///   annotations.
-    /// * "Crate root re-export surface" is inferred from the file
-    ///   path (`**/src/lib.rs` or `**/src/main.rs`).
+    /// PR F1 cut-over: entry-point detection now lives in
+    /// [`djinn_graph::entry_points`] and stamps `EntryPointOf` edges at
+    /// build time. This method just asks "does the symbol have any
+    /// incoming `EntryPointOf` edge?" — the per-language test / main /
+    /// HTTP-route heuristics are handled centrally by the detector.
+    /// "Crate root re-export surface" is still inferred locally from
+    /// the file path (`**/src/lib.rs` or `**/src/main.rs`) so a
+    /// `pub fn` re-exported from the crate root isn't flagged dead just
+    /// because no in-tree caller hits it.
     async fn dead_symbols(
         &self,
         ctx: &ProjectCtx,
@@ -1719,7 +1718,7 @@ impl RepoGraphOps for RepoGraphBridge {
         limit: usize,
     ) -> Result<Vec<DeadSymbolEntry>, String> {
         use djinn_graph::repo_graph::{RepoGraphEdgeKind, RepoGraphNodeKind};
-        use djinn_graph::scip_parser::{ScipSymbolKind, ScipVisibility};
+        use djinn_graph::scip_parser::ScipVisibility;
         use petgraph::Direction;
         use std::collections::HashSet;
 
@@ -1736,16 +1735,11 @@ impl RepoGraphOps for RepoGraphBridge {
         )
         .await?;
 
-        // Compile entry-path heuristics once.
-        let test_dir = globset::Glob::new("**/tests/**")
-            .map_err(|e| e.to_string())?
-            .compile_matcher();
-        let rs_test_file = globset::Glob::new("**/*_test.rs")
-            .map_err(|e| e.to_string())?
-            .compile_matcher();
-        let go_test_file = globset::Glob::new("**/*_test.go")
-            .map_err(|e| e.to_string())?
-            .compile_matcher();
+        // Crate-root public-surface heuristic still runs locally — the
+        // detector doesn't tag every public symbol re-exported from
+        // `src/lib.rs` because that would over-fire for non-library
+        // crates. We layer it in here so a `pub fn` at the crate root
+        // is still considered an entry point.
         let crate_root_lib = globset::Glob::new("**/src/lib.rs")
             .map_err(|e| e.to_string())?
             .compile_matcher();
@@ -1759,26 +1753,25 @@ impl RepoGraphOps for RepoGraphBridge {
             if node.kind != RepoGraphNodeKind::Symbol || node.is_external {
                 continue;
             }
-            let file_str = node
-                .file_path
-                .as_ref()
-                .map(|p| p.display().to_string());
-            let is_main = node.display_name == "main"
-                && node.symbol_kind.as_ref() == Some(&ScipSymbolKind::Function);
-            let name_hints_test = node.display_name.starts_with("test_")
-                || node.display_name.ends_with("_test");
-            let path_hints_test = file_str
-                .as_deref()
-                .map(|f| {
-                    test_dir.is_match(f) || rs_test_file.is_match(f) || go_test_file.is_match(f)
-                })
-                .unwrap_or(false);
+            // PR F1: any node with an incoming `EntryPointOf` edge is
+            // an entry point.
+            let has_entry_point_edge = graph
+                .graph()
+                .edges_directed(idx, Direction::Incoming)
+                .any(|e| e.weight().kind == RepoGraphEdgeKind::EntryPointOf);
+            if has_entry_point_edge {
+                entry_set.insert(idx);
+                continue;
+            }
+            // Crate-root public-surface fallback (file-path heuristic
+            // not covered by the detector).
+            let file_str = node.file_path.as_ref().map(|p| p.display().to_string());
             let crate_root_public = node.visibility == Some(ScipVisibility::Public)
                 && file_str
                     .as_deref()
                     .map(|f| crate_root_lib.is_match(f) || crate_root_main.is_match(f))
                     .unwrap_or(false);
-            if is_main || name_hints_test || path_hints_test || crate_root_public {
+            if crate_root_public {
                 entry_set.insert(idx);
             }
         }
@@ -1802,6 +1795,11 @@ impl RepoGraphOps for RepoGraphBridge {
                 match edge.weight().kind {
                     RepoGraphEdgeKind::ContainsDefinition
                     | RepoGraphEdgeKind::DeclaredInFile => {}
+                    // PR F1: `EntryPointOf` is metadata, not a caller
+                    // signal. Symbols with this edge already short-
+                    // circuit above via `entry_set`; non-entry symbols
+                    // shouldn't carry one, but skip defensively.
+                    RepoGraphEdgeKind::EntryPointOf => {}
                     RepoGraphEdgeKind::SymbolRelationshipImplementation => {
                         has_any_incoming = true;
                         has_relationship_ref_or_impl = true;
@@ -2932,6 +2930,7 @@ pub(crate) mod graph_bridge_tests {
             signature: None,
             documentation: vec![],
             signature_parts: None,
+            is_test: false,
         };
         // Both file-path match (User in path) and kind hint ("class")
         // fire. Tiebreaker for Type/Class is 0.05.
@@ -3368,6 +3367,7 @@ pub(crate) mod graph_bridge_tests {
             signature: None,
             documentation: vec![],
             signature_parts: None,
+            is_test: false,
         };
 
         let any_node = mk_node(None);
@@ -3671,6 +3671,7 @@ pub(crate) mod graph_bridge_tests {
             signature: Some("pub async fn list_items(...) -> Result<...>".into()),
             documentation: vec![],
             signature_parts: None,
+            is_test: false,
         }
     }
 

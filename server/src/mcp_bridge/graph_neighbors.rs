@@ -377,6 +377,10 @@ pub(super) fn classify_edge_category(
         RepoGraphEdgeKind::SymbolRelationshipImplementation => EdgeCategory::Implements,
         RepoGraphEdgeKind::SymbolRelationshipTypeDefinition => EdgeCategory::TypeDefines,
         RepoGraphEdgeKind::SymbolRelationshipDefinition => EdgeCategory::Defines,
+        // PR F1: `EntryPointOf` is metadata stamped by the entry-point
+        // detector. Surface as its own category so the UI can badge
+        // entry-point symbols.
+        RepoGraphEdgeKind::EntryPointOf => EdgeCategory::EntryPoint,
     }
 }
 
