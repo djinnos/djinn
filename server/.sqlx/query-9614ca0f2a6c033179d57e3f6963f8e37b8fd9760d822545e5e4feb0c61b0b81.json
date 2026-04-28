@@ -1,0 +1,84 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT id, file_path, symbol_key, kind, start_line, end_line, embedded_text\n             FROM code_chunks\n            WHERE project_id = ?\n              AND (LOWER(symbol_key) LIKE ?\n                   OR LOWER(file_path) LIKE ?\n                   OR LOWER(embedded_text) LIKE ?)\n            LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "file_path",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 262140
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "symbol_key",
+        "type_info": {
+          "type": "Blob",
+          "flags": "",
+          "max_size": 262140
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "kind",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 128
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "start_line",
+        "type_info": {
+          "type": "Long",
+          "flags": "NOT_NULL",
+          "max_size": 11
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "end_line",
+        "type_info": {
+          "type": "Long",
+          "flags": "NOT_NULL",
+          "max_size": 11
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "embedded_text",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 67108860
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "9614ca0f2a6c033179d57e3f6963f8e37b8fd9760d822545e5e4feb0c61b0b81"
+}

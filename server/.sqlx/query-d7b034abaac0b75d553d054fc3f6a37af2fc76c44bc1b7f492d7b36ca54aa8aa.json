@@ -1,6 +1,6 @@
 {
   "db_name": "MySQL",
-  "query": "SELECT c.id, c.project_id, c.file_path, c.symbol_key, c.kind,\n                      c.content_hash, c.embedded_text,\n                      m.content_hash AS \"meta_content_hash?\",\n                      m.model_version AS \"meta_model_version?\"\n                 FROM code_chunks c\n            LEFT JOIN code_chunk_meta m ON m.id = c.id\n                WHERE c.project_id = ?",
+  "query": "SELECT c.id, c.project_id, c.file_path, c.symbol_key, c.kind,\n                      c.content_hash, c.embedded_text,\n                      m.content_hash AS \"meta_content_hash?\",\n                      m.model_version AS \"meta_model_version?\",\n                      m.extension_state AS \"meta_extension_state?\"\n                 FROM code_chunks c\n            LEFT JOIN code_chunk_meta m ON m.id = c.id\n                WHERE c.project_id = ?",
   "describe": {
     "columns": [
       {
@@ -83,6 +83,15 @@
           "flags": "NOT_NULL",
           "max_size": 256
         }
+      },
+      {
+        "ordinal": 9,
+        "name": "meta_extension_state?",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
       }
     ],
     "parameters": {
@@ -97,8 +106,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "e5553d1d736615db3c470a02d4dcaec3b21786595e9b1a76b6718f123e23cf92"
+  "hash": "d7b034abaac0b75d553d054fc3f6a37af2fc76c44bc1b7f492d7b36ca54aa8aa"
 }

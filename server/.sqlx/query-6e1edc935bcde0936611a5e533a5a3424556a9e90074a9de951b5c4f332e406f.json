@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO code_chunk_meta\n            (id, project_id, content_hash, model_version, embedded_at, extension_state)\n           VALUES (?, ?, ?, ?, DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%S.%fZ'), ?)\n           ON DUPLICATE KEY UPDATE\n             project_id = VALUES(project_id),\n             content_hash = VALUES(content_hash),\n             model_version = VALUES(model_version),\n             embedded_at = VALUES(embedded_at),\n             extension_state = VALUES(extension_state)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "6e1edc935bcde0936611a5e533a5a3424556a9e90074a9de951b5c4f332e406f"
+}

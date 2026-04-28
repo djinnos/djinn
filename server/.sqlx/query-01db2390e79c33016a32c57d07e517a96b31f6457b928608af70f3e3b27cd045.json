@@ -1,0 +1,44 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT content_hash, model_version, extension_state\n                     FROM code_chunk_meta\n                    WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "content_hash",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "model_version",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "extension_state",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "01db2390e79c33016a32c57d07e517a96b31f6457b928608af70f3e3b27cd045"
+}
