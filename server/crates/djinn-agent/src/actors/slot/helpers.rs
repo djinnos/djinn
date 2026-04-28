@@ -1154,6 +1154,16 @@ mod tests {
             Err("unused in test".into())
         }
 
+        async fn detect_changes(
+            &self,
+            _: &ProjectCtx,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &[String],
+        ) -> Result<djinn_control_plane::bridge::DetectedChangesResult, String> {
+            Err("unused in test".into())
+        }
+
         async fn api_surface(
             &self,
             _: &ProjectCtx,

@@ -279,6 +279,67 @@ pub struct TouchedSymbol {
     pub fan_out: usize,
 }
 
+/// PageRank tier bucket for a touched symbol. Computed at request time
+/// against the current project graph (not the from/to shas), so review
+/// weight reflects "what matters now" rather than a stale snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PagerankTier {
+    High,
+    Medium,
+    Low,
+}
+
+/// Whether a symbol was added (post-image only), modified (overlapping
+/// pre and post), or deleted (no symbol left at this range in head).
+///
+/// PR C4 detects `Modified` for any symbol whose enclosing range
+/// overlaps a head-side hunk. `Added` and `Deleted` are reserved
+/// values — full add/delete classification requires a second graph
+/// build at the from-sha; left as an enum stub so the wire shape is
+/// stable for future enhancements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeKind {
+    Added,
+    Modified,
+    Deleted,
+}
+
+/// A single symbol surfaced by the `detect_changes` op. Distinct from
+/// [`TouchedSymbol`] (the `diff_touches` payload, which carries
+/// fan-in/fan-out) because review weight is driven by PageRank tier
+/// here, not raw degree.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DetectedTouchedSymbol {
+    /// SCIP symbol string (canonical node uid).
+    pub uid: String,
+    /// Human-friendly display name.
+    pub name: String,
+    /// SCIP symbol kind (e.g. `"function"`, `"method"`) lowercased,
+    /// or `"file"` when the touched node is a file rather than a symbol.
+    pub kind: String,
+    /// Repository-relative file the symbol lives in.
+    pub file_path: String,
+    /// 1-indexed inclusive start line of the symbol's enclosing range.
+    pub start_line: u32,
+    /// 1-indexed inclusive end line of the symbol's enclosing range.
+    pub end_line: u32,
+    pub pagerank_tier: PagerankTier,
+    pub change_kind: ChangeKind,
+}
+
+/// Result of a `detect_changes` op: a flat list of touched symbols plus
+/// a per-file rollup. The from/to shas are echoed back so callers
+/// can correlate without re-parsing the request.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DetectedChangesResult {
+    pub from_sha: String,
+    pub to_sha: String,
+    pub touched_symbols: Vec<DetectedTouchedSymbol>,
+    pub by_file: BTreeMap<String, Vec<DetectedTouchedSymbol>>,
+}
+
 /// Result of a `status` query — a peek at the persisted canonical graph cache
 /// for a project. No warming side effects.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -694,6 +755,28 @@ pub trait RepoGraphOps: Send + Sync {
         ctx: &ProjectCtx,
         changed_ranges: &[ChangedRange],
     ) -> Result<DiffTouchesResult, String>;
+
+    /// Given a SHA range (`from_sha..to_sha`) or an explicit
+    /// `changed_files` list, return every symbol whose enclosing range
+    /// overlaps a hunk, bucketed by current-project PageRank tier.
+    ///
+    /// SHA-range mode runs `git diff --unified=0 from..to` against the
+    /// project clone and pipes the hunks through
+    /// `RepoDependencyGraph::symbols_enclosing`. The `changed_files`
+    /// fallback considers every symbol in the listed files as touched
+    /// (no line-level filtering). Both modes can be combined; line-level
+    /// wins.
+    ///
+    /// PageRank tiers are quartile-bucketed against the current
+    /// project graph at request time, NOT a graph rebuilt at the from
+    /// or to sha — review weight reflects "what matters now."
+    async fn detect_changes(
+        &self,
+        ctx: &ProjectCtx,
+        from_sha: Option<&str>,
+        to_sha: Option<&str>,
+        changed_files: &[String],
+    ) -> Result<DetectedChangesResult, String>;
 
     /// List every public (or private/any, per `visibility`) symbol in
     /// the base graph, enriched with fan-in / fan-out and a

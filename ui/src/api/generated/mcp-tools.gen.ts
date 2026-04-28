@@ -313,6 +313,12 @@ export type BoardReconcileOutput = BoardReconcileOutputSchema.BoardReconcileOutp
 export namespace CodeGraphInputSchema {
   export interface CodeGraphInput {
   /**
+   * Repository-relative file paths for `detect_changes` when no
+   * SHA range is supplied (or as a coarser fallback). Every symbol
+   * in each listed file is treated as potentially touched.
+   */
+  changed_files?: string[]
+  /**
    * List of `(file, start_line, end_line?)` hunks for `diff_touches`.
    */
   changed_ranges?: ChangedRange[]
@@ -350,6 +356,14 @@ export namespace CodeGraphInputSchema {
    * Source path glob for `edges`.
    */
   from_glob?: string
+  /**
+   * Base SHA for `detect_changes`. When paired with `to_sha`, the
+   * op runs `git diff --unified=0 from_sha..to_sha` and maps the
+   * resulting hunks to symbols. Mutually exclusive with
+   * `changed_files` only when both are absent — when both are
+   * provided, line-level wins.
+   */
+  from_sha?: string
   /**
    * Group results: only `file` is supported. Applies to `impact`/`neighbors`.
    */
@@ -409,7 +423,7 @@ export namespace CodeGraphInputSchema {
    * The operation to perform.
    * One of: `neighbors`, `ranked`, `impact`, `implementations`,
    * `search`, `cycles`, `orphans`, `path`, `edges`, `symbols_at`,
-   * `diff_touches`, `describe`, `status`.
+   * `diff_touches`, `detect_changes`, `describe`, `status`.
    */
   operation: string
   /**
@@ -464,6 +478,10 @@ export namespace CodeGraphInputSchema {
    * Destination path glob for `edges`.
    */
   to_glob?: string
+  /**
+   * Head SHA for `detect_changes`.
+   */
+  to_sha?: string
   /**
    * Visibility filter for `orphans`: `public`, `private`, or `any` (default).
    */

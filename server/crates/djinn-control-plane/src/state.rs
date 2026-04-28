@@ -351,6 +351,20 @@ pub mod stubs {
                 unknown_files: vec![],
             })
         }
+        async fn detect_changes(
+            &self,
+            _: &crate::bridge::ProjectCtx,
+            from_sha: Option<&str>,
+            to_sha: Option<&str>,
+            _: &[String],
+        ) -> Result<crate::bridge::DetectedChangesResult, String> {
+            Ok(crate::bridge::DetectedChangesResult {
+                from_sha: from_sha.unwrap_or("").to_string(),
+                to_sha: to_sha.unwrap_or("").to_string(),
+                touched_symbols: vec![],
+                by_file: std::collections::BTreeMap::new(),
+            })
+        }
         async fn api_surface(
             &self,
             _: &crate::bridge::ProjectCtx,

@@ -232,6 +232,96 @@ export function parseNotFound(value: unknown): NotFound | null {
   };
 }
 
+// ── detect_changes (PR C4) ──────────────────────────────────────────────────
+
+export type PagerankTier = "high" | "medium" | "low";
+export type ChangeKind = "added" | "modified" | "deleted";
+
+export interface DetectedTouchedSymbol {
+  uid: string;
+  name: string;
+  kind: string;
+  file_path: string;
+  start_line: number;
+  end_line: number;
+  pagerank_tier: PagerankTier;
+  change_kind: ChangeKind;
+}
+
+export interface DetectedChangesResult {
+  from_sha: string;
+  to_sha: string;
+  touched_symbols: DetectedTouchedSymbol[];
+  by_file: Record<string, DetectedTouchedSymbol[]>;
+}
+
+function asPagerankTier(value: unknown): PagerankTier {
+  return value === "high" || value === "medium" || value === "low"
+    ? value
+    : "low";
+}
+
+function asChangeKind(value: unknown): ChangeKind {
+  return value === "added" || value === "modified" || value === "deleted"
+    ? value
+    : "modified";
+}
+
+function parseDetectedTouchedSymbol(value: unknown): DetectedTouchedSymbol | null {
+  if (!isRecord(value)) return null;
+  const uid = String(value.uid ?? "");
+  if (uid.length === 0) return null;
+  return {
+    uid,
+    name: String(value.name ?? ""),
+    kind: String(value.kind ?? ""),
+    file_path: String(value.file_path ?? ""),
+    start_line: Number(value.start_line ?? 0),
+    end_line: Number(value.end_line ?? 0),
+    pagerank_tier: asPagerankTier(value.pagerank_tier),
+    change_kind: asChangeKind(value.change_kind),
+  };
+}
+
+/**
+ * Narrow a `code_graph detect_changes` response. The discriminator
+ * field (per the inter-PR contract) is `detected_changes`, an object
+ * shaped `{from_sha, to_sha, touched_symbols, by_file}`.
+ *
+ * Returns `null` when the response is for a different `code_graph`
+ * variant — callers can chain a `?? defaultValue` for graceful
+ * fallback.
+ */
+export function parseDetectedChanges(value: unknown): DetectedChangesResult | null {
+  if (!isRecord(value)) return null;
+  const detected = (value as Record<string, unknown>).detected_changes;
+  if (!isRecord(detected)) return null;
+
+  const touchedRaw = asArray(detected.touched_symbols);
+  const touched_symbols = touchedRaw
+    .map(parseDetectedTouchedSymbol)
+    .filter((s): s is DetectedTouchedSymbol => s !== null);
+
+  const by_file: Record<string, DetectedTouchedSymbol[]> = {};
+  if (isRecord(detected.by_file)) {
+    for (const [file, list] of Object.entries(
+      detected.by_file as Record<string, unknown>,
+    )) {
+      const items = asArray(list)
+        .map(parseDetectedTouchedSymbol)
+        .filter((s): s is DetectedTouchedSymbol => s !== null);
+      by_file[file] = items;
+    }
+  }
+
+  return {
+    from_sha: String(detected.from_sha ?? ""),
+    to_sha: String(detected.to_sha ?? ""),
+    touched_symbols,
+    by_file,
+  };
+}
+
 // ── Display helpers ─────────────────────────────────────────────────────────
 
 /** Truncate a long path from the left: `/a/b/c/d.rs` → `…/c/d.rs`. */

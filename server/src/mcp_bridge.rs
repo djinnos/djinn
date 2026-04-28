@@ -11,13 +11,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use djinn_git::{GitActorHandle, GitError};
 use djinn_control_plane::bridge::{
-    ApiSurfaceEntry, BoundaryRule, BoundaryViolation, CallerRef, ChangedRange, CoordinatorOps,
-    CoordinatorStatus, CycleGroup, CycleMember, DeadSymbolEntry, DeprecatedHit, DiffTouchesResult,
-    EdgeEntry, GitOps, GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry, ImpactEntry,
-    ImpactResult, LspOps, LspWarning, MetricsAtResult, ModelPoolStatus, NeighborsResult,
-    OrphanEntry, PathHop, PathResult, PoolStatus, ProjectCtx, RankedNode, RepoGraphOps,
-    ResolveOutcome, RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding, SlotPoolOps,
-    SymbolAtHit, SymbolDescription, TouchedSymbol,
+    ApiSurfaceEntry, BoundaryRule, BoundaryViolation, CallerRef, ChangeKind, ChangedRange,
+    CoordinatorOps, CoordinatorStatus, CycleGroup, CycleMember, DeadSymbolEntry, DeprecatedHit,
+    DetectedChangesResult, DetectedTouchedSymbol, DiffTouchesResult, EdgeEntry, GitOps,
+    GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry, ImpactEntry, ImpactResult, LspOps,
+    LspWarning, MetricsAtResult, ModelPoolStatus, NeighborsResult, OrphanEntry, PagerankTier,
+    PathHop, PathResult, PoolStatus, ProjectCtx, RankedNode, RepoGraphOps, ResolveOutcome,
+    RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding, SlotPoolOps, SymbolAtHit,
+    SymbolDescription, TouchedSymbol,
 };
 use petgraph::visit::EdgeRef;
 use djinn_agent::actors::coordinator::CoordinatorHandle;
@@ -925,6 +926,164 @@ impl RepoGraphOps for RepoGraphBridge {
             touched_symbols,
             affected_files,
             unknown_files,
+        })
+    }
+
+    async fn detect_changes(
+        &self,
+        ctx: &ProjectCtx,
+        from_sha: Option<&str>,
+        to_sha: Option<&str>,
+        changed_files: &[String],
+    ) -> Result<DetectedChangesResult, String> {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        // Pull the warmed graph + pagerank ranking once. PageRank tiers
+        // are computed against the *current* graph rather than a graph
+        // rebuilt at the from/to shas — review weight should reflect
+        // "what matters now" (per plan §C4).
+        let (graph, ranking, _sccs) = djinn_graph::canonical_graph::load_canonical_graph(
+            &self.state,
+            &ctx.id,
+            &ctx.clone_path,
+        )
+        .await?;
+
+        // Pre-compute pagerank tiers via quartile bucketing across all
+        // *symbol* nodes (file nodes' pagerank is structurally inflated
+        // by the `ContainsDefinition` fan-out, so mixing them in
+        // produces tier thresholds that flag every method as Low).
+        let tier_thresholds = quartile_thresholds(&ranking);
+        let pagerank_lookup: BTreeMap<petgraph::graph::NodeIndex, f64> = ranking
+            .nodes
+            .iter()
+            .map(|n| (n.node_index, n.page_rank))
+            .collect();
+
+        // Resolve hunks → symbol indices.
+        //
+        // Line-mode wins when both inputs are present (per request-shape
+        // contract). The `git diff` shell-out lives in `djinn_graph`;
+        // we go through the helper so the worker binary can reuse it
+        // without reaching into the bridge.
+        let mut touched_indices: BTreeSet<petgraph::graph::NodeIndex> = BTreeSet::new();
+        let line_mode = matches!((from_sha, to_sha), (Some(f), Some(t)) if !f.is_empty() && !t.is_empty());
+        let (effective_from, effective_to) = if line_mode {
+            (
+                from_sha.unwrap_or("").to_string(),
+                to_sha.unwrap_or("").to_string(),
+            )
+        } else {
+            // Echo back empty strings when in changed_files mode — the
+            // wire shape always includes both fields (see `DetectedChangesResult`).
+            (String::new(), String::new())
+        };
+
+        if line_mode {
+            let hunks = djinn_graph::git_diff::diff_changed_ranges(
+                std::path::Path::new(&ctx.clone_path),
+                &effective_from,
+                &effective_to,
+            )
+            .await
+            .map_err(|e| format!("git diff {}..{}: {e}", effective_from, effective_to))?;
+            for hunk in &hunks {
+                let start = hunk.start_line.max(0) as u32;
+                let end = hunk.end_line.unwrap_or(hunk.start_line).max(0) as u32;
+                let (start, end) = if start <= end { (start, end) } else { (end, start) };
+                let path = std::path::Path::new(&hunk.file);
+                for idx in graph.symbols_enclosing(path, start, end) {
+                    touched_indices.insert(idx);
+                }
+            }
+        } else {
+            // changed_files mode: every symbol inside the listed files
+            // is treated as touched. We find them by walking the
+            // ContainsDefinition fan-out from the file node.
+            use petgraph::Direction;
+            use djinn_graph::repo_graph::RepoGraphEdgeKind;
+            for file in changed_files {
+                let path = std::path::Path::new(file);
+                let Some(file_idx) = graph.file_node(path) else {
+                    continue;
+                };
+                for edge in graph.graph().edges_directed(file_idx, Direction::Outgoing) {
+                    if matches!(edge.weight().kind, RepoGraphEdgeKind::ContainsDefinition) {
+                        touched_indices.insert(edge.target());
+                    }
+                }
+            }
+        }
+
+        // Project to the wire type. Skip nodes that are file rather
+        // than symbol — `detect_changes` is symbol-centric. (File
+        // nodes still surface as symbols' `file_path` field.)
+        use djinn_graph::repo_graph::RepoGraphNodeKind;
+        let mut touched_symbols: Vec<DetectedTouchedSymbol> = Vec::new();
+        for idx in &touched_indices {
+            let node = graph.node(*idx);
+            if !matches!(node.kind, RepoGraphNodeKind::Symbol) {
+                continue;
+            }
+            // Prefer the node's own `file_path`; fall back to the
+            // SCIP file association is already stored there at build.
+            let Some(file_pb) = node.file_path.as_ref() else {
+                continue;
+            };
+            let file_path = file_pb.display().to_string();
+            // Pull the symbol's enclosing range — we have to re-read it
+            // out of the per-file `symbol_ranges` sidecar via the
+            // public `symbols_enclosing` API (no direct getter), so
+            // probe a max-window to collect the entry.
+            let (start_line, end_line) = symbol_range_for_node(&graph, *idx, file_pb);
+
+            let pagerank = pagerank_lookup.get(idx).copied().unwrap_or(0.0);
+            let pagerank_tier = bucket_pagerank(&tier_thresholds, pagerank);
+
+            touched_symbols.push(DetectedTouchedSymbol {
+                uid: format_node_key(&node.id),
+                name: node.display_name.clone(),
+                kind: node
+                    .symbol_kind
+                    .as_ref()
+                    .map(|k| format!("{k:?}").to_lowercase())
+                    .unwrap_or_else(|| format!("{:?}", node.kind).to_lowercase()),
+                file_path,
+                start_line,
+                end_line,
+                pagerank_tier,
+                // PR C4 only detects modification — full add/delete
+                // classification needs a from-sha graph build (see
+                // `ChangeKind` doc).
+                change_kind: ChangeKind::Modified,
+            });
+        }
+
+        // Stable, reviewer-friendly order: tier desc, then file path,
+        // then start line.
+        touched_symbols.sort_by(|a, b| {
+            tier_rank(a.pagerank_tier)
+                .cmp(&tier_rank(b.pagerank_tier))
+                .then_with(|| a.file_path.cmp(&b.file_path))
+                .then_with(|| a.start_line.cmp(&b.start_line))
+                .then_with(|| a.uid.cmp(&b.uid))
+        });
+
+        // Per-file rollup (sorted by file path; per-file order matches
+        // the global order above).
+        let mut by_file: BTreeMap<String, Vec<DetectedTouchedSymbol>> = BTreeMap::new();
+        for sym in &touched_symbols {
+            by_file
+                .entry(sym.file_path.clone())
+                .or_default()
+                .push(sym.clone());
+        }
+
+        Ok(DetectedChangesResult {
+            from_sha: effective_from,
+            to_sha: effective_to,
+            touched_symbols,
+            by_file,
         })
     }
 
@@ -1962,6 +2121,97 @@ impl AppState {
             Arc::new(self.clone()),
             Arc::new(RepoGraphBridge::new(self.clone())),
         )
+    }
+}
+
+/// Quartile thresholds for PageRank tiering, computed once per
+/// `detect_changes` call.
+///
+/// Returns `(q33, q67)` from the symbol-only PageRank distribution:
+/// scores ≥ q67 → High, q33..q67 → Medium, < q33 → Low.
+///
+/// Symbol nodes only because file nodes' PageRank is structurally
+/// inflated by the `ContainsDefinition` fan-out (every symbol
+/// declares-in its file), so mixing them in produces thresholds
+/// that flag every method as Low and every file as High.
+fn quartile_thresholds(ranking: &djinn_graph::repo_graph::RepoGraphRanking) -> (f64, f64) {
+    use djinn_graph::repo_graph::RepoGraphNodeKind;
+    let mut scores: Vec<f64> = ranking
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.kind, RepoGraphNodeKind::Symbol))
+        .map(|n| n.page_rank)
+        .collect();
+    scores.sort_by(|a, b| a.total_cmp(b));
+    if scores.is_empty() {
+        return (0.0, 0.0);
+    }
+    // Use 1/3 and 2/3 quantiles — three roughly equal-sized buckets.
+    // True quartiles would split four ways; we want three (High /
+    // Medium / Low) so 33rd and 67th percentiles are the right cuts.
+    let q33_idx = (scores.len() as f64 * 0.34).floor() as usize;
+    let q67_idx = (scores.len() as f64 * 0.67).floor() as usize;
+    let q33 = scores[q33_idx.min(scores.len() - 1)];
+    let q67 = scores[q67_idx.min(scores.len() - 1)];
+    (q33, q67)
+}
+
+fn bucket_pagerank(thresholds: &(f64, f64), score: f64) -> PagerankTier {
+    let (q33, q67) = *thresholds;
+    if score >= q67 {
+        PagerankTier::High
+    } else if score >= q33 {
+        PagerankTier::Medium
+    } else {
+        PagerankTier::Low
+    }
+}
+
+fn tier_rank(t: PagerankTier) -> u8 {
+    match t {
+        PagerankTier::High => 0,
+        PagerankTier::Medium => 1,
+        PagerankTier::Low => 2,
+    }
+}
+
+/// Resolve the (start_line, end_line) enclosing range for a touched
+/// symbol. Falls back to (0, 0) when the per-file `symbol_ranges`
+/// sidecar is empty (cache-restored graph) — see
+/// `RepoDependencyGraph::range_for_node` for the limitation.
+fn symbol_range_for_node(
+    graph: &djinn_graph::repo_graph::RepoDependencyGraph,
+    idx: petgraph::graph::NodeIndex,
+    file: &std::path::Path,
+) -> (u32, u32) {
+    graph.range_for_node(idx, file).unwrap_or((0, 0))
+}
+
+#[cfg(test)]
+mod detect_changes_helper_tests {
+    use super::{bucket_pagerank, quartile_thresholds, tier_rank};
+    use djinn_control_plane::bridge::PagerankTier;
+
+    #[test]
+    fn bucket_pagerank_uses_q33_q67() {
+        let thresholds = (0.10, 0.20);
+        assert_eq!(bucket_pagerank(&thresholds, 0.05), PagerankTier::Low);
+        assert_eq!(bucket_pagerank(&thresholds, 0.10), PagerankTier::Medium);
+        assert_eq!(bucket_pagerank(&thresholds, 0.15), PagerankTier::Medium);
+        assert_eq!(bucket_pagerank(&thresholds, 0.20), PagerankTier::High);
+        assert_eq!(bucket_pagerank(&thresholds, 0.99), PagerankTier::High);
+    }
+
+    #[test]
+    fn tier_rank_orders_high_first() {
+        assert!(tier_rank(PagerankTier::High) < tier_rank(PagerankTier::Medium));
+        assert!(tier_rank(PagerankTier::Medium) < tier_rank(PagerankTier::Low));
+    }
+
+    #[test]
+    fn quartile_thresholds_handles_empty_ranking() {
+        let ranking = djinn_graph::repo_graph::RepoGraphRanking { nodes: vec![] };
+        assert_eq!(quartile_thresholds(&ranking), (0.0, 0.0));
     }
 }
 

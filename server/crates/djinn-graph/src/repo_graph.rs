@@ -401,6 +401,14 @@ impl RepoDependencyGraph {
     /// range overlaps `[start_line, end_line]` in `file`.
     ///
     /// Lines are 1-indexed inclusive.
+    pub fn range_for_node(&self, node: NodeIndex, file: &Path) -> Option<(u32, u32)> {
+        let ranges = self.symbol_ranges.get(file)?;
+        ranges
+            .iter()
+            .find(|r| r.node == node)
+            .map(|r| (r.start_line, r.end_line))
+    }
+
     pub fn symbols_enclosing(
         &self,
         file: &Path,
