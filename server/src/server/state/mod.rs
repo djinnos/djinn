@@ -16,8 +16,8 @@ use djinn_agent::roles::RoleRegistry;
 use djinn_agent::runtime_bridge::{K8sTokenReviewValidator, RuntimeKind, runtime_kind};
 use djinn_supervisor::{AllowAllValidator, ConnectionRegistry, ServeHandle, serve_on_tcp};
 use djinn_db::{
-    Database, NoopNoteVectorStore, NoteVectorStore, ProjectRepository, QdrantConfig,
-    QdrantNoteVectorStore, SettingsRepository,
+    Database, NoopNoteVectorStore, NoteVectorStore, ProjectRepository, QdrantCodeChunkConfig,
+    QdrantCodeChunkVectorStore, QdrantConfig, QdrantNoteVectorStore, SettingsRepository,
 };
 use djinn_git::{GitActorHandle, GitError};
 use djinn_image_controller::{ImageBuildWatcher, ImageController, ImageControllerConfig};
@@ -46,6 +46,24 @@ const MODEL_HEALTH_STATE_KEY: &str = "model_health.state";
 /// startup-time `initialize_vector_store()` agree on configuration.
 fn qdrant_config_from_env() -> QdrantConfig {
     let mut config = QdrantConfig::default();
+    if let Ok(url) = std::env::var("QDRANT_URL")
+        && !url.is_empty()
+    {
+        config.url = url;
+    }
+    if let Ok(key) = std::env::var("QDRANT_API_KEY")
+        && !key.is_empty()
+    {
+        config.api_key = Some(key);
+    }
+    config
+}
+
+/// `code_chunks`-collection variant of [`qdrant_config_from_env`]. Same
+/// URL/API-key surface; the collection name is fixed to `code_chunks` to
+/// keep it disjoint from the notes collection.
+fn qdrant_code_chunk_config_from_env() -> QdrantCodeChunkConfig {
+    let mut config = QdrantCodeChunkConfig::default();
     if let Ok(url) = std::env::var("QDRANT_URL")
         && !url.is_empty()
     {
@@ -866,6 +884,21 @@ impl AppState {
         store.ensure_collection(dim).await
     }
 
+    /// `code_chunks` analog of [`Self::initialize_vector_store`]. Gated on
+    /// `DJINN_CODE_CHUNKS_BACKEND=qdrant` (PR B1 of the code-graph + RAG
+    /// overhaul) so the collection only materializes once the chunker
+    /// pipeline (B2/B3) is rolled in. Reuses the same embedding dimension
+    /// as notes since both sit on `nomic-embed-text-v1.5`.
+    pub async fn initialize_code_vector_store(&self) -> Result<(), String> {
+        let backend = std::env::var("DJINN_CODE_CHUNKS_BACKEND").unwrap_or_default();
+        if !backend.eq_ignore_ascii_case("qdrant") {
+            return Ok(());
+        }
+        let store = QdrantCodeChunkVectorStore::new(qdrant_code_chunk_config_from_env());
+        let dim = djinn_provider::embeddings::DEFAULT_EMBEDDING_DIMENSION as u64;
+        store.ensure_collection(dim).await
+    }
+
     /// Register a task as having an in-flight verification pipeline.
     pub fn register_verification(&self, task_id: &str) {
         self.inner
@@ -1093,6 +1126,14 @@ impl AppState {
         // rather than silently writing to a wrongly-shaped collection.
         if let Err(error) = self.initialize_vector_store().await {
             tracing::error!(%error, "failed to bootstrap qdrant collection on startup");
+        }
+
+        // Same idempotent bootstrap for the `code_chunks` collection (PR B1
+        // of the code-graph + RAG overhaul). Gated on the
+        // `DJINN_CODE_CHUNKS_BACKEND` flag — empty default makes this a
+        // no-op until B2/B3 ship the chunker + embed pipeline.
+        if let Err(error) = self.initialize_code_vector_store().await {
+            tracing::error!(%error, "failed to bootstrap qdrant code_chunks collection on startup");
         }
 
         // One-shot backfill of pre-existing blobless mirrors to full

@@ -1,0 +1,104 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT c.id, c.project_id, c.file_path, c.symbol_key, c.kind,\n                      c.content_hash, c.embedded_text,\n                      m.content_hash AS \"meta_content_hash?\",\n                      m.model_version AS \"meta_model_version?\"\n                 FROM code_chunks c\n            LEFT JOIN code_chunk_meta m ON m.id = c.id\n                WHERE c.project_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "project_id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "file_path",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 262140
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "symbol_key",
+        "type_info": {
+          "type": "Blob",
+          "flags": "",
+          "max_size": 262140
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "kind",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 128
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "content_hash",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "embedded_text",
+        "type_info": {
+          "type": "Blob",
+          "flags": "NOT_NULL",
+          "max_size": 67108860
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "meta_content_hash?",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "meta_model_version?",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e5553d1d736615db3c470a02d4dcaec3b21786595e9b1a76b6718f123e23cf92"
+}

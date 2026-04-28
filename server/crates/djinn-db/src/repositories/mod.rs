@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod code_chunk;
 pub mod commit_file_changes;
 pub mod dolt_branch;
 pub mod dolt_history_maintenance;

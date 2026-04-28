@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO code_chunks\n                (id, project_id, file_path, symbol_key, kind,\n                 start_line, end_line, content_hash, embedded_text)\n               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "41f02bcf3b63af51ad921f998c21d17346eaa515405237494a542221022a7de5"
+}

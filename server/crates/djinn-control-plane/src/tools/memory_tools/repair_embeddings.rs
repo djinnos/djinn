@@ -5,7 +5,7 @@
 
 use rmcp::{Json, handler::server::wrapper::Parameters, tool, tool_router};
 
-use djinn_db::embedding_content_hash;
+use djinn_db::{CodeChunkRepository, embedding_content_hash};
 
 use super::write_services::note_repository;
 use super::{MemoryRepairEmbeddingFailure, MemoryRepairEmbeddingsResponse, RepairEmbeddingsParams};
@@ -86,7 +86,7 @@ async fn repair_embeddings(
     };
 
     let mut response = MemoryRepairEmbeddingsResponse {
-        total: rows.len(),
+        total: rows.len() as i64,
         ..MemoryRepairEmbeddingsResponse::default()
     };
 
@@ -131,6 +131,47 @@ async fn repair_embeddings(
 
         // Cooperative yield so a large repair doesn't starve the runtime.
         tokio::task::yield_now().await;
+    }
+
+    // Code-chunk pass (PR B1 scaffolding). The chunker (B2) and embedding
+    // pipeline (B3) haven't shipped yet, so the table is always empty here
+    // — but the repair tool already knows the surface so a future deploy
+    // doesn't crash on the first scan after enabling
+    // `DJINN_CODE_CHUNKS_BACKEND`.
+    let code_chunk_repo = CodeChunkRepository::new(server.state.db().clone());
+    match code_chunk_repo.list_repair_embedding_rows(&project_id).await {
+        Ok(rows) => {
+            response.code_chunks_total = rows.len() as i64;
+            for row in rows {
+                let is_stale = match (
+                    row.meta_content_hash.as_deref(),
+                    row.meta_model_version.as_deref(),
+                ) {
+                    (Some(hash), Some(version)) => {
+                        hash != row.content_hash || version != model_version
+                    }
+                    _ => true,
+                };
+
+                if !force && !is_stale {
+                    response.code_chunks_up_to_date += 1;
+                } else {
+                    // PR B3 wires the actual embed call. Until then, we
+                    // can't repair: count as failed without touching the
+                    // failures vector (those are note-scoped today).
+                    response.code_chunks_failed += 1;
+                }
+
+                tokio::task::yield_now().await;
+            }
+        }
+        Err(error) => {
+            tracing::debug!(
+                %error,
+                project_id,
+                "code-chunk repair scan failed; continuing with note-only counters"
+            );
+        }
     }
 
     response
