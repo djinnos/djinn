@@ -477,6 +477,145 @@ pub(crate) async fn call_code_graph(
             // can't otherwise discover. Cheap — no graph load.
             code_graph_capabilities()
         }
+        "cochange" => {
+            // v8: files that change together. Underlying data already
+            // ingested by the coupling-index pass — this op exposes
+            // the existing query as a first-class MCP capability.
+            // When `key` is set: top files co-edited with that one
+            // file (uses CommitFileChangeRepository::top_coupled).
+            // When `key` is unset: project-wide top coupled pairs
+            // (uses top_coupled_pairs).
+            let limit = p.limit.unwrap_or(20);
+            let repo = djinn_db::CommitFileChangeRepository::new(state.db.clone());
+            if let Some(key) = p.key.as_deref().filter(|k| !k.is_empty()) {
+                let file_path = key.trim_start_matches("file:");
+                let coupled = repo
+                    .top_coupled(&ctx.id, file_path, limit)
+                    .await
+                    .map_err(|e| format!("cochange: top_coupled failed: {e}"))?;
+                let entries: Vec<serde_json::Value> = coupled
+                    .iter()
+                    .map(|c| serde_json::json!({
+                        "file": c.file_path,
+                        "co_edit_count": c.co_edit_count,
+                        "last_co_edit": c.last_co_edit,
+                        "supporting_commits": c.supporting_commit_samples(),
+                    }))
+                    .collect();
+                serde_json::json!({
+                    "target": file_path,
+                    "coupled": entries,
+                })
+            } else {
+                let pairs = repo
+                    .top_coupled_pairs(&ctx.id, limit, None, 15)
+                    .await
+                    .map_err(|e| format!("cochange: top_coupled_pairs failed: {e}"))?;
+                let entries: Vec<serde_json::Value> = pairs
+                    .iter()
+                    .map(|p| serde_json::json!({
+                        "file_a": p.file_a,
+                        "file_b": p.file_b,
+                        "co_edits": p.co_edits,
+                        "last_co_edit": p.last_co_edit,
+                    }))
+                    .collect();
+                serde_json::json!({
+                    "pairs": entries,
+                })
+            }
+        }
+        "churn" => {
+            // v8: top files by distinct-commit count. Optional time
+            // window via the `since` field (passed through `query`
+            // for now to avoid extending CodeGraphParams further; an
+            // ISO-8601 timestamp string).
+            let limit = p.limit.unwrap_or(20);
+            let since = p.query.as_deref().filter(|s| !s.is_empty());
+            let repo = djinn_db::CommitFileChangeRepository::new(state.db.clone());
+            let rows = repo
+                .churn(&ctx.id, limit, since)
+                .await
+                .map_err(|e| format!("churn: query failed: {e}"))?;
+            let entries: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|r| serde_json::json!({
+                    "file": r.file_path,
+                    "commit_count": r.commit_count,
+                    "insertions": r.insertions,
+                    "deletions": r.deletions,
+                    "last_commit_at": r.last_commit_at,
+                }))
+                .collect();
+            serde_json::json!({
+                "since": since,
+                "files": entries,
+            })
+        }
+        "hotspots" => {
+            // v8: churn × centrality. A file that's both architecturally
+            // central (high pagerank) AND high-churn is the highest-risk
+            // refactor target — combines the two signals for a single
+            // ranked list.
+            let limit = p.limit.unwrap_or(20);
+            // Over-fetch from each source so the join doesn't starve.
+            // Both sources cap at ~500.
+            let oversampled = limit.saturating_mul(5).clamp(limit, 500);
+            let repo = djinn_db::CommitFileChangeRepository::new(state.db.clone());
+            let churn_rows = repo
+                .churn(&ctx.id, oversampled, None)
+                .await
+                .map_err(|e| format!("hotspots: churn failed: {e}"))?;
+            let ranked = graph_ops
+                .ranked(&ctx, Some("file"), Some("pagerank"), oversampled)
+                .await?;
+            let pagerank_by_file: std::collections::HashMap<String, f64> = ranked
+                .iter()
+                .filter_map(|r| {
+                    // r.key is `file:path` for file nodes
+                    r.key.strip_prefix("file:").map(|p| (p.to_string(), r.page_rank))
+                })
+                .collect();
+            // Score = log10(commit_count + 1) * pagerank_normalized.
+            // log dampens the fact that some files have 100x the
+            // commits of others; pagerank already sits in [0, ~0.01].
+            let max_pr = pagerank_by_file
+                .values()
+                .copied()
+                .fold(f64::MIN_POSITIVE, f64::max);
+            let mut hotspots: Vec<serde_json::Value> = Vec::new();
+            for row in &churn_rows {
+                let pr = match pagerank_by_file.get(&row.file_path) {
+                    Some(&v) => v,
+                    None => continue, // file isn't in graph (test-filtered, excluded, etc.)
+                };
+                let pr_norm = pr / max_pr.max(1e-12);
+                let churn_log = ((row.commit_count as f64) + 1.0).log10();
+                let score = churn_log * pr_norm;
+                hotspots.push(serde_json::json!({
+                    "file": row.file_path,
+                    "score": score,
+                    "commit_count": row.commit_count,
+                    "page_rank": pr,
+                    "last_commit_at": row.last_commit_at,
+                }));
+            }
+            // Sort by score desc, truncate.
+            hotspots.sort_by(|a, b| {
+                let sa = a["score"].as_f64().unwrap_or(0.0);
+                let sb = b["score"].as_f64().unwrap_or(0.0);
+                sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            hotspots.truncate(limit);
+            serde_json::json!({
+                "hotspots": hotspots,
+                "scoring": "score = log10(commit_count + 1) × normalized_pagerank",
+                "next_steps": [
+                    "review top hotspots for refactoring candidates",
+                    "high churn + high centrality = highest blast radius if it breaks",
+                ],
+            })
+        }
         "boundary_check" => {
             // v8: enforce architectural layering rules. Each rule
             // says "files matching `from_glob` must not depend on
@@ -619,7 +758,7 @@ pub(crate) async fn call_code_graph(
                  'neighbors', 'ranked', 'impact', 'implementations', \
                  'search', 'cycles', 'orphans', 'path', 'edges', \
                  'describe', 'context', 'capabilities', 'blast_radius', \
-                 'boundary_check'"
+                 'boundary_check', 'cochange', 'churn', 'hotspots'"
             ));
         }
     };
@@ -809,7 +948,7 @@ fn code_graph_capabilities() -> serde_json::Value {
             "neighbors", "ranked", "impact", "implementations",
             "search", "cycles", "orphans", "path", "edges",
             "describe", "context", "capabilities", "blast_radius",
-            "boundary_check",
+            "boundary_check", "cochange", "churn", "hotspots",
         ],
         "default_search_mode": std::env::var("DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE")
             .unwrap_or_else(|_| "name".to_string()),

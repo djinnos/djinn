@@ -419,6 +419,98 @@ async fn code_graph_dispatch_describe_reaches_graph_ops() {
     );
 }
 
+/// v8 cochange op: dispatch wires through to the
+/// CommitFileChangeRepository query layer. Empty DB → empty result
+/// (not an error), which is the correct behavior for a project that
+/// hasn't yet had the coupling-index pass run.
+#[tokio::test]
+async fn code_graph_dispatch_cochange_returns_empty_on_unindexed_project() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-cochange-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let result = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "cochange",
+            "project_path": worktree.path().to_string_lossy(),
+            "key": "file:internal/worker/page_worker.go",
+        }),
+        worktree.path(),
+    )
+    .await
+    .expect("cochange should not error on empty index");
+    let coupled = result["coupled"].as_array().expect("coupled key present");
+    assert!(coupled.is_empty(), "expected empty coupled list, got: {result}");
+}
+
+/// v8 cochange without key returns project-wide pairs (top_coupled_pairs).
+#[tokio::test]
+async fn code_graph_dispatch_cochange_without_key_returns_project_pairs() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-cochange-pairs-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let result = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "cochange",
+            "project_path": worktree.path().to_string_lossy(),
+        }),
+        worktree.path(),
+    )
+    .await
+    .expect("cochange-without-key should not error");
+    let pairs = result["pairs"].as_array().expect("pairs key present");
+    assert!(pairs.is_empty(), "expected empty pairs list, got: {result}");
+}
+
+/// v8 churn op: same dispatch test pattern. Empty result on unindexed
+/// project; opt-in `since` filter accepted.
+#[tokio::test]
+async fn code_graph_dispatch_churn_returns_empty_on_unindexed_project() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-churn-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let result = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "churn",
+            "project_path": worktree.path().to_string_lossy(),
+            "limit": 10,
+        }),
+        worktree.path(),
+    )
+    .await
+    .expect("churn should not error on empty index");
+    let files = result["files"].as_array().expect("files key present");
+    assert!(files.is_empty(), "expected empty files list, got: {result}");
+}
+
+/// v8 hotspots op: short-circuits cleanly when graph isn't warmed —
+/// the underlying ranked() call hits the same "code_graph not available"
+/// stub. Asserts the dispatch is wired even though the empty-state
+/// behavior depends on warm + churn data.
+#[tokio::test]
+async fn code_graph_dispatch_hotspots_reaches_graph_ops() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-hotspots-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let err = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "hotspots",
+            "project_path": worktree.path().to_string_lossy(),
+            "limit": 5,
+        }),
+        worktree.path(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("code_graph not available"),
+        "hotspots should reach the bridge stub, got: {err}"
+    );
+}
+
 /// v8 boundary_check op: reaches the bridge layer (which short-circuits
 /// in agent-side stub mode). Asserts the dispatch wire is hooked up
 /// AND that the rules-required validation fires before the bridge.
