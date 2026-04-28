@@ -313,6 +313,14 @@ impl RepoGraphOps for StubRepoGraphOps {
     ) -> Result<Option<SymbolDescription>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
+    async fn context(
+        &self,
+        _: &ProjectCtx,
+        _: &str,
+        _: bool,
+    ) -> Result<Option<bridge::SymbolContext>, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
     async fn status(&self, _: &ProjectCtx) -> Result<bridge::GraphStatus, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }

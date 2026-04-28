@@ -1,9 +1,13 @@
 use std::collections::BTreeMap;
 
-use djinn_control_plane::bridge::{Candidate, FileGroupEntry, GraphNeighbor, ImpactEntry};
+use djinn_control_plane::bridge::{
+    Candidate, EdgeCategory, FileGroupEntry, GraphNeighbor, ImpactEntry, MethodMeta, MethodParam,
+    RelatedSymbol,
+};
 
 use djinn_graph::repo_graph::{
-    RepoDependencyGraph, RepoGraphNode, RepoGraphNodeKind, RepoNodeKey,
+    RepoDependencyGraph, RepoGraphEdge, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind,
+    RepoNodeKey,
 };
 use djinn_graph::scip_parser::ScipSymbolKind;
 
@@ -315,5 +319,157 @@ pub(super) fn resolve_node_or_err(
                 .unwrap_or("<none>")
         )),
         ResolveOutcome::NotFound => Err(format!("node '{key}' not found in graph")),
+    }
+}
+
+// ── PR C1 helpers (context op) ──────────────────────────────────────────────
+
+/// Map a `RepoGraphEdge` to the [`EdgeCategory`] used to bucket
+/// incoming/outgoing neighbors in `code_graph context`. The mapping
+/// follows the inter-PR contract table verbatim:
+///
+/// ```text
+/// calls         <- SymbolReference where target.kind ∈ {Function, Method, Constructor}
+/// references    <- SymbolReference (catch-all fallback)
+/// imports       <- FileReference
+/// contains      <- ContainsDefinition | DeclaredInFile
+/// extends       <- SymbolRelationshipReference
+/// implements    <- SymbolRelationshipImplementation
+/// type_defines  <- SymbolRelationshipTypeDefinition
+/// defines       <- SymbolRelationshipDefinition
+/// reads         <- Reads
+/// writes        <- Writes
+/// ```
+///
+/// `target` is whichever endpoint sits opposite the queried node, so the
+/// `Calls` discrimination on `SymbolReference` looks at the symbol kind
+/// of the *other* endpoint regardless of edge direction.
+pub(super) fn classify_edge_category(
+    edge: Option<&RepoGraphEdge>,
+    other: &RepoGraphNode,
+) -> EdgeCategory {
+    let Some(edge) = edge else {
+        // Defensive: callers always pass a real edge weight, but a None
+        // here would mean the graph layer returned an out-of-band
+        // sentinel. Treat as a generic reference rather than panic.
+        return EdgeCategory::References;
+    };
+    match edge.kind {
+        RepoGraphEdgeKind::FileReference => EdgeCategory::Imports,
+        RepoGraphEdgeKind::ContainsDefinition | RepoGraphEdgeKind::DeclaredInFile => {
+            EdgeCategory::Contains
+        }
+        RepoGraphEdgeKind::SymbolReference => {
+            // The plan's mapping table says SymbolReference → Calls when
+            // the *target* is a callable kind. We let either endpoint's
+            // callable-ness decide because neighbors() flips direction
+            // based on incoming/outgoing.
+            match other.symbol_kind {
+                Some(ScipSymbolKind::Function)
+                | Some(ScipSymbolKind::Method)
+                | Some(ScipSymbolKind::Constructor) => EdgeCategory::Calls,
+                _ => EdgeCategory::References,
+            }
+        }
+        RepoGraphEdgeKind::Reads => EdgeCategory::Reads,
+        RepoGraphEdgeKind::Writes => EdgeCategory::Writes,
+        RepoGraphEdgeKind::SymbolRelationshipReference => EdgeCategory::Extends,
+        RepoGraphEdgeKind::SymbolRelationshipImplementation => EdgeCategory::Implements,
+        RepoGraphEdgeKind::SymbolRelationshipTypeDefinition => EdgeCategory::TypeDefines,
+        RepoGraphEdgeKind::SymbolRelationshipDefinition => EdgeCategory::Defines,
+    }
+}
+
+/// Public wrapper for the EdgeCategory mapping; used by integration
+/// tests in `mcp_bridge.rs` that want to assert classification without
+/// going through a full graph round-trip.
+#[cfg(test)]
+pub(crate) fn edge_category_for(
+    edge: Option<&RepoGraphEdge>,
+    other: &RepoGraphNode,
+) -> EdgeCategory {
+    classify_edge_category(edge, other)
+}
+
+/// Build a `RelatedSymbol` payload for the `context` op. The
+/// `confidence` is plumbed straight from the underlying edge so the UI
+/// can de-emphasize weak references.
+pub(super) fn build_related_symbol(node: &RepoGraphNode, confidence: f64) -> RelatedSymbol {
+    let file_path = node
+        .file_path
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .or_else(|| match &node.id {
+            RepoNodeKey::File(p) => Some(p.display().to_string()),
+            RepoNodeKey::Symbol(_) => None,
+        });
+    RelatedSymbol {
+        uid: format_node_key(&node.id),
+        name: node.display_name.clone(),
+        kind: kind_label(node),
+        file_path,
+        confidence,
+    }
+}
+
+/// Public-in-crate wrapper around the existing `kind_label` so the
+/// `context` op picks up identical labels as the resolver.
+pub(super) fn kind_label_for_node(node: &RepoGraphNode) -> String {
+    kind_label(node)
+}
+
+/// Build `MethodMeta` from a node's structured signature parts. Returns
+/// `None` whenever SCIP did not populate `signature_parts` — per the
+/// plan contract, never regex the markdown signature blob.
+pub(super) fn build_method_metadata(node: &RepoGraphNode) -> Option<MethodMeta> {
+    let parts = node.signature_parts.as_ref()?;
+    let params: Vec<MethodParam> = parts
+        .parameters
+        .iter()
+        .map(|p| MethodParam {
+            name: p.name.clone(),
+            type_name: p.type_name.clone(),
+            default_value: p.default_value.clone(),
+        })
+        .collect();
+    Some(MethodMeta {
+        visibility: parts.visibility.clone(),
+        is_async: parts.is_async,
+        params,
+        return_type: parts.return_type.clone(),
+        annotations: parts.annotations.clone(),
+    })
+}
+
+/// Best-effort body-content read for `code_graph context include_content=true`.
+/// Reads `start_line..=end_line` from the project clone, with a 64KiB
+/// cap so a runaway range cannot blow out the wire size. Failures
+/// (missing file, IO error, out-of-range lines) collapse to `None` —
+/// the caller treats the field as advisory.
+pub(super) fn read_symbol_content(
+    clone_path: &str,
+    file_path: &str,
+    start_line: u32,
+    end_line: u32,
+) -> Option<String> {
+    if start_line == 0 {
+        return None;
+    }
+    let abs_path = std::path::Path::new(clone_path).join(file_path);
+    let body = std::fs::read_to_string(&abs_path).ok()?;
+    let start = start_line.saturating_sub(1) as usize;
+    let end = end_line.max(start_line).saturating_sub(1) as usize;
+    let lines: Vec<&str> = body.lines().collect();
+    if start >= lines.len() {
+        return None;
+    }
+    let upper = (end + 1).min(lines.len());
+    let slice = lines[start..upper].join("\n");
+    // 64 KiB hard cap — a worst-case 800-line method at 80 cols ≈ 64KB.
+    const MAX: usize = 64 * 1024;
+    if slice.len() > MAX {
+        Some(slice[..MAX].to_string())
+    } else {
+        Some(slice)
     }
 }

@@ -320,6 +320,14 @@ pub mod stubs {
         ) -> Result<Option<crate::bridge::SymbolDescription>, String> {
             Ok(None)
         }
+        async fn context(
+            &self,
+            _: &crate::bridge::ProjectCtx,
+            _: &str,
+            _: bool,
+        ) -> Result<Option<crate::bridge::SymbolContext>, String> {
+            Ok(None)
+        }
         async fn status(
             &self,
             _: &crate::bridge::ProjectCtx,

@@ -255,6 +255,14 @@ impl RepoGraphOps for StubRepoGraph {
     ) -> std::result::Result<Option<SymbolDescription>, String> {
         Ok(None)
     }
+    async fn context(
+        &self,
+        _ctx: &ProjectCtx,
+        _key: &str,
+        _include_content: bool,
+    ) -> std::result::Result<Option<crate::bridge::SymbolContext>, String> {
+        Ok(None)
+    }
     async fn status(
         &self,
         ctx: &ProjectCtx,

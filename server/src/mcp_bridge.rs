@@ -13,12 +13,12 @@ use djinn_git::{GitActorHandle, GitError};
 use djinn_control_plane::bridge::{
     ApiSurfaceEntry, BoundaryRule, BoundaryViolation, CallerRef, ChangeKind, ChangedRange,
     CoordinatorOps, CoordinatorStatus, CycleGroup, CycleMember, DeadSymbolEntry, DeprecatedHit,
-    DetectedChangesResult, DetectedTouchedSymbol, DiffTouchesResult, EdgeEntry, GitOps,
-    GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry, ImpactEntry, ImpactResult, LspOps,
-    LspWarning, MetricsAtResult, ModelPoolStatus, NeighborsResult, OrphanEntry, PagerankTier,
-    PathHop, PathResult, PoolStatus, ProjectCtx, RankedNode, RepoGraphOps, ResolveOutcome,
-    RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding, SlotPoolOps, SymbolAtHit,
-    SymbolDescription, TouchedSymbol,
+    DetectedChangesResult, DetectedTouchedSymbol, DiffTouchesResult, EdgeCategory, EdgeEntry,
+    GitOps, GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry, ImpactEntry, ImpactResult,
+    LspOps, LspWarning, MetricsAtResult, ModelPoolStatus, NeighborsResult, OrphanEntry,
+    PagerankTier, PathHop, PathResult, PoolStatus, ProjectCtx, RankedNode, RelatedSymbol,
+    RepoGraphOps, ResolveOutcome, RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding,
+    SlotPoolOps, SymbolAtHit, SymbolContext, SymbolDescription, SymbolNode, TouchedSymbol,
 };
 use petgraph::visit::EdgeRef;
 use djinn_agent::actors::coordinator::CoordinatorHandle;
@@ -28,8 +28,9 @@ use djinn_agent::lsp::LspManager;
 pub(crate) mod graph_neighbors;
 
 use self::graph_neighbors::{
-    format_node_key, group_impact_by_file, group_neighbors_by_file, resolve_node_or_err,
-    resolve_node_with_hint,
+    build_method_metadata, build_related_symbol, classify_edge_category, format_node_key,
+    group_impact_by_file, group_neighbors_by_file, kind_label_for_node, read_symbol_content,
+    resolve_node_or_err, resolve_node_with_hint,
 };
 
 // ── Newtype wrappers ───────────────────────────────────────────────────────────
@@ -750,6 +751,109 @@ impl RepoGraphOps for RepoGraphBridge {
             signature: node.signature.clone(),
             documentation,
             file: node.file_path.as_ref().map(|p| p.display().to_string()),
+        }))
+    }
+
+    /// PR C1: 360° symbol context. Resolve `key` to a single graph node,
+    /// gather every incident edge, bucket by [`EdgeCategory`], and hard-cap
+    /// each list at 30. When `include_content` is true, attempt to read
+    /// the symbol body from disk (best-effort: failures degrade silently
+    /// to `content: None`).
+    async fn context(
+        &self,
+        ctx: &ProjectCtx,
+        key: &str,
+        include_content: bool,
+    ) -> Result<Option<SymbolContext>, String> {
+        use petgraph::Direction;
+        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
+            &self.state,
+            &ctx.id,
+            &ctx.clone_path,
+        )
+        .await?;
+        let node_index = match resolve_node_or_err(&graph, key) {
+            Ok(idx) => idx,
+            Err(_) => return Ok(None),
+        };
+        let node = graph.node(node_index);
+
+        // Build incoming/outgoing buckets. We over-collect into per-category
+        // Vecs and truncate at 30 once everything is in — sorting by
+        // confidence (desc) so the highest-trust edges win the cap.
+        let mut incoming: std::collections::BTreeMap<EdgeCategory, Vec<RelatedSymbol>> =
+            std::collections::BTreeMap::new();
+        let mut outgoing: std::collections::BTreeMap<EdgeCategory, Vec<RelatedSymbol>> =
+            std::collections::BTreeMap::new();
+
+        for dir in [Direction::Incoming, Direction::Outgoing] {
+            for edge in graph.graph().edges_directed(node_index, dir) {
+                let other_index = match dir {
+                    Direction::Incoming => edge.source(),
+                    Direction::Outgoing => edge.target(),
+                };
+                let other = graph.node(other_index);
+                let category = classify_edge_category(Some(edge.weight()), other);
+                let related = build_related_symbol(other, edge.weight().confidence);
+                let bucket = match dir {
+                    Direction::Incoming => incoming.entry(category).or_default(),
+                    Direction::Outgoing => outgoing.entry(category).or_default(),
+                };
+                bucket.push(related);
+            }
+        }
+
+        // Plan-mandated hard limit: 30 per category. Sort desc by
+        // confidence first so the bucket-truncation drops the
+        // lowest-confidence entries.
+        for buckets in [&mut incoming, &mut outgoing] {
+            for entries in buckets.values_mut() {
+                entries.sort_by(|a, b| {
+                    b.confidence
+                        .partial_cmp(&a.confidence)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.uid.cmp(&b.uid))
+                });
+                entries.truncate(30);
+            }
+        }
+
+        // Pin the symbol's range and (optionally) body content.
+        let (start_line, end_line) = node
+            .file_path
+            .as_ref()
+            .and_then(|p| graph.range_for_node(node_index, p))
+            .unwrap_or((0, 0));
+        let file_path = node
+            .file_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+
+        let content = if include_content && start_line > 0 && !file_path.is_empty() {
+            read_symbol_content(&ctx.clone_path, &file_path, start_line, end_line)
+        } else {
+            None
+        };
+
+        let method_metadata = build_method_metadata(node);
+
+        let symbol = SymbolNode {
+            uid: format_node_key(&node.id),
+            name: node.display_name.clone(),
+            kind: kind_label_for_node(node),
+            file_path,
+            start_line,
+            end_line,
+            content,
+            method_metadata,
+        };
+
+        Ok(Some(SymbolContext {
+            symbol,
+            incoming,
+            outgoing,
+            processes: Vec::new(),
         }))
     }
 
@@ -2329,6 +2433,7 @@ pub(crate) mod graph_bridge_tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(djinn_graph::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
         };
         let trait_symbol = ScipSymbol {
             symbol: "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
@@ -2338,6 +2443,7 @@ pub(crate) mod graph_bridge_tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(djinn_graph::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
         };
         let main_symbol = ScipSymbol {
             symbol: "scip-rust pkg src/app.rs `main`().".to_string(),
@@ -2351,6 +2457,7 @@ pub(crate) mod graph_bridge_tests {
                 kinds: BTreeSet::from([ScipRelationshipKind::Implementation]),
             }],
             visibility: Some(djinn_graph::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
         };
         ParsedScipIndex {
             metadata: ScipMetadata::default(),
@@ -2482,6 +2589,7 @@ pub(crate) mod graph_bridge_tests {
                 documentation: vec![],
                 relationships: vec![],
                 visibility: Some(djinn_graph::scip_parser::ScipVisibility::Public),
+                signature_parts: None,
             }],
         };
         ParsedScipIndex {
@@ -2610,6 +2718,7 @@ pub(crate) mod graph_bridge_tests {
             visibility: None,
             signature: None,
             documentation: vec![],
+            signature_parts: None,
         };
         // Both file-path match (User in path) and kind hint ("class")
         // fire. Tiebreaker for Type/Class is 0.05.
@@ -2857,4 +2966,498 @@ pub(crate) mod graph_bridge_tests {
         );
     }
 
+    // ── PR C1: `context` op tests ────────────────────────────────────
+
+    /// Builds a synthetic graph and returns
+    ///   (graph, helper_node_index, helper_uid_string)
+    /// — used by the C1 tests below so they don't repeat the setup.
+    fn build_context_fixture()
+    -> (djinn_graph::repo_graph::RepoDependencyGraph, petgraph::graph::NodeIndex, String) {
+        let graph = build_test_graph();
+        let key = "scip-rust pkg src/helper.rs `helper`().";
+        let node_index = match resolve_node(&graph, key) {
+            ResolveOutcome::Found(idx) => idx,
+            _ => panic!("expected helper symbol in fixture"),
+        };
+        (graph, node_index, key.to_string())
+    }
+
+    /// Replicates the production `context()` bucketing logic without
+    /// spinning up an `MCPBridge`/db. Returns the populated maps so we
+    /// can assert against them directly.
+    fn collect_context_buckets(
+        graph: &djinn_graph::repo_graph::RepoDependencyGraph,
+        node_index: petgraph::graph::NodeIndex,
+    ) -> (
+        std::collections::BTreeMap<EdgeCategory, Vec<RelatedSymbol>>,
+        std::collections::BTreeMap<EdgeCategory, Vec<RelatedSymbol>>,
+    ) {
+        use crate::mcp_bridge::graph_neighbors::{build_related_symbol, edge_category_for};
+        use petgraph::Direction;
+        let mut incoming: std::collections::BTreeMap<EdgeCategory, Vec<RelatedSymbol>> =
+            std::collections::BTreeMap::new();
+        let mut outgoing: std::collections::BTreeMap<EdgeCategory, Vec<RelatedSymbol>> =
+            std::collections::BTreeMap::new();
+        for dir in [Direction::Incoming, Direction::Outgoing] {
+            for edge in graph.graph().edges_directed(node_index, dir) {
+                let other_index = match dir {
+                    Direction::Incoming => edge.source(),
+                    Direction::Outgoing => edge.target(),
+                };
+                let other = graph.node(other_index);
+                let cat = edge_category_for(Some(edge.weight()), other);
+                let related = build_related_symbol(other, edge.weight().confidence);
+                let bucket = match dir {
+                    Direction::Incoming => incoming.entry(cat).or_default(),
+                    Direction::Outgoing => outgoing.entry(cat).or_default(),
+                };
+                bucket.push(related);
+            }
+        }
+        for buckets in [&mut incoming, &mut outgoing] {
+            for entries in buckets.values_mut() {
+                entries.sort_by(|a, b| {
+                    b.confidence
+                        .partial_cmp(&a.confidence)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.uid.cmp(&b.uid))
+                });
+                entries.truncate(30);
+            }
+        }
+        (incoming, outgoing)
+    }
+
+    #[tokio::test]
+    async fn context_buckets_match_neighbors_count_pr_c1() {
+        // Plan acceptance: `incoming.calls.len()` (and the union over
+        // every bucket) must equal what a sibling `neighbors` call
+        // returns for the same node. Rebuild the neighbors() count
+        // inline to keep the assertion graph-only.
+        use petgraph::Direction;
+        let (graph, node_index, _) = build_context_fixture();
+        let (incoming, outgoing) = collect_context_buckets(&graph, node_index);
+
+        let incoming_total: usize = incoming.values().map(|v| v.len()).sum();
+        let outgoing_total: usize = outgoing.values().map(|v| v.len()).sum();
+
+        let raw_incoming = graph
+            .graph()
+            .edges_directed(node_index, Direction::Incoming)
+            .count();
+        let raw_outgoing = graph
+            .graph()
+            .edges_directed(node_index, Direction::Outgoing)
+            .count();
+
+        // `helper` has at most 30 incoming/outgoing in the synthetic
+        // fixture; with the hard cap not engaging, the bucketed total
+        // must equal the raw edge count.
+        assert!(
+            raw_incoming <= 30,
+            "fixture has too many incoming edges; widen the test"
+        );
+        assert!(
+            raw_outgoing <= 30,
+            "fixture has too many outgoing edges; widen the test"
+        );
+        assert_eq!(
+            incoming_total, raw_incoming,
+            "context.incoming bucket sum {incoming_total} != raw neighbors {raw_incoming}"
+        );
+        assert_eq!(
+            outgoing_total, raw_outgoing,
+            "context.outgoing bucket sum {outgoing_total} != raw neighbors {raw_outgoing}"
+        );
+    }
+
+    #[tokio::test]
+    async fn context_relationship_bucket_implements_pr_c1() {
+        // The fixture wires `main` → `HelperTrait` via a SCIP
+        // `is_implementation=true` relationship, which the
+        // `RepoGraphEdgeKind::SymbolRelationshipImplementation` →
+        // `EdgeCategory::Implements` mapping must surface in the
+        // outgoing.implements bucket.
+        let graph = build_test_graph();
+        let main_index = match resolve_node(&graph, "scip-rust pkg src/app.rs `main`().") {
+            ResolveOutcome::Found(idx) => idx,
+            _ => panic!("expected main symbol"),
+        };
+        let (_, outgoing) = collect_context_buckets(&graph, main_index);
+
+        let implements = outgoing
+            .get(&EdgeCategory::Implements)
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            implements.iter().any(|r| r.name.contains("HelperTrait")),
+            "expected HelperTrait in outgoing.implements: {implements:?}"
+        );
+        // Confirm Extends bucket is *empty* — the fixture's relationship
+        // only sets `is_implementation`, not `is_reference`.
+        assert!(
+            outgoing.get(&EdgeCategory::Extends).is_none()
+                || outgoing.get(&EdgeCategory::Extends).unwrap().is_empty(),
+            "outgoing.extends should be empty when only is_implementation is set"
+        );
+    }
+
+    #[tokio::test]
+    async fn context_imports_bucket_for_file_references_pr_c1() {
+        // FileReference edges (file → symbol or file → file) land in
+        // the Imports bucket. The fixture's `src/app.rs` references
+        // the `helper` symbol, so we expect `helper` in
+        // `src/app.rs`'s outgoing.imports.
+        let graph = build_test_graph();
+        let app_index = match resolve_node(&graph, "src/app.rs") {
+            ResolveOutcome::Found(idx) => idx,
+            _ => panic!("expected src/app.rs file node"),
+        };
+        let (_, outgoing) = collect_context_buckets(&graph, app_index);
+
+        let imports = outgoing
+            .get(&EdgeCategory::Imports)
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            imports.iter().any(|r| r.name == "helper"),
+            "expected `helper` in src/app.rs outgoing.imports: {imports:?}"
+        );
+    }
+
+    #[test]
+    fn edge_category_table_pr_c1() {
+        // Spot-check the EdgeCategory mapping — the contract table is
+        // load-bearing for the UI parser so any silent rewrite must
+        // break this test.
+        use crate::mcp_bridge::graph_neighbors::edge_category_for;
+        use djinn_graph::repo_graph::{RepoGraphEdge, RepoGraphEdgeKind};
+        use djinn_graph::scip_parser::ScipSymbolKind;
+        use std::path::PathBuf;
+
+        let mk_edge = |kind: RepoGraphEdgeKind| RepoGraphEdge {
+            kind,
+            weight: 1.0,
+            evidence_count: 1,
+            confidence: 0.9,
+            reason: None,
+        };
+        let mk_node = |kind: Option<ScipSymbolKind>| djinn_graph::repo_graph::RepoGraphNode {
+            id: djinn_graph::repo_graph::RepoNodeKey::Symbol("x".into()),
+            kind: djinn_graph::repo_graph::RepoGraphNodeKind::Symbol,
+            display_name: "x".into(),
+            language: None,
+            file_path: Some(PathBuf::from("x.rs")),
+            symbol: Some("x".into()),
+            symbol_kind: kind,
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: vec![],
+            signature_parts: None,
+        };
+
+        let any_node = mk_node(None);
+        // SymbolReference with non-callable target → References.
+        assert_eq!(
+            edge_category_for(Some(&mk_edge(RepoGraphEdgeKind::SymbolReference)), &any_node),
+            EdgeCategory::References
+        );
+        // SymbolReference with Function target → Calls.
+        let fn_node = mk_node(Some(ScipSymbolKind::Function));
+        assert_eq!(
+            edge_category_for(Some(&mk_edge(RepoGraphEdgeKind::SymbolReference)), &fn_node),
+            EdgeCategory::Calls
+        );
+        // SymbolReference with Method target → Calls.
+        let method_node = mk_node(Some(ScipSymbolKind::Method));
+        assert_eq!(
+            edge_category_for(Some(&mk_edge(RepoGraphEdgeKind::SymbolReference)), &method_node),
+            EdgeCategory::Calls
+        );
+        // SymbolReference with Constructor target → Calls.
+        let ctor_node = mk_node(Some(ScipSymbolKind::Constructor));
+        assert_eq!(
+            edge_category_for(Some(&mk_edge(RepoGraphEdgeKind::SymbolReference)), &ctor_node),
+            EdgeCategory::Calls
+        );
+        // PR A3 splits.
+        assert_eq!(
+            edge_category_for(Some(&mk_edge(RepoGraphEdgeKind::Reads)), &any_node),
+            EdgeCategory::Reads
+        );
+        assert_eq!(
+            edge_category_for(Some(&mk_edge(RepoGraphEdgeKind::Writes)), &any_node),
+            EdgeCategory::Writes
+        );
+        // FileReference → Imports.
+        assert_eq!(
+            edge_category_for(Some(&mk_edge(RepoGraphEdgeKind::FileReference)), &any_node),
+            EdgeCategory::Imports
+        );
+        // Containment.
+        assert_eq!(
+            edge_category_for(
+                Some(&mk_edge(RepoGraphEdgeKind::ContainsDefinition)),
+                &any_node
+            ),
+            EdgeCategory::Contains
+        );
+        assert_eq!(
+            edge_category_for(
+                Some(&mk_edge(RepoGraphEdgeKind::DeclaredInFile)),
+                &any_node
+            ),
+            EdgeCategory::Contains
+        );
+        // Symbol relationships.
+        assert_eq!(
+            edge_category_for(
+                Some(&mk_edge(RepoGraphEdgeKind::SymbolRelationshipReference)),
+                &any_node
+            ),
+            EdgeCategory::Extends
+        );
+        assert_eq!(
+            edge_category_for(
+                Some(&mk_edge(RepoGraphEdgeKind::SymbolRelationshipImplementation)),
+                &any_node
+            ),
+            EdgeCategory::Implements
+        );
+        assert_eq!(
+            edge_category_for(
+                Some(&mk_edge(RepoGraphEdgeKind::SymbolRelationshipTypeDefinition)),
+                &any_node
+            ),
+            EdgeCategory::TypeDefines
+        );
+        assert_eq!(
+            edge_category_for(
+                Some(&mk_edge(RepoGraphEdgeKind::SymbolRelationshipDefinition)),
+                &any_node
+            ),
+            EdgeCategory::Defines
+        );
+    }
+
+    #[test]
+    fn context_limit_30_per_category_pr_c1() {
+        // Build a fan-in of 35 callers on a single symbol and verify
+        // the `Calls` bucket truncates at 30, sorted desc by
+        // confidence so the highest-confidence callers survive.
+        use crate::mcp_bridge::graph_neighbors::{build_related_symbol, edge_category_for};
+        use djinn_graph::repo_graph::*;
+        use djinn_graph::scip_parser::*;
+        use std::collections::BTreeSet;
+        use std::path::PathBuf;
+
+        let target_sym = "scip-rust pkg src/lib.rs `target`().".to_string();
+        let target_symbol = ScipSymbol {
+            symbol: target_sym.clone(),
+            kind: Some(ScipSymbolKind::Function),
+            display_name: Some("target".to_string()),
+            signature: Some("fn target()".to_string()),
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(ScipVisibility::Public),
+            signature_parts: None,
+        };
+        let mut files: Vec<ScipFile> = vec![ScipFile {
+            language: "rust".into(),
+            relative_path: PathBuf::from("src/lib.rs"),
+            definitions: vec![ScipOccurrence {
+                symbol: target_sym.clone(),
+                range: ScipRange {
+                    start_line: 0,
+                    start_character: 0,
+                    end_line: 0,
+                    end_character: 6,
+                },
+                enclosing_range: None,
+                roles: BTreeSet::from([ScipSymbolRole::Definition]),
+                syntax_kind: None,
+                override_documentation: vec![],
+            }],
+            references: vec![],
+            occurrences: vec![],
+            symbols: vec![target_symbol],
+        }];
+        for i in 0..35 {
+            let caller_sym = format!("scip-rust pkg src/c{i}.rs `caller{i}`().");
+            files.push(ScipFile {
+                language: "rust".into(),
+                relative_path: PathBuf::from(format!("src/c{i}.rs")),
+                definitions: vec![ScipOccurrence {
+                    symbol: caller_sym.clone(),
+                    range: ScipRange {
+                        start_line: 0,
+                        start_character: 0,
+                        end_line: 0,
+                        end_character: 8,
+                    },
+                    enclosing_range: None,
+                    roles: BTreeSet::from([ScipSymbolRole::Definition]),
+                    syntax_kind: None,
+                    override_documentation: vec![],
+                }],
+                references: vec![ScipOccurrence {
+                    symbol: target_sym.clone(),
+                    range: ScipRange {
+                        start_line: 1,
+                        start_character: 4,
+                        end_line: 1,
+                        end_character: 10,
+                    },
+                    enclosing_range: None,
+                    roles: BTreeSet::new(),
+                    syntax_kind: None,
+                    override_documentation: vec![],
+                }],
+                occurrences: vec![],
+                symbols: vec![ScipSymbol {
+                    symbol: caller_sym,
+                    kind: Some(ScipSymbolKind::Function),
+                    display_name: Some(format!("caller{i}")),
+                    signature: None,
+                    documentation: vec![],
+                    relationships: vec![],
+                    visibility: Some(ScipVisibility::Public),
+                    signature_parts: None,
+                }],
+            });
+        }
+        let parsed = ParsedScipIndex {
+            metadata: ScipMetadata::default(),
+            files,
+            external_symbols: vec![],
+        };
+        let graph = RepoDependencyGraph::build(&[parsed]);
+        let target_node = graph
+            .symbol_node(&target_sym)
+            .expect("target should be in graph");
+
+        // Collect incoming edges directly and bucket them.
+        use petgraph::Direction;
+        let mut by_cat: std::collections::BTreeMap<EdgeCategory, Vec<RelatedSymbol>> =
+            std::collections::BTreeMap::new();
+        for edge in graph
+            .graph()
+            .edges_directed(target_node, Direction::Incoming)
+        {
+            let other = graph.node(edge.source());
+            let cat = edge_category_for(Some(edge.weight()), other);
+            let related = build_related_symbol(other, edge.weight().confidence);
+            by_cat.entry(cat).or_default().push(related);
+        }
+        for entries in by_cat.values_mut() {
+            entries.sort_by(|a, b| {
+                b.confidence
+                    .partial_cmp(&a.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.uid.cmp(&b.uid))
+            });
+            entries.truncate(30);
+        }
+
+        // The fan-in mints `FileReference` edges from each caller-file
+        // into the target symbol, which the EdgeCategory mapping
+        // routes to `Imports`. With 35 raw incoming references, the
+        // bucket must truncate at 30 (the plan-mandated hard cap).
+        let imports_count = by_cat
+            .get(&EdgeCategory::Imports)
+            .map(|v| v.len())
+            .unwrap_or(0);
+        assert_eq!(
+            imports_count, 30,
+            "incoming.imports must hard-cap at 30; got {imports_count}"
+        );
+        // And confirm: at least one bucket actually exceeded the cap
+        // pre-truncation (otherwise the test isn't exercising the cap).
+        let raw_incoming = graph
+            .graph()
+            .edges_directed(target_node, Direction::Incoming)
+            .count();
+        assert!(
+            raw_incoming >= 35,
+            "fan-in fixture should produce >= 35 raw incoming edges, got {raw_incoming}"
+        );
+    }
+
+    #[test]
+    fn context_method_metadata_none_when_signature_parts_absent_pr_c1() {
+        // SCIP 0.7 ships only the markdown signature blob, so
+        // `signature_parts` is None on every fixture. Per the plan
+        // contract this MUST surface as `method_metadata: None` —
+        // never regex-extracted from the markdown.
+        use crate::mcp_bridge::graph_neighbors::build_method_metadata;
+        let graph = build_test_graph();
+        let helper_idx = graph
+            .symbol_node("scip-rust pkg src/helper.rs `helper`().")
+            .expect("helper exists");
+        let helper = graph.node(helper_idx);
+        assert!(
+            helper.signature_parts.is_none(),
+            "fixture should not carry structured signature_parts"
+        );
+        assert!(
+            build_method_metadata(helper).is_none(),
+            "method_metadata must be None when signature_parts is absent"
+        );
+    }
+
+    #[test]
+    fn context_method_metadata_some_when_signature_parts_present_pr_c1() {
+        // Synthesise a signature_parts payload (as a future indexer
+        // would) and assert the bridge surfaces it as MethodMeta.
+        use crate::mcp_bridge::graph_neighbors::build_method_metadata;
+        use djinn_graph::scip_parser::{ScipSignatureParam, ScipSignatureParts};
+
+        let mut node = graph_neighbors_test_node();
+        node.signature_parts = Some(ScipSignatureParts {
+            parameters: vec![
+                ScipSignatureParam {
+                    name: "user".into(),
+                    type_name: Some("User".into()),
+                    default_value: None,
+                },
+                ScipSignatureParam {
+                    name: "limit".into(),
+                    type_name: Some("usize".into()),
+                    default_value: Some("20".into()),
+                },
+            ],
+            return_type: Some("Result<Vec<Item>, Error>".into()),
+            type_parameters: vec!["T".into()],
+            visibility: Some("pub".into()),
+            is_async: Some(true),
+            annotations: vec!["#[tracing::instrument]".into()],
+        });
+        let meta = build_method_metadata(&node).expect("metadata expected");
+        assert_eq!(meta.params.len(), 2);
+        assert_eq!(meta.params[0].name, "user");
+        assert_eq!(meta.params[1].default_value.as_deref(), Some("20"));
+        assert_eq!(meta.return_type.as_deref(), Some("Result<Vec<Item>, Error>"));
+        assert_eq!(meta.is_async, Some(true));
+        assert_eq!(meta.visibility.as_deref(), Some("pub"));
+        assert_eq!(meta.annotations, vec!["#[tracing::instrument]"]);
+    }
+
+    fn graph_neighbors_test_node() -> djinn_graph::repo_graph::RepoGraphNode {
+        use std::path::PathBuf;
+        djinn_graph::repo_graph::RepoGraphNode {
+            id: djinn_graph::repo_graph::RepoNodeKey::Symbol("x".into()),
+            kind: djinn_graph::repo_graph::RepoGraphNodeKind::Symbol,
+            display_name: "list_items".into(),
+            language: Some("rust".into()),
+            file_path: Some(PathBuf::from("src/lib.rs")),
+            symbol: Some("scip-rust pkg src/lib.rs `list_items`().".into()),
+            symbol_kind: Some(djinn_graph::scip_parser::ScipSymbolKind::Function),
+            is_external: false,
+            visibility: None,
+            signature: Some("pub async fn list_items(...) -> Result<...>".into()),
+            documentation: vec![],
+            signature_parts: None,
+        }
+    }
 }

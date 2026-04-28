@@ -649,6 +649,7 @@ pub fn build_test_parsed_index_fixture() -> crate::scip_parser::ParsedScipIndex 
         documentation: vec![],
         relationships: vec![],
         visibility: Some(crate::scip_parser::ScipVisibility::Public),
+    signature_parts: None,
     };
     let trait_symbol = ScipSymbol {
         symbol: "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
@@ -658,6 +659,7 @@ pub fn build_test_parsed_index_fixture() -> crate::scip_parser::ParsedScipIndex 
         documentation: vec![],
         relationships: vec![],
         visibility: Some(crate::scip_parser::ScipVisibility::Public),
+    signature_parts: None,
     };
     let main_symbol = ScipSymbol {
         symbol: "scip-rust pkg src/app.rs `main`().".to_string(),
@@ -671,6 +673,7 @@ pub fn build_test_parsed_index_fixture() -> crate::scip_parser::ParsedScipIndex 
             kinds: BTreeSet::from([ScipRelationshipKind::Implementation]),
         }],
         visibility: Some(crate::scip_parser::ScipVisibility::Public),
+    signature_parts: None,
     };
 
     fn def_occ(symbol: &str) -> ScipOccurrence {
