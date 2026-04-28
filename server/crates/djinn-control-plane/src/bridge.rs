@@ -351,6 +351,66 @@ pub struct GraphStatus {
     pub commits_since_pin: Option<u64>,
 }
 
+/// PR D2: snapshot node — one entry in the `snapshot.nodes` array. The
+/// shape is binding (see `code_graph snapshot` inter-PR contract): `id`
+/// is the canonical RepoNodeKey (`"file:..."` / `"symbol:..."`), `kind`
+/// is `"file" | "folder" | "symbol"` (folder is reserved for future
+/// folder-grouping; D2 emits only `file`/`symbol`), and `pagerank` is
+/// the cached score from the canonical-graph ranking.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SnapshotNode {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+    pub pagerank: f64,
+    /// Populated post-F3 (Leiden community detection). Always `None` in D2.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub community_id: Option<String>,
+}
+
+/// PR D2: snapshot edge — one entry in the `snapshot.edges` array.
+/// `kind` mirrors the `RepoGraphEdgeKind` Debug variant name (matching
+/// the `edges` op convention).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SnapshotEdge {
+    pub from: String,
+    pub to: String,
+    pub kind: String,
+    pub confidence: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// PR D2: full graph snapshot payload — capped by PageRank tier and
+/// filtered by `graph_excluded_paths`. Wire shape pinned by the
+/// inter-PR contract (`code_graph snapshot` section): the entire
+/// payload sits under the `snapshot` discriminator field on
+/// `CodeGraphResponse`, so it doesn't collide with `Ranked.nodes` or
+/// `Edges.edges`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SnapshotPayload {
+    pub project_id: String,
+    pub git_head: String,
+    /// ISO8601 UTC timestamp at which the snapshot was assembled.
+    pub generated_at: String,
+    /// `true` when the underlying graph contained more nodes than
+    /// `node_cap`, so the lowest-PageRank tier was dropped.
+    pub truncated: bool,
+    /// Total node count in the unfiltered, uncapped graph.
+    pub total_nodes: usize,
+    /// Total edge count in the unfiltered, uncapped graph.
+    pub total_edges: usize,
+    /// PageRank-tier cap actually applied (default 2000; settable via
+    /// the request `limit` field).
+    pub node_cap: usize,
+    pub nodes: Vec<SnapshotNode>,
+    pub edges: Vec<SnapshotEdge>,
+}
+
 /// A symbol description sourced from `ScipSymbol` fields without an LSP round
 /// trip.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -888,6 +948,21 @@ pub trait RepoGraphOps: Send + Sync {
     /// empty for this project, returns `warmed: false` with the timestamp/
     /// commit fields set to `None`.
     async fn status(&self, ctx: &ProjectCtx) -> Result<GraphStatus, String>;
+
+    /// PR D2: full-graph snapshot capped by PageRank tier — the wire
+    /// payload that drives the `/code-graph` UI's Sigma render. The
+    /// caller passes a `node_cap` (default 2000); we keep the top
+    /// `node_cap` nodes by PageRank, then emit every edge whose source
+    /// AND target survived the cap. `excluded_keys` is the pre-resolved
+    /// set of node keys filtered out by `graph_excluded_paths`; both
+    /// node and edge filtering happens against this set so the wire
+    /// shape is consistent with what the rest of `code_graph` returns.
+    async fn snapshot(
+        &self,
+        ctx: &ProjectCtx,
+        node_cap: usize,
+        exclusions: &crate::tools::graph_exclusions::GraphExclusions,
+    ) -> Result<SnapshotPayload, String>;
 
     /// Resolve a `(file, start_line, end_line?)` tuple into the set of
     /// base-graph symbols whose definition range encloses the queried

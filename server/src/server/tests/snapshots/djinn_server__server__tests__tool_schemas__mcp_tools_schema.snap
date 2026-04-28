@@ -895,7 +895,7 @@ expression: signatures
           "type": "string"
         },
         "operation": {
-          "description": "The operation to perform.\nOne of: `neighbors`, `ranked`, `impact`, `implementations`,\n`search`, `cycles`, `orphans`, `path`, `edges`, `symbols_at`,\n`diff_touches`, `detect_changes`, `describe`, `context`, `status`.",
+          "description": "The operation to perform.\nOne of: `neighbors`, `ranked`, `impact`, `implementations`,\n`search`, `cycles`, `orphans`, `path`, `edges`, `symbols_at`,\n`diff_touches`, `detect_changes`, `describe`, `context`, `status`,\n`snapshot`.",
           "type": "string"
         },
         "project": {

@@ -437,7 +437,8 @@ export namespace CodeGraphInputSchema {
    * The operation to perform.
    * One of: `neighbors`, `ranked`, `impact`, `implementations`,
    * `search`, `cycles`, `orphans`, `path`, `edges`, `symbols_at`,
-   * `diff_touches`, `detect_changes`, `describe`, `context`, `status`.
+   * `diff_touches`, `detect_changes`, `describe`, `context`, `status`,
+   * `snapshot`.
    */
   operation: string
   /**

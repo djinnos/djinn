@@ -12,8 +12,8 @@ use crate::bridge::{
     CoupledPairEntry, CouplingEntry, CouplingHubEntry, CycleGroup, DeadSymbolEntry, DeprecatedHit,
     DetectedChangesResult, EdgeEntry, FileGroupEntry, GraphNeighbor, GraphStatus, HotPathHit,
     HotspotEntry, ImpactEntry, ImpactResult, MetricsAtResult, NeighborsResult, OrphanEntry,
-    PathResult, ProjectCtx, RankedNode, ResolveOutcome, SearchHit, SymbolAtHit, SymbolContext,
-    SymbolDescription, TouchedSymbol,
+    PathResult, ProjectCtx, RankedNode, ResolveOutcome, SearchHit, SnapshotPayload, SymbolAtHit,
+    SymbolContext, SymbolDescription, TouchedSymbol,
 };
 use crate::server::DjinnMcpServer;
 use crate::tools::graph_exclusions::GraphExclusions;
@@ -27,7 +27,8 @@ pub struct CodeGraphParams {
     /// The operation to perform.
     /// One of: `neighbors`, `ranked`, `impact`, `implementations`,
     /// `search`, `cycles`, `orphans`, `path`, `edges`, `symbols_at`,
-    /// `diff_touches`, `detect_changes`, `describe`, `context`, `status`.
+    /// `diff_touches`, `detect_changes`, `describe`, `context`, `status`,
+    /// `snapshot`.
     pub operation: String,
     /// Project identifier — either the UUID (`project_id`) or the
     /// canonical `"owner/repo"` slug. The handler resolves it to the
@@ -505,6 +506,21 @@ pub struct NotFoundDetail {
     pub kind_hint: Option<String>,
 }
 
+/// PR D2: full-graph snapshot for the `/code-graph` UI. The discriminator
+/// field per the inter-PR contract is `snapshot`, which carries the
+/// shape spec'd in the plan (`{project_id, git_head, generated_at,
+/// truncated, total_nodes, total_edges, node_cap, nodes, edges}`). We
+/// wrap the payload under that field rather than flattening to avoid
+/// colliding with `Ranked.nodes` and `Edges.edges` — the
+/// `CodeGraphResponse` is `#[serde(untagged)]`, so a unique top-level
+/// field name is the disambiguator.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SnapshotResponse {
+    pub snapshot: SnapshotPayload,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum CodeGraphResponse {
@@ -541,6 +557,9 @@ pub enum CodeGraphResponse {
     /// PR C2: hard miss — neither exact nor name-index resolution
     /// produced any hit for the caller's key.
     NotFound(NotFoundResponse),
+    /// PR D2: full-graph snapshot for the `/code-graph` UI render.
+    /// Discriminator field `snapshot`.
+    Snapshot(SnapshotResponse),
 }
 
 // ── Next-step hints ─────────────────────────────────────────────────────────────
@@ -616,6 +635,21 @@ fn compute_next_step_hint(op: &str, response: &CodeGraphResponse) -> String {
             Some(risk) if risk.is_high_or_critical() => HIGH_IMPACT_NEXT_STEP.to_string(),
             _ => FALLBACK_NEXT_STEP.to_string(),
         },
+        // PR D2: nudge the caller toward `context` on a top-PageRank
+        // node. Truncation is the common case for medium repos, so the
+        // hint focuses on drilling into the cap rather than expanding
+        // it.
+        ("snapshot", CodeGraphResponse::Snapshot(r)) => {
+            match r.snapshot.nodes.first() {
+                Some(node) => format!(
+                    "Snapshot capped at {} of {} nodes; call `code_graph context name={}` to drill in.",
+                    r.snapshot.nodes.len(),
+                    r.snapshot.total_nodes,
+                    node.label,
+                ),
+                None => FALLBACK_NEXT_STEP.to_string(),
+            }
+        }
         _ => FALLBACK_NEXT_STEP.to_string(),
     }
 }
@@ -655,6 +689,7 @@ fn next_step_slot(response: &mut CodeGraphResponse) -> &mut Option<String> {
         CodeGraphResponse::Ambiguous(r) => &mut r.next_step,
         CodeGraphResponse::NotFound(r) => &mut r.next_step,
         CodeGraphResponse::DetectedChanges(r) => &mut r.next_step,
+        CodeGraphResponse::Snapshot(r) => &mut r.next_step,
     }
 }
 
@@ -913,7 +948,7 @@ fn pick_next_step_target(symbols: &[crate::bridge::DetectedTouchedSymbol]) -> Op
 impl DjinnMcpServer {
     /// Query the repository dependency graph built from SCIP indexer output.
     #[tool(
-        description = "Query the repository dependency graph built from SCIP indexer output and the commit-based file-coupling index. Operations: neighbors (edges in/out of a node, with optional group_by=file rollup), ranked (top nodes; sort_by pagerank/in_degree/out_degree/total_degree), impact (transitive dependents, with optional group_by=file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup), cycles (strongly-connected components), orphans (zero-incoming-reference nodes, with visibility filter), path (shortest dependency path), edges (enumerate edges by from_glob/to_glob), symbols_at (given file+line range, return SCIP symbols whose definition range encloses those lines — diff-hunk → symbol lookup), diff_touches (given a list of changed line ranges parsed from `git diff --unified=0 base..head`, return every base-graph symbol touched, with fan-in/fan-out and file grouping; the base graph is always current main — this op does NOT build a head graph), detect_changes (given from_sha + to_sha [or a changed_files list], return touched symbols + their PageRank tier [High/Medium/Low quartile] + per-file rollup; shells out to `git diff --unified=0 from_sha..to_sha` server-side and maps hunks via symbols_enclosing — replaces the architect's manual diff inspection), describe (symbol signature/documentation without an LSP round trip), context (PR C1: 360° symbol view — categorized incoming/outgoing dicts [calls/reads/writes/extends/implements/...], plus structured method_metadata when SCIP populates it; pass include_content=true to include the symbol body. Each category list is hard-capped at 30 entries), status (peek at the persisted canonical graph cache; never warms), api_surface (list every public symbol with fan-in/fan-out and a used-outside-crate signal), boundary_check (edge-based architecture rule scanner over from_glob→to_glob pairs; returns forbidden violations), hotspots (file churn × centrality ranking over a configurable window; top_symbols per file), metrics_at (scalar graph snapshot: node/edge/cycle counts, god-object floor, orphans, public API and doc coverage), dead_symbols (no-incoming-edge-from-entry-points enumeration; confidence=high|med|low), deprecated_callers (symbols whose signature/documentation contains #[deprecated] or @deprecated, with caller list), touches_hot_path (given entry and sink SCIP keys, report which queried symbols sit on any entry→sink shortest path), coupling (files most frequently co-edited with `file`, sourced from the per-commit change log; returns co-edit count, last co-edit timestamp, and up to three supporting SHAs per peer), churn (top files by distinct-commit count over an optional `since_days` window; returns commit count, cumulative insertions/deletions, and last-touched timestamp), coupling_hotspots (top file PAIRS by co-edit count project-wide; returns [{file_a,file_b,co_edits,last_co_edit}]; respects `since_days` and `max_files_per_commit` [default 15] — useful for spotting implicit coupling between distant parts of the tree), coupling_hubs (top FILES by cumulative coupling across all partners; returns [{file_path,total_coupling,partner_count}] — change-propagation risk map, higher total_coupling means a touch to this file is more likely to require touching many others). All coupling / churn outputs are filtered through the project's `project_graph_exclusions` glob list at query time, so tuning exclusions takes effect without re-ingesting."
+        description = "Query the repository dependency graph built from SCIP indexer output and the commit-based file-coupling index. Operations: neighbors (edges in/out of a node, with optional group_by=file rollup), ranked (top nodes; sort_by pagerank/in_degree/out_degree/total_degree), impact (transitive dependents, with optional group_by=file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup), cycles (strongly-connected components), orphans (zero-incoming-reference nodes, with visibility filter), path (shortest dependency path), edges (enumerate edges by from_glob/to_glob), symbols_at (given file+line range, return SCIP symbols whose definition range encloses those lines — diff-hunk → symbol lookup), diff_touches (given a list of changed line ranges parsed from `git diff --unified=0 base..head`, return every base-graph symbol touched, with fan-in/fan-out and file grouping; the base graph is always current main — this op does NOT build a head graph), detect_changes (given from_sha + to_sha [or a changed_files list], return touched symbols + their PageRank tier [High/Medium/Low quartile] + per-file rollup; shells out to `git diff --unified=0 from_sha..to_sha` server-side and maps hunks via symbols_enclosing — replaces the architect's manual diff inspection), describe (symbol signature/documentation without an LSP round trip), context (PR C1: 360° symbol view — categorized incoming/outgoing dicts [calls/reads/writes/extends/implements/...], plus structured method_metadata when SCIP populates it; pass include_content=true to include the symbol body. Each category list is hard-capped at 30 entries), status (peek at the persisted canonical graph cache; never warms), api_surface (list every public symbol with fan-in/fan-out and a used-outside-crate signal), boundary_check (edge-based architecture rule scanner over from_glob→to_glob pairs; returns forbidden violations), hotspots (file churn × centrality ranking over a configurable window; top_symbols per file), metrics_at (scalar graph snapshot: node/edge/cycle counts, god-object floor, orphans, public API and doc coverage), dead_symbols (no-incoming-edge-from-entry-points enumeration; confidence=high|med|low), deprecated_callers (symbols whose signature/documentation contains #[deprecated] or @deprecated, with caller list), touches_hot_path (given entry and sink SCIP keys, report which queried symbols sit on any entry→sink shortest path), coupling (files most frequently co-edited with `file`, sourced from the per-commit change log; returns co-edit count, last co-edit timestamp, and up to three supporting SHAs per peer), churn (top files by distinct-commit count over an optional `since_days` window; returns commit count, cumulative insertions/deletions, and last-touched timestamp), coupling_hotspots (top file PAIRS by co-edit count project-wide; returns [{file_a,file_b,co_edits,last_co_edit}]; respects `since_days` and `max_files_per_commit` [default 15] — useful for spotting implicit coupling between distant parts of the tree), coupling_hubs (top FILES by cumulative coupling across all partners; returns [{file_path,total_coupling,partner_count}] — change-propagation risk map, higher total_coupling means a touch to this file is more likely to require touching many others), snapshot (PR D2: full graph snapshot capped by PageRank tier — returns {snapshot:{project_id,git_head,generated_at,truncated,total_nodes,total_edges,node_cap,nodes,edges}}; default cap 2000 nodes [Sigma WebGL ceiling], settable via `limit` up to 10k. Drives the `/code-graph` UI's force-directed render). All coupling / churn outputs are filtered through the project's `project_graph_exclusions` glob list at query time, so tuning exclusions takes effect without re-ingesting."
     )]
     pub async fn code_graph(
         &self,
@@ -1000,6 +1035,7 @@ impl DjinnMcpServer {
             "churn" => self.code_graph_churn(&ctx, &params).await,
             "coupling_hotspots" => self.code_graph_coupling_hotspots(&ctx, &params).await,
             "coupling_hubs" => self.code_graph_coupling_hubs(&ctx, &params).await,
+            "snapshot" => self.code_graph_snapshot(&ctx, &params).await,
             other => Err(format!(
                 "unknown code_graph operation '{other}': expected one of \
                  'neighbors', 'ranked', 'impact', 'implementations', \
@@ -1008,7 +1044,8 @@ impl DjinnMcpServer {
                  'describe', 'context', 'status', \
                  'api_surface', 'boundary_check', 'hotspots', 'metrics_at', \
                  'dead_symbols', 'deprecated_callers', 'touches_hot_path', \
-                 'coupling', 'churn', 'coupling_hotspots', 'coupling_hubs'"
+                 'coupling', 'churn', 'coupling_hotspots', 'coupling_hubs', \
+                 'snapshot'"
             )),
         };
 
@@ -2007,6 +2044,44 @@ impl DjinnMcpServer {
             next_step: None,
         }))
     }
+
+    /// Handler for `operation = "snapshot"` (PR D2).
+    ///
+    /// Returns the full repo graph capped by PageRank tier so the
+    /// `/code-graph` UI can render it through Sigma + ForceAtlas2
+    /// without hitting the ~5k-node WebGL ceiling on large
+    /// repositories. The cap defaults to 2000 (matches the plan's
+    /// `Sigma.js performance ceiling at ~5k nodes` mitigation) and is
+    /// settable via the `limit` field.
+    ///
+    /// `graph_excluded_paths` filtering happens in the bridge so
+    /// `total_nodes` / `total_edges` reflect the post-exclusion graph
+    /// — the cap is then applied to the surviving population.
+    async fn code_graph_snapshot(
+        &self,
+        ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        // Default 2000 nodes — plan §"Risks & mitigations" calls out
+        // this as the Sigma WebGL ceiling. Clamp to [1, 10_000] to keep
+        // the wire payload bounded; callers that want a wider view can
+        // request up to 10k explicitly.
+        let node_cap = params
+            .limit
+            .map(|l| l.max(1) as usize)
+            .unwrap_or(2_000)
+            .clamp(1, 10_000);
+        let exclusions = self.load_graph_exclusions(&params.project_id).await;
+        let snapshot = self
+            .state
+            .repo_graph()
+            .snapshot(ctx, node_cap, &exclusions)
+            .await?;
+        Ok(CodeGraphResponse::Snapshot(SnapshotResponse {
+            snapshot,
+            next_step: None,
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -2603,6 +2678,7 @@ mod tests {
             CodeGraphResponse::Ambiguous(r) => r.next_step.as_deref(),
             CodeGraphResponse::NotFound(r) => r.next_step.as_deref(),
             CodeGraphResponse::DetectedChanges(r) => r.next_step.as_deref(),
+            CodeGraphResponse::Snapshot(r) => r.next_step.as_deref(),
         }
     }
 
@@ -3081,5 +3157,164 @@ mod tests {
     #[test]
     fn pick_next_step_target_returns_none_for_empty() {
         assert!(super::pick_next_step_target(&[]).is_none());
+    }
+
+    // ── PR D2: snapshot wire-shape tests ───────────────────────────────────
+
+    fn empty_snapshot_response() -> SnapshotResponse {
+        SnapshotResponse {
+            snapshot: SnapshotPayload {
+                project_id: "proj-test".to_string(),
+                git_head: "deadbeef".to_string(),
+                generated_at: "2026-04-28T00:00:00Z".to_string(),
+                truncated: false,
+                total_nodes: 0,
+                total_edges: 0,
+                node_cap: 2_000,
+                nodes: vec![],
+                edges: vec![],
+            },
+            next_step: None,
+        }
+    }
+
+    #[test]
+    fn snapshot_variant_uses_unique_discriminator_pr_d2() {
+        // The `CodeGraphResponse` enum is `#[serde(untagged)]`; UI
+        // parsers disambiguate on a top-level field name. The plan
+        // pins `snapshot` as the PR D2 discriminator — assert it
+        // doesn't collide with any other variant's discriminator.
+        let response = CodeGraphResponse::Snapshot(empty_snapshot_response());
+        let json = serde_json::to_value(&response).expect("serialize");
+        let obj = json.as_object().expect("snapshot variant should be an object");
+        assert!(
+            obj.contains_key("snapshot"),
+            "snapshot variant must surface the `snapshot` field: {json}"
+        );
+        // Existing taken field names per the inter-PR contract — none
+        // may appear at the top level of the snapshot variant.
+        for forbidden in [
+            "nodes",
+            "orphans",
+            "cycles",
+            "hits",
+            "neighbors",
+            "file_groups",
+            "hotspots",
+            "pairs",
+            "hubs",
+            "coupled",
+            "edges",
+            "symbols",
+            "violations",
+            "description",
+            "path",
+            "status",
+            "warmed",
+            "deprecated_symbol",
+            "witness_path",
+            "members",
+            "symbol_context",
+            "candidates",
+            "not_found",
+            "detected_changes",
+        ] {
+            assert!(
+                !obj.contains_key(forbidden),
+                "snapshot variant must not surface the `{forbidden}` field at top level: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_response_serializes_full_contract_pr_d2() {
+        // Pin the wire shape spec'd in the inter-PR contract: the
+        // payload sits under `snapshot`, with all required fields
+        // present and the right types.
+        let mut response = empty_snapshot_response();
+        response.snapshot.total_nodes = 3;
+        response.snapshot.total_edges = 5;
+        response.snapshot.truncated = true;
+        response.snapshot.nodes.push(crate::bridge::SnapshotNode {
+            id: "symbol:scip-rust . . . main()".to_string(),
+            kind: "symbol".to_string(),
+            label: "main".to_string(),
+            symbol_kind: Some("function".to_string()),
+            file_path: Some("src/main.rs".to_string()),
+            pagerank: 0.42,
+            community_id: None,
+        });
+        response.snapshot.edges.push(crate::bridge::SnapshotEdge {
+            from: "file:src/main.rs".to_string(),
+            to: "symbol:scip-rust . . . main()".to_string(),
+            kind: "ContainsDefinition".to_string(),
+            confidence: 0.95,
+            reason: None,
+        });
+        let json = serde_json::to_value(&CodeGraphResponse::Snapshot(response))
+            .expect("serialize");
+        let snapshot = json
+            .get("snapshot")
+            .and_then(|s| s.as_object())
+            .expect("snapshot object present");
+        for required in [
+            "project_id",
+            "git_head",
+            "generated_at",
+            "truncated",
+            "total_nodes",
+            "total_edges",
+            "node_cap",
+            "nodes",
+            "edges",
+        ] {
+            assert!(
+                snapshot.contains_key(required),
+                "snapshot payload missing required field `{required}`: {json}"
+            );
+        }
+        assert_eq!(
+            snapshot.get("truncated").and_then(|v| v.as_bool()),
+            Some(true),
+            "truncated round-trips as bool: {json}"
+        );
+
+        // Nodes / edges shape spot-check.
+        let node = snapshot
+            .get("nodes")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.as_object())
+            .expect("first node object");
+        for required in ["id", "kind", "label", "pagerank"] {
+            assert!(
+                node.contains_key(required),
+                "node missing `{required}`: {node:?}"
+            );
+        }
+        let edge = snapshot
+            .get("edges")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.as_object())
+            .expect("first edge object");
+        for required in ["from", "to", "kind", "confidence"] {
+            assert!(
+                edge.contains_key(required),
+                "edge missing `{required}`: {edge:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_snapshot_params_from_json_pr_d2() {
+        let json = serde_json::json!({
+            "operation": "snapshot",
+            "project": "owner/repo",
+            "limit": 1500,
+        });
+        let params: CodeGraphParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.operation, "snapshot");
+        assert_eq!(params.limit, Some(1500));
     }
 }

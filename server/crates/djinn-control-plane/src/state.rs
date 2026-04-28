@@ -340,6 +340,24 @@ pub mod stubs {
                 commits_since_pin: None,
             })
         }
+        async fn snapshot(
+            &self,
+            _: &crate::bridge::ProjectCtx,
+            node_cap: usize,
+            _: &crate::tools::graph_exclusions::GraphExclusions,
+        ) -> Result<crate::bridge::SnapshotPayload, String> {
+            Ok(crate::bridge::SnapshotPayload {
+                project_id: String::new(),
+                git_head: String::new(),
+                generated_at: String::new(),
+                truncated: false,
+                total_nodes: 0,
+                total_edges: 0,
+                node_cap,
+                nodes: vec![],
+                edges: vec![],
+            })
+        }
         async fn symbols_at(
             &self,
             _: &crate::bridge::ProjectCtx,
