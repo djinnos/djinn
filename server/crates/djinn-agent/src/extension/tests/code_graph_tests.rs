@@ -419,16 +419,15 @@ async fn code_graph_dispatch_describe_reaches_graph_ops() {
     );
 }
 
-/// v8 cochange op: dispatch wires through to the
-/// CommitFileChangeRepository query layer. Empty DB → empty result
-/// (not an error), which is the correct behavior for a project that
-/// hasn't yet had the coupling-index pass run.
+/// v8 cochange op: routes through `RepoGraphOps::coupling`. Agent stub
+/// returns "code_graph not available" — same pattern as every other
+/// dispatch test. Verifies wiring rather than empty-state semantics.
 #[tokio::test]
-async fn code_graph_dispatch_cochange_returns_empty_on_unindexed_project() {
+async fn code_graph_dispatch_cochange_with_key_reaches_graph_ops() {
     let worktree = crate::test_helpers::test_tempdir("djinn-cg-cochange-");
     let state =
         crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
-    let result = code_graph_tool(
+    let err = code_graph_tool(
         &state,
         serde_json::json!({
             "operation": "cochange",
@@ -438,18 +437,20 @@ async fn code_graph_dispatch_cochange_returns_empty_on_unindexed_project() {
         worktree.path(),
     )
     .await
-    .expect("cochange should not error on empty index");
-    let coupled = result["coupled"].as_array().expect("coupled key present");
-    assert!(coupled.is_empty(), "expected empty coupled list, got: {result}");
+    .unwrap_err();
+    assert!(
+        err.contains("code_graph not available"),
+        "cochange-with-key should reach graph ops layer, got: {err}"
+    );
 }
 
-/// v8 cochange without key returns project-wide pairs (top_coupled_pairs).
+/// v8 cochange without key routes through `RepoGraphOps::coupling_hotspots`.
 #[tokio::test]
-async fn code_graph_dispatch_cochange_without_key_returns_project_pairs() {
+async fn code_graph_dispatch_cochange_without_key_reaches_graph_ops() {
     let worktree = crate::test_helpers::test_tempdir("djinn-cg-cochange-pairs-");
     let state =
         crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
-    let result = code_graph_tool(
+    let err = code_graph_tool(
         &state,
         serde_json::json!({
             "operation": "cochange",
@@ -458,19 +459,21 @@ async fn code_graph_dispatch_cochange_without_key_returns_project_pairs() {
         worktree.path(),
     )
     .await
-    .expect("cochange-without-key should not error");
-    let pairs = result["pairs"].as_array().expect("pairs key present");
-    assert!(pairs.is_empty(), "expected empty pairs list, got: {result}");
+    .unwrap_err();
+    assert!(
+        err.contains("code_graph not available"),
+        "cochange-without-key should reach graph ops layer, got: {err}"
+    );
 }
 
-/// v8 churn op: same dispatch test pattern. Empty result on unindexed
-/// project; opt-in `since` filter accepted.
+/// v8 churn op: routes through `RepoGraphOps::churn`. Same dispatch
+/// test pattern.
 #[tokio::test]
-async fn code_graph_dispatch_churn_returns_empty_on_unindexed_project() {
+async fn code_graph_dispatch_churn_reaches_graph_ops() {
     let worktree = crate::test_helpers::test_tempdir("djinn-cg-churn-");
     let state =
         crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
-    let result = code_graph_tool(
+    let err = code_graph_tool(
         &state,
         serde_json::json!({
             "operation": "churn",
@@ -480,9 +483,11 @@ async fn code_graph_dispatch_churn_returns_empty_on_unindexed_project() {
         worktree.path(),
     )
     .await
-    .expect("churn should not error on empty index");
-    let files = result["files"].as_array().expect("files key present");
-    assert!(files.is_empty(), "expected empty files list, got: {result}");
+    .unwrap_err();
+    assert!(
+        err.contains("code_graph not available"),
+        "churn should reach graph ops layer, got: {err}"
+    );
 }
 
 /// v8 hotspots op: short-circuits cleanly when graph isn't warmed —
