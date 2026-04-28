@@ -926,6 +926,45 @@ impl RepoGraphOps for RepoGraphBridge {
         } else {
             Some(node.documentation.join("\n"))
         };
+        // v8: behavioural fan-in / fan-out (skip structural anchors +
+        // synthetic side-channels, same edge-kind partition the impact
+        // BFS uses).
+        use djinn_graph::repo_graph::RepoGraphEdgeKind;
+        let is_behavioral = |kind: RepoGraphEdgeKind| -> bool {
+            matches!(
+                kind,
+                RepoGraphEdgeKind::Reads
+                    | RepoGraphEdgeKind::Writes
+                    | RepoGraphEdgeKind::SymbolReference
+                    | RepoGraphEdgeKind::FileReference
+                    | RepoGraphEdgeKind::Implements
+                    | RepoGraphEdgeKind::Extends
+                    | RepoGraphEdgeKind::TypeDefines
+                    | RepoGraphEdgeKind::Defines
+            )
+        };
+        let fan_in = graph
+            .graph()
+            .edges_directed(node_index, petgraph::Direction::Incoming)
+            .filter(|e| is_behavioral(e.weight().kind))
+            .count();
+        let fan_out = graph
+            .graph()
+            .edges_directed(node_index, petgraph::Direction::Outgoing)
+            .filter(|e| is_behavioral(e.weight().kind))
+            .count();
+        // v8: line range from the graph's symbol_ranges sidecar.
+        let (start_line, end_line) = node
+            .file_path
+            .as_ref()
+            .and_then(|p| graph.range_for_node(node_index, p))
+            .map(|(s, e)| (Some(s), Some(e)))
+            .unwrap_or((None, None));
+        // v8: entry-point flag derived from incoming EntryPointOf edges.
+        let is_entry_point = graph
+            .graph()
+            .edges_directed(node_index, petgraph::Direction::Incoming)
+            .any(|e| e.weight().kind == RepoGraphEdgeKind::EntryPointOf);
         Ok(Some(SymbolDescription {
             key: format_node_key(&node.id),
             kind: format!("{:?}", node.kind).to_lowercase(),
@@ -933,6 +972,14 @@ impl RepoGraphOps for RepoGraphBridge {
             signature: node.signature.clone(),
             documentation,
             file: node.file_path.as_ref().map(|p| p.display().to_string()),
+            start_line,
+            end_line,
+            fan_in,
+            fan_out,
+            visibility: node.visibility.map(|v| v.as_str().to_string()),
+            is_external: node.is_external,
+            is_entry_point,
+            is_test: node.is_test,
         }))
     }
 

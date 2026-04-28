@@ -443,6 +443,44 @@ pub struct SymbolDescription {
     pub signature: Option<String>,
     pub documentation: Option<String>,
     pub file: Option<String>,
+    /// v8: 1-indexed enclosing range of this symbol's definition in
+    /// `file`. `None` for file nodes, synthetic nodes (Process /
+    /// Community / Table), and external symbols.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u32>,
+    /// v8: count of incoming dependency edges (Reads/Writes/
+    /// SymbolReference/FileReference/Implements/Extends/TypeDefines/
+    /// Defines) — i.e. "how many things depend on this". Excludes the
+    /// structural anchors (ContainsDefinition/DeclaredInFile) and
+    /// synthetic side-channels (MemberOf/StepInProcess/EntryPointOf).
+    #[serde(default)]
+    pub fan_in: usize,
+    /// v8: count of outgoing dependency edges. "How many things this
+    /// depends on." Same edge-kind filter as `fan_in`.
+    #[serde(default)]
+    pub fan_out: usize,
+    /// v8: visibility (`public` / `private` / `unknown`) per SCIP
+    /// `local`-prefix heuristic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
+    /// v8: true when the symbol is from a vendored / third-party
+    /// crate / cross-package dep. Discovery ops filter externals by
+    /// default; surfacing the flag here lets describe callers reason
+    /// about why a symbol they're examining might not show up in
+    /// ranked / orphans / dead.
+    #[serde(default)]
+    pub is_external: bool,
+    /// v8: true when this symbol has any incoming `EntryPointOf`
+    /// edge (i.e. the entry-point detector flagged it as `fn main`,
+    /// a route handler, a test, etc.).
+    #[serde(default)]
+    pub is_entry_point: bool,
+    /// v8: SCIP-marked Test role. Mirrors the `is_test` flag on the
+    /// underlying graph node.
+    #[serde(default)]
+    pub is_test: bool,
 }
 
 /// Per-file rollup of `impact`/`neighbors` results, returned when
