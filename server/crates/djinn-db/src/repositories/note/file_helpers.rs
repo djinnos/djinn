@@ -27,6 +27,11 @@ pub fn folder_for_type(note_type: &str) -> &'static str {
         "competitive" => "research/competitive",
         "tech_spike" => "research/technical",
         "repo_map" => "reference/repo-maps",
+        // PR F4: auto-generated cluster doc for a community detected by
+        // `djinn_graph::communities::detect_communities`. One note per
+        // community; folder is unique so cluster docs are easy to list /
+        // exclude from human-curated knowledge browsing.
+        "cluster_doc" => "reference/clusters",
         // Singletons live at the .djinn/ root, no subfolder.
         "brief" | "roadmap" => "",
         // Unknown types fall back to reference.
