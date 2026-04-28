@@ -586,6 +586,22 @@ impl RepoGraphOps for RepoGraphBridge {
             if exclusions.excludes(&key, file.as_deref(), &node.display_name) {
                 continue;
             }
+            // v8: drop test-file results from name search by default.
+            // User feedback (cross-repo eval): searching `Strategy`
+            // returned mock-dominated results because mocks/test
+            // fixtures share the same display name as core types.
+            // Mocks are caught by Tier 1.5; tests need this extra
+            // file-path check (a real `Strategy` symbol in
+            // `internal/strategies/strategy_test.go` would otherwise
+            // outrank the prod `Strategy` type at limit boundaries).
+            // Externals already excluded by the search ranker upstream
+            // for symbol-kind queries; this catches the residual file
+            // case.
+            if let Some(path) = file.as_deref()
+                && djinn_control_plane::tools::graph_exclusions::is_test_path(path)
+            {
+                continue;
+            }
             out.push(SearchHit {
                 key,
                 kind: format!("{:?}", node.kind).to_lowercase(),
