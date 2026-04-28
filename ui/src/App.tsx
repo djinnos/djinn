@@ -8,7 +8,7 @@ import { SettingsPage } from "@/pages/SettingsPage";
 import { TaskSessionPage } from "@/pages/TaskSessionPage";
 import { ChatPage } from "@/pages/ChatPage";
 import { MemoryPage } from "@/pages/MemoryPage";
-import { PulsePage } from "@/pages/PulsePage";
+import { CodeGraphPage } from "@/pages/CodeGraphPage";
 import { ProposalsPage } from "@/pages/ProposalsPage";
 import { RepositoriesPage } from "@/pages/RepositoriesPage";
 import { ProjectEnvironmentPage } from "@/pages/ProjectEnvironmentPage";
@@ -40,7 +40,8 @@ function MainLayout() {
             <Route path="/chat/:sessionId" element={<ChatPage />} />
             <Route path="/agents" element={<AgentsPage />} />
             <Route path="/memory" element={<MemoryPage />} />
-            <Route path="/pulse" element={<PulsePage />} />
+            <Route path="/code-graph" element={<CodeGraphPage />} />
+            <Route path="/pulse" element={<Navigate to="/code-graph" replace />} />
             <Route path="/proposals" element={<ProposalsPage />} />
             <Route path="/metrics" element={<Navigate to="/agents" replace />} />
 

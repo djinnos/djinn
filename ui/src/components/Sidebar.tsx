@@ -13,7 +13,7 @@ import {
   WorkflowSquare06Icon,
   Brain01Icon,
   Idea01Icon,
-  Pulse01Icon,
+  ConnectIcon,
   GithubIcon,
 } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react';
@@ -134,8 +134,8 @@ export function Sidebar() {
       setActiveSection('agents');
     } else if (location.pathname.includes('/memory')) {
       setActiveSection('memory');
-    } else if (location.pathname.includes('/pulse')) {
-      setActiveSection('pulse');
+    } else if (location.pathname.includes('/code-graph')) {
+      setActiveSection('code-graph');
     } else if (location.pathname.includes('/proposals')) {
       setActiveSection('proposals');
     } else if (location.pathname.startsWith('/repositories')) {
@@ -195,10 +195,10 @@ export function Sidebar() {
           onClick={() => navigateToView('roadmap')}
         />
         <NavItem
-          icon={<HugeiconsIcon icon={Pulse01Icon} className="h-4 w-4" />}
-          label="Pulse"
-          isActive={activeSection === 'pulse'}
-          onClick={() => navigateToView('pulse')}
+          icon={<HugeiconsIcon icon={ConnectIcon} className="h-4 w-4" />}
+          label="Code Graph"
+          isActive={activeSection === 'code-graph'}
+          onClick={() => navigateToView('code-graph')}
         />
         <NavItem
           icon={<HugeiconsIcon icon={Idea01Icon} className="h-4 w-4" />}
