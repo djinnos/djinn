@@ -381,7 +381,7 @@ describe("colorForNode", () => {
     expect(colorForNode(sym)).toBe(colorForCommunity("cluster-7"));
   });
 
-  it("falls back to top-level folder hash when community_id is absent", () => {
+  it("falls back to parent-directory hash when community_id is absent", () => {
     const sym: SnapshotNode = {
       id: "s",
       kind: "symbol",
@@ -390,24 +390,47 @@ describe("colorForNode", () => {
       symbol_kind: "function",
       file_path: "server/crates/djinn-graph/src/lib.rs",
     };
-    expect(colorForNode(sym)).toBe(colorForCommunity("server"));
+    expect(colorForNode(sym)).toBe(
+      colorForCommunity("server/crates/djinn-graph/src"),
+    );
   });
 
-  it("returns a fixed color for files / folders", () => {
-    const file: SnapshotNode = {
-      id: "f",
+  it("colors files by parent-directory hash so siblings share a hue", () => {
+    const a: SnapshotNode = {
+      id: "f1",
       kind: "file",
-      label: "main.rs",
+      label: "page_worker.go",
+      file_path: "internal/worker/page_worker.go",
       pagerank: 0,
     };
-    expect(colorForNode(file)).toBe("#3b82f6");
-    const folder: SnapshotNode = {
-      id: "d",
-      kind: "folder",
-      label: "src",
+    const b: SnapshotNode = {
+      id: "f2",
+      kind: "file",
+      label: "interfaces.go",
+      file_path: "internal/worker/interfaces.go",
       pagerank: 0,
     };
-    expect(colorForNode(folder)).toBe("#6366f1");
+    const c: SnapshotNode = {
+      id: "f3",
+      kind: "file",
+      label: "client.go",
+      file_path: "internal/strategies/connectwise/client.go",
+      pagerank: 0,
+    };
+    expect(colorForNode(a)).toBe(colorForCommunity("internal/worker"));
+    expect(colorForNode(a)).toBe(colorForNode(b));
+    expect(colorForNode(a)).not.toBe(colorForNode(c));
+  });
+
+  it("uses the project accent for folders that look like the project root", () => {
+    expect(
+      colorForNode({
+        id: "p",
+        kind: "folder",
+        label: "Project",
+        pagerank: 0,
+      }),
+    ).toBe("#a855f7");
   });
 
   it("colorForCommunity is deterministic across calls", () => {

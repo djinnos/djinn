@@ -208,14 +208,11 @@ export const COMMUNITY_COLORS = [
   "#84cc16", // lime
 ] as const;
 
-/** Structural-node colors — distinct hues that don't fight the symbol cloud. */
-export const STRUCTURAL_COLORS = {
-  project: "#a855f7", // purple-500
-  folder: "#6366f1", // indigo-500
-  file: "#3b82f6", // blue-500
-} as const;
-
-/** Neutral fallback for symbols with neither community nor file_path. */
+/**
+ * The project root keeps its own bright accent so it always reads as
+ * "the apex node" no matter which palette index its slug hashes to.
+ */
+const PROJECT_COLOR = "#a855f7"; // purple-500
 const SYMBOL_FALLBACK = "#94a3b8"; // slate-400
 
 /** FNV-1a 32-bit — deterministic, fast, and well-distributed for short strings. */
@@ -228,31 +225,50 @@ function fnv1a(input: string): number {
   return hash >>> 0;
 }
 
-/** Top-level folder of a repo-relative path, or the whole path when flat. */
-function topLevelFolder(filePath: string): string {
-  const idx = filePath.indexOf("/");
-  return idx >= 0 ? filePath.slice(0, idx) : filePath;
+/** Parent directory of a repo-relative path, or "" for top-level paths. */
+function parentDirectory(filePath: string): string {
+  const idx = filePath.lastIndexOf("/");
+  return idx > 0 ? filePath.slice(0, idx) : "";
 }
 
 export function colorForCommunity(communityId: string): string {
   return COMMUNITY_COLORS[fnv1a(communityId) % COMMUNITY_COLORS.length];
 }
 
+/**
+ * Color routing:
+ *   - Project: fixed purple accent.
+ *   - Folder: hash the folder path so siblings under the same parent
+ *     share a hue — the canvas reads as colored regions per top-level
+ *     module instead of one indigo band.
+ *   - File: hash the parent directory so all files in a folder share a
+ *     color. This is the lever that breaks up the blue file wall.
+ *   - Symbol: community_id (if F3 populated) → file_path's parent
+ *     directory → fallback.
+ */
 export function colorForNode(node: SnapshotNode): string {
   if (node.kind === "folder") {
-    if (/project/i.test(node.label)) return STRUCTURAL_COLORS.project;
-    return STRUCTURAL_COLORS.folder;
+    if (/project/i.test(node.label) || node.label === "" || !node.file_path) {
+      return PROJECT_COLOR;
+    }
+    return colorForCommunity(node.label);
   }
-  if (node.kind === "file") return STRUCTURAL_COLORS.file;
+  if (node.kind === "file") {
+    const parent = node.file_path
+      ? parentDirectory(node.file_path)
+      : node.label;
+    if (parent.length === 0) return PROJECT_COLOR;
+    return colorForCommunity(parent);
+  }
 
-  if (node.community_id) {
-    return colorForCommunity(node.community_id);
-  }
+  if (node.community_id) return colorForCommunity(node.community_id);
   if (node.file_path) {
-    return colorForCommunity(topLevelFolder(node.file_path));
+    const parent = parentDirectory(node.file_path);
+    if (parent.length > 0) return colorForCommunity(parent);
   }
   return SYMBOL_FALLBACK;
 }
+
 
 // ── Edge styling ────────────────────────────────────────────────────────────
 
