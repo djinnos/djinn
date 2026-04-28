@@ -1,17 +1,26 @@
 /**
  * CodeGraphPage — top-level shell for `/code-graph`.
  *
- * D1 stood up an empty Sigma canvas and a project picker. D2 swaps
- * the empty canvas for `<CodeGraphCanvas>`, which fetches the
- * `code_graph snapshot` payload and renders it through Sigma +
- * ForceAtlas2. Interactions, citation highlighting, Mermaid impact,
- * and Cmd-K all land in D3-D6 — this file is intentionally thin.
+ * D1 stood up an empty Sigma canvas and a project picker.
+ * D2 swapped the empty canvas for `<CodeGraphCanvas>`, fetching the
+ *   `code_graph snapshot` payload and rendering through Sigma + FA2.
+ * D3 layered:
+ *   - `<GraphToolbar>`         (edge-kind checkboxes + depth slider)
+ *   - `<SymbolDetailPanel>`    (right rail; opens on selection)
+ *   - `<QueryPalette>`         (Cmd-K fuzzy hybrid search)
+ *
+ * The store survives across the canvas remount on project change —
+ * the canvas itself calls `reset()` on mount so stale highlights
+ * don't leak between projects.
  */
 
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ConnectIcon } from "@hugeicons/core-free-icons";
 
 import { CodeGraphCanvas } from "@/components/codegraph/CodeGraphCanvas";
+import { GraphToolbar } from "@/components/codegraph/GraphToolbar";
+import { QueryPalette } from "@/components/codegraph/QueryPalette";
+import { SymbolDetailPanel } from "@/components/codegraph/SymbolDetailPanel";
 import {
   useProjectStore,
   useProjects,
@@ -56,6 +65,13 @@ function ProjectPicker() {
           </option>
         ))}
       </select>
+      <span className="ml-auto text-[10px] uppercase tracking-wide text-muted-foreground/60">
+        Press{" "}
+        <kbd className="rounded border border-border/60 bg-background px-1 py-0.5 font-mono text-[10px]">
+          ⌘K
+        </kbd>{" "}
+        to search
+      </span>
     </div>
   );
 }
@@ -80,17 +96,25 @@ export function CodeGraphPage() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <ProjectPicker />
-      <div className={cn("relative min-h-0 flex-1")}>
+      {project && selectedProjectId && <GraphToolbar />}
+      <div className={cn("relative flex min-h-0 flex-1")}>
         {project && selectedProjectId ? (
-          // The `key` forces a fresh canvas + fetch when the project
-          // changes. The hook contract treats remount as the
-          // canonical "reset" path — D3 will revisit this if we add
-          // a per-project highlight store that survives across
-          // selections.
-          <CodeGraphCanvas
-            key={selectedProjectId}
-            projectId={selectedProjectId}
-          />
+          <>
+            <div className="relative min-w-0 flex-1">
+              {/*
+                The `key` forces a fresh canvas + fetch when the project
+                changes. The hook contract treats remount as the canonical
+                "reset" path — the canvas also calls `reset()` on mount so
+                cross-project highlight leaks are impossible.
+              */}
+              <CodeGraphCanvas
+                key={selectedProjectId}
+                projectId={selectedProjectId}
+              />
+            </div>
+            <SymbolDetailPanel projectId={selectedProjectId} />
+            <QueryPalette projectId={selectedProjectId} />
+          </>
         ) : (
           <EmptyHint message="Select a project to view its code graph." />
         )}

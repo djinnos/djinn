@@ -1,70 +1,201 @@
 /**
- * codeGraphStore — Zustand slice owning the cross-page selection / citation
- * state for `/code-graph` and the chat citation round-trip (PR D5).
+ * codeGraphStore — UI-side highlight + filter state for `/code-graph`.
  *
- * Source-of-truth contract per the plan:
+ * Owns the layered highlight slice that the Sigma `nodeReducer` /
+ * `edgeReducer` callbacks read on every render. Each highlight source
+ * is a separate Set so they compose without rebuilding the graph:
  *
- * - `/chat` writes `citationIds` (and bumps `selectionId`) before it
- *   navigates, so when `<CodeGraphCanvas>` mounts on `/code-graph` the
- *   highlight reducer (PR D3) sees the selection synchronously.
- * - `/code-graph` writes `selectionId` on hover/click; chat reads
- *   nothing back — the store is one-way for now.
+ *   selection           → user-clicked focal node (1-hop highlight)
+ *   citationIds         → AI chat citations (PR D5 will populate)
+ *   toolHighlightIds    → tool-call results (e.g. blast-radius BFS)
+ *   blastRadiusFrontier → animation-only set (CSS pulse) — separate
+ *                         from `toolHighlightIds` so the impact "fan-out"
+ *                         can ripple while the static highlight remains
+ *                         visible underneath.
+ *   hoverId             → hover tooltip target (transient)
  *
- * This file ships the *fields and setters* the chat path (D5) needs.
- * D3 builds the reducer that turns these fields into Sigma node
- * decorations; nothing in this file talks to Sigma directly.
+ * Filters live alongside because they're peer concerns of the same
+ * canvas:
+ *
+ *   edgeKindFilters     → per-RepoGraphEdgeKind toggle (default: all on)
+ *   depthFilter         → 1..5 hop depth from selection (default 5 = all)
+ *
+ * D5 will write to `citationIds` from the chat parser without ever
+ * touching the canvas component — the reducer pattern is what makes
+ * cross-page wiring trivial. Same for the future Cmd-K palette.
  */
 
 import { create } from "zustand";
 
-export interface CodeGraphState {
-  /**
-   * The "currently focused" node — last clicked / pinned via citation.
-   * Null when nothing is selected. The canvas pans to this node and
-   * adds a persistent ring around it.
-   */
-  selectionId: string | null;
-  /**
-   * Set of node ids that should pulse (i.e. recently arrived via a
-   * citation click).  Multiple citations from the same chat reply may
-   * land here at once.
-   */
-  citationIds: Set<string>;
+/**
+ * Set of `RepoGraphEdgeKind` Debug-style names emitted by
+ * `code_graph snapshot`. Mirrors the snake_case-via-Debug variant
+ * name convention used on the wire (see `bridge::SnapshotEdge.kind`
+ * in the Rust crate). Adding a new edge kind on the server requires
+ * updating this list, but the reducer treats unknown kinds as
+ * "always visible" so a missing entry never *hides* edges.
+ */
+export const EDGE_KINDS = [
+  "ContainsDefinition",
+  "DeclaredInFile",
+  "FileReference",
+  "SymbolReference",
+  "Reads",
+  "Writes",
+  "SymbolRelationshipReference",
+  "SymbolRelationshipImplementation",
+  "SymbolRelationshipTypeDefinition",
+  "SymbolRelationshipDefinition",
+] as const;
 
-  /** Set the persistent selection. Pass `null` to clear. */
-  setSelection: (id: string | null) => void;
-  /**
-   * Replace the active citation set wholesale. Intended for the
-   * common case where a chat click lights up exactly one (or a small
-   * batch of) refs.
-   */
-  setCitations: (ids: string[]) => void;
-  /** Add a single id to the existing citation set. */
-  addCitation: (id: string) => void;
-  /** Drop everything from the citation set. */
-  clearCitations: () => void;
+export type EdgeKind = (typeof EDGE_KINDS)[number];
+
+/** Minimum / maximum hop depth surfaced by the depth-filter slider. */
+export const MIN_DEPTH = 1;
+export const MAX_DEPTH = 5;
+/** Sentinel that means "no depth filtering" — equal to {@link MAX_DEPTH}. */
+export const DEFAULT_DEPTH = MAX_DEPTH;
+
+export interface CodeGraphHighlightState {
+  /** Currently focused node id (RepoNodeKey). */
+  selectionId: string | null;
+  /** AI chat citation set — populated by PR D5's parser. */
+  citationIds: Set<string>;
+  /** Tool-call result highlight (e.g. blast-radius BFS frontier). */
+  toolHighlightIds: Set<string>;
+  /** Animation-only set: nodes pulsing as part of an impact ripple. */
+  blastRadiusFrontier: Set<string>;
+  /** Hovered node id; cleared on `mouseleave`. */
+  hoverId: string | null;
+  /** Per-edge-kind visibility. Default: every kind on. */
+  edgeKindFilters: Record<string, boolean>;
+  /** Hop depth from selection to render; {@link DEFAULT_DEPTH} = no filtering. */
+  depthFilter: number;
 }
 
-export const useCodeGraphStore = create<CodeGraphState>((set) => ({
-  selectionId: null,
-  citationIds: new Set<string>(),
+export interface CodeGraphHighlightActions {
+  setSelection: (id: string | null) => void;
+  setCitations: (ids: Iterable<string>) => void;
+  clearCitations: () => void;
+  setToolHighlight: (ids: Iterable<string>) => void;
+  clearToolHighlight: () => void;
+  setBlastRadiusFrontier: (ids: Iterable<string>) => void;
+  clearBlastRadiusFrontier: () => void;
+  setHover: (id: string | null) => void;
+  toggleEdgeKind: (kind: string) => void;
+  setEdgeKindEnabled: (kind: string, enabled: boolean) => void;
+  setDepthFilter: (depth: number) => void;
+  /** Drop every highlight + filter back to defaults — used on project switch. */
+  reset: () => void;
+}
 
-  setSelection: (id) => set({ selectionId: id }),
-  setCitations: (ids) =>
+function defaultEdgeKindFilters(): Record<string, boolean> {
+  return Object.fromEntries(EDGE_KINDS.map((k) => [k, true]));
+}
+
+const INITIAL_STATE: CodeGraphHighlightState = {
+  selectionId: null,
+  citationIds: new Set(),
+  toolHighlightIds: new Set(),
+  blastRadiusFrontier: new Set(),
+  hoverId: null,
+  edgeKindFilters: defaultEdgeKindFilters(),
+  depthFilter: DEFAULT_DEPTH,
+};
+
+export const useCodeGraphStore = create<
+  CodeGraphHighlightState & CodeGraphHighlightActions
+>((set) => ({
+  ...INITIAL_STATE,
+
+  setSelection: (id) => {
+    // Selecting a new node implicitly resets depth filtering's effective
+    // root, but we keep the depth value itself sticky so a user who
+    // dialed it down doesn't lose their setting on every click.
+    set({ selectionId: id });
+  },
+
+  setCitations: (ids) => {
+    set({ citationIds: new Set(ids) });
+  },
+
+  clearCitations: () => {
+    set({ citationIds: new Set() });
+  },
+
+  setToolHighlight: (ids) => {
+    set({ toolHighlightIds: new Set(ids) });
+  },
+
+  clearToolHighlight: () => {
+    set({ toolHighlightIds: new Set() });
+  },
+
+  setBlastRadiusFrontier: (ids) => {
+    set({ blastRadiusFrontier: new Set(ids) });
+  },
+
+  clearBlastRadiusFrontier: () => {
+    set({ blastRadiusFrontier: new Set() });
+  },
+
+  setHover: (id) => {
+    set({ hoverId: id });
+  },
+
+  toggleEdgeKind: (kind) => {
+    set((state) => ({
+      edgeKindFilters: {
+        ...state.edgeKindFilters,
+        [kind]: !(state.edgeKindFilters[kind] ?? true),
+      },
+    }));
+  },
+
+  setEdgeKindEnabled: (kind, enabled) => {
+    set((state) => ({
+      edgeKindFilters: { ...state.edgeKindFilters, [kind]: enabled },
+    }));
+  },
+
+  setDepthFilter: (depth) => {
+    const clamped = Math.max(MIN_DEPTH, Math.min(MAX_DEPTH, Math.round(depth)));
+    set({ depthFilter: clamped });
+  },
+
+  reset: () => {
     set({
-      citationIds: new Set(ids),
-      // Convenience: also pin the first id as the selection so the
-      // canvas pans to it. Clears selection when ids is empty so a
-      // stale pin doesn't outlive the citation set.
-      selectionId: ids[0] ?? null,
-    }),
-  addCitation: (id) =>
-    set((state) => {
-      if (state.citationIds.has(id)) return state;
-      const next = new Set(state.citationIds);
-      next.add(id);
-      return { citationIds: next };
-    }),
-  clearCitations: () =>
-    set({ citationIds: new Set<string>(), selectionId: null }),
+      ...INITIAL_STATE,
+      // Re-derive the filters so callers that mutated the map don't
+      // share its reference with the next instance.
+      citationIds: new Set(),
+      toolHighlightIds: new Set(),
+      blastRadiusFrontier: new Set(),
+      edgeKindFilters: defaultEdgeKindFilters(),
+    });
+  },
 }));
+
+// ── Convenience selectors (stable identity, easy to memoize) ─────────────────
+
+export const selectSelectionId = (
+  s: CodeGraphHighlightState & CodeGraphHighlightActions,
+) => s.selectionId;
+export const selectHoverId = (
+  s: CodeGraphHighlightState & CodeGraphHighlightActions,
+) => s.hoverId;
+export const selectCitationIds = (
+  s: CodeGraphHighlightState & CodeGraphHighlightActions,
+) => s.citationIds;
+export const selectToolHighlightIds = (
+  s: CodeGraphHighlightState & CodeGraphHighlightActions,
+) => s.toolHighlightIds;
+export const selectBlastRadiusFrontier = (
+  s: CodeGraphHighlightState & CodeGraphHighlightActions,
+) => s.blastRadiusFrontier;
+export const selectEdgeKindFilters = (
+  s: CodeGraphHighlightState & CodeGraphHighlightActions,
+) => s.edgeKindFilters;
+export const selectDepthFilter = (
+  s: CodeGraphHighlightState & CodeGraphHighlightActions,
+) => s.depthFilter;

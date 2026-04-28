@@ -25,9 +25,37 @@
 import { useEffect, useRef, useState } from "react";
 import type Graph from "graphology";
 import Sigma from "sigma";
+
+import type { Attributes } from "@/lib/codeGraphReducers";
 import EdgeCurveProgram from "@sigma/edge-curve";
 import forceAtlas2 from "graphology-layout-forceatlas2";
 import FA2LayoutSupervisor from "graphology-layout-forceatlas2/worker";
+
+/**
+ * Per-render hooks the caller can supply to recolor / hide nodes &
+ * edges without re-mounting Sigma. Sigma calls these on every frame
+ * — keep them pure and *cheap* (lookups in pre-computed sets).
+ *
+ * Used by D3 to layer selection / citation / tool-call highlights over
+ * the base render. The hook itself stays agnostic about the highlight
+ * source; only the canvas wires in the Zustand store.
+ */
+export interface SigmaReducerHooks {
+  nodeReducer?: (id: string, attrs: Attributes) => Attributes;
+  edgeReducer?: (id: string, attrs: Attributes) => Attributes;
+}
+
+/** Imperative handle returned by the hook for click / hover wiring. */
+export interface SigmaInstanceHandle {
+  on: <E extends string>(
+    event: E,
+    handler: (payload: { node?: string; edge?: string }) => void,
+  ) => () => void;
+  /** Force a fresh paint — used after the store mutates. */
+  refresh: () => void;
+  /** Look up node attributes (for tooltip / detail panels). */
+  getNodeAttributes: (id: string) => Attributes | null;
+}
 
 export interface UseSigmaGraphResult {
   /** True once the Sigma instance is mounted and the layout has started. */
@@ -40,6 +68,8 @@ export interface UseSigmaGraphResult {
   layoutRunning: boolean;
   /** Force the layout supervisor to halt. Idempotent. */
   stopLayout: () => void;
+  /** Imperative handle for events; null until Sigma is mounted. */
+  sigma: SigmaInstanceHandle | null;
 }
 
 /**
@@ -57,13 +87,23 @@ function inferRunMs(nodeCount: number): number {
 export function useSigmaGraph(
   containerRef: React.RefObject<HTMLDivElement | null>,
   graph: Graph | null,
+  reducers?: SigmaReducerHooks,
 ): UseSigmaGraphResult {
   const sigmaRef = useRef<Sigma | null>(null);
   const supervisorRef = useRef<FA2LayoutSupervisor | null>(null);
   const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Stash the reducer hooks in a ref so the Sigma instance always reads
+  // the latest pair without us having to re-mount on every render. This
+  // is the trick that makes D3 layered highlights flicker-free.
+  const reducersRef = useRef<SigmaReducerHooks | undefined>(reducers);
+  useEffect(() => {
+    reducersRef.current = reducers;
+  }, [reducers]);
+
   const [ready, setReady] = useState(false);
   const [layoutRunning, setLayoutRunning] = useState(false);
+  const [handle, setHandle] = useState<SigmaInstanceHandle | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -88,6 +128,18 @@ export function useSigmaGraph(
         // Z-order so high-pagerank (large) nodes render last and
         // sit above the smaller ones — much easier to click hubs.
         zIndex: true,
+        // PR D3: layered highlight reducers. The wrapper indirection
+        // through `reducersRef` lets the canvas swap reducer fns on
+        // every render without re-mounting Sigma — Sigma reads the
+        // current ref each frame.
+        nodeReducer: (id, attrs) => {
+          const fn = reducersRef.current?.nodeReducer;
+          return fn ? fn(id, attrs) : attrs;
+        },
+        edgeReducer: (id, attrs) => {
+          const fn = reducersRef.current?.edgeReducer;
+          return fn ? fn(id, attrs) : attrs;
+        },
       });
     } catch (err) {
       // Defensive: if WebGL initialization fails (e.g. headless test
@@ -98,6 +150,39 @@ export function useSigmaGraph(
     }
     sigmaRef.current = sigma;
     setReady(true);
+
+    // Imperative handle — exposed so the canvas can wire click /
+    // hover handlers without poking Sigma directly. Each method
+    // tolerates a stubbed Sigma in tests by no-op'ing when the
+    // underlying API is missing.
+    const sigmaInstance = sigma;
+    setHandle({
+      on: (event, fn) => {
+        // Sigma's typing for event names is a string union; we widen
+        // here so the handle accepts any Sigma-supported event name
+        // (`clickNode`, `enterNode`, `leaveNode`, ...).
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const onFn = (sigmaInstance as any).on?.bind(sigmaInstance);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const offFn = (sigmaInstance as any).removeListener?.bind(
+          sigmaInstance,
+        );
+        onFn?.(event, fn);
+        return () => offFn?.(event, fn);
+      },
+      refresh: () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (sigmaInstance as any).refresh?.();
+      },
+      getNodeAttributes: (id) => {
+        try {
+          if (!graph.hasNode(id)) return null;
+          return graph.getNodeAttributes(id);
+        } catch {
+          return null;
+        }
+      },
+    });
 
     // ── ForceAtlas2 supervisor (off main thread) ────────────────
     // `inferSettings` scales gravity / scalingRatio / Barnes-Hut θ
@@ -146,6 +231,7 @@ export function useSigmaGraph(
       }
       setReady(false);
       setLayoutRunning(false);
+      setHandle(null);
     };
   }, [containerRef, graph]);
 
@@ -160,5 +246,5 @@ export function useSigmaGraph(
     setLayoutRunning(false);
   };
 
-  return { ready, layoutRunning, stopLayout };
+  return { ready, layoutRunning, stopLayout, sigma: handle };
 }

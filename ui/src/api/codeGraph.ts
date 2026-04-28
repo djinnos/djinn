@@ -33,6 +33,7 @@ export type CodeGraphOperation =
   | "impact"
   | "implementations"
   | "describe"
+  | "context"
   | "cycles"
   | "orphans"
   | "path"
@@ -63,6 +64,8 @@ export interface CodeGraphArgs {
   from_glob?: string;
   from_sha?: string;
   group_by?: string;
+  /** PR C1 `context` op: fetch the symbol body verbatim. Defaults false. */
+  include_content?: boolean;
   key?: string;
   kind_filter?: string;
   kind_hint?: string;
@@ -71,7 +74,11 @@ export interface CodeGraphArgs {
   max_files_per_commit?: number;
   min_confidence?: number;
   min_size?: number;
+  /** PR B4 `search` op: `name` (legacy) | `lexical` | `semantic` | `structural` | `hybrid`. */
+  mode?: string;
   module_glob?: string;
+  /** PR C1 `context` op: short-name lookup target (alternative to `key`). */
+  name?: string;
   query?: string;
   sort_by?: string;
   start_line?: number;
@@ -165,6 +172,37 @@ export function fetchSnapshot(project: string, nodeCap?: number) {
   });
 }
 
+/**
+ * PR C1 / D3: 360° symbol view. Pass either a `key` (full RepoNodeKey)
+ * or `name` (short name). `include_content` defaults to false because
+ * the right-rail Symbol Detail panel renders a header + neighbor list,
+ * not the body — D5's chat citations panel will pass `true` to surface
+ * the snippet inline.
+ */
+export function fetchContext(
+  project: string,
+  args: { key?: string; name?: string; include_content?: boolean },
+) {
+  return callCodeGraph(project, "context", args);
+}
+
+/**
+ * PR B4 / D3: hybrid (RRF-fused) symbol search. `mode` defaults to
+ * server-side `hybrid` when omitted; the Cmd-K palette pins it
+ * explicitly so behavior doesn't drift if the env default changes.
+ */
+export function searchHybrid(
+  project: string,
+  query: string,
+  args: Pick<CodeGraphArgs, "limit" | "kind_filter" | "kind_hint"> = {},
+) {
+  return callCodeGraph(project, "search", {
+    query,
+    mode: "hybrid",
+    ...args,
+  });
+}
+
 // ── Re-export the existing untagged-response parsers ───────────────────────
 // `pulseTypes` lives in `components/pulse/` for historic reasons. Once D2+
 // land we can move the file under `api/` if the layout still feels off.
@@ -181,6 +219,7 @@ export {
   parseOrphans,
   parseRanked,
   parseSearchHits,
+  parseSymbolContext,
   truncatePathLeft,
   type Candidate,
   type ChangeKind,
@@ -188,11 +227,18 @@ export {
   type CycleMember,
   type DetectedChangesResult,
   type DetectedTouchedSymbol,
+  type EdgeCategory,
   type FileGroupEntry,
   type GraphNeighbor,
+  type MethodMeta,
+  type MethodParam,
   type NotFound,
   type OrphanEntry,
   type PagerankTier,
+  type ProcessRef,
   type RankedNode,
+  type RelatedSymbol,
   type SearchHit,
+  type SymbolContext,
+  type SymbolNode,
 } from "@/components/pulse/pulseTypes";
