@@ -1,20 +1,20 @@
 /**
- * CodeGraphCanvas — main D2/D3 view: fetch → adapt → render → interact.
+ * CodeGraphCanvas — main view: fetch → adapt → render → interact.
  *
- * Owns the round-trip from project id to a fully-laid-out Sigma
- * canvas. State machine has three terminal states (loading / error /
- * ready) plus an empty-graph fallback for projects that haven't been
- * warmed yet.
+ * Owns the round-trip from project id to a fully-laid-out Sigma canvas.
+ * State machine has three terminal states (loading / error / ready)
+ * plus an empty-graph fallback for projects that haven't been warmed
+ * yet.
  *
- * D3 layers selection / hover / citation / blast-radius highlights via
- * the Zustand `codeGraphStore` and the `useGraphReducers` hook —
- * Sigma's `nodeReducer` / `edgeReducer` callbacks read the latest view
- * on every frame, so toggles are flicker-free without re-mounting.
+ * Highlight layers (selection / hover / citation / blast-radius)
+ * compose via the Zustand `codeGraphStore` and the `useGraphReducers`
+ * hook — Sigma's `nodeReducer` / `edgeReducer` callbacks read the
+ * latest view on every frame, so toggles are flicker-free without
+ * re-mounting.
  *
- * The canvas itself stays thin: click handlers write `selectionId` to
- * the store, the right-rail (`SymbolDetailPanel`) and Cmd-K palette
- * (`QueryPalette`) live in the page shell so they survive across
- * project switches via the store.
+ * The dark radial-gradient background and bottom-center "Layout
+ * optimizing…" pill mirror the GitNexus aesthetic the page is
+ * matching.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -30,6 +30,7 @@ import {
 import { useSigmaGraph } from "@/hooks/useSigmaGraph";
 import { useGraphReducers } from "@/hooks/useGraphReducers";
 import { useCodeGraphStore } from "@/stores/codeGraphStore";
+import { RendererCapabilityDialog } from "./RendererCapabilityDialog";
 import { cn } from "@/lib/utils";
 
 type FetchState =
@@ -40,14 +41,15 @@ type FetchState =
 interface CodeGraphCanvasProps {
   projectId: string;
   /**
-   * Maximum number of nodes to fetch. Default 2000 (Sigma WebGL ceiling
-   * per the plan §"Risks & mitigations"). Useful to drop lower for
-   * tests or raise for debugging.
+   * Maximum number of nodes to fetch. Default 2000. Useful to drop
+   * lower for tests or raise for debugging.
    */
   nodeCap?: number;
   /** Bumping this re-issues the snapshot fetch without unmounting. */
   reloadKey?: number;
 }
+
+const CANVAS_BACKGROUND = `radial-gradient(circle at 50% 50%, rgba(124, 58, 237, 0.05) 0%, transparent 70%), linear-gradient(to bottom, #06060a, #0a0a10)`;
 
 export function CodeGraphCanvas({
   projectId,
@@ -57,7 +59,6 @@ export function CodeGraphCanvas({
   const [state, setState] = useState<FetchState>({ status: "loading" });
   const containerRef = useRef<HTMLDivElement | null>(null);
 
-  // ── Fetch the snapshot ────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
     setState({ status: "loading" });
@@ -90,30 +91,25 @@ export function CodeGraphCanvas({
     };
   }, [projectId, nodeCap, reloadKey]);
 
-  // ── Build the graphology graph (memoized so it doesn't churn) ─────────
   const graph = useMemo(() => {
     if (state.status !== "ready") return null;
     return buildGraphFromSnapshot(state.snapshot);
   }, [state]);
 
-  // ── Reducers — wired before Sigma so the constructor sees them ────────
-  // We build the hook with `null` Sigma initially; the second pass
-  // (after `useSigmaGraph` mounts) re-runs with the live handle so the
-  // animation loop and `refresh` calls plug in correctly.
+  // The reducers hook needs the live Sigma handle to call refresh()
+  // when store slices change. We init `null` and lift the handle from
+  // the second pass of `useSigmaGraph`.
   const [sigmaHandle, setSigmaHandle] = useState<
     ReturnType<typeof useSigmaGraph>["sigma"]
   >(null);
   const { reducers } = useGraphReducers(graph, sigmaHandle);
 
-  // ── Sigma + ForceAtlas2 lifecycle ─────────────────────────────────────
   const { layoutRunning, sigma } = useSigmaGraph(containerRef, graph, reducers);
 
-  // Keep `sigmaHandle` in lockstep so the reducer hook can call refresh.
   useEffect(() => {
     setSigmaHandle(sigma);
   }, [sigma]);
 
-  // ── Click + hover wiring ──────────────────────────────────────────────
   const setSelection = useCodeGraphStore((s) => s.setSelection);
   const setHover = useCodeGraphStore((s) => s.setHover);
   useEffect(() => {
@@ -121,17 +117,18 @@ export function CodeGraphCanvas({
     const offClick = sigma.on("clickNode", ({ node }) => {
       if (node) setSelection(node);
     });
-    // Click on the empty stage (the canvas background) — Sigma emits
-    // `clickStage` with no node payload. Clear the selection so the
-    // right-rail closes cleanly.
     const offStage = sigma.on("clickStage", () => {
       setSelection(null);
     });
     const offEnter = sigma.on("enterNode", ({ node }) => {
       if (node) setHover(node);
+      const c = containerRef.current;
+      if (c) c.style.cursor = "pointer";
     });
     const offLeave = sigma.on("leaveNode", () => {
       setHover(null);
+      const c = containerRef.current;
+      if (c) c.style.cursor = "grab";
     });
     return () => {
       offClick();
@@ -141,9 +138,6 @@ export function CodeGraphCanvas({
     };
   }, [sigma, setSelection, setHover]);
 
-  // Reset highlight state on project switch so a stale selection
-  // doesn't leak across projects (the page itself remounts via `key`,
-  // but the store survives — call `reset()` defensively).
   const resetHighlights = useCodeGraphStore((s) => s.reset);
   useEffect(() => {
     resetHighlights();
@@ -151,21 +145,36 @@ export function CodeGraphCanvas({
   }, [projectId, resetHighlights]);
 
   return (
-    <div className="absolute inset-0 bg-background">
+    <div className="absolute inset-0" style={{ background: CANVAS_BACKGROUND }}>
+      <RendererCapabilityDialog />
       <div
         ref={containerRef}
         data-testid="code-graph-canvas"
         className="absolute inset-0"
+        style={{ cursor: "grab" }}
       />
-      <CanvasOverlay state={state} layoutRunning={layoutRunning} />
-      {/*
-       * D3's reducer will own the actual Sigma node-pulse animation.
-       * Until D3 lands, this badge gives D5's chat round-trip an
-       * observable signal — when a citation lands, the user sees the
-       * pinned node id render in the corner so the navigation isn't
-       * silent.
-       */}
+      <CanvasOverlay state={state} />
+      {layoutRunning && state.status === "ready" && state.snapshot.nodes.length > 0 && (
+        <LayoutOptimizingPill />
+      )}
       <CitationStatusBadge />
+    </div>
+  );
+}
+
+function LayoutOptimizingPill() {
+  return (
+    <div
+      data-testid="layout-running"
+      className="pointer-events-none absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/20 px-3 py-1.5 backdrop-blur"
+    >
+      <span className="relative flex h-2 w-2">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+        <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
+      </span>
+      <span className="text-xs font-medium text-emerald-300">
+        Layout optimizing…
+      </span>
     </div>
   );
 }
@@ -197,15 +206,14 @@ function CitationStatusBadge() {
 
 interface CanvasOverlayProps {
   state: FetchState;
-  layoutRunning: boolean;
 }
 
-function CanvasOverlay({ state, layoutRunning }: CanvasOverlayProps) {
+function CanvasOverlay({ state }: CanvasOverlayProps) {
   if (state.status === "loading") {
     return (
       <CenterCard>
         <SpinningIcon />
-        <p className="mt-3 text-sm text-muted-foreground">
+        <p className="mt-3 text-sm text-zinc-400">
           Loading code graph snapshot…
         </p>
       </CenterCard>
@@ -214,13 +222,13 @@ function CanvasOverlay({ state, layoutRunning }: CanvasOverlayProps) {
   if (state.status === "error") {
     return (
       <CenterCard>
-        <span className="mx-auto flex h-10 w-10 items-center justify-center rounded-full bg-destructive/15 text-destructive">
+        <span className="mx-auto flex h-10 w-10 items-center justify-center rounded-full bg-red-500/15 text-red-400">
           <HugeiconsIcon icon={AlertCircleIcon} className="h-5 w-5" />
         </span>
-        <p className="mt-3 text-sm font-medium text-foreground">
+        <p className="mt-3 text-sm font-medium text-zinc-200">
           Couldn&apos;t load the graph
         </p>
-        <p className="mt-1 max-w-sm text-xs text-muted-foreground">
+        <p className="mt-1 max-w-sm text-xs text-zinc-400">
           {state.error}
         </p>
       </CenterCard>
@@ -229,10 +237,10 @@ function CanvasOverlay({ state, layoutRunning }: CanvasOverlayProps) {
   if (state.snapshot.nodes.length === 0) {
     return (
       <CenterCard>
-        <span className="mx-auto flex h-10 w-10 items-center justify-center rounded-full bg-muted/30 text-muted-foreground/70">
+        <span className="mx-auto flex h-10 w-10 items-center justify-center rounded-full bg-zinc-800/60 text-zinc-400">
           <HugeiconsIcon icon={ConnectIcon} className="h-5 w-5" />
         </span>
-        <p className="mt-3 text-sm text-muted-foreground">
+        <p className="mt-3 text-sm text-zinc-400">
           No graph data yet — kick off an architect warm-up to populate it.
         </p>
       </CenterCard>
@@ -251,7 +259,6 @@ function CanvasOverlay({ state, layoutRunning }: CanvasOverlayProps) {
         )}
       </Pill>
       <Pill>{snapshot.edges.length.toLocaleString()} edges</Pill>
-      {layoutRunning && <Pill data-testid="layout-running">settling…</Pill>}
     </div>
   );
 }
@@ -259,7 +266,7 @@ function CanvasOverlay({ state, layoutRunning }: CanvasOverlayProps) {
 function CenterCard({ children }: { children: React.ReactNode }) {
   return (
     <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-      <div className="max-w-sm rounded-lg border border-border/40 bg-background/80 px-5 py-4 text-center backdrop-blur">
+      <div className="max-w-sm rounded-lg border border-[#2d2d3d] bg-[#0a0a10]/85 px-5 py-4 text-center backdrop-blur">
         {children}
       </div>
     </div>
@@ -274,7 +281,7 @@ function Pill({
   return (
     <div
       className={cn(
-        "inline-flex items-center gap-1 rounded-full border border-border/40 bg-background/85 px-2.5 py-0.5 text-[11px] font-medium text-muted-foreground backdrop-blur",
+        "inline-flex items-center gap-1 rounded-full border border-[#2d2d3d] bg-black/40 px-2.5 py-0.5 text-[11px] font-medium text-zinc-300 backdrop-blur",
         className,
       )}
       {...rest}
@@ -286,7 +293,7 @@ function Pill({
 
 function SpinningIcon() {
   return (
-    <span className="mx-auto flex h-10 w-10 items-center justify-center rounded-full bg-muted/30 text-muted-foreground/70">
+    <span className="mx-auto flex h-10 w-10 items-center justify-center rounded-full bg-zinc-800/60 text-zinc-400">
       <HugeiconsIcon
         icon={RefreshIcon}
         className="h-5 w-5 animate-spin [animation-duration:2s]"

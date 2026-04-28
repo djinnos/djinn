@@ -52,7 +52,12 @@ const EDGES: StubEdge[] = [
 
 function StubCanvas({ view }: { view: HighlightView }) {
   return (
-    <svg width={400} height={320} className="rounded-md border border-border/40 bg-background">
+    <svg
+      width={400}
+      height={320}
+      className="rounded-md border border-[#2d2d3d]"
+      style={{ background: "#0a0a10" }}
+    >
       {EDGES.map((e, i) => {
         const a = NODES.find((n) => n.id === e.source)!;
         const b = NODES.find((n) => n.id === e.target)!;
@@ -145,6 +150,7 @@ function StoryShell({
     setBlastRadius,
   ]);
 
+  const storeState = useCodeGraphStore.getState();
   const view: HighlightView = {
     ...EMPTY_HIGHLIGHT_VIEW,
     selectionId,
@@ -152,12 +158,20 @@ function StoryShell({
     citationIds: new Set(citationIds),
     toolHighlightIds: new Set(toolHighlightIds),
     blastRadiusFrontier: new Set(blastRadiusFrontier),
-    edgeKindFilters: useCodeGraphStore.getState().edgeKindFilters,
+    edgeKindFilters: storeState.edgeKindFilters,
+    nodeKindFilters: storeState.nodeKindFilters,
+    symbolKindFilters: storeState.symbolKindFilters,
     pulsePhase: 0.5,
   };
 
   return (
-    <div className="flex flex-col gap-2 bg-background p-4">
+    <div
+      className="flex flex-col gap-2 p-4"
+      style={{
+        background:
+          "radial-gradient(circle at 50% 50%, rgba(124, 58, 237, 0.05) 0%, transparent 70%), linear-gradient(to bottom, #06060a, #0a0a10)",
+      }}
+    >
       <GraphToolbar />
       <StubCanvas view={view} />
     </div>

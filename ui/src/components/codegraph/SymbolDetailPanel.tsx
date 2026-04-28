@@ -185,16 +185,16 @@ export function SymbolDetailPanel({
   return (
     <aside
       data-testid="symbol-detail-panel"
-      className="flex h-full w-[360px] shrink-0 flex-col border-l border-border/60 bg-background/60"
+      className="flex h-full w-[360px] shrink-0 flex-col border-l border-[#2d2d3d] bg-[#16161f]/85 backdrop-blur"
     >
-      <header className="flex items-center justify-between border-b border-border/60 px-4 py-2.5">
-        <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground/70">
+      <header className="flex items-center justify-between border-b border-[#2d2d3d] px-4 py-2.5">
+        <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
           Symbol detail
         </span>
         <button
           type="button"
           onClick={handleClose}
-          className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground"
+          className="rounded-md p-1 text-zinc-400 transition-colors hover:bg-zinc-800/60 hover:text-zinc-100"
           aria-label="Close detail panel"
         >
           <HugeiconsIcon icon={Cancel01Icon} className="h-4 w-4" />

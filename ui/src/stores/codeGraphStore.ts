@@ -6,34 +6,27 @@
  * is a separate Set so they compose without rebuilding the graph:
  *
  *   selection           → user-clicked focal node (1-hop highlight)
- *   citationIds         → AI chat citations (PR D5 will populate)
+ *   citationIds         → AI chat citations
  *   toolHighlightIds    → tool-call results (e.g. blast-radius BFS)
- *   blastRadiusFrontier → animation-only set (CSS pulse) — separate
- *                         from `toolHighlightIds` so the impact "fan-out"
- *                         can ripple while the static highlight remains
+ *   blastRadiusFrontier → animation-only set; separate from
+ *                         `toolHighlightIds` so impact "fan-out" can
+ *                         ripple while the static highlight remains
  *                         visible underneath.
  *   hoverId             → hover tooltip target (transient)
  *
  * Filters live alongside because they're peer concerns of the same
- * canvas:
- *
- *   edgeKindFilters     → per-RepoGraphEdgeKind toggle (default: all on)
- *   depthFilter         → 1..5 hop depth from selection (default 5 = all)
- *
- * D5 will write to `citationIds` from the chat parser without ever
- * touching the canvas component — the reducer pattern is what makes
- * cross-page wiring trivial. Same for the future Cmd-K palette.
+ * canvas — per-edge-kind toggle, per-node-kind toggle, and depth from
+ * selection. SymbolReference (the call graph) defaults OFF because at
+ * 60-80% of edges it dominates everything else.
  */
 
 import { create } from "zustand";
 
 /**
- * Set of `RepoGraphEdgeKind` Debug-style names emitted by
- * `code_graph snapshot`. Mirrors the snake_case-via-Debug variant
- * name convention used on the wire (see `bridge::SnapshotEdge.kind`
- * in the Rust crate). Adding a new edge kind on the server requires
- * updating this list, but the reducer treats unknown kinds as
- * "always visible" so a missing entry never *hides* edges.
+ * `RepoGraphEdgeKind` Debug-style names emitted by `code_graph snapshot`.
+ * Adding a new kind on the server requires updating this list, but the
+ * reducer treats unknown kinds as visible so a missing entry never
+ * silently hides edges.
  */
 export const EDGE_KINDS = [
   "ContainsDefinition",
@@ -42,34 +35,72 @@ export const EDGE_KINDS = [
   "SymbolReference",
   "Reads",
   "Writes",
-  "SymbolRelationshipReference",
-  "SymbolRelationshipImplementation",
-  "SymbolRelationshipTypeDefinition",
-  "SymbolRelationshipDefinition",
+  "Extends",
+  "Implements",
+  "TypeDefines",
+  "Defines",
+  "EntryPointOf",
+  "MemberOf",
+  "StepInProcess",
 ] as const;
 
 export type EdgeKind = (typeof EDGE_KINDS)[number];
 
-/** Minimum / maximum hop depth surfaced by the depth-filter slider. */
+/** Edges that ship OFF — too dense to render at full repo scale. */
+const NOISY_EDGE_KINDS: ReadonlySet<string> = new Set([
+  "SymbolReference",
+  "MemberOf",
+]);
+
+/**
+ * Top-level snapshot node-kind filter. `kind` is the wire-level
+ * `SnapshotNodeKind` (file/folder/symbol); `symbol_kind` discriminators
+ * (function/method/class/...) live in {@link SYMBOL_KIND_FILTERS}.
+ */
+export const NODE_KINDS = ["folder", "file", "symbol"] as const;
+export type NodeKind = (typeof NODE_KINDS)[number];
+
+/** Symbol-level filter. Mirrors GitNexus's DEFAULT_VISIBLE_LABELS. */
+export const SYMBOL_KIND_FILTERS = [
+  "class",
+  "struct",
+  "interface",
+  "trait",
+  "enum",
+  "function",
+  "method",
+  "constructor",
+  "impl",
+  "variable",
+  "const",
+  "static",
+  "property",
+  "import",
+] as const;
+export type SymbolKindFilter = (typeof SYMBOL_KIND_FILTERS)[number];
+
+/** Symbol kinds hidden by default — clutter without analytical value. */
+const NOISY_SYMBOL_KINDS: ReadonlySet<string> = new Set([
+  "variable",
+  "const",
+  "static",
+  "property",
+  "import",
+]);
+
 export const MIN_DEPTH = 1;
 export const MAX_DEPTH = 5;
-/** Sentinel that means "no depth filtering" — equal to {@link MAX_DEPTH}. */
 export const DEFAULT_DEPTH = MAX_DEPTH;
 
 export interface CodeGraphHighlightState {
-  /** Currently focused node id (RepoNodeKey). */
   selectionId: string | null;
-  /** AI chat citation set — populated by PR D5's parser. */
   citationIds: Set<string>;
-  /** Tool-call result highlight (e.g. blast-radius BFS frontier). */
   toolHighlightIds: Set<string>;
-  /** Animation-only set: nodes pulsing as part of an impact ripple. */
   blastRadiusFrontier: Set<string>;
-  /** Hovered node id; cleared on `mouseleave`. */
   hoverId: string | null;
-  /** Per-edge-kind visibility. Default: every kind on. */
   edgeKindFilters: Record<string, boolean>;
-  /** Hop depth from selection to render; {@link DEFAULT_DEPTH} = no filtering. */
+  nodeKindFilters: Record<string, boolean>;
+  symbolKindFilters: Record<string, boolean>;
   depthFilter: number;
 }
 
@@ -84,13 +115,26 @@ export interface CodeGraphHighlightActions {
   setHover: (id: string | null) => void;
   toggleEdgeKind: (kind: string) => void;
   setEdgeKindEnabled: (kind: string, enabled: boolean) => void;
+  toggleNodeKind: (kind: string) => void;
+  toggleSymbolKind: (kind: string) => void;
   setDepthFilter: (depth: number) => void;
-  /** Drop every highlight + filter back to defaults — used on project switch. */
   reset: () => void;
 }
 
 function defaultEdgeKindFilters(): Record<string, boolean> {
-  return Object.fromEntries(EDGE_KINDS.map((k) => [k, true]));
+  return Object.fromEntries(
+    EDGE_KINDS.map((k) => [k, !NOISY_EDGE_KINDS.has(k)]),
+  );
+}
+
+function defaultNodeKindFilters(): Record<string, boolean> {
+  return Object.fromEntries(NODE_KINDS.map((k) => [k, true]));
+}
+
+function defaultSymbolKindFilters(): Record<string, boolean> {
+  return Object.fromEntries(
+    SYMBOL_KIND_FILTERS.map((k) => [k, !NOISY_SYMBOL_KINDS.has(k)]),
+  );
 }
 
 const INITIAL_STATE: CodeGraphHighlightState = {
@@ -100,6 +144,8 @@ const INITIAL_STATE: CodeGraphHighlightState = {
   blastRadiusFrontier: new Set(),
   hoverId: null,
   edgeKindFilters: defaultEdgeKindFilters(),
+  nodeKindFilters: defaultNodeKindFilters(),
+  symbolKindFilters: defaultSymbolKindFilters(),
   depthFilter: DEFAULT_DEPTH,
 };
 
@@ -109,9 +155,6 @@ export const useCodeGraphStore = create<
   ...INITIAL_STATE,
 
   setSelection: (id) => {
-    // Selecting a new node implicitly resets depth filtering's effective
-    // root, but we keep the depth value itself sticky so a user who
-    // dialed it down doesn't lose their setting on every click.
     set({ selectionId: id });
   },
 
@@ -158,6 +201,24 @@ export const useCodeGraphStore = create<
     }));
   },
 
+  toggleNodeKind: (kind) => {
+    set((state) => ({
+      nodeKindFilters: {
+        ...state.nodeKindFilters,
+        [kind]: !(state.nodeKindFilters[kind] ?? true),
+      },
+    }));
+  },
+
+  toggleSymbolKind: (kind) => {
+    set((state) => ({
+      symbolKindFilters: {
+        ...state.symbolKindFilters,
+        [kind]: !(state.symbolKindFilters[kind] ?? true),
+      },
+    }));
+  },
+
   setDepthFilter: (depth) => {
     const clamped = Math.max(MIN_DEPTH, Math.min(MAX_DEPTH, Math.round(depth)));
     set({ depthFilter: clamped });
@@ -166,17 +227,17 @@ export const useCodeGraphStore = create<
   reset: () => {
     set({
       ...INITIAL_STATE,
-      // Re-derive the filters so callers that mutated the map don't
-      // share its reference with the next instance.
       citationIds: new Set(),
       toolHighlightIds: new Set(),
       blastRadiusFrontier: new Set(),
       edgeKindFilters: defaultEdgeKindFilters(),
+      nodeKindFilters: defaultNodeKindFilters(),
+      symbolKindFilters: defaultSymbolKindFilters(),
     });
   },
 }));
 
-// ── Convenience selectors (stable identity, easy to memoize) ─────────────────
+// ── Convenience selectors ────────────────────────────────────────────────────
 
 export const selectSelectionId = (
   s: CodeGraphHighlightState & CodeGraphHighlightActions,
@@ -196,6 +257,12 @@ export const selectBlastRadiusFrontier = (
 export const selectEdgeKindFilters = (
   s: CodeGraphHighlightState & CodeGraphHighlightActions,
 ) => s.edgeKindFilters;
+export const selectNodeKindFilters = (
+  s: CodeGraphHighlightState & CodeGraphHighlightActions,
+) => s.nodeKindFilters;
+export const selectSymbolKindFilters = (
+  s: CodeGraphHighlightState & CodeGraphHighlightActions,
+) => s.symbolKindFilters;
 export const selectDepthFilter = (
   s: CodeGraphHighlightState & CodeGraphHighlightActions,
 ) => s.depthFilter;

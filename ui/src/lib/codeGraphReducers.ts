@@ -45,6 +45,10 @@ export interface HighlightView {
   blastRadiusFrontier: ReadonlySet<string>;
   hoverId: string | null;
   edgeKindFilters: Readonly<Record<string, boolean>>;
+  /** Top-level node-kind filter (file/folder/symbol). */
+  nodeKindFilters: Readonly<Record<string, boolean>>;
+  /** Per-symbol-kind filter (function/method/class/...). */
+  symbolKindFilters: Readonly<Record<string, boolean>>;
   /**
    * Set of node ids reachable within `depthFilter` hops from the
    * selection. `null` means "depth filter disabled" (render every node).
@@ -74,6 +78,8 @@ export const EMPTY_HIGHLIGHT_VIEW: HighlightView = {
   blastRadiusFrontier: new Set<string>(),
   hoverId: null,
   edgeKindFilters: {},
+  nodeKindFilters: {},
+  symbolKindFilters: {},
   depthReachable: null,
   pulsePhase: 0,
 };
@@ -178,6 +184,22 @@ export function nodeReducer(
   attrs: Attributes,
   view: HighlightView,
 ): Attributes {
+  // Node-kind filter (file/folder/symbol). Treat missing entries as
+  // visible so an under-populated filter map never silently hides a
+  // whole class of nodes.
+  if (typeof attrs.kind === "string") {
+    const enabled = view.nodeKindFilters[attrs.kind];
+    if (enabled === false) return { ...attrs, hidden: true };
+  }
+
+  // Symbol-kind filter (function/method/class/...). Only applies when
+  // the node carries a `symbolKind` attribute (i.e. is a symbol, not
+  // a structural node) and the kind is in the filter map.
+  if (typeof attrs.symbolKind === "string") {
+    const enabled = view.symbolKindFilters[attrs.symbolKind];
+    if (enabled === false) return { ...attrs, hidden: true };
+  }
+
   // Depth filter hides nodes outside the configured BFS frontier.
   // This sits *outside* `pickHighlightMode` so the depth gate fires
   // even when no other highlight is active.

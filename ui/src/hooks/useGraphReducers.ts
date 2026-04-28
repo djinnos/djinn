@@ -87,6 +87,8 @@ export function useGraphReducers(
   const blastRadiusFrontier = useCodeGraphStore((s) => s.blastRadiusFrontier);
   const hoverId = useCodeGraphStore((s) => s.hoverId);
   const edgeKindFilters = useCodeGraphStore((s) => s.edgeKindFilters);
+  const nodeKindFilters = useCodeGraphStore((s) => s.nodeKindFilters);
+  const symbolKindFilters = useCodeGraphStore((s) => s.symbolKindFilters);
   const depthFilter = useCodeGraphStore((s) => s.depthFilter);
 
   // ── Lazy 1-hop neighbor set (memoized) ─────────────────────────────────
@@ -121,6 +123,8 @@ export function useGraphReducers(
       blastRadiusFrontier,
       hoverId,
       edgeKindFilters,
+      nodeKindFilters,
+      symbolKindFilters,
       depthReachable,
       // Preserve the latest animated phase so we don't snap to 0
       // every time a non-pulse slice changes.
@@ -136,6 +140,8 @@ export function useGraphReducers(
     blastRadiusFrontier,
     hoverId,
     edgeKindFilters,
+    nodeKindFilters,
+    symbolKindFilters,
     depthReachable,
   ]);
 

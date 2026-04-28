@@ -27,11 +27,27 @@ describe("codeGraphStore", () => {
       expect(state.blastRadiusFrontier.size).toBe(0);
     });
 
-    it("starts with every edge kind enabled", () => {
+    it("starts with non-noisy edge kinds enabled and SymbolReference/MemberOf off", () => {
       const filters = useCodeGraphStore.getState().edgeKindFilters;
       for (const kind of EDGE_KINDS) {
-        expect(filters[kind]).toBe(true);
+        const expected = !(kind === "SymbolReference" || kind === "MemberOf");
+        expect(filters[kind]).toBe(expected);
       }
+    });
+
+    it("starts with all top-level node kinds visible", () => {
+      const filters = useCodeGraphStore.getState().nodeKindFilters;
+      expect(filters.folder).toBe(true);
+      expect(filters.file).toBe(true);
+      expect(filters.symbol).toBe(true);
+    });
+
+    it("starts with noisy symbol kinds (variable/import) hidden", () => {
+      const filters = useCodeGraphStore.getState().symbolKindFilters;
+      expect(filters.function).toBe(true);
+      expect(filters.class).toBe(true);
+      expect(filters.variable).toBe(false);
+      expect(filters.import).toBe(false);
     });
 
     it("starts at the default (max) depth", () => {

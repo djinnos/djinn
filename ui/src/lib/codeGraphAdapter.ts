@@ -1,57 +1,42 @@
 /**
- * codeGraphAdapter — translate the `code_graph snapshot` MCP response into
- * a graphology graph ready for Sigma + ForceAtlas2 (PR D2).
+ * codeGraphAdapter — translate the `code_graph snapshot` MCP response
+ * into a graphology graph ready for Sigma + ForceAtlas2.
  *
- * Per-type ForceAtlas2 mass is the trick that makes a force-directed
- * layout *feel* hierarchical: heavy folder/project nodes pull their
- * file/symbol children into clusters instead of mashing everything
- * into the center.  Plan §PR-D2 mass table:
- *
- *   Project = 50
- *   Folder  = 15
- *   File    = 3
- *   Symbol  (Class/Function/Method/...) = 2
- *
- * The snapshot wire shape is pinned by the inter-PR contract
- * (`code_graph snapshot` section in the plan).  We re-declare the
- * relevant subset here as plain interfaces so the parser layer
- * doesn't depend on MCP autogen — the autogen treats the response as
- * `Record<string, any>` because `CodeGraphResponse` is `#[serde(untagged)]`.
+ * Three pillars produce the GitNexus-style "vivid clusters on near-black"
+ * look:
+ *   1. Community-driven coloring (12-hue palette indexed by hashed
+ *      community_id, falling back to top-level folder when D/F3 hasn't
+ *      shipped yet).
+ *   2. Per-edge-kind colors / sizes / curvature so every relationship
+ *      type is visually distinct rather than a uniform slate haze.
+ *   3. Hierarchical seed positioning (golden-angle spiral for structural
+ *      nodes, BFS jitter for files/symbols, cluster-center jitter when
+ *      community ids are present) so FA2 starts close to its terminal
+ *      layout instead of a chaotic random init.
  */
 
 import Graph from "graphology";
 
 export type SnapshotNodeKind = "file" | "folder" | "symbol";
 
-/** One node entry on the wire (matches `bridge::SnapshotNode`). */
 export interface SnapshotNode {
-  /** RepoNodeKey: `"file:..."` or `"symbol:..."`. */
   id: string;
   kind: SnapshotNodeKind;
   label: string;
-  /**
-   * SCIP symbol-kind (lowercased): `"function"`, `"class"`, `"method"`, ….
-   * Absent for file / folder nodes.
-   */
   symbol_kind?: string;
-  /** Repo-relative file path; present for `kind="symbol"` nodes. */
   file_path?: string;
   pagerank: number;
-  /** Populated post-F3 (Leiden community detection); absent in D2. */
   community_id?: string;
 }
 
-/** One edge entry on the wire (matches `bridge::SnapshotEdge`). */
 export interface SnapshotEdge {
   from: string;
   to: string;
-  /** `RepoGraphEdgeKind` Debug variant name (e.g. `"SymbolReference"`). */
   kind: string;
   confidence: number;
   reason?: string;
 }
 
-/** Full snapshot payload — matches `bridge::SnapshotPayload`. */
 export interface SnapshotPayload {
   project_id: string;
   git_head: string;
@@ -64,17 +49,11 @@ export interface SnapshotPayload {
   edges: SnapshotEdge[];
 }
 
-/**
- * Top-level wire envelope for the snapshot op.  The `code_graph`
- * MCP enum is `#[serde(untagged)]`, so the discriminator is the
- * `snapshot` field name (per the inter-PR contract).
- */
 export interface SnapshotResponse {
   snapshot: SnapshotPayload;
   next_step?: string | null;
 }
 
-/** Best-effort runtime narrowing for the untagged `code_graph` response. */
 export function parseSnapshotResponse(value: unknown): SnapshotPayload | null {
   if (!isRecord(value)) return null;
   const inner = (value as Record<string, unknown>).snapshot;
@@ -127,154 +106,435 @@ function normalizeKind(value: unknown): SnapshotNodeKind {
   return "symbol";
 }
 
-// ── Mass table (plan §PR-D2) ────────────────────────────────────────────────
+// ── Mass scaling ────────────────────────────────────────────────────────────
 
 /**
- * Per-type ForceAtlas2 mass.  Heavy nodes act as gravity wells, pulling
- * lighter neighbors into a hierarchical-feeling layout without an
- * explicit hierarchical algorithm.
+ * Heavy structural masses act as gravity wells in FA2 — folders blast
+ * apart and pull their files with them, producing the cluster spread
+ * GitNexus relies on. Scaled with node count so 12k-node monorepos
+ * still spread instead of collapsing.
  */
-export const NODE_MASS: Record<string, number> = {
-  project: 50,
-  folder: 15,
-  file: 3,
-  symbol: 2,
-  // Symbol-kind overrides — top-level symbols still default to 2, but
-  // heavier "type-like" symbols anchor their methods.
-  class: 2,
-  struct: 2,
-  interface: 2,
-  enum: 2,
-  function: 2,
-  method: 2,
-  constructor: 2,
-};
+export function massForNode(node: SnapshotNode, nodeCount: number = 0): number {
+  const baseMultiplier = nodeCount > 5000 ? 2 : nodeCount > 1000 ? 1.5 : 1;
 
-export function massForNode(node: SnapshotNode): number {
-  // Symbol-kind override (e.g. `class` vs generic `symbol`) when the
-  // SCIP indexer populated `symbol_kind`.
-  if (node.kind === "symbol" && node.symbol_kind) {
-    const fromKind = NODE_MASS[node.symbol_kind];
-    if (typeof fromKind === "number") return fromKind;
+  if (node.kind === "folder") {
+    if (node.symbol_kind === "project" || /project/i.test(node.label)) {
+      return 50 * baseMultiplier;
+    }
+    return 15 * baseMultiplier;
   }
-  const fromTopLevel = NODE_MASS[node.kind];
-  if (typeof fromTopLevel === "number") return fromTopLevel;
+  if (node.kind === "file") return 3 * baseMultiplier;
+
+  if (node.kind === "symbol") {
+    switch (node.symbol_kind) {
+      case "class":
+      case "struct":
+      case "interface":
+      case "trait":
+      case "enum":
+        return 5 * baseMultiplier;
+      case "function":
+      case "method":
+      case "constructor":
+      case "impl":
+        return 2 * baseMultiplier;
+      default:
+        return 1 * baseMultiplier;
+    }
+  }
   return 1;
 }
 
 // ── Color palette ───────────────────────────────────────────────────────────
 
-/** Tailwind-aligned colors so the canvas reads against the shadcn shell. */
-export const NODE_COLORS = {
-  file: "#60a5fa", // blue-400
-  folder: "#a78bfa", // violet-400
-  project: "#f472b6", // pink-400
-  symbol_class: "#fbbf24", // amber-400
-  symbol_struct: "#fbbf24",
-  symbol_interface: "#34d399", // emerald-400
-  symbol_enum: "#fbbf24",
-  symbol_function: "#a3e635", // lime-400
-  symbol_method: "#a3e635",
-  symbol_constructor: "#a3e635",
-  symbol_default: "#cbd5e1", // slate-300
-  edge_default: "rgba(148, 163, 184, 0.55)", // slate-400 @ 55%
+/**
+ * 12-hue Tailwind-500 palette. Symbols get colored by community
+ * (community_id from F3 Leiden detection, or top-level folder hash as
+ * a graceful fallback). The vivid saturation reads on the near-black
+ * background in a way the slate pastels did not.
+ */
+export const COMMUNITY_COLORS = [
+  "#ef4444", // red
+  "#f97316", // orange
+  "#eab308", // yellow
+  "#22c55e", // green
+  "#06b6d4", // cyan
+  "#3b82f6", // blue
+  "#8b5cf6", // violet
+  "#d946ef", // fuchsia
+  "#ec4899", // pink
+  "#f43f5e", // rose
+  "#14b8a6", // teal
+  "#84cc16", // lime
+] as const;
+
+/** Structural-node colors — distinct hues that don't fight the symbol cloud. */
+export const STRUCTURAL_COLORS = {
+  project: "#a855f7", // purple-500
+  folder: "#6366f1", // indigo-500
+  file: "#3b82f6", // blue-500
 } as const;
 
-export function colorForNode(node: SnapshotNode): string {
-  if (node.kind === "file") return NODE_COLORS.file;
-  if (node.kind === "folder") return NODE_COLORS.folder;
-  if (node.kind === "symbol") {
-    switch (node.symbol_kind) {
-      case "class":
-        return NODE_COLORS.symbol_class;
-      case "struct":
-        return NODE_COLORS.symbol_struct;
-      case "interface":
-        return NODE_COLORS.symbol_interface;
-      case "enum":
-        return NODE_COLORS.symbol_enum;
-      case "function":
-        return NODE_COLORS.symbol_function;
-      case "method":
-        return NODE_COLORS.symbol_method;
-      case "constructor":
-        return NODE_COLORS.symbol_constructor;
-      default:
-        return NODE_COLORS.symbol_default;
-    }
+/** Neutral fallback for symbols with neither community nor file_path. */
+const SYMBOL_FALLBACK = "#94a3b8"; // slate-400
+
+/** FNV-1a 32-bit — deterministic, fast, and well-distributed for short strings. */
+function fnv1a(input: string): number {
+  let hash = 0x811c_9dc5;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x0100_0193);
   }
-  return NODE_COLORS.symbol_default;
+  return hash >>> 0;
+}
+
+/** Top-level folder of a repo-relative path, or the whole path when flat. */
+function topLevelFolder(filePath: string): string {
+  const idx = filePath.indexOf("/");
+  return idx >= 0 ? filePath.slice(0, idx) : filePath;
+}
+
+export function colorForCommunity(communityId: string): string {
+  return COMMUNITY_COLORS[fnv1a(communityId) % COMMUNITY_COLORS.length];
+}
+
+export function colorForNode(node: SnapshotNode): string {
+  if (node.kind === "folder") {
+    if (/project/i.test(node.label)) return STRUCTURAL_COLORS.project;
+    return STRUCTURAL_COLORS.folder;
+  }
+  if (node.kind === "file") return STRUCTURAL_COLORS.file;
+
+  if (node.community_id) {
+    return colorForCommunity(node.community_id);
+  }
+  if (node.file_path) {
+    return colorForCommunity(topLevelFolder(node.file_path));
+  }
+  return SYMBOL_FALLBACK;
+}
+
+// ── Edge styling ────────────────────────────────────────────────────────────
+
+interface EdgeStyle {
+  color: string;
+  sizeMultiplier: number;
+  /** Drop the edge from the rendered graph entirely. */
+  drop?: boolean;
+}
+
+/**
+ * Per-RepoGraphEdgeKind style table. Greens for hierarchy, blue for
+ * file-level deps, violet for the call graph, warm hues for the OOP
+ * spine. `MemberOf` is scaffolding (introduced post-F2) — we render it
+ * as the dimmest possible thread so it doesn't compete with the
+ * call graph but stays available for the impact-analysis pipeline.
+ */
+const EDGE_STYLES: Record<string, EdgeStyle> = {
+  ContainsDefinition: { color: "#2d5a3d", sizeMultiplier: 0.4 },
+  DeclaredInFile: { color: "#2d5a3d", sizeMultiplier: 0.4 },
+  FileReference: { color: "#1d4ed8", sizeMultiplier: 0.6 },
+  SymbolReference: { color: "#7c3aed", sizeMultiplier: 0.8 },
+  Reads: { color: "#0e7490", sizeMultiplier: 0.5 },
+  Writes: { color: "#dc2626", sizeMultiplier: 0.6 },
+  Extends: { color: "#c2410c", sizeMultiplier: 1.0 },
+  Implements: { color: "#be185d", sizeMultiplier: 0.9 },
+  TypeDefines: { color: "#0e7490", sizeMultiplier: 0.5 },
+  Defines: { color: "#0e7490", sizeMultiplier: 0.5 },
+  EntryPointOf: { color: "#10b981", sizeMultiplier: 0.7 },
+  MemberOf: { color: "#1e293b", sizeMultiplier: 0.3 },
+  StepInProcess: { color: "#f43f5e", sizeMultiplier: 0.7 },
+};
+
+const DEFAULT_EDGE_STYLE: EdgeStyle = { color: "#4a4a5a", sizeMultiplier: 0.5 };
+
+export function edgeStyleFor(kind: string): EdgeStyle {
+  return EDGE_STYLES[kind] ?? DEFAULT_EDGE_STYLE;
+}
+
+/** Base size scales with graph density — denser graphs get thinner strokes. */
+function edgeBaseSize(nodeCount: number): number {
+  if (nodeCount > 20000) return 0.4;
+  if (nodeCount > 5000) return 0.6;
+  return 1.0;
 }
 
 // ── Adapter ─────────────────────────────────────────────────────────────────
 
 export interface BuildGraphOptions {
-  /**
-   * Drop self-loops?  Sigma renders self-loops as a small bow on the
-   * node, which is rarely meaningful in a code graph and clutters the
-   * rendering.  Default `true`.
-   */
+  /** Drop self-loops? Default `true`. */
   dropSelfLoops?: boolean;
+  /** Drop `MemberOf` edges (scaffolding). Default `false`. */
+  dropMemberOf?: boolean;
 }
 
 /**
  * Convert a snapshot payload into a graphology `Graph` configured for
- * Sigma + ForceAtlas2.  Each node carries `mass` (consumed by FA2 via
- * the `nodeMassReducer` we wire up in `useSigmaGraph`), `size`
- * (visual; pagerank-scaled), `color`, and `label`.
+ * Sigma + ForceAtlas2.
  *
- * Initial node positions are pseudo-randomized in `[-1, 1]^2` — FA2
- * does the heavy lifting.  We *don't* warm with circular / random
- * layouts because the per-type mass already produces a nice spread
- * once FA2 starts iterating.
+ * Layout seeding strategy:
+ *  - Structural nodes (file/folder) → golden-angle spiral with 15%
+ *    radial jitter so the geometry doesn't look mechanical.
+ *  - Symbols with `community_id` → cluster-center jitter (golden-angle
+ *    distributed over 80% of the structural spread).
+ *  - Symbols without community → BFS jitter around their declaring
+ *    file/folder via the parent map built from `ContainsDefinition` /
+ *    `DeclaredInFile` / `FileReference`.
+ *  - Orphans → random within half the structural spread.
  */
 export function buildGraphFromSnapshot(
   snapshot: SnapshotPayload,
   options: BuildGraphOptions = {},
 ): Graph {
   const dropSelfLoops = options.dropSelfLoops ?? true;
+  const dropMemberOf = options.dropMemberOf ?? false;
   const graph = new Graph({ multi: true, type: "directed" });
 
-  // Pagerank-scaled visual size.  Cap at [3, 18] so the largest hub
-  // doesn't drown the canvas and the smallest leaf is still clickable.
-  const ranks = snapshot.nodes.map((n) => n.pagerank);
+  const nodes = snapshot.nodes;
+  const nodeCount = nodes.length;
+  const ranks = nodes.map((n) => n.pagerank);
   const maxRank = ranks.length > 0 ? Math.max(...ranks, 0.000_001) : 1;
 
-  for (const node of snapshot.nodes) {
-    if (graph.hasNode(node.id)) continue;
-    const normalized = node.pagerank / maxRank;
-    const size = 3 + normalized * 15;
-    graph.addNode(node.id, {
-      // Sigma reads `label`, `x`, `y`, `size`, `color`. The rest is
-      // free-form metadata reducers / interaction layers can read.
-      label: node.label,
-      x: (Math.random() - 0.5) * 2,
-      y: (Math.random() - 0.5) * 2,
-      size,
-      color: colorForNode(node),
-      // Custom fields (used by FA2 mass reducer + D3 highlight layer):
-      mass: massForNode(node),
-      kind: node.kind,
-      symbolKind: node.symbol_kind,
-      pagerank: node.pagerank,
-      filePath: node.file_path,
-      communityId: node.community_id,
-    });
+  const structuralSpread = Math.sqrt(Math.max(nodeCount, 1)) * 40;
+  const childJitter = Math.sqrt(Math.max(nodeCount, 1)) * 3;
+  const clusterJitter = Math.sqrt(Math.max(nodeCount, 1)) * 1.5;
+
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+
+  // Build parent → children map from hierarchy edges. Only structural
+  // / declaration relationships count as "parent owns child" — call
+  // graph edges (SymbolReference) deliberately don't influence layout
+  // since they're noise during seeding.
+  const HIERARCHY_KINDS = new Set([
+    "ContainsDefinition",
+    "DeclaredInFile",
+    "FileReference",
+  ]);
+  const childToParent = new Map<string, string>();
+  for (const edge of snapshot.edges) {
+    if (!HIERARCHY_KINDS.has(edge.kind)) continue;
+    if (!nodeMap.has(edge.from) || !nodeMap.has(edge.to)) continue;
+    if (!childToParent.has(edge.to)) childToParent.set(edge.to, edge.from);
+  }
+  const parentToChildren = new Map<string, string[]>();
+  for (const [child, parent] of childToParent) {
+    const list = parentToChildren.get(parent) ?? [];
+    list.push(child);
+    parentToChildren.set(parent, list);
   }
 
+  const structuralNodes = nodes.filter(
+    (n) => n.kind === "folder" || n.kind === "file",
+  );
+
+  // Cluster centers — golden-angle distributed; sqrt(idx) radius
+  // produces an even areal density rather than a compressed center.
+  const clusterCenters = new Map<string, { x: number; y: number }>();
+  const communityIds = new Set<string>();
+  for (const n of nodes) if (n.community_id) communityIds.add(n.community_id);
+  if (communityIds.size > 0) {
+    const clusterSpread = structuralSpread * 0.8;
+    const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+    const total = communityIds.size;
+    let i = 0;
+    for (const cid of communityIds) {
+      const angle = i * goldenAngle;
+      const radius = clusterSpread * Math.sqrt((i + 1) / total);
+      clusterCenters.set(cid, {
+        x: radius * Math.cos(angle),
+        y: radius * Math.sin(angle),
+      });
+      i += 1;
+    }
+  }
+
+  const positions = new Map<string, { x: number; y: number }>();
+
+  // Structural nodes go down first — their children cluster around them.
+  const structuralCount = Math.max(structuralNodes.length, 1);
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+  structuralNodes.forEach((node, index) => {
+    const angle = index * goldenAngle;
+    const radius =
+      structuralSpread * Math.sqrt((index + 1) / structuralCount);
+    const jitter = structuralSpread * 0.15;
+    const x = radius * Math.cos(angle) + (Math.random() - 0.5) * jitter;
+    const y = radius * Math.sin(angle) + (Math.random() - 0.5) * jitter;
+    positions.set(node.id, { x, y });
+    addNode(graph, node, { x, y }, maxRank, nodeCount);
+  });
+
+  const SYMBOL_CLUSTER_KINDS = new Set([
+    "function",
+    "method",
+    "class",
+    "struct",
+    "interface",
+    "enum",
+    "constructor",
+    "trait",
+    "impl",
+  ]);
+
+  const placeNode = (id: string) => {
+    if (graph.hasNode(id)) return;
+    const node = nodeMap.get(id);
+    if (!node) return;
+
+    let pos: { x: number; y: number } | null = null;
+    const cid = node.community_id;
+    const isClusterableSymbol =
+      node.kind === "symbol" && SYMBOL_CLUSTER_KINDS.has(node.symbol_kind ?? "");
+
+    if (isClusterableSymbol && cid && clusterCenters.has(cid)) {
+      const c = clusterCenters.get(cid)!;
+      pos = {
+        x: c.x + (Math.random() - 0.5) * clusterJitter,
+        y: c.y + (Math.random() - 0.5) * clusterJitter,
+      };
+    } else {
+      const parentId = childToParent.get(id);
+      const parentPos = parentId ? positions.get(parentId) : null;
+      if (parentPos) {
+        pos = {
+          x: parentPos.x + (Math.random() - 0.5) * childJitter,
+          y: parentPos.y + (Math.random() - 0.5) * childJitter,
+        };
+      } else {
+        pos = {
+          x: (Math.random() - 0.5) * structuralSpread * 0.5,
+          y: (Math.random() - 0.5) * structuralSpread * 0.5,
+        };
+      }
+    }
+    positions.set(id, pos);
+    addNode(graph, node, pos, maxRank, nodeCount);
+  };
+
+  // BFS from structural nodes so parents always exist before children.
+  const queue: string[] = [...structuralNodes.map((n) => n.id)];
+  const visited = new Set<string>(queue);
+  while (queue.length > 0) {
+    const cur = queue.shift()!;
+    const children = parentToChildren.get(cur) ?? [];
+    for (const childId of children) {
+      if (visited.has(childId)) continue;
+      visited.add(childId);
+      placeNode(childId);
+      queue.push(childId);
+    }
+  }
+  for (const node of nodes) {
+    if (!graph.hasNode(node.id)) placeNode(node.id);
+  }
+
+  // Edges — per-kind colors, base scaled by graph density, modulated
+  // by per-edge confidence so hand-resolved edges trail brighter than
+  // weak heuristic ones.
+  const baseSize = edgeBaseSize(nodeCount);
   for (const edge of snapshot.edges) {
+    if (dropMemberOf && edge.kind === "MemberOf") continue;
     if (!graph.hasNode(edge.from) || !graph.hasNode(edge.to)) continue;
     if (dropSelfLoops && edge.from === edge.to) continue;
+    const style = edgeStyleFor(edge.kind);
+    if (style.drop) continue;
+    const confidenceFactor = 0.4 + edge.confidence * 0.6;
     graph.addEdge(edge.from, edge.to, {
       kind: edge.kind,
       confidence: edge.confidence,
       reason: edge.reason,
-      // Edge-confidence drives visual weight: high-confidence edges
-      // are slightly thicker so the eye trails them.
-      size: 0.4 + edge.confidence * 1.1,
-      color: NODE_COLORS.edge_default,
+      size: baseSize * style.sizeMultiplier * confidenceFactor,
+      color: style.color,
+      type: "curved",
+      curvature: 0.12 + Math.random() * 0.08,
     });
   }
 
   return graph;
+}
+
+function addNode(
+  graph: Graph,
+  node: SnapshotNode,
+  pos: { x: number; y: number },
+  maxRank: number,
+  nodeCount: number,
+): void {
+  if (graph.hasNode(node.id)) return;
+  const normalized = node.pagerank / maxRank;
+  const size = scaledNodeSize(node, normalized, nodeCount);
+  graph.addNode(node.id, {
+    label: node.label,
+    x: pos.x,
+    y: pos.y,
+    size,
+    color: colorForNode(node),
+    mass: massForNode(node, nodeCount),
+    kind: node.kind,
+    symbolKind: node.symbol_kind,
+    pagerank: node.pagerank,
+    filePath: node.file_path,
+    communityId: node.community_id,
+  });
+}
+
+/**
+ * Visual size with a hierarchy floor: structural nodes stay readable
+ * even on huge graphs, symbols shrink toward 2px so they don't drown
+ * the canvas. Pagerank then tilts within the per-kind band.
+ */
+function scaledNodeSize(
+  node: SnapshotNode,
+  pagerankNormalized: number,
+  nodeCount: number,
+): number {
+  const base = baseNodeSize(node);
+  const scaled = densityScale(base, nodeCount);
+  return scaled + pagerankNormalized * Math.max(scaled * 0.6, 1.5);
+}
+
+function baseNodeSize(node: SnapshotNode): number {
+  if (node.kind === "folder") {
+    if (/project/i.test(node.label)) return 20;
+    return 10;
+  }
+  if (node.kind === "file") return 6;
+  if (node.kind === "symbol") {
+    switch (node.symbol_kind) {
+      case "class":
+      case "struct":
+      case "record":
+        return 8;
+      case "interface":
+      case "trait":
+        return 7;
+      case "enum":
+      case "union":
+        return 5;
+      case "function":
+      case "constructor":
+        return 4;
+      case "method":
+      case "impl":
+        return 3;
+      case "variable":
+      case "const":
+      case "static":
+      case "property":
+        return 2;
+      case "import":
+        return 1.5;
+      default:
+        return 3;
+    }
+  }
+  return 4;
+}
+
+function densityScale(base: number, nodeCount: number): number {
+  if (nodeCount > 50000) return Math.max(1, base * 0.4);
+  if (nodeCount > 20000) return Math.max(1.5, base * 0.5);
+  if (nodeCount > 5000) return Math.max(2, base * 0.65);
+  if (nodeCount > 1000) return Math.max(2.5, base * 0.8);
+  return base;
 }
