@@ -2,7 +2,6 @@ import { useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { ChatSessionList } from '@/components/chat/ChatSessionList';
 import { ChatView } from '@/components/chat/ChatView';
-import { CodeRefsPanel } from '@/components/chat/CodeRefsPanel';
 import { listChatSessions } from '@/api/chatSessions';
 import { useChatStore } from '@/stores/chatStore';
 
@@ -44,7 +43,6 @@ export function ChatPage() {
       <div className="flex min-h-0 flex-1">
         <ChatView />
       </div>
-      {hasSessions && <CodeRefsPanel />}
     </div>
   );
 }

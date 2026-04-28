@@ -200,17 +200,6 @@ function coalesceText(segs: CitationSegment[]): CitationSegment[] {
 }
 
 /**
- * Convenience: extract every citation in a message in source order,
- * skipping malformed tokens. Used by `<CodeRefsPanel>` to enumerate
- * cited refs without re-rendering the prose.
- */
-export function extractCitations(text: string): ParsedCitation[] {
-  return segmentByCitations(text).flatMap((seg) =>
-    seg.type === "citation" ? [seg.citation] : [],
-  );
-}
-
-/**
  * Build the canonical node id for a file citation.
  *
  * The snapshot bridge formats file keys as `file:<repo-relative-path>`

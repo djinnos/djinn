@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  extractCitations,
   fileCitationToNodeId,
   parseCitationToken,
   segmentByCitations,
@@ -166,17 +165,6 @@ describe("segmentByCitations", () => {
   it("ignores wikilink-style brackets that aren't citations", () => {
     const out = segmentByCitations("see [[ADR-051]] for details");
     expect(out).toEqual([{ type: "text", text: "see [[ADR-051]] for details" }]);
-  });
-});
-
-describe("extractCitations", () => {
-  it("flattens to a list in source order", () => {
-    const cites = extractCitations(
-      "alpha [[file:src/a.rs:1]] beta [[symbol:Class:Foo]] gamma",
-    );
-    expect(cites).toHaveLength(2);
-    expect(cites[0]).toMatchObject({ kind: "file", path: "src/a.rs" });
-    expect(cites[1]).toMatchObject({ kind: "symbol", name: "Foo" });
   });
 });
 
