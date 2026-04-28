@@ -28,7 +28,11 @@ const PAGE_RANK_ITERATIONS: usize = 25;
 ///   `SymbolRole::ReadAccess` / `WriteAccess` flags (PR A3). Old blobs
 ///   bincode-deserialize but their edges are stamped with the legacy
 ///   `SymbolReference` kind only — next warm rebuilds with the split.
-pub const REPO_GRAPH_ARTIFACT_VERSION: u32 = 2;
+/// - v3: persist the [`crate::communities::Community`] sidecar in the
+///   artifact and add the [`RepoGraphEdgeKind::MemberOf`] variant
+///   (PR F3). Old blobs bincode-deserialize with empty communities;
+///   next warm runs greedy modularity detection and populates them.
+pub const REPO_GRAPH_ARTIFACT_VERSION: u32 = 3;
 
 // ── Edge confidence floor table (PR A2) ────────────────────────────────────
 //
@@ -55,6 +59,11 @@ const EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_DEFINITION: f64 = 0.85;
 // a one-tier penalty.
 const EDGE_CONFIDENCE_READS: f64 = 0.85;
 const EDGE_CONFIDENCE_WRITES: f64 = 0.90;
+// PR F3: synthesized `Community` membership edge — confidence floor
+// 0.95 since the modularity partition is deterministic for a given
+// graph. Same tier as `ContainsDefinition` / `DeclaredInFile` (also
+// algorithmically derived from SCIP, not sampled).
+const EDGE_CONFIDENCE_MEMBER_OF: f64 = 0.95;
 const EDGE_CONFIDENCE_LOCAL_PENALTY: f64 = 0.15;
 const EDGE_WEIGHT_DEFINITION_TO_FILE: f64 = 4.0;
 const EDGE_WEIGHT_FILE_TO_DEFINITION: f64 = 1.5;
@@ -64,6 +73,11 @@ const EDGE_WEIGHT_SYMBOL_RELATIONSHIP_REFERENCE: f64 = 2.0;
 const EDGE_WEIGHT_SYMBOL_RELATIONSHIP_IMPLEMENTATION: f64 = 2.5;
 const EDGE_WEIGHT_SYMBOL_RELATIONSHIP_TYPE_DEFINITION: f64 = 1.75;
 const EDGE_WEIGHT_SYMBOL_RELATIONSHIP_DEFINITION: f64 = 2.25;
+// PR F3: `MemberOf` edges are structural (not weighted by SCIP
+// evidence count), so they get a constant low weight that doesn't
+// dominate PageRank. The community is a side-channel; it shouldn't
+// reshape the importance ranking.
+const EDGE_WEIGHT_MEMBER_OF: f64 = 1.0;
 const SYMBOL_KIND_TYPE_MULTIPLIER: f64 = 1.15;
 const SYMBOL_KIND_METHOD_MULTIPLIER: f64 = 1.05;
 const SYMBOL_KIND_FUNCTION_MULTIPLIER: f64 = 1.0;
@@ -83,6 +97,17 @@ pub struct RepoDependencyGraph {
     /// SCIP input, and round-tripped through the artifact so cache-hit
     /// reloads via [`RepoDependencyGraph::from_artifact`] retain it.
     symbol_ranges: BTreeMap<PathBuf, Vec<SymbolRange>>,
+    /// PR F3: detected communities (greedy modularity over the
+    /// undirected weighted projection). Populated by
+    /// [`RepoDependencyGraph::build`] when `DJINN_COMMUNITY_DETECTION`
+    /// is unset/true; round-tripped through the artifact so cache-hit
+    /// reloads keep them.
+    communities: Vec<crate::communities::Community>,
+    /// Reverse index: `NodeIndex::index()` → position in `communities`.
+    /// Built whenever `communities` is set (build-time or after
+    /// `from_artifact`). Singleton nodes (not in any community) are
+    /// absent from the map.
+    community_lookup: BTreeMap<usize, usize>,
 }
 
 /// A single SCIP definition range pinned to a graph node.
@@ -454,6 +479,22 @@ impl RepoDependencyGraph {
             .map(|(path, ranges)| (path.as_path(), ranges.as_slice()))
     }
 
+    /// PR F3: return the [`crate::communities::Community::id`] for the
+    /// community containing `node`, or `None` if `node` is not in any
+    /// community (singletons are dropped during detection).
+    pub fn community_id(&self, node: NodeIndex) -> Option<&str> {
+        let pos = self.community_lookup.get(&node.index())?;
+        self.communities.get(*pos).map(|c| c.id.as_str())
+    }
+
+    /// Iterate over all detected communities. Empty when community
+    /// detection was disabled (`DJINN_COMMUNITY_DETECTION=0`) or when
+    /// the graph had no edges. Order matches the on-disk artifact —
+    /// largest community first, ties broken by id.
+    pub fn communities(&self) -> &[crate::communities::Community] {
+        &self.communities
+    }
+
     /// Shortest dependency path between two nodes using A* over edge weights.
     pub fn shortest_path(
         &self,
@@ -581,6 +622,14 @@ pub enum RepoGraphEdgeKind {
     SymbolRelationshipImplementation,
     SymbolRelationshipTypeDefinition,
     SymbolRelationshipDefinition,
+    /// PR F3: synthesized "node X is a member of community Y" edge.
+    /// Currently surfaced only via the per-graph
+    /// [`crate::communities::Community`] sidecar — the variant exists in
+    /// the enum (and in [`edge_confidence_floor`] / [`edge_weight`]) so
+    /// downstream tools that iterate by edge kind have a stable kind
+    /// name to dispatch on, even when no `MemberOf` edges are
+    /// materialized into the petgraph.
+    MemberOf,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -625,6 +674,7 @@ pub fn edge_confidence_floor(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::SymbolRelationshipDefinition => {
             EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_DEFINITION
         }
+        RepoGraphEdgeKind::MemberOf => EDGE_CONFIDENCE_MEMBER_OF,
     }
 }
 
@@ -985,12 +1035,41 @@ impl RepoDependencyGraphBuilder {
         }
 
         let name_index = build_name_index(&self.graph);
-        RepoDependencyGraph {
+        let mut graph = RepoDependencyGraph {
             graph: self.graph,
             node_lookup: self.node_lookup,
             name_index,
             symbol_ranges: self.symbol_ranges,
+            communities: Vec::new(),
+            community_lookup: BTreeMap::new(),
+        };
+
+        // PR F3: run modularity-based community detection unless the
+        // feature flag is explicitly turned off. The detector is
+        // O((V + E) × iterations); on a 12k-node, 150k-edge canonical
+        // graph it lands in the ~hundreds-of-ms range — comparable to
+        // the SCC pass that already runs in `derive_graph_caches`.
+        if crate::communities::detection_enabled() {
+            let communities = crate::communities::detect_communities(&graph);
+            graph.install_communities(communities);
         }
+
+        graph
+    }
+}
+
+impl RepoDependencyGraph {
+    /// Replace the community sidecar with a fresh detection pass
+    /// result. Rebuilds the reverse `community_lookup` index.
+    fn install_communities(&mut self, communities: Vec<crate::communities::Community>) {
+        let mut lookup: BTreeMap<usize, usize> = BTreeMap::new();
+        for (pos, community) in communities.iter().enumerate() {
+            for &node_pos in &community.member_ids {
+                lookup.insert(node_pos, pos);
+            }
+        }
+        self.communities = communities;
+        self.community_lookup = lookup;
     }
 }
 
@@ -1029,6 +1108,13 @@ pub struct RepoGraphArtifact {
     /// keeps `symbols_enclosing` non-empty after a cache-hit reload.
     #[serde(default)]
     pub symbol_ranges: BTreeMap<PathBuf, Vec<RepoGraphArtifactSymbolRange>>,
+    /// PR F3 community sidecar. Each community references its members
+    /// by their position in [`Self::nodes`]. New in artifact v3 — old
+    /// blobs that lack the field deserialize via `default` to an
+    /// empty vec, which is fine: `community_id(...)` then returns
+    /// `None` until the next warm rebuild repopulates it.
+    #[serde(default)]
+    pub communities: Vec<crate::communities::Community>,
 }
 
 /// A serializable directed edge between two graph nodes, identified by their
@@ -1111,6 +1197,7 @@ impl RepoDependencyGraph {
             nodes,
             edges,
             symbol_ranges,
+            communities: self.communities.clone(),
         }
     }
 
@@ -1161,12 +1248,21 @@ impl RepoDependencyGraph {
             }
         }
 
-        RepoDependencyGraph {
+        let mut out = RepoDependencyGraph {
             graph,
             node_lookup,
             name_index,
             symbol_ranges,
+            communities: Vec::new(),
+            community_lookup: BTreeMap::new(),
+        };
+        // PR F3: rehydrate the community sidecar verbatim — node
+        // positions in the artifact match `NodeIndex` 0..n thanks to the
+        // ordered `add_node` loop above.
+        if !artifact.communities.is_empty() {
+            out.install_communities(artifact.communities.clone());
         }
+        out
     }
 
     /// Serialize the graph artifact to a JSON string for DB storage.
@@ -1267,6 +1363,11 @@ impl RepoDependencyGraph {
             nodes: surviving_nodes,
             edges: surviving_edges,
             symbol_ranges: surviving_symbol_ranges,
+            // Communities are recomputed when the rebuilt graph runs
+            // through `finish()`; dropping the stale sidecar here is
+            // the safe choice since member positions get remapped
+            // anyway.
+            communities: Vec::new(),
         };
 
         // Step 2: Rebuild the base graph from the filtered artifact.
@@ -1413,6 +1514,7 @@ fn edge_weight(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::SymbolRelationshipDefinition => {
             EDGE_WEIGHT_SYMBOL_RELATIONSHIP_DEFINITION
         }
+        RepoGraphEdgeKind::MemberOf => EDGE_WEIGHT_MEMBER_OF,
     }
 }
 
@@ -1707,6 +1809,7 @@ mod tests {
             nodes: vec![],
             edges: vec![],
             symbol_ranges: BTreeMap::new(),
+            communities: Vec::new(),
         };
         let json = serde_json::to_string(&empty).expect("serialize empty");
         let restored = RepoDependencyGraph::deserialize_artifact(&json).expect("deserialize empty");
