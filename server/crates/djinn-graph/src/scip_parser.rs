@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use protobuf::{Enum, Message};
 use scip::types::{
-    Descriptor, Document, Index, Metadata, Occurrence, Relationship, SymbolInformation,
+    Descriptor, Document, Index, Metadata, Occurrence, Relationship, SymbolInformation, descriptor,
     symbol_information,
 };
 use serde::{Deserialize, Serialize};
@@ -144,6 +144,40 @@ pub fn is_local_symbol(symbol: &str) -> bool {
     symbol.starts_with("local ")
 }
 
+/// Returns `true` when `sym` is a function-or-method-scoped local variable
+/// or parameter that should never be a graph node — its identity is
+/// scope-bound and treating it as a global symbol creates super-nodes
+/// (every `ctx`/`err`/`logger` collapsing to one node with thousands of
+/// inbound edges).
+///
+/// SCIP `local 0`-style identifiers are caught by [`is_local_symbol`];
+/// this predicate covers the orthogonal case where the indexer (notably
+/// scip-go) emits a full scope-qualified symbol of `Kind::Variable` /
+/// `Kind::Parameter` whose descriptor chain contains a `()` (method/
+/// function) descriptor. Module-level constants, struct fields, and
+/// package-level vars are kept.
+pub fn is_function_scoped_variable(sym: &ScipSymbol) -> bool {
+    match sym.kind {
+        Some(ScipSymbolKind::Variable) | Some(ScipSymbolKind::Parameter) => {}
+        _ => return false,
+    }
+    let parsed = match scip::symbol::parse_symbol(&sym.symbol) {
+        Ok(parsed) => parsed,
+        Err(_) => return false,
+    };
+    let descriptors: Vec<Descriptor> = parsed.descriptors;
+    if descriptors.len() < 2 {
+        return false;
+    }
+    // Inspect every descriptor except the trailing one (which IS the
+    // variable / parameter itself). If any earlier descriptor carries the
+    // `Method` suffix, the symbol is function-or-method-scoped.
+    let upper_bound = descriptors.len() - 1;
+    descriptors[..upper_bound].iter().any(|descriptor| {
+        descriptor.suffix.enum_value().ok() == Some(descriptor::Suffix::Method)
+    })
+}
+
 /// Symbol visibility, derived from the SCIP symbol identifier shape.
 ///
 /// SCIP 0.7 does not carry a dedicated visibility flag on `SymbolInformation`,
@@ -224,6 +258,7 @@ pub enum ScipSymbolKind {
     Interface,
     Function,
     Variable,
+    Parameter,
     Constant,
     String,
     Number,
@@ -292,10 +327,15 @@ fn parse_index(index: Index) -> Result<ParsedScipIndex> {
     // Second gate: per-document, drop SCIP `local …` occurrences /
     // definitions / symbols (counted into `dropped_locals` by
     // `normalize_document`) so they never reach the graph builder.
+    // The same call also drops function/method-scoped `Variable` /
+    // `Parameter` symbols (counted into `dropped_scoped_variables`) so
+    // identifiers like `pkg/file.go/FuncName().localVar.` never collapse
+    // into a single `ctx`/`err`/`logger` super-node downstream.
     let mut dropped_locals: usize = 0;
+    let mut dropped_scoped_variables: usize = 0;
     let files = kept_documents
         .into_iter()
-        .map(|doc| normalize_document(doc, &mut dropped_locals))
+        .map(|doc| normalize_document(doc, &mut dropped_locals, &mut dropped_scoped_variables))
         .collect::<Result<Vec<_>>>()?;
     let external_symbols_raw = index
         .external_symbols
@@ -306,12 +346,17 @@ fn parse_index(index: Index) -> Result<ParsedScipIndex> {
     // expected to be cross-package globals, but indexers occasionally
     // leak locals into the external set; filter defensively so the
     // downstream graph builder never sees `symbol:local 0` from any
-    // path.
+    // path. Mirror the function-scoped-variable filter for the same
+    // reason — externals are not the right place for a per-method
+    // parameter to sneak in.
     let external_symbols: Vec<ScipSymbol> = external_symbols_raw
         .into_iter()
         .filter(|sym| {
             if is_local_symbol(&sym.symbol) {
                 dropped_locals += 1;
+                false
+            } else if is_function_scoped_variable(sym) {
+                dropped_scoped_variables += 1;
                 false
             } else {
                 true
@@ -319,11 +364,12 @@ fn parse_index(index: Index) -> Result<ParsedScipIndex> {
         })
         .collect();
 
-    if dropped_locals > 0 {
+    if dropped_locals > 0 || dropped_scoped_variables > 0 {
         tracing::info!(
             target: "djinn_graph::scip_parser",
             dropped_locals,
-            "filtered SCIP local symbols from parsed index"
+            dropped_scoped_variables,
+            "filtered SCIP local and function-scoped variable symbols from parsed index"
         );
     }
 
@@ -359,10 +405,40 @@ pub(crate) fn is_repo_relative(path: &str) -> bool {
     if path.starts_with('/') {
         return false;
     }
-    // Defensive: well-known cache / generated-out-of-tree path segments.
-    // We check `/.cache/` as an embedded segment so a legitimate file
-    // named `cache.go` or `internal/cachelib/foo.go` is unaffected.
-    if path.contains("/.cache/") {
+    // Defensive: well-known build / cache / generated-out-of-tree path
+    // segments. Each is checked as an EMBEDDED segment (between slashes)
+    // so a legitimately-named source file (`cache.go`, `target.rs`,
+    // `build.gradle.kts`, `dist/dist.go`) inside the repo is unaffected.
+    // A leading-segment check (`path.starts_with("target/")`) is also
+    // applied so the same patterns catch the build-output dir at the
+    // project root.
+    //
+    // What lives here: SCIP indexers occasionally pull in compiled
+    // artifacts, vendored copies, virtualenv libraries, etc. — file
+    // nodes from those paths get terrible labels (content hashes,
+    // generated symbols) that drown out real code in `ranked` /
+    // `cycles` / `orphans` output and in the graph visualization.
+    const FORBIDDEN_SEGMENTS: &[&str] = &[
+        ".cache",      // generic on-disk cache
+        "target",      // cargo
+        "node_modules", // npm / pnpm / yarn
+        "dist",        // bundlers (webpack, vite, rollup, parcel)
+        "build",       // generic
+        "_build",      // ocaml dune, rebar3
+        ".next",       // nextjs
+        ".nuxt",       // nuxt
+        "__pycache__", // cpython bytecode
+        ".venv",       // python venv (PEP 405 convention)
+        "venv",        // python venv (older convention)
+        ".gradle",     // gradle local cache
+        ".tox",        // python tox
+        "vendor",      // go modules vendor / php composer / ruby vendor
+        "Pods",        // CocoaPods
+    ];
+    if FORBIDDEN_SEGMENTS
+        .iter()
+        .any(|seg| path.starts_with(&format!("{seg}/")) || path.contains(&format!("/{seg}/")))
+    {
         return false;
     }
     // System-style path prefixes that occasionally appear when the SCIP
@@ -397,10 +473,63 @@ fn normalize_metadata(metadata: Option<&Metadata>) -> ScipMetadata {
     }
 }
 
-fn normalize_document(document: Document, dropped_locals: &mut usize) -> Result<ScipFile> {
+fn normalize_document(
+    document: Document,
+    dropped_locals: &mut usize,
+    dropped_scoped_variables: &mut usize,
+) -> Result<ScipFile> {
     if document.relative_path.is_empty() {
         return Err(anyhow!("SCIP document missing relative_path"));
     }
+
+    // First, normalize the symbol table. We need this *before* filtering
+    // occurrences so we can compute the set of scope-bound variable /
+    // parameter symbols that the document declares — once we know which
+    // identifiers are dropped from the symbol table, we strip occurrences
+    // that point at them too (otherwise the graph builder gets a
+    // dangling-target edge).
+    //
+    // Two filters apply, in order:
+    //   1. SCIP `local …` symbols (per-document anonymous IDs) — see
+    //      [`is_local_symbol`].
+    //   2. Function/method-scoped `Variable` / `Parameter` symbols — see
+    //      [`is_function_scoped_variable`].
+    let symbols_raw = document
+        .symbols
+        .into_iter()
+        .map(normalize_symbol)
+        .collect::<Result<Vec<_>>>()?;
+
+    // Two-pass filter: pass 1 partitions symbols and accumulates the set
+    // of dropped scope-bound identifiers; pass 2 walks the survivors and
+    // strips any relationship whose target points at a dropped symbol
+    // (local or scoped) so the graph builder never sees a dangling edge.
+    // A single-pass would miss the case where a relationship's target
+    // appears LATER in the symbol vector than its source.
+    let mut dropped_scoped_ids: BTreeSet<String> = BTreeSet::new();
+    let mut surviving: Vec<ScipSymbol> = Vec::with_capacity(symbols_raw.len());
+    for sym in symbols_raw {
+        if is_local_symbol(&sym.symbol) {
+            *dropped_locals += 1;
+            continue;
+        }
+        if is_function_scoped_variable(&sym) {
+            *dropped_scoped_variables += 1;
+            dropped_scoped_ids.insert(sym.symbol.clone());
+            continue;
+        }
+        surviving.push(sym);
+    }
+    let symbols: Vec<ScipSymbol> = surviving
+        .into_iter()
+        .map(|mut sym| {
+            sym.relationships.retain(|rel| {
+                !is_local_symbol(&rel.target_symbol)
+                    && !dropped_scoped_ids.contains(&rel.target_symbol)
+            });
+            sym
+        })
+        .collect();
 
     // scip-go emits some occurrences with an empty range field — e.g.
     // synthetic references to generated code. Skip those rather than failing
@@ -410,7 +539,11 @@ fn normalize_document(document: Document, dropped_locals: &mut usize) -> Result<
     // by the indexer, but our graph keys symbols by raw id, so identical
     // local indices would otherwise collapse across files (`local 0` in
     // dispatcher.go and `local 0` in backfill.go become a single super-node
-    // with hundreds of inbound edges). See [`is_local_symbol`].
+    // with hundreds of inbound edges). See [`is_local_symbol`]. Mirror the
+    // same filter for occurrences whose symbol was just dropped from the
+    // symbol table because it was a function-scoped variable / parameter
+    // (`is_function_scoped_variable`) — leaving the occurrence in would
+    // re-introduce the super-node we just filtered out.
     let occurrences: Vec<_> = document
         .occurrences
         .into_iter()
@@ -418,10 +551,13 @@ fn normalize_document(document: Document, dropped_locals: &mut usize) -> Result<
         .filter(|occurrence| {
             if is_local_symbol(&occurrence.symbol) {
                 *dropped_locals += 1;
-                false
-            } else {
-                true
+                return false;
             }
+            if dropped_scoped_ids.contains(&occurrence.symbol) {
+                *dropped_scoped_variables += 1;
+                return false;
+            }
+            true
         })
         .collect();
 
@@ -436,27 +572,6 @@ fn normalize_document(document: Document, dropped_locals: &mut usize) -> Result<
             !occurrence.symbol.is_empty() && !occurrence.roles.contains(&ScipSymbolRole::Definition)
         })
         .cloned()
-        .collect();
-
-    // Filter local symbols out of the per-document symbol table. Also strip
-    // any relationship whose target is a local — those would otherwise
-    // generate dangling edges to a node that never gets created.
-    let symbols_raw = document
-        .symbols
-        .into_iter()
-        .map(normalize_symbol)
-        .collect::<Result<Vec<_>>>()?;
-    let symbols: Vec<ScipSymbol> = symbols_raw
-        .into_iter()
-        .filter_map(|mut sym| {
-            if is_local_symbol(&sym.symbol) {
-                *dropped_locals += 1;
-                return None;
-            }
-            sym.relationships
-                .retain(|rel| !is_local_symbol(&rel.target_symbol));
-            Some(sym)
-        })
         .collect();
 
     Ok(ScipFile {
@@ -734,6 +849,10 @@ fn map_symbol_kind(kind: Option<symbol_information::Kind>) -> Option<ScipSymbolK
         symbol_information::Kind::Variable | symbol_information::Kind::StaticVariable => {
             ScipSymbolKind::Variable
         }
+        symbol_information::Kind::Parameter
+        | symbol_information::Kind::SelfParameter
+        | symbol_information::Kind::ThisParameter
+        | symbol_information::Kind::ParameterLabel => ScipSymbolKind::Parameter,
         symbol_information::Kind::Constant => ScipSymbolKind::Constant,
         symbol_information::Kind::String => ScipSymbolKind::String,
         symbol_information::Kind::Number => ScipSymbolKind::Number,
@@ -940,6 +1059,44 @@ mod tests {
         assert!(!is_repo_relative(""));
     }
 
+    /// v8: every conventional build-output / vendored dir lands in the
+    /// FORBIDDEN_SEGMENTS set. Cover both the leading-segment case (the
+    /// build dir at the project root) and the embedded-segment case
+    /// (build dir nested under a workspace member).
+    #[test]
+    fn is_repo_relative_drops_conventional_build_artifact_dirs() {
+        // Cargo target/ at workspace root.
+        assert!(!is_repo_relative("target/debug/build/foo/out/lib.rs"));
+        // Cargo target/ nested in a workspace member.
+        assert!(!is_repo_relative("server/target/debug/deps/foo.rs"));
+        // npm / pnpm / yarn.
+        assert!(!is_repo_relative("node_modules/react/index.js"));
+        assert!(!is_repo_relative("ui/node_modules/react/index.js"));
+        // Bundler output.
+        assert!(!is_repo_relative("dist/index.js"));
+        assert!(!is_repo_relative("ui/dist/assets/index.js"));
+        // Generic build/.
+        assert!(!is_repo_relative("build/output.so"));
+        // ocaml dune / rebar.
+        assert!(!is_repo_relative("_build/default/bin/main.ml"));
+        // Next.js.
+        assert!(!is_repo_relative(".next/server/pages/index.js"));
+        // Python bytecode + venv.
+        assert!(!is_repo_relative("scripts/__pycache__/helper.cpython-311.pyc"));
+        assert!(!is_repo_relative(".venv/lib/python3.11/site-packages/foo.py"));
+        assert!(!is_repo_relative("venv/lib/python3.11/site-packages/foo.py"));
+        // Go vendor / PHP composer.
+        assert!(!is_repo_relative("vendor/github.com/foo/bar.go"));
+
+        // False positives we DO admit: source files named after these
+        // dirs but living elsewhere.
+        assert!(is_repo_relative("src/target.rs"));
+        assert!(is_repo_relative("internal/build_helpers/foo.go"));
+        assert!(is_repo_relative("packages/dist-info/index.ts"));
+        assert!(is_repo_relative("docs/vendor-roadmap.md"));
+        assert!(is_repo_relative("scripts/venv-bootstrap.py"));
+    }
+
     #[test]
     fn parse_index_drops_non_repo_relative_documents() {
         let mut index = Index::new();
@@ -1131,6 +1288,206 @@ mod tests {
         // External symbols must contain only the global `Helper`.
         assert_eq!(parsed.external_symbols.len(), 1);
         assert_eq!(parsed.external_symbols[0].display_name.as_deref(), Some("Helper"));
+    }
+
+    // ── is_function_scoped_variable predicate ──────────────────────────
+    //
+    // These tests cover the "scope-bound `Variable`/`Parameter`" filter
+    // (PR fix following the SCIP local filter): scip-go-style symbols
+    // like `pkg/file.go/Foo().bar.` are real SCIP globals from a parser
+    // standpoint but represent a function-internal binding that must
+    // never become a graph node — otherwise every `ctx`/`err`/`logger`
+    // in the repo collapses into one super-node with thousands of
+    // incoming edges.
+
+    fn make_symbol(symbol: &str, kind: ScipSymbolKind) -> ScipSymbol {
+        ScipSymbol {
+            symbol: symbol.to_string(),
+            kind: Some(kind),
+            ..ScipSymbol::default()
+        }
+    }
+
+    #[test]
+    fn drops_function_scoped_variable() {
+        // `Foo()` is a Method descriptor, so `bar` is function-scoped.
+        let sym = make_symbol(
+            "scip-go gomod example.com/svc . pkg/file_go/Foo().bar.",
+            ScipSymbolKind::Variable,
+        );
+        assert!(is_function_scoped_variable(&sym));
+    }
+
+    #[test]
+    fn drops_method_scoped_parameter() {
+        // `Bar#method()` is a Type-then-Method chain; `param` is the
+        // method-scoped parameter the indexer emitted.
+        let sym = make_symbol(
+            "scip-go gomod example.com/svc . pkg/file_go/Bar#method().param.",
+            ScipSymbolKind::Parameter,
+        );
+        assert!(is_function_scoped_variable(&sym));
+    }
+
+    #[test]
+    fn keeps_module_level_const() {
+        // Boundary case: the descriptor chain has no `()` segment AND
+        // the kind is `Constant`. The predicate must not fire — both
+        // checks should pass.
+        let sym = make_symbol(
+            "scip-go gomod example.com/svc . pkg/file_go/MaxRetries.",
+            ScipSymbolKind::Constant,
+        );
+        assert!(!is_function_scoped_variable(&sym));
+    }
+
+    #[test]
+    fn keeps_struct_field() {
+        // `#` (Type) suffix, not `()` (Method) — struct fields survive.
+        let sym = make_symbol(
+            "scip-go gomod example.com/svc . pkg/file_go/Bar#field.",
+            ScipSymbolKind::Field,
+        );
+        assert!(!is_function_scoped_variable(&sym));
+    }
+
+    #[test]
+    fn keeps_package_level_var() {
+        // Top-level package var: kind is `Variable` but there is no
+        // Method descriptor in the chain, so the predicate must not
+        // fire.
+        let sym = make_symbol(
+            "scip-go gomod example.com/svc . pkg/file_go/topLevelVar.",
+            ScipSymbolKind::Variable,
+        );
+        assert!(!is_function_scoped_variable(&sym));
+    }
+
+    /// Build a single-document SCIP `Index` with `symbols` and a single
+    /// trivial occurrence per symbol so the parser exercises both the
+    /// symbol-table and occurrence filters.
+    fn index_with_symbols(symbols: Vec<SymbolInformation>) -> Vec<u8> {
+        let mut index = Index::new();
+        let mut document = Document::new();
+        document.language = "go".to_string();
+        document.relative_path = "pkg/file.go".to_string();
+        document.occurrences = symbols
+            .iter()
+            .enumerate()
+            .map(|(i, s)| Occurrence {
+                range: vec![i as i32, 0, 4],
+                symbol: s.symbol.clone(),
+                symbol_roles: 1,
+                ..Occurrence::new()
+            })
+            .collect();
+        document.symbols = symbols;
+        index.documents.push(document);
+        index.write_to_bytes().expect("encode fixture index")
+    }
+
+    #[test]
+    fn dropped_scoped_variables_counter_increments() {
+        // Three symbols total; two are function-scoped (one Variable
+        // and one Parameter) and one is a module-level constant. The
+        // parse must drop exactly two and the surviving symbol set
+        // must contain only the constant.
+        let bytes = index_with_symbols(vec![
+            SymbolInformation {
+                symbol: "scip-go gomod example.com/svc . pkg/file_go/Foo().bar.".to_string(),
+                display_name: "bar".to_string(),
+                kind: EnumOrUnknown::new(symbol_information::Kind::Variable),
+                ..SymbolInformation::new()
+            },
+            SymbolInformation {
+                symbol: "scip-go gomod example.com/svc . pkg/file_go/Bar#method().param."
+                    .to_string(),
+                display_name: "param".to_string(),
+                kind: EnumOrUnknown::new(symbol_information::Kind::Parameter),
+                ..SymbolInformation::new()
+            },
+            SymbolInformation {
+                symbol: "scip-go gomod example.com/svc . pkg/file_go/MaxRetries.".to_string(),
+                display_name: "MaxRetries".to_string(),
+                kind: EnumOrUnknown::new(symbol_information::Kind::Constant),
+                ..SymbolInformation::new()
+            },
+        ]);
+
+        let parsed = parse_scip_bytes(&bytes).expect("parse synthetic index");
+        assert_eq!(parsed.files.len(), 1);
+        let file = &parsed.files[0];
+        // The constant must survive both filters.
+        assert_eq!(file.symbols.len(), 1, "expected only the constant to remain");
+        assert_eq!(
+            file.symbols[0].symbol,
+            "scip-go gomod example.com/svc . pkg/file_go/MaxRetries."
+        );
+        // Occurrences for the dropped symbols must also have been
+        // filtered (the parse_index path scrubs occurrences whose
+        // symbol matches a now-dropped function-scoped variable).
+        assert_eq!(file.occurrences.len(), 1);
+        assert_eq!(
+            file.occurrences[0].symbol,
+            "scip-go gomod example.com/svc . pkg/file_go/MaxRetries."
+        );
+    }
+
+    #[test]
+    fn relationships_to_dropped_locals_are_stripped() {
+        // The surviving global has two relationships: one targeting a
+        // function-scoped variable that we just dropped, and one
+        // targeting another global. After parse only the global-target
+        // relationship should remain.
+        let bytes = index_with_symbols(vec![
+            SymbolInformation {
+                symbol: "scip-go gomod example.com/svc . pkg/file_go/Run().".to_string(),
+                display_name: "Run".to_string(),
+                kind: EnumOrUnknown::new(symbol_information::Kind::Function),
+                relationships: vec![
+                    Relationship {
+                        symbol: "scip-go gomod example.com/svc . pkg/file_go/Foo().bar."
+                            .to_string(),
+                        is_reference: true,
+                        ..Relationship::new()
+                    },
+                    Relationship {
+                        symbol: "scip-go gomod example.com/svc . pkg/file_go/helper()."
+                            .to_string(),
+                        is_reference: true,
+                        ..Relationship::new()
+                    },
+                ],
+                ..SymbolInformation::new()
+            },
+            SymbolInformation {
+                symbol: "scip-go gomod example.com/svc . pkg/file_go/Foo().bar.".to_string(),
+                display_name: "bar".to_string(),
+                kind: EnumOrUnknown::new(symbol_information::Kind::Variable),
+                ..SymbolInformation::new()
+            },
+        ]);
+
+        let parsed = parse_scip_bytes(&bytes).expect("parse synthetic index");
+        let file = &parsed.files[0];
+        // `Run` survives, `Foo().bar.` is dropped.
+        assert_eq!(file.symbols.len(), 1);
+        assert_eq!(
+            file.symbols[0].symbol,
+            "scip-go gomod example.com/svc . pkg/file_go/Run()."
+        );
+        // The relationship to the dropped function-scoped variable must
+        // be stripped; the relationship to the surviving global stays.
+        assert_eq!(
+            file.symbols[0].relationships.len(),
+            1,
+            "expected exactly one relationship after scoped-target stripping, got {:?}",
+            file.symbols[0].relationships
+        );
+        assert_eq!(
+            file.symbols[0].relationships[0].target_symbol,
+            "scip-go gomod example.com/svc . pkg/file_go/helper()."
+        );
     }
 
     // ── prettify_scip_descriptor (Fix 2) ───────────────────────────────

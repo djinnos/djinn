@@ -27,6 +27,11 @@ tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["process", "sync", "fs", "macros", "rt", "rt-multi-thread", "time", "io-util"] }
 tracing = "0.1"
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
+tree-sitter-go = "0.25"
+tree-sitter-python = "0.25"
+tree-sitter-typescript = "0.23"
 
 workspace-hack.workspace = true
 

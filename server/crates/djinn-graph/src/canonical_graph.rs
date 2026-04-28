@@ -261,6 +261,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
 
     let output_dir_for_blocking = output_dir.clone();
     let artifacts = run.artifacts;
+    let project_root_for_blocking = handle.path().to_path_buf();
     let blocking =
         tokio::task::spawn_blocking(move || -> Result<CanonicalGraphBuildOutput, String> {
             let t_parse = std::time::Instant::now();
@@ -270,7 +271,25 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             let _ = std::fs::remove_dir_all(&output_dir_for_blocking);
 
             let t_build = std::time::Instant::now();
-            let graph = crate::repo_graph::RepoDependencyGraph::build(&parsed);
+            let mut graph = crate::repo_graph::RepoDependencyGraph::build_with_source(
+                &parsed,
+                Some(&project_root_for_blocking),
+            );
+            // DB-access post-processor: opt-in via
+            // `DJINN_DB_ACCESS_DETECTION`. Reads files from the index
+            // tree and stamps `Reads`/`Writes` edges from caller
+            // symbols to synthetic `Table` nodes. Logged at info level
+            // so we can see the size of the signal during rollout.
+            if crate::db_access::db_access_detection_enabled() {
+                let added = crate::db_access::detect_db_access(
+                    &mut graph,
+                    &project_root_for_blocking,
+                );
+                tracing::info!(
+                    db_access_edges = added,
+                    "ensure_canonical_graph: db_access pass complete"
+                );
+            }
             let build_ms = t_build.elapsed().as_millis() as u64;
             let node_count = graph.node_count();
             let edge_count = graph.edge_count();

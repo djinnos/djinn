@@ -11,6 +11,14 @@ export interface RankedNode {
   structural_weight: number;
   inbound_edge_weight: number;
   outbound_edge_weight: number;
+  /** PR F4: lowest-ordinal Process this node participates in. */
+  process_id: string | null;
+  /** PR F4: Community (Leiden cluster) this node belongs to. */
+  community_id: string | null;
+  /** PR F4: true when an `EntryPointOf` edge points at this node. */
+  is_entry_point: boolean;
+  /** PR F4: BFS hops from the nearest entry point. `null` = unreachable. */
+  entry_point_distance: number | null;
 }
 
 export interface OrphanEntry {
@@ -130,6 +138,11 @@ export function parseRanked(value: unknown): RankedNode[] {
       structural_weight: Number(r.structural_weight ?? 0),
       inbound_edge_weight: Number(r.inbound_edge_weight ?? 0),
       outbound_edge_weight: Number(r.outbound_edge_weight ?? 0),
+      process_id: typeof r.process_id === "string" ? r.process_id : null,
+      community_id: typeof r.community_id === "string" ? r.community_id : null,
+      is_entry_point: r.is_entry_point === true,
+      entry_point_distance:
+        typeof r.entry_point_distance === "number" ? r.entry_point_distance : null,
     }))
     .filter((r) => r.key.length > 0);
 }

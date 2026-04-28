@@ -141,7 +141,7 @@ pub struct GraphNeighbor {
 }
 
 /// A ranked node from PageRank + structural weight scoring.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct RankedNode {
     pub key: String,
     pub kind: String,
@@ -151,6 +151,19 @@ pub struct RankedNode {
     pub structural_weight: f64,
     pub inbound_edge_weight: f64,
     pub outbound_edge_weight: f64,
+    // v8: added with parse-time scoped-variable filter; see version bump in
+    // sibling change. PR F4: entry-point + bucketing side-channels exposed
+    // by the new multi-signal RRF ranker so the UI can group results by
+    // process / community and surface entry-point status without a second
+    // round-trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub community_id: Option<String>,
+    #[serde(default)]
+    pub is_entry_point: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_point_distance: Option<u32>,
 }
 
 /// A search hit from the name-index lookup or hybrid RRF fusion. Returned
@@ -629,13 +642,15 @@ pub enum EdgeCategory {
     Imports,
     /// ContainsDefinition / DeclaredInFile — file ↔ symbol containment.
     Contains,
-    /// SymbolRelationshipReference — subtype-of / extends.
+    /// `RepoGraphEdgeKind::Extends` — subtype-of / extends.
     Extends,
-    /// SymbolRelationshipImplementation.
+    /// `RepoGraphEdgeKind::Implements` — interface / trait implementation.
     Implements,
-    /// SymbolRelationshipTypeDefinition.
+    /// `RepoGraphEdgeKind::TypeDefines` — variable / param / return type,
+    /// type alias target, generic bound.
     TypeDefines,
-    /// SymbolRelationshipDefinition.
+    /// `RepoGraphEdgeKind::Defines` — canonical-definition relationship
+    /// (target's defining region is contained in the source).
     Defines,
     /// PR A3: SymbolRole::ReadAccess split-out.
     Reads,

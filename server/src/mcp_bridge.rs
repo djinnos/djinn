@@ -250,6 +250,11 @@ impl RepoGraphOps for RepoGraphBridge {
             &ctx.clone_path,
         )
         .await?;
+        // v8: apply project graph_excluded_paths to the neighbor set so
+        // SCIP module-tree synthetic nodes (`crate/`, `…/MODULE.`) and
+        // user-configured globs don't leak into dependents-discovery
+        // queries — same as ranked / search / cycles / impact / dead.
+        let exclusions = self.state.mcp_state_graph_exclusions(&ctx.id).await;
         let node_index = resolve_node_or_err(&graph, key)?;
         let directions: Vec<Direction> = match direction {
             Some("incoming") => vec![Direction::Incoming],
@@ -284,10 +289,26 @@ impl RepoGraphOps for RepoGraphBridge {
                     Direction::Incoming => edge.source(),
                 };
                 let other_node = graph.node(other_index);
+                // v8: skip external (vendored / third-party / cross-crate)
+                // neighbors. `neighbors` is "what's connected to this in
+                // MY codebase"; an imported `tokio::spawn` showing up
+                // among callers is noise.
+                if other_node.is_external {
+                    continue;
+                }
+                let other_key = format_node_key(&other_node.id);
+                let other_file = other_node
+                    .file_path
+                    .as_ref()
+                    .map(|p| p.display().to_string());
+                if exclusions.excludes(&other_key, other_file.as_deref(), &other_node.display_name)
+                {
+                    continue;
+                }
                 neighbors.push((
                     other_node,
                     GraphNeighbor {
-                        key: format_node_key(&other_node.id),
+                        key: other_key,
                         kind: format!("{:?}", other_node.kind).to_lowercase(),
                         display_name: other_node.display_name.clone(),
                         edge_kind: format!("{:?}", edge.weight().kind),
@@ -330,6 +351,7 @@ impl RepoGraphOps for RepoGraphBridge {
             &ctx.clone_path,
         )
         .await?;
+        let exclusions = self.state.mcp_state_graph_exclusions(&ctx.id).await;
         let filter = match kind_filter {
             Some("file") => Some(RepoGraphNodeKind::File),
             Some("symbol") => Some(RepoGraphNodeKind::Symbol),
@@ -339,10 +361,33 @@ impl RepoGraphOps for RepoGraphBridge {
             .nodes
             .iter()
             .filter(|node| filter.is_none() || Some(node.kind) == filter)
-            .map(|node| {
+            .filter_map(|node| {
                 let graph_node = graph.node(node.node_index);
-                RankedNode {
-                    key: format_node_key(&node.key),
+                // v8: skip external (vendored / third-party / cross-crate)
+                // symbols. `ranked` is "what's central in MY codebase"; an
+                // imported `tokio::spawn` getting top-3 is noise. Mirrors
+                // the long-standing filter in `orphans` and `dead`.
+                if graph_node.is_external {
+                    return None;
+                }
+                let key = format_node_key(&node.key);
+                let file_hint = graph_node.file_path.as_ref().map(|p| p.display().to_string());
+                // PR F4: apply graph exclusions BEFORE the limit truncate
+                // so the user gets `limit` non-excluded results, not
+                // `limit` raw results minus exclusions.
+                if exclusions.excludes(&key, file_hint.as_deref(), &graph_node.display_name) {
+                    return None;
+                }
+                // PR F4: pick the lowest-ordinal step's process when the
+                // node belongs to multiple — that's the "most upstream"
+                // membership, which makes the bucket label the entry
+                // point closest to this node.
+                let process_id = pick_lowest_ordinal_process_id(&graph, node.node_index);
+                let community_id = graph
+                    .community_id(node.node_index)
+                    .map(|s| s.to_string());
+                Some(RankedNode {
+                    key,
                     kind: format!("{:?}", node.kind).to_lowercase(),
                     display_name: graph_node.display_name.clone(),
                     score: node.score,
@@ -350,13 +395,21 @@ impl RepoGraphOps for RepoGraphBridge {
                     structural_weight: node.structural_weight,
                     inbound_edge_weight: node.inbound_edge_weight,
                     outbound_edge_weight: node.outbound_edge_weight,
-                }
+                    process_id,
+                    community_id,
+                    is_entry_point: node.is_entry_point,
+                    entry_point_distance: node.entry_point_distance,
+                })
             })
             .collect();
 
         match sort_by {
-            None | Some("pagerank") => {
-                // already in pagerank order
+            None | Some("fused") => {
+                // PR F4: already in fused (RRF) order — the canonical
+                // ranking sorts by `fused_rank` desc.
+            }
+            Some("pagerank") => {
+                nodes.sort_by(|a, b| b.page_rank.total_cmp(&a.page_rank));
             }
             Some("in_degree") => {
                 nodes.sort_by(|a, b| b.inbound_edge_weight.total_cmp(&a.inbound_edge_weight));
@@ -373,7 +426,7 @@ impl RepoGraphOps for RepoGraphBridge {
             }
             Some(other) => {
                 return Err(format!(
-                    "invalid sort_by '{other}': expected 'pagerank', 'in_degree', \
+                    "invalid sort_by '{other}': expected 'fused', 'pagerank', 'in_degree', \
                      'out_degree', or 'total_degree'"
                 ));
             }
@@ -395,6 +448,11 @@ impl RepoGraphOps for RepoGraphBridge {
             &ctx.clone_path,
         )
         .await?;
+        // v8: filter implementor symbols through the project's
+        // graph_excluded_paths so vendored impl files (e.g. a `vendor/`
+        // copy of an interface implementation) don't show up alongside
+        // the in-repo implementors.
+        let exclusions = self.state.mcp_state_graph_exclusions(&ctx.id).await;
         let node_index = graph
             .symbol_node(symbol)
             .ok_or_else(|| format!("symbol '{symbol}' not found in graph"))?;
@@ -403,9 +461,23 @@ impl RepoGraphOps for RepoGraphBridge {
             .graph()
             .edges_directed(node_index, petgraph::Direction::Incoming)
         {
-            if edge.weight().kind == RepoGraphEdgeKind::SymbolRelationshipImplementation {
+            if edge.weight().kind == RepoGraphEdgeKind::Implements {
                 let source_node = graph.node(edge.source());
+                // v8: skip external (vendored / third-party) implementors.
+                // "Who implements this trait" should be in-repo by default.
+                if source_node.is_external {
+                    continue;
+                }
                 if let Some(sym) = &source_node.symbol {
+                    let src_key = format_node_key(&source_node.id);
+                    let src_file = source_node
+                        .file_path
+                        .as_ref()
+                        .map(|p| p.display().to_string());
+                    if exclusions.excludes(&src_key, src_file.as_deref(), &source_node.display_name)
+                    {
+                        continue;
+                    }
                     impls.push(sym.clone());
                 }
             }
@@ -427,51 +499,28 @@ impl RepoGraphOps for RepoGraphBridge {
             &ctx.clone_path,
         )
         .await?;
+        // v8: thread project graph_excluded_paths through impact too —
+        // even with the behavioral-edge whitelist, the BFS frontier
+        // can land on nodes the user has explicitly excluded
+        // (vendored mirrors, generated dirs).
+        let exclusions = self.state.mcp_state_graph_exclusions(&ctx.id).await;
         let start = resolve_node_or_err(&graph, key)?;
-        let mut visited = std::collections::HashSet::new();
-        visited.insert(start);
-        let mut queue = std::collections::VecDeque::new();
-        queue.push_back((start, 0usize));
-        let mut result: Vec<(petgraph::graph::NodeIndex, ImpactEntry)> = Vec::new();
-
-        while let Some((current, depth)) = queue.pop_front() {
-            if depth > 0 {
-                let node = graph.node(current);
-                result.push((
-                    current,
-                    ImpactEntry {
-                        key: format_node_key(&node.id),
-                        depth,
-                        // PR C3: surface file_path so the response-shaping
-                        // layer can bucket entries into modules for risk
-                        // classification.
-                        file_path: node
-                            .file_path
-                            .as_ref()
-                            .map(|p| p.display().to_string()),
-                    },
-                ));
-            }
-            if depth < max_depth {
-                for edge in graph
-                    .graph()
-                    .edges_directed(current, petgraph::Direction::Incoming)
-                {
-                    // PR A2: skip weak edges before they enter the BFS
-                    // frontier so the impact set reflects only the
-                    // confidence band the caller asked for.
-                    if let Some(threshold) = min_confidence
-                        && edge.weight().confidence < threshold
-                    {
-                        continue;
-                    }
-                    let source = edge.source();
-                    if visited.insert(source) {
-                        queue.push_back((source, depth + 1));
-                    }
+        let raw = impact_bfs(&graph, start, max_depth, min_confidence);
+        let result: Vec<_> = raw
+            .into_iter()
+            .filter(|(idx, _)| {
+                let node = graph.node(*idx);
+                // v8: skip external (vendored / third-party / cross-crate)
+                // dependents — "what breaks if I change this" should be
+                // about MY code, not someone else's.
+                if node.is_external {
+                    return false;
                 }
-            }
-        }
+                let key = format_node_key(&node.id);
+                let file_hint = node.file_path.as_ref().map(|p| p.display().to_string());
+                !exclusions.excludes(&key, file_hint.as_deref(), &node.display_name)
+            })
+            .collect();
 
         match group_by {
             None => Ok(ImpactResult::Detailed(
@@ -501,26 +550,39 @@ impl RepoGraphOps for RepoGraphBridge {
             &ctx.clone_path,
         )
         .await?;
+        let exclusions = self.state.mcp_state_graph_exclusions(&ctx.id).await;
         let filter = match kind_filter {
             Some("file") => Some(RepoGraphNodeKind::File),
             Some("symbol") => Some(RepoGraphNodeKind::Symbol),
             _ => None,
         };
-        let hits = graph.search_by_name(query, filter, limit);
-        Ok(hits
-            .into_iter()
-            .map(|hit| {
-                let node = graph.node(hit.node_index);
-                SearchHit {
-                    key: format_node_key(&node.id),
-                    kind: format!("{:?}", node.kind).to_lowercase(),
-                    display_name: node.display_name.clone(),
-                    score: hit.score,
-                    file: node.file_path.as_ref().map(|p| p.display().to_string()),
-                    match_kind: None,
-                }
-            })
-            .collect())
+        // PR F4: ask `search_by_name` for an unbounded result set so the
+        // exclusions filter runs BEFORE we cap to `limit`. Otherwise a
+        // user with a noisy `tests/**` prefix would see ≤limit matches
+        // even when there were plenty of legitimate hits past the
+        // truncation point.
+        let hits = graph.search_by_name(query, filter, usize::MAX);
+        let mut out: Vec<SearchHit> = Vec::new();
+        for hit in hits {
+            let node = graph.node(hit.node_index);
+            let key = format_node_key(&node.id);
+            let file = node.file_path.as_ref().map(|p| p.display().to_string());
+            if exclusions.excludes(&key, file.as_deref(), &node.display_name) {
+                continue;
+            }
+            out.push(SearchHit {
+                key,
+                kind: format!("{:?}", node.kind).to_lowercase(),
+                display_name: node.display_name.clone(),
+                score: hit.score,
+                file,
+                match_kind: None,
+            });
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     async fn hybrid_search(
@@ -794,6 +856,12 @@ impl RepoGraphOps for RepoGraphBridge {
         };
         let node = graph.node(node_index);
 
+        // v8: filter related symbols through graph_excluded_paths so the
+        // 360° view doesn't pull in synthetic SCIP module-tree nodes
+        // (`crate/`, `…/MODULE.`) or vendored copies for the queried
+        // symbol's neighborhood.
+        let exclusions = self.state.mcp_state_graph_exclusions(&ctx.id).await;
+
         // Build incoming/outgoing buckets. We over-collect into per-category
         // Vecs and truncate at 30 once everything is in — sorting by
         // confidence (desc) so the highest-trust edges win the cap.
@@ -809,6 +877,18 @@ impl RepoGraphOps for RepoGraphBridge {
                     Direction::Outgoing => edge.target(),
                 };
                 let other = graph.node(other_index);
+                // v8: skip external (vendored / third-party / cross-crate)
+                // related symbols. The 360° view is "what surrounds THIS
+                // codebase symbol"; an imported `tokio::Future` showing
+                // up alongside in-repo callers is noise.
+                if other.is_external {
+                    continue;
+                }
+                let other_key = format_node_key(&other.id);
+                let other_file = other.file_path.as_ref().map(|p| p.display().to_string());
+                if exclusions.excludes(&other_key, other_file.as_deref(), &other.display_name) {
+                    continue;
+                }
                 let category = classify_edge_category(Some(edge.weight()), other);
                 let related = build_related_symbol(other, edge.weight().confidence);
                 let bucket = match dir {
@@ -1815,12 +1895,12 @@ impl RepoGraphOps for RepoGraphBridge {
                     // circuit above via `entry_set`; non-entry symbols
                     // shouldn't carry one, but skip defensively.
                     RepoGraphEdgeKind::EntryPointOf => {}
-                    RepoGraphEdgeKind::SymbolRelationshipImplementation => {
+                    RepoGraphEdgeKind::Implements => {
                         has_any_incoming = true;
                         has_relationship_ref_or_impl = true;
                         has_relationship_impl = true;
                     }
-                    RepoGraphEdgeKind::SymbolRelationshipReference => {
+                    RepoGraphEdgeKind::Extends => {
                         has_any_incoming = true;
                         has_relationship_ref_or_impl = true;
                     }
@@ -1907,7 +1987,7 @@ impl RepoGraphOps for RepoGraphBridge {
                     RepoGraphEdgeKind::SymbolReference
                     | RepoGraphEdgeKind::Reads
                     | RepoGraphEdgeKind::Writes
-                    | RepoGraphEdgeKind::SymbolRelationshipReference
+                    | RepoGraphEdgeKind::Extends
                     | RepoGraphEdgeKind::FileReference => {
                         let src = graph.node(edge.source());
                         let src_key = format_node_key(&src.id);
@@ -2299,6 +2379,126 @@ impl AppState {
     }
 }
 
+/// PR F4: pick the [`djinn_graph::processes::Process`] id whose member
+/// list places `node` at the lowest step ordinal (most upstream). When
+/// the node sits in two flows — say it's `step=0` in process A and
+/// `step=5` in process B — process A wins because it identifies this
+/// v8: BFS used by `impact` and its tests. Walks Incoming edges from
+/// `start` up to `max_depth`, returning each visited node with the
+/// depth at which it was first reached.
+///
+/// Two filters cut the BFS frontier so transitive impact reflects
+/// load-bearing propagation, not "every node anchored to the queried
+/// file":
+///
+/// * **Behavioral-edge whitelist.** Only edges that actually carry
+///   "if this changes, that breaks" semantics propagate the BFS:
+///   `Reads`, `Writes`, `SymbolReference`, `FileReference` (the
+///   file→file dependency edge that drives file-level impact),
+///   `Implements`, `Extends`, `TypeDefines`, `Defines`. Pure
+///   structural anchors (`ContainsDefinition` = "file contains this
+///   symbol", `DeclaredInFile` = "this symbol lives in this file")
+///   and synthetic side-channel edges (`MemberOf`, `StepInProcess`,
+///   `EntryPointOf`) are skipped — they connect everything that
+///   contains everything, not "this changes when that changes".
+/// * **Confidence floor.** Defaults to 0.85 when the caller passes
+///   `None`; pass `Some(0.0)` to opt back into the full set.
+fn impact_bfs(
+    graph: &djinn_graph::repo_graph::RepoDependencyGraph,
+    start: petgraph::graph::NodeIndex,
+    max_depth: usize,
+    min_confidence: Option<f64>,
+) -> Vec<(petgraph::graph::NodeIndex, ImpactEntry)> {
+    use djinn_graph::repo_graph::RepoGraphEdgeKind;
+    let propagates = |kind: RepoGraphEdgeKind| match kind {
+        RepoGraphEdgeKind::Reads
+        | RepoGraphEdgeKind::Writes
+        | RepoGraphEdgeKind::SymbolReference
+        | RepoGraphEdgeKind::FileReference
+        | RepoGraphEdgeKind::Implements
+        | RepoGraphEdgeKind::Extends
+        | RepoGraphEdgeKind::TypeDefines
+        | RepoGraphEdgeKind::Defines => true,
+        RepoGraphEdgeKind::ContainsDefinition
+        | RepoGraphEdgeKind::DeclaredInFile
+        | RepoGraphEdgeKind::MemberOf
+        | RepoGraphEdgeKind::StepInProcess
+        | RepoGraphEdgeKind::EntryPointOf => false,
+    };
+    let confidence_threshold = min_confidence.unwrap_or(0.85);
+
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(start);
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back((start, 0usize));
+    let mut result: Vec<(petgraph::graph::NodeIndex, ImpactEntry)> = Vec::new();
+
+    while let Some((current, depth)) = queue.pop_front() {
+        if depth > 0 {
+            let node = graph.node(current);
+            result.push((
+                current,
+                ImpactEntry {
+                    key: format_node_key(&node.id),
+                    depth,
+                    file_path: node.file_path.as_ref().map(|p| p.display().to_string()),
+                },
+            ));
+        }
+        if depth < max_depth {
+            for edge in graph
+                .graph()
+                .edges_directed(current, petgraph::Direction::Incoming)
+            {
+                if !propagates(edge.weight().kind) {
+                    continue;
+                }
+                if edge.weight().confidence < confidence_threshold {
+                    continue;
+                }
+                let source = edge.source();
+                if visited.insert(source) {
+                    queue.push_back((source, depth + 1));
+                }
+            }
+        }
+    }
+    result
+}
+
+/// node as an entry point (or near-entry), which is the more
+/// actionable bucket label for the UI.
+///
+/// Returns `None` when the node is not a step in any process. Ties on
+/// step ordinal are broken by `Process::id` (lex asc) so the result
+/// is deterministic across rebuilds.
+fn pick_lowest_ordinal_process_id(
+    graph: &djinn_graph::repo_graph::RepoDependencyGraph,
+    node: petgraph::graph::NodeIndex,
+) -> Option<String> {
+    let processes = graph.processes_for_node(node);
+    if processes.is_empty() {
+        return None;
+    }
+    let mut best: Option<(usize, &str)> = None;
+    for proc in processes {
+        let step_ord = proc
+            .steps
+            .iter()
+            .position(|step| *step == node)
+            .unwrap_or(usize::MAX);
+        match best {
+            None => best = Some((step_ord, proc.id.as_str())),
+            Some((cur_ord, cur_id)) => {
+                if step_ord < cur_ord || (step_ord == cur_ord && proc.id.as_str() < cur_id) {
+                    best = Some((step_ord, proc.id.as_str()));
+                }
+            }
+        }
+    }
+    best.map(|(_, id)| id.to_string())
+}
+
 impl AppState {
     /// Build a `djinn_control_plane::McpState` from this AppState, wiring all bridge impls.
     ///
@@ -2363,10 +2563,17 @@ fn build_snapshot_payload(
         if exclusions.excludes(&key, file_hint.as_deref(), display_name) {
             continue;
         }
+        // v8: skip external nodes from the snapshot too — they're
+        // imported library symbols, not part of the codebase the UI
+        // is rendering.
+        if node.is_external {
+            continue;
+        }
         total_nodes_post_excl += 1;
         pagerank_lookup.insert(ranked_node.node_index, ranked_node.page_rank);
-        // `ranking.nodes` is pagerank-sorted; collecting the first
-        // `node_cap` survivors gives the top tier.
+        // `ranking.nodes` is fused-rank-sorted (PR F4 RRF); collecting
+        // the first `node_cap` survivors promotes entry points and the
+        // shortest-distance neighborhood, not just raw PageRank leaves.
         if surviving.len() < node_cap {
             surviving.insert(ranked_node.node_index);
         }
@@ -3064,12 +3271,135 @@ pub(crate) mod graph_bridge_tests {
                     structural_weight: node.structural_weight,
                     inbound_edge_weight: node.inbound_edge_weight,
                     outbound_edge_weight: node.outbound_edge_weight,
+                    process_id: None,
+                    community_id: None,
+                    is_entry_point: node.is_entry_point,
+                    entry_point_distance: node.entry_point_distance,
                 }
             })
             .collect();
         assert!(!nodes.is_empty());
         for node in &nodes {
             assert!(node.score >= 0.0);
+        }
+    }
+
+    /// PR F4: build a graph with a `tests/**`-shadowed file and assert
+    /// the post-exclusion `ranked` projection (the same filter the
+    /// bridge applies in [`RepoGraphBridge::ranked`]) drops it. We
+    /// exercise the predicate inline rather than spinning up the full
+    /// async bridge — a DB-backed AppState would dominate the test
+    /// runtime without adding signal.
+    #[test]
+    fn ranked_respects_graph_exclusions() {
+        use djinn_control_plane::tools::graph_exclusions::GraphExclusions;
+        use djinn_graph::repo_graph::RepoDependencyGraph;
+
+        // Promote a fixture file into `tests/` so the glob matches.
+        let mut idx = fixture_index();
+        idx.files[0].relative_path = PathBuf::from("tests/helper.rs");
+        let graph = RepoDependencyGraph::build(&[idx]);
+        let ranking = graph.rank();
+        let exclusions = GraphExclusions::build(&["tests/**".to_string()], &[]);
+
+        let kept: Vec<String> = ranking
+            .nodes
+            .iter()
+            .filter_map(|node| {
+                let g = graph.node(node.node_index);
+                let key = format_node_key(&node.key);
+                let file = g.file_path.as_ref().map(|p| p.display().to_string());
+                if exclusions.excludes(&key, file.as_deref(), &g.display_name) {
+                    return None;
+                }
+                Some(key)
+            })
+            .collect();
+
+        assert!(
+            !kept.iter().any(|k| k.contains("tests/helper.rs")),
+            "tests/helper.rs leaked through GraphExclusions: {kept:?}",
+        );
+    }
+
+    /// PR F4: same as `ranked_respects_graph_exclusions` but for the
+    /// search code path.
+    #[test]
+    fn search_respects_graph_exclusions() {
+        use djinn_control_plane::tools::graph_exclusions::GraphExclusions;
+        use djinn_graph::repo_graph::RepoDependencyGraph;
+
+        let mut idx = fixture_index();
+        idx.files[0].relative_path = PathBuf::from("tests/helper.rs");
+        let graph = RepoDependencyGraph::build(&[idx]);
+        let exclusions = GraphExclusions::build(&["tests/**".to_string()], &[]);
+
+        let hits = graph.search_by_name("helper", None, usize::MAX);
+        let mut kept: Vec<String> = Vec::new();
+        for hit in hits {
+            let node = graph.node(hit.node_index);
+            let key = format_node_key(&node.id);
+            let file = node.file_path.as_ref().map(|p| p.display().to_string());
+            if exclusions.excludes(&key, file.as_deref(), &node.display_name) {
+                continue;
+            }
+            kept.push(key);
+        }
+        assert!(
+            !kept.iter().any(|k| k.contains("tests/helper.rs")),
+            "tests/helper.rs leaked through search exclusions: {kept:?}",
+        );
+    }
+
+    /// PR F4: with the new fused-rank default, an entry-point function
+    /// (the fixture's `fn main`, picked up by the entry-point detector)
+    /// must rank above a generic helper symbol. Before the multi-signal
+    /// fusion landed, `helper` outranked `main` because it had a
+    /// fan-in via `FileReference` from `src/app.rs`.
+    ///
+    /// We do NOT assert a strict main-outranks-helper position on this
+    /// fixture: with only one caller-callee pair the entry-point
+    /// distance signal is too weak to break a 2-out-of-3 RRF vote in
+    /// helper's favour. The peer
+    /// `rrf_fused_rank_promotes_entry_points_under_pagerank_tie`
+    /// test in `repo_graph::tests` exercises the lift in isolation.
+    #[test]
+    fn ranked_default_sort_is_fused_and_promotes_entry_points() {
+        use djinn_graph::repo_graph::{RepoDependencyGraph, RepoNodeKey};
+        let graph = RepoDependencyGraph::build(&[fixture_index()]);
+        let ranking = graph.rank();
+
+        let main_node = ranking
+            .nodes
+            .iter()
+            .find(|node| {
+                node.key == RepoNodeKey::Symbol("scip-rust pkg src/app.rs `main`().".to_string())
+            })
+            .expect("main symbol should be ranked");
+
+        // The detector tagged `main` as an entry point, so the
+        // side-channel that drives UI bucketing must reflect that.
+        assert!(
+            main_node.is_entry_point,
+            "expected `main` to be marked as an entry point",
+        );
+        assert_eq!(
+            main_node.entry_point_distance,
+            Some(0),
+            "entry-point function should sit at distance 0",
+        );
+
+        // Fused rank is the active sort signal: every adjacent pair
+        // in the ranking is fused-rank-monotonic.
+        for window in ranking.nodes.windows(2) {
+            assert!(
+                window[0].fused_rank >= window[1].fused_rank,
+                "ranking not fused-rank-desc: {} < {} (keys {:?} vs {:?})",
+                window[0].fused_rank,
+                window[1].fused_rank,
+                window[0].key,
+                window[1].key,
+            );
         }
     }
 
@@ -3085,9 +3415,7 @@ pub(crate) mod graph_bridge_tests {
             .graph()
             .edges_directed(node_index, petgraph::Direction::Incoming)
         {
-            if edge.weight().kind
-                == djinn_graph::repo_graph::RepoGraphEdgeKind::SymbolRelationshipImplementation
-            {
+            if edge.weight().kind == djinn_graph::repo_graph::RepoGraphEdgeKind::Implements {
                 let source_node = graph.node(edge.source());
                 if let Some(sym) = &source_node.symbol {
                     impls.push(sym.clone());
@@ -3139,6 +3467,133 @@ pub(crate) mod graph_bridge_tests {
         assert!(
             !result.is_empty(),
             "expected at least one node in the impact set"
+        );
+    }
+
+    /// v8: `impact_bfs` skips structural anchors (`ContainsDefinition`,
+    /// `DeclaredInFile`) and synthetic side-channels (`MemberOf`,
+    /// `StepInProcess`, `EntryPointOf`) so an impact walk doesn't
+    /// pull in "every node that's anchored to this file". The
+    /// behavioral set (`Reads`/`Writes`/`SymbolReference`/`FileReference`
+    /// /typing relationships) IS walked.
+    ///
+    /// Build a tiny graph with one structural and one behavioral
+    /// incoming edge to a target node, run impact_bfs, assert the
+    /// behavioral source is admitted and the structural source is
+    /// not.
+    #[tokio::test]
+    async fn impact_bfs_skips_structural_anchors_but_walks_behavioral_edges() {
+        use djinn_graph::repo_graph::{
+            RepoDependencyGraph, RepoGraphArtifact, RepoGraphArtifactEdge, RepoGraphEdgeKind,
+            RepoGraphNode, RepoGraphNodeKind, RepoNodeKey, REPO_GRAPH_ARTIFACT_VERSION,
+        };
+
+        let mk_node = |key: RepoNodeKey, name: &str, kind: RepoGraphNodeKind| RepoGraphNode {
+            id: key.clone(),
+            kind,
+            display_name: name.to_string(),
+            language: None,
+            file_path: None,
+            symbol: None,
+            symbol_kind: None,
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: vec![],
+            signature_parts: None,
+            is_test: false,
+        };
+        // Three nodes:
+        //   [0] target — receives both edges
+        //   [1] behavioral_src → target via Reads (should propagate)
+        //   [2] structural_src → target via ContainsDefinition (should NOT)
+        let nodes = vec![
+            mk_node(
+                RepoNodeKey::Symbol("symbol:target".to_string()),
+                "target",
+                RepoGraphNodeKind::Symbol,
+            ),
+            mk_node(
+                RepoNodeKey::Symbol("symbol:behavioral".to_string()),
+                "behavioral_caller",
+                RepoGraphNodeKind::Symbol,
+            ),
+            mk_node(
+                RepoNodeKey::File(std::path::PathBuf::from("src/foo.rs")),
+                "src/foo.rs",
+                RepoGraphNodeKind::File,
+            ),
+        ];
+        let mk_edge = |source: usize, target: usize, kind: RepoGraphEdgeKind| {
+            RepoGraphArtifactEdge {
+                source,
+                target,
+                kind,
+                weight: 1.0,
+                evidence_count: 1,
+                confidence: 0.95,
+                reason: None,
+                step: None,
+            }
+        };
+        let edges = vec![
+            mk_edge(1, 0, RepoGraphEdgeKind::Reads),
+            mk_edge(2, 0, RepoGraphEdgeKind::ContainsDefinition),
+        ];
+        let artifact = RepoGraphArtifact {
+            version: REPO_GRAPH_ARTIFACT_VERSION,
+            nodes,
+            edges,
+            symbol_ranges: std::collections::BTreeMap::new(),
+            communities: vec![],
+            processes: vec![],
+        };
+        let graph = RepoDependencyGraph::from_artifact(&artifact);
+        let target_idx = graph
+            .symbol_node("symbol:target")
+            .expect("target should resolve");
+
+        let result = impact_bfs(&graph, target_idx, 3, Some(0.0));
+        let keys: Vec<&str> = result.iter().map(|(_, e)| e.key.as_str()).collect();
+        assert!(
+            keys.iter().any(|k| k.contains("symbol:behavioral")),
+            "behavioral Reads edge should propagate; got {keys:?}"
+        );
+        assert!(
+            !keys.iter().any(|k| k.contains("src/foo.rs")),
+            "structural ContainsDefinition edge should NOT propagate; got {keys:?}"
+        );
+    }
+
+    /// v8: `impact_bfs` defaults `min_confidence` to 0.85 when the
+    /// caller passes `None`. Floor above the highest possible
+    /// confidence (1.0+) collapses the frontier to empty regardless
+    /// of edge kind.
+    #[tokio::test]
+    async fn impact_bfs_min_confidence_default_and_strict_threshold() {
+        let graph = build_test_graph();
+        let helper_idx =
+            resolve_node_or_err(&graph, "scip-rust pkg src/helper.rs `helper`().").unwrap();
+
+        // A floor above the highest possible confidence drops
+        // everything — proves the threshold is honored.
+        let strict = impact_bfs(&graph, helper_idx, 3, Some(1.5));
+        assert!(
+            strict.is_empty(),
+            "min_confidence above 1.0 must collapse the frontier to empty"
+        );
+
+        // Default (None → 0.85) admits high-confidence FileReference
+        // edges (floor 0.85) and Reads/Writes/SymbolReference (0.85+)
+        // — fixture's app.rs ↔ helper.rs FileReference at 0.85
+        // qualifies, so default-walked result contains the helper
+        // file's caller file.
+        let with_default = impact_bfs(&graph, helper_idx, 3, None);
+        let keys: Vec<&str> = with_default.iter().map(|(_, e)| e.key.as_str()).collect();
+        assert!(
+            keys.iter().any(|k| k.contains("src/app.rs")),
+            "default 0.85 floor should still admit the file→file FileReference edge \
+             (app.rs references helper.rs); got {keys:?}"
         );
     }
 
@@ -3316,9 +3771,8 @@ pub(crate) mod graph_bridge_tests {
     async fn context_relationship_bucket_implements_pr_c1() {
         // The fixture wires `main` → `HelperTrait` via a SCIP
         // `is_implementation=true` relationship, which the
-        // `RepoGraphEdgeKind::SymbolRelationshipImplementation` →
-        // `EdgeCategory::Implements` mapping must surface in the
-        // outgoing.implements bucket.
+        // `RepoGraphEdgeKind::Implements` → `EdgeCategory::Implements`
+        // mapping must surface in the outgoing.implements bucket.
         let graph = build_test_graph();
         let main_index = match resolve_node(&graph, "scip-rust pkg src/app.rs `main`().") {
             ResolveOutcome::Found(idx) => idx,
@@ -3455,31 +3909,19 @@ pub(crate) mod graph_bridge_tests {
         );
         // Symbol relationships.
         assert_eq!(
-            edge_category_for(
-                Some(&mk_edge(RepoGraphEdgeKind::SymbolRelationshipReference)),
-                &any_node
-            ),
+            edge_category_for(Some(&mk_edge(RepoGraphEdgeKind::Extends)), &any_node),
             EdgeCategory::Extends
         );
         assert_eq!(
-            edge_category_for(
-                Some(&mk_edge(RepoGraphEdgeKind::SymbolRelationshipImplementation)),
-                &any_node
-            ),
+            edge_category_for(Some(&mk_edge(RepoGraphEdgeKind::Implements)), &any_node),
             EdgeCategory::Implements
         );
         assert_eq!(
-            edge_category_for(
-                Some(&mk_edge(RepoGraphEdgeKind::SymbolRelationshipTypeDefinition)),
-                &any_node
-            ),
+            edge_category_for(Some(&mk_edge(RepoGraphEdgeKind::TypeDefines)), &any_node),
             EdgeCategory::TypeDefines
         );
         assert_eq!(
-            edge_category_for(
-                Some(&mk_edge(RepoGraphEdgeKind::SymbolRelationshipDefinition)),
-                &any_node
-            ),
+            edge_category_for(Some(&mk_edge(RepoGraphEdgeKind::Defines)), &any_node),
             EdgeCategory::Defines
         );
     }

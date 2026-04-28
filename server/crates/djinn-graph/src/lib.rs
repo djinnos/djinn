@@ -15,12 +15,14 @@ use std::sync::Arc;
 use djinn_core::events::EventBus;
 use djinn_db::Database;
 
+pub mod access_classifier;
 pub mod architect;
 pub mod canonical_graph;
 pub mod chunk_and_embed;
 pub mod cluster_doc;
 pub mod communities;
 pub mod coupling_index;
+pub mod db_access;
 pub mod entry_points;
 pub mod git_diff;
 pub mod index_tree;

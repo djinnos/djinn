@@ -41,7 +41,24 @@ const PAGE_RANK_ITERATIONS: usize = 25;
 ///   edge, and a `processes: Vec<Process>` sidecar on the artifact. Old
 ///   v4 blobs bincode-fail on the new variants / extra fields and force
 ///   a re-warm.
-pub const REPO_GRAPH_ARTIFACT_VERSION: u32 = 5;
+/// - v6: rename the four `SymbolRelationship*` edge variants to their
+///   semantic names (`Extends`, `Implements`, `TypeDefines`, `Defines`).
+///   The on-wire bincode positional encoding is unchanged (variant
+///   order preserved), but the serde rename surface and public JSON
+///   field names shift, so the version stamp is bumped to communicate
+///   the public-API break to any consumers parsing serialized output.
+/// - v7: DB-access detection — adds `RepoGraphNodeKind::Table` and
+///   `RepoNodeKey::Table(String)` for synthetic database-table nodes,
+///   plus `Reads`/`Writes` edges from caller symbols to table nodes.
+///   Old v6 blobs bincode-fail on the new `RepoNodeKey` / kind
+///   variants and trigger a re-warm.
+/// - v8: drop function/method-scoped `Variable`/`Parameter` SCIP symbols at
+///   parse time to avoid super-nodes (every `ctx`/`err`/`logger` across the
+///   repo collapsing into one). Old v7 blobs still bincode-deserialize but
+///   contain the polluted node set; the version bump forces a re-warm so
+///   the on-disk cache reflects the cleaner graph. Filter predicate:
+///   see `crate::scip_parser::is_function_scoped_variable`.
+pub const REPO_GRAPH_ARTIFACT_VERSION: u32 = 8;
 
 // ── Edge confidence floor table (PR A2) ────────────────────────────────────
 //
@@ -54,10 +71,10 @@ const EDGE_CONFIDENCE_CONTAINS_DEFINITION: f64 = 0.95;
 const EDGE_CONFIDENCE_DECLARED_IN_FILE: f64 = 0.95;
 const EDGE_CONFIDENCE_FILE_REFERENCE: f64 = 0.85;
 const EDGE_CONFIDENCE_SYMBOL_REFERENCE: f64 = 0.90;
-const EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_REFERENCE: f64 = 0.80;
-const EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_IMPLEMENTATION: f64 = 0.85;
-const EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_TYPE_DEFINITION: f64 = 0.85;
-const EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_DEFINITION: f64 = 0.85;
+const EDGE_CONFIDENCE_EXTENDS: f64 = 0.80;
+const EDGE_CONFIDENCE_IMPLEMENTS: f64 = 0.85;
+const EDGE_CONFIDENCE_TYPE_DEFINES: f64 = 0.85;
+const EDGE_CONFIDENCE_DEFINES: f64 = 0.85;
 // PR A3: split confidences for `Reads` / `Writes` (carved out of
 // `SymbolReference`). Writes are the more reliable signal because SCIP's
 // `WriteAccess` flag is set deterministically by the indexer at the
@@ -93,10 +110,10 @@ const EDGE_WEIGHT_DEFINITION_TO_FILE: f64 = 4.0;
 const EDGE_WEIGHT_FILE_TO_DEFINITION: f64 = 1.5;
 const EDGE_WEIGHT_FILE_REFERENCE: f64 = 2.5;
 const EDGE_WEIGHT_SYMBOL_REFERENCE: f64 = 3.5;
-const EDGE_WEIGHT_SYMBOL_RELATIONSHIP_REFERENCE: f64 = 2.0;
-const EDGE_WEIGHT_SYMBOL_RELATIONSHIP_IMPLEMENTATION: f64 = 2.5;
-const EDGE_WEIGHT_SYMBOL_RELATIONSHIP_TYPE_DEFINITION: f64 = 1.75;
-const EDGE_WEIGHT_SYMBOL_RELATIONSHIP_DEFINITION: f64 = 2.25;
+const EDGE_WEIGHT_EXTENDS: f64 = 2.0;
+const EDGE_WEIGHT_IMPLEMENTS: f64 = 2.5;
+const EDGE_WEIGHT_TYPE_DEFINES: f64 = 1.75;
+const EDGE_WEIGHT_DEFINES: f64 = 2.25;
 // PR F1: keep `EntryPointOf` light — the edge is metadata, not a
 // dependency signal, so it should not perturb PageRank or shortest-path
 // scoring.
@@ -257,9 +274,134 @@ fn compute_pagerank_sparse(
     ranks
 }
 
+/// PR F4: BFS shortest hop count to every node from the entry-point
+/// set. Sources (`distance = 0`) are nodes that have at least one
+/// incoming `EntryPointOf` edge — i.e. the entry-point function nodes
+/// themselves (`fn main`, route handlers, tests, …). The traversal
+/// follows `Outgoing` edges from those sources, so dependents of
+/// entry points get small distances and pure utility helpers reachable
+/// only via reverse traversal are absent from the map.
+///
+/// Returned map omits unreachable nodes so the rank-position calculation
+/// can treat `None` as "infinity" (last in the entry-distance ranking).
+fn compute_entry_point_distance(
+    graph: &DiGraph<RepoGraphNode, RepoGraphEdge>,
+) -> std::collections::HashMap<NodeIndex, u32> {
+    use std::collections::{HashMap, VecDeque};
+
+    let mut distances: HashMap<NodeIndex, u32> = HashMap::new();
+    let mut queue: VecDeque<NodeIndex> = VecDeque::new();
+    for idx in graph.node_indices() {
+        let is_entry = graph
+            .edges_directed(idx, Incoming)
+            .any(|e| e.weight().kind == RepoGraphEdgeKind::EntryPointOf);
+        if is_entry {
+            distances.insert(idx, 0);
+            queue.push_back(idx);
+        }
+    }
+    while let Some(node) = queue.pop_front() {
+        let next_dist = distances[&node].saturating_add(1);
+        for edge in graph.edges_directed(node, Outgoing) {
+            let target = edge.target();
+            if !distances.contains_key(&target) {
+                distances.insert(target, next_dist);
+                queue.push_back(target);
+            }
+        }
+    }
+    distances
+}
+
+/// PR F4: Reciprocal Rank Fusion (K=60) across pagerank, total-degree,
+/// and entry-point distance. Mutates `nodes` in place to set the
+/// `fused_rank` field — caller is responsible for the final sort.
+///
+/// Rank positions are computed deterministically: `total_cmp` for the
+/// numeric signals, alphabetical key as the final tiebreaker so two
+/// nodes with identical raw values still get distinct positions.
+fn apply_rrf_fused_rank(nodes: &mut [RankedRepoGraphNode]) {
+    const K: f64 = 60.0;
+    if nodes.is_empty() {
+        return;
+    }
+
+    // PageRank desc (highest first)
+    let mut by_pagerank: Vec<usize> = (0..nodes.len()).collect();
+    by_pagerank.sort_by(|&a, &b| {
+        nodes[b]
+            .page_rank
+            .total_cmp(&nodes[a].page_rank)
+            .then_with(|| nodes[a].key.cmp(&nodes[b].key))
+    });
+
+    // Total degree desc
+    let mut by_degree: Vec<usize> = (0..nodes.len()).collect();
+    by_degree.sort_by(|&a, &b| {
+        let total_a = nodes[a].inbound_edge_weight + nodes[a].outbound_edge_weight;
+        let total_b = nodes[b].inbound_edge_weight + nodes[b].outbound_edge_weight;
+        total_b
+            .total_cmp(&total_a)
+            .then_with(|| nodes[a].key.cmp(&nodes[b].key))
+    });
+
+    // Entry-point distance asc — None sorts last so nodes unreachable
+    // from any entry point sit at the bottom of this signal.
+    let mut by_distance: Vec<usize> = (0..nodes.len()).collect();
+    by_distance.sort_by(|&a, &b| {
+        let da = nodes[a].entry_point_distance;
+        let db = nodes[b].entry_point_distance;
+        match (da, db) {
+            (Some(x), Some(y)) => x
+                .cmp(&y)
+                .then_with(|| nodes[a].key.cmp(&nodes[b].key)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => nodes[a].key.cmp(&nodes[b].key),
+        }
+    });
+
+    let mut pagerank_pos = vec![0_usize; nodes.len()];
+    let mut degree_pos = vec![0_usize; nodes.len()];
+    let mut distance_pos = vec![0_usize; nodes.len()];
+    for (rank, &orig_idx) in by_pagerank.iter().enumerate() {
+        pagerank_pos[orig_idx] = rank;
+    }
+    for (rank, &orig_idx) in by_degree.iter().enumerate() {
+        degree_pos[orig_idx] = rank;
+    }
+    for (rank, &orig_idx) in by_distance.iter().enumerate() {
+        distance_pos[orig_idx] = rank;
+    }
+
+    for (i, node) in nodes.iter_mut().enumerate() {
+        let pr = pagerank_pos[i] as f64;
+        let dr = degree_pos[i] as f64;
+        let er = distance_pos[i] as f64;
+        node.fused_rank = (1.0 / (K + pr)) + (1.0 / (K + dr)) + (1.0 / (K + er));
+    }
+}
+
 impl RepoDependencyGraph {
     pub fn build(indices: &[ParsedScipIndex]) -> Self {
-        let mut builder = RepoDependencyGraphBuilder::default();
+        Self::build_with_source(indices, None)
+    }
+
+    /// Build with an optional project-clone root. When `project_root` is
+    /// `Some`, the edge-classification path will read source files via
+    /// the [`crate::access_classifier::AccessClassifier`] to recover
+    /// `Reads`/`Writes` edges for indexers (notably rust-analyzer) whose
+    /// SCIP output doesn't carry `ReadAccess`/`WriteAccess` role bits.
+    /// Tests that don't need access classification should call
+    /// [`Self::build`] (no on-disk file required).
+    pub fn build_with_source(
+        indices: &[ParsedScipIndex],
+        project_root: Option<&Path>,
+    ) -> Self {
+        let mut builder = RepoDependencyGraphBuilder {
+            project_root: project_root.map(|p| p.to_path_buf()),
+            ..RepoDependencyGraphBuilder::default()
+        };
         for index in indices {
             builder.add_index(index);
         }
@@ -327,12 +469,23 @@ impl RepoDependencyGraph {
         let page_rank_scores =
             compute_pagerank_sparse(&self.graph, PAGE_RANK_DAMPING_FACTOR, PAGE_RANK_ITERATIONS);
 
+        // PR F4: identify entry-point nodes (any node with an incoming
+        // `EntryPointOf` edge) and BFS the graph from them via Outgoing
+        // edges to compute `entry_point_distance`. Distance 0 sits on
+        // the entry-point function itself; downstream callees grow
+        // monotonically. Unreachable nodes stay `None`.
+        let entry_distance = compute_entry_point_distance(&self.graph);
+
         let mut scored_nodes = Vec::with_capacity(self.graph.node_count());
         for node_index in self.graph.node_indices() {
             let node = &self.graph[node_index];
             let page_rank = page_rank_scores[node_index.index()];
             let structural_weight = self.structural_weight(node_index);
             let score = page_rank * structural_weight;
+            let is_entry_point = entry_distance
+                .get(&node_index)
+                .map(|d| *d == 0)
+                .unwrap_or(false);
             scored_nodes.push(RankedRepoGraphNode {
                 node_index,
                 key: node.key(),
@@ -342,13 +495,25 @@ impl RepoDependencyGraph {
                 structural_weight,
                 inbound_edge_weight: self.total_edge_weight(node_index, Incoming),
                 outbound_edge_weight: self.total_edge_weight(node_index, Outgoing),
+                is_entry_point,
+                entry_point_distance: entry_distance.get(&node_index).copied(),
+                // Filled in by `apply_rrf_fused_rank` below — we need
+                // the full ranks before we can compute it.
+                fused_rank: 0.0,
             });
         }
 
+        // PR F4: Reciprocal Rank Fusion across pagerank, total degree,
+        // and entry-point distance. Sort by fused rank desc; secondary
+        // tiebreakers (pagerank → structural_weight → key) match the
+        // legacy ordering so deterministic snapshots stay stable when
+        // two nodes happen to fuse to the same value.
+        apply_rrf_fused_rank(&mut scored_nodes);
+
         scored_nodes.sort_by(|left, right| {
             right
-                .score
-                .total_cmp(&left.score)
+                .fused_rank
+                .total_cmp(&left.fused_rank)
                 .then_with(|| right.page_rank.total_cmp(&left.page_rank))
                 .then_with(|| right.structural_weight.total_cmp(&left.structural_weight))
                 .then_with(|| left.key.cmp(&right.key))
@@ -656,6 +821,64 @@ impl RepoDependencyGraph {
         idx
     }
 
+    /// Register a synthetic [`RepoGraphNodeKind::Table`] node and
+    /// return its [`NodeIndex`]. Idempotent on the lowercased table
+    /// name. Used by [`crate::db_access::detect_db_access`].
+    pub(crate) fn ensure_table_node(&mut self, name: &str) -> NodeIndex {
+        let normalized = name.trim().to_lowercase();
+        let key = RepoNodeKey::Table(normalized.clone());
+        if let Some(&idx) = self.node_lookup.get(&key) {
+            return idx;
+        }
+        let node = RepoGraphNode {
+            id: key.clone(),
+            kind: RepoGraphNodeKind::Table,
+            display_name: format!("table:{normalized}"),
+            language: None,
+            file_path: None,
+            symbol: None,
+            symbol_kind: None,
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: Vec::new(),
+            signature_parts: None,
+            is_test: false,
+        };
+        let idx = self.graph.add_node(node);
+        self.node_lookup.insert(key, idx);
+        idx
+    }
+
+    /// Stamp a `Reads` / `Writes` edge from a caller symbol to a
+    /// database-table node. Used by
+    /// [`crate::db_access::detect_db_access`] to materialize SQL
+    /// access into the canonical graph.
+    pub(crate) fn add_table_access_edge(
+        &mut self,
+        caller: NodeIndex,
+        table: NodeIndex,
+        kind: RepoGraphEdgeKind,
+        reason: &str,
+    ) {
+        debug_assert!(matches!(
+            kind,
+            RepoGraphEdgeKind::Reads | RepoGraphEdgeKind::Writes
+        ));
+        self.graph.add_edge(
+            caller,
+            table,
+            RepoGraphEdge {
+                kind,
+                weight: edge_weight(kind),
+                evidence_count: 1,
+                confidence: edge_confidence_floor(kind),
+                reason: Some(reason.to_string()),
+                step: None,
+            },
+        );
+    }
+
     /// Shortest dependency path between two nodes using A* over edge weights.
     pub fn shortest_path(
         &self,
@@ -697,6 +920,15 @@ pub enum RepoNodeKey {
     /// process id (sha256 of `entry_point_uid || step_count` truncated
     /// to 16 hex chars) — see [`crate::processes::Process::id`].
     Process(String),
+    /// Synthetic node identifying a database table referenced by raw
+    /// SQL or ORM access in source code. The string is the lowercased,
+    /// schema-qualified table name (`"public.users"`, or just `"users"`
+    /// when no schema is present). Materialized by
+    /// [`crate::db_access::detect_db_access`]; receivers of `Reads` /
+    /// `Writes` edges from the enclosing function/method symbol.
+    /// Kept under the same enum so name-index / search / impact ops
+    /// surface tables transparently alongside symbols.
+    Table(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -710,6 +942,12 @@ pub enum RepoGraphNodeKind {
     /// node's identity lives entirely in [`RepoNodeKey::Process`]. Hung
     /// off the canonical graph by a chain of `StepInProcess` edges.
     Process,
+    /// Synthetic database-table node materialized by
+    /// [`crate::db_access::detect_db_access`]. Identity in
+    /// [`RepoNodeKey::Table`]; carries `display_name` only. Receives
+    /// `Reads` / `Writes` edges from enclosing function symbols whose
+    /// bodies contain raw SQL touching the table.
+    Table,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -782,6 +1020,11 @@ impl RepoGraphNode {
             // doesn't promote them above real symbols just because
             // they fan out to many steps.
             RepoGraphNodeKind::Process => SYMBOL_KIND_VARIABLE_MULTIPLIER,
+            // Database tables are pure sinks — they only receive
+            // `Reads`/`Writes` edges from caller symbols. Same tier as
+            // `Process` so PageRank doesn't promote them just because
+            // many functions touch the same table.
+            RepoGraphNodeKind::Table => SYMBOL_KIND_VARIABLE_MULTIPLIER,
         }
     }
 }
@@ -805,10 +1048,30 @@ pub enum RepoGraphEdgeKind {
     /// PR A3: SCIP `SymbolRole::WriteAccess` reference. Occurrences
     /// where the symbol is assigned to or otherwise mutated.
     Writes,
-    SymbolRelationshipReference,
-    SymbolRelationshipImplementation,
-    SymbolRelationshipTypeDefinition,
-    SymbolRelationshipDefinition,
+    /// SCIP `Relationship.is_reference` — subtype-of / supertype-of.
+    /// Used by scip-typescript for `class Foo extends Bar`, by
+    /// rust-analyzer for supertrait references, and as a generic
+    /// upward-typing pointer for cross-symbol relationships that aren't
+    /// covered by the more specific variants below. Renamed from
+    /// `SymbolRelationshipReference` in artifact v6 (PR clarity rename).
+    Extends,
+    /// SCIP `Relationship.is_implementation` — interface / trait
+    /// implementation. `impl Trait for Struct` in Rust, `class Foo
+    /// implements Bar` in TypeScript / Java, `class Child(Parent)` for
+    /// ABC implementations in Python. Renamed from
+    /// `SymbolRelationshipImplementation` in artifact v6.
+    Implements,
+    /// SCIP `Relationship.is_type_definition` — variable / parameter /
+    /// return type, type alias target, generic bound. The receiver
+    /// symbol's *type* is the target. Renamed from
+    /// `SymbolRelationshipTypeDefinition` in artifact v6.
+    TypeDefines,
+    /// SCIP `Relationship.is_definition` — canonical-definition
+    /// relationship. Rare; emitted when a symbol's definition is part of
+    /// another symbol's defining region (e.g. a property defined inside
+    /// a class without its own definition site). Renamed from
+    /// `SymbolRelationshipDefinition` in artifact v6.
+    Defines,
     /// PR F1: synthetic edge marking that the *target* symbol is an
     /// entry point of the *source* file (e.g. `src/main.rs ─EntryPointOf→
     /// fn main`). Stamped by [`crate::entry_points::detect_entry_points`]
@@ -874,18 +1137,10 @@ pub fn edge_confidence_floor(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::SymbolReference => EDGE_CONFIDENCE_SYMBOL_REFERENCE,
         RepoGraphEdgeKind::Reads => EDGE_CONFIDENCE_READS,
         RepoGraphEdgeKind::Writes => EDGE_CONFIDENCE_WRITES,
-        RepoGraphEdgeKind::SymbolRelationshipReference => {
-            EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_REFERENCE
-        }
-        RepoGraphEdgeKind::SymbolRelationshipImplementation => {
-            EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_IMPLEMENTATION
-        }
-        RepoGraphEdgeKind::SymbolRelationshipTypeDefinition => {
-            EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_TYPE_DEFINITION
-        }
-        RepoGraphEdgeKind::SymbolRelationshipDefinition => {
-            EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_DEFINITION
-        }
+        RepoGraphEdgeKind::Extends => EDGE_CONFIDENCE_EXTENDS,
+        RepoGraphEdgeKind::Implements => EDGE_CONFIDENCE_IMPLEMENTS,
+        RepoGraphEdgeKind::TypeDefines => EDGE_CONFIDENCE_TYPE_DEFINES,
+        RepoGraphEdgeKind::Defines => EDGE_CONFIDENCE_DEFINES,
         RepoGraphEdgeKind::EntryPointOf => EDGE_CONFIDENCE_ENTRY_POINT_OF,
         RepoGraphEdgeKind::MemberOf => EDGE_CONFIDENCE_MEMBER_OF,
         RepoGraphEdgeKind::StepInProcess => EDGE_CONFIDENCE_STEP_IN_PROCESS,
@@ -907,6 +1162,13 @@ pub struct RankedRepoGraphNode {
     pub structural_weight: f64,
     pub inbound_edge_weight: f64,
     pub outbound_edge_weight: f64,
+    // v8: added with parse-time scoped-variable filter; see version bump
+    // in sibling change. PR F4: multi-signal Reciprocal Rank Fusion
+    // surfaces entry-point membership and BFS distance from the entry
+    // set so utility helpers stop dominating the top of `ranked`.
+    pub is_entry_point: bool,
+    pub entry_point_distance: Option<u32>,
+    pub fused_rank: f64,
 }
 
 #[derive(Default)]
@@ -920,6 +1182,18 @@ struct RepoDependencyGraphBuilder {
     /// Accumulator for the per-file `SymbolRange` sidecar. Unsorted; the
     /// builder sorts each entry by `start_line` in `finish()`.
     symbol_ranges: BTreeMap<PathBuf, Vec<SymbolRange>>,
+    /// Project clone root, when known. When set, edge classification can
+    /// fall back to a tree-sitter-based access classifier for occurrences
+    /// whose SCIP indexer didn't populate `ReadAccess`/`WriteAccess`
+    /// roles (notably rust-analyzer). When `None`, classification stays
+    /// SCIP-only — used by unit tests that pass synthetic indices with
+    /// no on-disk file backing.
+    project_root: Option<PathBuf>,
+    classifier: crate::access_classifier::AccessClassifier,
+    /// Per-file source-text cache. `None` means a previous read failed
+    /// (file outside project root, missing, not UTF-8) — re-cached so
+    /// we don't keep retrying.
+    source_cache: BTreeMap<PathBuf, Option<String>>,
 }
 
 impl RepoDependencyGraphBuilder {
@@ -1028,11 +1302,64 @@ impl RepoDependencyGraphBuilder {
             // `WriteAccess` on the same occurrence (e.g. `x += 1`); when
             // both flags are present we treat it as a write since the
             // mutation is the more load-bearing signal for callers asking
-            // "who changes X". Fall back to the generic `SymbolReference`
-            // when neither flag is set (imports, type-only refs, indexers
-            // that don't populate role bits).
-            let edge_kind = symbol_reference_edge_kind(&occurrence.roles);
+            // "who changes X".
+            //
+            // Indexer-quality fallback: when neither role bit is set
+            // (notably rust-analyzer, which emits no access roles at all),
+            // consult the tree-sitter `AccessClassifier` to recover the
+            // read/write distinction from AST context. Only fires when
+            // the builder was created via `build_with_source` with a
+            // project root — `build` keeps the SCIP-only fast path for
+            // unit tests with synthetic indices.
+            let edge_kind = self.classify_reference_edge_kind(file, occurrence);
             self.bump_edge(symbol_index, target_file_index, edge_kind, 1);
+        }
+    }
+
+    /// Classify the symbol→target_file reference edge for an occurrence.
+    /// SCIP role bits are the primary signal. When the indexer didn't
+    /// populate either `ReadAccess` or `WriteAccess` (rust-analyzer is
+    /// the canonical case), fall back to the tree-sitter
+    /// [`crate::access_classifier::AccessClassifier`] which derives the
+    /// distinction from AST context (`assignment_expression` LHS, etc.).
+    /// The fallback only fires when the builder has a `project_root`
+    /// and the occurrence's file is readable as UTF-8.
+    fn classify_reference_edge_kind(
+        &mut self,
+        file: &ScipFile,
+        occurrence: &ScipOccurrence,
+    ) -> RepoGraphEdgeKind {
+        if occurrence.roles.contains(&ScipSymbolRole::WriteAccess) {
+            return RepoGraphEdgeKind::Writes;
+        }
+        if occurrence.roles.contains(&ScipSymbolRole::ReadAccess) {
+            return RepoGraphEdgeKind::Reads;
+        }
+        let Some(root) = self.project_root.as_ref() else {
+            return RepoGraphEdgeKind::SymbolReference;
+        };
+        // Read-and-cache the file source. Failures are negative-cached
+        // so subsequent occurrences in the same file don't re-stat.
+        let rel = file.relative_path.clone();
+        if !self.source_cache.contains_key(&rel) {
+            let abs = root.join(&rel);
+            let read = std::fs::read_to_string(&abs).ok();
+            self.source_cache.insert(rel.clone(), read);
+        }
+        let Some(source) = self.source_cache.get(&rel).and_then(|s| s.as_deref()) else {
+            return RepoGraphEdgeKind::SymbolReference;
+        };
+        let kind = self.classifier.classify(
+            file.language.as_str(),
+            source,
+            occurrence.range.start_line as u32,
+            occurrence.range.start_character as u32,
+        );
+        use crate::access_classifier::AccessKind;
+        match kind {
+            AccessKind::Write | AccessKind::ReadWrite => RepoGraphEdgeKind::Writes,
+            AccessKind::Read => RepoGraphEdgeKind::Reads,
+            AccessKind::NotAnAccess | AccessKind::Unknown => RepoGraphEdgeKind::SymbolReference,
         }
     }
 
@@ -1045,14 +1372,10 @@ impl RepoDependencyGraphBuilder {
 
         for kind in &relationship.kinds {
             let edge_kind = match kind {
-                ScipRelationshipKind::Reference => RepoGraphEdgeKind::SymbolRelationshipReference,
-                ScipRelationshipKind::Implementation => {
-                    RepoGraphEdgeKind::SymbolRelationshipImplementation
-                }
-                ScipRelationshipKind::TypeDefinition => {
-                    RepoGraphEdgeKind::SymbolRelationshipTypeDefinition
-                }
-                ScipRelationshipKind::Definition => RepoGraphEdgeKind::SymbolRelationshipDefinition,
+                ScipRelationshipKind::Reference => RepoGraphEdgeKind::Extends,
+                ScipRelationshipKind::Implementation => RepoGraphEdgeKind::Implements,
+                ScipRelationshipKind::TypeDefinition => RepoGraphEdgeKind::TypeDefines,
+                ScipRelationshipKind::Definition => RepoGraphEdgeKind::Defines,
             };
             self.bump_edge(source_symbol_index, target_symbol_index, edge_kind, 1);
         }
@@ -1806,6 +2129,9 @@ fn is_owned_by_changed_file(node: &RepoGraphNode, changed_files: &BTreeSet<PathB
         // sidecar entirely (see the filtered-artifact construction
         // above) and lets the next full rebuild re-trace.
         RepoGraphNodeKind::Process => false,
+        // Synthetic table nodes — same: they're rebuilt by the
+        // db-access pass on the next warm.
+        RepoGraphNodeKind::Table => false,
     }
 }
 
@@ -1849,27 +2175,6 @@ fn derive_edge_confidence(
     (confidence, reason)
 }
 
-/// PR A3: classify a symbol→target_file reference edge from the SCIP
-/// `SymbolRole` bitset on the occurrence.
-///
-/// Precedence:
-/// 1. `WriteAccess` → [`RepoGraphEdgeKind::Writes`] (mutation wins; SCIP
-///    stamps both bits on read-modify-write occurrences such as `x += 1`).
-/// 2. `ReadAccess` → [`RepoGraphEdgeKind::Reads`].
-/// 3. neither → [`RepoGraphEdgeKind::SymbolReference`] (imports, type-only
-///    references, indexers that don't populate role bits).
-fn symbol_reference_edge_kind(
-    roles: &std::collections::BTreeSet<ScipSymbolRole>,
-) -> RepoGraphEdgeKind {
-    if roles.contains(&ScipSymbolRole::WriteAccess) {
-        RepoGraphEdgeKind::Writes
-    } else if roles.contains(&ScipSymbolRole::ReadAccess) {
-        RepoGraphEdgeKind::Reads
-    } else {
-        RepoGraphEdgeKind::SymbolReference
-    }
-}
-
 /// PR F1: public wrapper around the per-kind weight table so the
 /// entry-point detector (which lives in a sibling module and assembles
 /// `EntryPointOf` edges by hand) can stay in sync with the build-time
@@ -1889,16 +2194,10 @@ fn edge_weight(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::SymbolReference
         | RepoGraphEdgeKind::Reads
         | RepoGraphEdgeKind::Writes => EDGE_WEIGHT_SYMBOL_REFERENCE,
-        RepoGraphEdgeKind::SymbolRelationshipReference => EDGE_WEIGHT_SYMBOL_RELATIONSHIP_REFERENCE,
-        RepoGraphEdgeKind::SymbolRelationshipImplementation => {
-            EDGE_WEIGHT_SYMBOL_RELATIONSHIP_IMPLEMENTATION
-        }
-        RepoGraphEdgeKind::SymbolRelationshipTypeDefinition => {
-            EDGE_WEIGHT_SYMBOL_RELATIONSHIP_TYPE_DEFINITION
-        }
-        RepoGraphEdgeKind::SymbolRelationshipDefinition => {
-            EDGE_WEIGHT_SYMBOL_RELATIONSHIP_DEFINITION
-        }
+        RepoGraphEdgeKind::Extends => EDGE_WEIGHT_EXTENDS,
+        RepoGraphEdgeKind::Implements => EDGE_WEIGHT_IMPLEMENTS,
+        RepoGraphEdgeKind::TypeDefines => EDGE_WEIGHT_TYPE_DEFINES,
+        RepoGraphEdgeKind::Defines => EDGE_WEIGHT_DEFINES,
         RepoGraphEdgeKind::EntryPointOf => EDGE_WEIGHT_ENTRY_POINT_OF,
         RepoGraphEdgeKind::MemberOf => EDGE_WEIGHT_MEMBER_OF,
         RepoGraphEdgeKind::StepInProcess => EDGE_WEIGHT_STEP_IN_PROCESS,
@@ -2021,12 +2320,101 @@ mod tests {
             .position(|node| node.key == RepoNodeKey::File(PathBuf::from("src/app.rs")))
             .expect("app file should be ranked");
 
-        assert!(helper_symbol_rank < app_symbol_rank);
-        assert!(helper_file_rank < app_file_rank);
-
+        // PR F4: positions are now governed by fused rank (RRF over
+        // pagerank, total degree, entry-point distance), so we no
+        // longer assert the legacy "helper outranks main" position
+        // ordering — `main` is an entry point and the fusion now
+        // promotes it. The classic `pagerank * structural_weight`
+        // score is still surfaced on the node for callers that want
+        // it, and we keep asserting that signal directly so the
+        // PageRank pass itself doesn't silently regress.
         let helper_symbol_score = ranking.nodes[helper_symbol_rank].score;
         let app_symbol_score = ranking.nodes[app_symbol_rank].score;
         assert!(helper_symbol_score > app_symbol_score);
+
+        let helper_file_score = ranking.nodes[helper_file_rank].score;
+        let app_file_score = ranking.nodes[app_file_rank].score;
+        assert!(helper_file_score > app_file_score);
+    }
+
+    /// PR F4: the entry-point function detected for the fixture
+    /// (`fn main` in `src/app.rs`) must come back from `rank()` with
+    /// `entry_point_distance == Some(0)` — distance is measured from
+    /// the entry-point set itself, BFS via Outgoing edges.
+    #[test]
+    fn entry_point_distance_zero_at_entry_point() {
+        let graph = RepoDependencyGraph::build(&[fixture_index()]);
+        let ranking = graph.rank();
+        let main_node = ranking
+            .nodes
+            .iter()
+            .find(|n| {
+                n.key == RepoNodeKey::Symbol("scip-rust pkg src/app.rs `main`().".to_string())
+            })
+            .expect("main symbol should be in ranking");
+        assert!(
+            main_node.is_entry_point,
+            "fixture's `fn main` should have been detected as an entry point",
+        );
+        assert_eq!(
+            main_node.entry_point_distance,
+            Some(0),
+            "entry-point function should sit at distance 0",
+        );
+    }
+
+    /// PR F4: build a tiny synthetic graph with two symbols at
+    /// identical PageRank — one is the entry point, the other is a
+    /// helper that lives off to the side. With RRF the entry-point
+    /// signal breaks the tie and the entry point ranks higher.
+    #[test]
+    fn rrf_fused_rank_promotes_entry_points_under_pagerank_tie() {
+        // Hand-build the ranked node vector to control the inputs
+        // exactly — using the SCIP fixture pulls in too much
+        // structural variation to guarantee a strict pagerank tie.
+        let entry_key = RepoNodeKey::Symbol("symbol:entry".to_string());
+        let helper_key = RepoNodeKey::Symbol("symbol:helper".to_string());
+        let mut nodes = vec![
+            RankedRepoGraphNode {
+                node_index: NodeIndex::new(0),
+                key: entry_key.clone(),
+                kind: RepoGraphNodeKind::Symbol,
+                score: 0.5,
+                page_rank: 0.5,
+                structural_weight: 1.0,
+                inbound_edge_weight: 1.0,
+                outbound_edge_weight: 1.0,
+                is_entry_point: true,
+                entry_point_distance: Some(0),
+                fused_rank: 0.0,
+            },
+            RankedRepoGraphNode {
+                node_index: NodeIndex::new(1),
+                key: helper_key.clone(),
+                kind: RepoGraphNodeKind::Symbol,
+                score: 0.5,
+                page_rank: 0.5,
+                structural_weight: 1.0,
+                inbound_edge_weight: 1.0,
+                outbound_edge_weight: 1.0,
+                is_entry_point: false,
+                entry_point_distance: None,
+                fused_rank: 0.0,
+            },
+        ];
+        apply_rrf_fused_rank(&mut nodes);
+        nodes.sort_by(|l, r| r.fused_rank.total_cmp(&l.fused_rank));
+        assert_eq!(
+            nodes[0].key, entry_key,
+            "entry point must outrank helper under RRF when pagerank/degree are tied",
+        );
+        assert_eq!(nodes[1].key, helper_key);
+        assert!(
+            nodes[0].fused_rank > nodes[1].fused_rank,
+            "fused rank for entry point ({}) should exceed helper ({})",
+            nodes[0].fused_rank,
+            nodes[1].fused_rank,
+        );
     }
 
     fn fixture_index() -> ParsedScipIndex {
@@ -2127,6 +2515,157 @@ mod tests {
             syntax_kind: None,
             override_documentation: vec![],
         }
+    }
+
+    /// v8 end-to-end: simulate a rust-analyzer SCIP feed (no `ReadAccess`
+    /// or `WriteAccess` role bits on any occurrence) against a real
+    /// on-disk Rust file. The classifier should recover the read/write
+    /// distinction from AST context, producing `Reads` and `Writes`
+    /// edges where v7 would have emitted only `SymbolReference`.
+    ///
+    /// This is the reference verification for the `build_with_source`
+    /// path — proves the fallback fires end-to-end and not just in the
+    /// classifier's unit tests.
+    #[test]
+    fn build_with_source_recovers_reads_and_writes_when_scip_roles_absent() {
+        // A real Rust source file where `counter` is written on one line
+        // and read on another. `value` is a definition site (not an
+        // access). The line/column positions below match these
+        // identifiers exactly.
+        //
+        // Layout (0-indexed):
+        //   line 0: pub static mut COUNTER: i32 = 0;
+        //   line 1:
+        //   line 2: pub fn bump() {
+        //   line 3:     unsafe { COUNTER = COUNTER + 1; }
+        //                        ^^^^^^^   ^^^^^^^
+        //                        col 13    col 23
+        //   line 4: }
+        let source = "pub static mut COUNTER: i32 = 0;\n\n\
+                      pub fn bump() {\n    \
+                      unsafe { COUNTER = COUNTER + 1; }\n}\n";
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let rel = PathBuf::from("src/counter.rs");
+        let abs = tempdir.path().join(&rel);
+        std::fs::create_dir_all(abs.parent().unwrap()).expect("mkdir");
+        std::fs::write(&abs, source).expect("write");
+
+        let counter_symbol = "scip-rust pkg src/counter.rs `COUNTER`.".to_string();
+        let counter_def_sym = ScipSymbol {
+            symbol: counter_symbol.clone(),
+            kind: Some(ScipSymbolKind::Variable),
+            display_name: Some("COUNTER".to_string()),
+            signature: None,
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+            signature_parts: None,
+        };
+
+        // Definition occurrence at line 0 (the `static mut COUNTER`).
+        let def = ScipOccurrence {
+            symbol: counter_symbol.clone(),
+            range: ScipRange {
+                start_line: 0,
+                start_character: 15,
+                end_line: 0,
+                end_character: 22,
+            },
+            enclosing_range: None,
+            roles: BTreeSet::from([ScipSymbolRole::Definition]),
+            syntax_kind: None,
+            override_documentation: vec![],
+        };
+        // Reference occurrence at line 3 column 13 (`COUNTER = …` LHS) —
+        // EMPTY role bits, mirroring rust-analyzer's SCIP output.
+        let write_ref = ScipOccurrence {
+            symbol: counter_symbol.clone(),
+            range: ScipRange {
+                start_line: 3,
+                start_character: 13,
+                end_line: 3,
+                end_character: 20,
+            },
+            enclosing_range: None,
+            roles: BTreeSet::new(),
+            syntax_kind: None,
+            override_documentation: vec![],
+        };
+        // Reference occurrence at line 3 column 23 (`= COUNTER + 1` RHS).
+        let read_ref = ScipOccurrence {
+            symbol: counter_symbol.clone(),
+            range: ScipRange {
+                start_line: 3,
+                start_character: 23,
+                end_line: 3,
+                end_character: 30,
+            },
+            enclosing_range: None,
+            roles: BTreeSet::new(),
+            syntax_kind: None,
+            override_documentation: vec![],
+        };
+
+        let index = ParsedScipIndex {
+            metadata: ScipMetadata {
+                project_root: Some("file:///workspace/repo".to_string()),
+                tool_name: Some("rust-analyzer".to_string()),
+                tool_version: Some("1.0.0".to_string()),
+            },
+            files: vec![ScipFile {
+                language: "rust".to_string(),
+                relative_path: rel.clone(),
+                definitions: vec![def.clone()],
+                references: vec![write_ref.clone(), read_ref.clone()],
+                occurrences: vec![def, write_ref, read_ref],
+                symbols: vec![counter_def_sym],
+            }],
+            external_symbols: vec![],
+        };
+
+        let graph = RepoDependencyGraph::build_with_source(&[index], Some(tempdir.path()));
+
+        // Walk every edge with the COUNTER symbol as source and the
+        // counter.rs file as target — there should be exactly one
+        // `Writes` and one `Reads`, no `SymbolReference` fallbacks.
+        let symbol_idx = graph
+            .symbol_node(&counter_symbol)
+            .expect("COUNTER symbol node should exist");
+        let file_idx = graph
+            .file_node(&rel)
+            .expect("counter.rs file node should exist");
+        let mut writes = 0usize;
+        let mut reads = 0usize;
+        let mut other = 0usize;
+        for edge in graph
+            .graph()
+            .edges_directed(symbol_idx, petgraph::Direction::Outgoing)
+        {
+            if edge.target() != file_idx {
+                continue;
+            }
+            match edge.weight().kind {
+                RepoGraphEdgeKind::Writes => writes += 1,
+                RepoGraphEdgeKind::Reads => reads += 1,
+                RepoGraphEdgeKind::SymbolReference => other += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            writes, 1,
+            "tree-sitter classifier should have recovered exactly one Writes edge \
+             (counter.rs `COUNTER = …` LHS)"
+        );
+        assert_eq!(
+            reads, 1,
+            "tree-sitter classifier should have recovered exactly one Reads edge \
+             (counter.rs `… = COUNTER + 1` RHS)"
+        );
+        assert_eq!(
+            other, 0,
+            "no SymbolReference fallback edges should remain when the classifier \
+             can resolve the AST context"
+        );
     }
 
     #[test]
@@ -2269,7 +2808,7 @@ mod tests {
         assert!(seen_kinds.contains(&RepoGraphEdgeKind::DeclaredInFile));
         assert!(seen_kinds.contains(&RepoGraphEdgeKind::FileReference));
         assert!(seen_kinds.contains(&RepoGraphEdgeKind::Reads));
-        assert!(seen_kinds.contains(&RepoGraphEdgeKind::SymbolRelationshipImplementation));
+        assert!(seen_kinds.contains(&RepoGraphEdgeKind::Implements));
     }
 
     /// Bincode round-trip preserves `confidence` and `reason` on every edge.

@@ -40,12 +40,25 @@ async fn pre_resolve_chat_key(
     }
 
     if params.operation == "path" {
+        // Validate required args BEFORE the resolve loop so a missing
+        // `to` (or `from`) returns the user-facing arg-validation error,
+        // not whatever the bridge stub happened to say. The dispatch
+        // arm at `match params.operation` would also catch this — but
+        // by the time we get there, `graph.resolve` has already been
+        // called for whichever field IS present, propagating any
+        // bridge error and masking the real problem.
+        if params.from.as_deref().filter(|s| !s.is_empty()).is_none() {
+            return Err("'from' is required for 'path'".to_string());
+        }
+        if params.to.as_deref().filter(|s| !s.is_empty()).is_none() {
+            return Err("'to' is required for 'path'".to_string());
+        }
         for which in ["from", "to"] {
-            let raw = match which {
-                "from" => params.from.as_deref().filter(|s| !s.is_empty()),
-                _ => params.to.as_deref().filter(|s| !s.is_empty()),
+            // After the validation above both are guaranteed Some/non-empty.
+            let key = match which {
+                "from" => params.from.as_deref().expect("validated above"),
+                _ => params.to.as_deref().expect("validated above"),
             };
-            let Some(key) = raw else { continue };
             let kind_hint = params.kind_hint.as_deref();
             match graph.resolve(ctx, key, kind_hint).await? {
                 ResolveOutcome::Found(uid) => {
@@ -283,7 +296,14 @@ pub(crate) async fn call_code_graph(
                 .as_deref()
                 .filter(|k| !k.is_empty())
                 .ok_or("'key' is required for 'impact'")?;
-            let depth = p.limit.unwrap_or(3);
+            // v8: lowered default depth from 3 to 2. At depth=3, FileReference
+            // compounds through hub files (cmd/deps.go, cmd/dispatcher.go in
+            // a typical Go service; mod.rs / lib.rs in Rust) and the impact
+            // set effectively becomes "the whole runtime". Depth 2 still
+            // catches the dependency-of-a-dependency that matters for "what
+            // breaks if I change this", without the third hop's noise. Power
+            // users can still pass `limit: 3+` explicitly.
+            let depth = p.limit.unwrap_or(2);
             // PR A2: validate `min_confidence` in `[0, 1]` before forwarding
             // so chat-tool callers get a clear error instead of silent zero
             // results.
@@ -341,8 +361,17 @@ pub(crate) async fn call_code_graph(
         }
         "cycles" => {
             let min_size = p.min_size.unwrap_or(2);
+            // v8: default kind_filter to "symbol" when unspecified.
+            // The raw graph always contains tautological file↔symbol
+            // 2-cycles (every symbol forms one with its containing file
+            // via ContainsDefinition + DeclaredInFile), which drown
+            // out real dependency cycles. Power users can pass
+            // kind_filter="file" for file-level import cycles, or
+            // kind_filter=null explicitly via the underlying bridge
+            // for the mixed view.
+            let kind_filter = p.kind_filter.as_deref().or(Some("symbol"));
             let cycles = graph_ops
-                .cycles(&ctx, p.kind_filter.as_deref(), min_size)
+                .cycles(&ctx, kind_filter, min_size)
                 .await?;
             serde_json::to_value(&cycles).map_err(|e| format!("serialize error: {e}"))?
         }

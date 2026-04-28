@@ -1,5 +1,6 @@
 ---
 source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
+assertion_line: 258
 expression: "serde_json::to_value(tool_code_graph()).unwrap()"
 ---
 {
@@ -108,6 +109,14 @@ expression: "serde_json::to_value(tool_code_graph()).unwrap()"
         "description": "Minimum SCC size for cycles (default 2)",
         "minimum": 2,
         "type": "integer"
+      },
+      "mode": {
+        "description": "Search mode for the `search` op (PR B4). `name` runs the canonical-graph name index only (fast path); `hybrid` blends lexical + semantic + structural via RRF k=60 and stamps each hit with a `match_kind` tag for debug surfaces. Default reads `DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE` (env var; defaults to `name`).",
+        "enum": [
+          "name",
+          "hybrid"
+        ],
+        "type": "string"
       },
       "module_glob": {
         "description": "File-path glob restricting api_surface to a subset of symbols",

@@ -1866,6 +1866,7 @@ mod tests {
                     structural_weight: 1.0,
                     inbound_edge_weight: 1.0,
                     outbound_edge_weight: 1.0,
+                    ..Default::default()
                 },
                 RankedNode {
                     key: "file:server/src/existing.rs".to_string(),
@@ -1876,6 +1877,7 @@ mod tests {
                     structural_weight: 1.0,
                     inbound_edge_weight: 1.0,
                     outbound_edge_weight: 1.0,
+                    ..Default::default()
                 },
             ],
             contexts: HashMap::new(),
@@ -2173,6 +2175,7 @@ mod tests {
                     structural_weight: 1.0,
                     inbound_edge_weight: 1.0,
                     outbound_edge_weight: 1.0,
+                    ..Default::default()
                 },
                 RankedNode {
                     key: unrelated_key.to_string(),
@@ -2183,6 +2186,7 @@ mod tests {
                     structural_weight: 1.0,
                     inbound_edge_weight: 1.0,
                     outbound_edge_weight: 1.0,
+                    ..Default::default()
                 },
                 RankedNode {
                     key: qux_key.to_string(),
@@ -2193,6 +2197,7 @@ mod tests {
                     structural_weight: 1.0,
                     inbound_edge_weight: 1.0,
                     outbound_edge_weight: 1.0,
+                    ..Default::default()
                 },
             ],
             contexts,

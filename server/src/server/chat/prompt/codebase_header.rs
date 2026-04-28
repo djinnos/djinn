@@ -633,6 +633,7 @@ mod tests {
             structural_weight: 0.0,
             inbound_edge_weight: 0.0,
             outbound_edge_weight: 0.0,
+            ..Default::default()
         }
     }
 

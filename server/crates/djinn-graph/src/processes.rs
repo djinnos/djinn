@@ -267,7 +267,7 @@ fn call_chain_successors(
 
     let node_kind = graph.node(node).kind;
 
-    // Direct symbol→symbol hops via SymbolRelationship reference
+    // Direct symbol→symbol hops via SCIP reference / read / write
     // edges (rare; mostly produced by the relationship pass).
     for edge in g.edges_directed(node, Outgoing) {
         if !matches!(
@@ -332,6 +332,8 @@ fn build_process_id(
         // Process keys can't be entry points (they're synthetic),
         // but the match has to be exhaustive.
         RepoNodeKey::Process(s) => format!("process:{s}"),
+        // Table keys can't be entry points either (they're sinks).
+        RepoNodeKey::Table(s) => format!("table:{s}"),
     };
     let mut hasher = Sha256::new();
     hasher.update(uid.as_bytes());

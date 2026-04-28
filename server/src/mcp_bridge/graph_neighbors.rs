@@ -28,6 +28,8 @@ pub(super) fn group_neighbors_by_file(
                 // file-grouped views can still render them without
                 // panicking.
                 RepoNodeKey::Process(_) => "<process>".to_string(),
+                // Synthetic table nodes — same bucketing strategy.
+                RepoNodeKey::Table(_) => "<table>".to_string(),
             });
         let entry = by_file.entry(file_label.clone()).or_insert(FileGroupEntry {
             file: file_label,
@@ -80,6 +82,8 @@ pub(crate) fn format_node_key(key: &RepoNodeKey) -> String {
         // callers can round-trip them through the same key channel as
         // file/symbol nodes.
         RepoNodeKey::Process(id) => format!("process:{id}"),
+        // Synthetic database-table nodes get a `table:<name>` uid.
+        RepoNodeKey::Table(name) => format!("table:{name}"),
     }
 }
 
@@ -122,6 +126,8 @@ fn kind_label(node: &RepoGraphNode) -> String {
         // PR F2: synthetic process nodes carry the kind label
         // `"process"` so the UI / chooser can branch on it.
         RepoGraphNodeKind::Process => "process".to_string(),
+        // Synthetic database-table nodes carry kind `"table"`.
+        RepoGraphNodeKind::Table => "table".to_string(),
         RepoGraphNodeKind::Symbol => match &node.symbol_kind {
             Some(ScipSymbolKind::Type) => "class".to_string(),
             Some(ScipSymbolKind::Struct) => "struct".to_string(),
@@ -181,6 +187,8 @@ fn file_path_substring_match(node: &RepoGraphNode, query: &str) -> f64 {
             // PR F2: process nodes carry no file affinity — refuse to
             // contribute to file-path scoring.
             RepoNodeKey::Process(_) => None,
+            // Synthetic table nodes likewise carry no file affinity.
+            RepoNodeKey::Table(_) => None,
         });
     match candidate_path {
         Some(path) if path.to_lowercase().contains(&q) => 1.0,
@@ -232,6 +240,8 @@ fn build_candidate(node: &RepoGraphNode, score: f64) -> Candidate {
             RepoNodeKey::Symbol(_) => String::new(),
             // PR F2: synthetic process nodes have no file_path.
             RepoNodeKey::Process(_) => String::new(),
+            // Synthetic table nodes have no file_path either.
+            RepoNodeKey::Table(_) => String::new(),
         });
     Candidate {
         uid,
@@ -350,10 +360,10 @@ pub(super) fn resolve_node_or_err(
 /// references    <- SymbolReference (catch-all fallback)
 /// imports       <- FileReference
 /// contains      <- ContainsDefinition | DeclaredInFile
-/// extends       <- SymbolRelationshipReference
-/// implements    <- SymbolRelationshipImplementation
-/// type_defines  <- SymbolRelationshipTypeDefinition
-/// defines       <- SymbolRelationshipDefinition
+/// extends       <- Extends
+/// implements    <- Implements
+/// type_defines  <- TypeDefines
+/// defines       <- Defines
 /// reads         <- Reads
 /// writes        <- Writes
 /// ```
@@ -390,10 +400,10 @@ pub(super) fn classify_edge_category(
         }
         RepoGraphEdgeKind::Reads => EdgeCategory::Reads,
         RepoGraphEdgeKind::Writes => EdgeCategory::Writes,
-        RepoGraphEdgeKind::SymbolRelationshipReference => EdgeCategory::Extends,
-        RepoGraphEdgeKind::SymbolRelationshipImplementation => EdgeCategory::Implements,
-        RepoGraphEdgeKind::SymbolRelationshipTypeDefinition => EdgeCategory::TypeDefines,
-        RepoGraphEdgeKind::SymbolRelationshipDefinition => EdgeCategory::Defines,
+        RepoGraphEdgeKind::Extends => EdgeCategory::Extends,
+        RepoGraphEdgeKind::Implements => EdgeCategory::Implements,
+        RepoGraphEdgeKind::TypeDefines => EdgeCategory::TypeDefines,
+        RepoGraphEdgeKind::Defines => EdgeCategory::Defines,
         // PR F1: `EntryPointOf` is metadata stamped by the entry-point
         // detector. Surface as its own category so the UI can badge
         // entry-point symbols.
@@ -437,6 +447,8 @@ pub(super) fn build_related_symbol(node: &RepoGraphNode, confidence: f64) -> Rel
             RepoNodeKey::Symbol(_) => None,
             // PR F2: synthetic process nodes have no file affinity.
             RepoNodeKey::Process(_) => None,
+            // Synthetic table nodes likewise carry no file affinity.
+            RepoNodeKey::Table(_) => None,
         });
     RelatedSymbol {
         uid: format_node_key(&node.id),
