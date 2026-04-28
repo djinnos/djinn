@@ -646,6 +646,13 @@ pub enum EdgeCategory {
     /// can render an "entry point" badge on the symbol panel without
     /// confusing it with structural call / reference edges.
     EntryPoint,
+    /// PR F2: `StepInProcess` — synthetic edge from a `Process` node
+    /// to each step along a traced execution flow. Surfaced as its
+    /// own category so the UI can group process-membership edges
+    /// separately from real call / reference edges. Note: this only
+    /// shows up on `incoming` for symbol nodes (whose ancestor in the
+    /// edge is the synthetic process node).
+    Process,
 }
 
 /// PR C1: a neighbor of the queried symbol, grouped under its

@@ -31,7 +31,13 @@ const PAGE_RANK_ITERATIONS: usize = 25;
 /// - v3: entry-point detection (PR F1) — adds `EntryPointOf` edge kind
 ///   and `is_test` flag on `RepoGraphNode`. Old v2 blobs bincode-fail on
 ///   the new edge variant / extra node field and trigger a re-warm.
-pub const REPO_GRAPH_ARTIFACT_VERSION: u32 = 3;
+/// - v4: process (execution flow) detection (PR F2) — adds
+///   `RepoGraphEdgeKind::StepInProcess`, `RepoGraphNodeKind::Process`,
+///   `RepoNodeKey::Process(String)`, an optional `step` ordinal on each
+///   edge, and a `processes: Vec<Process>` sidecar on the artifact. Old
+///   v3 blobs bincode-fail on the new variants / extra fields and force
+///   a re-warm.
+pub const REPO_GRAPH_ARTIFACT_VERSION: u32 = 4;
 
 // ── Edge confidence floor table (PR A2) ────────────────────────────────────
 //
@@ -66,6 +72,13 @@ const EDGE_CONFIDENCE_WRITES: f64 = 0.90;
 // stays consistent with the rest of the file. Per-hit confidences
 // override the floor in [`detect_entry_points`].
 const EDGE_CONFIDENCE_ENTRY_POINT_OF: f64 = 0.5;
+// PR F2: `StepInProcess` edges are synthetic links from a `Process`
+// node to each step in the deterministic call chain it traces. They
+// carry the same 0.95 floor as `ContainsDefinition` / `DeclaredInFile`
+// — the partition is computed from the SCIP-derived edge structure, so
+// every `StepInProcess` is as trustworthy as the strongest source edge
+// the trace consumed.
+const EDGE_CONFIDENCE_STEP_IN_PROCESS: f64 = 0.95;
 const EDGE_CONFIDENCE_LOCAL_PENALTY: f64 = 0.15;
 const EDGE_WEIGHT_DEFINITION_TO_FILE: f64 = 4.0;
 const EDGE_WEIGHT_FILE_TO_DEFINITION: f64 = 1.5;
@@ -79,6 +92,12 @@ const EDGE_WEIGHT_SYMBOL_RELATIONSHIP_DEFINITION: f64 = 2.25;
 // dependency signal, so it should not perturb PageRank or shortest-path
 // scoring.
 const EDGE_WEIGHT_ENTRY_POINT_OF: f64 = 0.5;
+// PR F2: `StepInProcess` edges are structural metadata (not new SCIP
+// evidence), so they get a constant low weight that does not dominate
+// PageRank or A* shortest-path queries. Process nodes are a side-
+// channel: they should not reshape the importance ranking of the
+// underlying call graph.
+const EDGE_WEIGHT_STEP_IN_PROCESS: f64 = 0.5;
 const SYMBOL_KIND_TYPE_MULTIPLIER: f64 = 1.15;
 const SYMBOL_KIND_METHOD_MULTIPLIER: f64 = 1.05;
 const SYMBOL_KIND_FUNCTION_MULTIPLIER: f64 = 1.0;
@@ -98,6 +117,16 @@ pub struct RepoDependencyGraph {
     /// SCIP input, and round-tripped through the artifact so cache-hit
     /// reloads via [`RepoDependencyGraph::from_artifact`] retain it.
     symbol_ranges: BTreeMap<PathBuf, Vec<SymbolRange>>,
+    /// PR F2: detected execution-flow processes traced from each
+    /// entry point. Populated by [`RepoDependencyGraph::build`] when
+    /// `DJINN_PROCESS_DETECTION` is unset/true; round-tripped through
+    /// the artifact so cache-hit reloads keep them.
+    processes: Vec<crate::processes::Process>,
+    /// Reverse index: `NodeIndex::index()` → list of positions in
+    /// `processes` where the node appears as a step. Built whenever
+    /// `processes` is set (build-time or after `from_artifact`). Empty
+    /// for nodes that don't participate in any traced process.
+    process_lookup: BTreeMap<usize, Vec<usize>>,
 }
 
 /// A single SCIP definition range pinned to a graph node.
@@ -217,6 +246,14 @@ impl RepoDependencyGraph {
         // `DJINN_ENTRY_POINT_DETECTION` env var.
         if crate::entry_points::entry_point_detection_enabled() {
             let _ = crate::entry_points::detect_entry_points(&mut graph);
+        }
+        // PR F2: post-entry-point process tracing. Walks each entry-
+        // point's deterministic call chain and materializes a
+        // `Process` synthetic node + `StepInProcess` edges. Off-by-
+        // default escape hatch via the `DJINN_PROCESS_DETECTION`
+        // env var. No-op when entry-point detection didn't fire.
+        if crate::processes::process_detection_enabled() {
+            let _ = crate::processes::detect_processes(&mut graph);
         }
         graph
     }
@@ -489,6 +526,94 @@ impl RepoDependencyGraph {
             .map(|(path, ranges)| (path.as_path(), ranges.as_slice()))
     }
 
+    /// PR F2: every detected [`crate::processes::Process`] in which the
+    /// supplied node appears as a step (including processes where the
+    /// node is the entry point or the terminal). Returns an empty vec
+    /// when the node is not part of any traced flow, when the detector
+    /// is disabled, or when the artifact pre-dates v4. The order is
+    /// deterministic — sorted by process insertion order, which
+    /// follows entry-point discovery order in `detect_processes`.
+    pub fn processes_for_node(&self, node: NodeIndex) -> Vec<&crate::processes::Process> {
+        let Some(positions) = self.process_lookup.get(&node.index()) else {
+            return Vec::new();
+        };
+        positions
+            .iter()
+            .filter_map(|&pos| self.processes.get(pos))
+            .collect()
+    }
+
+    /// Iterate every detected process in deterministic insertion order.
+    /// Empty when process detection is disabled or no entry points
+    /// produced a flow that survived the pruning rules in
+    /// [`crate::processes::detect_processes`].
+    pub fn processes(&self) -> &[crate::processes::Process] {
+        &self.processes
+    }
+
+    /// PR F2: install the detector's output on the graph and rebuild
+    /// the reverse `process_lookup` index. Public to crate so
+    /// [`crate::processes::detect_processes`] can swap in its result
+    /// without exposing a generic mutator surface to outside callers.
+    pub(crate) fn set_processes(&mut self, processes: Vec<crate::processes::Process>) {
+        self.process_lookup = build_process_lookup(&processes);
+        self.processes = processes;
+    }
+
+    /// PR F2: stamp a `StepInProcess` edge from a `Process` synthetic
+    /// node to a member step. Used internally by
+    /// [`crate::processes::detect_processes`].
+    pub(crate) fn add_step_in_process_edge(
+        &mut self,
+        process_node: NodeIndex,
+        step_node: NodeIndex,
+        step: i32,
+    ) {
+        let weight = edge_weight_for(RepoGraphEdgeKind::StepInProcess);
+        let confidence = edge_confidence_floor(RepoGraphEdgeKind::StepInProcess);
+        self.graph.add_edge(
+            process_node,
+            step_node,
+            RepoGraphEdge {
+                kind: RepoGraphEdgeKind::StepInProcess,
+                weight,
+                evidence_count: 1,
+                confidence,
+                reason: Some("process-step".to_string()),
+                step: Some(step),
+            },
+        );
+    }
+
+    /// PR F2: register a new synthetic [`RepoGraphNodeKind::Process`]
+    /// node and return its [`NodeIndex`]. Idempotent: returns the
+    /// existing index when a process with `id` was already inserted.
+    /// Used internally by [`crate::processes::detect_processes`].
+    pub(crate) fn ensure_process_node(&mut self, id: &str, label: &str) -> NodeIndex {
+        let key = RepoNodeKey::Process(id.to_string());
+        if let Some(&idx) = self.node_lookup.get(&key) {
+            return idx;
+        }
+        let node = RepoGraphNode {
+            id: key.clone(),
+            kind: RepoGraphNodeKind::Process,
+            display_name: label.to_string(),
+            language: None,
+            file_path: None,
+            symbol: None,
+            symbol_kind: None,
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: Vec::new(),
+            signature_parts: None,
+            is_test: false,
+        };
+        let idx = self.graph.add_node(node);
+        self.node_lookup.insert(key, idx);
+        idx
+    }
+
     /// Shortest dependency path between two nodes using A* over edge weights.
     pub fn shortest_path(
         &self,
@@ -525,6 +650,11 @@ pub struct RepoGraphSearchHit {
 pub enum RepoNodeKey {
     File(PathBuf),
     Symbol(String),
+    /// PR F2: synthetic node identifying a deterministic execution
+    /// flow traced from an entry point. The string is the stable
+    /// process id (sha256 of `entry_point_uid || step_count` truncated
+    /// to 16 hex chars) — see [`crate::processes::Process::id`].
+    Process(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -532,6 +662,12 @@ pub enum RepoNodeKey {
 pub enum RepoGraphNodeKind {
     File,
     Symbol,
+    /// PR F2: synthetic execution-flow node materialized by
+    /// [`crate::processes::detect_processes`]. Carries no SCIP-derived
+    /// metadata of its own (no `file_path`, no `symbol_kind`); the
+    /// node's identity lives entirely in [`RepoNodeKey::Process`]. Hung
+    /// off the canonical graph by a chain of `StepInProcess` edges.
+    Process,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -599,6 +735,11 @@ impl RepoGraphNode {
                 | Some(ScipSymbolKind::Constant) => SYMBOL_KIND_VARIABLE_MULTIPLIER,
                 _ => SYMBOL_KIND_DEFAULT_MULTIPLIER,
             },
+            // PR F2: process nodes are synthetic side-channel metadata.
+            // Give them the lowest tier (variable-class) so PageRank
+            // doesn't promote them above real symbols just because
+            // they fan out to many steps.
+            RepoGraphNodeKind::Process => SYMBOL_KIND_VARIABLE_MULTIPLIER,
         }
     }
 }
@@ -636,6 +777,14 @@ pub enum RepoGraphEdgeKind {
     /// describing the matching heuristic (e.g. `"rust-main"`,
     /// `"scip-test-role"`, `"py-dunder-main"`).
     EntryPointOf,
+    /// PR F2: synthetic edge linking a [`RepoGraphNodeKind::Process`]
+    /// node to each [`RepoGraphNode`] along the deterministic call
+    /// chain it traced. The 0-indexed step ordinal lives on
+    /// [`RepoGraphEdge::step`] (the entry point is `step=0`, the
+    /// terminal node is `step=step_count-1`). Confidence floor is 0.95 —
+    /// process membership is computed from SCIP-derived edges, so it's
+    /// as deterministic as the source graph.
+    StepInProcess,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -652,6 +801,13 @@ pub struct RepoGraphEdge {
     /// document-local). `None` means "default floor for kind, no
     /// adjustments applied".
     pub reason: Option<String>,
+    /// PR F2: 0-indexed step ordinal — only populated on
+    /// [`RepoGraphEdgeKind::StepInProcess`] edges. `None` for every
+    /// other kind. Stored as a dedicated field rather than reusing
+    /// `weight` so PageRank / shortest-path scoring stays oblivious to
+    /// the process side-channel.
+    #[serde(default)]
+    pub step: Option<i32>,
 }
 
 /// Initial confidence floor for an edge of the given kind.
@@ -681,6 +837,7 @@ pub fn edge_confidence_floor(kind: RepoGraphEdgeKind) -> f64 {
             EDGE_CONFIDENCE_SYMBOL_RELATIONSHIP_DEFINITION
         }
         RepoGraphEdgeKind::EntryPointOf => EDGE_CONFIDENCE_ENTRY_POINT_OF,
+        RepoGraphEdgeKind::StepInProcess => EDGE_CONFIDENCE_STEP_IN_PROCESS,
     }
 }
 
@@ -1043,6 +1200,7 @@ impl RepoDependencyGraphBuilder {
                     evidence_count,
                     confidence,
                     reason,
+                    step: None,
                 },
             );
         }
@@ -1060,6 +1218,8 @@ impl RepoDependencyGraphBuilder {
             node_lookup: self.node_lookup,
             name_index,
             symbol_ranges: self.symbol_ranges,
+            processes: Vec::new(),
+            process_lookup: BTreeMap::new(),
         }
     }
 }
@@ -1074,6 +1234,22 @@ fn build_name_index(
         index.entry(key).or_default().push(node_index);
     }
     index
+}
+
+/// PR F2: build the reverse `node_index → process positions` lookup
+/// from a freshly-set process list. The same node can appear in
+/// multiple processes (a shared utility called by several entry
+/// points), so the value is `Vec<usize>` rather than `Option<usize>`.
+fn build_process_lookup(
+    processes: &[crate::processes::Process],
+) -> BTreeMap<usize, Vec<usize>> {
+    let mut out: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (process_pos, process) in processes.iter().enumerate() {
+        for step in &process.steps {
+            out.entry(step.index()).or_default().push(process_pos);
+        }
+    }
+    out
 }
 
 /// Minimal serializable artifact capturing the per-file and per-symbol graph
@@ -1099,6 +1275,12 @@ pub struct RepoGraphArtifact {
     /// keeps `symbols_enclosing` non-empty after a cache-hit reload.
     #[serde(default)]
     pub symbol_ranges: BTreeMap<PathBuf, Vec<RepoGraphArtifactSymbolRange>>,
+    /// PR F2: detected execution-flow processes. Each `Process` carries
+    /// node-position references into `nodes`; persisting it here lets
+    /// `processes_for_node` answer queries after a cache-hit reload
+    /// without re-running the detector.
+    #[serde(default)]
+    pub processes: Vec<RepoGraphArtifactProcess>,
 }
 
 /// A serializable directed edge between two graph nodes, identified by their
@@ -1116,6 +1298,10 @@ pub struct RepoGraphArtifactEdge {
     /// Optional reason explaining the confidence value; mirrors
     /// [`RepoGraphEdge::reason`]. New in artifact v1 (PR A2).
     pub reason: Option<String>,
+    /// PR F2: 0-indexed step ordinal for [`RepoGraphEdgeKind::StepInProcess`]
+    /// edges. `None` for every other kind. New in artifact v4 (PR F2).
+    #[serde(default)]
+    pub step: Option<i32>,
 }
 
 /// A serializable enclosing range for a symbol definition, identified by the
@@ -1125,6 +1311,30 @@ pub struct RepoGraphArtifactSymbolRange {
     pub start_line: u32,
     pub end_line: u32,
     pub node: usize,
+}
+
+/// PR F2: serializable form of [`crate::processes::Process`] keyed by
+/// node positions in the parent [`RepoGraphArtifact::nodes`] vec
+/// rather than by `NodeIndex` (which is not stable across artifact
+/// rebuilds). New in artifact v4.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoGraphArtifactProcess {
+    /// Stable process id — sha256 of the entry-point uid + step count,
+    /// truncated to 16 hex chars. Mirrors [`crate::processes::Process::id`].
+    pub id: String,
+    /// Human-readable label (entry point's display name + " process").
+    pub label: String,
+    /// Position in `nodes` of the synthetic [`RepoGraphNodeKind::Process`]
+    /// node materialized for this flow.
+    pub process_node: usize,
+    /// Position in `nodes` of the entry-point symbol that originated
+    /// this flow.
+    pub entry_point: usize,
+    /// Position in `nodes` of the last node along the trace.
+    pub terminal: usize,
+    /// Ordered node positions along the trace, including the entry
+    /// point at `[0]` and the terminal at `[step_count - 1]`.
+    pub steps: Vec<usize>,
 }
 
 impl RepoDependencyGraph {
@@ -1151,6 +1361,7 @@ impl RepoDependencyGraph {
                 evidence_count: w.evidence_count,
                 confidence: w.confidence,
                 reason: w.reason.clone(),
+                step: w.step,
             });
         }
 
@@ -1176,11 +1387,50 @@ impl RepoDependencyGraph {
             }
         }
 
+        // PR F2: serialize the process sidecar. Each `Process` is keyed
+        // by node positions (a `Vec<usize>`) rather than `NodeIndex`
+        // values so the artifact survives a `from_artifact` rebuild.
+        let mut processes_out: Vec<RepoGraphArtifactProcess> = Vec::with_capacity(
+            self.processes.len(),
+        );
+        for process in &self.processes {
+            let Some(&entry_pos) = index_map.get(&process.entry_point_id) else {
+                continue;
+            };
+            let Some(&terminal_pos) = index_map.get(&process.terminal_id) else {
+                continue;
+            };
+            let Some(&process_node_pos) = index_map.get(&process.process_node_id) else {
+                continue;
+            };
+            let mut steps_out = Vec::with_capacity(process.steps.len());
+            let mut steps_complete = true;
+            for step in &process.steps {
+                let Some(&pos) = index_map.get(step) else {
+                    steps_complete = false;
+                    break;
+                };
+                steps_out.push(pos);
+            }
+            if !steps_complete {
+                continue;
+            }
+            processes_out.push(RepoGraphArtifactProcess {
+                id: process.id.clone(),
+                label: process.label.clone(),
+                process_node: process_node_pos,
+                entry_point: entry_pos,
+                terminal: terminal_pos,
+                steps: steps_out,
+            });
+        }
+
         RepoGraphArtifact {
             version: REPO_GRAPH_ARTIFACT_VERSION,
             nodes,
             edges,
             symbol_ranges,
+            processes: processes_out,
         }
     }
 
@@ -1206,6 +1456,7 @@ impl RepoDependencyGraph {
                     evidence_count: edge.evidence_count,
                     confidence: edge.confidence,
                     reason: edge.reason.clone(),
+                    step: edge.step,
                 },
             );
         }
@@ -1231,11 +1482,53 @@ impl RepoDependencyGraph {
             }
         }
 
+        // PR F2: rehydrate the process sidecar. Reject any process whose
+        // step list references a node position outside the artifact's
+        // bounds — defensive guard against an artifact and node table
+        // that drifted out of sync.
+        let mut processes: Vec<crate::processes::Process> =
+            Vec::with_capacity(artifact.processes.len());
+        for process in &artifact.processes {
+            let Some(&entry_id) = index_map.get(process.entry_point) else {
+                continue;
+            };
+            let Some(&terminal_id) = index_map.get(process.terminal) else {
+                continue;
+            };
+            let Some(&process_node_id) = index_map.get(process.process_node) else {
+                continue;
+            };
+            let mut steps_out = Vec::with_capacity(process.steps.len());
+            let mut steps_complete = true;
+            for &step_pos in &process.steps {
+                let Some(&node) = index_map.get(step_pos) else {
+                    steps_complete = false;
+                    break;
+                };
+                steps_out.push(node);
+            }
+            if !steps_complete {
+                continue;
+            }
+            processes.push(crate::processes::Process {
+                id: process.id.clone(),
+                label: process.label.clone(),
+                process_node_id,
+                entry_point_id: entry_id,
+                terminal_id,
+                step_count: steps_out.len(),
+                steps: steps_out,
+            });
+        }
+        let process_lookup = build_process_lookup(&processes);
+
         RepoDependencyGraph {
             graph,
             node_lookup,
             name_index,
             symbol_ranges,
+            processes,
+            process_lookup,
         }
     }
 
@@ -1305,6 +1598,7 @@ impl RepoDependencyGraph {
                 evidence_count: edge.evidence_count,
                 confidence: edge.confidence,
                 reason: edge.reason.clone(),
+                step: edge.step,
             })
             .collect();
 
@@ -1332,11 +1626,17 @@ impl RepoDependencyGraph {
             }
         }
 
+        // PR F2: drop the process sidecar entirely on patch — the
+        // changed files may have rewritten the call chains the trace
+        // followed, and the test path doesn't exercise the process
+        // detector anyway. The next full rebuild re-runs detection
+        // from scratch.
         let filtered_artifact = RepoGraphArtifact {
             version: REPO_GRAPH_ARTIFACT_VERSION,
             nodes: surviving_nodes,
             edges: surviving_edges,
             symbol_ranges: surviving_symbol_ranges,
+            processes: Vec::new(),
         };
 
         // Step 2: Rebuild the base graph from the filtered artifact.
@@ -1398,6 +1698,11 @@ fn is_owned_by_changed_file(node: &RepoGraphNode, changed_files: &BTreeSet<PathB
                     .as_ref()
                     .is_some_and(|p| changed_files.contains(p))
         }
+        // PR F2: synthetic process nodes are never owned by a changed
+        // file — `patch_changed_files` always drops the process
+        // sidecar entirely (see the filtered-artifact construction
+        // above) and lets the next full rebuild re-trace.
+        RepoGraphNodeKind::Process => false,
     }
 }
 
@@ -1492,6 +1797,7 @@ fn edge_weight(kind: RepoGraphEdgeKind) -> f64 {
             EDGE_WEIGHT_SYMBOL_RELATIONSHIP_DEFINITION
         }
         RepoGraphEdgeKind::EntryPointOf => EDGE_WEIGHT_ENTRY_POINT_OF,
+        RepoGraphEdgeKind::StepInProcess => EDGE_WEIGHT_STEP_IN_PROCESS,
     }
 }
 
@@ -1512,7 +1818,13 @@ mod tests {
     fn builds_dependency_graph_with_file_and_symbol_metadata() {
         let graph = RepoDependencyGraph::build(&[fixture_index()]);
 
-        assert_eq!(graph.node_count(), 5);
+        // PR F2 bumped the count from 5 to 6: the entry-point detector
+        // tags `main` as `EntryPointKind::Main`, and the process
+        // detector traces a (short) call chain from it, materializing
+        // one synthetic `Process` node. The five SCIP-derived nodes
+        // (2 files + 3 symbols) are still all present; the extra node
+        // is the synthetic process.
+        assert_eq!(graph.node_count(), 6);
         assert!(graph.edge_count() >= 8);
 
         let app_file = graph
@@ -1786,6 +2098,7 @@ mod tests {
             nodes: vec![],
             edges: vec![],
             symbol_ranges: BTreeMap::new(),
+            processes: vec![],
         };
         let json = serde_json::to_string(&empty).expect("serialize empty");
         let restored = RepoDependencyGraph::deserialize_artifact(&json).expect("deserialize empty");
@@ -1817,7 +2130,9 @@ mod tests {
             // dropped by exactly the local-prefix penalty when the reason
             // says so. PR F1: `EntryPointOf` edges set their own
             // confidence (per-detector, 0.6 – 0.95) so the floor check
-            // doesn't apply — we just bound them in (0, 1].
+            // doesn't apply — we just bound them in (0, 1]. PR F2:
+            // `StepInProcess` edges always carry `reason="process-step"`
+            // and stick to the floor; we whitelist that reason.
             if edge.kind == RepoGraphEdgeKind::EntryPointOf {
                 continue;
             }
@@ -1833,6 +2148,10 @@ mod tests {
                         expected,
                         edge.kind
                     );
+                }
+                Some("process-step") => {
+                    assert_eq!(edge.kind, RepoGraphEdgeKind::StepInProcess);
+                    assert!((edge.confidence - floor).abs() < 1e-9);
                 }
                 Some(other) => panic!("unexpected reason {other:?} on edge {:?}", edge.kind),
             }

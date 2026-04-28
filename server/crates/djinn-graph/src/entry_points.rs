@@ -529,6 +529,7 @@ impl RepoDependencyGraph {
                 evidence_count: 1,
                 confidence,
                 reason: Some(reason.to_string()),
+                step: None,
             },
         );
     }
