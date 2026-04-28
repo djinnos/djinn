@@ -397,6 +397,7 @@ impl RepoGraphOps for RepoGraphBridge {
         key: &str,
         max_depth: usize,
         group_by: Option<&str>,
+        min_confidence: Option<f64>,
     ) -> Result<ImpactResult, String> {
         let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
             &self.state,
@@ -427,6 +428,14 @@ impl RepoGraphOps for RepoGraphBridge {
                     .graph()
                     .edges_directed(current, petgraph::Direction::Incoming)
                 {
+                    // PR A2: skip weak edges before they enter the BFS
+                    // frontier so the impact set reflects only the
+                    // confidence band the caller asked for.
+                    if let Some(threshold) = min_confidence
+                        && edge.weight().confidence < threshold
+                    {
+                        continue;
+                    }
                     let source = edge.source();
                     if visited.insert(source) {
                         queue.push_back((source, depth + 1));
@@ -2237,6 +2246,70 @@ pub(crate) mod graph_bridge_tests {
         assert!(
             !result.is_empty(),
             "expected at least one node in the impact set"
+        );
+    }
+
+    /// PR A2: `min_confidence` on the BFS frontier drops weak edges. A
+    /// threshold above the highest confidence in the fixture must collapse
+    /// the impact set to empty; mid-band thresholds must shrink it.
+    /// We replicate the impact BFS inline (the production handler is async
+    /// and needs an `MCPBridge`/db, neither cheap to spin up here).
+    #[tokio::test]
+    async fn impact_min_confidence_filters_bfs_frontier_pr_a2() {
+        let graph = build_test_graph();
+        let start = resolve_node(&graph, "scip-rust pkg src/helper.rs `helper`().").unwrap();
+
+        fn run_bfs(
+            graph: &djinn_graph::repo_graph::RepoDependencyGraph,
+            start: petgraph::graph::NodeIndex,
+            max_depth: usize,
+            min_confidence: Option<f64>,
+        ) -> usize {
+            let mut visited = std::collections::HashSet::new();
+            visited.insert(start);
+            let mut queue = std::collections::VecDeque::new();
+            queue.push_back((start, 0usize));
+            let mut count = 0;
+            while let Some((current, depth)) = queue.pop_front() {
+                if depth > 0 {
+                    count += 1;
+                }
+                if depth < max_depth {
+                    for edge in graph
+                        .graph()
+                        .edges_directed(current, petgraph::Direction::Incoming)
+                    {
+                        if let Some(threshold) = min_confidence
+                            && edge.weight().confidence < threshold
+                        {
+                            continue;
+                        }
+                        let source = edge.source();
+                        if visited.insert(source) {
+                            queue.push_back((source, depth + 1));
+                        }
+                    }
+                }
+            }
+            count
+        }
+
+        let unfiltered = run_bfs(&graph, start, 3, None);
+        assert!(unfiltered > 0, "fixture must yield a non-empty impact set");
+
+        // Threshold above 1.0 collapses the frontier to empty.
+        let strict = run_bfs(&graph, start, 3, Some(1.5));
+        assert_eq!(
+            strict, 0,
+            "min_confidence=1.5 must drop every edge — got {strict} entries"
+        );
+
+        // A modest threshold must not exceed the unfiltered count and may
+        // shrink it.
+        let mid = run_bfs(&graph, start, 3, Some(0.85));
+        assert!(
+            mid <= unfiltered,
+            "filtered count {mid} must be <= unfiltered {unfiltered}"
         );
     }
 

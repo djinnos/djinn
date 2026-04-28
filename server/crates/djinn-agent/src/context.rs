@@ -256,6 +256,7 @@ impl RepoGraphOps for StubRepoGraphOps {
         _: &str,
         _: usize,
         _: Option<&str>,
+        _: Option<f64>,
     ) -> Result<ImpactResult, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }

@@ -263,6 +263,7 @@ pub mod stubs {
             _: &str,
             _: usize,
             _: Option<&str>,
+            _: Option<f64>,
         ) -> Result<crate::bridge::ImpactResult, String> {
             Ok(crate::bridge::ImpactResult::Detailed(vec![]))
         }

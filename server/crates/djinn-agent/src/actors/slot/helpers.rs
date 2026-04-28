@@ -1069,6 +1069,7 @@ mod tests {
             _: &str,
             _: usize,
             _: Option<&str>,
+            _: Option<f64>,
         ) -> Result<ImpactResult, String> {
             Err("unused in test".into())
         }
