@@ -413,6 +413,14 @@ async fn codebase_header_builder_renders_status_hotspots_and_tree() {
         ) -> Result<djinn_control_plane::bridge::ResolveOutcome, String> {
             StubRepoGraph.resolve(ctx, k, kh).await
         }
+        async fn snapshot(
+            &self,
+            ctx: &ProjectCtx,
+            cap: usize,
+            ex: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
+        ) -> Result<djinn_control_plane::bridge::SnapshotPayload, String> {
+            StubRepoGraph.snapshot(ctx, cap, ex).await
+        }
     }
 
     clear_cache_for_tests();

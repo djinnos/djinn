@@ -1279,6 +1279,14 @@ mod tests {
         ) -> Result<djinn_control_plane::bridge::ResolveOutcome, String> {
             Err("unused in test".into())
         }
+        async fn snapshot(
+            &self,
+            _: &ProjectCtx,
+            _: usize,
+            _: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
+        ) -> Result<djinn_control_plane::bridge::SnapshotPayload, String> {
+            Err("unused in test".into())
+        }
     }
 
     async fn setup_project() -> (Database, AgentContext, Project, tempfile::TempDir) {
