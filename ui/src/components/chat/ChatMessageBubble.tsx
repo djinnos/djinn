@@ -23,25 +23,44 @@ type ToolCallItem = NonNullable<ChatMessage['toolCalls']>[number];
 /**
  * Strip leftover `[[file:...]]` / `[[symbol:Type:Name]]` tokens from the
  * model's output. The chat prompt no longer asks for them, but in-flight
- * sessions and habit-echo from the model still emit them; without this
- * fallback they render as bare bracket text or as fractured inline-code
- * chips that wreck list / table layout.
+ * sessions and habit-echo still emit them; without this fallback they
+ * render as bare bracket text or — when the model wraps them in double
+ * backticks like `` `[[file:foo]]` `` — leave literal stranded backticks
+ * inside the inline-code chip after the inner token is removed.
  *
- * `[[file:path/to/foo.go:42-58]]`  →  `path/to/foo.go:42-58`
- * `[[symbol:Function:check]]`      →  `check`
+ * Three passes, longest match first so we don't strand wrappers:
+ *   `` `` `[[file:foo]]` `` ``  →  `path/to/foo:42-58`   (with outer code span)
+ *   `` `[[file:foo]]` ``        →  `path/to/foo:42-58`
+ *   `[[file:foo]]`              →  path/to/foo:42-58
  *
- * Surrounding inline-code backticks are left in place — when the model
- * wrote `` `[[file:foo.go]]` `` we keep the backticks so the path still
- * renders as inline code.
+ * For symbols, take only the trailing identifier so the rendered text
+ * reads naturally:
+ *   `[[symbol:Function:check]]`  →  `check`
  */
 function stripCitationTokens(text: string): string {
-  return text.replace(/\[\[(file|symbol):([^\]]+)\]\]/g, (_, kind, body) => {
+  const cleanBody = (kind: string, body: string): string => {
     if (kind === "symbol") {
       const segments = body.split(":");
       return segments[segments.length - 1] ?? body;
     }
     return body;
-  });
+  };
+  // Pass 1: double-backtick wrap → single-backtick inline-code wrap.
+  let out = text.replace(
+    /``\s*`\[\[(file|symbol):([^\]]+)\]\]`\s*``/g,
+    (_, kind, body) => `\`${cleanBody(kind, body)}\``,
+  );
+  // Pass 2: single-backtick wrap → keep one backtick wrap.
+  out = out.replace(
+    /`\[\[(file|symbol):([^\]]+)\]\]`/g,
+    (_, kind, body) => `\`${cleanBody(kind, body)}\``,
+  );
+  // Pass 3: bare token → plain text.
+  out = out.replace(
+    /\[\[(file|symbol):([^\]]+)\]\]/g,
+    (_, kind, body) => cleanBody(kind, body),
+  );
+  return out;
 }
 
 function hasInputContent(input: unknown): boolean {
