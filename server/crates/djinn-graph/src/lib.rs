@@ -18,6 +18,7 @@ use djinn_db::Database;
 pub mod architect;
 pub mod canonical_graph;
 pub mod coupling_index;
+pub mod git_diff;
 pub mod index_tree;
 pub mod process;
 pub mod repo_graph;

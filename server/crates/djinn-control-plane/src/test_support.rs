@@ -285,6 +285,20 @@ impl RepoGraphOps for StubRepoGraph {
             unknown_files: Vec::new(),
         })
     }
+    async fn detect_changes(
+        &self,
+        _ctx: &ProjectCtx,
+        from_sha: Option<&str>,
+        to_sha: Option<&str>,
+        _changed_files: &[String],
+    ) -> std::result::Result<crate::bridge::DetectedChangesResult, String> {
+        Ok(crate::bridge::DetectedChangesResult {
+            from_sha: from_sha.unwrap_or("").to_string(),
+            to_sha: to_sha.unwrap_or("").to_string(),
+            touched_symbols: Vec::new(),
+            by_file: std::collections::BTreeMap::new(),
+        })
+    }
     async fn api_surface(
         &self,
         _ctx: &ProjectCtx,

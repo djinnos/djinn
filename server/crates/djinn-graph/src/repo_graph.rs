@@ -380,6 +380,20 @@ impl RepoDependencyGraph {
     /// have an empty map because per-occurrence ranges are not persisted in
     /// the artifact. On a cache hit this method therefore returns an empty
     /// `Vec` until the next rebuild repopulates the sidecar.
+    /// Find the (start_line, end_line) enclosing range for `node` in
+    /// `file`, if recorded. 1-indexed inclusive on both ends.
+    ///
+    /// Same `from_artifact` limitation as [`symbols_enclosing`]: returns
+    /// `None` on cache-restore paths until the next rebuild repopulates
+    /// the per-file `symbol_ranges` sidecar.
+    pub fn range_for_node(&self, node: NodeIndex, file: &Path) -> Option<(u32, u32)> {
+        let ranges = self.symbol_ranges.get(file)?;
+        ranges
+            .iter()
+            .find(|r| r.node == node)
+            .map(|r| (r.start_line, r.end_line))
+    }
+
     pub fn symbols_enclosing(
         &self,
         file: &Path,

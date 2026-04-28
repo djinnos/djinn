@@ -330,6 +330,15 @@ impl RepoGraphOps for StubRepoGraphOps {
     ) -> Result<DiffTouchesResult, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
+    async fn detect_changes(
+        &self,
+        _: &ProjectCtx,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: &[String],
+    ) -> Result<bridge::DetectedChangesResult, String> {
+        Err("code_graph not available in agent bridge — use MCP server".into())
+    }
     async fn api_surface(
         &self,
         _: &ProjectCtx,

@@ -9,10 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::bridge::{
     ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangedRange, ChurnEntry, CoupledPairEntry,
-    CouplingEntry, CouplingHubEntry, CycleGroup, DeadSymbolEntry, DeprecatedHit, EdgeEntry,
-    FileGroupEntry, GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry, ImpactEntry,
-    ImpactResult, MetricsAtResult, NeighborsResult, OrphanEntry, PathResult, ProjectCtx,
-    RankedNode, SearchHit, SymbolAtHit, SymbolDescription, TouchedSymbol,
+    CouplingEntry, CouplingHubEntry, CycleGroup, DeadSymbolEntry, DeprecatedHit,
+    DetectedChangesResult, EdgeEntry, FileGroupEntry, GraphNeighbor, GraphStatus, HotPathHit,
+    HotspotEntry, ImpactEntry, ImpactResult, MetricsAtResult, NeighborsResult, OrphanEntry,
+    PathResult, ProjectCtx, RankedNode, SearchHit, SymbolAtHit, SymbolDescription, TouchedSymbol,
 };
 use crate::server::DjinnMcpServer;
 use crate::tools::graph_exclusions::GraphExclusions;
@@ -26,7 +26,7 @@ pub struct CodeGraphParams {
     /// The operation to perform.
     /// One of: `neighbors`, `ranked`, `impact`, `implementations`,
     /// `search`, `cycles`, `orphans`, `path`, `edges`, `symbols_at`,
-    /// `diff_touches`, `describe`, `status`.
+    /// `diff_touches`, `detect_changes`, `describe`, `status`.
     pub operation: String,
     /// Project identifier — either the UUID (`project_id`) or the
     /// canonical `"owner/repo"` slug. The handler resolves it to the
@@ -144,6 +144,21 @@ pub struct CodeGraphParams {
     /// pairs with essentially zero real coupling information.
     #[serde(default)]
     pub max_files_per_commit: Option<i64>,
+    /// Base SHA for `detect_changes`. When paired with `to_sha`, the
+    /// op runs `git diff --unified=0 from_sha..to_sha` and maps the
+    /// resulting hunks to symbols. Mutually exclusive with
+    /// `changed_files` only when both are absent — when both are
+    /// provided, line-level wins.
+    #[serde(default)]
+    pub from_sha: Option<String>,
+    /// Head SHA for `detect_changes`.
+    #[serde(default)]
+    pub to_sha: Option<String>,
+    /// Repository-relative file paths for `detect_changes` when no
+    /// SHA range is supplied (or as a coarser fallback). Every symbol
+    /// in each listed file is treated as potentially touched.
+    #[serde(default)]
+    pub changed_files: Option<Vec<String>>,
 }
 
 // ── Response types ──────────────────────────────────────────────────────────────
@@ -239,6 +254,19 @@ pub struct DiffTouchesResponse {
     pub unknown_files: Vec<String>,
 }
 
+/// Response for the `detect_changes` op (PR C4). The discriminator field
+/// is `detected_changes` (matching the `CodeGraphResponse` untagged-enum
+/// contract); a `next_step` hint nudges the caller toward an `impact`
+/// follow-up on the highest-tier touched symbol.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DetectedChangesResponse {
+    pub detected_changes: DetectedChangesResult,
+    /// Human-readable suggestion for the next MCP call. Always present
+    /// (matches the A4 next-step convention).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
+}
+
 /// Response for the `api_surface` op.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ApiSurfaceResponse {
@@ -325,6 +353,7 @@ pub enum CodeGraphResponse {
     Status(StatusResponse),
     SymbolsAt(SymbolsAtResponse),
     DiffTouches(DiffTouchesResponse),
+    DetectedChanges(DetectedChangesResponse),
     ApiSurface(ApiSurfaceResponse),
     BoundaryCheck(BoundaryCheckResponse),
     Hotspots(HotspotsResponse),
@@ -452,13 +481,35 @@ fn validate_group_by(group_by: Option<&str>) -> Result<(), String> {
     }
 }
 
+/// Pick the highest-priority touched symbol for the next-step impact
+/// hint. High-tier wins over Medium wins over Low; ties break on
+/// `name` for stability.
+fn pick_next_step_target(symbols: &[crate::bridge::DetectedTouchedSymbol]) -> Option<String> {
+    use crate::bridge::PagerankTier;
+    fn rank(t: PagerankTier) -> u8 {
+        match t {
+            PagerankTier::High => 0,
+            PagerankTier::Medium => 1,
+            PagerankTier::Low => 2,
+        }
+    }
+    symbols
+        .iter()
+        .min_by(|a, b| {
+            rank(a.pagerank_tier)
+                .cmp(&rank(b.pagerank_tier))
+                .then_with(|| a.name.cmp(&b.name))
+        })
+        .map(|s| s.uid.clone())
+}
+
 // ── Handler ─────────────────────────────────────────────────────────────────────
 
 #[tool_router(router = graph_tool_router, vis = "pub")]
 impl DjinnMcpServer {
     /// Query the repository dependency graph built from SCIP indexer output.
     #[tool(
-        description = "Query the repository dependency graph built from SCIP indexer output and the commit-based file-coupling index. Operations: neighbors (edges in/out of a node, with optional group_by=file rollup), ranked (top nodes; sort_by pagerank/in_degree/out_degree/total_degree), impact (transitive dependents, with optional group_by=file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup), cycles (strongly-connected components), orphans (zero-incoming-reference nodes, with visibility filter), path (shortest dependency path), edges (enumerate edges by from_glob/to_glob), symbols_at (given file+line range, return SCIP symbols whose definition range encloses those lines — diff-hunk → symbol lookup), diff_touches (given a list of changed line ranges parsed from `git diff --unified=0 base..head`, return every base-graph symbol touched, with fan-in/fan-out and file grouping; the base graph is always current main — this op does NOT build a head graph), describe (symbol signature/documentation without an LSP round trip), status (peek at the persisted canonical graph cache; never warms), api_surface (list every public symbol with fan-in/fan-out and a used-outside-crate signal), boundary_check (edge-based architecture rule scanner over from_glob→to_glob pairs; returns forbidden violations), hotspots (file churn × centrality ranking over a configurable window; top_symbols per file), metrics_at (scalar graph snapshot: node/edge/cycle counts, god-object floor, orphans, public API and doc coverage), dead_symbols (no-incoming-edge-from-entry-points enumeration; confidence=high|med|low), deprecated_callers (symbols whose signature/documentation contains #[deprecated] or @deprecated, with caller list), touches_hot_path (given entry and sink SCIP keys, report which queried symbols sit on any entry→sink shortest path), coupling (files most frequently co-edited with `file`, sourced from the per-commit change log; returns co-edit count, last co-edit timestamp, and up to three supporting SHAs per peer), churn (top files by distinct-commit count over an optional `since_days` window; returns commit count, cumulative insertions/deletions, and last-touched timestamp), coupling_hotspots (top file PAIRS by co-edit count project-wide; returns [{file_a,file_b,co_edits,last_co_edit}]; respects `since_days` and `max_files_per_commit` [default 15] — useful for spotting implicit coupling between distant parts of the tree), coupling_hubs (top FILES by cumulative coupling across all partners; returns [{file_path,total_coupling,partner_count}] — change-propagation risk map, higher total_coupling means a touch to this file is more likely to require touching many others). All coupling / churn outputs are filtered through the project's `project_graph_exclusions` glob list at query time, so tuning exclusions takes effect without re-ingesting."
+        description = "Query the repository dependency graph built from SCIP indexer output and the commit-based file-coupling index. Operations: neighbors (edges in/out of a node, with optional group_by=file rollup), ranked (top nodes; sort_by pagerank/in_degree/out_degree/total_degree), impact (transitive dependents, with optional group_by=file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup), cycles (strongly-connected components), orphans (zero-incoming-reference nodes, with visibility filter), path (shortest dependency path), edges (enumerate edges by from_glob/to_glob), symbols_at (given file+line range, return SCIP symbols whose definition range encloses those lines — diff-hunk → symbol lookup), diff_touches (given a list of changed line ranges parsed from `git diff --unified=0 base..head`, return every base-graph symbol touched, with fan-in/fan-out and file grouping; the base graph is always current main — this op does NOT build a head graph), detect_changes (given from_sha + to_sha [or a changed_files list], return touched symbols + their PageRank tier [High/Medium/Low quartile] + per-file rollup; shells out to `git diff --unified=0 from_sha..to_sha` server-side and maps hunks via symbols_enclosing — replaces the architect's manual diff inspection), describe (symbol signature/documentation without an LSP round trip), status (peek at the persisted canonical graph cache; never warms), api_surface (list every public symbol with fan-in/fan-out and a used-outside-crate signal), boundary_check (edge-based architecture rule scanner over from_glob→to_glob pairs; returns forbidden violations), hotspots (file churn × centrality ranking over a configurable window; top_symbols per file), metrics_at (scalar graph snapshot: node/edge/cycle counts, god-object floor, orphans, public API and doc coverage), dead_symbols (no-incoming-edge-from-entry-points enumeration; confidence=high|med|low), deprecated_callers (symbols whose signature/documentation contains #[deprecated] or @deprecated, with caller list), touches_hot_path (given entry and sink SCIP keys, report which queried symbols sit on any entry→sink shortest path), coupling (files most frequently co-edited with `file`, sourced from the per-commit change log; returns co-edit count, last co-edit timestamp, and up to three supporting SHAs per peer), churn (top files by distinct-commit count over an optional `since_days` window; returns commit count, cumulative insertions/deletions, and last-touched timestamp), coupling_hotspots (top file PAIRS by co-edit count project-wide; returns [{file_a,file_b,co_edits,last_co_edit}]; respects `since_days` and `max_files_per_commit` [default 15] — useful for spotting implicit coupling between distant parts of the tree), coupling_hubs (top FILES by cumulative coupling across all partners; returns [{file_path,total_coupling,partner_count}] — change-propagation risk map, higher total_coupling means a touch to this file is more likely to require touching many others). All coupling / churn outputs are filtered through the project's `project_graph_exclusions` glob list at query time, so tuning exclusions takes effect without re-ingesting."
     )]
     pub async fn code_graph(
         &self,
@@ -515,6 +566,7 @@ impl DjinnMcpServer {
             "status" => self.code_graph_status(&ctx, &params).await,
             "symbols_at" => self.code_graph_symbols_at(&ctx, &params).await,
             "diff_touches" => self.code_graph_diff_touches(&ctx, &params).await,
+            "detect_changes" => self.code_graph_detect_changes(&ctx, &params).await,
             "api_surface" => self.code_graph_api_surface(&ctx, &params).await,
             "boundary_check" => self.code_graph_boundary_check(&ctx, &params).await,
             "hotspots" => self.code_graph_hotspots(&ctx, &params).await,
@@ -530,7 +582,8 @@ impl DjinnMcpServer {
                 "unknown code_graph operation '{other}': expected one of \
                  'neighbors', 'ranked', 'impact', 'implementations', \
                  'search', 'cycles', 'orphans', 'path', 'edges', \
-                 'symbols_at', 'diff_touches', 'describe', 'status', \
+                 'symbols_at', 'diff_touches', 'detect_changes', \
+                 'describe', 'status', \
                  'api_surface', 'boundary_check', 'hotspots', 'metrics_at', \
                  'dead_symbols', 'deprecated_callers', 'touches_hot_path', \
                  'coupling', 'churn', 'coupling_hotspots', 'coupling_hubs'"
@@ -964,6 +1017,78 @@ impl DjinnMcpServer {
         }))
     }
 
+    /// Handler for `operation = "detect_changes"`.
+    ///
+    /// Two input modes:
+    /// * `from_sha` + `to_sha` — runs `git diff --unified=0 from..to`
+    ///   server-side and maps hunks via `symbols_enclosing`.
+    /// * `changed_files` — every symbol in each listed file is treated
+    ///   as touched (no line-level filtering).
+    ///
+    /// When both are provided line-level wins; the file list is
+    /// ignored. At least one mode must be supplied.
+    async fn code_graph_detect_changes(
+        &self,
+        ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let from = params.from_sha.as_deref().filter(|s| !s.is_empty());
+        let to = params.to_sha.as_deref().filter(|s| !s.is_empty());
+        let changed_files: Vec<String> = params
+            .changed_files
+            .as_ref()
+            .map(|v| v.iter().filter(|s| !s.is_empty()).cloned().collect())
+            .unwrap_or_default();
+        let line_mode = from.is_some() && to.is_some();
+        if !line_mode && changed_files.is_empty() {
+            return Err(format!(
+                "'detect_changes' requires either both 'from_sha' and \
+                 'to_sha', or a non-empty 'changed_files' list (got \
+                 from_sha={}, to_sha={}, changed_files={})",
+                from.is_some(),
+                to.is_some(),
+                changed_files.len()
+            ));
+        }
+        let result = self
+            .state
+            .repo_graph()
+            .detect_changes(ctx, from, to, &changed_files)
+            .await?;
+
+        // Apply Phase-0 graph exclusions to suppress generated/vendored
+        // noise — match the diff_touches policy.
+        let exclusions = self.load_graph_exclusions(&params.project_id).await;
+        let mut filtered = result;
+        filtered.touched_symbols.retain(|s| {
+            !exclusions.excludes(&s.uid, Some(&s.file_path), &s.name)
+        });
+        // Rebuild `by_file` after filtering so the rollup matches.
+        let mut by_file: std::collections::BTreeMap<String, Vec<_>> =
+            std::collections::BTreeMap::new();
+        for sym in &filtered.touched_symbols {
+            by_file
+                .entry(sym.file_path.clone())
+                .or_default()
+                .push(sym.clone());
+        }
+        filtered.by_file = by_file;
+
+        // Bias the next-step hint toward the highest-tier symbol —
+        // High > Medium > Low, then by symbol name (stable).
+        let next_step = pick_next_step_target(&filtered.touched_symbols).map(|target| {
+            format!(
+                "Call `code_graph impact target={target}` to assess each \
+                 touched symbol's blast radius."
+            )
+        });
+
+        Ok(CodeGraphResponse::DetectedChanges(DetectedChangesResponse {
+            detected_changes: filtered,
+            next_step,
+        }))
+    }
+
     /// Handler for `operation = "api_surface"`.
     async fn code_graph_api_surface(
         &self,
@@ -1317,6 +1442,9 @@ mod tests {
             symbols: None,
             since_days: None,
             max_files_per_commit: None,
+            from_sha: None,
+            to_sha: None,
+            changed_files: None,
         }
     }
 
@@ -1680,5 +1808,78 @@ mod tests {
         assert_eq!(ranges[1].file, "src/b.rs");
         assert_eq!(ranges[1].start_line, 5);
         assert!(ranges[1].end_line.is_none());
+    }
+
+    #[test]
+    fn parses_detect_changes_params_with_sha_range() {
+        let json = serde_json::json!({
+            "operation": "detect_changes",
+            "project": "owner/repo",
+            "from_sha": "abc123",
+            "to_sha": "HEAD",
+        });
+        let params: CodeGraphParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.operation, "detect_changes");
+        assert_eq!(params.from_sha.as_deref(), Some("abc123"));
+        assert_eq!(params.to_sha.as_deref(), Some("HEAD"));
+        assert!(params.changed_files.is_none());
+    }
+
+    #[test]
+    fn parses_detect_changes_params_with_changed_files() {
+        let json = serde_json::json!({
+            "operation": "detect_changes",
+            "project": "owner/repo",
+            "changed_files": ["src/a.rs", "src/b.rs"],
+        });
+        let params: CodeGraphParams = serde_json::from_value(json).unwrap();
+        let files = params.changed_files.as_ref().expect("changed_files set");
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0], "src/a.rs");
+        assert_eq!(files[1], "src/b.rs");
+    }
+
+    #[test]
+    fn pick_next_step_target_prefers_high_tier() {
+        use crate::bridge::{ChangeKind, DetectedTouchedSymbol, PagerankTier};
+        let symbols = vec![
+            DetectedTouchedSymbol {
+                uid: "sym:low".to_string(),
+                name: "z_low".to_string(),
+                kind: "function".to_string(),
+                file_path: "src/lib.rs".to_string(),
+                start_line: 1,
+                end_line: 1,
+                pagerank_tier: PagerankTier::Low,
+                change_kind: ChangeKind::Modified,
+            },
+            DetectedTouchedSymbol {
+                uid: "sym:high".to_string(),
+                name: "a_high".to_string(),
+                kind: "function".to_string(),
+                file_path: "src/lib.rs".to_string(),
+                start_line: 10,
+                end_line: 20,
+                pagerank_tier: PagerankTier::High,
+                change_kind: ChangeKind::Modified,
+            },
+            DetectedTouchedSymbol {
+                uid: "sym:medium".to_string(),
+                name: "m_medium".to_string(),
+                kind: "function".to_string(),
+                file_path: "src/lib.rs".to_string(),
+                start_line: 5,
+                end_line: 5,
+                pagerank_tier: PagerankTier::Medium,
+                change_kind: ChangeKind::Modified,
+            },
+        ];
+        let target = super::pick_next_step_target(&symbols);
+        assert_eq!(target.as_deref(), Some("sym:high"));
+    }
+
+    #[test]
+    fn pick_next_step_target_returns_none_for_empty() {
+        assert!(super::pick_next_step_target(&[]).is_none());
     }
 }

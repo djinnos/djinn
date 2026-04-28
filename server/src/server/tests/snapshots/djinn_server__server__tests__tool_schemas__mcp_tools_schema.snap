@@ -750,6 +750,15 @@ expression: signatures
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "changed_files": {
+          "default": null,
+          "description": "Repository-relative file paths for `detect_changes` when no\nSHA range is supplied (or as a coarser fallback). Every symbol\nin each listed file is treated as potentially touched.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
         "changed_ranges": {
           "default": null,
           "description": "List of `(file, start_line, end_line?)` hunks for `diff_touches`.",
@@ -808,6 +817,12 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "from_sha": {
+          "default": null,
+          "description": "Base SHA for `detect_changes`. When paired with `to_sha`, the\nop runs `git diff --unified=0 from_sha..to_sha` and maps the\nresulting hunks to symbols. Mutually exclusive with\n`changed_files` only when both are absent — when both are\nprovided, line-level wins.",
+          "nullable": true,
+          "type": "string"
+        },
         "group_by": {
           "default": null,
           "description": "Group results: only `file` is supported. Applies to `impact`/`neighbors`.",
@@ -861,7 +876,7 @@ expression: signatures
           "type": "string"
         },
         "operation": {
-          "description": "The operation to perform.\nOne of: `neighbors`, `ranked`, `impact`, `implementations`,\n`search`, `cycles`, `orphans`, `path`, `edges`, `symbols_at`,\n`diff_touches`, `describe`, `status`.",
+          "description": "The operation to perform.\nOne of: `neighbors`, `ranked`, `impact`, `implementations`,\n`search`, `cycles`, `orphans`, `path`, `edges`, `symbols_at`,\n`diff_touches`, `detect_changes`, `describe`, `status`.",
           "type": "string"
         },
         "project": {
@@ -939,6 +954,12 @@ expression: signatures
         "to_glob": {
           "default": null,
           "description": "Destination path glob for `edges`.",
+          "nullable": true,
+          "type": "string"
+        },
+        "to_sha": {
+          "default": null,
+          "description": "Head SHA for `detect_changes`.",
           "nullable": true,
           "type": "string"
         },
