@@ -363,6 +363,7 @@ mod tests {
                         documentation: vec![],
                         relationships: vec![],
                         visibility: Some(crate::scip_parser::ScipVisibility::Public),
+                        signature_parts: None,
                     }],
                 },
                 ScipFile {
@@ -379,6 +380,7 @@ mod tests {
                         documentation: vec![],
                         relationships: vec![],
                         visibility: Some(crate::scip_parser::ScipVisibility::Public),
+                        signature_parts: None,
                     }],
                 },
             ],
