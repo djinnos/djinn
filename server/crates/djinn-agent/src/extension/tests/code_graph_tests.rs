@@ -516,6 +516,126 @@ async fn code_graph_dispatch_hotspots_reaches_graph_ops() {
     );
 }
 
+/// v8 batch: 6 trait-delegation ops (api_surface / metrics_at /
+/// dead_symbols / deprecated_callers / touches_hot_path /
+/// coupling_hubs) all reach the agent bridge stub. One test per op
+/// — deliberately uniform so adding the next trait op only needs a
+/// tiny copy-paste here.
+#[tokio::test]
+async fn code_graph_dispatch_api_surface_reaches_graph_ops() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-api-surface-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let err = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "api_surface",
+            "project_path": worktree.path().to_string_lossy(),
+        }),
+        worktree.path(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("code_graph not available"), "got: {err}");
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_metrics_at_reaches_graph_ops() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-metrics-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let err = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "metrics_at",
+            "project_path": worktree.path().to_string_lossy(),
+        }),
+        worktree.path(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("code_graph not available"), "got: {err}");
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_dead_symbols_reaches_graph_ops() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-dead-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let err = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "dead_symbols",
+            "project_path": worktree.path().to_string_lossy(),
+            "kind_filter": "high",
+        }),
+        worktree.path(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("code_graph not available"), "got: {err}");
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_deprecated_callers_reaches_graph_ops() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-deprecated-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let err = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "deprecated_callers",
+            "project_path": worktree.path().to_string_lossy(),
+        }),
+        worktree.path(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("code_graph not available"), "got: {err}");
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_touches_hot_path_validates_inputs() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-hotpath-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let err = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "touches_hot_path",
+            "project_path": worktree.path().to_string_lossy(),
+            // Missing the required from_glob/to_glob/query — should
+            // fail with arg-validation message before reaching the
+            // bridge stub.
+        }),
+        worktree.path(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("touches_hot_path requires"),
+        "should fail with arg-validation, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_coupling_hubs_reaches_graph_ops() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-hubs-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let err = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "coupling_hubs",
+            "project_path": worktree.path().to_string_lossy(),
+        }),
+        worktree.path(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("code_graph not available"), "got: {err}");
+}
+
 /// v8 boundary_check op: reaches the bridge layer (which short-circuits
 /// in agent-side stub mode). Asserts the dispatch wire is hooked up
 /// AND that the rules-required validation fires before the bridge.

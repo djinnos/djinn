@@ -470,6 +470,87 @@ pub(crate) async fn call_code_graph(
                 }),
             }
         }
+        "api_surface" => {
+            // v8: list public symbols with fan-in / fan-out + a
+            // used-outside-crate signal. Trait method already exists;
+            // this is just dispatch wiring.
+            let limit = p.limit.unwrap_or(50);
+            let result = graph_ops
+                .api_surface(
+                    &ctx,
+                    p.from_glob.as_deref(),
+                    p.visibility.as_deref(),
+                    limit,
+                )
+                .await?;
+            serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
+        }
+        "metrics_at" => {
+            // v8: scalar graph snapshot — node/edge counts, cycles,
+            // god-object floor, orphan count, public-API and
+            // documentation coverage. Cheap enough to call any time;
+            // no graph load if cached.
+            let result = graph_ops.metrics_at(&ctx).await?;
+            serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
+        }
+        "dead_symbols" => {
+            // v8: stricter sibling of `orphans`. Tiered by caller-
+            // confidence (`high`/`med`/`low`); high = no incoming
+            // refs from any entry-point reachable scope.
+            let confidence = p.kind_filter.as_deref().unwrap_or("high");
+            let limit = p.limit.unwrap_or(50);
+            let result = graph_ops.dead_symbols(&ctx, confidence, limit).await?;
+            serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
+        }
+        "deprecated_callers" => {
+            // v8: surface symbols whose signature/documentation
+            // carries `#[deprecated]` / `@deprecated`, plus their
+            // callers — actionable removal target list.
+            let limit = p.limit.unwrap_or(50);
+            let result = graph_ops.deprecated_callers(&ctx, limit).await?;
+            serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
+        }
+        "touches_hot_path" => {
+            // v8: given entries (e.g. `[fn main]`) + sinks (e.g. db
+            // writes) + queried symbols, returns which queried
+            // symbols sit on any shortest path entry → sink. Useful
+            // for "does my refactor touch the hot request path?"
+            let entries: Vec<String> = p
+                .from_glob
+                .as_deref()
+                .map(|s| s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect())
+                .unwrap_or_default();
+            let sinks: Vec<String> = p
+                .to_glob
+                .as_deref()
+                .map(|s| s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect())
+                .unwrap_or_default();
+            let queried: Vec<String> = p
+                .query
+                .as_deref()
+                .map(|s| s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect())
+                .unwrap_or_default();
+            if entries.is_empty() || sinks.is_empty() || queried.is_empty() {
+                return Err(
+                    "touches_hot_path requires from_glob (entries, comma-sep), \
+                     to_glob (sinks, comma-sep), and query (symbols, comma-sep)"
+                        .to_string(),
+                );
+            }
+            let result = graph_ops
+                .touches_hot_path(&ctx, &entries, &sinks, &queried)
+                .await?;
+            serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
+        }
+        "coupling_hubs" => {
+            // v8: top files by cumulative coupling across all
+            // partners (sum of co_edits). High value = touching this
+            // file is more likely to require touching many others.
+            let limit = p.limit.unwrap_or(20);
+            let since_days = p.query.as_deref().and_then(|s| s.parse::<u32>().ok());
+            let result = graph_ops.coupling_hubs(&ctx, limit, since_days, 15).await?;
+            serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
+        }
         "capabilities" => {
             // v8: introspection. Lets clients plan workflows without
             // trial-and-error against a deployment whose set of wired
@@ -693,7 +774,9 @@ pub(crate) async fn call_code_graph(
                  'neighbors', 'ranked', 'impact', 'implementations', \
                  'search', 'cycles', 'orphans', 'path', 'edges', \
                  'describe', 'context', 'capabilities', 'blast_radius', \
-                 'boundary_check', 'cochange', 'churn', 'hotspots'"
+                 'boundary_check', 'cochange', 'churn', 'hotspots', \
+                 'api_surface', 'metrics_at', 'dead_symbols', \
+                 'deprecated_callers', 'touches_hot_path', 'coupling_hubs'"
             ));
         }
     };
@@ -884,6 +967,8 @@ fn code_graph_capabilities() -> serde_json::Value {
             "search", "cycles", "orphans", "path", "edges",
             "describe", "context", "capabilities", "blast_radius",
             "boundary_check", "cochange", "churn", "hotspots",
+            "api_surface", "metrics_at", "dead_symbols",
+            "deprecated_callers", "touches_hot_path", "coupling_hubs",
         ],
         "default_search_mode": std::env::var("DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE")
             .unwrap_or_else(|_| "name".to_string()),
