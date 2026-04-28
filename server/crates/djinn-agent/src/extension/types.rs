@@ -334,6 +334,39 @@ pub(super) struct CodeGraphParams {
     /// violation. Empty / absent for every other op.
     #[serde(default)]
     pub rules: Option<Vec<BoundaryRule>>,
+    /// v8 `symbols_at` op: 0-indexed end line for the range query.
+    /// `start_line` reuses the existing `min_size` field. Both
+    /// optional; absence triggers single-line mode.
+    #[serde(default)]
+    pub end_line: Option<u32>,
+    /// v8 `diff_touches` op: list of changed file/line-range
+    /// records parsed from `git diff --unified=0 base..head`.
+    /// Each entry passes through to the bridge as-is.
+    #[serde(default)]
+    pub changed_ranges: Option<Vec<ChangedRangeArg>>,
+    /// v8 `detect_changes` op: SHA range or explicit changed-files
+    /// list. When `from_sha` is set, the bridge shells out to git
+    /// diff; when `changed_files` is set, those files are taken as
+    /// the touched set wholesale.
+    #[serde(default)]
+    pub from_sha: Option<String>,
+    #[serde(default)]
+    pub to_sha: Option<String>,
+    #[serde(default)]
+    pub changed_files: Option<Vec<String>>,
+    /// v8 `snapshot` op: cap on returned node count. Default 2000
+    /// (Sigma WebGL ceiling); the trait clamps to 10k.
+    #[serde(default)]
+    pub node_cap: Option<usize>,
+}
+
+/// v8 `diff_touches` input shape — mirrors
+/// `djinn_control_plane::bridge::ChangedRange`.
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct ChangedRangeArg {
+    pub file_path: String,
+    pub start_line: u32,
+    pub end_line: u32,
 }
 
 /// One rule for the `boundary_check` op. Names an architectural

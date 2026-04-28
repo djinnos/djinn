@@ -516,6 +516,103 @@ async fn code_graph_dispatch_hotspots_reaches_graph_ops() {
     );
 }
 
+/// v8 final batch: 5 trait-delegation ops (status / snapshot /
+/// symbols_at / diff_touches / detect_changes). Same pattern.
+#[tokio::test]
+async fn code_graph_dispatch_status_reaches_graph_ops() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-status-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let err = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "status",
+            "project_path": worktree.path().to_string_lossy(),
+        }),
+        worktree.path(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("code_graph not available"), "got: {err}");
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_snapshot_reaches_graph_ops() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-snapshot-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let err = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "snapshot",
+            "project_path": worktree.path().to_string_lossy(),
+            "node_cap": 1000,
+        }),
+        worktree.path(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("code_graph not available"), "got: {err}");
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_symbols_at_validates_inputs() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-symat-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let err = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "symbols_at",
+            "project_path": worktree.path().to_string_lossy(),
+            // Missing key + min_size — should hit arg validation.
+        }),
+        worktree.path(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("'key' (file path) is required"), "got: {err}");
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_diff_touches_validates_inputs() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-diff-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let err = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "diff_touches",
+            "project_path": worktree.path().to_string_lossy(),
+        }),
+        worktree.path(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("'changed_ranges' is required"), "got: {err}");
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_detect_changes_validates_inputs() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-dc-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let err = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "detect_changes",
+            "project_path": worktree.path().to_string_lossy(),
+        }),
+        worktree.path(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("detect_changes requires"),
+        "got: {err}"
+    );
+}
+
 /// v8 batch: 6 trait-delegation ops (api_surface / metrics_at /
 /// dead_symbols / deprecated_callers / touches_hot_path /
 /// coupling_hubs) all reach the agent bridge stub. One test per op

@@ -470,6 +470,85 @@ pub(crate) async fn call_code_graph(
                 }),
             }
         }
+        "status" => {
+            // v8: peek at the persisted canonical-graph cache. Cheap;
+            // never warms.
+            let result = graph_ops.status(&ctx).await?;
+            serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
+        }
+        "snapshot" => {
+            // v8: full graph snapshot for the /code-graph UI.
+            // Default cap 2000 (Sigma WebGL ceiling); trait clamps
+            // higher values.
+            let node_cap = p.node_cap.or(p.limit).unwrap_or(2000);
+            let exclusions = djinn_control_plane::tools::graph_exclusions::GraphExclusions::empty();
+            let result = graph_ops.snapshot(&ctx, node_cap, &exclusions).await?;
+            serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
+        }
+        "symbols_at" => {
+            // v8: file/line → enclosing symbols. Required: file
+            // (via key, with file: prefix stripped) + start_line
+            // (passed via min_size since we don't have a dedicated
+            // line param). Optional end_line.
+            let file = p
+                .key
+                .as_deref()
+                .map(|k| k.trim_start_matches("file:"))
+                .filter(|f| !f.is_empty())
+                .ok_or("'key' (file path) is required for 'symbols_at'")?;
+            let start_line = p
+                .min_size
+                .map(|n| n as u32)
+                .ok_or("'min_size' (start_line) is required for 'symbols_at'")?;
+            let result = graph_ops
+                .symbols_at(&ctx, file, start_line, p.end_line)
+                .await?;
+            serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
+        }
+        "diff_touches" => {
+            // v8: changed line ranges → touched symbols. Caller
+            // supplies `changed_ranges: [{file_path, start_line,
+            // end_line}, ...]` parsed from `git diff --unified=0
+            // base..head`.
+            use djinn_control_plane::bridge::ChangedRange;
+            let agents_ranges = p
+                .changed_ranges
+                .as_ref()
+                .ok_or("'changed_ranges' is required for 'diff_touches'")?;
+            if agents_ranges.is_empty() {
+                return Err("'changed_ranges' must be a non-empty array".to_string());
+            }
+            let bridge_ranges: Vec<ChangedRange> = agents_ranges
+                .iter()
+                .map(|r| ChangedRange {
+                    file: r.file_path.clone(),
+                    start_line: r.start_line as i64,
+                    end_line: Some(r.end_line as i64),
+                })
+                .collect();
+            let result = graph_ops.diff_touches(&ctx, &bridge_ranges).await?;
+            serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
+        }
+        "detect_changes" => {
+            // v8: SHA range or explicit changed_files → touched
+            // symbols + PageRank tier. Either {from_sha, to_sha}
+            // (server shells out to git) or {changed_files} (caller
+            // pre-resolved).
+            let from_sha = p.from_sha.as_deref();
+            let to_sha = p.to_sha.as_deref();
+            let changed: Vec<String> = p.changed_files.clone().unwrap_or_default();
+            if from_sha.is_none() && changed.is_empty() {
+                return Err(
+                    "detect_changes requires either {from_sha, to_sha} or non-empty \
+                     changed_files"
+                        .to_string(),
+                );
+            }
+            let result = graph_ops
+                .detect_changes(&ctx, from_sha, to_sha, &changed)
+                .await?;
+            serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
+        }
         "api_surface" => {
             // v8: list public symbols with fan-in / fan-out + a
             // used-outside-crate signal. Trait method already exists;
@@ -776,7 +855,9 @@ pub(crate) async fn call_code_graph(
                  'describe', 'context', 'capabilities', 'blast_radius', \
                  'boundary_check', 'cochange', 'churn', 'hotspots', \
                  'api_surface', 'metrics_at', 'dead_symbols', \
-                 'deprecated_callers', 'touches_hot_path', 'coupling_hubs'"
+                 'deprecated_callers', 'touches_hot_path', 'coupling_hubs', \
+                 'status', 'snapshot', 'symbols_at', 'diff_touches', \
+                 'detect_changes'"
             ));
         }
     };
@@ -969,6 +1050,8 @@ fn code_graph_capabilities() -> serde_json::Value {
             "boundary_check", "cochange", "churn", "hotspots",
             "api_surface", "metrics_at", "dead_symbols",
             "deprecated_callers", "touches_hot_path", "coupling_hubs",
+            "status", "snapshot", "symbols_at", "diff_touches",
+            "detect_changes",
         ],
         "default_search_mode": std::env::var("DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE")
             .unwrap_or_else(|_| "name".to_string()),
