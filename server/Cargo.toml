@@ -88,6 +88,7 @@ landlock = "0.4"
 fuser = { version = "0.15", optional = true, default-features = false }
 
 [dev-dependencies]
+djinn-control-plane = { path = "crates/djinn-control-plane", features = ["test-support"] }
 insta = { version = "1", features = ["json", "redactions"] }
 proptest = "1"
 rstest = "0.24"

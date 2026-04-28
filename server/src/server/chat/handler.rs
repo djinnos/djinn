@@ -219,10 +219,56 @@ pub(super) async fn completions_handler_impl(
     // User-scoped system message: base prompt + optional client-supplied
     // system string, NO per-project repo map, NO per-project brief.  The
     // orientation plan (§2) forbids project-named templating here.
+    //
+    // PR E1 (Epic E — RAG plumbing): when `req.project` is supplied AND
+    // `DJINN_CHAT_AUTO_CODEBASE_HEADER` is on, we resolve the project
+    // and inject a compact `📦 CURRENT CODEBASE` block as the
+    // `project_context` slot. The block is cached in-process for 60s
+    // keyed by `(project_id, pinned_commit)` so we don't re-run the
+    // status/ranked queries on every chat turn.
+    let codebase_header = if super::prompt::codebase_header::is_enabled() {
+        match req.project.as_ref().filter(|p| !p.trim().is_empty()) {
+            Some(project_ref) => {
+                // Build a one-shot resolver locally — the per-tool-call
+                // resolver is constructed below for tool dispatch but we
+                // need the path now.  We share its workspace store so
+                // both layers hit the same persistent clone.
+                let header_resolver = ProjectResolver::new(
+                    state.db().clone(),
+                    state.event_bus(),
+                    state.workspace_store(),
+                );
+                match header_resolver.resolve(project_ref).await {
+                    Ok(resolved) => {
+                        let agent_ctx = state.agent_context();
+                        match agent_ctx.repo_graph_ops.clone() {
+                            Some(ops) => {
+                                super::prompt::codebase_header::build_codebase_header(
+                                    ops,
+                                    &resolved.id,
+                                    &resolved.clone_path,
+                                )
+                                .await
+                            }
+                            None => None,
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(project=%project_ref, error=%err, "codebase_header: project resolution failed; skipping");
+                        None
+                    }
+                }
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
     let mut conversation = Conversation::new();
     let system_message = super::prompt::system_message::build_system_message(
         DJINN_CHAT_SYSTEM_PROMPT,
-        None,
+        codebase_header.as_deref(),
         req.system.as_deref(),
         &req.model,
     );
