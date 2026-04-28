@@ -477,6 +477,81 @@ pub(crate) async fn call_code_graph(
             // can't otherwise discover. Cheap — no graph load.
             code_graph_capabilities()
         }
+        "boundary_check" => {
+            // v8: enforce architectural layering rules. Each rule
+            // says "files matching `from_glob` must not depend on
+            // any file matching any of `forbid_to`". We reuse the
+            // existing `edges` op per (from_glob, forbid_to_glob)
+            // pair so we don't need a new trait method — keeps
+            // bridge surface stable.
+            let rules = p.rules.as_deref().unwrap_or(&[]);
+            if rules.is_empty() {
+                return Err(
+                    "'rules' is required for 'boundary_check': pass [{name, from_glob, \
+                     forbid_to: [...]}]"
+                        .to_string(),
+                );
+            }
+            // Per-rule cap on returned violations to keep the wire
+            // size bounded; the count is reported separately so the
+            // user knows when output was truncated.
+            const PER_RULE_LIMIT: usize = 100;
+            let mut report_rules: Vec<serde_json::Value> = Vec::new();
+            let mut total_violations: usize = 0;
+            for rule in rules {
+                let mut rule_violations: Vec<serde_json::Value> = Vec::new();
+                let mut rule_count: usize = 0;
+                let mut truncated = false;
+                for forbid in &rule.forbid_to {
+                    let edges_for_pair = graph_ops
+                        .edges(
+                            &ctx,
+                            &rule.from_glob,
+                            forbid,
+                            None, // no edge_kind filter — any dependency counts
+                            PER_RULE_LIMIT,
+                        )
+                        .await?;
+                    for edge in edges_for_pair {
+                        rule_count += 1;
+                        if rule_violations.len() >= PER_RULE_LIMIT {
+                            truncated = true;
+                            continue;
+                        }
+                        rule_violations.push(serde_json::json!({
+                            "from": edge.from,
+                            "to": edge.to,
+                            "matched_forbid_glob": forbid,
+                            "edge_kind": edge.edge_kind,
+                        }));
+                    }
+                }
+                total_violations += rule_count;
+                report_rules.push(serde_json::json!({
+                    "name": rule.name,
+                    "from_glob": rule.from_glob,
+                    "forbid_to": rule.forbid_to,
+                    "violation_count": rule_count,
+                    "violations": rule_violations,
+                    "truncated": truncated,
+                    "passed": rule_count == 0,
+                }));
+            }
+            serde_json::json!({
+                "rules_evaluated": rules.len(),
+                "total_violations": total_violations,
+                "passed": total_violations == 0,
+                "rules": report_rules,
+                "next_steps": if total_violations == 0 {
+                    serde_json::json!(["all rules passed — no architectural violations detected"])
+                } else {
+                    serde_json::json!([
+                        "for each violation, decide: refactor the dependency, or relax the rule",
+                        "wire `boundary_check` into CI to fail on regressions",
+                    ])
+                },
+            })
+        }
         "blast_radius" => {
             // v8: first-class "what breaks if I change this" op.
             // Bundles `neighbors(incoming, group_by=file)` for direct
@@ -543,7 +618,8 @@ pub(crate) async fn call_code_graph(
                 "unknown code_graph operation '{other}': expected one of \
                  'neighbors', 'ranked', 'impact', 'implementations', \
                  'search', 'cycles', 'orphans', 'path', 'edges', \
-                 'describe', 'context', 'capabilities', 'blast_radius'"
+                 'describe', 'context', 'capabilities', 'blast_radius', \
+                 'boundary_check'"
             ));
         }
     };
@@ -733,6 +809,7 @@ fn code_graph_capabilities() -> serde_json::Value {
             "neighbors", "ranked", "impact", "implementations",
             "search", "cycles", "orphans", "path", "edges",
             "describe", "context", "capabilities", "blast_radius",
+            "boundary_check",
         ],
         "default_search_mode": std::env::var("DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE")
             .unwrap_or_else(|_| "name".to_string()),

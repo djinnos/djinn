@@ -327,6 +327,32 @@ pub(super) struct CodeGraphParams {
     /// `DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE` (default `"name"`).
     #[serde(default)]
     pub mode: Option<String>,
+    /// v8 `boundary_check` op: list of architectural rules to enforce.
+    /// Each rule names a `from_glob` and a list of `forbid_to` globs;
+    /// any edge whose source file matches the from-glob and whose
+    /// target file matches any forbid-to-glob is reported as a
+    /// violation. Empty / absent for every other op.
+    #[serde(default)]
+    pub rules: Option<Vec<BoundaryRule>>,
+}
+
+/// One rule for the `boundary_check` op. Names an architectural
+/// invariant the reviewer wants enforced — e.g. "domain must not
+/// depend on transport". The op walks `graph_ops.edges(from_glob,
+/// forbid_to_glob)` for each `forbid_to` entry and reports any
+/// matching edges.
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct BoundaryRule {
+    /// Human-readable rule label, surfaced in violations so the
+    /// reviewer can map a hit back to the policy that flagged it.
+    pub name: String,
+    /// Glob matched against the source file of each edge.
+    pub from_glob: String,
+    /// Globs matched against the target file of each edge. ANY match
+    /// is a violation. Allows expressing "domain must not depend on
+    /// any of {transport, api, http_handlers}" without splitting it
+    /// into separate rules.
+    pub forbid_to: Vec<String>,
 }
 
 #[derive(Deserialize)]

@@ -419,6 +419,58 @@ async fn code_graph_dispatch_describe_reaches_graph_ops() {
     );
 }
 
+/// v8 boundary_check op: reaches the bridge layer (which short-circuits
+/// in agent-side stub mode). Asserts the dispatch wire is hooked up
+/// AND that the rules-required validation fires before the bridge.
+#[tokio::test]
+async fn code_graph_dispatch_boundary_check_reaches_graph_ops() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-boundary-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let err = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "boundary_check",
+            "project_path": worktree.path().to_string_lossy(),
+            "rules": [
+                {
+                    "name": "domain-must-not-depend-on-transport",
+                    "from_glob": "internal/domain/**",
+                    "forbid_to": ["internal/api/**", "internal/transport/**"]
+                }
+            ]
+        }),
+        worktree.path(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("code_graph not available"),
+        "boundary_check should reach graph ops layer, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_boundary_check_requires_rules() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-boundary-no-rules-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let err = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "boundary_check",
+            "project_path": worktree.path().to_string_lossy(),
+        }),
+        worktree.path(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("'rules' is required"),
+        "boundary_check without rules should fail with arg-validation error, got: {err}"
+    );
+}
+
 /// v8 blast_radius op: aggregates `neighbors(incoming, group_by=file)`
 /// + `impact(group_by=file)`, categorises each file path into
 /// runtime/tests/e2e_tests buckets. The agent bridge stub still short-
