@@ -16,7 +16,7 @@ async fn pre_resolve_chat_key(
     ctx: &ProjectCtx,
     params: &mut CodeGraphParams,
 ) -> Result<Option<serde_json::Value>, String> {
-    let single_key_ops = ["neighbors", "impact", "implementations", "describe"];
+    let single_key_ops = ["neighbors", "impact", "implementations", "describe", "context"];
     if single_key_ops.contains(&params.operation.as_str()) {
         if let Some(key) = params.key.as_deref().filter(|k| !k.is_empty()) {
             let kind_hint = params.kind_hint.as_deref();
@@ -383,11 +383,34 @@ pub(crate) async fn call_code_graph(
             let description = graph_ops.describe(&ctx, key).await?;
             serde_json::to_value(&description).map_err(|e| format!("serialize error: {e}"))?
         }
+        "context" => {
+            // PR C1: 360° symbol view. Default include_content=false to
+            // keep wire size bounded — chat callers rarely need the body
+            // on the first hop.
+            let key = p
+                .key
+                .as_deref()
+                .filter(|k| !k.is_empty())
+                .ok_or("'key' is required for 'context'")?;
+            let include_content = p.include_content.unwrap_or(false);
+            match graph_ops.context(&ctx, key, include_content).await? {
+                Some(symbol_context) => {
+                    // Wrap in the same `symbol_context` discriminator the
+                    // MCP dispatcher emits so downstream parsers stay
+                    // consistent.
+                    serde_json::json!({ "symbol_context": symbol_context })
+                }
+                None => serde_json::json!({
+                    "not_found": { "query": key, "kind_hint": p.kind_hint }
+                }),
+            }
+        }
         other => {
             return Err(format!(
                 "unknown code_graph operation '{other}': expected one of \
                  'neighbors', 'ranked', 'impact', 'implementations', \
-                 'search', 'cycles', 'orphans', 'path', 'edges', 'describe'"
+                 'search', 'cycles', 'orphans', 'path', 'edges', \
+                 'describe', 'context'"
             ));
         }
     };

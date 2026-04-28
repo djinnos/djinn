@@ -545,6 +545,142 @@ pub struct ChurnEntry {
     pub last_commit_at: String,
 }
 
+/// PR C1: edge categories used to bucket incoming/outgoing neighbors in
+/// the `context` op response. Mirrors the inter-PR contract table mapping
+/// `RepoGraphEdgeKind` → category. Serialized as snake_case so JSON keys
+/// like `calls`, `reads`, `type_defines` line up with the UI parsers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeCategory {
+    /// SymbolReference where the target symbol is a function/method/constructor.
+    Calls,
+    /// SymbolReference catch-all (imports, type-only references, etc.).
+    References,
+    /// FileReference — file-to-file edge derived from cross-file occurrences.
+    Imports,
+    /// ContainsDefinition / DeclaredInFile — file ↔ symbol containment.
+    Contains,
+    /// SymbolRelationshipReference — subtype-of / extends.
+    Extends,
+    /// SymbolRelationshipImplementation.
+    Implements,
+    /// SymbolRelationshipTypeDefinition.
+    TypeDefines,
+    /// SymbolRelationshipDefinition.
+    Defines,
+    /// PR A3: SymbolRole::ReadAccess split-out.
+    Reads,
+    /// PR A3: SymbolRole::WriteAccess split-out.
+    Writes,
+}
+
+/// PR C1: a neighbor of the queried symbol, grouped under its
+/// [`EdgeCategory`] in [`SymbolContext::incoming`] / `outgoing`. The shape
+/// mirrors [`GraphNeighbor`] but carries the category-aware view used by
+/// the 360° symbol panel.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct RelatedSymbol {
+    /// Stable RepoNodeKey (`"symbol:..."` or `"file:..."`). Pass back as
+    /// `key` for follow-up `context` / `impact` calls.
+    pub uid: String,
+    /// Display name (typically the unqualified identifier).
+    pub name: String,
+    /// `"file"`, `"function"`, `"class"`, `"method"`, etc.
+    pub kind: String,
+    /// Repository-relative file path when known. `None` for symbol nodes
+    /// that lack a `file_path` (synthetic placeholders, externals).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+    /// Confidence carried by the underlying edge (PR A2 — propagates to
+    /// the UI so weak references can be visually de-emphasized).
+    pub confidence: f64,
+}
+
+/// PR C1: structured method metadata. Populated only when the upstream
+/// SCIP indexer emits structured signature fields; absent otherwise — the
+/// plan explicitly forbids regexing the markdown signature blob.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct MethodMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_async: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub params: Vec<MethodParam>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_type: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<String>,
+}
+
+/// PR C1: a single parameter on a method/function symbol. Lifted from
+/// the structured `scip::Signature` proto when the indexer populates it.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct MethodParam {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_value: Option<String>,
+}
+
+/// PR C1: stub for Epic F2's "process" linking. A `Context` response
+/// carries an empty `processes: []` list until F2 backfills the
+/// process-membership index. The shape is fixed up-front so UI
+/// consumers can render the empty list today and progressive-enhance
+/// later.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ProcessRef {
+    pub id: String,
+    pub label: String,
+    pub role: String,
+}
+
+/// PR C1: the queried symbol's identity + content + structural metadata
+/// returned in [`SymbolContext::symbol`].
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SymbolNode {
+    /// Stable RepoNodeKey of the queried node.
+    pub uid: String,
+    /// Display name (unqualified identifier, file basename, etc.).
+    pub name: String,
+    /// `"file"`, `"function"`, `"class"`, `"method"`, etc.
+    pub kind: String,
+    /// Repository-relative file path. Empty string for synthetic nodes.
+    pub file_path: String,
+    /// 1-indexed inclusive start line of the definition range. `0` when
+    /// the indexer didn't pin a line range to the symbol.
+    pub start_line: u32,
+    /// 1-indexed inclusive end line of the definition range. `0` when
+    /// no range is known.
+    pub end_line: u32,
+    /// Body text — only populated when the caller passes
+    /// `include_content=true`. Bandwidth-gated by default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    /// Structured method metadata when SCIP populated it. `None` for
+    /// non-method symbols and for indexers that only emit the markdown
+    /// signature blob.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method_metadata: Option<MethodMeta>,
+}
+
+/// PR C1: 360° view of a single symbol — the queried node plus its
+/// categorized incoming/outgoing neighbors and (post-F2) the process
+/// memberships the symbol participates in.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SymbolContext {
+    pub symbol: SymbolNode,
+    /// Incoming neighbors bucketed by [`EdgeCategory`]. Each bucket is
+    /// hard-capped at 30 entries (per the plan) so the wire payload
+    /// stays bounded on high-fan-in symbols.
+    pub incoming: BTreeMap<EdgeCategory, Vec<RelatedSymbol>>,
+    /// Outgoing neighbors bucketed by [`EdgeCategory`]. Same 30-entry cap.
+    pub outgoing: BTreeMap<EdgeCategory, Vec<RelatedSymbol>>,
+    /// F2 stub — empty until process membership lands.
+    pub processes: Vec<ProcessRef>,
+}
+
 /// A ranked disambiguation candidate emitted by the `code_graph`
 /// `resolve` op (PR C2). When `code_graph` cannot resolve a caller-supplied
 /// key (`User`, `helper`, `MyClass`) to a single graph node, the dispatcher
@@ -732,6 +868,20 @@ pub trait RepoGraphOps: Send + Sync {
         ctx: &ProjectCtx,
         key: &str,
     ) -> Result<Option<SymbolDescription>, String>;
+
+    /// PR C1: 360° view of a symbol — resolved node identity plus
+    /// categorized incoming/outgoing neighbors. Each category list is
+    /// hard-capped at 30 entries server-side. When `include_content` is
+    /// `true`, [`SymbolNode::content`] is populated with the symbol's
+    /// body text (best-effort: requires the file to be readable from the
+    /// project clone). The `processes` list is empty until F2 backfills
+    /// process membership.
+    async fn context(
+        &self,
+        ctx: &ProjectCtx,
+        key: &str,
+        include_content: bool,
+    ) -> Result<Option<SymbolContext>, String>;
 
     /// Peek at the in-memory canonical graph cache for the given project.
     /// MUST NOT trigger any warming or SCIP indexing.  When the cache is

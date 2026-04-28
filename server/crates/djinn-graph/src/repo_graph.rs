@@ -508,6 +508,12 @@ pub struct RepoGraphNode {
     /// Symbol documentation, copied from `ScipSymbol::documentation`.
     #[serde(default)]
     pub documentation: Vec<String>,
+    /// PR C1: structured signature parts when SCIP populates them.
+    /// Propagated from `ScipSymbol::signature_parts`. `None` for indexers
+    /// that emit only the markdown signature blob — `code_graph context`
+    /// surfaces this as `method_metadata: None` rather than regexing.
+    #[serde(default)]
+    pub signature_parts: Option<crate::scip_parser::ScipSignatureParts>,
 }
 
 impl RepoGraphNode {
@@ -785,6 +791,7 @@ impl RepoDependencyGraphBuilder {
             visibility: None,
             signature: None,
             documentation: Vec::new(),
+            signature_parts: None,
         };
         let node_index = self.graph.add_node(node);
         self.node_lookup.insert(key, node_index);
@@ -818,6 +825,7 @@ impl RepoDependencyGraphBuilder {
             visibility: symbol.visibility,
             signature: symbol.signature.clone(),
             documentation: symbol.documentation.clone(),
+            signature_parts: symbol.signature_parts.clone(),
         };
         let node_index = self.graph.add_node(node);
         self.node_lookup.insert(key, node_index);
@@ -857,6 +865,7 @@ impl RepoDependencyGraphBuilder {
             visibility: Some(crate::scip_parser::ScipVisibility::from_symbol_identifier(
                 &occurrence.symbol,
             )),
+            signature_parts: None,
         };
         self.ensure_symbol_node(
             &symbol,
@@ -890,6 +899,7 @@ impl RepoDependencyGraphBuilder {
             visibility: Some(ScipVisibility::from_symbol_identifier(symbol)),
             signature: None,
             documentation: Vec::new(),
+            signature_parts: None,
         };
         let key = node.id.clone();
         let node_index = self.graph.add_node(node);
@@ -1523,6 +1533,7 @@ mod tests {
             documentation: vec!["returns a value".to_string()],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
         };
         let trait_symbol = ScipSymbol {
             symbol: "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
@@ -1532,6 +1543,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
         };
         let main_symbol = ScipSymbol {
             symbol: "scip-rust pkg src/app.rs `main`().".to_string(),
@@ -1545,6 +1557,7 @@ mod tests {
                 kinds: BTreeSet::from([ScipRelationshipKind::Implementation]),
             }],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
         };
 
         ParsedScipIndex {
@@ -1806,6 +1819,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Private),
+        signature_parts: None,
         };
         let pub_sym = ScipSymbol {
             symbol: "scip-rust pkg src/main.rs `caller`().".to_string(),
@@ -1819,6 +1833,7 @@ mod tests {
                 kinds: BTreeSet::from([ScipRelationshipKind::Reference]),
             }],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
         };
         let index = ParsedScipIndex {
             metadata: ScipMetadata::default(),
@@ -1874,6 +1889,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
         };
         let value_field = ScipSymbol {
             symbol: field_symbol.clone(),
@@ -1883,6 +1899,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
         };
 
         let writer_sym = ScipSymbol {
@@ -1893,6 +1910,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
         };
         let reader_sym = ScipSymbol {
             symbol: "scip-rust pkg src/reader.rs `peek`().".to_string(),
@@ -1902,6 +1920,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
         };
 
         // Helper: build an occurrence with explicit roles, since the
@@ -2081,6 +2100,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
         };
         fn role_occurrence(symbol: &str, roles: BTreeSet<ScipSymbolRole>) -> ScipOccurrence {
             ScipOccurrence {
@@ -2204,6 +2224,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
         };
         let new_index = ParsedScipIndex {
             metadata: ScipMetadata::default(),
@@ -2286,6 +2307,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
         };
         let new_index = ParsedScipIndex {
             metadata: ScipMetadata::default(),
@@ -2354,6 +2376,7 @@ mod tests {
                 kinds: BTreeSet::from([ScipRelationshipKind::Reference]),
             }],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
         };
         let b_sym = ScipSymbol {
             symbol: "scip-rust pkg src/b.rs `b_fn`().".to_string(),
@@ -2367,6 +2390,7 @@ mod tests {
                 kinds: BTreeSet::from([ScipRelationshipKind::Reference]),
             }],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
         };
         let index = ParsedScipIndex {
             metadata: ScipMetadata::default(),
@@ -2414,6 +2438,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
         };
         let private_unused = ScipSymbol {
             symbol: "local 1".to_string(),
@@ -2423,6 +2448,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Private),
+        signature_parts: None,
         };
         let index = ParsedScipIndex {
             metadata: ScipMetadata::default(),
@@ -2533,6 +2559,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
         };
         let inner_sym = ScipSymbol {
             symbol: "scip-rust pkg src/lib.rs `outer`/`Inner`#".to_string(),
@@ -2542,6 +2569,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
         };
         let method_sym = ScipSymbol {
             symbol: "scip-rust pkg src/lib.rs `outer`/`Inner`#`inner_method`().".to_string(),
@@ -2551,6 +2579,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
         };
         let sibling_sym = ScipSymbol {
             symbol: "scip-rust pkg src/lib.rs `sibling_fn`().".to_string(),
@@ -2560,6 +2589,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
         };
         let other_sym = ScipSymbol {
             symbol: "scip-rust pkg src/other.rs `other_fn`().".to_string(),
@@ -2569,6 +2599,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
         };
 
         ParsedScipIndex {

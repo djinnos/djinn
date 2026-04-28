@@ -829,6 +829,12 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "include_content": {
+          "default": null,
+          "description": "PR C1: when `true`, the `context` op populates\n`symbol_context.symbol.content` with the symbol's body text\nread from the project clone. Default `false` — bandwidth\nmatters; clients that already have the file open don't need\nthe body shipped over MCP.",
+          "nullable": true,
+          "type": "boolean"
+        },
         "key": {
           "default": null,
           "description": "The node key to query (file path or SCIP symbol string).\nRequired for `neighbors`, `impact`, `implementations`, and `describe`.",
@@ -889,7 +895,7 @@ expression: signatures
           "type": "string"
         },
         "operation": {
-          "description": "The operation to perform.\nOne of: `neighbors`, `ranked`, `impact`, `implementations`,\n`search`, `cycles`, `orphans`, `path`, `edges`, `symbols_at`,\n`diff_touches`, `detect_changes`, `describe`, `status`.",
+          "description": "The operation to perform.\nOne of: `neighbors`, `ranked`, `impact`, `implementations`,\n`search`, `cycles`, `orphans`, `path`, `edges`, `symbols_at`,\n`diff_touches`, `detect_changes`, `describe`, `context`, `status`.",
           "type": "string"
         },
         "project": {

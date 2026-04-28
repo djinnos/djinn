@@ -1133,6 +1133,15 @@ mod tests {
             Err("unused in test".into())
         }
 
+        async fn context(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+            _: bool,
+        ) -> Result<Option<djinn_control_plane::bridge::SymbolContext>, String> {
+            Err("unused in test".into())
+        }
+
         async fn status(&self, _: &ProjectCtx) -> Result<GraphStatus, String> {
             Err("unused in test".into())
         }

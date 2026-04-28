@@ -12,8 +12,8 @@ use crate::bridge::{
     CoupledPairEntry, CouplingEntry, CouplingHubEntry, CycleGroup, DeadSymbolEntry, DeprecatedHit,
     DetectedChangesResult, EdgeEntry, FileGroupEntry, GraphNeighbor, GraphStatus, HotPathHit,
     HotspotEntry, ImpactEntry, ImpactResult, MetricsAtResult, NeighborsResult, OrphanEntry,
-    PathResult, ProjectCtx, RankedNode, ResolveOutcome, SearchHit, SymbolAtHit, SymbolDescription,
-    TouchedSymbol,
+    PathResult, ProjectCtx, RankedNode, ResolveOutcome, SearchHit, SymbolAtHit, SymbolContext,
+    SymbolDescription, TouchedSymbol,
 };
 use crate::server::DjinnMcpServer;
 use crate::tools::graph_exclusions::GraphExclusions;
@@ -27,7 +27,7 @@ pub struct CodeGraphParams {
     /// The operation to perform.
     /// One of: `neighbors`, `ranked`, `impact`, `implementations`,
     /// `search`, `cycles`, `orphans`, `path`, `edges`, `symbols_at`,
-    /// `diff_touches`, `detect_changes`, `describe`, `status`.
+    /// `diff_touches`, `detect_changes`, `describe`, `context`, `status`.
     pub operation: String,
     /// Project identifier — either the UUID (`project_id`) or the
     /// canonical `"owner/repo"` slug. The handler resolves it to the
@@ -180,6 +180,13 @@ pub struct CodeGraphParams {
     /// in each listed file is treated as potentially touched.
     #[serde(default)]
     pub changed_files: Option<Vec<String>>,
+    /// PR C1: when `true`, the `context` op populates
+    /// `symbol_context.symbol.content` with the symbol's body text
+    /// read from the project clone. Default `false` — bandwidth
+    /// matters; clients that already have the file open don't need
+    /// the body shipped over MCP.
+    #[serde(default)]
+    pub include_content: Option<bool>,
 }
 
 // ── Response types ──────────────────────────────────────────────────────────────
@@ -320,6 +327,17 @@ pub struct EdgesResponse {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DescribeResponse {
     pub description: Option<SymbolDescription>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
+}
+
+/// PR C1: 360° symbol view emitted by `code_graph context`. The
+/// discriminator field per the inter-PR contract is `symbol_context`,
+/// which carries `{symbol, incoming, outgoing, processes}`. UI parsers
+/// (`parseSymbolContext` in `pulseTypes.ts`) hang off that field name.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ContextResponse {
+    pub symbol_context: SymbolContext,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
 }
@@ -500,6 +518,9 @@ pub enum CodeGraphResponse {
     Path(PathResponse),
     Edges(EdgesResponse),
     Describe(DescribeResponse),
+    /// PR C1: 360° symbol view (incoming/outgoing categorized neighbors
+    /// + method metadata). Discriminator field `symbol_context`.
+    Context(ContextResponse),
     Status(StatusResponse),
     SymbolsAt(SymbolsAtResponse),
     DiffTouches(DiffTouchesResponse),
@@ -616,6 +637,7 @@ fn next_step_slot(response: &mut CodeGraphResponse) -> &mut Option<String> {
         CodeGraphResponse::Path(r) => &mut r.next_step,
         CodeGraphResponse::Edges(r) => &mut r.next_step,
         CodeGraphResponse::Describe(r) => &mut r.next_step,
+        CodeGraphResponse::Context(r) => &mut r.next_step,
         CodeGraphResponse::Status(r) => &mut r.next_step,
         CodeGraphResponse::SymbolsAt(r) => &mut r.next_step,
         CodeGraphResponse::DiffTouches(r) => &mut r.next_step,
@@ -891,7 +913,7 @@ fn pick_next_step_target(symbols: &[crate::bridge::DetectedTouchedSymbol]) -> Op
 impl DjinnMcpServer {
     /// Query the repository dependency graph built from SCIP indexer output.
     #[tool(
-        description = "Query the repository dependency graph built from SCIP indexer output and the commit-based file-coupling index. Operations: neighbors (edges in/out of a node, with optional group_by=file rollup), ranked (top nodes; sort_by pagerank/in_degree/out_degree/total_degree), impact (transitive dependents, with optional group_by=file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup), cycles (strongly-connected components), orphans (zero-incoming-reference nodes, with visibility filter), path (shortest dependency path), edges (enumerate edges by from_glob/to_glob), symbols_at (given file+line range, return SCIP symbols whose definition range encloses those lines — diff-hunk → symbol lookup), diff_touches (given a list of changed line ranges parsed from `git diff --unified=0 base..head`, return every base-graph symbol touched, with fan-in/fan-out and file grouping; the base graph is always current main — this op does NOT build a head graph), detect_changes (given from_sha + to_sha [or a changed_files list], return touched symbols + their PageRank tier [High/Medium/Low quartile] + per-file rollup; shells out to `git diff --unified=0 from_sha..to_sha` server-side and maps hunks via symbols_enclosing — replaces the architect's manual diff inspection), describe (symbol signature/documentation without an LSP round trip), status (peek at the persisted canonical graph cache; never warms), api_surface (list every public symbol with fan-in/fan-out and a used-outside-crate signal), boundary_check (edge-based architecture rule scanner over from_glob→to_glob pairs; returns forbidden violations), hotspots (file churn × centrality ranking over a configurable window; top_symbols per file), metrics_at (scalar graph snapshot: node/edge/cycle counts, god-object floor, orphans, public API and doc coverage), dead_symbols (no-incoming-edge-from-entry-points enumeration; confidence=high|med|low), deprecated_callers (symbols whose signature/documentation contains #[deprecated] or @deprecated, with caller list), touches_hot_path (given entry and sink SCIP keys, report which queried symbols sit on any entry→sink shortest path), coupling (files most frequently co-edited with `file`, sourced from the per-commit change log; returns co-edit count, last co-edit timestamp, and up to three supporting SHAs per peer), churn (top files by distinct-commit count over an optional `since_days` window; returns commit count, cumulative insertions/deletions, and last-touched timestamp), coupling_hotspots (top file PAIRS by co-edit count project-wide; returns [{file_a,file_b,co_edits,last_co_edit}]; respects `since_days` and `max_files_per_commit` [default 15] — useful for spotting implicit coupling between distant parts of the tree), coupling_hubs (top FILES by cumulative coupling across all partners; returns [{file_path,total_coupling,partner_count}] — change-propagation risk map, higher total_coupling means a touch to this file is more likely to require touching many others). All coupling / churn outputs are filtered through the project's `project_graph_exclusions` glob list at query time, so tuning exclusions takes effect without re-ingesting."
+        description = "Query the repository dependency graph built from SCIP indexer output and the commit-based file-coupling index. Operations: neighbors (edges in/out of a node, with optional group_by=file rollup), ranked (top nodes; sort_by pagerank/in_degree/out_degree/total_degree), impact (transitive dependents, with optional group_by=file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup), cycles (strongly-connected components), orphans (zero-incoming-reference nodes, with visibility filter), path (shortest dependency path), edges (enumerate edges by from_glob/to_glob), symbols_at (given file+line range, return SCIP symbols whose definition range encloses those lines — diff-hunk → symbol lookup), diff_touches (given a list of changed line ranges parsed from `git diff --unified=0 base..head`, return every base-graph symbol touched, with fan-in/fan-out and file grouping; the base graph is always current main — this op does NOT build a head graph), detect_changes (given from_sha + to_sha [or a changed_files list], return touched symbols + their PageRank tier [High/Medium/Low quartile] + per-file rollup; shells out to `git diff --unified=0 from_sha..to_sha` server-side and maps hunks via symbols_enclosing — replaces the architect's manual diff inspection), describe (symbol signature/documentation without an LSP round trip), context (PR C1: 360° symbol view — categorized incoming/outgoing dicts [calls/reads/writes/extends/implements/...], plus structured method_metadata when SCIP populates it; pass include_content=true to include the symbol body. Each category list is hard-capped at 30 entries), status (peek at the persisted canonical graph cache; never warms), api_surface (list every public symbol with fan-in/fan-out and a used-outside-crate signal), boundary_check (edge-based architecture rule scanner over from_glob→to_glob pairs; returns forbidden violations), hotspots (file churn × centrality ranking over a configurable window; top_symbols per file), metrics_at (scalar graph snapshot: node/edge/cycle counts, god-object floor, orphans, public API and doc coverage), dead_symbols (no-incoming-edge-from-entry-points enumeration; confidence=high|med|low), deprecated_callers (symbols whose signature/documentation contains #[deprecated] or @deprecated, with caller list), touches_hot_path (given entry and sink SCIP keys, report which queried symbols sit on any entry→sink shortest path), coupling (files most frequently co-edited with `file`, sourced from the per-commit change log; returns co-edit count, last co-edit timestamp, and up to three supporting SHAs per peer), churn (top files by distinct-commit count over an optional `since_days` window; returns commit count, cumulative insertions/deletions, and last-touched timestamp), coupling_hotspots (top file PAIRS by co-edit count project-wide; returns [{file_a,file_b,co_edits,last_co_edit}]; respects `since_days` and `max_files_per_commit` [default 15] — useful for spotting implicit coupling between distant parts of the tree), coupling_hubs (top FILES by cumulative coupling across all partners; returns [{file_path,total_coupling,partner_count}] — change-propagation risk map, higher total_coupling means a touch to this file is more likely to require touching many others). All coupling / churn outputs are filtered through the project's `project_graph_exclusions` glob list at query time, so tuning exclusions takes effect without re-ingesting."
     )]
     pub async fn code_graph(
         &self,
@@ -962,6 +984,7 @@ impl DjinnMcpServer {
             "path" => self.code_graph_path(&ctx, &params).await,
             "edges" => self.code_graph_edges(&ctx, &params).await,
             "describe" => self.code_graph_describe(&ctx, &params).await,
+            "context" => self.code_graph_context(&ctx, &params).await,
             "status" => self.code_graph_status(&ctx, &params).await,
             "symbols_at" => self.code_graph_symbols_at(&ctx, &params).await,
             "diff_touches" => self.code_graph_diff_touches(&ctx, &params).await,
@@ -982,7 +1005,7 @@ impl DjinnMcpServer {
                  'neighbors', 'ranked', 'impact', 'implementations', \
                  'search', 'cycles', 'orphans', 'path', 'edges', \
                  'symbols_at', 'diff_touches', 'detect_changes', \
-                 'describe', 'status', \
+                 'describe', 'context', 'status', \
                  'api_surface', 'boundary_check', 'hotspots', 'metrics_at', \
                  'dead_symbols', 'deprecated_callers', 'touches_hot_path', \
                  'coupling', 'churn', 'coupling_hotspots', 'coupling_hubs'"
@@ -1027,6 +1050,10 @@ impl DjinnMcpServer {
             "impact",
             "implementations",
             "describe",
+            // PR C1: `context` shares the same key-resolution path so a
+            // short identifier like `User` short-circuits to Ambiguous /
+            // NotFound instead of failing inside the graph backend.
+            "context",
         ];
         if single_key_ops.contains(&params.operation.as_str()) {
             if let Some(key) = params.key.as_deref().filter(|k| !k.is_empty()) {
@@ -1480,6 +1507,30 @@ impl DjinnMcpServer {
             .await?;
         Ok(CodeGraphResponse::Describe(DescribeResponse {
             description,
+            next_step: None,
+        }))
+    }
+
+    /// PR C1: `context` op handler. Resolves to a 360° symbol view
+    /// (categorized incoming/outgoing dicts + method metadata). The
+    /// pre-resolve pass runs in `pre_resolve_key`; if we got here the
+    /// `key` is already a canonical RepoNodeKey or the resolver
+    /// short-circuited.
+    async fn code_graph_context(
+        &self,
+        ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let key = require_key(params)?;
+        let include_content = params.include_content.unwrap_or(false);
+        let symbol_context = self
+            .state
+            .repo_graph()
+            .context(ctx, key, include_content)
+            .await?
+            .ok_or_else(|| format!("symbol '{key}' not found in graph"))?;
+        Ok(CodeGraphResponse::Context(ContextResponse {
+            symbol_context,
             next_step: None,
         }))
     }
@@ -2041,6 +2092,7 @@ mod tests {
             from_sha: None,
             to_sha: None,
             changed_files: None,
+            include_content: None,
         }
     }
 
@@ -2489,6 +2541,30 @@ mod tests {
         })
     }
 
+    /// PR C1: synthetic empty `Context` response used by hint tests and
+    /// the snapshot serialization tests.
+    fn empty_context() -> CodeGraphResponse {
+        use crate::bridge::{SymbolContext, SymbolNode};
+        CodeGraphResponse::Context(ContextResponse {
+            symbol_context: SymbolContext {
+                symbol: SymbolNode {
+                    uid: "symbol:foo".to_string(),
+                    name: "foo".to_string(),
+                    kind: "function".to_string(),
+                    file_path: "src/lib.rs".to_string(),
+                    start_line: 0,
+                    end_line: 0,
+                    content: None,
+                    method_metadata: None,
+                },
+                incoming: std::collections::BTreeMap::new(),
+                outgoing: std::collections::BTreeMap::new(),
+                processes: vec![],
+            },
+            next_step: None,
+        })
+    }
+
     fn empty_orphans() -> CodeGraphResponse {
         CodeGraphResponse::Orphans(OrphansResponse {
             orphans: vec![],
@@ -2509,6 +2585,7 @@ mod tests {
             CodeGraphResponse::Path(r) => r.next_step.as_deref(),
             CodeGraphResponse::Edges(r) => r.next_step.as_deref(),
             CodeGraphResponse::Describe(r) => r.next_step.as_deref(),
+            CodeGraphResponse::Context(r) => r.next_step.as_deref(),
             CodeGraphResponse::Status(r) => r.next_step.as_deref(),
             CodeGraphResponse::SymbolsAt(r) => r.next_step.as_deref(),
             CodeGraphResponse::DiffTouches(r) => r.next_step.as_deref(),
@@ -2619,10 +2696,35 @@ mod tests {
 
     #[test]
     fn context_hint_points_to_impact() {
-        let mut response = empty_describe();
+        // PR C1: the dedicated Context variant routes through the
+        // `("context" | "describe", _)` arm and emits the
+        // blast-radius nudge.
+        let mut response = empty_context();
         attach_next_step_hint("context", &mut response);
         let hint = read_next_step(&response).expect("hint set");
         assert!(hint.contains("impact"), "hint: {hint}");
+        // Sanity-check the discriminator field stays intact post-hint.
+        let json = serde_json::to_value(&response).expect("serialize");
+        assert!(
+            json.get("symbol_context").is_some(),
+            "Context discriminator dropped: {json}"
+        );
+    }
+
+    #[test]
+    fn context_response_serializes_symbol_context_discriminator_pr_c1() {
+        // The untagged-enum contract pins the discriminator field to
+        // `symbol_context`. UI parsers in `pulseTypes.ts` hang off
+        // exactly that name; renaming would silently break them.
+        let response = empty_context();
+        let json = serde_json::to_value(&response).expect("serialize");
+        let inner = json
+            .get("symbol_context")
+            .expect("symbol_context discriminator missing");
+        assert!(inner.get("symbol").is_some(), "no nested symbol: {json}");
+        assert!(inner.get("incoming").is_some(), "no incoming map: {json}");
+        assert!(inner.get("outgoing").is_some(), "no outgoing map: {json}");
+        assert!(inner.get("processes").is_some(), "no processes list: {json}");
     }
 
     #[test]
@@ -2652,6 +2754,7 @@ mod tests {
             ("impact", empty_impact()),
             ("orphans", empty_orphans()),
             ("describe", empty_describe()),
+            ("context", empty_context()),
             ("metrics_at", CodeGraphResponse::MetricsAt(MetricsAtResponse {
                 metrics: MetricsAtResult {
                     commit: "abc123".to_string(),

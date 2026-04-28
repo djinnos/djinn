@@ -369,6 +369,14 @@ export namespace CodeGraphInputSchema {
    */
   group_by?: string
   /**
+   * PR C1: when `true`, the `context` op populates
+   * `symbol_context.symbol.content` with the symbol's body text
+   * read from the project clone. Default `false` — bandwidth
+   * matters; clients that already have the file open don't need
+   * the body shipped over MCP.
+   */
+  include_content?: boolean
+  /**
    * The node key to query (file path or SCIP symbol string).
    * Required for `neighbors`, `impact`, `implementations`, and `describe`.
    */
@@ -429,7 +437,7 @@ export namespace CodeGraphInputSchema {
    * The operation to perform.
    * One of: `neighbors`, `ranked`, `impact`, `implementations`,
    * `search`, `cycles`, `orphans`, `path`, `edges`, `symbols_at`,
-   * `diff_touches`, `detect_changes`, `describe`, `status`.
+   * `diff_touches`, `detect_changes`, `describe`, `context`, `status`.
    */
   operation: string
   /**

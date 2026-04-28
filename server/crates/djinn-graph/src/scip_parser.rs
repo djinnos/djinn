@@ -59,6 +59,16 @@ pub struct ScipRange {
 }
 
 /// A symbol defined or declared in a file, with outbound semantic relationships.
+///
+/// PR C1 added the `signature_parts` field. SCIP 0.7's
+/// `signature_documentation` is a markdown blob (a `Document` proto with
+/// only a `text` field), so for the indexers we ship today
+/// `signature_parts` is `None`. The slot exists so downstream consumers
+/// (e.g. `code_graph context`'s `MethodMeta` extraction) have a
+/// uniform structured surface to read from when a future SCIP version
+/// or indexer emits parameter / return-type fields. Per the plan
+/// contract: NEVER regex the markdown — leave `signature_parts: None`
+/// when structured proto fields are absent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScipSymbol {
     pub symbol: String,
@@ -68,6 +78,52 @@ pub struct ScipSymbol {
     pub documentation: Vec<String>,
     pub relationships: Vec<ScipRelationship>,
     pub visibility: Option<ScipVisibility>,
+    /// Optional structured signature parsed from a richer `scip::Signature`
+    /// proto. Populated only when the upstream indexer emits structured
+    /// parameter / return-type fields. None for the vanilla SCIP 0.7
+    /// schema's markdown-only `signature_documentation`.
+    pub signature_parts: Option<ScipSignatureParts>,
+}
+
+/// PR C1: structured method signature lifted from the SCIP proto when
+/// available. Mirrors the shape `MethodMeta` exposes through the
+/// bridge: parameter names + types, optional return type, optional
+/// type-parameter names, and pass-through visibility / async / annotation
+/// hints.
+///
+/// These fields stay `Option` / `Vec` so partial population (e.g. an
+/// indexer that emits only parameters) still surfaces what it has.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScipSignatureParts {
+    pub parameters: Vec<ScipSignatureParam>,
+    pub return_type: Option<String>,
+    pub type_parameters: Vec<String>,
+    pub visibility: Option<String>,
+    pub is_async: Option<bool>,
+    pub annotations: Vec<String>,
+}
+
+/// PR C1: a single structured parameter on a method/function signature.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScipSignatureParam {
+    pub name: String,
+    pub type_name: Option<String>,
+    pub default_value: Option<String>,
+}
+
+impl Default for ScipSymbol {
+    fn default() -> Self {
+        ScipSymbol {
+            symbol: String::new(),
+            kind: None,
+            display_name: None,
+            signature: None,
+            documentation: Vec::new(),
+            relationships: Vec::new(),
+            visibility: None,
+            signature_parts: None,
+        }
+    }
 }
 
 /// Symbol visibility, derived from the SCIP symbol identifier shape.
@@ -299,6 +355,16 @@ fn normalize_symbol(symbol: SymbolInformation) -> Result<ScipSymbol> {
         .as_ref()
         .and_then(|document| (!document.text.is_empty()).then(|| document.text.clone()));
 
+    // PR C1: SCIP 0.7's `signature_documentation` is a markdown-only
+    // `Document` proto (just a `text` field), so there are no
+    // structured `parameters`/`return_type`/`type_parameters` to lift
+    // here. We deliberately leave `signature_parts` as None — the plan
+    // contract forbids regexing the markdown blob to fake structured
+    // fields. When a future SCIP version or richer indexer emits a
+    // proper `scip::Signature` message, this is the call-site to
+    // populate the new fields.
+    let signature_parts: Option<ScipSignatureParts> = None;
+
     let source_symbol = symbol.symbol.clone();
     let relationships = symbol
         .relationships
@@ -316,6 +382,7 @@ fn normalize_symbol(symbol: SymbolInformation) -> Result<ScipSymbol> {
         documentation: symbol.documentation,
         relationships,
         visibility: Some(visibility),
+        signature_parts,
     })
 }
 

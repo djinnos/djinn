@@ -322,6 +322,201 @@ export function parseDetectedChanges(value: unknown): DetectedChangesResult | nu
   };
 }
 
+// ── context (PR C1) ─────────────────────────────────────────────────────────
+
+/**
+ * PR C1: edge categories used to bucket incoming/outgoing neighbors in
+ * the `context` op. Mirrors the Rust `EdgeCategory` enum verbatim and
+ * the inter-PR contract table mapping `RepoGraphEdgeKind` → category.
+ */
+export type EdgeCategory =
+  | "calls"
+  | "references"
+  | "imports"
+  | "contains"
+  | "extends"
+  | "implements"
+  | "type_defines"
+  | "defines"
+  | "reads"
+  | "writes";
+
+/** PR C1: a neighbor of the queried symbol, grouped under its EdgeCategory. */
+export interface RelatedSymbol {
+  uid: string;
+  name: string;
+  kind: string;
+  file_path: string | null;
+  confidence: number;
+}
+
+/** PR C1: a single structured method parameter. */
+export interface MethodParam {
+  name: string;
+  type_name: string | null;
+  default_value: string | null;
+}
+
+/** PR C1: structured method metadata. Populated only when SCIP emits
+ * structured signature fields; `null` when the indexer only emits the
+ * markdown signature blob. */
+export interface MethodMeta {
+  visibility: string | null;
+  is_async: boolean | null;
+  params: MethodParam[];
+  return_type: string | null;
+  annotations: string[];
+}
+
+/** PR C1: F2 stub. The list is empty until process membership lands. */
+export interface ProcessRef {
+  id: string;
+  label: string;
+  role: string;
+}
+
+/** PR C1: identity + structural metadata of the queried symbol. */
+export interface SymbolNode {
+  uid: string;
+  name: string;
+  kind: string;
+  file_path: string;
+  start_line: number;
+  end_line: number;
+  content: string | null;
+  method_metadata: MethodMeta | null;
+}
+
+/** PR C1: 360° symbol view returned by `code_graph context`. */
+export interface SymbolContext {
+  symbol: SymbolNode;
+  incoming: Partial<Record<EdgeCategory, RelatedSymbol[]>>;
+  outgoing: Partial<Record<EdgeCategory, RelatedSymbol[]>>;
+  processes: ProcessRef[];
+}
+
+const EDGE_CATEGORIES: readonly EdgeCategory[] = [
+  "calls",
+  "references",
+  "imports",
+  "contains",
+  "extends",
+  "implements",
+  "type_defines",
+  "defines",
+  "reads",
+  "writes",
+] as const;
+
+function asEdgeCategory(value: unknown): EdgeCategory | null {
+  return typeof value === "string" &&
+    (EDGE_CATEGORIES as readonly string[]).includes(value)
+    ? (value as EdgeCategory)
+    : null;
+}
+
+function parseRelatedSymbol(value: unknown): RelatedSymbol | null {
+  if (!isRecord(value)) return null;
+  const uid = String(value.uid ?? "");
+  if (uid.length === 0) return null;
+  return {
+    uid,
+    name: String(value.name ?? ""),
+    kind: String(value.kind ?? ""),
+    file_path: typeof value.file_path === "string" ? value.file_path : null,
+    confidence: Number(value.confidence ?? 0),
+  };
+}
+
+function parseRelatedMap(
+  value: unknown,
+): Partial<Record<EdgeCategory, RelatedSymbol[]>> {
+  if (!isRecord(value)) return {};
+  const out: Partial<Record<EdgeCategory, RelatedSymbol[]>> = {};
+  for (const [rawKey, rawList] of Object.entries(value)) {
+    const cat = asEdgeCategory(rawKey);
+    if (!cat) continue;
+    const items = asArray(rawList)
+      .map(parseRelatedSymbol)
+      .filter((r): r is RelatedSymbol => r !== null);
+    out[cat] = items;
+  }
+  return out;
+}
+
+function parseMethodParam(value: unknown): MethodParam | null {
+  if (!isRecord(value)) return null;
+  const name = String(value.name ?? "");
+  if (name.length === 0) return null;
+  return {
+    name,
+    type_name: typeof value.type_name === "string" ? value.type_name : null,
+    default_value:
+      typeof value.default_value === "string" ? value.default_value : null,
+  };
+}
+
+function parseMethodMeta(value: unknown): MethodMeta | null {
+  if (!isRecord(value)) return null;
+  return {
+    visibility: typeof value.visibility === "string" ? value.visibility : null,
+    is_async: typeof value.is_async === "boolean" ? value.is_async : null,
+    params: asArray(value.params)
+      .map(parseMethodParam)
+      .filter((p): p is MethodParam => p !== null),
+    return_type:
+      typeof value.return_type === "string" ? value.return_type : null,
+    annotations: asArray(value.annotations).map(String),
+  };
+}
+
+function parseProcessRef(value: unknown): ProcessRef | null {
+  if (!isRecord(value)) return null;
+  const id = String(value.id ?? "");
+  if (id.length === 0) return null;
+  return {
+    id,
+    label: String(value.label ?? ""),
+    role: String(value.role ?? ""),
+  };
+}
+
+function parseSymbolNode(value: unknown): SymbolNode | null {
+  if (!isRecord(value)) return null;
+  const uid = String(value.uid ?? "");
+  if (uid.length === 0) return null;
+  return {
+    uid,
+    name: String(value.name ?? ""),
+    kind: String(value.kind ?? ""),
+    file_path: String(value.file_path ?? ""),
+    start_line: Number(value.start_line ?? 0),
+    end_line: Number(value.end_line ?? 0),
+    content: typeof value.content === "string" ? value.content : null,
+    method_metadata: parseMethodMeta(value.method_metadata),
+  };
+}
+
+/**
+ * Narrow a `code_graph context` response. The discriminator field per
+ * the inter-PR contract is `symbol_context`, an object shaped
+ * `{symbol, incoming, outgoing, processes}`. Returns `null` when the
+ * value is for a different `code_graph` variant.
+ */
+export function parseSymbolContext(value: unknown): SymbolContext | null {
+  if (!isRecord(value)) return null;
+  const inner = (value as Record<string, unknown>).symbol_context;
+  if (!isRecord(inner)) return null;
+  const symbol = parseSymbolNode(inner.symbol);
+  if (!symbol) return null;
+  const incoming = parseRelatedMap(inner.incoming);
+  const outgoing = parseRelatedMap(inner.outgoing);
+  const processes = asArray(inner.processes)
+    .map(parseProcessRef)
+    .filter((p): p is ProcessRef => p !== null);
+  return { symbol, incoming, outgoing, processes };
+}
+
 // ── Display helpers ─────────────────────────────────────────────────────────
 
 /** Truncate a long path from the left: `/a/b/c/d.rs` → `…/c/d.rs`. */

@@ -317,6 +317,10 @@ pub(super) struct CodeGraphParams {
     /// `"file"`, `"class"`, `"function"`, `"method"`, etc.
     #[serde(default)]
     pub kind_hint: Option<String>,
+    /// PR C1: when `true`, the `context` op populates the symbol body
+    /// inline. Default `false` (bandwidth gate).
+    #[serde(default)]
+    pub include_content: Option<bool>,
 }
 
 #[derive(Deserialize)]
