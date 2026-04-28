@@ -237,7 +237,9 @@ impl RepoGraphOps for RepoGraphBridge {
         key: &str,
         direction: Option<&str>,
         group_by: Option<&str>,
+        kind_filter: Option<&str>,
     ) -> Result<NeighborsResult, String> {
+        use djinn_graph::repo_graph::RepoGraphEdgeKind;
         use petgraph::Direction;
         let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
             &self.state,
@@ -252,6 +254,16 @@ impl RepoGraphOps for RepoGraphBridge {
             _ => vec![Direction::Incoming, Direction::Outgoing],
         };
 
+        // PR A3: when the caller asks for `kind_filter=reads|writes`,
+        // restrict the BFS frontier to that edge kind. Validation happens
+        // upstream (`validate_edge_kind_filter`); anything else here is a
+        // bug and we treat it as "no filter" rather than panic.
+        let edge_kind_filter: Option<RepoGraphEdgeKind> = match kind_filter {
+            Some("reads") => Some(RepoGraphEdgeKind::Reads),
+            Some("writes") => Some(RepoGraphEdgeKind::Writes),
+            _ => None,
+        };
+
         let mut neighbors = Vec::new();
         for dir in directions {
             let dir_label = match dir {
@@ -259,6 +271,11 @@ impl RepoGraphOps for RepoGraphBridge {
                 Direction::Outgoing => "outgoing",
             };
             for edge in graph.graph().edges_directed(node_index, dir) {
+                if let Some(filter) = edge_kind_filter
+                    && edge.weight().kind != filter
+                {
+                    continue;
+                }
                 let other_index = match dir {
                     Direction::Outgoing => edge.target(),
                     Direction::Incoming => edge.source(),
@@ -1700,7 +1717,12 @@ impl RepoGraphOps for RepoGraphBridge {
             let mut callers: Vec<CallerRef> = Vec::new();
             for edge in graph.graph().edges_directed(idx, Direction::Incoming) {
                 match edge.weight().kind {
+                    // PR A3: `Reads` / `Writes` are split-out variants of the
+                    // legacy `SymbolReference` edge; they still count as
+                    // "this caller touches the deprecated symbol".
                     RepoGraphEdgeKind::SymbolReference
+                    | RepoGraphEdgeKind::Reads
+                    | RepoGraphEdgeKind::Writes
                     | RepoGraphEdgeKind::SymbolRelationshipReference
                     | RepoGraphEdgeKind::FileReference => {
                         let src = graph.node(edge.source());

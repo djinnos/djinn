@@ -238,6 +238,7 @@ pub mod stubs {
             _: &str,
             _: Option<&str>,
             _: Option<&str>,
+            _: Option<&str>,
         ) -> Result<crate::bridge::NeighborsResult, String> {
             Ok(crate::bridge::NeighborsResult::Detailed(vec![]))
         }

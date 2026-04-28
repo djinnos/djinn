@@ -632,12 +632,18 @@ pub struct ProjectCtx {
 pub trait RepoGraphOps: Send + Sync {
     /// Neighbors of a file or symbol node (edges in/out). When `group_by` is
     /// `Some("file")`, results are collapsed into per-file rollups.
+    ///
+    /// `kind_filter` (PR A3) restricts the response to neighbors reached by
+    /// edges of a specific kind: `Some("reads")` keeps only `Reads` edges,
+    /// `Some("writes")` only `Writes`. `None` keeps every kind (the
+    /// pre-PR-A3 behaviour).
     async fn neighbors(
         &self,
         ctx: &ProjectCtx,
         key: &str,
         direction: Option<&str>,
         group_by: Option<&str>,
+        kind_filter: Option<&str>,
     ) -> Result<NeighborsResult, String>;
 
     /// Top-ranked nodes by PageRank + structural weight. `sort_by` can be one

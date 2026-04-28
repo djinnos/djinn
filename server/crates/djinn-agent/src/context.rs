@@ -235,6 +235,7 @@ impl RepoGraphOps for StubRepoGraphOps {
         _: &str,
         _: Option<&str>,
         _: Option<&str>,
+        _: Option<&str>,
     ) -> Result<NeighborsResult, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }

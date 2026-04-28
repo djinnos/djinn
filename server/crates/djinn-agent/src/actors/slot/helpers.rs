@@ -1045,6 +1045,7 @@ mod tests {
             _: &str,
             _: Option<&str>,
             _: Option<&str>,
+            _: Option<&str>,
         ) -> Result<NeighborsResult, String> {
             Err("unused in test".into())
         }

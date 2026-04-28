@@ -173,6 +173,7 @@ impl RepoGraphOps for StubRepoGraph {
         _key: &str,
         _direction: Option<&str>,
         _group_by: Option<&str>,
+        _kind_filter: Option<&str>,
     ) -> std::result::Result<NeighborsResult, String> {
         Ok(NeighborsResult::Detailed(Vec::new()))
     }

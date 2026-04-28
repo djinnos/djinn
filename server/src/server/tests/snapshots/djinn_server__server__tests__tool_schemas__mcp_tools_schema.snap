@@ -1,6 +1,5 @@
 ---
 source: src/server/tests/tool_schemas.rs
-assertion_line: 175
 expression: signatures
 ---
 [
@@ -838,7 +837,7 @@ expression: signatures
         },
         "kind_filter": {
           "default": null,
-          "description": "Node kind filter for `ranked`/`search`/`cycles`/`orphans`: `file` or `symbol`.",
+          "description": "Kind filter, op-specific:\n- `ranked` / `search` / `cycles` / `orphans`: node kind — `file` or\n  `symbol`.\n- `neighbors`: edge kind — `reads` or `writes` (PR A3). Restricts\n  the response to neighbors connected by `Reads` / `Writes` edges\n  only, so callers can ask for \"who writes to field X\" without\n  post-filtering.",
           "nullable": true,
           "type": "string"
         },
