@@ -151,6 +151,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         {
             ingest_coupling_best_effort(ctx, project_id, handle.path()).await;
             spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &cached.graph);
+            spawn_cluster_docs_best_effort(ctx, project_id, &cached.graph);
             return Ok((handle, cached.graph.clone()));
         }
     }
@@ -170,6 +171,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
                 .await;
                 ingest_coupling_best_effort(ctx, project_id, handle.path()).await;
                 spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &graph);
+                spawn_cluster_docs_best_effort(ctx, project_id, &graph);
                 return Ok((handle, graph));
             }
             Err(e) => {
@@ -194,6 +196,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         {
             ingest_coupling_best_effort(ctx, project_id, handle.path()).await;
             spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &cached.graph);
+            spawn_cluster_docs_best_effort(ctx, project_id, &cached.graph);
             return Ok((handle, cached.graph.clone()));
         }
     }
@@ -212,6 +215,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
                 .await;
                 ingest_coupling_best_effort(ctx, project_id, handle.path()).await;
                 spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &graph);
+                spawn_cluster_docs_best_effort(ctx, project_id, &graph);
                 return Ok((handle, graph));
             }
             Err(e) => {
@@ -337,6 +341,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     )
     .await;
     spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &graph);
+    spawn_cluster_docs_best_effort(ctx, project_id, &graph);
     Ok((handle, graph))
 }
 
@@ -363,6 +368,24 @@ fn spawn_chunk_and_embed_best_effort<C: WarmContext>(
         Arc::new(graph.clone()),
         project_id.to_string(),
         project_root.to_path_buf(),
+    );
+}
+
+/// PR F4: fire the cluster-doc generator on a detached `tokio::spawn`
+/// when the `DJINN_CLUSTER_DOCS` flag is on and the graph carries at
+/// least one community. Idempotent — already-written notes are
+/// skipped at the permalink check inside `generate_for_all`. Always a
+/// no-op when the flag is unset (default).
+fn spawn_cluster_docs_best_effort<C: WarmContext>(
+    ctx: &C,
+    project_id: &str,
+    graph: &crate::repo_graph::RepoDependencyGraph,
+) {
+    crate::cluster_doc::spawn_generate_for_all(
+        ctx.db().clone(),
+        ctx.event_bus(),
+        project_id.to_string(),
+        Arc::new(graph.clone()),
     );
 }
 

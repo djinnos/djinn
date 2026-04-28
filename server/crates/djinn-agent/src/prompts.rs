@@ -25,6 +25,13 @@ pub(crate) const REVIEWER_TEMPLATE: &str = include_str!("prompts/task-reviewer.m
 pub(crate) const LEAD_TEMPLATE: &str = include_str!("prompts/lead.md");
 pub(crate) const PLANNER_TEMPLATE: &str = include_str!("prompts/planner.md");
 pub(crate) const ARCHITECT_TEMPLATE: &str = include_str!("prompts/architect.md");
+/// PR F4: cluster-doc synthesis template. Currently shipped but not yet
+/// wired to an LLM call site — `djinn-graph::cluster_doc` writes a
+/// deterministic placeholder body until the agent runtime exposes a
+/// generic "render this prompt with these slots" entry point. Slots:
+/// `{{MODULE_NAME}}`, `{{INTRA_CALLS}}`, `{{OUTGOING_CALLS}}`,
+/// `{{TOP_PROCESSES}}`, `{{CHILDREN_DOCS}}`, `{{PROJECT_INFO}}`.
+pub const CLUSTER_DOC_TEMPLATE: &str = include_str!("prompts/cluster-doc.md");
 
 // ─── Context ───────────────────────────────────────────────────────────────────
 
