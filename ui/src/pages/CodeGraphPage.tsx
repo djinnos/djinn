@@ -19,6 +19,7 @@ import { ConnectIcon } from "@hugeicons/core-free-icons";
 
 import { CodeGraphCanvas } from "@/components/codegraph/CodeGraphCanvas";
 import { GraphToolbar } from "@/components/codegraph/GraphToolbar";
+import { QueryFAB } from "@/components/codegraph/QueryFAB";
 import { QueryPalette } from "@/components/codegraph/QueryPalette";
 import { SymbolDetailPanel } from "@/components/codegraph/SymbolDetailPanel";
 import {
@@ -114,6 +115,7 @@ export function CodeGraphPage() {
             </div>
             <SymbolDetailPanel projectId={selectedProjectId} />
             <QueryPalette projectId={selectedProjectId} />
+            <QueryFAB projectId={selectedProjectId} />
           </>
         ) : (
           <EmptyHint message="Select a project to view its code graph." />

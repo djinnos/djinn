@@ -121,6 +121,31 @@ export function fetchRanked(
   return callCodeGraph(project, "ranked", args);
 }
 
+/**
+ * PR D6: enumerate strongly-connected import cycles. `min_size` defaults
+ * to 2 server-side; the FAB chip pre-fills 3 to filter trivial pairs.
+ */
+export function fetchCycles(
+  project: string,
+  args: Pick<CodeGraphArgs, "min_size" | "limit"> = {},
+) {
+  return callCodeGraph(project, "cycles", args);
+}
+
+/**
+ * PR D6: shortest dependency path between two SCIP keys. Both `from`
+ * and `to` are RepoNodeKeys (the same form `selectionId` takes); the
+ * server returns `null` under `path` if the nodes are disconnected.
+ */
+export function fetchPath(
+  project: string,
+  from: string,
+  to: string,
+  args: Pick<CodeGraphArgs, "max_depth" | "edge_kind"> = {},
+) {
+  return callCodeGraph(project, "path", { from, to, ...args });
+}
+
 export function searchSymbols(
   project: string,
   query: string,
@@ -214,9 +239,11 @@ export {
   parseCycles,
   parseDetectedChanges,
   parseFileGroups,
+  parseImpactDetailed,
   parseNeighbors,
   parseNotFound,
   parseOrphans,
+  parsePath,
   parseRanked,
   parseSearchHits,
   parseSymbolContext,
@@ -235,6 +262,8 @@ export {
   type NotFound,
   type OrphanEntry,
   type PagerankTier,
+  type PathHop,
+  type PathResult,
   type ProcessRef,
   type RankedNode,
   type RelatedSymbol,
