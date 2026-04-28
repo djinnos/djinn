@@ -2398,7 +2398,11 @@ fn build_snapshot_payload(
                     .map(|k| format!("{k:?}").to_lowercase()),
                 file_path: node.file_path.as_ref().map(|p| p.display().to_string()),
                 pagerank,
-                community_id: None,
+                // PR F3: populate from the canonical graph's community
+                // sidecar; `None` when the node is a singleton (not in
+                // any non-trivial community) or when detection was
+                // skipped (`DJINN_COMMUNITY_DETECTION=0`).
+                community_id: graph.community_id(idx).map(str::to_string),
             }
         })
         .collect();
@@ -3811,5 +3815,149 @@ pub(crate) mod graph_bridge_tests {
                 edge.to
             );
         }
+    }
+
+    /// PR F3 acceptance: when the canonical graph has detected
+    /// communities, the snapshot payload's `community_id` field is
+    /// populated for every node that joined a non-trivial community.
+    /// We synthesize a graph via the artifact seam (two tight 3-node
+    /// clusters joined by a thin bridge — the same fixture pattern
+    /// used in the `communities` module's unit tests) and verify the
+    /// adapter wires `RepoDependencyGraph::community_id(...)` through
+    /// to `SnapshotNode::community_id`.
+    #[test]
+    fn snapshot_payload_populates_community_id_pr_f3() {
+        use djinn_control_plane::tools::graph_exclusions::GraphExclusions;
+        use djinn_graph::repo_graph::{
+            REPO_GRAPH_ARTIFACT_VERSION, RepoDependencyGraph, RepoGraphArtifact,
+            RepoGraphArtifactEdge, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind,
+            RepoNodeKey,
+        };
+
+        let mk_node = |name: &str, file: &str| RepoGraphNode {
+            id: RepoNodeKey::Symbol(format!("symbol:{name}")),
+            kind: RepoGraphNodeKind::Symbol,
+            display_name: name.to_string(),
+            language: Some("rust".to_string()),
+            file_path: Some(PathBuf::from(file)),
+            symbol: Some(format!("symbol:{name}")),
+            symbol_kind: None,
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: vec![],
+            signature_parts: None,
+            is_test: false,
+        };
+        let nodes = vec![
+            mk_node("auth_login", "src/auth/login.rs"),
+            mk_node("auth_session", "src/auth/session.rs"),
+            mk_node("auth_token", "src/auth/token.rs"),
+            mk_node("billing_charge", "src/billing/charge.rs"),
+            mk_node("billing_invoice", "src/billing/invoice.rs"),
+            mk_node("billing_refund", "src/billing/refund.rs"),
+        ];
+        let edge = |s, t, w| RepoGraphArtifactEdge {
+            source: s,
+            target: t,
+            kind: RepoGraphEdgeKind::SymbolReference,
+            weight: w,
+            evidence_count: 1,
+            confidence: 0.9,
+            reason: None,
+        };
+        // Two tight triangles + a thin bridge between clusters.
+        let mut edges = vec![
+            edge(0, 1, 5.0),
+            edge(1, 0, 5.0),
+            edge(1, 2, 5.0),
+            edge(2, 1, 5.0),
+            edge(0, 2, 5.0),
+            edge(2, 0, 5.0),
+            edge(3, 4, 5.0),
+            edge(4, 3, 5.0),
+            edge(4, 5, 5.0),
+            edge(5, 4, 5.0),
+            edge(3, 5, 5.0),
+            edge(5, 3, 5.0),
+            edge(2, 3, 0.5),
+            edge(3, 2, 0.5),
+        ];
+        // Sort to keep the artifact output stable across runs.
+        edges.sort_by_key(|e| (e.source, e.target));
+
+        let artifact = RepoGraphArtifact {
+            version: REPO_GRAPH_ARTIFACT_VERSION,
+            nodes,
+            edges,
+            symbol_ranges: std::collections::BTreeMap::new(),
+            communities: vec![],
+        };
+        // `from_artifact` does NOT run community detection (it
+        // restores the persisted sidecar — empty here). To exercise
+        // the detector against this fixture we re-run it manually
+        // and install the result, mirroring how `finish()` does it
+        // at build time. The detector is `pub`, so this is a
+        // legitimate adapter call.
+        let mut graph = RepoDependencyGraph::from_artifact(&artifact);
+        let communities = djinn_graph::communities::detect_communities(&graph);
+        assert!(
+            !communities.is_empty(),
+            "fixture should produce at least one community"
+        );
+        // Bypass `install_communities` (private) by round-tripping
+        // through a populated artifact.
+        let mut a2 = graph.to_artifact();
+        a2.communities = communities;
+        graph = RepoDependencyGraph::from_artifact(&a2);
+
+        let ranking = graph.rank();
+        let payload = build_snapshot_payload(
+            &graph,
+            &ranking,
+            "proj-f3".to_string(),
+            "deadbeef".to_string(),
+            "2026-04-28T00:00:00Z".to_string(),
+            2_000,
+            &GraphExclusions::empty(),
+        );
+
+        // Every emitted node should carry a community_id (these are
+        // all symbols in the two tight triangles — none of them is a
+        // singleton).
+        let with_community = payload
+            .nodes
+            .iter()
+            .filter(|n| n.community_id.is_some())
+            .count();
+        assert!(
+            with_community >= 4,
+            "expected ≥4 nodes with a community_id, got {with_community}: {:?}",
+            payload
+                .nodes
+                .iter()
+                .map(|n| (n.id.clone(), n.community_id.clone()))
+                .collect::<Vec<_>>()
+        );
+
+        // The auth and billing clusters should map to *different*
+        // community ids — proves the adapter isn't lazily handing
+        // back a single global id.
+        let auth_id = payload
+            .nodes
+            .iter()
+            .find(|n| n.id.contains("auth_login"))
+            .and_then(|n| n.community_id.clone())
+            .expect("auth_login should carry a community_id");
+        let billing_id = payload
+            .nodes
+            .iter()
+            .find(|n| n.id.contains("billing_charge"))
+            .and_then(|n| n.community_id.clone())
+            .expect("billing_charge should carry a community_id");
+        assert_ne!(
+            auth_id, billing_id,
+            "auth and billing clusters should not share community_id"
+        );
     }
 }

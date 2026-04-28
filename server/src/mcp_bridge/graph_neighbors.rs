@@ -381,6 +381,13 @@ pub(super) fn classify_edge_category(
         // detector. Surface as its own category so the UI can badge
         // entry-point symbols.
         RepoGraphEdgeKind::EntryPointOf => EdgeCategory::EntryPoint,
+        // PR F3: `MemberOf` is a synthetic community-membership edge.
+        // It currently never lives in the petgraph (the membership
+        // sidecar carries it instead), but if a future warm pass
+        // materializes it, "References" is the closest neutral
+        // category — consumers asking "who imports/calls X" should
+        // not see community membership in their answers.
+        RepoGraphEdgeKind::MemberOf => EdgeCategory::References,
     }
 }
 
