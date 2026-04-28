@@ -871,6 +871,22 @@ impl AppState {
         }
     }
 
+    /// `code_chunks` analog of [`Self::note_vector_store`]. Gated on
+    /// `DJINN_CODE_CHUNKS_BACKEND=qdrant`; defaults to the no-op store
+    /// so the chunk-and-embed pipeline still records SQL rows but never
+    /// attempts a Qdrant upsert until the operator opts in.
+    pub fn code_chunk_vector_store(&self) -> Arc<dyn djinn_db::CodeChunkVectorStore> {
+        let backend = std::env::var("DJINN_CODE_CHUNKS_BACKEND").unwrap_or_default();
+        if backend.eq_ignore_ascii_case("qdrant") {
+            Arc::new(QdrantCodeChunkVectorStore::new(
+                qdrant_code_chunk_config_from_env(),
+            )) as Arc<dyn djinn_db::CodeChunkVectorStore>
+        } else {
+            Arc::new(djinn_db::NoopCodeChunkVectorStore)
+                as Arc<dyn djinn_db::CodeChunkVectorStore>
+        }
+    }
+
     /// Bootstrap-time call: ensure the configured Qdrant collection exists
     /// with the expected vector dimensions before the server starts taking
     /// embed-upsert traffic. No-op when `DJINN_VECTOR_BACKEND` isn't `qdrant`.
@@ -1533,6 +1549,20 @@ impl djinn_graph::WarmContext for AppState {
 
     fn indexer_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
         AppState::indexer_lock(self)
+    }
+
+    fn code_chunk_embeddings(
+        &self,
+    ) -> Option<Arc<dyn djinn_db::CodeChunkEmbeddingProvider>> {
+        // The shared `EmbeddingService` impls both `NoteEmbeddingProvider`
+        // and `CodeChunkEmbeddingProvider` (PR B3) — same model, same
+        // version stamp. Cloning is cheap (Arc-internal).
+        Some(Arc::new(self.inner.embedding_service.clone())
+            as Arc<dyn djinn_db::CodeChunkEmbeddingProvider>)
+    }
+
+    fn code_chunk_vector_store(&self) -> Option<Arc<dyn djinn_db::CodeChunkVectorStore>> {
+        Some(AppState::code_chunk_vector_store(self))
     }
 }
 

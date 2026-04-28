@@ -443,6 +443,17 @@ impl RepoDependencyGraph {
             .collect()
     }
 
+    /// Iterate the per-file symbol-range index in deterministic order.
+    /// Each yielded slice is sorted by `start_line` (the invariant
+    /// established by [`RepoDependencyGraph::build`]). Used by the chunk-
+    /// and-embed pipeline (PR B3) to walk every symbol in every file
+    /// without exposing the inner `BTreeMap` shape.
+    pub fn symbol_ranges_by_file(&self) -> impl Iterator<Item = (&Path, &[SymbolRange])> {
+        self.symbol_ranges
+            .iter()
+            .map(|(path, ranges)| (path.as_path(), ranges.as_slice()))
+    }
+
     /// Shortest dependency path between two nodes using A* over edge weights.
     pub fn shortest_path(
         &self,

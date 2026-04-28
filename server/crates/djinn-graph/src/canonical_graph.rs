@@ -150,6 +150,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             && cached.git_head == commit_sha
         {
             ingest_coupling_best_effort(ctx, project_id, handle.path()).await;
+            spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &cached.graph);
             return Ok((handle, cached.graph.clone()));
         }
     }
@@ -168,6 +169,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
                 )
                 .await;
                 ingest_coupling_best_effort(ctx, project_id, handle.path()).await;
+                spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &graph);
                 return Ok((handle, graph));
             }
             Err(e) => {
@@ -191,6 +193,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             && cached.git_head == commit_sha
         {
             ingest_coupling_best_effort(ctx, project_id, handle.path()).await;
+            spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &cached.graph);
             return Ok((handle, cached.graph.clone()));
         }
     }
@@ -208,6 +211,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
                 )
                 .await;
                 ingest_coupling_best_effort(ctx, project_id, handle.path()).await;
+                spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &graph);
                 return Ok((handle, graph));
             }
             Err(e) => {
@@ -332,7 +336,34 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         sccs,
     )
     .await;
+    spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &graph);
     Ok((handle, graph))
+}
+
+/// Fire the PR B3 chunk-and-embed pipeline on a detached `tokio::spawn`
+/// when the warm context exposes both an embedding provider and a
+/// vector store. Skipped when either is `None` (warm worker / tests
+/// that don't ship the embedding model) or when the
+/// `DJINN_CODE_CHUNKS_BACKEND` flag is unset (default).
+fn spawn_chunk_and_embed_best_effort<C: WarmContext>(
+    ctx: &C,
+    project_id: &str,
+    project_root: &Path,
+    graph: &crate::repo_graph::RepoDependencyGraph,
+) {
+    let (Some(embeddings), Some(vector_store)) =
+        (ctx.code_chunk_embeddings(), ctx.code_chunk_vector_store())
+    else {
+        return;
+    };
+    crate::chunk_and_embed::spawn_chunk_and_embed_pass(
+        ctx.db().clone(),
+        embeddings,
+        vector_store,
+        Arc::new(graph.clone()),
+        project_id.to_string(),
+        project_root.to_path_buf(),
+    );
 }
 
 /// Keep the per-project commit-coupling index current. Non-fatal on

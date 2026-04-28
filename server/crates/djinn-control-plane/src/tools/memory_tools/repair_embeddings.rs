@@ -143,12 +143,23 @@ async fn repair_embeddings(
         Ok(rows) => {
             response.code_chunks_total = rows.len() as i64;
             for row in rows {
+                // Mirror the note-side rule: a row whose Qdrant upsert
+                // failed is recorded with `extension_state="pending"`
+                // and must be treated as stale even when the content
+                // hash + model version match — the vector store doesn't
+                // actually have a point yet.
                 let is_stale = match (
                     row.meta_content_hash.as_deref(),
                     row.meta_model_version.as_deref(),
                 ) {
                     (Some(hash), Some(version)) => {
-                        hash != row.content_hash || version != model_version
+                        hash != row.content_hash
+                            || version != model_version
+                            || row
+                                .meta_extension_state
+                                .as_deref()
+                                .unwrap_or("pending")
+                                != "ready"
                     }
                     _ => true,
                 };

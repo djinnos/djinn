@@ -17,6 +17,7 @@ use djinn_db::Database;
 
 pub mod architect;
 pub mod canonical_graph;
+pub mod chunk_and_embed;
 pub mod coupling_index;
 pub mod git_diff;
 pub mod index_tree;
@@ -44,4 +45,22 @@ pub trait WarmContext: Send + Sync {
     /// fan-out (ADR-050 §3).  Must return the same `Arc` each call so all
     /// callers serialize through one mutex.
     fn indexer_lock(&self) -> Arc<tokio::sync::Mutex<()>>;
+
+    /// Optional handle for the chunk-and-embed kickoff
+    /// ([`canonical_graph::ensure_canonical_graph`] fires this on its
+    /// success path when both `code_chunk_embeddings()` and
+    /// `code_chunk_vector_store()` are `Some`). Returning `None` keeps
+    /// the embed pass disabled — the right default for the warm worker
+    /// binary, which doesn't ship an embedding model.
+    fn code_chunk_embeddings(
+        &self,
+    ) -> Option<Arc<dyn djinn_db::CodeChunkEmbeddingProvider>> {
+        None
+    }
+
+    /// Optional Qdrant `code_chunks` vector store handle. Pairs with
+    /// [`Self::code_chunk_embeddings`].
+    fn code_chunk_vector_store(&self) -> Option<Arc<dyn djinn_db::CodeChunkVectorStore>> {
+        None
+    }
 }

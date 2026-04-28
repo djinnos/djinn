@@ -17,7 +17,9 @@ use serde::Serialize;
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationDirection, TruncationParams, TruncationStrategy};
 use tokio::sync::{Mutex, OnceCell};
 
-use djinn_db::{EmbeddedNote, NoteEmbeddingProvider};
+use djinn_db::{
+    CodeChunkEmbeddingProvider, EmbeddedCodeChunk, EmbeddedNote, NoteEmbeddingProvider,
+};
 
 const DEFAULT_MODEL_ID: &str = "nomic-ai/nomic-embed-text-v1.5";
 const DEFAULT_MODEL_REVISION: &str = "main";
@@ -43,6 +45,27 @@ impl NoteEmbeddingProvider for EmbeddingService {
     async fn embed_note(&self, text: &str) -> Result<EmbeddedNote, String> {
         match self.embed_document(text).await {
             EmbeddingOutcome::Ready(vector) => Ok(EmbeddedNote {
+                values: vector.values,
+                model_version: format!("{}@{}", vector.model.model_id, vector.model.revision),
+            }),
+            EmbeddingOutcome::Degraded(degraded) => Err(degraded.reason),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl CodeChunkEmbeddingProvider for EmbeddingService {
+    fn model_version(&self) -> String {
+        // Same string as the note path — both notes and code-chunks ride
+        // on `nomic-embed-text-v1.5` so the version stamp is shared
+        // (plan §"PR B3 → reuse `nomic-embed-text-v1.5` (already loaded)").
+        let model = self.model_descriptor();
+        format!("{}@{}", model.model_id, model.revision)
+    }
+
+    async fn embed_chunk(&self, text: &str) -> Result<EmbeddedCodeChunk, String> {
+        match self.embed_document(text).await {
+            EmbeddingOutcome::Ready(vector) => Ok(EmbeddedCodeChunk {
                 values: vector.values,
                 model_version: format!("{}@{}", vector.model.model_id, vector.model.revision),
             }),
