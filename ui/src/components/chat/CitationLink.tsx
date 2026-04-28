@@ -61,6 +61,7 @@ export function CitationLink({
 }: CitationLinkProps) {
   const navigate = useNavigate();
   const setCitations = useCodeGraphStore((s) => s.setCitations);
+  const setSelection = useCodeGraphStore((s) => s.setSelection);
   const projectId = useSelectedProjectId();
 
   const [resolving, setResolving] = useState(false);
@@ -83,6 +84,7 @@ export function CitationLink({
 
   const pin = (nodeId: string) => {
     setCitations([nodeId]);
+    setSelection(nodeId);
     setPopover(null);
     if (typeof window !== "undefined" && window.location.pathname === destination) {
       // Already on the canvas — store change is enough to repaint.
