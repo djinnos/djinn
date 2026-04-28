@@ -1,5 +1,77 @@
 use super::*;
 use crate::extension::github_search;
+use djinn_control_plane::bridge::{ProjectCtx, RepoGraphOps, ResolveOutcome};
+
+/// PR C2 mirror of the MCP-side dispatcher's pre-resolve. When the chat
+/// tool's caller passes a short identifier (`User`, `helper`) we go
+/// through the bridge's `resolve` op so we can return a structured JSON
+/// payload describing the ambiguity / hard miss instead of failing the
+/// tool call.
+///
+/// On `Found(uid)`, mutate `params.key` (or `from`/`to`) so the
+/// downstream op sees the canonical RepoNodeKey. Return `Ok(None)` to
+/// continue dispatch as usual.
+async fn pre_resolve_chat_key(
+    graph: &dyn RepoGraphOps,
+    ctx: &ProjectCtx,
+    params: &mut CodeGraphParams,
+) -> Result<Option<serde_json::Value>, String> {
+    let single_key_ops = ["neighbors", "impact", "implementations", "describe"];
+    if single_key_ops.contains(&params.operation.as_str()) {
+        if let Some(key) = params.key.as_deref().filter(|k| !k.is_empty()) {
+            let kind_hint = params.kind_hint.as_deref();
+            match graph.resolve(ctx, key, kind_hint).await? {
+                ResolveOutcome::Found(uid) => {
+                    params.key = Some(uid);
+                }
+                ResolveOutcome::Ambiguous(candidates) => {
+                    return Ok(Some(serde_json::json!({ "candidates": candidates })));
+                }
+                ResolveOutcome::NotFound => {
+                    return Ok(Some(serde_json::json!({
+                        "not_found": {
+                            "query": key,
+                            "kind_hint": kind_hint,
+                        }
+                    })));
+                }
+            }
+        }
+    }
+
+    if params.operation == "path" {
+        for which in ["from", "to"] {
+            let raw = match which {
+                "from" => params.from.as_deref().filter(|s| !s.is_empty()),
+                _ => params.to.as_deref().filter(|s| !s.is_empty()),
+            };
+            let Some(key) = raw else { continue };
+            let kind_hint = params.kind_hint.as_deref();
+            match graph.resolve(ctx, key, kind_hint).await? {
+                ResolveOutcome::Found(uid) => {
+                    if which == "from" {
+                        params.from = Some(uid);
+                    } else {
+                        params.to = Some(uid);
+                    }
+                }
+                ResolveOutcome::Ambiguous(candidates) => {
+                    return Ok(Some(serde_json::json!({ "candidates": candidates })));
+                }
+                ResolveOutcome::NotFound => {
+                    return Ok(Some(serde_json::json!({
+                        "not_found": {
+                            "query": key,
+                            "kind_hint": kind_hint,
+                        }
+                    })));
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
 
 pub(crate) async fn call_lsp(
     state: &AgentContext,
@@ -146,7 +218,7 @@ pub(crate) async fn call_code_graph(
     project_id: &str,
     project_path: &str,
 ) -> Result<serde_json::Value, String> {
-    let p: CodeGraphParams = parse_args(arguments)?;
+    let mut p: CodeGraphParams = parse_args(arguments)?;
     let mcp_state = state.to_mcp_state();
     let graph_ops = mcp_state.repo_graph();
     // Build the resolved ProjectCtx once; pass by reference to each op.
@@ -156,6 +228,15 @@ pub(crate) async fn call_code_graph(
         id: project_id.to_string(),
         clone_path: project_path.to_string(),
     };
+
+    // PR C2: pre-resolve key-bearing ops so the chat tool surfaces
+    // `Ambiguous` / `NotFound` as structured JSON the model can act on,
+    // instead of failing the call with a generic "not found" string.
+    if let Some(short_circuit) =
+        pre_resolve_chat_key(graph_ops.as_ref(), &ctx, &mut p).await?
+    {
+        return Ok(short_circuit);
+    }
 
     let result: serde_json::Value = match p.operation.as_str() {
         "neighbors" => {

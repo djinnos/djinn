@@ -827,6 +827,12 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "kind_hint": {
+          "default": null,
+          "description": "PR C2: optional kind hint biasing the C2 disambiguation score\nwhen `key` is a short identifier (e.g. `\"User\"`) and the\nresolver hits multiple candidates. Accepts the same labels the\nresolver emits: `\"file\"`, `\"class\"`, `\"interface\"`, `\"function\"`,\n`\"method\"`, `\"struct\"`, `\"enum\"`, etc.",
+          "nullable": true,
+          "type": "string"
+        },
         "limit": {
           "default": null,
           "description": "Maximum results for `ranked`/`search`/`orphans`/`edges`/`neighbors`\n(default 20) or max traversal depth for `impact` (default 3).",

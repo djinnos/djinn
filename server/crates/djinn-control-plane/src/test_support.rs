@@ -385,6 +385,16 @@ impl RepoGraphOps for StubRepoGraph {
     ) -> std::result::Result<Vec<crate::bridge::CouplingHubEntry>, String> {
         Ok(Vec::new())
     }
+    async fn resolve(
+        &self,
+        _ctx: &ProjectCtx,
+        _key: &str,
+        _kind_hint: Option<&str>,
+    ) -> std::result::Result<crate::bridge::ResolveOutcome, String> {
+        // Stub: pretend the key matches itself. Tests that exercise the
+        // C2 ambiguity path inject their own bridge.
+        Ok(crate::bridge::ResolveOutcome::NotFound)
+    }
 }
 
 /// NoteEmbeddingProvider stub. `model_version` is informational; `embed_note`

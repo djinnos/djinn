@@ -364,6 +364,14 @@ export namespace CodeGraphInputSchema {
    */
   kind_filter?: string
   /**
+   * PR C2: optional kind hint biasing the C2 disambiguation score
+   * when `key` is a short identifier (e.g. `"User"`) and the
+   * resolver hits multiple candidates. Accepts the same labels the
+   * resolver emits: `"file"`, `"class"`, `"interface"`, `"function"`,
+   * `"method"`, `"struct"`, `"enum"`, etc.
+   */
+  kind_hint?: string
+  /**
    * Maximum results for `ranked`/`search`/`orphans`/`edges`/`neighbors`
    * (default 20) or max traversal depth for `impact` (default 3).
    */

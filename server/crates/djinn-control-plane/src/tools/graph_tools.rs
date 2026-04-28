@@ -8,11 +8,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::bridge::{
-    ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangedRange, ChurnEntry, CoupledPairEntry,
-    CouplingEntry, CouplingHubEntry, CycleGroup, DeadSymbolEntry, DeprecatedHit, EdgeEntry,
-    FileGroupEntry, GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry, ImpactEntry,
+    ApiSurfaceEntry, BoundaryRule, BoundaryViolation, Candidate, ChangedRange, ChurnEntry,
+    CoupledPairEntry, CouplingEntry, CouplingHubEntry, CycleGroup, DeadSymbolEntry, DeprecatedHit,
+    EdgeEntry, FileGroupEntry, GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry, ImpactEntry,
     ImpactResult, MetricsAtResult, NeighborsResult, OrphanEntry, PathResult, ProjectCtx,
-    RankedNode, SearchHit, SymbolAtHit, SymbolDescription, TouchedSymbol,
+    RankedNode, ResolveOutcome, SearchHit, SymbolAtHit, SymbolDescription, TouchedSymbol,
 };
 use crate::server::DjinnMcpServer;
 use crate::tools::graph_exclusions::GraphExclusions;
@@ -151,6 +151,13 @@ pub struct CodeGraphParams {
     /// confidence (default behaviour).
     #[serde(default)]
     pub min_confidence: Option<f64>,
+    /// PR C2: optional kind hint biasing the C2 disambiguation score
+    /// when `key` is a short identifier (e.g. `"User"`) and the
+    /// resolver hits multiple candidates. Accepts the same labels the
+    /// resolver emits: `"file"`, `"class"`, `"interface"`, `"function"`,
+    /// `"method"`, `"struct"`, `"enum"`, etc.
+    #[serde(default)]
+    pub kind_hint: Option<String>,
 }
 
 // ── Response types ──────────────────────────────────────────────────────────────
@@ -364,6 +371,35 @@ pub struct CouplingHubsResponse {
     pub next_step: Option<String>,
 }
 
+/// PR C2: emitted when the dispatcher's pre-resolve pass returns
+/// multiple plausible nodes for a caller-supplied `key`. The wire shape
+/// hangs on the `candidates` discriminator so the untagged enum stays
+/// disambiguable from every other `CodeGraphResponse` variant.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct AmbiguousResponse {
+    pub candidates: Vec<Candidate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
+}
+
+/// PR C2: emitted when neither the exact-match nor the name-search
+/// fallback turns up any node for the supplied `key`. The body is an
+/// object (not a bare string) so the discriminator is unambiguous and
+/// callers can read `query` for telemetry / surfaces.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct NotFoundResponse {
+    pub not_found: NotFoundDetail,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct NotFoundDetail {
+    pub query: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind_hint: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum CodeGraphResponse {
@@ -391,6 +427,11 @@ pub enum CodeGraphResponse {
     Churn(ChurnResponse),
     CouplingHotspots(CouplingHotspotsResponse),
     CouplingHubs(CouplingHubsResponse),
+    /// PR C2: multi-match disambiguation list.
+    Ambiguous(AmbiguousResponse),
+    /// PR C2: hard miss — neither exact nor name-index resolution
+    /// produced any hit for the caller's key.
+    NotFound(NotFoundResponse),
 }
 
 // ── Next-step hints ─────────────────────────────────────────────────────────────
@@ -490,6 +531,8 @@ fn next_step_slot(response: &mut CodeGraphResponse) -> &mut Option<String> {
         CodeGraphResponse::Churn(r) => &mut r.next_step,
         CodeGraphResponse::CouplingHotspots(r) => &mut r.next_step,
         CodeGraphResponse::CouplingHubs(r) => &mut r.next_step,
+        CodeGraphResponse::Ambiguous(r) => &mut r.next_step,
+        CodeGraphResponse::NotFound(r) => &mut r.next_step,
     }
 }
 
@@ -656,6 +699,23 @@ impl DjinnMcpServer {
             clone_path: params.project_path.clone(),
         };
 
+        // PR C2: pre-resolve key-bearing ops through the bridge so we
+        // can surface `Ambiguous` / `NotFound` as structured wire variants
+        // instead of generic error strings. When the resolver lands on
+        // `Found(uid)`, we rewrite `params.key` (or `params.from`/`to`
+        // for `path`) to the canonical RepoNodeKey before dispatching —
+        // this guarantees the inner op gets a unique node even when the
+        // caller passed a short identifier.
+        match Self::pre_resolve_key(self.state.repo_graph().as_ref(), &ctx, &mut params).await {
+            Ok(None) => {} // proceed normally
+            Ok(Some(short_circuit)) => {
+                return Json(ErrorOr::Ok(short_circuit));
+            }
+            Err(error) => {
+                return Json(ErrorOr::Error(ErrorResponse { error }));
+            }
+        }
+
         let result = match params.operation.as_str() {
             "neighbors" => self.code_graph_neighbors(&ctx, &params).await,
             "ranked" => self.code_graph_ranked(&ctx, &params).await,
@@ -705,6 +765,101 @@ impl DjinnMcpServer {
 }
 
 impl DjinnMcpServer {
+    /// PR C2 dispatcher hook: for ops that read a caller-supplied node
+    /// key (`neighbors`, `impact`, `implementations`, `describe`,
+    /// `path`), pre-resolve via [`RepoGraphOps::resolve`] so the inner
+    /// op gets either a unique RepoNodeKey or short-circuits on a
+    /// disambiguation list / hard miss.
+    ///
+    /// Returns:
+    /// - `Ok(None)` — caller may dispatch the inner op as usual. For
+    ///   `Found(uid)` we rewrite `params.key` (or `from`/`to` for
+    ///   `path`) to the canonical key first.
+    /// - `Ok(Some(response))` — short-circuit; emit `Ambiguous`/`NotFound`.
+    /// - `Err(_)` — bridge call failed; surface as an MCP error.
+    async fn pre_resolve_key(
+        graph: &dyn crate::bridge::RepoGraphOps,
+        ctx: &ProjectCtx,
+        params: &mut CodeGraphParams,
+    ) -> Result<Option<CodeGraphResponse>, String> {
+        // Operations that take a single `key`. `search`/`ranked`/
+        // `cycles`/`orphans`/`hotspots`/etc. don't go through
+        // resolution — their `key` is a query/glob.
+        let single_key_ops = [
+            "neighbors",
+            "impact",
+            "implementations",
+            "describe",
+        ];
+        if single_key_ops.contains(&params.operation.as_str()) {
+            if let Some(key) = params.key.as_deref().filter(|k| !k.is_empty()) {
+                let kind_hint = params.kind_hint.as_deref();
+                match graph.resolve(ctx, key, kind_hint).await? {
+                    ResolveOutcome::Found(uid) => {
+                        params.key = Some(uid);
+                    }
+                    ResolveOutcome::Ambiguous(candidates) => {
+                        return Ok(Some(CodeGraphResponse::Ambiguous(
+                            AmbiguousResponse {
+                                candidates,
+                                next_step: None,
+                            },
+                        )));
+                    }
+                    ResolveOutcome::NotFound => {
+                        return Ok(Some(CodeGraphResponse::NotFound(NotFoundResponse {
+                            not_found: NotFoundDetail {
+                                query: key.to_string(),
+                                kind_hint: kind_hint.map(str::to_string),
+                            },
+                            next_step: None,
+                        })));
+                    }
+                }
+            }
+        }
+
+        // `path` takes two keys; resolve both.
+        if params.operation == "path" {
+            for which in ["from", "to"] {
+                let raw = match which {
+                    "from" => params.from.as_deref().filter(|s| !s.is_empty()),
+                    _ => params.to.as_deref().filter(|s| !s.is_empty()),
+                };
+                let Some(key) = raw else { continue };
+                let kind_hint = params.kind_hint.as_deref();
+                match graph.resolve(ctx, key, kind_hint).await? {
+                    ResolveOutcome::Found(uid) => {
+                        if which == "from" {
+                            params.from = Some(uid);
+                        } else {
+                            params.to = Some(uid);
+                        }
+                    }
+                    ResolveOutcome::Ambiguous(candidates) => {
+                        return Ok(Some(CodeGraphResponse::Ambiguous(
+                            AmbiguousResponse {
+                                candidates,
+                                next_step: None,
+                            },
+                        )));
+                    }
+                    ResolveOutcome::NotFound => {
+                        return Ok(Some(CodeGraphResponse::NotFound(NotFoundResponse {
+                            not_found: NotFoundDetail {
+                                query: key.to_string(),
+                                kind_hint: kind_hint.map(str::to_string),
+                            },
+                            next_step: None,
+                        })));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Load the per-project graph exclusions, rendered into a compiled
     /// [`GraphExclusions`] predicate. On any lookup failure we fall
     /// back to [`GraphExclusions::empty`], which still applies Tier 1
@@ -1540,6 +1695,7 @@ mod tests {
             since_days: None,
             max_files_per_commit: None,
             min_confidence: None,
+            kind_hint: None,
         }
     }
 
@@ -1993,6 +2149,8 @@ mod tests {
             CodeGraphResponse::Churn(r) => r.next_step.as_deref(),
             CodeGraphResponse::CouplingHotspots(r) => r.next_step.as_deref(),
             CodeGraphResponse::CouplingHubs(r) => r.next_step.as_deref(),
+            CodeGraphResponse::Ambiguous(r) => r.next_step.as_deref(),
+            CodeGraphResponse::NotFound(r) => r.next_step.as_deref(),
         }
     }
 
