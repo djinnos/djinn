@@ -336,6 +336,7 @@ fn aggregate_node_pms<'a>(
 const PYTHON_SCIP_INDEXER: &str = "scip-python";
 const GO_SCIP_INDEXER: &str = "scip-go";
 const TYPESCRIPT_SCIP_INDEXER: &str = "scip-typescript";
+const JAVA_SCIP_INDEXER: &str = "scip-java";
 
 // Version pins for SCIP indexers. `"latest"` means the Go-module-proxy /
 // PyPI / npm `latest` tag at build time. Bump these consts to roll
@@ -345,6 +346,7 @@ const TYPESCRIPT_SCIP_INDEXER: &str = "scip-typescript";
 const SCIP_GO_VERSION: &str = "latest";
 const SCIP_PYTHON_VERSION: &str = "latest";
 const SCIP_TYPESCRIPT_VERSION: &str = "latest";
+const SCIP_JAVA_VERSION: &str = "latest";
 
 fn emit_python_block(df: &mut String, languages: &Languages, config: &EnvironmentConfig) {
     let Some(python) = &languages.python else { return };
@@ -372,7 +374,7 @@ fn emit_java_block(df: &mut String, languages: &Languages, _config: &Environment
     let Some(java) = &languages.java else { return };
     writeln!(
         df,
-        "RUN JAVA_VERSION=\"{}\" /tmp/djinn-scripts/install-java.sh",
+        "RUN JAVA_VERSION=\"{}\" SCIP_INDEXER=\"{JAVA_SCIP_INDEXER}\" SCIP_JAVA_VERSION=\"{SCIP_JAVA_VERSION}\" /tmp/djinn-scripts/install-java.sh",
         java.default_version
     )
     .unwrap();
