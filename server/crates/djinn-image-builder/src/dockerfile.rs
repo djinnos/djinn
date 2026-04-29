@@ -338,6 +338,7 @@ const GO_SCIP_INDEXER: &str = "scip-go";
 const TYPESCRIPT_SCIP_INDEXER: &str = "scip-typescript";
 const JAVA_SCIP_INDEXER: &str = "scip-java";
 const CLANG_SCIP_INDEXER: &str = "scip-clang";
+const RUBY_SCIP_INDEXER: &str = "scip-ruby";
 
 // Version pins for SCIP indexers. `"latest"` means the Go-module-proxy /
 // PyPI / npm `latest` tag at build time. Bump these consts to roll
@@ -349,6 +350,7 @@ const SCIP_PYTHON_VERSION: &str = "latest";
 const SCIP_TYPESCRIPT_VERSION: &str = "latest";
 const SCIP_JAVA_VERSION: &str = "latest";
 const SCIP_CLANG_VERSION: &str = "latest";
+const SCIP_RUBY_VERSION: &str = "latest";
 
 fn emit_python_block(df: &mut String, languages: &Languages, config: &EnvironmentConfig) {
     let Some(python) = &languages.python else { return };
@@ -386,7 +388,7 @@ fn emit_ruby_block(df: &mut String, languages: &Languages, _config: &Environment
     let Some(ruby) = &languages.ruby else { return };
     writeln!(
         df,
-        "RUN RUBY_VERSION=\"{}\" /tmp/djinn-scripts/install-ruby.sh",
+        "RUN RUBY_VERSION=\"{}\" SCIP_INDEXER=\"{RUBY_SCIP_INDEXER}\" SCIP_RUBY_VERSION=\"{SCIP_RUBY_VERSION}\" /tmp/djinn-scripts/install-ruby.sh",
         ruby.default_version
     )
     .unwrap();
