@@ -330,11 +330,19 @@ fn aggregate_node_pms<'a>(
 const PYTHON_SCIP_INDEXER: &str = "scip-python";
 const GO_SCIP_INDEXER: &str = "scip-go";
 
+// Version pins for SCIP indexers. `"latest"` means the Go-module-proxy /
+// PyPI `latest` tag at build time. Bump these consts to roll forward;
+// pin to a known-good tag (e.g. `"v0.2.3"`) when an upstream `@latest`
+// regresses. See `project_scip_indexer_versions.md` in user memory for
+// the running list of known regressions.
+const SCIP_GO_VERSION: &str = "latest";
+const SCIP_PYTHON_VERSION: &str = "latest";
+
 fn emit_python_block(df: &mut String, languages: &Languages, config: &EnvironmentConfig) {
     let Some(python) = &languages.python else { return };
     let versions = aggregate_simple(&python.default_version, config, "python");
     let line = format!(
-        "RUN PYTHON_VERSIONS=\"{}\" DEFAULT_PYTHON=\"{}\" SCIP_INDEXER=\"{PYTHON_SCIP_INDEXER}\" /tmp/djinn-scripts/install-python.sh",
+        "RUN PYTHON_VERSIONS=\"{}\" DEFAULT_PYTHON=\"{}\" SCIP_INDEXER=\"{PYTHON_SCIP_INDEXER}\" SCIP_PYTHON_VERSION=\"{SCIP_PYTHON_VERSION}\" /tmp/djinn-scripts/install-python.sh",
         space_join(versions.iter().copied()),
         python.default_version
     );
@@ -346,7 +354,7 @@ fn emit_go_block(df: &mut String, languages: &Languages, _config: &EnvironmentCo
     // Go is intentionally single-version — multi-toolchain is handled
     // by `go install golang.org/dl/go<X>` at runtime, not at image build.
     let line = format!(
-        "RUN GO_VERSION=\"{}\" SCIP_INDEXER=\"{GO_SCIP_INDEXER}\" /tmp/djinn-scripts/install-go.sh",
+        "RUN GO_VERSION=\"{}\" SCIP_INDEXER=\"{GO_SCIP_INDEXER}\" SCIP_GO_VERSION=\"{SCIP_GO_VERSION}\" /tmp/djinn-scripts/install-go.sh",
         go.default_version
     );
     writeln!(df, "{line}").unwrap();
