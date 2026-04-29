@@ -433,6 +433,27 @@ pub struct SnapshotPayload {
     pub edges: Vec<SnapshotEdge>,
 }
 
+/// Per-function complexity metrics surfaced on `describe` and
+/// `context` responses (iter 27). Wire-shape mirror of
+/// `djinn_graph::complexity::ComplexityMetrics`. Computed from the
+/// tree-sitter AST during graph build (iter 26); `None` when the
+/// symbol's language is outside the walker's table or when the
+/// symbol isn't function-like.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, JsonSchema)]
+pub struct ComplexityMetrics {
+    /// McCabe cyclomatic complexity = 1 + decision-point count.
+    pub cyclomatic: u16,
+    /// Sonar cognitive complexity. Penalises nesting, flat-rates
+    /// `else if`, counts boolean-operator switches.
+    pub cognitive: u16,
+    /// Non-blank lines inside the body block.
+    pub nloc: u16,
+    /// Deepest nesting level reached inside the function body.
+    pub max_nesting: u8,
+    /// Number of formal parameters (includes `self`-receivers).
+    pub param_count: u8,
+}
+
 /// A symbol description sourced from `ScipSymbol` fields without an LSP round
 /// trip.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -481,6 +502,11 @@ pub struct SymbolDescription {
     /// underlying graph node.
     #[serde(default)]
     pub is_test: bool,
+    /// Iter 27: per-function complexity metrics from the tree-sitter
+    /// walker. `None` for non-function symbols, file/synthetic nodes,
+    /// and languages outside the walker's table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub complexity: Option<ComplexityMetrics>,
 }
 
 /// Per-file rollup of `impact`/`neighbors` results, returned when
@@ -813,6 +839,11 @@ pub struct SymbolNode {
     /// signature blob.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub method_metadata: Option<MethodMeta>,
+    /// Iter 27: per-function complexity metrics from the tree-sitter
+    /// walker. `None` for non-function symbols, file/synthetic nodes,
+    /// and languages outside the walker's table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub complexity: Option<ComplexityMetrics>,
 }
 
 /// PR C1: 360° view of a single symbol — the queried node plus its

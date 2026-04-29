@@ -2078,6 +2078,7 @@ mod tests {
                 end_line: 10,
                 content: None,
                 method_metadata: None,
+                complexity: None,
             },
             incoming,
             outgoing,

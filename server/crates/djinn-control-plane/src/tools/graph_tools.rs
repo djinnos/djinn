@@ -2857,6 +2857,7 @@ mod tests {
                     end_line: 0,
                     content: None,
                     method_metadata: None,
+                    complexity: None,
                 },
                 incoming: std::collections::BTreeMap::new(),
                 outgoing: std::collections::BTreeMap::new(),

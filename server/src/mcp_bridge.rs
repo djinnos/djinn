@@ -12,15 +12,28 @@ use async_trait::async_trait;
 use djinn_git::{GitActorHandle, GitError};
 use djinn_control_plane::bridge::{
     ApiSurfaceEntry, BoundaryRule, BoundaryViolation, CallerRef, ChangeKind, ChangedRange,
-    CoordinatorOps, CoordinatorStatus, CycleGroup, CycleMember, DeadSymbolEntry, DeprecatedHit,
-    DetectedChangesResult, DetectedTouchedSymbol, DiffTouchesResult, EdgeCategory, EdgeEntry,
-    GitOps, GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry, ImpactEntry, ImpactResult,
-    LspOps, LspWarning, MetricsAtResult, ModelPoolStatus, NeighborsResult, OrphanEntry,
-    PagerankTier, PathHop, PathResult, PoolStatus, ProcessRef, ProjectCtx, RankedNode,
-    RelatedSymbol, RepoGraphOps, ResolveOutcome, RunningTaskInfo, RuntimeOps, SearchHit,
-    SemanticQueryEmbedding, SlotPoolOps, SnapshotEdge, SnapshotNode, SnapshotPayload,
-    SymbolAtHit, SymbolContext, SymbolDescription, SymbolNode, TouchedSymbol,
+    ComplexityMetrics as WireComplexityMetrics, CoordinatorOps, CoordinatorStatus, CycleGroup,
+    CycleMember, DeadSymbolEntry, DeprecatedHit, DetectedChangesResult, DetectedTouchedSymbol,
+    DiffTouchesResult, EdgeCategory, EdgeEntry, GitOps, GraphNeighbor, GraphStatus, HotPathHit,
+    HotspotEntry, ImpactEntry, ImpactResult, LspOps, LspWarning, MetricsAtResult,
+    ModelPoolStatus, NeighborsResult, OrphanEntry, PagerankTier, PathHop, PathResult,
+    PoolStatus, ProcessRef, ProjectCtx, RankedNode, RelatedSymbol, RepoGraphOps, ResolveOutcome,
+    RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding, SlotPoolOps, SnapshotEdge,
+    SnapshotNode, SnapshotPayload, SymbolAtHit, SymbolContext, SymbolDescription, SymbolNode,
+    TouchedSymbol,
 };
+
+fn complexity_metrics_to_wire(
+    m: djinn_graph::complexity::ComplexityMetrics,
+) -> WireComplexityMetrics {
+    WireComplexityMetrics {
+        cyclomatic: m.cyclomatic,
+        cognitive: m.cognitive,
+        nloc: m.nloc,
+        max_nesting: m.max_nesting,
+        param_count: m.param_count,
+    }
+}
 use petgraph::visit::EdgeRef;
 use djinn_agent::actors::coordinator::CoordinatorHandle;
 use djinn_agent::actors::slot::SlotPoolHandle;
@@ -980,6 +993,7 @@ impl RepoGraphOps for RepoGraphBridge {
             is_external: node.is_external,
             is_entry_point,
             is_test: node.is_test,
+            complexity: node.complexity.map(complexity_metrics_to_wire),
         }))
     }
 
@@ -1094,6 +1108,7 @@ impl RepoGraphOps for RepoGraphBridge {
             end_line,
             content,
             method_metadata,
+            complexity: node.complexity.map(complexity_metrics_to_wire),
         };
 
         // PR F2: populate process memberships from the per-graph
@@ -3338,6 +3353,7 @@ pub(crate) mod graph_bridge_tests {
             documentation: vec![],
             signature_parts: None,
             is_test: false,
+            complexity: None,
         };
         // Both file-path match (User in path) and kind hint ("class")
         // fire. Tiebreaker for Type/Class is 0.05.
@@ -3673,6 +3689,7 @@ pub(crate) mod graph_bridge_tests {
             documentation: vec![],
             signature_parts: None,
             is_test: false,
+            complexity: None,
         };
         // Three nodes:
         //   [0] target — receives both edges
@@ -4023,6 +4040,7 @@ pub(crate) mod graph_bridge_tests {
             documentation: vec![],
             signature_parts: None,
             is_test: false,
+            complexity: None,
         };
 
         let any_node = mk_node(None);
@@ -4444,6 +4462,7 @@ pub(crate) mod graph_bridge_tests {
             documentation: vec![],
             signature_parts: None,
             is_test: false,
+            complexity: None,
         }
     }
 
@@ -4620,6 +4639,7 @@ pub(crate) mod graph_bridge_tests {
             documentation: vec![],
             signature_parts: None,
             is_test: false,
+            complexity: None,
         };
         let nodes = vec![
             mk_node("auth_login", "src/auth/login.rs"),
