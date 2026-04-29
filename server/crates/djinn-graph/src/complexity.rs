@@ -37,6 +37,11 @@ pub enum ComplexityLang {
     TypeScript,
     Tsx,
     JavaScript,
+    Java,
+    C,
+    Cpp,
+    CSharp,
+    Ruby,
 }
 
 impl ComplexityLang {
@@ -48,6 +53,11 @@ impl ComplexityLang {
             "typescript" | "ts" => Some(Self::TypeScript),
             "typescriptreact" | "tsx" => Some(Self::Tsx),
             "javascript" | "js" | "javascriptreact" | "jsx" => Some(Self::JavaScript),
+            "java" => Some(Self::Java),
+            "c" => Some(Self::C),
+            "cpp" | "c++" => Some(Self::Cpp),
+            "csharp" | "c#" | "cs" => Some(Self::CSharp),
+            "ruby" | "rb" => Some(Self::Ruby),
             _ => None,
         }
     }
@@ -63,6 +73,11 @@ impl ComplexityLang {
                 tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
             }
             Self::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+            Self::Java => tree_sitter_java::LANGUAGE.into(),
+            Self::C => tree_sitter_c::LANGUAGE.into(),
+            Self::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+            Self::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+            Self::Ruby => tree_sitter_ruby::LANGUAGE.into(),
         }
     }
 
@@ -72,6 +87,11 @@ impl ComplexityLang {
             Self::Go => &RULES_GO,
             Self::Python => &RULES_PYTHON,
             Self::TypeScript | Self::JavaScript | Self::Tsx => &RULES_TYPESCRIPT,
+            Self::Java => &RULES_JAVA,
+            Self::C => &RULES_C,
+            Self::Cpp => &RULES_CPP,
+            Self::CSharp => &RULES_CSHARP,
+            Self::Ruby => &RULES_RUBY,
         }
     }
 }
@@ -86,6 +106,11 @@ pub(crate) struct LangRules {
     pub body_field: Option<&'static str>,
     /// Field name on function nodes carrying the parameter list.
     pub parameters_field: Option<&'static str>,
+    /// Fallback for grammars (C/C++) where the parameter list isn't a
+    /// direct field of the function node — it's nested under a
+    /// `function_declarator`. When set, we search for the first
+    /// descendant of this kind anywhere under the function node.
+    pub parameters_descendant_kind: Option<&'static str>,
     /// Decision-point kinds whose cost = 1 + nesting; their children
     /// recurse with nesting+1.
     pub nest_increments: &'static [&'static str],
@@ -120,6 +145,7 @@ const RULES_RUST: LangRules = LangRules {
     function_kinds: &["function_item"],
     body_field: Some("body"),
     parameters_field: Some("parameters"),
+    parameters_descendant_kind: None,
     nest_increments: &[
         "if_expression",
         "match_expression",
@@ -150,6 +176,7 @@ const RULES_GO: LangRules = LangRules {
     function_kinds: &["function_declaration", "method_declaration"],
     body_field: Some("body"),
     parameters_field: Some("parameters"),
+    parameters_descendant_kind: None,
     nest_increments: &[
         "if_statement",
         "for_statement",
@@ -179,6 +206,7 @@ const RULES_PYTHON: LangRules = LangRules {
     function_kinds: &["function_definition"],
     body_field: Some("body"),
     parameters_field: Some("parameters"),
+    parameters_descendant_kind: None,
     nest_increments: &[
         "if_statement",
         "for_statement",
@@ -219,6 +247,7 @@ const RULES_TYPESCRIPT: LangRules = LangRules {
     ],
     body_field: Some("body"),
     parameters_field: Some("parameters"),
+    parameters_descendant_kind: None,
     nest_increments: &[
         "if_statement",
         "for_statement",
@@ -240,6 +269,180 @@ const RULES_TYPESCRIPT: LangRules = LangRules {
     if_kind: Some("if_statement"),
     else_if_parent_kind: Some("else_clause"),
     else_if_via_alternative_field: true,
+};
+
+// Java: like Go/C#, `if_statement.alternative` directly points at
+// another `if_statement` for `else if` (no wrapping `else_clause`).
+// Constructors are their own kind. `enhanced_for_statement` (`for-each`)
+// joins the classic `for_statement` as a flow point. Modern `switch`
+// is `switch_expression` (Java 14+); legacy `switch_statement` covers
+// the C-like form. `lambda_expression` is `nest_only`.
+//
+// TODOs deferred: recursion, `goto` (n/a in Java), labelled break/
+// continue.
+const RULES_JAVA: LangRules = LangRules {
+    function_kinds: &["method_declaration", "constructor_declaration"],
+    body_field: Some("body"),
+    parameters_field: Some("parameters"),
+    parameters_descendant_kind: None,
+    nest_increments: &[
+        "if_statement",
+        "for_statement",
+        "enhanced_for_statement",
+        "while_statement",
+        "do_statement",
+        "switch_statement",
+        "switch_expression",
+        "ternary_expression",
+        "catch_clause",
+    ],
+    flat_increment_kinds: &[],
+    nest_only: &["lambda_expression"],
+    binary_kind: Some("binary_expression"),
+    operator_field: Some("operator"),
+    logical_ops: &["&&", "||"],
+    if_kind: Some("if_statement"),
+    else_if_parent_kind: None,
+    else_if_via_alternative_field: true,
+};
+
+// C: parameters live two levels deep (`function_definition` →
+// `function_declarator` → `parameter_list`), so we use the descendant-
+// kind fallback for `parameters_field`. C *does* wrap `else if` in an
+// `else_clause` node, so we use `else_if_parent_kind` here (not the
+// `alternative` field).
+//
+// TODOs deferred: recursion, `goto` (genuinely common in C — flagged
+// as a TODO for Sonar parity), labelled break.
+const RULES_C: LangRules = LangRules {
+    function_kinds: &["function_definition"],
+    body_field: Some("body"),
+    parameters_field: None,
+    parameters_descendant_kind: Some("parameter_list"),
+    nest_increments: &[
+        "if_statement",
+        "for_statement",
+        "while_statement",
+        "do_statement",
+        "switch_statement",
+        "conditional_expression",
+    ],
+    flat_increment_kinds: &[],
+    nest_only: &[],
+    binary_kind: Some("binary_expression"),
+    operator_field: Some("operator"),
+    logical_ops: &["&&", "||"],
+    if_kind: Some("if_statement"),
+    else_if_parent_kind: Some("else_clause"),
+    else_if_via_alternative_field: false,
+};
+
+// C++: same parameter-nesting story as C plus `lambda_expression` as a
+// `nest_only` closure. `try_statement` + `catch_clause` are flow points
+// per Sonar (catch is the increment; `try` itself is plumbing).
+//
+// TODOs deferred: recursion, `goto`, labelled break/continue.
+const RULES_CPP: LangRules = LangRules {
+    function_kinds: &["function_definition"],
+    body_field: Some("body"),
+    parameters_field: None,
+    parameters_descendant_kind: Some("parameter_list"),
+    nest_increments: &[
+        "if_statement",
+        "for_statement",
+        "for_range_loop",
+        "while_statement",
+        "do_statement",
+        "switch_statement",
+        "conditional_expression",
+        "catch_clause",
+    ],
+    flat_increment_kinds: &[],
+    nest_only: &["lambda_expression"],
+    binary_kind: Some("binary_expression"),
+    operator_field: Some("operator"),
+    logical_ops: &["&&", "||", "and", "or"],
+    if_kind: Some("if_statement"),
+    else_if_parent_kind: Some("else_clause"),
+    else_if_via_alternative_field: false,
+};
+
+// C#: like Java, `if_statement.alternative = if_statement` directly
+// (no wrapping `else_clause`). `??` is a logical op for cognitive
+// purposes per Sonar. `lambda_expression` is `nest_only`. `foreach` is
+// its own kind, alongside the classic `for_statement`.
+//
+// TODOs deferred: recursion, `goto`, labelled break/continue.
+const RULES_CSHARP: LangRules = LangRules {
+    function_kinds: &[
+        "method_declaration",
+        "constructor_declaration",
+        "local_function_statement",
+    ],
+    body_field: Some("body"),
+    parameters_field: Some("parameters"),
+    parameters_descendant_kind: None,
+    nest_increments: &[
+        "if_statement",
+        "for_statement",
+        "foreach_statement",
+        "while_statement",
+        "do_statement",
+        "switch_statement",
+        "conditional_expression",
+        "catch_clause",
+    ],
+    flat_increment_kinds: &[],
+    nest_only: &["lambda_expression"],
+    binary_kind: Some("binary_expression"),
+    operator_field: Some("operator"),
+    logical_ops: &["&&", "||", "??"],
+    if_kind: Some("if_statement"),
+    else_if_parent_kind: None,
+    else_if_via_alternative_field: true,
+};
+
+// Ruby: very different shape from the C-family. `if`/`unless`/`while`/
+// `until`/`for`/`case`/`begin` are the kinds (no `_statement` suffix),
+// `elsif` is a separate node nested inside the parent `if` via
+// `alternative` (each chained `elsif` is the alternative of the
+// previous) — flat_increment captures it. `binary` (not
+// `binary_expression`) holds `&&`/`||`/`and`/`or` chains. Blocks
+// (`{ ... }` and `do ... end`) are `block` and `do_block`, both
+// `nest_only`. `if_modifier`/`unless_modifier`/`while_modifier`/
+// `until_modifier` are postfix guards — also flow points. `rescue` is
+// the catch-equivalent. `conditional` is the `?:` ternary.
+//
+// TODOs deferred: recursion, labelled break/next/redo, retry.
+const RULES_RUBY: LangRules = LangRules {
+    function_kinds: &["method", "singleton_method"],
+    body_field: Some("body"),
+    parameters_field: Some("parameters"),
+    parameters_descendant_kind: None,
+    nest_increments: &[
+        "if",
+        "unless",
+        "while",
+        "until",
+        "for",
+        "case",
+        // `begin` itself is plumbing (Sonar treats `try` similarly);
+        // `rescue` is the cognitive increment.
+        "rescue",
+        "conditional",
+        "if_modifier",
+        "unless_modifier",
+        "while_modifier",
+        "until_modifier",
+    ],
+    flat_increment_kinds: &["elsif"],
+    nest_only: &["block", "do_block"],
+    binary_kind: Some("binary"),
+    operator_field: Some("operator"),
+    logical_ops: &["&&", "||", "and", "or"],
+    if_kind: Some("if"),
+    else_if_parent_kind: None,
+    else_if_via_alternative_field: false,
 };
 
 pub struct ComplexityWalker {
@@ -318,7 +521,12 @@ fn analyze_function(fn_node: Node, rules: &LangRules, src: &[u8]) -> FunctionMet
         .unwrap_or(fn_node);
     let params = rules
         .parameters_field
-        .and_then(|f| fn_node.child_by_field_name(f));
+        .and_then(|f| fn_node.child_by_field_name(f))
+        .or_else(|| {
+            rules
+                .parameters_descendant_kind
+                .and_then(|k| find_first_descendant(fn_node, k))
+        });
     let name = fn_node
         .child_by_field_name("name")
         .and_then(|n| n.utf8_text(src).ok())
@@ -498,6 +706,19 @@ fn count_params(params_node: Node) -> u8 {
         .named_children(&mut walker)
         .count()
         .min(u8::MAX as usize) as u8
+}
+
+fn find_first_descendant<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
+    let mut walker = node.walk();
+    for child in node.named_children(&mut walker) {
+        if child.kind() == kind {
+            return Some(child);
+        }
+        if let Some(found) = find_first_descendant(child, kind) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -930,5 +1151,436 @@ mod tests {
         let src = "function f(x: number) { if (x === 0) {} else if (x === 1) {} else if (x === 2) {} }";
         let m = &tsx(src)[0];
         assert_eq!(m.cognitive, 3);
+    }
+
+    // ---------- Java ----------
+
+    fn java(source: &str) -> Vec<ComplexityMetrics> {
+        analyze("java", source)
+    }
+
+    fn java_method(body: &str) -> ComplexityMetrics {
+        // `m` takes a few unused params so test bodies can mention
+        // a/b/c/x/n without an undeclared-identifier parse-tree dent.
+        let src = format!(
+            "class C {{ void m(int a, int b, int c, int x, int n) {{ {} }} }}",
+            body
+        );
+        java(&src).into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn java_empty_function() {
+        let m = java_method("");
+        assert_eq!(m.cyclomatic, 1);
+        assert_eq!(m.cognitive, 0);
+    }
+
+    #[test]
+    fn java_single_if() {
+        let m = java_method("if (x > 0) {}");
+        // x is undeclared but the parser still produces an if_statement.
+        assert_eq!(m.cognitive, 1);
+        assert_eq!(m.cyclomatic, 2);
+    }
+
+    #[test]
+    fn java_nested_if_grows_with_nesting() {
+        let m = java_method("if (a) { if (b) {} }");
+        assert_eq!(m.cognitive, 1 + 2);
+        assert_eq!(m.max_nesting, 2);
+    }
+
+    #[test]
+    fn java_else_if_is_flat() {
+        // Java: no `else_clause` wrapper — uses bare `if` in the
+        // `alternative` field. Tests the
+        // `else_if_via_alternative_field` path.
+        let m = java_method("if (a) {} else if (b) {} else if (c) {} else {}");
+        assert_eq!(m.cognitive, 3);
+    }
+
+    #[test]
+    fn java_logical_or_chain() {
+        let m = java_method("if (a || b || c) {}");
+        assert_eq!(m.cognitive, 2);
+    }
+
+    #[test]
+    fn java_mixed_logical_ops() {
+        let m = java_method("if (a && b || c) {}");
+        assert_eq!(m.cognitive, 3);
+    }
+
+    #[test]
+    fn java_switch_is_one_increment() {
+        let m = java_method("switch (x) { case 0: break; case 1: break; default: break; }");
+        assert_eq!(m.cognitive, 1);
+    }
+
+    #[test]
+    fn java_for_inside_if_doubles() {
+        let m = java_method("if (n > 0) { for (int i = 0; i < n; i++) {} }");
+        assert_eq!(m.cognitive, 1 + 2);
+    }
+
+    #[test]
+    fn java_lambda_raises_nesting() {
+        let m = java_method("Runnable r = () -> { if (x > 0) {} };");
+        assert_eq!(m.cognitive, 2);
+    }
+
+    #[test]
+    fn java_param_count() {
+        let metrics = java("class C { int g(int a, String b, boolean c) { return 0; } }");
+        assert_eq!(metrics[0].param_count, 3);
+    }
+
+    #[test]
+    fn java_constructor_is_a_function() {
+        let metrics = java("class C { int x; C(int v) { if (v > 0) { this.x = v; } } }");
+        let m = &metrics[0];
+        assert_eq!(m.cognitive, 1);
+        assert_eq!(m.param_count, 1);
+    }
+
+    // ---------- C ----------
+
+    fn c(source: &str) -> Vec<ComplexityMetrics> {
+        analyze("c", source)
+    }
+
+    fn c_function(body: &str) -> ComplexityMetrics {
+        let src = format!("int f(int a, int b, int c) {{ {} }}", body);
+        c(&src).into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn c_empty_function() {
+        let m = &c("int f(void) { return 0; }")[0];
+        assert_eq!(m.cyclomatic, 1);
+        assert_eq!(m.cognitive, 0);
+    }
+
+    #[test]
+    fn c_single_if() {
+        let m = c_function("if (a > 0) {}");
+        assert_eq!(m.cognitive, 1);
+        assert_eq!(m.cyclomatic, 2);
+    }
+
+    #[test]
+    fn c_nested_if_grows_with_nesting() {
+        let m = c_function("if (a > 0) { if (b > 0) {} }");
+        assert_eq!(m.cognitive, 1 + 2);
+        assert_eq!(m.max_nesting, 2);
+    }
+
+    #[test]
+    fn c_else_if_is_flat() {
+        // C *does* wrap `else if` in an `else_clause`.
+        let m = c_function("if (a == 0) {} else if (a == 1) {} else if (a == 2) {} else {}");
+        assert_eq!(m.cognitive, 3);
+    }
+
+    #[test]
+    fn c_logical_or_chain() {
+        let m = c_function("if (a || b || c) {}");
+        assert_eq!(m.cognitive, 2);
+    }
+
+    #[test]
+    fn c_mixed_logical_ops() {
+        let m = c_function("if (a && b || c) {}");
+        assert_eq!(m.cognitive, 3);
+    }
+
+    #[test]
+    fn c_switch_is_one_increment() {
+        let m = c_function("switch (a) { case 0: break; case 1: break; default: break; }");
+        assert_eq!(m.cognitive, 1);
+    }
+
+    #[test]
+    fn c_for_inside_if_doubles() {
+        let m = c_function("if (a > 0) { for (int i = 0; i < a; i++) {} }");
+        assert_eq!(m.cognitive, 1 + 2);
+    }
+
+    #[test]
+    fn c_param_count_via_descendant_kind() {
+        // Tests `parameters_descendant_kind` — C nests `parameter_list`
+        // under `function_declarator`.
+        let m = &c("int f(int a, char *b, double c) { return 0; }")[0];
+        assert_eq!(m.param_count, 3);
+    }
+
+    #[test]
+    fn c_ternary_is_one_increment() {
+        let m = c_function("int r = a > 0 ? 1 : 0;");
+        assert_eq!(m.cognitive, 1);
+    }
+
+    // ---------- C++ ----------
+
+    fn cpp(source: &str) -> Vec<ComplexityMetrics> {
+        analyze("cpp", source)
+    }
+
+    #[test]
+    fn cpp_empty_function() {
+        let m = &cpp("int f() { return 0; }")[0];
+        assert_eq!(m.cyclomatic, 1);
+        assert_eq!(m.cognitive, 0);
+    }
+
+    #[test]
+    fn cpp_single_if() {
+        let m = &cpp("int f(int x) { if (x > 0) {} return 0; }")[0];
+        assert_eq!(m.cognitive, 1);
+    }
+
+    #[test]
+    fn cpp_nested_if_grows_with_nesting() {
+        let m = &cpp("int f(int a, int b) { if (a) { if (b) {} } return 0; }")[0];
+        assert_eq!(m.cognitive, 1 + 2);
+        assert_eq!(m.max_nesting, 2);
+    }
+
+    #[test]
+    fn cpp_else_if_is_flat() {
+        let src = "int f(int x) { if (x==0) {} else if (x==1) {} else if (x==2) {} else {} return 0; }";
+        let m = &cpp(src)[0];
+        assert_eq!(m.cognitive, 3);
+    }
+
+    #[test]
+    fn cpp_logical_or_chain() {
+        let m = &cpp("int f(int a, int b, int c) { if (a || b || c) {} return 0; }")[0];
+        assert_eq!(m.cognitive, 2);
+    }
+
+    #[test]
+    fn cpp_switch_is_one_increment() {
+        let m = &cpp("int f(int x) { switch (x) { case 0: break; default: break; } return 0; }")[0];
+        assert_eq!(m.cognitive, 1);
+    }
+
+    #[test]
+    fn cpp_for_inside_if_doubles() {
+        let src = "int f(int n) { if (n > 0) { for (int i = 0; i < n; i++) {} } return 0; }";
+        let m = &cpp(src)[0];
+        assert_eq!(m.cognitive, 1 + 2);
+    }
+
+    #[test]
+    fn cpp_lambda_raises_nesting() {
+        // Lambda body's `if` is at nesting=1 → cost 1+1 = 2.
+        let src = "void g(int x) { auto f = [&](int y) { if (y > 0) {} }; f(x); }";
+        let m = &cpp(src)[0];
+        assert_eq!(m.cognitive, 2);
+    }
+
+    #[test]
+    fn cpp_param_count_via_descendant_kind() {
+        let m = &cpp("int f(int a, double b, char c) { return 0; }")[0];
+        assert_eq!(m.param_count, 3);
+    }
+
+    #[test]
+    fn cpp_method_body_emits_metrics() {
+        // Method bodies declared inline in a class body.
+        let src = "class C { public: void m(int x) { if (x > 0) {} } };";
+        let metrics = cpp(src);
+        let m = &metrics[0];
+        assert_eq!(m.cognitive, 1);
+        assert_eq!(m.param_count, 1);
+    }
+
+    // ---------- C# ----------
+
+    fn cs(source: &str) -> Vec<ComplexityMetrics> {
+        analyze("csharp", source)
+    }
+
+    fn cs_method(body: &str) -> ComplexityMetrics {
+        let src = format!("class C {{ void M(int a, int b, int c) {{ {} }} }}", body);
+        cs(&src).into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn cs_empty_function() {
+        let m = cs_method("");
+        assert_eq!(m.cyclomatic, 1);
+        assert_eq!(m.cognitive, 0);
+    }
+
+    #[test]
+    fn cs_single_if() {
+        let m = cs_method("if (a > 0) {}");
+        assert_eq!(m.cognitive, 1);
+    }
+
+    #[test]
+    fn cs_nested_if_grows_with_nesting() {
+        let m = cs_method("if (a > 0) { if (b > 0) {} }");
+        assert_eq!(m.cognitive, 1 + 2);
+        assert_eq!(m.max_nesting, 2);
+    }
+
+    #[test]
+    fn cs_else_if_is_flat() {
+        // C# also uses bare-`if-as-alternative-field` form.
+        let m = cs_method("if (a == 0) {} else if (a == 1) {} else if (a == 2) {} else {}");
+        assert_eq!(m.cognitive, 3);
+    }
+
+    #[test]
+    fn cs_logical_or_chain() {
+        let m = cs_method("if (a == 0 || b == 0 || c == 0) {}");
+        assert_eq!(m.cognitive, 2);
+    }
+
+    #[test]
+    fn cs_mixed_logical_ops() {
+        let m = cs_method("if (a == 0 && b == 0 || c == 0) {}");
+        assert_eq!(m.cognitive, 3);
+    }
+
+    #[test]
+    fn cs_nullish_coalescing_is_logical_op() {
+        let src = "class C { object F(object x, object y, object z) { return x ?? y ?? z; } }";
+        let m = &cs(src)[0];
+        assert_eq!(m.cognitive, 1);
+    }
+
+    #[test]
+    fn cs_switch_is_one_increment() {
+        let m = cs_method("switch (a) { case 0: break; case 1: break; default: break; }");
+        assert_eq!(m.cognitive, 1);
+    }
+
+    #[test]
+    fn cs_for_inside_if_doubles() {
+        let m = cs_method("if (a > 0) { for (int i = 0; i < a; i++) {} }");
+        assert_eq!(m.cognitive, 1 + 2);
+    }
+
+    #[test]
+    fn cs_lambda_raises_nesting() {
+        let m =
+            cs_method("System.Action act = () => { if (a > 0) {} }; act();");
+        assert_eq!(m.cognitive, 2);
+    }
+
+    #[test]
+    fn cs_param_count() {
+        let m = &cs("class C { int G(int a, string b, bool c) { return 0; } }")[0];
+        assert_eq!(m.param_count, 3);
+    }
+
+    #[test]
+    fn cs_constructor_is_a_function() {
+        let metrics =
+            cs("class C { int x; public C(int v) { if (v > 0) { this.x = v; } } }");
+        let m = &metrics[0];
+        assert_eq!(m.cognitive, 1);
+        assert_eq!(m.param_count, 1);
+    }
+
+    // ---------- Ruby ----------
+
+    fn ruby(source: &str) -> Vec<ComplexityMetrics> {
+        analyze("ruby", source)
+    }
+
+    #[test]
+    fn ruby_empty_function() {
+        let m = &ruby("def f; end")[0];
+        assert_eq!(m.cyclomatic, 1);
+        assert_eq!(m.cognitive, 0);
+    }
+
+    #[test]
+    fn ruby_single_if() {
+        let src = "def f(x)\n  if x > 0\n    p 1\n  end\nend\n";
+        let m = &ruby(src)[0];
+        assert_eq!(m.cognitive, 1);
+        assert_eq!(m.cyclomatic, 2);
+    }
+
+    #[test]
+    fn ruby_nested_if_grows_with_nesting() {
+        let src = "def f(x, y)\n  if x > 0\n    if y > 0\n      p 1\n    end\n  end\nend\n";
+        let m = &ruby(src)[0];
+        assert_eq!(m.cognitive, 1 + 2);
+        assert_eq!(m.max_nesting, 2);
+    }
+
+    #[test]
+    fn ruby_elsif_is_flat() {
+        // Tests `flat_increment_kinds` for Ruby's `elsif` node.
+        let src = "def f(x)\n  if x == 0\n    p 0\n  elsif x == 1\n    p 1\n  elsif x == 2\n    p 2\n  else\n    p 3\n  end\nend\n";
+        let m = &ruby(src)[0];
+        assert_eq!(m.cognitive, 3);
+    }
+
+    #[test]
+    fn ruby_logical_or_chain() {
+        let src = "def f(a, b, c)\n  if a || b || c\n    p 1\n  end\nend\n";
+        let m = &ruby(src)[0];
+        assert_eq!(m.cognitive, 2);
+    }
+
+    #[test]
+    fn ruby_mixed_logical_ops() {
+        let src = "def f(a, b, c)\n  if a && b || c\n    p 1\n  end\nend\n";
+        let m = &ruby(src)[0];
+        assert_eq!(m.cognitive, 3);
+    }
+
+    #[test]
+    fn ruby_case_is_one_increment() {
+        let src = "def f(x)\n  case x\n  when 0 then p 0\n  when 1 then p 1\n  else p 2\n  end\nend\n";
+        let m = &ruby(src)[0];
+        assert_eq!(m.cognitive, 1);
+    }
+
+    #[test]
+    fn ruby_for_inside_if_doubles() {
+        let src = "def f(xs)\n  if xs\n    for x in xs\n      p x\n    end\n  end\nend\n";
+        let m = &ruby(src)[0];
+        assert_eq!(m.cognitive, 1 + 2);
+    }
+
+    #[test]
+    fn ruby_block_raises_nesting() {
+        // `xs.each do |x| if x then ... end end` — the `do_block`
+        // raises nesting, so the inner `if` is at nesting=1 → cost
+        // 1+1 = 2.
+        let src = "def f(xs)\n  xs.each do |x|\n    if x\n      p x\n    end\n  end\nend\n";
+        let m = &ruby(src)[0];
+        assert_eq!(m.cognitive, 2);
+    }
+
+    #[test]
+    fn ruby_curly_block_raises_nesting() {
+        let src = "def f(xs)\n  xs.each { |x| if x then p x end }\nend\n";
+        let m = &ruby(src)[0];
+        assert_eq!(m.cognitive, 2);
+    }
+
+    #[test]
+    fn ruby_param_count() {
+        let src = "def f(a, b, c)\nend\n";
+        let m = &ruby(src)[0];
+        assert_eq!(m.param_count, 3);
+    }
+
+    #[test]
+    fn ruby_ternary_is_one_increment() {
+        let src = "def f(x); x > 0 ? 1 : 0; end\n";
+        let m = &ruby(src)[0];
+        assert_eq!(m.cognitive, 1);
     }
 }
