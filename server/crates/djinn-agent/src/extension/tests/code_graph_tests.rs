@@ -571,7 +571,11 @@ async fn code_graph_dispatch_symbols_at_validates_inputs() {
     )
     .await
     .unwrap_err();
-    assert!(err.contains("'key' (file path) is required"), "got: {err}");
+    // iter-21: error message updated to mention both new + legacy field names.
+    assert!(
+        err.contains("'file_path'") && err.contains("legacy 'key'"),
+        "got: {err}"
+    );
 }
 
 #[tokio::test]

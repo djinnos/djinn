@@ -1890,6 +1890,14 @@ impl RepoGraphOps for RepoGraphBridge {
             .count();
 
         // Cycles — exclude SCCs whose kept members drop below size 2.
+        // We surface three distinct cycle counts so the user can tell
+        // which scope the number refers to:
+        //   - cycle_count        : all-scopes raw count (includes
+        //                          tautological file↔symbol pairs)
+        //   - cycle_count_symbol_only : symbol-only subgraph (matches
+        //                          the `cycles` op default kind_filter)
+        //   - cycle_count_file_only   : file-only subgraph (file→file
+        //                          import cycles; non-DAG languages)
         let mut cycles_by_size_histogram: BTreeMap<usize, usize> = BTreeMap::new();
         let mut cycle_count = 0usize;
         for component in sccs.full.iter() {
@@ -1902,6 +1910,16 @@ impl RepoGraphOps for RepoGraphBridge {
                 *cycles_by_size_histogram.entry(surviving).or_insert(0) += 1;
             }
         }
+        let cycle_count_symbol_only = sccs
+            .symbol
+            .iter()
+            .filter(|c| c.iter().filter(|idx| kept_set.contains(idx)).count() >= 2)
+            .count();
+        let cycle_count_file_only = sccs
+            .file
+            .iter()
+            .filter(|c| c.iter().filter(|idx| kept_set.contains(idx)).count() >= 2)
+            .count();
 
         // Orphan count — defer to graph.orphans(), then strip via exclusions.
         let orphans = graph.orphans(None, None, usize::MAX);
@@ -1938,6 +1956,8 @@ impl RepoGraphOps for RepoGraphBridge {
             node_count: kept.len(),
             edge_count,
             cycle_count,
+            cycle_count_symbol_only,
+            cycle_count_file_only,
             cycles_by_size_histogram,
             god_object_count,
             orphan_count,

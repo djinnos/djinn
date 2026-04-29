@@ -578,8 +578,24 @@ pub struct MetricsAtResult {
     pub commit: String,
     pub node_count: usize,
     pub edge_count: usize,
+    /// All-scopes cycle count. INCLUDES tautological file↔symbol
+    /// 2-cycles (every symbol forms one with its containing file via
+    /// ContainsDefinition + DeclaredInFile). For "real" code-level
+    /// cycles use `cycle_count_symbol_only` (matches what the
+    /// `cycles` op returns by default).
     pub cycle_count: usize,
-    /// Histogram bucketing SCCs by member count.
+    /// v8: cycle count over the symbol-only subgraph — matches the
+    /// `cycles(kind_filter="symbol")` op (the `cycles` op default).
+    /// This is the architecturally meaningful number; the `cycle_count`
+    /// total above is the all-scopes raw count.
+    #[serde(default)]
+    pub cycle_count_symbol_only: usize,
+    /// v8: cycle count over the file-only subgraph (file→file import
+    /// cycles). Only relevant for languages whose import graph is
+    /// non-DAG (Go, Python, Ruby).
+    #[serde(default)]
+    pub cycle_count_file_only: usize,
+    /// Histogram bucketing all-scopes SCCs by member count.
     pub cycles_by_size_histogram: BTreeMap<usize, usize>,
     pub god_object_count: usize,
     pub orphan_count: usize,

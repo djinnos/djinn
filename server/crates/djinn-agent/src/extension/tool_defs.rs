@@ -317,26 +317,17 @@ pub(crate) fn tool_lsp() -> RmcpTool {
 pub(crate) fn tool_code_graph() -> RmcpTool {
     RmcpTool::new(
         "code_graph".to_string(),
-        "Query the repository dependency graph built from SCIP indexer output. Operations: \
-         neighbors (edges in/out of a node; group_by=file for per-file rollup), \
-         ranked (top nodes by PageRank or degree; sort_by pagerank|in_degree|out_degree|total_degree), \
-         impact (transitive dependents; group_by=file for per-file rollup), \
-         implementations (find implementors of a trait/interface symbol), \
-         search (name-based symbol lookup via query substring), \
-         cycles (strongly-connected components of size >= min_size), \
-         orphans (zero-incoming-reference nodes filtered by visibility public|private|any), \
-         path (shortest dependency path from→to), \
-         edges (enumerate edges matching from_glob→to_glob), \
-         symbols_at (given (file, start_line, end_line?), return SCIP symbols whose definition range encloses those lines — lookup for diff-hunk → symbols mapping), \
-         diff_touches (given a list of changed line ranges (parsed from `git diff --unified=0 base..head`), return every base-graph symbol touched, with fan-in/fan-out and file grouping; the base graph is always current `main` — this op does NOT build a head graph), \
-         describe (symbol signature/documentation without an LSP round trip), \
-         api_surface (every public symbol with fan-in/out and used-outside-crate flag; filter via module_glob/visibility), \
-         boundary_check (detect forbidden from_glob→to_glob edges via `rules` list), \
-         hotspots (file churn × PageRank centrality ranking; window_days controls look-back, file_glob narrows the file set), \
-         metrics_at (scalar graph snapshot: node/edge/cycle counts, god-objects at p95 total-degree, orphan count, public API size + doc coverage), \
-         dead_symbols (symbols with zero incoming edges from entry-points; confidence=high|med|low tunes dyn-dispatch tolerance), \
-         deprecated_callers (symbols whose signature/documentation contains `#[deprecated]` or `@deprecated`, with caller list), \
-         touches_hot_path (given entry-point and sink SCIP keys plus queried symbols, return which sit on any entry→sink shortest path).".to_string(),
+        "Query the SCIP-built repository dependency graph. Set `operation` to one of the enum \
+         values; most ops accept optional filters (kind_filter, group_by, limit, min_confidence). \
+         Call `operation=capabilities` for the full per-op param shapes + defaults. Quick guide: \
+         neighbors / ranked / impact / implementations / search / cycles / orphans / path / edges \
+         — basic graph queries (impact defaults: depth=2, min_confidence=0.85, behavioural edges only). \
+         symbols_at / diff_touches / detect_changes — line-range → touched symbols. \
+         describe / context — single-symbol detail (context = bucketed incoming/outgoing edges). \
+         status / metrics_at / snapshot — graph health + introspection. \
+         api_surface / dead_symbols / deprecated_callers — public surface health. \
+         boundary_check / blast_radius / touches_hot_path — change-impact analysis. \
+         hotspots / cochange / churn / coupling_hubs — git-coupling × PageRank centrality.".to_string(),
         object!({
             "type": "object",
             "required": ["operation", "project"],
@@ -346,10 +337,12 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
                     "enum": [
                         "neighbors", "ranked", "impact", "implementations",
                         "search", "cycles", "orphans", "path", "edges",
-                        "symbols_at", "diff_touches", "describe",
-                        "api_surface", "boundary_check", "hotspots",
-                        "metrics_at", "dead_symbols", "deprecated_callers",
-                        "touches_hot_path"
+                        "symbols_at", "diff_touches", "detect_changes",
+                        "describe", "context", "api_surface", "boundary_check",
+                        "blast_radius", "hotspots", "cochange", "churn",
+                        "coupling_hubs", "metrics_at", "dead_symbols",
+                        "deprecated_callers", "touches_hot_path", "status",
+                        "snapshot", "capabilities"
                     ],
                     "description": "Graph query to perform"
                 },

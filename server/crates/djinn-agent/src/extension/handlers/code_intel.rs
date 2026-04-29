@@ -486,22 +486,27 @@ pub(crate) async fn call_code_graph(
             serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
         }
         "symbols_at" => {
-            // v8: file/line → enclosing symbols. Required: file
-            // (via key, with file: prefix stripped) + start_line
-            // (passed via min_size since we don't have a dedicated
-            // line param). Optional end_line.
-            let file = p
-                .key
-                .as_deref()
-                .map(|k| k.trim_start_matches("file:"))
+            // v8: file/line → enclosing symbols.
+            // Accepts EITHER the new dedicated `file_path` + `start_line`
+            // fields (preferred, matches the schema doc) OR the
+            // legacy `key` + `min_size` overload (kept so existing
+            // callers don't break).
+            let file_owned: String = p
+                .file_path
+                .clone()
+                .or_else(|| {
+                    p.key
+                        .as_deref()
+                        .map(|k| k.trim_start_matches("file:").to_string())
+                })
                 .filter(|f| !f.is_empty())
-                .ok_or("'key' (file path) is required for 'symbols_at'")?;
+                .ok_or("'file_path' (or legacy 'key') is required for 'symbols_at'")?;
             let start_line = p
-                .min_size
-                .map(|n| n as u32)
-                .ok_or("'min_size' (start_line) is required for 'symbols_at'")?;
+                .start_line
+                .or_else(|| p.min_size.map(|n| n as u32))
+                .ok_or("'start_line' (or legacy 'min_size') is required for 'symbols_at'")?;
             let result = graph_ops
-                .symbols_at(&ctx, file, start_line, p.end_line)
+                .symbols_at(&ctx, &file_owned, start_line, p.end_line)
                 .await?;
             serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
         }
@@ -521,9 +526,9 @@ pub(crate) async fn call_code_graph(
             let bridge_ranges: Vec<ChangedRange> = agents_ranges
                 .iter()
                 .map(|r| ChangedRange {
-                    file: r.file_path.clone(),
+                    file: r.file.clone(),
                     start_line: r.start_line as i64,
-                    end_line: Some(r.end_line as i64),
+                    end_line: r.end_line.map(|n| n as i64),
                 })
                 .collect();
             let result = graph_ops.diff_touches(&ctx, &bridge_ranges).await?;
@@ -576,7 +581,15 @@ pub(crate) async fn call_code_graph(
             // v8: stricter sibling of `orphans`. Tiered by caller-
             // confidence (`high`/`med`/`low`); high = no incoming
             // refs from any entry-point reachable scope.
-            let confidence = p.kind_filter.as_deref().unwrap_or("high");
+            //
+            // Accepts the dedicated `confidence` field (preferred);
+            // falls back to `kind_filter` for callers using the
+            // pre-iter-21 contract.
+            let confidence = p
+                .confidence
+                .as_deref()
+                .or(p.kind_filter.as_deref())
+                .unwrap_or("high");
             let limit = p.limit.unwrap_or(50);
             let result = graph_ops.dead_symbols(&ctx, confidence, limit).await?;
             serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
@@ -625,8 +638,12 @@ pub(crate) async fn call_code_graph(
             // v8: top files by cumulative coupling across all
             // partners (sum of co_edits). High value = touching this
             // file is more likely to require touching many others.
+            // Accepts dedicated `since_days` (preferred); falls back
+            // to parsing `query` as int.
             let limit = p.limit.unwrap_or(20);
-            let since_days = p.query.as_deref().and_then(|s| s.parse::<u32>().ok());
+            let since_days = p
+                .since_days
+                .or_else(|| p.query.as_deref().and_then(|s| s.parse::<u32>().ok()));
             let result = graph_ops.coupling_hubs(&ctx, limit, since_days, 15).await?;
             serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
         }
@@ -662,14 +679,13 @@ pub(crate) async fn call_code_graph(
         }
         "churn" => {
             // v8: top files by distinct-commit count.
-            // `query` carries an optional `since_days` integer (parsed
-            // back here) so we don't add yet another field to
-            // CodeGraphParams.
+            // Accepts the dedicated `since_days` field (preferred);
+            // falls back to parsing `query` as an integer for the
+            // pre-iter-21 contract.
             let limit = p.limit.unwrap_or(20);
             let since_days = p
-                .query
-                .as_deref()
-                .and_then(|s| s.parse::<u32>().ok());
+                .since_days
+                .or_else(|| p.query.as_deref().and_then(|s| s.parse::<u32>().ok()));
             let rows = graph_ops.churn(&ctx, limit, since_days).await?;
             serde_json::json!({
                 "since_days": since_days,
@@ -679,20 +695,20 @@ pub(crate) async fn call_code_graph(
         "hotspots" => {
             // v8: churn × centrality, via the trait's existing
             // hotspots method. Returns HotspotEntry with `top_symbols`
-            // (highest-pagerank symbol display names per file) so the
-            // user gets actionable "what symbols would I touch in
-            // this hotspot" without a second round-trip.
+            // (highest-pagerank symbol display names per file).
+            // Accepts dedicated `since_days` + `file_glob` (preferred);
+            // falls back to parsing `query` as int.
             let limit = p.limit.unwrap_or(20);
             let window_days = p
-                .query
-                .as_deref()
-                .and_then(|s| s.parse::<u32>().ok())
+                .since_days
+                .or_else(|| p.query.as_deref().and_then(|s| s.parse::<u32>().ok()))
                 .unwrap_or(90);
             let hotspots = graph_ops
-                .hotspots(&ctx, window_days, None, limit)
+                .hotspots(&ctx, window_days, p.file_glob.as_deref(), limit)
                 .await?;
             serde_json::json!({
                 "window_days": window_days,
+                "file_glob": p.file_glob,
                 "hotspots": hotspots,
                 "scoring": "composite_score = churn × centrality (sum of pagerank over file's symbols)",
                 "next_steps": [

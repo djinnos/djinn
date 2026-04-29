@@ -361,6 +361,8 @@ impl RepoGraphOps for StubRepoGraph {
             node_count: 0,
             edge_count: 0,
             cycle_count: 0,
+            cycle_count_symbol_only: 0,
+            cycle_count_file_only: 0,
             cycles_by_size_histogram: std::collections::BTreeMap::new(),
             god_object_count: 0,
             orphan_count: 0,

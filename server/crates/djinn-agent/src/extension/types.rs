@@ -334,11 +334,35 @@ pub(super) struct CodeGraphParams {
     /// violation. Empty / absent for every other op.
     #[serde(default)]
     pub rules: Option<Vec<BoundaryRule>>,
-    /// v8 `symbols_at` op: 0-indexed end line for the range query.
-    /// `start_line` reuses the existing `min_size` field. Both
-    /// optional; absence triggers single-line mode.
+    /// v8 `symbols_at` op: 1-indexed end line for the range query.
+    /// Both `start_line` and `end_line` are now first-class fields
+    /// (the old `min_size` overload remains as a fallback).
     #[serde(default)]
     pub end_line: Option<u32>,
+    /// v8 `symbols_at` op: 1-indexed start line for the range query.
+    /// First-class field — see `end_line` doc.
+    #[serde(default)]
+    pub start_line: Option<u32>,
+    /// v8 `symbols_at` / `dead_symbols` / etc: explicit `file_path`
+    /// alias for the queried file, instead of overloading `key` with
+    /// the `file:` prefix. When both are set, `file_path` wins.
+    #[serde(default)]
+    pub file_path: Option<String>,
+    /// v8 `dead_symbols` op: confidence band for the dead-code
+    /// detector ("high" | "med" | "low"). Distinct from `kind_filter`
+    /// (which restricts node kinds for ranked/orphans/cycles).
+    #[serde(default)]
+    pub confidence: Option<String>,
+    /// v8 `hotspots` / `churn` / `coupling_hubs` ops: look-back
+    /// window in days. First-class field — the previous overload
+    /// of `query` to carry an integer is kept as a fallback.
+    #[serde(default)]
+    pub since_days: Option<u32>,
+    /// v8 `hotspots` op: file path glob to narrow the hotspot set.
+    /// Distinct from `from_glob` so a caller can pass both an
+    /// architectural and a path-shape filter.
+    #[serde(default)]
+    pub file_glob: Option<String>,
     /// v8 `diff_touches` op: list of changed file/line-range
     /// records parsed from `git diff --unified=0 base..head`.
     /// Each entry passes through to the bridge as-is.
@@ -362,11 +386,18 @@ pub(super) struct CodeGraphParams {
 
 /// v8 `diff_touches` input shape — mirrors
 /// `djinn_control_plane::bridge::ChangedRange`.
+///
+/// Accepts EITHER `file` (matches the bridge ChangedRange + the
+/// MCP-server-advertised schema) OR `file_path` (legacy / agent-dispatch
+/// alias) so both client conventions deserialize correctly. End_line
+/// defaults to start_line for single-line hunks (matches bridge default).
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct ChangedRangeArg {
-    pub file_path: String,
+    #[serde(alias = "file_path")]
+    pub file: String,
     pub start_line: u32,
-    pub end_line: u32,
+    #[serde(default)]
+    pub end_line: Option<u32>,
 }
 
 /// One rule for the `boundary_check` op. Names an architectural
