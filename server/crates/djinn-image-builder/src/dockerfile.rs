@@ -279,6 +279,12 @@ fn emit_node_block(df: &mut String, languages: &Languages, config: &EnvironmentC
             space_join(package_managers.iter().copied())
         ));
     }
+    // scip-typescript is the right indexer for both TS and JS workspaces —
+    // there's no separate `typescript` block in `Languages`, so we key on
+    // `node` being present.
+    line.push_str(&format!(
+        " SCIP_INDEXER=\"{TYPESCRIPT_SCIP_INDEXER}\" SCIP_TYPESCRIPT_VERSION=\"{SCIP_TYPESCRIPT_VERSION}\""
+    ));
     line.push_str(" /tmp/djinn-scripts/install-node.sh");
     writeln!(df, "{line}").unwrap();
 }
@@ -329,14 +335,16 @@ fn aggregate_node_pms<'a>(
 // dropped the field.
 const PYTHON_SCIP_INDEXER: &str = "scip-python";
 const GO_SCIP_INDEXER: &str = "scip-go";
+const TYPESCRIPT_SCIP_INDEXER: &str = "scip-typescript";
 
 // Version pins for SCIP indexers. `"latest"` means the Go-module-proxy /
-// PyPI `latest` tag at build time. Bump these consts to roll forward;
-// pin to a known-good tag (e.g. `"v0.2.3"`) when an upstream `@latest`
-// regresses. See `project_scip_indexer_versions.md` in user memory for
-// the running list of known regressions.
+// PyPI / npm `latest` tag at build time. Bump these consts to roll
+// forward; pin to a known-good tag (e.g. `"v0.2.3"`) when an upstream
+// `@latest` regresses. See `project_scip_indexer_versions.md` in user
+// memory for the running list of known regressions.
 const SCIP_GO_VERSION: &str = "latest";
 const SCIP_PYTHON_VERSION: &str = "latest";
+const SCIP_TYPESCRIPT_VERSION: &str = "latest";
 
 fn emit_python_block(df: &mut String, languages: &Languages, config: &EnvironmentConfig) {
     let Some(python) = &languages.python else { return };

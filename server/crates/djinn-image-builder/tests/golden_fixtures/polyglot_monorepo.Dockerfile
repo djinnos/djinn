@@ -12,7 +12,7 @@ RUN APT_PACKAGES="postgresql-client" /tmp/djinn-scripts/install-system.sh
 COPY --from=djinn/agent-worker:sha256-golden /usr/local/bin/djinn-agent-worker /opt/djinn/bin/djinn-agent-worker
 RUN /tmp/djinn-scripts/install-agent-worker.sh
 RUN TOOLCHAINS="stable 1.85.0" DEFAULT_TOOLCHAIN="stable" COMPONENTS="rust-analyzer" /tmp/djinn-scripts/install-rust.sh
-RUN NODE_VERSIONS="22 20" DEFAULT_NODE="22" PACKAGE_MANAGERS="pnpm" /tmp/djinn-scripts/install-node.sh
+RUN NODE_VERSIONS="22 20" DEFAULT_NODE="22" PACKAGE_MANAGERS="pnpm" SCIP_INDEXER="scip-typescript" SCIP_TYPESCRIPT_VERSION="latest" /tmp/djinn-scripts/install-node.sh
 RUN PYTHON_VERSIONS="3.12" DEFAULT_PYTHON="3.12" SCIP_INDEXER="scip-python" SCIP_PYTHON_VERSION="latest" /tmp/djinn-scripts/install-python.sh
 ENV RUST_LOG=info
 RUN rm -rf /tmp/djinn-scripts

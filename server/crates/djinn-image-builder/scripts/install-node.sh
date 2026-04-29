@@ -3,10 +3,16 @@
 # managers as global npm packages on the first version.
 #
 # Inputs (env):
-#   NODE_VERSIONS     — required. Space-separated major versions: "20 22".
-#                       fnm resolves each to the latest LTS in the major.
-#   PACKAGE_MANAGERS  — optional. Space-separated: "pnpm yarn".
-#   DEFAULT_NODE      — optional. Defaults to the first NODE_VERSIONS entry.
+#   NODE_VERSIONS           — required. Space-separated major versions: "20 22".
+#                             fnm resolves each to the latest LTS in the major.
+#   PACKAGE_MANAGERS        — optional. Space-separated: "pnpm yarn".
+#   DEFAULT_NODE            — optional. Defaults to the first NODE_VERSIONS entry.
+#   SCIP_INDEXER            — optional. "scip-typescript" → installs the indexer
+#                             at `${SCIP_TYPESCRIPT_VERSION}` (default `latest`)
+#                             via npm on the default node. Handles JS too —
+#                             scip-typescript is a strict superset.
+#   SCIP_TYPESCRIPT_VERSION — optional. Pin scip-typescript to a specific npm
+#                             version (e.g. `0.3.30`) when `latest` regresses.
 #
 # fnm is installed at /usr/local/share/fnm and managed via a PATH
 # fragment at /etc/profile.d/20-node.sh.
@@ -68,4 +74,14 @@ if [ -n "${PACKAGE_MANAGERS:-}" ]; then
                 ;;
         esac
     done
+fi
+
+if [ "${SCIP_INDEXER:-}" = "scip-typescript" ]; then
+    eval "$(fnm env --shell bash)"
+    fnm use "${DEFAULT_NODE_VALUE}"
+    if [ -n "${SCIP_TYPESCRIPT_VERSION:-}" ] && [ "${SCIP_TYPESCRIPT_VERSION}" != "latest" ]; then
+        npm install -g "@sourcegraph/scip-typescript@${SCIP_TYPESCRIPT_VERSION}"
+    else
+        npm install -g @sourcegraph/scip-typescript
+    fi
 fi
