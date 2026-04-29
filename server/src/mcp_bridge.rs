@@ -34,6 +34,105 @@ fn complexity_metrics_to_wire(
         param_count: m.param_count,
     }
 }
+
+/// Iter 28: sort `entries` in-place by the requested `sort_by` field
+/// descending, with a deterministic alpha tie-break. Extracted so the
+/// op's pure ranking logic is unit-testable without the canonical
+/// graph round-trip.
+fn sort_function_complexity_entries(
+    entries: &mut Vec<djinn_control_plane::bridge::FunctionComplexityEntry>,
+    sort_by: &str,
+) {
+    entries.sort_by(|a, b| {
+        let cmp = match sort_by {
+            "cyclomatic" => b.metrics.cyclomatic.cmp(&a.metrics.cyclomatic),
+            "nloc" => b.metrics.nloc.cmp(&a.metrics.nloc),
+            "max_nesting" => b.metrics.max_nesting.cmp(&a.metrics.max_nesting),
+            "param_count" => b.metrics.param_count.cmp(&a.metrics.param_count),
+            // "cognitive" (default)
+            _ => b.metrics.cognitive.cmp(&a.metrics.cognitive),
+        };
+        cmp.then_with(|| a.display_name.cmp(&b.display_name))
+            .then_with(|| a.key.cmp(&b.key))
+    });
+}
+
+/// Iter 28: roll a per-function entry list up into per-file aggregates,
+/// then sort by the file-level analog of `sort_by`. Pure on its inputs
+/// for unit-test isolation.
+fn aggregate_files_complexity(
+    entries: &[djinn_control_plane::bridge::FunctionComplexityEntry],
+    sort_by: &str,
+) -> Vec<djinn_control_plane::bridge::FileComplexityEntry> {
+    use djinn_control_plane::bridge::FileComplexityEntry;
+    use std::collections::BTreeMap;
+
+    struct FileAgg {
+        function_count: u32,
+        total_cognitive: u32,
+        total_cyclomatic: u32,
+        total_nloc: u32,
+        max_function_cognitive: u16,
+        max_function_name: String,
+    }
+    let mut by_file: BTreeMap<String, FileAgg> = BTreeMap::new();
+    for entry in entries {
+        let agg = by_file.entry(entry.file.clone()).or_insert(FileAgg {
+            function_count: 0,
+            total_cognitive: 0,
+            total_cyclomatic: 0,
+            total_nloc: 0,
+            max_function_cognitive: 0,
+            max_function_name: String::new(),
+        });
+        agg.function_count = agg.function_count.saturating_add(1);
+        agg.total_cognitive = agg
+            .total_cognitive
+            .saturating_add(u32::from(entry.metrics.cognitive));
+        agg.total_cyclomatic = agg
+            .total_cyclomatic
+            .saturating_add(u32::from(entry.metrics.cyclomatic));
+        agg.total_nloc = agg.total_nloc.saturating_add(u32::from(entry.metrics.nloc));
+        if entry.metrics.cognitive > agg.max_function_cognitive
+            || (entry.metrics.cognitive == agg.max_function_cognitive
+                && (agg.max_function_name.is_empty()
+                    || entry.display_name < agg.max_function_name))
+        {
+            agg.max_function_cognitive = entry.metrics.cognitive;
+            agg.max_function_name = entry.display_name.clone();
+        }
+    }
+
+    let mut files: Vec<FileComplexityEntry> = by_file
+        .into_iter()
+        .map(|(file, agg)| FileComplexityEntry {
+            file,
+            function_count: agg.function_count,
+            total_cognitive: agg.total_cognitive,
+            total_cyclomatic: agg.total_cyclomatic,
+            total_nloc: agg.total_nloc,
+            max_function_cognitive: agg.max_function_cognitive,
+            max_function_name: agg.max_function_name,
+        })
+        .collect();
+
+    files.sort_by(|a, b| {
+        let cmp = match sort_by {
+            "cyclomatic" => b.total_cyclomatic.cmp(&a.total_cyclomatic),
+            "nloc" => b.total_nloc.cmp(&a.total_nloc),
+            // `max_nesting` doesn't have a per-file aggregate — use
+            // the worst-function cognitive as the proxy. `param_count`
+            // collapses to "how many function-likes live here" since
+            // formal params don't sum meaningfully across functions.
+            "max_nesting" => b.max_function_cognitive.cmp(&a.max_function_cognitive),
+            "param_count" => b.function_count.cmp(&a.function_count),
+            // "cognitive" (default)
+            _ => b.total_cognitive.cmp(&a.total_cognitive),
+        };
+        cmp.then_with(|| a.file.cmp(&b.file))
+    });
+    files
+}
 use petgraph::visit::EdgeRef;
 use djinn_agent::actors::coordinator::CoordinatorHandle;
 use djinn_agent::actors::slot::SlotPoolHandle;
@@ -1838,6 +1937,115 @@ impl RepoGraphOps for RepoGraphBridge {
         });
         out.truncate(limit);
         Ok(out)
+    }
+
+    async fn complexity(
+        &self,
+        ctx: &ProjectCtx,
+        target: &str,
+        sort_by: &str,
+        file_glob: Option<&str>,
+        limit: usize,
+    ) -> Result<djinn_control_plane::bridge::ComplexityResult, String> {
+        use djinn_control_plane::bridge::{ComplexityResult, FunctionComplexityEntry};
+        use djinn_graph::scip_parser::ScipSymbolKind;
+
+        // Wire-shape contract: validate up front so an invalid `target`
+        // or `sort_by` doesn't quietly degrade to a default ranking.
+        match target {
+            "functions" | "files" => {}
+            other => {
+                return Err(format!(
+                    "invalid target '{other}': expected 'functions' or 'files'"
+                ));
+            }
+        }
+        match sort_by {
+            "cognitive" | "cyclomatic" | "nloc" | "max_nesting" | "param_count" => {}
+            other => {
+                return Err(format!(
+                    "invalid sort_by '{other}': expected 'cognitive', 'cyclomatic', \
+                     'nloc', 'max_nesting', or 'param_count'"
+                ));
+            }
+        }
+
+        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
+            &self.state,
+            &ctx.id,
+            &ctx.clone_path,
+        )
+        .await?;
+
+        let file_matcher = match file_glob {
+            Some(pattern) => Some(
+                globset::Glob::new(pattern)
+                    .map_err(|e| format!("invalid file_glob '{pattern}': {e}"))?
+                    .compile_matcher(),
+            ),
+            None => None,
+        };
+        let exclusions = self.state.mcp_state_graph_exclusions(&ctx.id).await;
+        let limit = limit.clamp(1, 200);
+
+        // Walk every function-like node carrying a complexity payload
+        // and collect the per-function tuple. The walker only emits
+        // metrics for Function/Method/Constructor symbols (iter 26), so
+        // the symbol_kind check is defensive — but it keeps the contract
+        // explicit so a future widening on the walker side doesn't
+        // silently broaden this op's surface.
+        let mut functions: Vec<FunctionComplexityEntry> = Vec::new();
+        for node_index in graph.graph().node_indices() {
+            let node = graph.node(node_index);
+            let Some(metrics) = node.complexity else { continue };
+            let Some(symbol_kind) = node.symbol_kind.as_ref() else {
+                continue;
+            };
+            if !matches!(
+                symbol_kind,
+                ScipSymbolKind::Function | ScipSymbolKind::Method | ScipSymbolKind::Constructor
+            ) {
+                continue;
+            }
+            let Some(file_path) = node.file_path.as_ref() else {
+                continue;
+            };
+            let file_str = file_path.display().to_string();
+            if let Some(matcher) = &file_matcher
+                && !matcher.is_match(&file_str)
+            {
+                continue;
+            }
+            let key = format_node_key(&node.id);
+            if exclusions.excludes(&key, Some(&file_str), &node.display_name) {
+                continue;
+            }
+            let (start_line, end_line) = graph
+                .range_for_node(node_index, file_path)
+                .unwrap_or((0, 0));
+            functions.push(FunctionComplexityEntry {
+                key,
+                display_name: node.display_name.clone(),
+                file: file_str,
+                start_line,
+                end_line,
+                metrics: complexity_metrics_to_wire(metrics),
+            });
+        }
+
+        match target {
+            "functions" => {
+                sort_function_complexity_entries(&mut functions, sort_by);
+                functions.truncate(limit);
+                Ok(ComplexityResult::Functions(functions))
+            }
+            // "files"
+            _ => {
+                let mut files = aggregate_files_complexity(&functions, sort_by);
+                files.truncate(limit);
+                Ok(ComplexityResult::Files(files))
+            }
+        }
     }
 
     async fn metrics_at(
@@ -4753,5 +4961,124 @@ pub(crate) mod graph_bridge_tests {
             auth_id, billing_id,
             "auth and billing clusters should not share community_id"
         );
+    }
+
+    // ── Iter 28: complexity op ranking + aggregation ─────────────────────
+
+    fn complexity_metrics(cog: u16, cyc: u16, nloc: u16, nest: u8, params: u8) -> WireComplexityMetrics {
+        WireComplexityMetrics {
+            cyclomatic: cyc,
+            cognitive: cog,
+            nloc,
+            max_nesting: nest,
+            param_count: params,
+        }
+    }
+
+    fn function_entry(
+        key: &str,
+        display_name: &str,
+        file: &str,
+        metrics: WireComplexityMetrics,
+    ) -> djinn_control_plane::bridge::FunctionComplexityEntry {
+        djinn_control_plane::bridge::FunctionComplexityEntry {
+            key: key.to_string(),
+            display_name: display_name.to_string(),
+            file: file.to_string(),
+            start_line: 1,
+            end_line: 10,
+            metrics,
+        }
+    }
+
+    #[test]
+    fn complexity_sort_functions_by_cognitive_iter28() {
+        // Two functions in two files — one with cognitive=10, one with
+        // cognitive=1. After sorting by cognitive desc, the high-
+        // complexity entry must lead.
+        let mut entries = vec![
+            function_entry("symbol:a", "easy", "src/a.rs", complexity_metrics(1, 1, 5, 0, 0)),
+            function_entry("symbol:b", "hard", "src/b.rs", complexity_metrics(10, 8, 50, 4, 3)),
+        ];
+        sort_function_complexity_entries(&mut entries, "cognitive");
+        assert_eq!(entries[0].display_name, "hard");
+        assert_eq!(entries[0].metrics.cognitive, 10);
+        assert_eq!(entries[1].display_name, "easy");
+        assert_eq!(entries[1].metrics.cognitive, 1);
+    }
+
+    #[test]
+    fn complexity_sort_functions_by_cyclomatic_iter28() {
+        // Verify the non-default sort key actually rotates the ordering.
+        // `easy` has higher cognitive but lower cyclomatic.
+        let mut entries = vec![
+            function_entry("symbol:easy", "easy", "src/a.rs", complexity_metrics(10, 2, 5, 0, 0)),
+            function_entry("symbol:hard", "hard", "src/b.rs", complexity_metrics(5, 9, 50, 4, 3)),
+        ];
+        sort_function_complexity_entries(&mut entries, "cyclomatic");
+        assert_eq!(entries[0].display_name, "hard", "cyclomatic=9 should win over cyclomatic=2");
+        assert_eq!(entries[0].metrics.cyclomatic, 9);
+    }
+
+    #[test]
+    fn complexity_aggregate_files_groups_by_path_iter28() {
+        // Two functions in `src/big.rs` (cognitive 7+3) and one in
+        // `src/small.rs` (cognitive 2). After aggregation: big.rs has
+        // function_count=2, total_cognitive=10, max_function_name="big_fn"
+        // (worst offender); small.rs has 1 function. Sorted by total
+        // cognitive desc, big.rs leads.
+        let entries = vec![
+            function_entry("symbol:big1", "big_fn", "src/big.rs", complexity_metrics(7, 5, 30, 2, 2)),
+            function_entry("symbol:big2", "small_fn", "src/big.rs", complexity_metrics(3, 2, 12, 1, 1)),
+            function_entry("symbol:s1", "tiny", "src/small.rs", complexity_metrics(2, 1, 8, 0, 0)),
+        ];
+        let files = aggregate_files_complexity(&entries, "cognitive");
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].file, "src/big.rs");
+        assert_eq!(files[0].function_count, 2);
+        assert_eq!(files[0].total_cognitive, 10);
+        assert_eq!(files[0].total_cyclomatic, 7);
+        assert_eq!(files[0].total_nloc, 42);
+        assert_eq!(files[0].max_function_cognitive, 7);
+        assert_eq!(files[0].max_function_name, "big_fn");
+        assert_eq!(files[1].file, "src/small.rs");
+        assert_eq!(files[1].function_count, 1);
+    }
+
+    #[test]
+    fn complexity_aggregate_files_param_count_proxy_iter28() {
+        // For `target=files, sort_by=param_count` we proxy to
+        // function_count (formal params don't sum meaningfully across
+        // functions). A file with one 5-param function ranks BELOW a
+        // file with two 1-param functions.
+        let entries = vec![
+            function_entry("symbol:a", "single", "src/wide.rs", complexity_metrics(1, 1, 5, 0, 5)),
+            function_entry("symbol:b", "first", "src/many.rs", complexity_metrics(1, 1, 5, 0, 1)),
+            function_entry("symbol:c", "second", "src/many.rs", complexity_metrics(1, 1, 5, 0, 1)),
+        ];
+        let files = aggregate_files_complexity(&entries, "param_count");
+        assert_eq!(files[0].file, "src/many.rs", "two functions should win by param_count proxy");
+        assert_eq!(files[0].function_count, 2);
+        assert_eq!(files[1].file, "src/wide.rs");
+        assert_eq!(files[1].function_count, 1);
+    }
+
+    #[test]
+    fn complexity_result_serializes_as_array_iter28() {
+        // Serde-untagged invariant: a `Functions` variant serializes as
+        // a bare JSON array (the inner Vec). Pinning this so a future
+        // refactor that wraps it in a discriminator breaks the test
+        // explicitly.
+        use djinn_control_plane::bridge::ComplexityResult;
+        let entry = function_entry(
+            "symbol:x",
+            "x",
+            "src/x.rs",
+            complexity_metrics(1, 1, 1, 0, 0),
+        );
+        let result = ComplexityResult::Functions(vec![entry]);
+        let json = serde_json::to_value(&result).expect("serialize");
+        assert!(json.is_array(), "Functions should serialize as bare array: {json}");
+        assert_eq!(json.as_array().unwrap().len(), 1);
     }
 }

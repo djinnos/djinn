@@ -417,6 +417,16 @@ pub mod stubs {
         ) -> Result<Vec<crate::bridge::HotspotEntry>, String> {
             Ok(vec![])
         }
+        async fn complexity(
+            &self,
+            _: &crate::bridge::ProjectCtx,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<crate::bridge::ComplexityResult, String> {
+            Ok(crate::bridge::ComplexityResult::Functions(vec![]))
+        }
         async fn metrics_at(
             &self,
             _: &crate::bridge::ProjectCtx,

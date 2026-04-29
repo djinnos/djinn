@@ -1687,6 +1687,17 @@ mod tests {
             Err("unused in test".into())
         }
 
+        async fn complexity(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<djinn_control_plane::bridge::ComplexityResult, String> {
+            Err("unused in test".into())
+        }
+
         async fn metrics_at(&self, _: &ProjectCtx) -> Result<MetricsAtResult, String> {
             Err("unused in test".into())
         }

@@ -1,10 +1,9 @@
 ---
 source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
-assertion_line: 258
 expression: "serde_json::to_value(tool_code_graph()).unwrap()"
 ---
 {
-  "description": "Query the SCIP-built repository dependency graph. Set `operation` to one of the enum values; most ops accept optional filters (kind_filter, group_by, limit, min_confidence). Call `operation=capabilities` for the full per-op param shapes + defaults. Quick guide: neighbors / ranked / impact / implementations / search / cycles / orphans / path / edges — basic graph queries (impact defaults: depth=2, min_confidence=0.85, behavioural edges only). symbols_at / diff_touches / detect_changes — line-range → touched symbols. describe / context — single-symbol detail (context = bucketed incoming/outgoing edges). status / metrics_at / snapshot — graph health + introspection. api_surface / dead_symbols / deprecated_callers — public surface health. boundary_check / blast_radius / touches_hot_path — change-impact analysis. hotspots / cochange / churn / coupling_hubs — git-coupling × PageRank centrality.",
+  "description": "Query the SCIP-built repository dependency graph. Set `operation` to one of the enum values; most ops accept optional filters (kind_filter, group_by, limit, min_confidence). Call `operation=capabilities` for the full per-op param shapes + defaults. Quick guide: neighbors / ranked / impact / implementations / search / cycles / orphans / path / edges — basic graph queries (impact defaults: depth=2, min_confidence=0.85, behavioural edges only). symbols_at / diff_touches / detect_changes — line-range → touched symbols. describe / context — single-symbol detail (context = bucketed incoming/outgoing edges). status / metrics_at / snapshot — graph health + introspection. api_surface / dead_symbols / deprecated_callers — public surface health. boundary_check / blast_radius / touches_hot_path — change-impact analysis. hotspots / cochange / churn / coupling_hubs — git-coupling × PageRank centrality. complexity — rank functions or files by cognitive/cyclomatic/nloc complexity.",
   "inputSchema": {
     "properties": {
       "changed_ranges": {
@@ -143,6 +142,7 @@ expression: "serde_json::to_value(tool_code_graph()).unwrap()"
           "boundary_check",
           "blast_radius",
           "hotspots",
+          "complexity",
           "cochange",
           "churn",
           "coupling_hubs",
@@ -200,12 +200,17 @@ expression: "serde_json::to_value(tool_code_graph()).unwrap()"
         "type": "array"
       },
       "sort_by": {
-        "description": "Sort key for ranked (default pagerank)",
+        "description": "Sort key. For ranked: pagerank|in_degree|out_degree|total_degree (default pagerank). For complexity: cognitive|cyclomatic|nloc|max_nesting|param_count (default cognitive).",
         "enum": [
           "pagerank",
           "in_degree",
           "out_degree",
-          "total_degree"
+          "total_degree",
+          "cognitive",
+          "cyclomatic",
+          "nloc",
+          "max_nesting",
+          "param_count"
         ],
         "type": "string"
       },
@@ -220,6 +225,14 @@ expression: "serde_json::to_value(tool_code_graph()).unwrap()"
           "type": "string"
         },
         "type": "array"
+      },
+      "target": {
+        "description": "Target tier for complexity (default functions). 'files' aggregates by file_path.",
+        "enum": [
+          "functions",
+          "files"
+        ],
+        "type": "string"
       },
       "to": {
         "description": "Destination node for path",

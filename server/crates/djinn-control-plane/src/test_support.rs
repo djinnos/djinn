@@ -352,6 +352,16 @@ impl RepoGraphOps for StubRepoGraph {
     ) -> std::result::Result<Vec<HotspotEntry>, String> {
         Ok(Vec::new())
     }
+    async fn complexity(
+        &self,
+        _ctx: &ProjectCtx,
+        _target: &str,
+        _sort_by: &str,
+        _file_glob: Option<&str>,
+        _limit: usize,
+    ) -> std::result::Result<crate::bridge::ComplexityResult, String> {
+        Ok(crate::bridge::ComplexityResult::Functions(Vec::new()))
+    }
     async fn metrics_at(
         &self,
         _ctx: &ProjectCtx,

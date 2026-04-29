@@ -327,7 +327,8 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
          status / metrics_at / snapshot — graph health + introspection. \
          api_surface / dead_symbols / deprecated_callers — public surface health. \
          boundary_check / blast_radius / touches_hot_path — change-impact analysis. \
-         hotspots / cochange / churn / coupling_hubs — git-coupling × PageRank centrality.".to_string(),
+         hotspots / cochange / churn / coupling_hubs — git-coupling × PageRank centrality. \
+         complexity — rank functions or files by cognitive/cyclomatic/nloc complexity.".to_string(),
         object!({
             "type": "object",
             "required": ["operation", "project"],
@@ -339,8 +340,8 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
                         "search", "cycles", "orphans", "path", "edges",
                         "symbols_at", "diff_touches", "detect_changes",
                         "describe", "context", "api_surface", "boundary_check",
-                        "blast_radius", "hotspots", "cochange", "churn",
-                        "coupling_hubs", "metrics_at", "dead_symbols",
+                        "blast_radius", "hotspots", "complexity", "cochange",
+                        "churn", "coupling_hubs", "metrics_at", "dead_symbols",
                         "deprecated_callers", "touches_hot_path", "status",
                         "snapshot", "capabilities"
                     ],
@@ -401,8 +402,16 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
                 },
                 "sort_by": {
                     "type": "string",
-                    "enum": ["pagerank", "in_degree", "out_degree", "total_degree"],
-                    "description": "Sort key for ranked (default pagerank)"
+                    "enum": [
+                        "pagerank", "in_degree", "out_degree", "total_degree",
+                        "cognitive", "cyclomatic", "nloc", "max_nesting", "param_count"
+                    ],
+                    "description": "Sort key. For ranked: pagerank|in_degree|out_degree|total_degree (default pagerank). For complexity: cognitive|cyclomatic|nloc|max_nesting|param_count (default cognitive)."
+                },
+                "target": {
+                    "type": "string",
+                    "enum": ["functions", "files"],
+                    "description": "Target tier for complexity (default functions). 'files' aggregates by file_path."
                 },
                 "group_by": {
                     "type": "string",

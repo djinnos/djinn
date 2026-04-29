@@ -382,6 +382,16 @@ impl RepoGraphOps for StubRepoGraphOps {
     ) -> Result<Vec<HotspotEntry>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
+    async fn complexity(
+        &self,
+        _: &ProjectCtx,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<bridge::ComplexityResult, String> {
+        Err("complexity not available in agent bridge — use MCP server".into())
+    }
     async fn metrics_at(&self, _: &ProjectCtx) -> Result<MetricsAtResult, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }

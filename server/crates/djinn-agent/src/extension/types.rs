@@ -382,6 +382,11 @@ pub(super) struct CodeGraphParams {
     /// (Sigma WebGL ceiling); the trait clamps to 10k.
     #[serde(default)]
     pub node_cap: Option<usize>,
+    /// Iter 28 `complexity` op: target tier — `"functions"` (default)
+    /// or `"files"`. Reuses the existing `sort_by`, `file_glob`, and
+    /// `limit` fields for the metric / glob / cap.
+    #[serde(default)]
+    pub target: Option<String>,
 }
 
 /// v8 `diff_touches` input shape — mirrors

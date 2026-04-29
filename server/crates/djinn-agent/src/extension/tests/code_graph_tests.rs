@@ -516,6 +516,33 @@ async fn code_graph_dispatch_hotspots_reaches_graph_ops() {
     );
 }
 
+/// Iter 28 complexity op: dispatches through
+/// `RepoGraphOps::complexity` and surfaces the unavailability error
+/// when the agent stub is in play. Confirms the new arm is wired.
+#[tokio::test]
+async fn code_graph_dispatch_complexity_reaches_graph_ops() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-complexity-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let err = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "complexity",
+            "project_path": worktree.path().to_string_lossy(),
+            "target": "functions",
+            "sort_by": "cognitive",
+            "limit": 5,
+        }),
+        worktree.path(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("complexity not available"),
+        "complexity should reach the bridge stub, got: {err}"
+    );
+}
+
 /// v8 final batch: 5 trait-delegation ops (status / snapshot /
 /// symbols_at / diff_touches / detect_changes). Same pattern.
 #[tokio::test]

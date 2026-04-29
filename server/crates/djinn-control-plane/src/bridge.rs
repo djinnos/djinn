@@ -582,6 +582,50 @@ pub struct BoundaryViolation {
     pub witness_path: Option<Vec<String>>,
 }
 
+/// Iter 28: result emitted by the `complexity` op. Untagged so the
+/// per-target shape ships under a single discriminator-free union; the
+/// `Functions` variant is the default `target=functions` payload, and
+/// `Files` is the `target=files` aggregation.
+///
+/// JsonSchema: untagged enums of homogeneous variants serialize as a
+/// `oneOf` of the inner array shapes — matches the contract `code_graph`
+/// uses for `NeighborsResult` and `ImpactResult`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ComplexityResult {
+    Functions(Vec<FunctionComplexityEntry>),
+    Files(Vec<FileComplexityEntry>),
+}
+
+/// Per-function entry for the `complexity` op (target=functions). The
+/// `metrics` payload is the same wire shape `describe`/`context` ship
+/// (iter 27); the extra fields lift the function's location so callers
+/// don't need a follow-up `describe` to know where to look.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FunctionComplexityEntry {
+    pub key: String,
+    pub display_name: String,
+    pub file: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub metrics: ComplexityMetrics,
+}
+
+/// Per-file aggregation for the `complexity` op (target=files). Sums
+/// every function-like node's metrics by their `file_path` and tracks
+/// the worst offender (`max_function_*`) so callers can sort by either
+/// totals or peaks.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FileComplexityEntry {
+    pub file: String,
+    pub function_count: u32,
+    pub total_cognitive: u32,
+    pub total_cyclomatic: u32,
+    pub total_nloc: u32,
+    pub max_function_cognitive: u16,
+    pub max_function_name: String,
+}
+
 /// A single hotspot entry emitted by `hotspots`.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct HotspotEntry {
@@ -1186,6 +1230,26 @@ pub trait RepoGraphOps: Send + Sync {
         file_glob: Option<&str>,
         limit: usize,
     ) -> Result<Vec<HotspotEntry>, String>;
+
+    /// Iter 28: rank function-like symbols (Function/Method/Constructor)
+    /// or files by complexity. Reads the per-node `complexity` metrics
+    /// the SCIP build pipeline (iter 26) attaches via the tree-sitter
+    /// walker; nodes without metrics (non-function, unsupported language,
+    /// external symbols) are skipped.
+    ///
+    /// `target`: `"functions"` | `"files"`. `sort_by`: `"cognitive"` (default)
+    /// `| "cyclomatic" | "nloc" | "max_nesting" | "param_count"`. For
+    /// `target=files`, the file-level analog of each `sort_by` field is
+    /// used (`max_nesting` → `max_function_cognitive`, `param_count` →
+    /// `function_count`).
+    async fn complexity(
+        &self,
+        ctx: &ProjectCtx,
+        target: &str,
+        sort_by: &str,
+        file_glob: Option<&str>,
+        limit: usize,
+    ) -> Result<ComplexityResult, String>;
 
     /// Scalar graph snapshot of the currently-pinned canonical graph.
     async fn metrics_at(

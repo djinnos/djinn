@@ -342,6 +342,16 @@ async fn codebase_header_builder_renders_status_hotspots_and_tree() {
         ) -> Result<Vec<djinn_control_plane::bridge::HotspotEntry>, String> {
             StubRepoGraph.hotspots(ctx, wd, fg, l).await
         }
+        async fn complexity(
+            &self,
+            ctx: &ProjectCtx,
+            t: &str,
+            sb: &str,
+            fg: Option<&str>,
+            l: usize,
+        ) -> Result<djinn_control_plane::bridge::ComplexityResult, String> {
+            StubRepoGraph.complexity(ctx, t, sb, fg, l).await
+        }
         async fn metrics_at(
             &self,
             ctx: &ProjectCtx,

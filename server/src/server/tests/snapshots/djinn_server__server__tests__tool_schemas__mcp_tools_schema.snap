@@ -970,6 +970,12 @@ expression: signatures
           "nullable": true,
           "type": "array"
         },
+        "target": {
+          "default": null,
+          "description": "Iter 28: target tier for the `complexity` op — `\"functions\"`\n(default) or `\"files\"`. The `functions` shape ranks individual\nfunction-like symbols; the `files` shape aggregates by file_path\nand returns per-file totals + worst-offender info. Reuses the\nshared `sort_by`, `file_glob`, and `limit` fields.",
+          "nullable": true,
+          "type": "string"
+        },
         "to": {
           "default": null,
           "description": "Destination node for `path`.",

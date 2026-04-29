@@ -876,6 +876,28 @@ async fn call_code_graph_inner(
                 },
             })
         }
+        "complexity" => {
+            // Iter 28: rank functions or files by complexity metric
+            // (cognitive / cyclomatic / nloc / max_nesting / param_count).
+            // Reuses the trait's `RepoGraphOps::complexity` method so the
+            // agent dispatch returns the same shape the MCP server emits.
+            let target = p.target.as_deref().unwrap_or("functions");
+            let sort_by = p.sort_by.as_deref().unwrap_or("cognitive");
+            let limit = p.limit.unwrap_or(30);
+            let result = graph_ops
+                .complexity(&ctx, target, sort_by, p.file_glob.as_deref(), limit)
+                .await?;
+            // The bridge return is an untagged enum — serde just emits
+            // either a `[FunctionComplexityEntry]` array or a
+            // `[FileComplexityEntry]` array. Wrap in a `complexity` key
+            // for the same reason the MCP-side response does (avoid
+            // collision with the surrounding agent JSON shape).
+            serde_json::json!({
+                "target": target,
+                "sort_by": sort_by,
+                "complexity": result,
+            })
+        }
         "blast_radius" => {
             // v8: first-class "what breaks if I change this" op.
             // Bundles `neighbors(incoming, group_by=file)` for direct
@@ -944,7 +966,7 @@ async fn call_code_graph_inner(
                  'search', 'cycles', 'orphans', 'path', 'edges', \
                  'describe', 'context', 'capabilities', 'blast_radius', \
                  'boundary_check', 'cochange', 'churn', 'hotspots', \
-                 'api_surface', 'metrics_at', 'dead_symbols', \
+                 'complexity', 'api_surface', 'metrics_at', 'dead_symbols', \
                  'deprecated_callers', 'touches_hot_path', 'coupling_hubs', \
                  'status', 'snapshot', 'symbols_at', 'diff_touches', \
                  'detect_changes'"
@@ -1138,7 +1160,7 @@ fn code_graph_capabilities() -> serde_json::Value {
             "search", "cycles", "orphans", "path", "edges",
             "describe", "context", "capabilities", "blast_radius",
             "boundary_check", "cochange", "churn", "hotspots",
-            "api_surface", "metrics_at", "dead_symbols",
+            "complexity", "api_surface", "metrics_at", "dead_symbols",
             "deprecated_callers", "touches_hot_path", "coupling_hubs",
             "status", "snapshot", "symbols_at", "diff_touches",
             "detect_changes",
