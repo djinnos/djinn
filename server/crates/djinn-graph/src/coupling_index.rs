@@ -14,12 +14,16 @@
 use std::path::Path;
 use std::time::Duration;
 
-use djinn_db::{CommitFileChange, CommitFileChangeRepository, Database};
+use djinn_db::{
+    CommitFileChange, CommitFileChangeRepository, CouplingPairEvent, Database,
+    derive_pair_events_into,
+};
 use thiserror::Error;
 use tokio::process::Command;
 
 const GIT_LOG_TIMEOUT: Duration = Duration::from_secs(120);
 const BATCH_SIZE: usize = 500;
+const PAIR_BATCH_SIZE: usize = 500;
 const COMMIT_SENTINEL: &str = "__COMMIT__";
 
 /// Observability rollup returned by [`ingest_new_commits`].
@@ -27,6 +31,9 @@ const COMMIT_SENTINEL: &str = "__COMMIT__";
 pub struct IngestStats {
     pub commits_ingested: usize,
     pub rows_inserted: usize,
+    /// Pair events written to `coupling_pair_events`. Includes any
+    /// first-pass backfill from existing `commit_file_changes` rows.
+    pub pair_events_inserted: usize,
     /// True when we invoked `git fetch --unshallow` to try to extend a
     /// shallow clone. Surfaced for tests / dashboards.
     pub unshallowed: bool,
@@ -102,7 +109,25 @@ pub async fn ingest_new_commits(
     let parsed = parse_git_log(&output, project_id).map_err(IngestError::Parse)?;
     stats.commits_ingested = parsed.commits_seen;
 
+    // Group rows by commit so we can derive pair events alongside the
+    // raw row insert. We accumulate per-commit file lists in
+    // `commit_files` keyed by commit_sha; the parser emits all rows
+    // for one commit contiguously, so a streaming "flush on sha
+    // change" would also work — using a small map keeps the code
+    // path symmetric with the row batch.
+    use std::collections::HashMap;
+    let mut commit_meta: HashMap<String, String> = HashMap::new();
+    let mut commit_files: HashMap<String, Vec<String>> = HashMap::new();
+    let mut pair_buffer: Vec<CouplingPairEvent> = Vec::with_capacity(PAIR_BATCH_SIZE);
+
     for row in parsed.rows {
+        commit_meta
+            .entry(row.commit_sha.clone())
+            .or_insert_with(|| row.committed_at.clone());
+        commit_files
+            .entry(row.commit_sha.clone())
+            .or_default()
+            .push(row.file_path.clone());
         batch.push(row);
         if batch.len() >= BATCH_SIZE {
             stats.rows_inserted += repo.upsert_batch(&batch).await?;
@@ -111,6 +136,46 @@ pub async fn ingest_new_commits(
     }
     if !batch.is_empty() {
         stats.rows_inserted += repo.upsert_batch(&batch).await?;
+    }
+
+    // Derive + upsert pair events. Big commits (> MAX_FILES_PER_COMMIT_FOR_PAIRS)
+    // contribute zero pairs — the cap that used to live on the read
+    // side as a correlated `IN (HAVING COUNT(*) <= ?)` subquery now
+    // applies at write time, so the pathological self-join never
+    // executes against Dolt's planner.
+    for (sha, files) in &commit_files {
+        let committed_at = match commit_meta.get(sha) {
+            Some(at) => at,
+            None => continue,
+        };
+        derive_pair_events_into(project_id, sha, committed_at, files, &mut pair_buffer);
+        if pair_buffer.len() >= PAIR_BATCH_SIZE {
+            stats.pair_events_inserted += repo.upsert_pair_events(&pair_buffer).await?;
+            pair_buffer.clear();
+        }
+    }
+    if !pair_buffer.is_empty() {
+        stats.pair_events_inserted += repo.upsert_pair_events(&pair_buffer).await?;
+    }
+
+    // First-time backfill: if the cursor is unset (full-history run)
+    // OR the pair-events table is empty for this project (migration
+    // 20 just landed), force a rebuild from the existing
+    // `commit_file_changes` rows. The ingest above only touches new
+    // commits since `cursor`; this catches up the pair table for
+    // projects that were ingested before pair materialisation.
+    let needs_backfill = match cursor.as_deref() {
+        Some(_) => repo.pair_events_count_for_project(project_id).await? == 0,
+        None => false, // full-history run already wrote pairs above
+    };
+    if needs_backfill {
+        let backfilled = repo.rebuild_pair_events_for_project(project_id).await?;
+        stats.pair_events_inserted += backfilled;
+        tracing::info!(
+            project_id,
+            backfilled,
+            "coupling_pair_events: backfilled from existing commit_file_changes"
+        );
     }
 
     // Advance cursor even when we observed zero new commits — we still

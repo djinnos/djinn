@@ -6,6 +6,7 @@
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tracing::Instrument;
 
 use crate::bridge::{
     ApiSurfaceEntry, BoundaryRule, BoundaryViolation, Candidate, ChangedRange, ChurnEntry,
@@ -1030,63 +1031,11 @@ impl DjinnMcpServer {
             clone_path: params.project_path.clone(),
         };
 
-        // PR C2: pre-resolve key-bearing ops through the bridge so we
-        // can surface `Ambiguous` / `NotFound` as structured wire variants
-        // instead of generic error strings. When the resolver lands on
-        // `Found(uid)`, we rewrite `params.key` (or `params.from`/`to`
-        // for `path`) to the canonical RepoNodeKey before dispatching —
-        // this guarantees the inner op gets a unique node even when the
-        // caller passed a short identifier.
-        match Self::pre_resolve_key(self.state.repo_graph().as_ref(), &ctx, &mut params).await {
-            Ok(None) => {} // proceed normally
-            Ok(Some(short_circuit)) => {
-                return Json(ErrorOr::Ok(short_circuit));
-            }
-            Err(error) => {
-                return Json(ErrorOr::Error(ErrorResponse { error }));
-            }
-        }
-
-        let result = match params.operation.as_str() {
-            "neighbors" => self.code_graph_neighbors(&ctx, &params).await,
-            "ranked" => self.code_graph_ranked(&ctx, &params).await,
-            "implementations" => self.code_graph_implementations(&ctx, &params).await,
-            "impact" => self.code_graph_impact(&ctx, &params).await,
-            "search" => self.code_graph_search(&ctx, &params).await,
-            "cycles" => self.code_graph_cycles(&ctx, &params).await,
-            "orphans" => self.code_graph_orphans(&ctx, &params).await,
-            "path" => self.code_graph_path(&ctx, &params).await,
-            "edges" => self.code_graph_edges(&ctx, &params).await,
-            "describe" => self.code_graph_describe(&ctx, &params).await,
-            "context" => self.code_graph_context(&ctx, &params).await,
-            "status" => self.code_graph_status(&ctx, &params).await,
-            "symbols_at" => self.code_graph_symbols_at(&ctx, &params).await,
-            "diff_touches" => self.code_graph_diff_touches(&ctx, &params).await,
-            "detect_changes" => self.code_graph_detect_changes(&ctx, &params).await,
-            "api_surface" => self.code_graph_api_surface(&ctx, &params).await,
-            "boundary_check" => self.code_graph_boundary_check(&ctx, &params).await,
-            "hotspots" => self.code_graph_hotspots(&ctx, &params).await,
-            "metrics_at" => self.code_graph_metrics_at(&ctx, &params).await,
-            "dead_symbols" => self.code_graph_dead_symbols(&ctx, &params).await,
-            "deprecated_callers" => self.code_graph_deprecated_callers(&ctx, &params).await,
-            "touches_hot_path" => self.code_graph_touches_hot_path(&ctx, &params).await,
-            "coupling" => self.code_graph_coupling(&ctx, &params).await,
-            "churn" => self.code_graph_churn(&ctx, &params).await,
-            "coupling_hotspots" => self.code_graph_coupling_hotspots(&ctx, &params).await,
-            "coupling_hubs" => self.code_graph_coupling_hubs(&ctx, &params).await,
-            "snapshot" => self.code_graph_snapshot(&ctx, &params).await,
-            other => Err(format!(
-                "unknown code_graph operation '{other}': expected one of \
-                 'neighbors', 'ranked', 'impact', 'implementations', \
-                 'search', 'cycles', 'orphans', 'path', 'edges', \
-                 'symbols_at', 'diff_touches', 'detect_changes', \
-                 'describe', 'context', 'status', \
-                 'api_surface', 'boundary_check', 'hotspots', 'metrics_at', \
-                 'dead_symbols', 'deprecated_callers', 'touches_hot_path', \
-                 'coupling', 'churn', 'coupling_hotspots', 'coupling_hubs', \
-                 'snapshot'"
-            )),
-        };
+        // Both pre-resolve and the per-op match now live inside
+        // `dispatch_code_graph`, which also wraps the inner call in a
+        // tokio timeout + tracing span so the chat handler can't be
+        // wedged forever by a slow op.
+        let result = self.dispatch_code_graph(&ctx, &mut params).await;
 
         Json(match result {
             Ok(mut response) => {
@@ -1100,7 +1049,149 @@ impl DjinnMcpServer {
     }
 }
 
+/// Default per-op timeout for `dispatch_code_graph`. Override with the
+/// `DJINN_CODE_GRAPH_DISPATCH_TIMEOUT_SECS` env var. 60s is comfortably
+/// above the slowest healthy op we measure (snapshot at full size
+/// ~1.5s) but well under the chat handler's outer guard so the
+/// timeout error surfaces to the model instead of stalling the stream.
+const CODE_GRAPH_DISPATCH_TIMEOUT_DEFAULT_SECS: u64 = 60;
+
+fn code_graph_dispatch_timeout() -> std::time::Duration {
+    let secs = std::env::var("DJINN_CODE_GRAPH_DISPATCH_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(CODE_GRAPH_DISPATCH_TIMEOUT_DEFAULT_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
 impl DjinnMcpServer {
+    /// Single source of truth for `code_graph` dispatch.
+    ///
+    /// Wraps the op-string match in:
+    /// - **Pre-resolve** — short identifiers (`User`, `helper`) routed
+    ///   through `RepoGraphOps::resolve` so they short-circuit to
+    ///   `Ambiguous` / `NotFound` instead of failing inside the inner
+    ///   handler.
+    /// - **Tokio timeout** — a slow op (e.g. an unindexed coupling
+    ///   self-join hitting Dolt's planner pathology) returns a
+    ///   structured timeout error after
+    ///   `DJINN_CODE_GRAPH_DISPATCH_TIMEOUT_SECS` (default 60s) instead
+    ///   of stalling the chat stream forever. This is the chat-handler
+    ///   hang fix — without it, a slow op wedges the whole tool loop.
+    /// - **Tracing span** — every dispatch emits an `info_span!` with
+    ///   `op`, `project_id`, `elapsed_ms`, `status` so we can grep
+    ///   latency / failure rates.
+    ///
+    /// Both the MCP tool entry (`code_graph` below) and the chat
+    /// extension (`djinn_agent::extension::handlers::code_intel`) call
+    /// this method. Keep the per-op match here; do not duplicate it.
+    pub async fn dispatch_code_graph(
+        &self,
+        ctx: &ProjectCtx,
+        params: &mut CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        match Self::pre_resolve_key(self.state.repo_graph().as_ref(), ctx, params).await? {
+            None => {}
+            Some(short_circuit) => return Ok(short_circuit),
+        }
+
+        let timeout = code_graph_dispatch_timeout();
+        let op = params.operation.clone();
+        let project_id = params.project_id.clone();
+        let started = std::time::Instant::now();
+
+        let span = tracing::info_span!(
+            "code_graph",
+            op = %op,
+            project_id = %project_id,
+        );
+        let inner = self.dispatch_code_graph_op(ctx, params);
+        let result = tokio::time::timeout(timeout, inner)
+            .instrument(span)
+            .await
+            .unwrap_or_else(|_| {
+                Err(format!(
+                    "code_graph op '{op}' exceeded {}s — try a narrower call \
+                     (lower limit, file_glob filter, since_days) or a different op",
+                    timeout.as_secs()
+                ))
+            });
+
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        match &result {
+            Ok(_) => tracing::info!(
+                target: "djinn_control_plane::tools::graph_tools",
+                op = %op,
+                project_id = %project_id,
+                elapsed_ms,
+                status = "ok",
+                "code_graph dispatch completed"
+            ),
+            Err(err) => tracing::warn!(
+                target: "djinn_control_plane::tools::graph_tools",
+                op = %op,
+                project_id = %project_id,
+                elapsed_ms,
+                status = "error",
+                error = %err,
+                "code_graph dispatch failed"
+            ),
+        }
+
+        result
+    }
+
+    /// Inner op-string match. Lives here so [`Self::dispatch_code_graph`]
+    /// can wrap it uniformly in timeout + tracing without each per-op
+    /// handler having to know about either.
+    async fn dispatch_code_graph_op(
+        &self,
+        ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        match params.operation.as_str() {
+            "neighbors" => self.code_graph_neighbors(ctx, params).await,
+            "ranked" => self.code_graph_ranked(ctx, params).await,
+            "implementations" => self.code_graph_implementations(ctx, params).await,
+            "impact" => self.code_graph_impact(ctx, params).await,
+            "search" => self.code_graph_search(ctx, params).await,
+            "cycles" => self.code_graph_cycles(ctx, params).await,
+            "orphans" => self.code_graph_orphans(ctx, params).await,
+            "path" => self.code_graph_path(ctx, params).await,
+            "edges" => self.code_graph_edges(ctx, params).await,
+            "describe" => self.code_graph_describe(ctx, params).await,
+            "context" => self.code_graph_context(ctx, params).await,
+            "status" => self.code_graph_status(ctx, params).await,
+            "symbols_at" => self.code_graph_symbols_at(ctx, params).await,
+            "diff_touches" => self.code_graph_diff_touches(ctx, params).await,
+            "detect_changes" => self.code_graph_detect_changes(ctx, params).await,
+            "api_surface" => self.code_graph_api_surface(ctx, params).await,
+            "boundary_check" => self.code_graph_boundary_check(ctx, params).await,
+            "hotspots" => self.code_graph_hotspots(ctx, params).await,
+            "metrics_at" => self.code_graph_metrics_at(ctx, params).await,
+            "dead_symbols" => self.code_graph_dead_symbols(ctx, params).await,
+            "deprecated_callers" => self.code_graph_deprecated_callers(ctx, params).await,
+            "touches_hot_path" => self.code_graph_touches_hot_path(ctx, params).await,
+            "coupling" => self.code_graph_coupling(ctx, params).await,
+            "churn" => self.code_graph_churn(ctx, params).await,
+            "coupling_hotspots" => self.code_graph_coupling_hotspots(ctx, params).await,
+            "coupling_hubs" => self.code_graph_coupling_hubs(ctx, params).await,
+            "snapshot" => self.code_graph_snapshot(ctx, params).await,
+            other => Err(format!(
+                "unknown code_graph operation '{other}': expected one of \
+                 'neighbors', 'ranked', 'impact', 'implementations', \
+                 'search', 'cycles', 'orphans', 'path', 'edges', \
+                 'symbols_at', 'diff_touches', 'detect_changes', \
+                 'describe', 'context', 'status', \
+                 'api_surface', 'boundary_check', 'hotspots', 'metrics_at', \
+                 'dead_symbols', 'deprecated_callers', 'touches_hot_path', \
+                 'coupling', 'churn', 'coupling_hotspots', 'coupling_hubs', \
+                 'snapshot'"
+            )),
+        }
+    }
+
     /// PR C2 dispatcher hook: for ops that read a caller-supplied node
     /// key (`neighbors`, `impact`, `implementations`, `describe`,
     /// `path`), pre-resolve via [`RepoGraphOps::resolve`] so the inner

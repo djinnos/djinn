@@ -36,7 +36,8 @@ pub use repositories::{
     },
     commit_file_changes::{
         CommitFileChange, CommitFileChangeRepository, CoupledFile, CoupledPair, CouplingHub,
-        FileChurn,
+        CouplingPairEvent, FileChurn, MAX_FILES_PER_COMMIT_FOR_PAIRS, derive_pair_events,
+        derive_pair_events_into,
     },
     dolt_branch::{
         DoltBranchError, DoltBranchLifecycle, DoltBranchLifecycleAction, DoltBranchLifecycleResult,

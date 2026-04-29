@@ -70,6 +70,13 @@ async fn call_write_emits_related_files_when_coupling_data_exists() {
         row("c5", "dist/out.js", "2026-04-05T00:00:00Z"),
     ];
     repo.upsert_batch(&rows).await.expect("seed coupling");
+    // Coupling reads from `coupling_pair_events` (built at ingest by
+    // the warmer); this test seeds raw rows so we drive the same
+    // backfill path the warmer triggers on first run after the
+    // pair-events migration landed.
+    repo.rebuild_pair_events_for_project(pid)
+        .await
+        .expect("rebuild pair events");
 
     // Set an exclusion glob that hides `dist/**` — the reused
     // `GraphExclusions` matcher should drop `dist/out.js` from the

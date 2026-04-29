@@ -1,6 +1,22 @@
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// Default outer timeout for per-tool dispatch in the chat loop.
+/// Defense-in-depth on top of op-specific inner timeouts (e.g. the 60s
+/// `code_graph` dispatcher cap). Override with
+/// `DJINN_CHAT_TOOL_DISPATCH_TIMEOUT_SECS`. 120s leaves the inner cap
+/// comfortable headroom while still bounding worst-case stream stalls.
+const CHAT_TOOL_DISPATCH_TIMEOUT_DEFAULT_SECS: u64 = 120;
+
+fn chat_tool_dispatch_timeout() -> Duration {
+    let secs = std::env::var("DJINN_CHAT_TOOL_DISPATCH_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(CHAT_TOOL_DISPATCH_TIMEOUT_DEFAULT_SECS);
+    Duration::from_secs(secs)
+}
 
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -514,54 +530,76 @@ async fn run_chat_loop(
             let args = serde_json::Value::Object(input.as_object().cloned().unwrap_or_default());
             let started_at = Instant::now();
 
-            let dispatch_result = if djinn_agent::chat_tools::is_chat_extension_tool(&name) {
-                let resolver_for_dispatch = resolver.clone();
-                let resolve_fn = move |project_ref: String| {
-                    let resolver = resolver_for_dispatch.clone();
-                    Box::pin(async move {
-                        resolver
-                            .resolve(&project_ref)
-                            .await
-                            .map(|resolved| ChatResolvedProject {
-                                id: resolved.id,
-                                clone_path: resolved.clone_path,
-                            })
-                            .map_err(|e| match e {
-                                ProjectResolverError::NotFound(r) => {
-                                    format!("project '{r}' not found")
-                                }
-                                ProjectResolverError::InvalidId => {
-                                    "project id invalid (must be UUID-shaped)".to_owned()
-                                }
-                                ProjectResolverError::Workspace(inner) => {
-                                    format!("workspace failed: {inner}")
-                                }
-                                ProjectResolverError::Database(inner) => {
-                                    format!("project lookup failed: {inner}")
-                                }
-                            })
-                    })
-                        as std::pin::Pin<
-                            Box<
-                                dyn std::future::Future<
-                                        Output = Result<ChatResolvedProject, String>,
-                                    > + Send,
-                            >,
-                        >
-                };
-                djinn_agent::chat_tools::dispatch_chat_tool(
-                    &agent_ctx,
-                    &name,
-                    args,
-                    &resolve_fn,
-                )
-                .await
-            } else if djinn_agent::chat_tools::is_chat_allowed_mcp_tool(&name) {
-                mcp.dispatch_tool(&name, args).await
-            } else {
-                Err(format!(
-                    "tool '{name}' is not available from chat (admin or write tools are gated)"
-                ))
+            // Outer per-tool timeout. Defense-in-depth on top of the
+            // op-specific timeouts inside `code_graph` dispatchers — any
+            // tool that wedges (an LSP server hung on a 100k-line file,
+            // a pathological SQL plan, an external API call without its
+            // own timeout) returns a structured `is_error` tool_result
+            // here instead of stalling the SSE stream forever. The
+            // model gets a turn to recover. Override with
+            // `DJINN_CHAT_TOOL_DISPATCH_TIMEOUT_SECS`; default 120s
+            // gives the inner code_graph dispatcher's 60s comfortable
+            // headroom plus margin for other tools.
+            let tool_timeout = chat_tool_dispatch_timeout();
+            let dispatch_future = async {
+                if djinn_agent::chat_tools::is_chat_extension_tool(&name) {
+                    let resolver_for_dispatch = resolver.clone();
+                    let resolve_fn = move |project_ref: String| {
+                        let resolver = resolver_for_dispatch.clone();
+                        Box::pin(async move {
+                            resolver
+                                .resolve(&project_ref)
+                                .await
+                                .map(|resolved| ChatResolvedProject {
+                                    id: resolved.id,
+                                    clone_path: resolved.clone_path,
+                                })
+                                .map_err(|e| match e {
+                                    ProjectResolverError::NotFound(r) => {
+                                        format!("project '{r}' not found")
+                                    }
+                                    ProjectResolverError::InvalidId => {
+                                        "project id invalid (must be UUID-shaped)".to_owned()
+                                    }
+                                    ProjectResolverError::Workspace(inner) => {
+                                        format!("workspace failed: {inner}")
+                                    }
+                                    ProjectResolverError::Database(inner) => {
+                                        format!("project lookup failed: {inner}")
+                                    }
+                                })
+                        })
+                            as std::pin::Pin<
+                                Box<
+                                    dyn std::future::Future<
+                                            Output = Result<ChatResolvedProject, String>,
+                                        > + Send,
+                                >,
+                            >
+                    };
+                    djinn_agent::chat_tools::dispatch_chat_tool(
+                        &agent_ctx,
+                        &name,
+                        args,
+                        &resolve_fn,
+                    )
+                    .await
+                } else if djinn_agent::chat_tools::is_chat_allowed_mcp_tool(&name) {
+                    mcp.dispatch_tool(&name, args).await
+                } else {
+                    Err(format!(
+                        "tool '{name}' is not available from chat (admin or write tools are gated)"
+                    ))
+                }
+            };
+            let dispatch_result = match tokio::time::timeout(tool_timeout, dispatch_future).await {
+                Ok(r) => r,
+                Err(_) => Err(format!(
+                    "tool '{name}' exceeded {}s — aborting so the chat can continue. \
+                     If this is expected for the input, narrow the call \
+                     (smaller scope, smaller limit, etc.)",
+                    tool_timeout.as_secs()
+                )),
             };
             match dispatch_result {
                 Ok(value) => {

@@ -90,6 +90,26 @@ pub struct CouplingHub {
     pub partner_count: i64,
 }
 
+/// One per-commit pair fact stored in `coupling_pair_events`.
+/// `file_a < file_b` is enforced at insert time so each unordered pair
+/// appears at most once per commit.
+#[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
+pub struct CouplingPairEvent {
+    pub project_id: String,
+    pub file_a: String,
+    pub file_b: String,
+    pub commit_sha: String,
+    pub committed_at: String,
+}
+
+/// Maximum files-per-commit to consider for pair generation. Commits
+/// touching more files than this (lockfile refreshes, codemods,
+/// initial-import "fat" commits) generate near-quadratic pair counts
+/// with little real coupling signal — they get dropped at write time
+/// instead of filtered at read time. Matches the historical
+/// `max_files_per_commit` default of 15 used by the MCP dispatch.
+pub const MAX_FILES_PER_COMMIT_FOR_PAIRS: usize = 15;
+
 pub struct CommitFileChangeRepository {
     db: Database,
 }
@@ -150,6 +170,135 @@ impl CommitFileChangeRepository {
         Ok(rows.len())
     }
 
+    /// Batch upsert of pair events into `coupling_pair_events`.
+    /// Idempotent on the `(project_id, file_a, file_b, commit_sha)` PK
+    /// — replays no-op. Callers should derive pairs via
+    /// [`derive_pair_events`] (skips fat commits, enforces
+    /// `file_a < file_b`).
+    pub async fn upsert_pair_events(&self, events: &[CouplingPairEvent]) -> Result<usize> {
+        if events.is_empty() {
+            return Ok(0);
+        }
+        self.db.ensure_initialized().await?;
+
+        // Dolt prepared-statement parameters cap is ~65k; 5 params per
+        // row leaves us well under the cap at 500-row batches.
+        let mut sql = String::from(
+            "INSERT INTO coupling_pair_events \
+             (project_id, file_a, file_b, commit_sha, committed_at) VALUES ",
+        );
+        for i in 0..events.len() {
+            if i > 0 {
+                sql.push(',');
+            }
+            sql.push_str("(?, ?, ?, ?, ?)");
+        }
+        // Replays must be no-ops. Touch any non-PK column with the
+        // same value so the UPSERT contract is satisfied without
+        // changing semantics on duplicate keys.
+        sql.push_str(
+            " ON DUPLICATE KEY UPDATE committed_at = VALUES(committed_at)",
+        );
+
+        let mut query = sqlx::query(&sql);
+        for e in events {
+            query = query
+                .bind(&e.project_id)
+                .bind(&e.file_a)
+                .bind(&e.file_b)
+                .bind(&e.commit_sha)
+                .bind(&e.committed_at);
+        }
+        query.execute(self.db.pool()).await?;
+        Ok(events.len())
+    }
+
+    /// Count rows in `coupling_pair_events` for a project. Cheap —
+    /// hits the PK prefix `(project_id, ...)`. Used by the ingest path
+    /// to detect "first run after migration 20 landed" and trigger a
+    /// one-shot backfill from `commit_file_changes`.
+    pub async fn pair_events_count_for_project(&self, project_id: &str) -> Result<usize> {
+        self.db.ensure_initialized().await?;
+        use sqlx::Row;
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS row_count \
+             FROM coupling_pair_events WHERE project_id = ?",
+        )
+        .bind(project_id)
+        .fetch_one(self.db.pool())
+        .await?;
+        let count: i64 = row.get("row_count");
+        Ok(count.max(0) as usize)
+    }
+
+    /// Backfill helper: rebuild `coupling_pair_events` for `project_id`
+    /// from the existing rows in `commit_file_changes`. Used the first
+    /// time the new schema runs against a project that was ingested
+    /// before pair materialisation existed.
+    ///
+    /// Streams rows by commit so we never hold the whole project in
+    /// memory. Idempotent — re-running just upserts the same events.
+    pub async fn rebuild_pair_events_for_project(&self, project_id: &str) -> Result<usize> {
+        self.db.ensure_initialized().await?;
+        use sqlx::Row;
+
+        // Pull rows ordered by (commit_sha, file_path) so we can group
+        // a single sweep without an in-memory hash. Per-commit work is
+        // bounded by MAX_FILES_PER_COMMIT_FOR_PAIRS²/2 = 105 pair
+        // candidates; commits that exceed the cap are dropped.
+        let rows = sqlx::query(
+            "SELECT commit_sha, file_path, committed_at \
+             FROM commit_file_changes \
+             WHERE project_id = ? \
+             ORDER BY commit_sha ASC, file_path ASC",
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        let mut written = 0usize;
+        let mut current_sha: Option<String> = None;
+        let mut current_committed_at: Option<String> = None;
+        let mut files: Vec<String> = Vec::new();
+        const FLUSH_AT: usize = 500;
+        let mut buffer: Vec<CouplingPairEvent> = Vec::with_capacity(FLUSH_AT);
+
+        for row in rows {
+            let sha: String = row.get("commit_sha");
+            let file: String = row.get("file_path");
+            let committed_at: String = row.get("committed_at");
+
+            if Some(&sha) != current_sha.as_ref() {
+                if let (Some(prev_sha), Some(prev_at)) =
+                    (current_sha.take(), current_committed_at.take())
+                {
+                    derive_pair_events_into(
+                        project_id,
+                        &prev_sha,
+                        &prev_at,
+                        &files,
+                        &mut buffer,
+                    );
+                    if buffer.len() >= FLUSH_AT {
+                        written += self.upsert_pair_events(&buffer).await?;
+                        buffer.clear();
+                    }
+                }
+                current_sha = Some(sha);
+                current_committed_at = Some(committed_at);
+                files.clear();
+            }
+            files.push(file);
+        }
+        if let (Some(sha), Some(at)) = (current_sha, current_committed_at) {
+            derive_pair_events_into(project_id, &sha, &at, &files, &mut buffer);
+        }
+        if !buffer.is_empty() {
+            written += self.upsert_pair_events(&buffer).await?;
+        }
+        Ok(written)
+    }
+
     /// Read the per-project ingest cursor (last SHA walked).
     pub async fn get_cursor(&self, project_id: &str) -> Result<Option<String>> {
         self.db.ensure_initialized().await?;
@@ -182,6 +331,11 @@ impl CommitFileChangeRepository {
 
     /// Files most frequently co-edited with `file_path`, by distinct
     /// commit count. Limit is capped by the caller.
+    ///
+    /// Reads from the materialised `coupling_pair_events` table (one
+    /// row per pair-per-commit). The previous self-join over
+    /// `commit_file_changes` was retired because Dolt's planner does
+    /// not push the big-commit cap subquery early — see migration 20.
     pub async fn top_coupled(
         &self,
         project_id: &str,
@@ -189,27 +343,31 @@ impl CommitFileChangeRepository {
         limit: usize,
     ) -> Result<Vec<CoupledFile>> {
         self.db.ensure_initialized().await?;
-        // Self-join on commit_sha: for every commit that touched the
-        // seed file, pull every other file touched in the same commit.
-        // GROUP BY peer path → distinct commit count + most recent
-        // co-edit timestamp + up to three sample SHAs.
+        // The pair table stores `file_a < file_b`, so the seed appears
+        // on either side. UNION ALL the two halves, project the
+        // counterpart as `file_path`, then aggregate.
         let limit = limit.clamp(1, 500) as i64;
         let rows: Vec<CoupledFile> = sqlx::query_as(
             "SELECT \
-                peer.file_path AS file_path, \
-                CAST(COUNT(DISTINCT peer.commit_sha) AS SIGNED) AS co_edit_count, \
-                MAX(peer.committed_at) AS last_co_edit, \
-                GROUP_CONCAT(DISTINCT peer.commit_sha ORDER BY peer.committed_at DESC SEPARATOR ',') AS supporting_commit_samples \
-             FROM commit_file_changes AS seed \
-             JOIN commit_file_changes AS peer \
-               ON peer.project_id = seed.project_id \
-              AND peer.commit_sha = seed.commit_sha \
-              AND peer.file_path <> seed.file_path \
-             WHERE seed.project_id = ? AND seed.file_path = ? \
-             GROUP BY peer.file_path \
-             ORDER BY co_edit_count DESC, last_co_edit DESC, peer.file_path ASC \
+                file_path, \
+                CAST(COUNT(DISTINCT commit_sha) AS SIGNED) AS co_edit_count, \
+                MAX(committed_at) AS last_co_edit, \
+                GROUP_CONCAT(DISTINCT commit_sha ORDER BY committed_at DESC SEPARATOR ',') AS supporting_commit_samples \
+             FROM ( \
+                 SELECT file_b AS file_path, commit_sha, committed_at \
+                   FROM coupling_pair_events \
+                  WHERE project_id = ? AND file_a = ? \
+                 UNION ALL \
+                 SELECT file_a AS file_path, commit_sha, committed_at \
+                   FROM coupling_pair_events \
+                  WHERE project_id = ? AND file_b = ? \
+             ) AS peers \
+             GROUP BY file_path \
+             ORDER BY co_edit_count DESC, last_co_edit DESC, file_path ASC \
              LIMIT ?",
         )
+        .bind(project_id)
+        .bind(file_path)
         .bind(project_id)
         .bind(file_path)
         .bind(limit)
@@ -291,74 +449,90 @@ impl CommitFileChangeRepository {
         project_id: &str,
         limit: usize,
         since: Option<&str>,
-        max_files_per_commit: usize,
+        _max_files_per_commit: usize,
     ) -> Result<Vec<CoupledPair>> {
         self.db.ensure_initialized().await?;
         let limit = limit.clamp(1, 5000) as i64;
-        let max_files = max_files_per_commit.max(1) as i64;
 
-        // Self-join `commit_file_changes` by commit_sha, constraining
-        // `a.file_path < b.file_path` so each unordered pair appears
-        // exactly once. The inner subquery drops big commits (lockfile
-        // refreshes, codemods) before the join — same source table, so
-        // Dolt can still keep it all in one execution plan.
+        // Reads from `coupling_pair_events`. The big-commit cap that
+        // `_max_files_per_commit` used to enforce is now applied at
+        // ingest time (see `MAX_FILES_PER_COMMIT_FOR_PAIRS`), so the
+        // parameter is accepted for backwards compatibility with the
+        // RepoGraphOps trait surface but ignored here. Without the
+        // self-join, this is a straight indexed range scan on
+        // `idx_recent` (with `since`) or PK prefix (without).
         let rows: Vec<CoupledPair> = match since {
             Some(ts) => sqlx::query_as(
                 "SELECT \
-                    a.file_path AS file_a, \
-                    b.file_path AS file_b, \
+                    file_a, \
+                    file_b, \
                     CAST(COUNT(*) AS SIGNED) AS co_edits, \
-                    MAX(a.committed_at) AS last_co_edit \
-                 FROM commit_file_changes a \
-                 JOIN commit_file_changes b \
-                   ON a.project_id = b.project_id \
-                  AND a.commit_sha = b.commit_sha \
-                 WHERE a.project_id = ? \
-                   AND a.committed_at >= ? \
-                   AND a.file_path < b.file_path \
-                   AND a.commit_sha IN ( \
-                       SELECT commit_sha FROM commit_file_changes \
-                       WHERE project_id = ? AND committed_at >= ? \
-                       GROUP BY commit_sha \
-                       HAVING COUNT(*) <= ? \
-                   ) \
-                 GROUP BY a.file_path, b.file_path \
-                 ORDER BY co_edits DESC, last_co_edit DESC, a.file_path ASC, b.file_path ASC \
+                    MAX(committed_at) AS last_co_edit \
+                 FROM coupling_pair_events \
+                 WHERE project_id = ? AND committed_at >= ? \
+                 GROUP BY file_a, file_b \
+                 ORDER BY co_edits DESC, last_co_edit DESC, file_a ASC, file_b ASC \
                  LIMIT ?",
             )
             .bind(project_id)
             .bind(ts)
-            .bind(project_id)
-            .bind(ts)
-            .bind(max_files)
             .bind(limit)
             .fetch_all(self.db.pool())
             .await?,
             None => sqlx::query_as(
                 "SELECT \
-                    a.file_path AS file_a, \
-                    b.file_path AS file_b, \
+                    file_a, \
+                    file_b, \
                     CAST(COUNT(*) AS SIGNED) AS co_edits, \
-                    MAX(a.committed_at) AS last_co_edit \
-                 FROM commit_file_changes a \
-                 JOIN commit_file_changes b \
-                   ON a.project_id = b.project_id \
-                  AND a.commit_sha = b.commit_sha \
-                 WHERE a.project_id = ? \
-                   AND a.file_path < b.file_path \
-                   AND a.commit_sha IN ( \
-                       SELECT commit_sha FROM commit_file_changes \
-                       WHERE project_id = ? \
-                       GROUP BY commit_sha \
-                       HAVING COUNT(*) <= ? \
-                   ) \
-                 GROUP BY a.file_path, b.file_path \
-                 ORDER BY co_edits DESC, last_co_edit DESC, a.file_path ASC, b.file_path ASC \
+                    MAX(committed_at) AS last_co_edit \
+                 FROM coupling_pair_events \
+                 WHERE project_id = ? \
+                 GROUP BY file_a, file_b \
+                 ORDER BY co_edits DESC, last_co_edit DESC, file_a ASC, file_b ASC \
                  LIMIT ?",
             )
             .bind(project_id)
+            .bind(limit)
+            .fetch_all(self.db.pool())
+            .await?,
+        };
+        Ok(rows)
+    }
+
+    /// Raw pair-event read for ops that need per-event timestamps
+    /// (e.g. exponential-decay weighted scores computed in Rust).
+    /// Capped — pass a generous limit (the typical project keeps
+    /// pair-event counts in the tens of thousands; scans of 50k rows
+    /// stay sub-100ms over the indexed range).
+    pub async fn pair_events(
+        &self,
+        project_id: &str,
+        since: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<CouplingPairEvent>> {
+        self.db.ensure_initialized().await?;
+        let limit = limit.clamp(1, 200_000) as i64;
+        let rows: Vec<CouplingPairEvent> = match since {
+            Some(ts) => sqlx::query_as(
+                "SELECT project_id, file_a, file_b, commit_sha, committed_at \
+                 FROM coupling_pair_events \
+                 WHERE project_id = ? AND committed_at >= ? \
+                 ORDER BY committed_at DESC \
+                 LIMIT ?",
+            )
             .bind(project_id)
-            .bind(max_files)
+            .bind(ts)
+            .bind(limit)
+            .fetch_all(self.db.pool())
+            .await?,
+            None => sqlx::query_as(
+                "SELECT project_id, file_a, file_b, commit_sha, committed_at \
+                 FROM coupling_pair_events \
+                 WHERE project_id = ? \
+                 ORDER BY committed_at DESC \
+                 LIMIT ?",
+            )
+            .bind(project_id)
             .bind(limit)
             .fetch_all(self.db.pool())
             .await?,
@@ -418,6 +592,60 @@ impl CommitFileChangeRepository {
         hubs.truncate(limit.max(1));
         Ok(hubs)
     }
+}
+
+/// Derive `CouplingPairEvent`s from a single commit's file list,
+/// appending into `out`. Returns nothing — caller checks `out` if it
+/// cares about the count. Skips commits with > MAX_FILES_PER_COMMIT_FOR_PAIRS
+/// files (the bulk-rewrite filter that used to live in the query
+/// layer; now applied at write time).
+///
+/// `files` does not need to be sorted; the function dedups + sorts so
+/// `file_a < file_b` is enforced regardless of input order.
+pub fn derive_pair_events_into(
+    project_id: &str,
+    commit_sha: &str,
+    committed_at: &str,
+    files: &[String],
+    out: &mut Vec<CouplingPairEvent>,
+) {
+    if files.len() < 2 || files.len() > MAX_FILES_PER_COMMIT_FOR_PAIRS {
+        return;
+    }
+    // Dedup + sort. A commit row may appear twice if a file was
+    // both renamed and modified (edge case in the parser); sorting
+    // also gives us file_a < file_b for free.
+    let mut sorted: Vec<&str> = files.iter().map(|s| s.as_str()).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    if sorted.len() < 2 || sorted.len() > MAX_FILES_PER_COMMIT_FOR_PAIRS {
+        return;
+    }
+    for i in 0..sorted.len() {
+        for j in (i + 1)..sorted.len() {
+            out.push(CouplingPairEvent {
+                project_id: project_id.to_owned(),
+                file_a: sorted[i].to_owned(),
+                file_b: sorted[j].to_owned(),
+                commit_sha: commit_sha.to_owned(),
+                committed_at: committed_at.to_owned(),
+            });
+        }
+    }
+}
+
+/// Convenience wrapper around [`derive_pair_events_into`] that
+/// allocates a fresh vec. Callers in the ingest hot path should prefer
+/// the `_into` variant to amortise allocation across commits.
+pub fn derive_pair_events(
+    project_id: &str,
+    commit_sha: &str,
+    committed_at: &str,
+    files: &[String],
+) -> Vec<CouplingPairEvent> {
+    let mut out = Vec::new();
+    derive_pair_events_into(project_id, commit_sha, committed_at, files, &mut out);
+    out
 }
 
 #[cfg(test)]
@@ -492,6 +720,13 @@ mod tests {
             }
         }
         repo.upsert_batch(&rows).await.expect("upsert");
+        // Coupling queries read from `coupling_pair_events` (built at
+        // ingest time); the test inserts raw `commit_file_changes`
+        // rows so we trigger the same backfill path the warmer uses
+        // on first run after migration 20.
+        repo.rebuild_pair_events_for_project("p1")
+            .await
+            .expect("rebuild pairs");
 
         let coupled = repo
             .top_coupled("p1", "src/a.rs", 10)
@@ -597,6 +832,9 @@ mod tests {
             }
         }
         repo.upsert_batch(&rows).await.expect("upsert");
+        repo.rebuild_pair_events_for_project("p1")
+            .await
+            .expect("rebuild pairs");
 
         let pairs = repo
             .top_coupled_pairs("p1", 100, None, 15)
@@ -625,21 +863,35 @@ mod tests {
     #[tokio::test]
     async fn top_coupled_pairs_skips_big_commits() {
         let repo = fresh();
-        // A small real commit — a+b — plus a "lockfile refresh" that
-        // touches a+b+x+y+z. With max_files_per_commit=3 the big
-        // commit is dropped before the pair join, so a↔b stays at 1.
+        // A small real commit (a+b) plus a "lockfile refresh"-style
+        // commit touching 16 files. The cap (`MAX_FILES_PER_COMMIT_FOR_PAIRS`
+        // = 15) is now applied at ingest time, so the big commit
+        // contributes zero pairs regardless of query parameters.
         let mut rows = Vec::new();
         for p in ["src/a.rs", "src/b.rs"] {
             rows.push(row("p1", "small", p, "2026-04-01T00:00:00Z"));
         }
-        for p in ["src/a.rs", "src/b.rs", "src/x.rs", "src/y.rs", "src/z.rs"] {
+        let big_files: Vec<String> =
+            (0..16).map(|i| format!("src/big_{i:02}.rs")).collect();
+        // Make sure a + b are also touched in the big commit so a
+        // naive (no-cap) implementation would over-count a↔b at 2.
+        let big_with_ab: Vec<String> = std::iter::once("src/a.rs".to_string())
+            .chain(std::iter::once("src/b.rs".to_string()))
+            .chain(big_files.iter().cloned())
+            .collect();
+        for p in &big_with_ab {
             rows.push(row("p1", "big", p, "2026-04-02T00:00:00Z"));
         }
         repo.upsert_batch(&rows).await.expect("upsert");
+        repo.rebuild_pair_events_for_project("p1")
+            .await
+            .expect("rebuild pairs");
 
-        // max_files=3 → drop "big"; only "small" contributes a↔b.
+        // The big commit was dropped at write time. a↔b only has the
+        // small commit's contribution = 1, and none of the big_NN
+        // files appear as pairs anywhere.
         let pairs = repo
-            .top_coupled_pairs("p1", 100, None, 3)
+            .top_coupled_pairs("p1", 100, None, 15)
             .await
             .expect("pairs");
         let ab = pairs
@@ -647,18 +899,110 @@ mod tests {
             .find(|p| p.file_a == "src/a.rs" && p.file_b == "src/b.rs")
             .expect("a↔b");
         assert_eq!(ab.co_edits, 1);
-        assert!(!pairs.iter().any(|p| p.file_b == "src/x.rs" || p.file_a == "src/x.rs"));
+        assert!(
+            !pairs.iter().any(|p| p.file_a.starts_with("src/big_")
+                || p.file_b.starts_with("src/big_")),
+            "big commit files leaked into pair table"
+        );
+    }
 
-        // max_files=10 → both commits counted, a↔b = 2.
-        let pairs = repo
-            .top_coupled_pairs("p1", 100, None, 10)
+    #[test]
+    fn derive_pair_events_enforces_cap_and_canonical_order() {
+        // 2 files → 1 pair, file_a < file_b regardless of input order.
+        let events = derive_pair_events(
+            "p1",
+            "abc",
+            "2026-04-01T00:00:00Z",
+            &["src/z.rs".to_string(), "src/a.rs".to_string()],
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].file_a, "src/a.rs");
+        assert_eq!(events[0].file_b, "src/z.rs");
+
+        // 1 file → no pair (commit must touch ≥2 to couple).
+        assert!(
+            derive_pair_events("p1", "abc", "ts", &["only.rs".to_string()]).is_empty()
+        );
+
+        // > MAX_FILES_PER_COMMIT_FOR_PAIRS files → no pairs (cap drops
+        // bulk rewrites at write time so the read path stays fast).
+        let too_many: Vec<String> = (0..(MAX_FILES_PER_COMMIT_FOR_PAIRS + 1))
+            .map(|i| format!("f{i}.rs"))
+            .collect();
+        assert!(
+            derive_pair_events("p1", "abc", "ts", &too_many).is_empty(),
+            "commit with {} files should be excluded by cap (max {})",
+            too_many.len(),
+            MAX_FILES_PER_COMMIT_FOR_PAIRS
+        );
+
+        // Exactly at the cap: emits all C(n, 2) pairs.
+        let at_cap: Vec<String> = (0..MAX_FILES_PER_COMMIT_FOR_PAIRS)
+            .map(|i| format!("f{i:02}.rs"))
+            .collect();
+        let n = MAX_FILES_PER_COMMIT_FOR_PAIRS;
+        let expected = n * (n - 1) / 2;
+        assert_eq!(derive_pair_events("p1", "abc", "ts", &at_cap).len(), expected);
+    }
+
+    #[test]
+    fn derive_pair_events_dedups_duplicate_paths() {
+        // Parser may emit a duplicate row for rename+modify edge case;
+        // dedup so we don't get a spurious self-pair.
+        let events = derive_pair_events(
+            "p1",
+            "abc",
+            "ts",
+            &["src/a.rs".to_string(), "src/a.rs".to_string(), "src/b.rs".to_string()],
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].file_a, "src/a.rs");
+        assert_eq!(events[0].file_b, "src/b.rs");
+    }
+
+    #[tokio::test]
+    async fn rebuild_matches_live_ingest() {
+        // Fresh repo: rows inserted via `upsert_batch`, then
+        // `rebuild_pair_events_for_project` should produce the same
+        // pair events as if we had derived them at ingest time.
+        let repo = fresh();
+        let commits: [(&str, &str, Vec<&str>); 2] = [
+            ("c1", "2026-04-01T00:00:00Z", vec!["src/a.rs", "src/b.rs"]),
+            (
+                "c2",
+                "2026-04-02T00:00:00Z",
+                vec!["src/b.rs", "src/c.rs", "src/d.rs"],
+            ),
+        ];
+        let mut rows = Vec::new();
+        for (sha, ts, paths) in commits.iter() {
+            for p in paths {
+                rows.push(row("p1", sha, p, ts));
+            }
+        }
+        repo.upsert_batch(&rows).await.expect("upsert");
+        repo.rebuild_pair_events_for_project("p1")
             .await
-            .expect("pairs");
-        let ab = pairs
-            .iter()
-            .find(|p| p.file_a == "src/a.rs" && p.file_b == "src/b.rs")
-            .expect("a↔b");
-        assert_eq!(ab.co_edits, 2);
+            .expect("rebuild");
+
+        // c1 → 1 pair (a↔b), c2 → 3 pairs (b↔c, b↔d, c↔d) = 4 events.
+        assert_eq!(
+            repo.pair_events_count_for_project("p1")
+                .await
+                .expect("count"),
+            4
+        );
+
+        // Idempotent — second rebuild produces the same row set.
+        repo.rebuild_pair_events_for_project("p1")
+            .await
+            .expect("rebuild again");
+        assert_eq!(
+            repo.pair_events_count_for_project("p1")
+                .await
+                .expect("count again"),
+            4
+        );
     }
 
     #[tokio::test]
@@ -678,6 +1022,9 @@ mod tests {
             }
         }
         repo.upsert_batch(&rows).await.expect("upsert");
+        repo.rebuild_pair_events_for_project("p1")
+            .await
+            .expect("rebuild pairs");
 
         let hubs = repo
             .coupling_hubs("p1", 10, None, 15, 2000)

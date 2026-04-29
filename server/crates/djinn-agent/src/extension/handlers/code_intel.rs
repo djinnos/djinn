@@ -251,6 +251,80 @@ pub(crate) async fn call_code_graph(
         return Ok(short_circuit);
     }
 
+    // Wrap the per-op dispatch in a tokio timeout + tracing span. The
+    // chat handler does NOT impose its own per-tool timeout, so a slow
+    // op (e.g. an unindexed coupling self-join hitting Dolt's planner
+    // pathology) would otherwise wedge the chat stream forever — the
+    // hang fix that motivated this whole change. Mirrors the MCP-side
+    // timeout in `DjinnMcpServer::dispatch_code_graph`. Override with
+    // `DJINN_CODE_GRAPH_DISPATCH_TIMEOUT_SECS`.
+    let op = p.operation.clone();
+    let project_id_for_log = ctx.id.clone();
+    let started = std::time::Instant::now();
+    let span = tracing::info_span!(
+        "code_graph_chat",
+        op = %op,
+        project_id = %project_id_for_log,
+    );
+    let timeout = code_graph_chat_dispatch_timeout();
+    let inner = call_code_graph_inner(state, &mut p, &ctx, graph_ops.as_ref());
+    let result = {
+        use tracing::Instrument;
+        tokio::time::timeout(timeout, inner)
+            .instrument(span)
+            .await
+            .unwrap_or_else(|_| {
+                Err(format!(
+                    "code_graph op '{op}' exceeded {}s — try a narrower call \
+                     (lower limit, file_glob filter, since_days) or a different op",
+                    timeout.as_secs()
+                ))
+            })
+    };
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    match &result {
+        Ok(_) => tracing::info!(
+            target: "djinn_agent::extension::handlers::code_intel",
+            op = %op,
+            project_id = %project_id_for_log,
+            elapsed_ms,
+            status = "ok",
+            "code_graph chat dispatch completed"
+        ),
+        Err(err) => tracing::warn!(
+            target: "djinn_agent::extension::handlers::code_intel",
+            op = %op,
+            project_id = %project_id_for_log,
+            elapsed_ms,
+            status = "error",
+            error = %err,
+            "code_graph chat dispatch failed"
+        ),
+    }
+    result
+}
+
+/// Default per-op timeout for the chat-side `code_graph` dispatch.
+/// Mirrors `DjinnMcpServer::dispatch_code_graph` — keep them aligned
+/// so the same op behaves the same under either surface.
+const CODE_GRAPH_CHAT_DISPATCH_TIMEOUT_DEFAULT_SECS: u64 = 60;
+
+fn code_graph_chat_dispatch_timeout() -> std::time::Duration {
+    let secs = std::env::var("DJINN_CODE_GRAPH_DISPATCH_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(CODE_GRAPH_CHAT_DISPATCH_TIMEOUT_DEFAULT_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
+async fn call_code_graph_inner(
+    state: &AgentContext,
+    p: &mut CodeGraphParams,
+    ctx: &djinn_control_plane::bridge::ProjectCtx,
+    graph_ops: &dyn RepoGraphOps,
+) -> Result<serde_json::Value, String> {
+    let _ = state; // reserved for future op handlers that need full context
     let result: serde_json::Value = match p.operation.as_str() {
         "neighbors" => {
             let key = p
