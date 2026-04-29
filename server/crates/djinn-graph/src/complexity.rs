@@ -32,12 +32,22 @@ pub struct ComplexityMetrics {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ComplexityLang {
     Rust,
+    Go,
+    Python,
+    TypeScript,
+    Tsx,
+    JavaScript,
 }
 
 impl ComplexityLang {
     pub fn from_scip(lang: &str) -> Option<Self> {
         match lang.trim().to_ascii_lowercase().as_str() {
             "rust" => Some(Self::Rust),
+            "go" => Some(Self::Go),
+            "python" | "py" => Some(Self::Python),
+            "typescript" | "ts" => Some(Self::TypeScript),
+            "typescriptreact" | "tsx" => Some(Self::Tsx),
+            "javascript" | "js" | "javascriptreact" | "jsx" => Some(Self::JavaScript),
             _ => None,
         }
     }
@@ -45,12 +55,23 @@ impl ComplexityLang {
     fn ts_language(self) -> Language {
         match self {
             Self::Rust => tree_sitter_rust::LANGUAGE.into(),
+            Self::Go => tree_sitter_go::LANGUAGE.into(),
+            Self::Python => tree_sitter_python::LANGUAGE.into(),
+            // JS is a strict subset of TS for the AST shape we care
+            // about — same trick as `access_classifier.rs`.
+            Self::TypeScript | Self::JavaScript => {
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
+            }
+            Self::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
         }
     }
 
     fn rules(self) -> &'static LangRules {
         match self {
             Self::Rust => &RULES_RUST,
+            Self::Go => &RULES_GO,
+            Self::Python => &RULES_PYTHON,
+            Self::TypeScript | Self::JavaScript | Self::Tsx => &RULES_TYPESCRIPT,
         }
     }
 }
@@ -68,6 +89,11 @@ pub(crate) struct LangRules {
     /// Decision-point kinds whose cost = 1 + nesting; their children
     /// recurse with nesting+1.
     pub nest_increments: &'static [&'static str],
+    /// Decision-point kinds whose cost is a flat 1 (no nesting bonus)
+    /// but whose body still bumps `child_nesting`. Used for nodes that
+    /// the parent-kind/parent-field `else-if` trick can't catch (e.g.
+    /// Python's `elif_clause`, Ruby's `elsif`).
+    pub flat_increment_kinds: &'static [&'static str],
     /// Kinds that bump nesting depth without their own cost (lambdas,
     /// nested closures).
     pub nest_only: &'static [&'static str],
@@ -83,6 +109,11 @@ pub(crate) struct LangRules {
     /// increment instead of a nesting one.
     pub if_kind: Option<&'static str>,
     pub else_if_parent_kind: Option<&'static str>,
+    /// When true, also treat an `if`-kind node as a flat `else if`
+    /// when the parent is itself an `if` and points to this node via
+    /// its `alternative` field. Needed for Go/JS/TS/Java/C/C++/C#
+    /// where there's no wrapping `else_clause` between sibling ifs.
+    pub else_if_via_alternative_field: bool,
 }
 
 const RULES_RUST: LangRules = LangRules {
@@ -96,12 +127,119 @@ const RULES_RUST: LangRules = LangRules {
         "while_expression",
         "loop_expression",
     ],
+    flat_increment_kinds: &[],
     nest_only: &["closure_expression"],
     binary_kind: Some("binary_expression"),
     operator_field: Some("operator"),
     logical_ops: &["&&", "||"],
     if_kind: Some("if_expression"),
     else_if_parent_kind: Some("else_clause"),
+    else_if_via_alternative_field: false,
+};
+
+// Go: top-level `func`s, methods, and anonymous `func_literal`s. The
+// `if_statement.alternative` field can point straight at another
+// `if_statement` (no wrapping `else_clause`), so we lean on
+// `else_if_via_alternative_field`. `expression_switch_statement` and
+// `type_switch_statement` cover both `switch` flavours; `select_statement`
+// dispatches on channels and is a flow point too.
+//
+// TODOs deferred: recursion (+1 in Sonar), `goto`, labelled
+// break/continue.
+const RULES_GO: LangRules = LangRules {
+    function_kinds: &["function_declaration", "method_declaration"],
+    body_field: Some("body"),
+    parameters_field: Some("parameters"),
+    nest_increments: &[
+        "if_statement",
+        "for_statement",
+        "expression_switch_statement",
+        "type_switch_statement",
+        "select_statement",
+    ],
+    flat_increment_kinds: &[],
+    nest_only: &["func_literal"],
+    binary_kind: Some("binary_expression"),
+    operator_field: Some("operator"),
+    logical_ops: &["&&", "||"],
+    if_kind: Some("if_statement"),
+    else_if_parent_kind: None,
+    else_if_via_alternative_field: true,
+};
+
+// Python: `boolean_operator` (NOT `binary_expression`) carries `and`/
+// `or` chains via an `operator` field. `elif_clause` is its own node
+// with no parent-kind shortcut to "this is an else-if", so it lives
+// in `flat_increment_kinds`. `match_statement` (PEP 634) and
+// `try_statement`/`except_clause` are flow points; per Sonar `catch`
+// is a nest_increment so we treat `except_clause` the same.
+//
+// TODOs deferred: recursion, `with`-clause-as-flow (debatable).
+const RULES_PYTHON: LangRules = LangRules {
+    function_kinds: &["function_definition"],
+    body_field: Some("body"),
+    parameters_field: Some("parameters"),
+    nest_increments: &[
+        "if_statement",
+        "for_statement",
+        "while_statement",
+        "match_statement",
+        "try_statement",
+        "except_clause",
+        "conditional_expression",
+    ],
+    flat_increment_kinds: &["elif_clause"],
+    nest_only: &["lambda"],
+    binary_kind: Some("boolean_operator"),
+    operator_field: Some("operator"),
+    logical_ops: &["and", "or"],
+    if_kind: Some("if_statement"),
+    else_if_parent_kind: None,
+    else_if_via_alternative_field: false,
+};
+
+// TypeScript / JavaScript / TSX: same grammar shape (LANGUAGE_TYPESCRIPT
+// is also a strict superset of JS for our purposes — see
+// `access_classifier.rs`). Methods, classic functions, generators, plus
+// arrow / function expressions for closures (the latter two as
+// `nest_only` so they don't emit their own metric entries).
+//
+// `??` (nullish-coalescing) is a logical op for cognitive purposes per
+// Sonar. `else if` does come wrapped in an `else_clause` here (TS) but
+// we also tolerate the bare-`if-as-alternative` form since some emitter
+// paths (and `ts.alternative` field semantics) put the inner `if`
+// directly under the outer one.
+//
+// TODOs deferred: recursion, labelled break/continue.
+const RULES_TYPESCRIPT: LangRules = LangRules {
+    function_kinds: &[
+        "function_declaration",
+        "method_definition",
+        "generator_function_declaration",
+    ],
+    body_field: Some("body"),
+    parameters_field: Some("parameters"),
+    nest_increments: &[
+        "if_statement",
+        "for_statement",
+        "for_in_statement",
+        "while_statement",
+        "do_statement",
+        "switch_statement",
+        "ternary_expression",
+        "catch_clause",
+    ],
+    flat_increment_kinds: &[],
+    // `arrow_function` and `function_expression` are nest_only — they
+    // raise nesting for code inside them but don't emit a separate
+    // metric (matches how Rust handles closures).
+    nest_only: &["arrow_function", "function_expression"],
+    binary_kind: Some("binary_expression"),
+    operator_field: Some("operator"),
+    logical_ops: &["&&", "||", "??"],
+    if_kind: Some("if_statement"),
+    else_if_parent_kind: Some("else_clause"),
+    else_if_via_alternative_field: true,
 };
 
 pub struct ComplexityWalker {
@@ -229,15 +367,34 @@ fn walk(node: Node, rules: &LangRules, src: &[u8], nesting: u8, state: &mut Walk
 
     let mut child_nesting = nesting;
 
-    let is_else_if = match (rules.if_kind, rules.else_if_parent_kind, node.parent()) {
+    let is_else_if_parent_kind = match (rules.if_kind, rules.else_if_parent_kind, node.parent()) {
         (Some(if_k), Some(parent_k), Some(parent)) => kind == if_k && parent.kind() == parent_k,
         _ => false,
     };
+    let is_else_if_alt_field = rules.else_if_via_alternative_field
+        && match (rules.if_kind, node.parent()) {
+            (Some(if_k), Some(parent)) => {
+                kind == if_k
+                    && parent.kind() == if_k
+                    && parent
+                        .child_by_field_name("alternative")
+                        .map(|alt| alt.id() == node.id())
+                        .unwrap_or(false)
+            }
+            _ => false,
+        };
+    let is_else_if = is_else_if_parent_kind || is_else_if_alt_field;
 
     if is_else_if {
         state.cognitive = state.cognitive.saturating_add(1);
         state.cyclomatic_decisions = state.cyclomatic_decisions.saturating_add(1);
         // The if's body still introduces nesting for things inside it.
+        child_nesting = nesting.saturating_add(1);
+    } else if rules.flat_increment_kinds.contains(&kind) {
+        // Flat increment: +1 cognitive (no nesting bonus), but the
+        // body underneath still nests.
+        state.cognitive = state.cognitive.saturating_add(1);
+        state.cyclomatic_decisions = state.cyclomatic_decisions.saturating_add(1);
         child_nesting = nesting.saturating_add(1);
     } else if rules.nest_increments.contains(&kind) {
         let cost = 1u16.saturating_add(nesting as u16);
@@ -347,12 +504,16 @@ fn count_params(params_node: Node) -> u8 {
 mod tests {
     use super::*;
 
-    fn rust(source: &str) -> Vec<ComplexityMetrics> {
+    fn analyze(language: &str, source: &str) -> Vec<ComplexityMetrics> {
         ComplexityWalker::new()
-            .analyze_file("rust", source)
+            .analyze_file(language, source)
             .into_iter()
             .map(|f| f.metrics)
             .collect()
+    }
+
+    fn rust(source: &str) -> Vec<ComplexityMetrics> {
+        analyze("rust", source)
     }
 
     #[test]
@@ -462,5 +623,312 @@ mod tests {
         // 1 + 2 + 3 + 4 = 10
         assert_eq!(m.cognitive, 10);
         assert_eq!(m.max_nesting, 4);
+    }
+
+    // ---------- Go ----------
+
+    fn go(source: &str) -> Vec<ComplexityMetrics> {
+        analyze("go", source)
+    }
+
+    #[test]
+    fn go_empty_function() {
+        let m = &go("package p\nfunc f() {}")[0];
+        assert_eq!(m.cyclomatic, 1);
+        assert_eq!(m.cognitive, 0);
+    }
+
+    #[test]
+    fn go_single_if() {
+        let m = &go("package p\nfunc f(x int) { if x > 0 { } }")[0];
+        assert_eq!(m.cognitive, 1);
+        assert_eq!(m.cyclomatic, 2);
+    }
+
+    #[test]
+    fn go_nested_if_grows_with_nesting() {
+        let m = &go("package p\nfunc f(x, y int) { if x > 0 { if y > 0 { } } }")[0];
+        assert_eq!(m.cognitive, 1 + 2);
+        assert_eq!(m.max_nesting, 2);
+    }
+
+    #[test]
+    fn go_else_if_is_flat() {
+        // Go has no `else_clause` wrapper — uses `alternative` field
+        // directly. Tests the `else_if_via_alternative_field` path.
+        let src = "package p\nfunc f(x int) { if x == 0 { } else if x == 1 { } else if x == 2 { } else { } }";
+        let m = &go(src)[0];
+        assert_eq!(m.cognitive, 3);
+    }
+
+    #[test]
+    fn go_logical_or_chain() {
+        let m = &go("package p\nfunc f(a, b, c bool) { if a || b || c { } }")[0];
+        assert_eq!(m.cognitive, 2);
+    }
+
+    #[test]
+    fn go_mixed_logical_ops() {
+        let m = &go("package p\nfunc f(a, b, c bool) { if a && b || c { } }")[0];
+        assert_eq!(m.cognitive, 3);
+    }
+
+    #[test]
+    fn go_switch_is_one_increment() {
+        let src = "package p\nfunc f(x int) int { switch x { case 0: return 0; case 1: return 1; default: return 2 } }";
+        let m = &go(src)[0];
+        assert_eq!(m.cognitive, 1);
+    }
+
+    #[test]
+    fn go_for_inside_if_doubles() {
+        let src = "package p\nfunc f(xs []int) { if len(xs) > 0 { for _, x := range xs { _ = x } } }";
+        let m = &go(src)[0];
+        assert_eq!(m.cognitive, 1 + 2);
+    }
+
+    #[test]
+    fn go_func_literal_raises_nesting() {
+        let src = "package p\nfunc f() { fn := func(x int) { if x > 0 { } }; _ = fn }";
+        let m = &go(src)[0];
+        assert_eq!(m.cognitive, 2);
+    }
+
+    #[test]
+    fn go_param_count() {
+        let m = &go("package p\nfunc f(a int, b string, c bool) {}")[0];
+        assert_eq!(m.param_count, 3);
+    }
+
+    // ---------- Python ----------
+
+    fn python(source: &str) -> Vec<ComplexityMetrics> {
+        analyze("python", source)
+    }
+
+    #[test]
+    fn py_empty_function() {
+        let m = &python("def f():\n    pass\n")[0];
+        assert_eq!(m.cyclomatic, 1);
+        assert_eq!(m.cognitive, 0);
+    }
+
+    #[test]
+    fn py_single_if() {
+        let m = &python("def f(x):\n    if x > 0:\n        pass\n")[0];
+        assert_eq!(m.cognitive, 1);
+        assert_eq!(m.cyclomatic, 2);
+    }
+
+    #[test]
+    fn py_nested_if_grows_with_nesting() {
+        let m = &python(
+            "def f(x, y):\n    if x > 0:\n        if y > 0:\n            pass\n",
+        )[0];
+        assert_eq!(m.cognitive, 1 + 2);
+        assert_eq!(m.max_nesting, 2);
+    }
+
+    #[test]
+    fn py_elif_is_flat() {
+        // Tests the `flat_increment_kinds` path via Python's
+        // `elif_clause` node.
+        let src = "def f(x):\n    if x == 0:\n        pass\n    elif x == 1:\n        pass\n    elif x == 2:\n        pass\n    else:\n        pass\n";
+        let m = &python(src)[0];
+        assert_eq!(m.cognitive, 3);
+    }
+
+    #[test]
+    fn py_logical_or_chain() {
+        let m = &python("def f(a, b, c):\n    if a or b or c:\n        pass\n")[0];
+        assert_eq!(m.cognitive, 2);
+    }
+
+    #[test]
+    fn py_mixed_logical_ops() {
+        let m = &python("def f(a, b, c):\n    if a and b or c:\n        pass\n")[0];
+        assert_eq!(m.cognitive, 3);
+    }
+
+    #[test]
+    fn py_match_is_one_increment() {
+        let src = "def f(x):\n    match x:\n        case 0:\n            return 0\n        case 1:\n            return 1\n        case _:\n            return 2\n";
+        let m = &python(src)[0];
+        assert_eq!(m.cognitive, 1);
+    }
+
+    #[test]
+    fn py_for_inside_if_doubles() {
+        let src = "def f(xs):\n    if xs:\n        for x in xs:\n            pass\n";
+        let m = &python(src)[0];
+        assert_eq!(m.cognitive, 1 + 2);
+    }
+
+    #[test]
+    fn py_lambda_raises_nesting() {
+        // `if x else y` is a `conditional_expression` (ternary, +1 nest).
+        // Lambda raises nesting +1, so the inner ternary is at nesting=1
+        // → cost 1+1 = 2.
+        let src = "def f(xs):\n    return list(map(lambda x: x*2 if x else 0, xs))\n";
+        let m = &python(src)[0];
+        assert_eq!(m.cognitive, 2);
+    }
+
+    #[test]
+    fn py_param_count() {
+        let m = &python("def f(a, b, c):\n    pass\n")[0];
+        assert_eq!(m.param_count, 3);
+    }
+
+    #[test]
+    fn py_method_with_self_param_counts_self() {
+        let metrics = python("class S:\n    def f(self, a):\n        pass\n");
+        assert_eq!(metrics[0].param_count, 2);
+    }
+
+    // ---------- TypeScript ----------
+
+    fn ts(source: &str) -> Vec<ComplexityMetrics> {
+        analyze("typescript", source)
+    }
+
+    #[test]
+    fn ts_empty_function() {
+        let m = &ts("function f() {}")[0];
+        assert_eq!(m.cyclomatic, 1);
+        assert_eq!(m.cognitive, 0);
+    }
+
+    #[test]
+    fn ts_single_if() {
+        let m = &ts("function f(x: number) { if (x > 0) { } }")[0];
+        assert_eq!(m.cognitive, 1);
+        assert_eq!(m.cyclomatic, 2);
+    }
+
+    #[test]
+    fn ts_nested_if_grows_with_nesting() {
+        let m = &ts("function f(x: number, y: number) { if (x > 0) { if (y > 0) { } } }")[0];
+        assert_eq!(m.cognitive, 1 + 2);
+        assert_eq!(m.max_nesting, 2);
+    }
+
+    #[test]
+    fn ts_else_if_is_flat() {
+        let src = "function f(x: number) { if (x === 0) { } else if (x === 1) { } else if (x === 2) { } else { } }";
+        let m = &ts(src)[0];
+        assert_eq!(m.cognitive, 3);
+    }
+
+    #[test]
+    fn ts_logical_or_chain() {
+        let m = &ts("function f(a: boolean, b: boolean, c: boolean) { if (a || b || c) { } }")[0];
+        assert_eq!(m.cognitive, 2);
+    }
+
+    #[test]
+    fn ts_mixed_logical_ops() {
+        let m = &ts("function f(a: boolean, b: boolean, c: boolean) { if (a && b || c) { } }")[0];
+        assert_eq!(m.cognitive, 3);
+    }
+
+    #[test]
+    fn ts_nullish_coalescing_is_logical_op() {
+        // `??` chain counts as a logical op for cognitive purposes
+        // (Sonar treats it as one).
+        let m = &ts("function f(a: any, b: any, c: any) { return a ?? b ?? c; }")[0];
+        assert_eq!(m.cognitive, 1);
+    }
+
+    #[test]
+    fn ts_switch_is_one_increment() {
+        let src = "function f(x: number) { switch (x) { case 0: break; case 1: break; default: break; } }";
+        let m = &ts(src)[0];
+        assert_eq!(m.cognitive, 1);
+    }
+
+    #[test]
+    fn ts_for_inside_if_doubles() {
+        let src = "function f(xs: number[]) { if (xs.length > 0) { for (const x of xs) { console.log(x); } } }";
+        let m = &ts(src)[0];
+        assert_eq!(m.cognitive, 1 + 2);
+    }
+
+    #[test]
+    fn ts_arrow_function_raises_nesting() {
+        let src = "function f(xs: number[]) { xs.forEach((x) => { if (x > 0) { } }); }";
+        let m = &ts(src)[0];
+        assert_eq!(m.cognitive, 2);
+    }
+
+    #[test]
+    fn ts_param_count() {
+        let m = &ts("function f(a: number, b: string, c: boolean) {}")[0];
+        assert_eq!(m.param_count, 3);
+    }
+
+    #[test]
+    fn ts_method_definition_emits_metrics() {
+        let metrics = ts("class C { method(x: number) { if (x) { } } }");
+        let m = &metrics[0];
+        assert_eq!(m.cognitive, 1);
+    }
+
+    #[test]
+    fn ts_ternary_is_one_increment() {
+        let m = &ts("function f(x: number) { return x > 0 ? 1 : 0; }")[0];
+        assert_eq!(m.cognitive, 1);
+    }
+
+    // ---------- JavaScript (uses TS grammar) ----------
+
+    fn js(source: &str) -> Vec<ComplexityMetrics> {
+        analyze("javascript", source)
+    }
+
+    #[test]
+    fn js_empty_function() {
+        let m = &js("function f() {}")[0];
+        assert_eq!(m.cyclomatic, 1);
+        assert_eq!(m.cognitive, 0);
+    }
+
+    #[test]
+    fn js_single_if() {
+        let m = &js("function f(x) { if (x > 0) { } }")[0];
+        assert_eq!(m.cognitive, 1);
+    }
+
+    #[test]
+    fn js_else_if_is_flat() {
+        let src = "function f(x) { if (x === 0) {} else if (x === 1) {} else if (x === 2) {} else {} }";
+        let m = &js(src)[0];
+        assert_eq!(m.cognitive, 3);
+    }
+
+    #[test]
+    fn js_logical_or_chain() {
+        let m = &js("function f(a, b, c) { if (a || b || c) { } }")[0];
+        assert_eq!(m.cognitive, 2);
+    }
+
+    // ---------- TSX ----------
+
+    fn tsx(source: &str) -> Vec<ComplexityMetrics> {
+        analyze("tsx", source)
+    }
+
+    #[test]
+    fn tsx_ternary_with_jsx() {
+        let src = "function App(x: boolean) { return x ? 1 : 0; }";
+        let m = &tsx(src)[0];
+        assert_eq!(m.cognitive, 1);
+    }
+
+    #[test]
+    fn tsx_else_if_is_flat() {
+        let src = "function f(x: number) { if (x === 0) {} else if (x === 1) {} else if (x === 2) {} }";
+        let m = &tsx(src)[0];
+        assert_eq!(m.cognitive, 3);
     }
 }
