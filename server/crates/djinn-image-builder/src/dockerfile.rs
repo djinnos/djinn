@@ -339,6 +339,7 @@ const TYPESCRIPT_SCIP_INDEXER: &str = "scip-typescript";
 const JAVA_SCIP_INDEXER: &str = "scip-java";
 const CLANG_SCIP_INDEXER: &str = "scip-clang";
 const RUBY_SCIP_INDEXER: &str = "scip-ruby";
+const DOTNET_SCIP_INDEXER: &str = "scip-dotnet";
 
 // Version pins for SCIP indexers. `"latest"` means the Go-module-proxy /
 // PyPI / npm `latest` tag at build time. Bump these consts to roll
@@ -351,6 +352,7 @@ const SCIP_TYPESCRIPT_VERSION: &str = "latest";
 const SCIP_JAVA_VERSION: &str = "latest";
 const SCIP_CLANG_VERSION: &str = "latest";
 const SCIP_RUBY_VERSION: &str = "latest";
+const SCIP_DOTNET_VERSION: &str = "latest";
 
 fn emit_python_block(df: &mut String, languages: &Languages, config: &EnvironmentConfig) {
     let Some(python) = &languages.python else { return };
@@ -398,7 +400,7 @@ fn emit_dotnet_block(df: &mut String, languages: &Languages) {
     let Some(d) = &languages.dotnet else { return };
     writeln!(
         df,
-        "RUN DOTNET_VERSION=\"{}\" /tmp/djinn-scripts/install-dotnet.sh",
+        "RUN DOTNET_VERSION=\"{}\" SCIP_INDEXER=\"{DOTNET_SCIP_INDEXER}\" SCIP_DOTNET_VERSION=\"{SCIP_DOTNET_VERSION}\" /tmp/djinn-scripts/install-dotnet.sh",
         d.default_version
     )
     .unwrap();
