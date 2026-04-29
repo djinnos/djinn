@@ -143,13 +143,22 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     let commit_sha = handle.commit_sha().to_string();
     let cache_repo = RepoGraphCacheRepository::new(ctx.db().clone());
 
+    // Coupling ingest is independent of canonical graph success —
+    // SCIP indexer panics (e.g. scip-go's `index out of range` bug)
+    // used to silently freeze coupling data forever because the call
+    // sat AFTER the SCIP step. Run it once, early, before any cache
+    // check or indexer work, so coupling stays fresh regardless of
+    // SCIP / graph-build outcomes. `ingest_new_commits` is cheap on
+    // already-current projects (cursor..HEAD = empty log) and
+    // idempotent on replays.
+    ingest_coupling_best_effort(ctx, project_id, handle.path()).await;
+
     {
         let cache = GRAPH_CACHE.read().await;
         if let Some(cached) = cache.as_ref()
             && cached.project_path == handle.path()
             && cached.git_head == commit_sha
         {
-            ingest_coupling_best_effort(ctx, project_id, handle.path()).await;
             spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &cached.graph);
             spawn_cluster_docs_best_effort(ctx, project_id, &cached.graph);
             return Ok((handle, cached.graph.clone()));
@@ -169,7 +178,6 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
                     sccs,
                 )
                 .await;
-                ingest_coupling_best_effort(ctx, project_id, handle.path()).await;
                 spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &graph);
                 spawn_cluster_docs_best_effort(ctx, project_id, &graph);
                 return Ok((handle, graph));
@@ -194,7 +202,6 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             && cached.project_path == handle.path()
             && cached.git_head == commit_sha
         {
-            ingest_coupling_best_effort(ctx, project_id, handle.path()).await;
             spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &cached.graph);
             spawn_cluster_docs_best_effort(ctx, project_id, &cached.graph);
             return Ok((handle, cached.graph.clone()));
@@ -213,7 +220,6 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
                     sccs,
                 )
                 .await;
-                ingest_coupling_best_effort(ctx, project_id, handle.path()).await;
                 spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &graph);
                 spawn_cluster_docs_best_effort(ctx, project_id, &graph);
                 return Ok((handle, graph));
@@ -347,7 +353,9 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         tracing::warn!(error = %e, "ensure_canonical_graph: failed to persist graph cache row");
     }
 
-    ingest_coupling_best_effort(ctx, project_id, handle.path()).await;
+    // Coupling ingest already ran early in this function, so no
+    // duplicate call here. See the comment at the top of
+    // `ensure_canonical_graph` for the rationale.
 
     install_as_canonical(
         ctx,
