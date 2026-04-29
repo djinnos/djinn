@@ -337,6 +337,7 @@ const PYTHON_SCIP_INDEXER: &str = "scip-python";
 const GO_SCIP_INDEXER: &str = "scip-go";
 const TYPESCRIPT_SCIP_INDEXER: &str = "scip-typescript";
 const JAVA_SCIP_INDEXER: &str = "scip-java";
+const CLANG_SCIP_INDEXER: &str = "scip-clang";
 
 // Version pins for SCIP indexers. `"latest"` means the Go-module-proxy /
 // PyPI / npm `latest` tag at build time. Bump these consts to roll
@@ -347,6 +348,7 @@ const SCIP_GO_VERSION: &str = "latest";
 const SCIP_PYTHON_VERSION: &str = "latest";
 const SCIP_TYPESCRIPT_VERSION: &str = "latest";
 const SCIP_JAVA_VERSION: &str = "latest";
+const SCIP_CLANG_VERSION: &str = "latest";
 
 fn emit_python_block(df: &mut String, languages: &Languages, config: &EnvironmentConfig) {
     let Some(python) = &languages.python else { return };
@@ -404,7 +406,7 @@ fn emit_clang_block(df: &mut String, languages: &Languages) {
     let Some(c) = &languages.clang else { return };
     writeln!(
         df,
-        "RUN CLANG_VERSION=\"{}\" /tmp/djinn-scripts/install-clang.sh",
+        "RUN CLANG_VERSION=\"{}\" SCIP_INDEXER=\"{CLANG_SCIP_INDEXER}\" SCIP_CLANG_VERSION=\"{SCIP_CLANG_VERSION}\" /tmp/djinn-scripts/install-clang.sh",
         c.default_version
     )
     .unwrap();
