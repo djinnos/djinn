@@ -3305,6 +3305,12 @@ fn build_snapshot_payload(
                 // any non-trivial community) or when detection was
                 // skipped (`DJINN_COMMUNITY_DETECTION=0`).
                 community_id: graph.community_id(idx).map(str::to_string),
+                // Iter 30: per-function cognitive complexity from the
+                // tree-sitter walker (iter 26 post-pass). Drives the
+                // `/code-graph` heatmap overlay; `None` for non-function
+                // nodes and unsupported languages — the UI maps null →
+                // muted gray so non-function nodes don't dominate.
+                cognitive: node.complexity.map(|c| c.cognitive),
             }
         })
         .collect();

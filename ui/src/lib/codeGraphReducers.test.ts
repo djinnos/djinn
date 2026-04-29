@@ -2,12 +2,21 @@ import { describe, expect, it } from "vitest";
 
 import {
   EMPTY_HIGHLIGHT_VIEW,
+  HEATMAP_COLOR_HIGH,
+  HEATMAP_COLOR_LOW,
+  HEATMAP_COLOR_MID,
+  HEATMAP_COLOR_NULL,
+  HEATMAP_COLOR_TOP,
+  applyComplexityHeatmap,
   bfsReachable,
+  colorForComplexity,
+  computeComplexityThresholds,
   edgeReducer,
   isViewEmpty,
   nodeReducer,
   oneHopNeighborhood,
   pickHighlightMode,
+  topComplexityIds,
   type HighlightView,
   type MinimalGraph,
 } from "./codeGraphReducers";
@@ -258,6 +267,213 @@ describe("oneHopNeighborhood", () => {
     const ns = oneHopNeighborhood(g, "a");
     expect(ns.has("b")).toBe(true);
     expect(ns.has("c")).toBe(true);
+  });
+});
+
+describe("computeComplexityThresholds", () => {
+  it("returns null for an empty sample", () => {
+    expect(computeComplexityThresholds([])).toBeNull();
+  });
+
+  it("filters out non-finite values and returns null when nothing remains", () => {
+    expect(
+      computeComplexityThresholds([Number.NaN, Number.POSITIVE_INFINITY]),
+    ).toBeNull();
+  });
+
+  it("computes ascending p33 / p67 / p90 over a uniform sample", () => {
+    // 1..100 — exact-percentile sanity check.
+    const values = Array.from({ length: 100 }, (_, i) => i + 1);
+    const t = computeComplexityThresholds(values)!;
+    expect(t.sampleSize).toBe(100);
+    expect(t.p33).toBeLessThan(t.p67);
+    expect(t.p67).toBeLessThan(t.p90);
+    // numpy default percentile method: clamp(0..1) * (n-1).
+    // index = 0.33 * 99 = 32.67 → values[32]=33, values[33]=34 →
+    // lerp(33, 34, 0.67) = 33.67
+    expect(t.p33).toBeCloseTo(33.67, 1);
+    // index = 0.9 * 99 = 89.1 → values[89]=90, values[90]=91 →
+    // lerp(90, 91, 0.1) = 90.1
+    expect(t.p90).toBeCloseTo(90.1, 1);
+  });
+
+  it("handles a single-value sample by returning a flat threshold band", () => {
+    const t = computeComplexityThresholds([42])!;
+    expect(t.p33).toBe(42);
+    expect(t.p67).toBe(42);
+    expect(t.p90).toBe(42);
+  });
+});
+
+describe("colorForComplexity", () => {
+  const thresholds = { p33: 5, p67: 10, p90: 20, sampleSize: 100 };
+
+  it("returns the muted-gray bucket for null cognitive", () => {
+    expect(colorForComplexity(null, thresholds)).toBe(HEATMAP_COLOR_NULL);
+    expect(colorForComplexity(undefined, thresholds)).toBe(HEATMAP_COLOR_NULL);
+  });
+
+  it("greens nodes at or below the 33rd percentile", () => {
+    expect(colorForComplexity(1, thresholds)).toBe(HEATMAP_COLOR_LOW);
+    expect(colorForComplexity(5, thresholds)).toBe(HEATMAP_COLOR_LOW);
+  });
+
+  it("yellows nodes between p33 and p67", () => {
+    expect(colorForComplexity(6, thresholds)).toBe(HEATMAP_COLOR_MID);
+    expect(colorForComplexity(10, thresholds)).toBe(HEATMAP_COLOR_MID);
+  });
+
+  it("oranges nodes between p67 and p90", () => {
+    expect(colorForComplexity(11, thresholds)).toBe(HEATMAP_COLOR_HIGH);
+    expect(colorForComplexity(20, thresholds)).toBe(HEATMAP_COLOR_HIGH);
+  });
+
+  it("reds nodes above p90", () => {
+    expect(colorForComplexity(21, thresholds)).toBe(HEATMAP_COLOR_TOP);
+    expect(colorForComplexity(999, thresholds)).toBe(HEATMAP_COLOR_TOP);
+  });
+});
+
+describe("topComplexityIds", () => {
+  it("returns the top-N ids sorted by cognitive descending", () => {
+    const ids = topComplexityIds(
+      [
+        { id: "a", cognitive: 1 },
+        { id: "b", cognitive: 50 },
+        { id: "c", cognitive: 10 },
+        { id: "d", cognitive: 100 },
+        { id: "e", cognitive: null },
+      ],
+      2,
+    );
+    expect(ids.has("d")).toBe(true);
+    expect(ids.has("b")).toBe(true);
+    expect(ids.has("c")).toBe(false);
+    expect(ids.has("e")).toBe(false);
+    expect(ids.size).toBe(2);
+  });
+
+  it("skips null cognitive and returns smaller set when fewer ranked nodes than N", () => {
+    const ids = topComplexityIds(
+      [
+        { id: "a", cognitive: null },
+        { id: "b", cognitive: 5 },
+      ],
+      5,
+    );
+    expect(ids.size).toBe(1);
+    expect(ids.has("b")).toBe(true);
+  });
+
+  it("returns an empty set when the input is empty", () => {
+    expect(topComplexityIds([], 3).size).toBe(0);
+  });
+});
+
+describe("applyComplexityHeatmap", () => {
+  const thresholds = { p33: 5, p67: 10, p90: 20, sampleSize: 50 };
+
+  it("colors a low-complexity node green", () => {
+    const out = applyComplexityHeatmap(
+      { color: "#aaaaaa", cognitive: 3 },
+      thresholds,
+      new Set(),
+      "x",
+    );
+    expect(out.color).toBe(HEATMAP_COLOR_LOW);
+    expect(out.haloed).toBeUndefined();
+  });
+
+  it("colors a high-complexity node red and adds the halo when in the top-N set", () => {
+    const out = applyComplexityHeatmap(
+      { color: "#aaaaaa", cognitive: 99 },
+      thresholds,
+      new Set(["x"]),
+      "x",
+    );
+    expect(out.color).toBe(HEATMAP_COLOR_TOP);
+    expect(out.haloed).toBe(true);
+    expect(out.borderColor).toBe(HEATMAP_COLOR_TOP);
+  });
+
+  it("falls back to gray for a node without cognitive data", () => {
+    const out = applyComplexityHeatmap(
+      { color: "#aaaaaa" },
+      thresholds,
+      new Set(),
+      "x",
+    );
+    expect(out.color).toBe(HEATMAP_COLOR_NULL);
+  });
+});
+
+describe("nodeReducer with complexity heatmap", () => {
+  const thresholds = { p33: 5, p67: 10, p90: 20, sampleSize: 50 };
+
+  it("paints the heatmap base color in complexity mode", () => {
+    const view: HighlightView = {
+      ...EMPTY_HIGHLIGHT_VIEW,
+      colorMode: "complexity",
+      complexityThresholds: thresholds,
+    };
+    const lo = nodeReducer("a", { color: "#dirhash", cognitive: 2 }, view);
+    const hi = nodeReducer("b", { color: "#dirhash", cognitive: 100 }, view);
+    expect(lo.color).toBe(HEATMAP_COLOR_LOW);
+    expect(hi.color).toBe(HEATMAP_COLOR_TOP);
+  });
+
+  it("preserves topology color in topology mode", () => {
+    const view: HighlightView = {
+      ...EMPTY_HIGHLIGHT_VIEW,
+      colorMode: "topology",
+      complexityThresholds: thresholds,
+    };
+    const out = nodeReducer("a", { color: "#dirhash", cognitive: 100 }, view);
+    expect(out.color).toBe("#dirhash");
+  });
+
+  it("draws the halo on top-N nodes regardless of color mode", () => {
+    const haloIds = new Set(["a"]);
+    const topology: HighlightView = {
+      ...EMPTY_HIGHLIGHT_VIEW,
+      colorMode: "topology",
+      complexityHaloIds: haloIds,
+    };
+    const complexity: HighlightView = {
+      ...EMPTY_HIGHLIGHT_VIEW,
+      colorMode: "complexity",
+      complexityThresholds: thresholds,
+      complexityHaloIds: haloIds,
+    };
+    const topOut = nodeReducer("a", { color: "#dirhash", cognitive: 30 }, topology);
+    const cxOut = nodeReducer("a", { color: "#dirhash", cognitive: 30 }, complexity);
+    expect(topOut.haloed).toBe(true);
+    expect(cxOut.haloed).toBe(true);
+    expect(topOut.borderColor).toBe(HEATMAP_COLOR_TOP);
+    expect(cxOut.borderColor).toBe(HEATMAP_COLOR_TOP);
+  });
+
+  it("selection still wins the color channel over the heatmap base coat", () => {
+    const view: HighlightView = {
+      ...EMPTY_HIGHLIGHT_VIEW,
+      colorMode: "complexity",
+      complexityThresholds: thresholds,
+      selectionId: "a",
+      selectionNeighbors: new Set(["a"]),
+    };
+    const out = nodeReducer("a", { color: "#dirhash", cognitive: 1 }, view);
+    // Focus orange, not heatmap green.
+    expect(out.color).toBe("#f97316");
+  });
+
+  it("complexity mode is a no-op when thresholds are null", () => {
+    const view: HighlightView = {
+      ...EMPTY_HIGHLIGHT_VIEW,
+      colorMode: "complexity",
+      complexityThresholds: null,
+    };
+    const out = nodeReducer("a", { color: "#dirhash", cognitive: 2 }, view);
+    expect(out.color).toBe("#dirhash");
   });
 });
 

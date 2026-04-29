@@ -392,6 +392,14 @@ pub struct SnapshotNode {
     /// Populated post-F3 (Leiden community detection). Always `None` in D2.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub community_id: Option<String>,
+    /// Iter 30: per-node cognitive complexity from the tree-sitter
+    /// walker (iter 23–25). Only populated for function-like nodes
+    /// (Function/Method/Constructor) and only when the file's language
+    /// is in the walker's table. `None` for files, types, externals,
+    /// synthetic nodes. The UI's `/code-graph` heatmap mode colors by
+    /// this field's project-internal percentile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cognitive: Option<u16>,
 }
 
 /// PR D2: snapshot edge — one entry in the `snapshot.edges` array.

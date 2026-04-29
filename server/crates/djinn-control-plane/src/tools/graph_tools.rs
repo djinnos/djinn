@@ -3633,6 +3633,7 @@ mod tests {
             file_path: Some("src/main.rs".to_string()),
             pagerank: 0.42,
             community_id: None,
+            cognitive: None,
         });
         response.snapshot.edges.push(crate::bridge::SnapshotEdge {
             from: "file:src/main.rs".to_string(),

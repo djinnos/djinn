@@ -21,6 +21,7 @@ import {
   NODE_KINDS,
   SYMBOL_KIND_FILTERS,
   useCodeGraphStore,
+  type ColorMode,
 } from "@/stores/codeGraphStore";
 import { cn } from "@/lib/utils";
 
@@ -80,6 +81,9 @@ export function GraphToolbar({ className }: GraphToolbarProps) {
   const depthFilter = useCodeGraphStore((s) => s.depthFilter);
   const setDepthFilter = useCodeGraphStore((s) => s.setDepthFilter);
   const selectionId = useCodeGraphStore((s) => s.selectionId);
+  const colorMode = useCodeGraphStore((s) => s.colorMode);
+  const setColorMode = useCodeGraphStore((s) => s.setColorMode);
+  const complexityAvailable = useCodeGraphStore((s) => s.complexityAvailable);
 
   const handleDepthChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -147,7 +151,12 @@ export function GraphToolbar({ className }: GraphToolbarProps) {
         })}
       </FilterGroup>
 
-      <div className="ml-auto flex items-center gap-2">
+      <div className="ml-auto flex items-center gap-3">
+        <ColorModeToggle
+          mode={colorMode}
+          onChange={setColorMode}
+          disabled={!complexityAvailable}
+        />
         <label
           htmlFor="code-graph-depth"
           className="text-[10px] font-medium uppercase tracking-wide text-zinc-500"
@@ -220,6 +229,102 @@ function Chip({ active, onClick, testId, title, children }: ChipProps) {
       )}
     >
       {children}
+    </button>
+  );
+}
+
+interface ColorModeToggleProps {
+  mode: ColorMode;
+  onChange: (mode: ColorMode) => void;
+  /**
+   * `true` when the current snapshot has zero function nodes carrying
+   * a `cognitive` value — the heatmap would be degenerate, so we
+   * disable the toggle and surface a tooltip explaining why.
+   */
+  disabled: boolean;
+}
+
+/**
+ * Iter 30: segmented control swapping between topology coloring (the
+ * default dir-hash / community palette) and the cognitive-complexity
+ * heatmap. Sized to fit the existing toolbar's vertical rhythm so it
+ * sits next to the depth slider without breaking layout.
+ */
+function ColorModeToggle({ mode, onChange, disabled }: ColorModeToggleProps) {
+  return (
+    <div className="flex items-center gap-1.5" data-testid="color-mode-toggle">
+      <span className="text-[10px] font-medium uppercase tracking-wide text-zinc-500">
+        Color
+      </span>
+      <div
+        role="radiogroup"
+        aria-label="Color mode"
+        className={cn(
+          "flex items-center rounded-md border border-zinc-800 bg-[#0a0a10]/40 p-0.5",
+          disabled && "opacity-50",
+        )}
+      >
+        <ColorModeButton
+          active={mode === "topology"}
+          disabled={false}
+          onClick={() => onChange("topology")}
+          testId="color-mode-topology"
+          label="Topology"
+          tooltip="Color nodes by parent directory / community"
+        />
+        <ColorModeButton
+          active={mode === "complexity"}
+          disabled={disabled}
+          onClick={() => onChange("complexity")}
+          testId="color-mode-complexity"
+          label="Complexity"
+          tooltip={
+            disabled
+              ? "No complexity data — graph not yet warmed for languages in the walker"
+              : "Color nodes by cognitive-complexity percentile"
+          }
+        />
+      </div>
+    </div>
+  );
+}
+
+interface ColorModeButtonProps {
+  active: boolean;
+  disabled: boolean;
+  onClick: () => void;
+  testId: string;
+  label: string;
+  tooltip: string;
+}
+
+function ColorModeButton({
+  active,
+  disabled,
+  onClick,
+  testId,
+  label,
+  tooltip,
+}: ColorModeButtonProps) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={active}
+      aria-disabled={disabled}
+      disabled={disabled}
+      data-testid={testId}
+      onClick={onClick}
+      title={tooltip}
+      className={cn(
+        "rounded px-2 py-0.5 text-[11px] font-medium transition-colors",
+        active
+          ? "bg-zinc-800/80 text-zinc-100"
+          : "text-zinc-400 hover:text-zinc-200",
+        disabled && "cursor-not-allowed hover:text-zinc-400",
+      )}
+    >
+      {label}
     </button>
   );
 }

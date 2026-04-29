@@ -125,6 +125,37 @@ describe("parseSnapshotResponse", () => {
     expect(parsed?.nodes[0]?.label).toBe("Context");
   });
 
+  it("preserves cognitive on nodes when present (iter 30)", () => {
+    const wire = {
+      snapshot: {
+        ...fixtureSnapshot,
+        nodes: [
+          {
+            ...fixtureSnapshot.nodes[1],
+            cognitive: 17,
+          },
+        ],
+      },
+    };
+    const parsed = parseSnapshotResponse(wire);
+    expect(parsed?.nodes[0]?.cognitive).toBe(17);
+  });
+
+  it("treats non-numeric / missing cognitive as undefined (iter 30)", () => {
+    const wire = {
+      snapshot: {
+        ...fixtureSnapshot,
+        nodes: [
+          { ...fixtureSnapshot.nodes[1], cognitive: null },
+          { ...fixtureSnapshot.nodes[2], cognitive: "huge" as unknown as number },
+        ],
+      },
+    };
+    const parsed = parseSnapshotResponse(wire);
+    expect(parsed?.nodes[0]?.cognitive).toBeUndefined();
+    expect(parsed?.nodes[1]?.cognitive).toBeUndefined();
+  });
+
   it("preserves community_id on nodes when present", () => {
     const wire = {
       snapshot: {

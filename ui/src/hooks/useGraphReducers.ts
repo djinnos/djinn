@@ -29,10 +29,13 @@ import type Graph from "graphology";
 import {
   EMPTY_HIGHLIGHT_VIEW,
   bfsReachable,
+  computeComplexityThresholds,
   edgeReducer as edgeReducerImpl,
   nodeReducer as nodeReducerImpl,
   oneHopNeighborhood,
+  topComplexityIds,
   type Attributes,
+  type ComplexityThresholds,
   type HighlightView,
   type MinimalGraph,
 } from "@/lib/codeGraphReducers";
@@ -66,6 +69,14 @@ function asMinimalGraph(graph: Graph): MinimalGraph {
 export interface UseGraphReducersResult {
   /** Pass straight to `useSigmaGraph(...)`'s reducers parameter. */
   reducers: SigmaReducerHooks;
+  /**
+   * Iter 30: percentile breakpoints for the complexity heatmap.
+   * `null` when no function nodes carry a cognitive value — callers
+   * should disable the heatmap toggle in that case.
+   */
+  complexityThresholds: ComplexityThresholds | null;
+  /** Top-N most-complex node ids (used by the halo + legend). */
+  complexityHaloIds: ReadonlySet<string>;
 }
 
 /**
@@ -90,12 +101,48 @@ export function useGraphReducers(
   const nodeKindFilters = useCodeGraphStore((s) => s.nodeKindFilters);
   const symbolKindFilters = useCodeGraphStore((s) => s.symbolKindFilters);
   const depthFilter = useCodeGraphStore((s) => s.depthFilter);
+  const colorMode = useCodeGraphStore((s) => s.colorMode);
 
   // ── Lazy 1-hop neighbor set (memoized) ─────────────────────────────────
   const selectionNeighbors = useMemo<ReadonlySet<string>>(() => {
     if (!graph || !selectionId) return new Set();
     return oneHopNeighborhood(asMinimalGraph(graph), selectionId);
   }, [graph, selectionId]);
+
+  // ── Iter 30: complexity heatmap thresholds + halo set ──────────────────
+  // Computed once per graph identity. Only function-like nodes that
+  // actually carry a `cognitive` attribute contribute — files, types,
+  // externals, and unsupported-language nodes are filtered out so the
+  // percentile distribution isn't dragged down by zeros.
+  const complexityThresholds = useMemo<ComplexityThresholds | null>(() => {
+    if (!graph) return null;
+    const values: number[] = [];
+    for (const id of graph.nodes()) {
+      const cog = graph.getNodeAttribute(id, "cognitive");
+      if (typeof cog === "number" && Number.isFinite(cog)) values.push(cog);
+    }
+    return computeComplexityThresholds(values);
+  }, [graph]);
+
+  /**
+   * Top-5 most-complex node ids — these wear a persistent red halo
+   * regardless of color mode. The reasoning is that even in topology
+   * mode the user wants refactor candidates visually marked.
+   */
+  const TOP_COMPLEXITY_HALO_N = 5;
+  const complexityHaloIds = useMemo<ReadonlySet<string>>(() => {
+    if (!graph) return new Set();
+    const pairs: Array<{ id: string; cognitive: number | null }> = [];
+    for (const id of graph.nodes()) {
+      const cog = graph.getNodeAttribute(id, "cognitive");
+      pairs.push({
+        id,
+        cognitive:
+          typeof cog === "number" && Number.isFinite(cog) ? cog : null,
+      });
+    }
+    return topComplexityIds(pairs, TOP_COMPLEXITY_HALO_N);
+  }, [graph]);
 
   // ── Lazy depth-N BFS frontier (memoized) ───────────────────────────────
   const depthReachable = useMemo<ReadonlySet<string> | null>(() => {
@@ -129,6 +176,9 @@ export function useGraphReducers(
       // Preserve the latest animated phase so we don't snap to 0
       // every time a non-pulse slice changes.
       pulsePhase: viewRef.current.pulsePhase,
+      colorMode,
+      complexityThresholds,
+      complexityHaloIds,
     };
     sigma?.refresh();
   }, [
@@ -143,6 +193,9 @@ export function useGraphReducers(
     nodeKindFilters,
     symbolKindFilters,
     depthReachable,
+    colorMode,
+    complexityThresholds,
+    complexityHaloIds,
   ]);
 
   // ── Pulse phase (animated only when blast frontier is non-empty) ──────
@@ -194,5 +247,5 @@ export function useGraphReducers(
     [graph],
   );
 
-  return { reducers };
+  return { reducers, complexityThresholds, complexityHaloIds };
 }

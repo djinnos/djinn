@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, waitFor } from "@/test/test-utils";
+import { fireEvent, render, screen, waitFor } from "@/test/test-utils";
 
 import { CodeGraphPage } from "@/pages/CodeGraphPage";
 import { projectStore } from "@/stores/projectStore";
+import { useCodeGraphStore } from "@/stores/codeGraphStore";
 import type { Project } from "@/api/types";
 
 // Sigma + WebGL aren't worth wiring up in jsdom; we stub the constructor so
@@ -39,20 +40,12 @@ vi.mock("graphology-layout-forceatlas2/worker", () => ({
 }));
 
 // Default to "no warmed graph" — individual tests can override via
-// the wrapper's mock factory below.
-const fetchSnapshotMock = vi.fn(async () => ({
-  snapshot: {
-    project_id: "project-a",
-    git_head: "deadbeef",
-    generated_at: "2026-04-28T00:00:00Z",
-    truncated: false,
-    total_nodes: 0,
-    total_edges: 0,
-    node_cap: 2_000,
-    nodes: [],
-    edges: [],
-  },
-}));
+// `mockImplementation` / `mockResolvedValueOnce` to inject populated
+// snapshots (iter 30: with cognitive complexity for the heatmap tests).
+type SnapshotResponse = { snapshot: Record<string, unknown> };
+const fetchSnapshotMock = vi.fn<
+  (project: string, nodeCap?: number) => Promise<SnapshotResponse>
+>();
 
 vi.mock("@/api/codeGraph", async () => {
   const actual = await vi.importActual<typeof import("@/api/codeGraph")>(
@@ -60,8 +53,7 @@ vi.mock("@/api/codeGraph", async () => {
   );
   return {
     ...actual,
-    fetchSnapshot: (...args: unknown[]) =>
-      fetchSnapshotMock(...(args as [string, number?])),
+    fetchSnapshot: (...args: [string, number?]) => fetchSnapshotMock(...args),
   };
 });
 
@@ -84,6 +76,21 @@ describe("CodeGraphPage", () => {
   beforeEach(() => {
     localStorage.clear();
     fetchSnapshotMock.mockClear();
+    useCodeGraphStore.getState().reset();
+    // Default snapshot fixture: empty graph, no complexity data.
+    fetchSnapshotMock.mockImplementation(async () => ({
+      snapshot: {
+        project_id: "project-a",
+        git_head: "deadbeef",
+        generated_at: "2026-04-28T00:00:00Z",
+        truncated: false,
+        total_nodes: 0,
+        total_edges: 0,
+        node_cap: 2_000,
+        nodes: [],
+        edges: [],
+      },
+    }));
   });
 
   it("renders the empty-state hint when no project is selected", () => {
@@ -145,5 +152,152 @@ describe("CodeGraphPage", () => {
         screen.getByText(/no graph data yet/i),
       ).toBeInTheDocument();
     });
+  });
+
+  // ── Iter 30: complexity heatmap toggle ─────────────────────────────────
+
+  it("renders the color-mode toggle in the toolbar (iter 30)", async () => {
+    projectStore.setState({
+      projects: projectsFixture,
+      selectedProjectId: "project-a",
+      lastViewPerProject: {},
+    });
+
+    render(<CodeGraphPage />);
+
+    expect(await screen.findByTestId("color-mode-toggle")).toBeInTheDocument();
+    expect(screen.getByTestId("color-mode-topology")).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(screen.getByTestId("color-mode-complexity")).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
+  });
+
+  it("disables the heatmap option when no nodes carry cognitive (iter 30)", async () => {
+    projectStore.setState({
+      projects: projectsFixture,
+      selectedProjectId: "project-a",
+      lastViewPerProject: {},
+    });
+
+    render(<CodeGraphPage />);
+
+    await waitFor(() => {
+      expect(fetchSnapshotMock).toHaveBeenCalled();
+    });
+    // The empty fixture has no function nodes, so complexity data is
+    // unavailable and the heatmap option must be disabled.
+    const complexityBtn = await screen.findByTestId("color-mode-complexity");
+    expect(complexityBtn).toBeDisabled();
+    expect(complexityBtn).toHaveAttribute(
+      "title",
+      expect.stringMatching(/no complexity data/i),
+    );
+  });
+
+  it("enables the heatmap option once a snapshot carries cognitive (iter 30)", async () => {
+    fetchSnapshotMock.mockImplementation(async () => ({
+      snapshot: {
+        project_id: "project-a",
+        git_head: "deadbeef",
+        generated_at: "2026-04-28T00:00:00Z",
+        truncated: false,
+        total_nodes: 3,
+        total_edges: 0,
+        node_cap: 2_000,
+        nodes: [
+          {
+            id: "symbol:fn_a",
+            kind: "symbol",
+            label: "fn_a",
+            symbol_kind: "function",
+            file_path: "src/a.rs",
+            pagerank: 0.5,
+            cognitive: 3,
+          },
+          {
+            id: "symbol:fn_b",
+            kind: "symbol",
+            label: "fn_b",
+            symbol_kind: "function",
+            file_path: "src/b.rs",
+            pagerank: 0.3,
+            cognitive: 12,
+          },
+          {
+            id: "symbol:fn_c",
+            kind: "symbol",
+            label: "fn_c",
+            symbol_kind: "function",
+            file_path: "src/c.rs",
+            pagerank: 0.2,
+            cognitive: 30,
+          },
+        ],
+        edges: [],
+      },
+    }));
+
+    projectStore.setState({
+      projects: projectsFixture,
+      selectedProjectId: "project-a",
+      lastViewPerProject: {},
+    });
+
+    render(<CodeGraphPage />);
+
+    const complexityBtn = await screen.findByTestId("color-mode-complexity");
+    await waitFor(() => {
+      expect(complexityBtn).not.toBeDisabled();
+    });
+    expect(useCodeGraphStore.getState().complexityAvailable).toBe(true);
+  });
+
+  it("flips the store mode when the toggle is clicked (iter 30)", async () => {
+    fetchSnapshotMock.mockImplementation(async () => ({
+      snapshot: {
+        project_id: "project-a",
+        git_head: "deadbeef",
+        generated_at: "2026-04-28T00:00:00Z",
+        truncated: false,
+        total_nodes: 1,
+        total_edges: 0,
+        node_cap: 2_000,
+        nodes: [
+          {
+            id: "symbol:fn_a",
+            kind: "symbol",
+            label: "fn_a",
+            symbol_kind: "function",
+            file_path: "src/a.rs",
+            pagerank: 0.5,
+            cognitive: 7,
+          },
+        ],
+        edges: [],
+      },
+    }));
+
+    projectStore.setState({
+      projects: projectsFixture,
+      selectedProjectId: "project-a",
+      lastViewPerProject: {},
+    });
+
+    render(<CodeGraphPage />);
+
+    const complexityBtn = await screen.findByTestId("color-mode-complexity");
+    await waitFor(() => {
+      expect(complexityBtn).not.toBeDisabled();
+    });
+    fireEvent.click(complexityBtn);
+    expect(useCodeGraphStore.getState().colorMode).toBe("complexity");
+
+    // Toggling back to topology works too.
+    fireEvent.click(screen.getByTestId("color-mode-topology"));
+    expect(useCodeGraphStore.getState().colorMode).toBe("topology");
   });
 });

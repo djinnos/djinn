@@ -113,6 +113,19 @@ export const MIN_DEPTH = 1;
 export const MAX_DEPTH = 5;
 export const DEFAULT_DEPTH = MAX_DEPTH;
 
+/**
+ * Iter 30: color-mode discriminator for the canvas.
+ *   - `"topology"` (default) — preserves the dir-hash / community
+ *     coloring shipped in earlier iterations. Heatmap is opt-in.
+ *   - `"complexity"` — swaps the color channel for a green→red gradient
+ *     keyed off cognitive complexity percentile. Sizing stays from
+ *     PageRank so a "big and red" node is the strongest refactor
+ *     candidate. Disabled when no function nodes carry a `cognitive`
+ *     value (walker hasn't run / no supported languages).
+ */
+export type ColorMode = "topology" | "complexity";
+export const DEFAULT_COLOR_MODE: ColorMode = "topology";
+
 export interface CodeGraphHighlightState {
   selectionId: string | null;
   citationIds: Set<string>;
@@ -123,6 +136,16 @@ export interface CodeGraphHighlightState {
   nodeKindFilters: Record<string, boolean>;
   symbolKindFilters: Record<string, boolean>;
   depthFilter: number;
+  /** Iter 30: see {@link ColorMode}. Default `"topology"`. */
+  colorMode: ColorMode;
+  /**
+   * Iter 30: `true` when the current snapshot has at least one function
+   * node with a populated `cognitive` value. Drives the toolbar's
+   * heatmap-toggle disabled state — `false` means the walker hasn't
+   * run for any of the project's languages yet, so the gradient would
+   * be degenerate.
+   */
+  complexityAvailable: boolean;
 }
 
 export interface CodeGraphHighlightActions {
@@ -139,6 +162,10 @@ export interface CodeGraphHighlightActions {
   toggleNodeKind: (kind: string) => void;
   toggleSymbolKind: (kind: string) => void;
   setDepthFilter: (depth: number) => void;
+  /** Iter 30: switch heatmap mode. */
+  setColorMode: (mode: ColorMode) => void;
+  /** Iter 30: canvas reports whether complexity data is present in the snapshot. */
+  setComplexityAvailable: (available: boolean) => void;
   reset: () => void;
 }
 
@@ -168,6 +195,8 @@ const INITIAL_STATE: CodeGraphHighlightState = {
   nodeKindFilters: defaultNodeKindFilters(),
   symbolKindFilters: defaultSymbolKindFilters(),
   depthFilter: DEFAULT_DEPTH,
+  colorMode: DEFAULT_COLOR_MODE,
+  complexityAvailable: false,
 };
 
 export const useCodeGraphStore = create<
@@ -245,6 +274,23 @@ export const useCodeGraphStore = create<
     set({ depthFilter: clamped });
   },
 
+  setColorMode: (mode) => {
+    set({ colorMode: mode });
+  },
+
+  setComplexityAvailable: (available) => {
+    set((state) => {
+      // Auto-snap the mode back to topology if complexity becomes
+      // unavailable while the heatmap is engaged — guards against the
+      // canvas being stuck on a degenerate gradient when the snapshot
+      // refetches after a project switch.
+      if (!available && state.colorMode === "complexity") {
+        return { complexityAvailable: false, colorMode: "topology" };
+      }
+      return { complexityAvailable: available };
+    });
+  },
+
   reset: () => {
     set({
       ...INITIAL_STATE,
@@ -254,6 +300,8 @@ export const useCodeGraphStore = create<
       edgeKindFilters: defaultEdgeKindFilters(),
       nodeKindFilters: defaultNodeKindFilters(),
       symbolKindFilters: defaultSymbolKindFilters(),
+      colorMode: DEFAULT_COLOR_MODE,
+      complexityAvailable: false,
     });
   },
 }));

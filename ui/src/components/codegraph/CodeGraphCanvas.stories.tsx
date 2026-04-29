@@ -16,7 +16,10 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { GraphToolbar } from "./GraphToolbar";
 import {
   EMPTY_HIGHLIGHT_VIEW,
+  computeComplexityThresholds,
   nodeReducer,
+  topComplexityIds,
+  type ColorMode,
   type HighlightView,
 } from "@/lib/codeGraphReducers";
 import { useCodeGraphStore } from "@/stores/codeGraphStore";
@@ -28,6 +31,8 @@ interface StubNode {
   size: number;
   color: string;
   label: string;
+  /** Iter 30: optional cognitive complexity for the heatmap stories. */
+  cognitive?: number;
 }
 
 interface StubEdge {
@@ -37,10 +42,12 @@ interface StubEdge {
 }
 
 const NODES: StubNode[] = [
-  { id: "alpha", x: 100, y: 100, size: 12, color: "#a3e635", label: "alpha" },
-  { id: "beta", x: 220, y: 100, size: 10, color: "#60a5fa", label: "beta" },
-  { id: "gamma", x: 160, y: 220, size: 10, color: "#fbbf24", label: "gamma" },
-  { id: "delta", x: 300, y: 240, size: 8, color: "#cbd5e1", label: "delta" },
+  // Iter 30: cognitive values mimic a real distribution — alpha/beta
+  // are tame, gamma is mid-tier, delta is the refactor candidate.
+  { id: "alpha", x: 100, y: 100, size: 12, color: "#a3e635", label: "alpha", cognitive: 3 },
+  { id: "beta", x: 220, y: 100, size: 10, color: "#60a5fa", label: "beta", cognitive: 6 },
+  { id: "gamma", x: 160, y: 220, size: 10, color: "#fbbf24", label: "gamma", cognitive: 14 },
+  { id: "delta", x: 300, y: 240, size: 8, color: "#cbd5e1", label: "delta", cognitive: 38 },
 ];
 
 const EDGES: StubEdge[] = [
@@ -81,21 +88,38 @@ function StubCanvas({ view }: { view: HighlightView }) {
       {NODES.map((n) => {
         const out = nodeReducer(
           n.id,
-          { color: n.color, size: n.size, label: n.label },
+          {
+            color: n.color,
+            size: n.size,
+            label: n.label,
+            cognitive: n.cognitive,
+          },
           view,
         );
         if (out.hidden) return null;
+        const size = (out.size as number) ?? n.size;
+        const haloed = out.haloed === true;
         return (
           <g key={n.id}>
+            {haloed && (
+              <circle
+                cx={n.x}
+                cy={n.y}
+                r={size + 4}
+                fill="none"
+                stroke="rgba(239, 68, 68, 0.6)"
+                strokeWidth={2}
+              />
+            )}
             <circle
               cx={n.x}
               cy={n.y}
-              r={(out.size as number) ?? n.size}
+              r={size}
               fill={(out.color as string) ?? n.color}
               opacity={out.highlighted === false ? 0.4 : 1}
             />
             <text
-              x={n.x + ((out.size as number) ?? n.size) + 4}
+              x={n.x + size + 4}
               y={n.y + 4}
               fontSize={11}
               fontFamily="monospace"
@@ -116,6 +140,8 @@ interface StoryShellProps {
   citationIds?: string[];
   toolHighlightIds?: string[];
   blastRadiusFrontier?: string[];
+  /** Iter 30: pin the canvas into a specific color mode for the story. */
+  colorMode?: ColorMode;
 }
 
 function StoryShell({
@@ -124,6 +150,7 @@ function StoryShell({
   citationIds = [],
   toolHighlightIds = [],
   blastRadiusFrontier = [],
+  colorMode = "topology",
 }: StoryShellProps) {
   // Mirror the inputs into the global store so the toolbar reflects
   // the selection state correctly (depth-slider enable etc.).
@@ -131,11 +158,17 @@ function StoryShell({
   const setCitations = useCodeGraphStore((s) => s.setCitations);
   const setToolHighlight = useCodeGraphStore((s) => s.setToolHighlight);
   const setBlastRadius = useCodeGraphStore((s) => s.setBlastRadiusFrontier);
+  const setColorMode = useCodeGraphStore((s) => s.setColorMode);
+  const setComplexityAvailable = useCodeGraphStore(
+    (s) => s.setComplexityAvailable,
+  );
   useEffect(() => {
     setSelection(selectionId);
     setCitations(citationIds);
     setToolHighlight(toolHighlightIds);
     setBlastRadius(blastRadiusFrontier);
+    setComplexityAvailable(true);
+    setColorMode(colorMode);
     return () => {
       useCodeGraphStore.getState().reset();
     };
@@ -144,11 +177,26 @@ function StoryShell({
     citationIds,
     toolHighlightIds,
     blastRadiusFrontier,
+    colorMode,
     setSelection,
     setCitations,
     setToolHighlight,
     setBlastRadius,
+    setColorMode,
+    setComplexityAvailable,
   ]);
+
+  // Iter 30: derive heatmap thresholds + top-N halo set from the
+  // stub fixture so the story renders the same colors / ring the live
+  // canvas does.
+  const cognitiveValues = NODES.flatMap((n) =>
+    typeof n.cognitive === "number" ? [n.cognitive] : [],
+  );
+  const complexityThresholds = computeComplexityThresholds(cognitiveValues);
+  const complexityHaloIds = topComplexityIds(
+    NODES.map((n) => ({ id: n.id, cognitive: n.cognitive ?? null })),
+    1,
+  );
 
   const storeState = useCodeGraphStore.getState();
   const view: HighlightView = {
@@ -162,6 +210,9 @@ function StoryShell({
     nodeKindFilters: storeState.nodeKindFilters,
     symbolKindFilters: storeState.symbolKindFilters,
     pulsePhase: 0.5,
+    colorMode,
+    complexityThresholds,
+    complexityHaloIds,
   };
 
   return (
@@ -220,5 +271,27 @@ export const SelectionPlusCitation: Story = {
     selectionId: "alpha",
     selectionNeighbors: ["alpha", "beta"],
     citationIds: ["delta"],
+  },
+};
+
+/**
+ * Iter 30: complexity heatmap mode. Nodes recolor along the green→red
+ * gradient and the highest-cognitive node (delta) wears the persistent
+ * red halo. Reviewers can also flip the toolbar toggle to verify the
+ * topology mode still works with the same fixture.
+ */
+export const ComplexityHeatmap: Story = {
+  args: {
+    colorMode: "complexity",
+  },
+};
+
+/**
+ * Iter 30: topology mode with the persistent halo always-on. Even
+ * without engaging the heatmap, the top refactor candidate is marked.
+ */
+export const TopologyWithRefactorHalo: Story = {
+  args: {
+    colorMode: "topology",
   },
 };

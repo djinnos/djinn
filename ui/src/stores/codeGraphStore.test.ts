@@ -172,6 +172,37 @@ describe("codeGraphStore", () => {
     });
   });
 
+  describe("colorMode (iter 30)", () => {
+    it("defaults to topology", () => {
+      expect(useCodeGraphStore.getState().colorMode).toBe("topology");
+    });
+
+    it("setColorMode flips between topology and complexity", () => {
+      useCodeGraphStore.getState().setColorMode("complexity");
+      expect(useCodeGraphStore.getState().colorMode).toBe("complexity");
+      useCodeGraphStore.getState().setColorMode("topology");
+      expect(useCodeGraphStore.getState().colorMode).toBe("topology");
+    });
+
+    it("setComplexityAvailable(false) snaps mode back to topology to avoid degenerate gradient", () => {
+      const s = useCodeGraphStore.getState();
+      s.setComplexityAvailable(true);
+      s.setColorMode("complexity");
+      expect(useCodeGraphStore.getState().colorMode).toBe("complexity");
+      s.setComplexityAvailable(false);
+      const after = useCodeGraphStore.getState();
+      expect(after.complexityAvailable).toBe(false);
+      expect(after.colorMode).toBe("topology");
+    });
+
+    it("setComplexityAvailable(false) leaves mode alone when already on topology", () => {
+      const s = useCodeGraphStore.getState();
+      s.setComplexityAvailable(true);
+      s.setComplexityAvailable(false);
+      expect(useCodeGraphStore.getState().colorMode).toBe("topology");
+    });
+  });
+
   describe("reset", () => {
     it("returns every slice to its default", () => {
       const s = useCodeGraphStore.getState();
@@ -194,6 +225,8 @@ describe("codeGraphStore", () => {
       expect(after.edgeKindFilters.Implements).toBe(true);
       expect(after.edgeKindFilters.Reads).toBe(false);
       expect(after.edgeKindFilters.FileReference).toBe(false);
+      expect(after.colorMode).toBe("topology");
+      expect(after.complexityAvailable).toBe(false);
     });
   });
 });

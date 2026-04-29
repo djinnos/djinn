@@ -27,6 +27,15 @@ export interface SnapshotNode {
   file_path?: string;
   pagerank: number;
   community_id?: string;
+  /**
+   * Iter 30: per-function cognitive complexity from the tree-sitter
+   * walker. Only populated for function-like nodes (function/method/
+   * constructor) and only when the language is in the walker's table.
+   * `undefined` for files, types, externals, synthetic nodes — the
+   * heatmap mode renders those as muted gray so non-function nodes
+   * don't dominate the eye.
+   */
+  cognitive?: number;
 }
 
 export interface SnapshotEdge {
@@ -91,6 +100,10 @@ export function parseSnapshotResponse(value: unknown): SnapshotPayload | null {
           pagerank: Number(n.pagerank ?? 0),
           community_id:
             typeof n.community_id === "string" ? n.community_id : undefined,
+          cognitive:
+            typeof n.cognitive === "number" && Number.isFinite(n.cognitive)
+              ? n.cognitive
+              : undefined,
         };
       })
       .filter((n) => n.id.length > 0),
@@ -531,6 +544,14 @@ function addNode(
     pagerank: node.pagerank,
     filePath: node.file_path,
     communityId: node.community_id,
+    /**
+     * Iter 30: forwarded so the heatmap reducer can colorize without
+     * a side lookup. `undefined` means "non-function or unsupported
+     * language" — heatmap mode bins those into the gray bucket.
+     */
+    cognitive: node.cognitive,
+    /** Stash the topology color so we can restore it when toggling modes. */
+    topologyColor: colorForNode(node),
   });
 }
 

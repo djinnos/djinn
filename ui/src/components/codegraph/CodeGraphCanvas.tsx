@@ -110,7 +110,22 @@ export function CodeGraphCanvas({
   const [sigmaHandle, setSigmaHandle] = useState<
     ReturnType<typeof useSigmaGraph>["sigma"]
   >(null);
-  const { reducers } = useGraphReducers(graph, sigmaHandle);
+  const { reducers, complexityThresholds } = useGraphReducers(
+    graph,
+    sigmaHandle,
+  );
+
+  // Iter 30: report complexity availability up to the toolbar via the
+  // store. Drives the heatmap-toggle's disabled/tooltip state. Set
+  // false on unmount so the toolbar resets when the user switches
+  // projects mid-flight.
+  const setComplexityAvailable = useCodeGraphStore(
+    (s) => s.setComplexityAvailable,
+  );
+  useEffect(() => {
+    setComplexityAvailable(complexityThresholds !== null);
+    return () => setComplexityAvailable(false);
+  }, [complexityThresholds, setComplexityAvailable]);
 
   const { layoutRunning, sigma } = useSigmaGraph(containerRef, graph, reducers);
 
@@ -166,6 +181,55 @@ export function CodeGraphCanvas({
         <LayoutOptimizingPill />
       )}
       <CitationStatusBadge />
+      <ComplexityLegend thresholds={complexityThresholds} />
+    </div>
+  );
+}
+
+/**
+ * Iter 30: bottom-right gradient legend for the complexity heatmap.
+ * Visible only in `colorMode === "complexity"` and when thresholds
+ * are populated; the four-color ramp + percentile labels mirror the
+ * `colorForComplexity` bucketing in `codeGraphReducers.ts`.
+ */
+function ComplexityLegend({
+  thresholds,
+}: {
+  thresholds: { p33: number; p67: number; p90: number; sampleSize: number } | null;
+}) {
+  const colorMode = useCodeGraphStore((s) => s.colorMode);
+  if (colorMode !== "complexity" || !thresholds) return null;
+  const fmt = (n: number) =>
+    Number.isInteger(n) ? `${n}` : n.toFixed(1);
+  return (
+    <div
+      data-testid="complexity-legend"
+      className="pointer-events-none absolute bottom-3 right-3 flex flex-col gap-1 rounded-lg border border-[#2d2d3d] bg-black/60 px-3 py-2 text-[10px] text-zinc-200 shadow backdrop-blur"
+    >
+      <div className="text-[9px] font-medium uppercase tracking-wide text-zinc-400">
+        Cognitive complexity
+      </div>
+      <LegendRow color="#10b981" label={`≤ p33 (${fmt(thresholds.p33)})`} />
+      <LegendRow color="#eab308" label={`≤ p67 (${fmt(thresholds.p67)})`} />
+      <LegendRow color="#f97316" label={`≤ p90 (${fmt(thresholds.p90)})`} />
+      <LegendRow color="#ef4444" label={`> p90`} />
+      <LegendRow color="#6b7280" label="non-function" />
+      <div className="mt-1 text-[9px] text-zinc-500">
+        n={thresholds.sampleSize.toLocaleString()} fns
+      </div>
+    </div>
+  );
+}
+
+function LegendRow({ color, label }: { color: string; label: string }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span
+        aria-hidden
+        className="inline-block h-2.5 w-2.5 rounded-sm"
+        style={{ backgroundColor: color }}
+      />
+      <span className="tabular-nums">{label}</span>
     </div>
   );
 }

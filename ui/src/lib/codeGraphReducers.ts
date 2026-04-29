@@ -56,6 +56,26 @@ export interface HighlightView {
   depthReachable: ReadonlySet<string> | null;
   /** Pulse phase ∈ [0, 1] driving the blast-radius color cycle. */
   pulsePhase: number;
+  /**
+   * Iter 30: active color mode. `"topology"` keeps the existing
+   * dir-hash / community coloring; `"complexity"` swaps it for a
+   * green→red heatmap keyed off the per-function cognitive percentile.
+   */
+  colorMode: ColorMode;
+  /**
+   * Iter 30: percentile breakpoints driving the heatmap. `null` when
+   * either no function nodes carry a `cognitive` value, or
+   * `colorMode === "topology"` and the heatmap isn't engaged. The
+   * reducer treats `null` as "skip the heatmap layer entirely."
+   */
+  complexityThresholds: ComplexityThresholds | null;
+  /**
+   * Iter 30: top-N most-complex node ids that wear a persistent red
+   * halo regardless of color mode. The reasoning is that even in
+   * topology mode the user wants refactor candidates marked. Empty
+   * set when complexity data is unavailable.
+   */
+  complexityHaloIds: ReadonlySet<string>;
 }
 
 /** Bitset-style flag describing which highlight layer wins for a node. */
@@ -82,6 +102,9 @@ export const EMPTY_HIGHLIGHT_VIEW: HighlightView = {
   symbolKindFilters: {},
   depthReachable: null,
   pulsePhase: 0,
+  colorMode: "topology",
+  complexityThresholds: null,
+  complexityHaloIds: new Set<string>(),
 };
 
 /**
@@ -207,13 +230,39 @@ export function nodeReducer(
     return { ...attrs, hidden: true };
   }
 
+  // Iter 30: heatmap base layer. In `"complexity"` mode we replace the
+  // topology color with a green→red gradient keyed off the cognitive
+  // percentile; the persistent halo fires in *both* modes (always-on
+  // refactor-candidate marker). The selection / citation / blast
+  // overrides further down still win the color channel — heatmap is a
+  // *base* coat, not a top coat.
+  let baseAttrs: Attributes = attrs;
+  const haloed = view.complexityHaloIds.has(nodeId);
+  if (view.colorMode === "complexity" && view.complexityThresholds !== null) {
+    baseAttrs = applyComplexityHeatmap(
+      attrs,
+      view.complexityThresholds,
+      view.complexityHaloIds,
+      nodeId,
+    );
+  } else if (haloed) {
+    // Topology mode: keep the dir-hash color but still ring the
+    // top-N. The halo reads as "this matters" without screaming.
+    baseAttrs = {
+      ...attrs,
+      borderColor: HEATMAP_COLOR_TOP,
+      borderSize: 2,
+      haloed: true,
+    };
+  }
+
   const mode = pickHighlightMode(nodeId, view);
-  if (mode === "none") return attrs;
+  if (mode === "none") return baseAttrs;
 
   switch (mode) {
     case "focus":
       return {
-        ...attrs,
+        ...baseAttrs,
         color: COLOR_FOCUS,
         size: attrSize(attrs, 6) * 1.6,
         zIndex: 100,
@@ -221,7 +270,7 @@ export function nodeReducer(
       };
     case "neighbor":
       return {
-        ...attrs,
+        ...baseAttrs,
         color: COLOR_NEIGHBOR,
         size: attrSize(attrs, 6) * 1.15,
         zIndex: 60,
@@ -229,7 +278,7 @@ export function nodeReducer(
       };
     case "citation":
       return {
-        ...attrs,
+        ...baseAttrs,
         color: COLOR_CITATION,
         size: attrSize(attrs, 6) * 1.2,
         zIndex: 80,
@@ -237,7 +286,7 @@ export function nodeReducer(
       };
     case "tool":
       return {
-        ...attrs,
+        ...baseAttrs,
         color: COLOR_TOOL,
         size: attrSize(attrs, 6) * 1.15,
         zIndex: 70,
@@ -251,7 +300,7 @@ export function nodeReducer(
       const t =
         view.pulsePhase < 0.5 ? view.pulsePhase * 2 : (1 - view.pulsePhase) * 2;
       return {
-        ...attrs,
+        ...baseAttrs,
         color: lerpHex(COLOR_BLAST_LO, COLOR_BLAST_HI, t),
         size: attrSize(attrs, 6) * (1.1 + 0.25 * t),
         zIndex: 90,
@@ -260,7 +309,7 @@ export function nodeReducer(
     }
     case "hover":
       return {
-        ...attrs,
+        ...baseAttrs,
         color: COLOR_HOVER,
         size: attrSize(attrs, 6) * 1.15,
         zIndex: 50,
@@ -269,13 +318,179 @@ export function nodeReducer(
     case "dim":
     default:
       return {
-        ...attrs,
+        ...baseAttrs,
         color: COLOR_DIMMED,
         label: undefined, // de-emphasize: hide labels on dimmed nodes
         zIndex: 0,
         highlighted: false,
       };
   }
+}
+
+// ── Complexity heatmap (iter 30) ────────────────────────────────────────────
+
+/**
+ * Color palette for the complexity-heatmap overlay. Green → yellow →
+ * orange → red ramp keyed off the project-internal cognitive-complexity
+ * percentile. Tailwind-500/600 hexes so they slot into the existing
+ * design system without introducing new tokens.
+ *
+ *   ≤ p33 → green   (#10b981 emerald-500)
+ *   ≤ p67 → yellow  (#eab308 yellow-500)
+ *   ≤ p90 → orange  (#f97316 orange-500)
+ *   >  p90 → red    (#ef4444 red-500)
+ *   null  → gray    (#6b7280 gray-500) — non-function or unsupported
+ *                   language; muted so the eye doesn't latch onto it.
+ */
+export const HEATMAP_COLOR_LOW = "#10b981";
+export const HEATMAP_COLOR_MID = "#eab308";
+export const HEATMAP_COLOR_HIGH = "#f97316";
+export const HEATMAP_COLOR_TOP = "#ef4444";
+export const HEATMAP_COLOR_NULL = "#6b7280";
+
+/**
+ * Pre-computed cognitive-complexity percentile breakpoints for the
+ * current snapshot. `null` means "no function nodes had a populated
+ * `cognitive` field"; callers should disable the heatmap toggle in
+ * that case rather than show a degenerate single-color overlay.
+ */
+export interface ComplexityThresholds {
+  /** 33rd percentile of cognitive complexity. */
+  p33: number;
+  /** 67th percentile. */
+  p67: number;
+  /** 90th percentile. */
+  p90: number;
+  /** Number of function nodes that contributed to the percentiles. */
+  sampleSize: number;
+}
+
+/**
+ * Compute the heatmap's three percentile breakpoints from a list of
+ * raw cognitive-complexity values. Linear-interpolation percentile
+ * (the same convention `numpy.percentile` defaults to). Returns `null`
+ * when the sample is empty so the UI can fall back to "toggle disabled."
+ */
+export function computeComplexityThresholds(
+  cognitiveValues: ReadonlyArray<number>,
+): ComplexityThresholds | null {
+  if (cognitiveValues.length === 0) return null;
+  const sorted = [...cognitiveValues]
+    .filter((v) => Number.isFinite(v))
+    .sort((a, b) => a - b);
+  if (sorted.length === 0) return null;
+  return {
+    p33: percentile(sorted, 0.33),
+    p67: percentile(sorted, 0.67),
+    p90: percentile(sorted, 0.9),
+    sampleSize: sorted.length,
+  };
+}
+
+/**
+ * Linear-interpolation percentile on a pre-sorted ascending array.
+ * `q ∈ [0, 1]`. Mirrors the default behavior of `numpy.percentile` /
+ * Excel `PERCENTILE.INC` so docs and screenshots line up with what an
+ * engineer would compute by hand.
+ */
+function percentile(sortedAsc: ReadonlyArray<number>, q: number): number {
+  if (sortedAsc.length === 0) return 0;
+  if (sortedAsc.length === 1) return sortedAsc[0];
+  const clamped = Math.max(0, Math.min(1, q));
+  const pos = clamped * (sortedAsc.length - 1);
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  if (lo === hi) return sortedAsc[lo];
+  const frac = pos - lo;
+  return sortedAsc[lo] + (sortedAsc[hi] - sortedAsc[lo]) * frac;
+}
+
+/**
+ * Pick the heatmap color for a single cognitive value given the
+ * snapshot-wide thresholds. `null` / `undefined` cognitive falls into
+ * the muted-gray "non-function" bucket so the eye doesn't latch onto
+ * file/folder/external nodes.
+ */
+export function colorForComplexity(
+  cognitive: number | null | undefined,
+  thresholds: ComplexityThresholds,
+): string {
+  if (cognitive === null || cognitive === undefined) return HEATMAP_COLOR_NULL;
+  if (cognitive <= thresholds.p33) return HEATMAP_COLOR_LOW;
+  if (cognitive <= thresholds.p67) return HEATMAP_COLOR_MID;
+  if (cognitive <= thresholds.p90) return HEATMAP_COLOR_HIGH;
+  return HEATMAP_COLOR_TOP;
+}
+
+/**
+ * Color-mode discriminator owned by `CodeGraphPage`.
+ *   - `"topology"` (default) — preserves the dir-hash / community
+ *     coloring that ships in the adapter; this iteration doesn't
+ *     change it.
+ *   - `"complexity"` — swaps the color channel for a green→red gradient
+ *     keyed off the function's cognitive-complexity percentile. Size
+ *     stays driven by PageRank so a "big and red" node is the strongest
+ *     refactor candidate.
+ */
+export type ColorMode = "topology" | "complexity";
+
+/**
+ * Defensive readers — graphology attribute bags are typed `unknown` at
+ * the boundary, so we narrow them once and reuse.
+ */
+function attrCognitive(attrs: Attributes): number | null {
+  const v = attrs.cognitive;
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * Apply the heatmap color override on top of a base attribute bag.
+ * Pulled out into its own helper so the wrapping reducer in
+ * `useGraphReducers` can compose it with the existing highlight logic
+ * — color flips first, then `nodeReducer` decides whether the
+ * selection / dim / blast layers should override that color further.
+ */
+export function applyComplexityHeatmap(
+  attrs: Attributes,
+  thresholds: ComplexityThresholds,
+  haloIds: ReadonlySet<string>,
+  nodeId: string,
+): Attributes {
+  const cognitive = attrCognitive(attrs);
+  const color = colorForComplexity(cognitive, thresholds);
+  if (haloIds.has(nodeId)) {
+    return {
+      ...attrs,
+      color,
+      // `borderColor` / `borderSize` aren't first-class in vanilla Sigma,
+      // but the canvas re-uses them in the custom hover renderer
+      // (`useSigmaGraph`) and they're picked up by the noverlap pass.
+      // Keeping the keys explicit so we can wire a halo program later
+      // without touching this reducer.
+      borderColor: HEATMAP_COLOR_TOP,
+      borderSize: 2,
+      haloed: true,
+    };
+  }
+  return { ...attrs, color };
+}
+
+/**
+ * Build the top-N most-complex node ids from the snapshot. Iter 30
+ * pins this halo regardless of color mode — even in topology mode you
+ * want refactor candidates visually marked.
+ */
+export function topComplexityIds(
+  cognitiveByNode: ReadonlyArray<{ id: string; cognitive: number | null }>,
+  topN: number,
+): Set<string> {
+  const out = new Set<string>();
+  const ranked = cognitiveByNode
+    .filter((n): n is { id: string; cognitive: number } => n.cognitive !== null)
+    .sort((a, b) => b.cognitive - a.cognitive)
+    .slice(0, Math.max(0, topN));
+  for (const r of ranked) out.add(r.id);
+  return out;
 }
 
 // ── Edge reducer ────────────────────────────────────────────────────────────
