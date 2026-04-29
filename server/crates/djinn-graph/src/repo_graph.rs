@@ -4150,17 +4150,19 @@ mod tests {
 
     #[test]
     fn complexity_skips_files_with_unsupported_language() {
-        // A Go file pinned at 1..=3, but the walker only knows Rust at
-        // iter 26's launch; the post-pass must skip silently rather
-        // than panic, leaving `complexity = None` on every node.
-        let go_source = "package m\n\nfunc f() {}\n";
+        // SCIP `Document.language` strings outside the walker's table
+        // (iter 23–25 ships 11 languages — anything else, like
+        // "haskell", falls through `ComplexityLang::from_scip`). The
+        // post-pass must skip silently rather than panic, leaving
+        // `complexity = None` on every node.
+        let hs_source = "module M where\nf :: Int\nf = 0\n";
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let abs = tempdir.path().join("src/m.go");
+        let abs = tempdir.path().join("src/M.hs");
         std::fs::create_dir_all(abs.parent().unwrap()).expect("mkdir");
-        std::fs::write(&abs, go_source).expect("write");
+        std::fs::write(&abs, hs_source).expect("write");
 
-        let go_sym = ScipSymbol {
-            symbol: "scip-go pkg src/m.go `f`().".to_string(),
+        let hs_sym = ScipSymbol {
+            symbol: "scip-haskell pkg src/M.hs `f`().".to_string(),
             kind: Some(ScipSymbolKind::Function),
             display_name: Some("f".to_string()),
             signature: None,
@@ -4172,20 +4174,20 @@ mod tests {
         let index = ParsedScipIndex {
             metadata: ScipMetadata::default(),
             files: vec![ScipFile {
-                language: "go".to_string(),
-                relative_path: PathBuf::from("src/m.go"),
-                definitions: vec![definition_with_enclosing(&go_sym.symbol, 2, 2)],
+                language: "haskell".to_string(),
+                relative_path: PathBuf::from("src/M.hs"),
+                definitions: vec![definition_with_enclosing(&hs_sym.symbol, 2, 3)],
                 references: vec![],
                 occurrences: vec![],
-                symbols: vec![go_sym],
+                symbols: vec![hs_sym],
             }],
             external_symbols: vec![],
         };
 
         let graph = RepoDependencyGraph::build_with_source(&[index], Some(tempdir.path()));
         let f_idx = graph
-            .symbol_node("scip-go pkg src/m.go `f`().")
-            .expect("go fn node");
+            .symbol_node("scip-haskell pkg src/M.hs `f`().")
+            .expect("haskell fn node");
         assert!(graph.node(f_idx).complexity.is_none());
     }
 }
