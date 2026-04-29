@@ -225,44 +225,60 @@ async fn run_git_log(
     project_root: &Path,
     range: &str,
 ) -> Result<(String, bool), IngestError> {
-    let output = run_git_log_once(project_root, range).await?;
-
-    // Heuristic: if the log is empty AND we're on a shallow clone AND
-    // the caller asked for a bounded range, try to widen. We can't
-    // always tell, so we stay conservative and only try when the
-    // ".git/shallow" file exists.
+    // Unshallow eagerly when the clone is shallow. The warm Job pod
+    // does `git clone --depth 1 --single-branch` (see
+    // `djinn_k8s::warm_job`) — fast for SCIP, useless for coupling: a
+    // depth-1 clone walked by `git log` shows the single visible
+    // commit as "everything added," producing thousands of bogus rows
+    // all stamped with `change_kind = 'A'`. The previous heuristic
+    // only triggered on an empty log (cursor-bounded range that
+    // didn't intersect visible history); first-run / full-history
+    // walks slipped past it and wrote the bad data anyway.
     let is_shallow = tokio::fs::metadata(project_root.join(".git/shallow"))
         .await
         .is_ok();
-    if !is_shallow || !output.trim().is_empty() {
-        return Ok((output, false));
-    }
-
-    tracing::info!(
-        project_root = %project_root.display(),
-        "coupling_index: shallow clone detected; attempting `git fetch --unshallow`"
-    );
-    let fetch = tokio::time::timeout(
-        GIT_LOG_TIMEOUT,
-        Command::new("git")
-            .current_dir(project_root)
-            .args(["fetch", "--unshallow"])
-            .output(),
-    )
-    .await;
-    match fetch {
-        Ok(Ok(result)) if result.status.success() => {
-            let output = run_git_log_once(project_root, range).await?;
-            Ok((output, true))
+    let mut unshallowed = false;
+    if is_shallow {
+        tracing::info!(
+            project_root = %project_root.display(),
+            "coupling_index: shallow clone detected; attempting `git fetch --unshallow` before walk"
+        );
+        let fetch = tokio::time::timeout(
+            GIT_LOG_TIMEOUT,
+            Command::new("git")
+                .current_dir(project_root)
+                .args(["fetch", "--unshallow"])
+                .output(),
+        )
+        .await;
+        match fetch {
+            Ok(Ok(result)) if result.status.success() => {
+                unshallowed = true;
+            }
+            Ok(Ok(result)) => {
+                tracing::warn!(
+                    project_root = %project_root.display(),
+                    stderr = %String::from_utf8_lossy(&result.stderr).trim(),
+                    "coupling_index: `git fetch --unshallow` non-zero; ingesting visible history only"
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    project_root = %project_root.display(),
+                    error = %e,
+                    "coupling_index: `git fetch --unshallow` failed to spawn; ingesting visible history only"
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    project_root = %project_root.display(),
+                    "coupling_index: `git fetch --unshallow` timed out; ingesting visible history only"
+                );
+            }
         }
-        _ => {
-            tracing::warn!(
-                project_root = %project_root.display(),
-                "coupling_index: `git fetch --unshallow` failed; ingesting visible history only"
-            );
-            Ok((output, false))
-        }
     }
+    let output = run_git_log_once(project_root, range).await?;
+    Ok((output, unshallowed))
 }
 
 async fn run_git_log_once(
