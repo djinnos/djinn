@@ -626,6 +626,42 @@ pub struct FileComplexityEntry {
     pub max_function_name: String,
 }
 
+/// Iter 29: a single refactor-candidate entry emitted by the
+/// `refactor_candidates` op. Composite ranking that fuses three
+/// individually-noisy signals (cognitive complexity, file-level churn,
+/// PageRank) via z-score averaging. Higher `composite_score` = more
+/// urgent refactor target.
+///
+/// The raw signal fields (`cognitive`, `cyclomatic`, `churn_commits`,
+/// `page_rank`) and the per-axis z-scores are surfaced alongside the
+/// composite so callers can re-rank in their own UI without a
+/// round-trip back through `code_graph`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct RefactorCandidate {
+    pub key: String,
+    pub display_name: String,
+    pub file: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    /// Composite score = mean of the three z-scores. Higher = more
+    /// urgent refactor target.
+    pub composite_score: f64,
+    /// Tier label: `"high"` (top 10% of the returned set), `"medium"`
+    /// (next 15%), `"low"` (rest). For result sets with fewer than 10
+    /// candidates every entry is `"high"` (degenerate small project).
+    pub tier: String,
+    pub cognitive: u16,
+    pub cyclomatic: u16,
+    /// File-level commit count over the `since_days` window. Functions
+    /// in the same file share this number; functions whose file isn't
+    /// in the churn map get `0`.
+    pub churn_commits: u32,
+    pub page_rank: f64,
+    pub z_cognitive: f64,
+    pub z_churn: f64,
+    pub z_page_rank: f64,
+}
+
 /// A single hotspot entry emitted by `hotspots`.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct HotspotEntry {
@@ -1250,6 +1286,25 @@ pub trait RepoGraphOps: Send + Sync {
         file_glob: Option<&str>,
         limit: usize,
     ) -> Result<ComplexityResult, String>;
+
+    /// Iter 29: composite refactor-priority ranking. Walks every
+    /// function-like canonical-graph node carrying complexity metrics,
+    /// joins on file-level churn (over the `since_days` window) and
+    /// PageRank (from the canonical ranking), and returns a sorted top
+    /// `limit` ranked by the mean of the three z-scores.
+    ///
+    /// `since_days` defaults to 90 and is clamped to `[1, 365]` server-
+    /// side. `file_glob` filters the candidate set the same way the
+    /// `complexity` op's glob does. Empty result is the success shape
+    /// for projects with no function-like nodes carrying complexity
+    /// (not an error).
+    async fn refactor_candidates(
+        &self,
+        ctx: &ProjectCtx,
+        since_days: Option<u32>,
+        file_glob: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RefactorCandidate>, String>;
 
     /// Scalar graph snapshot of the currently-pinned canonical graph.
     async fn metrics_at(

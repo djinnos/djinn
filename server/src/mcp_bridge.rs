@@ -17,10 +17,10 @@ use djinn_control_plane::bridge::{
     DiffTouchesResult, EdgeCategory, EdgeEntry, GitOps, GraphNeighbor, GraphStatus, HotPathHit,
     HotspotEntry, ImpactEntry, ImpactResult, LspOps, LspWarning, MetricsAtResult,
     ModelPoolStatus, NeighborsResult, OrphanEntry, PagerankTier, PathHop, PathResult,
-    PoolStatus, ProcessRef, ProjectCtx, RankedNode, RelatedSymbol, RepoGraphOps, ResolveOutcome,
-    RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding, SlotPoolOps, SnapshotEdge,
-    SnapshotNode, SnapshotPayload, SymbolAtHit, SymbolContext, SymbolDescription, SymbolNode,
-    TouchedSymbol,
+    PoolStatus, ProcessRef, ProjectCtx, RankedNode, RefactorCandidate, RelatedSymbol,
+    RepoGraphOps, ResolveOutcome, RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding,
+    SlotPoolOps, SnapshotEdge, SnapshotNode, SnapshotPayload, SymbolAtHit, SymbolContext,
+    SymbolDescription, SymbolNode, TouchedSymbol,
 };
 
 fn complexity_metrics_to_wire(
@@ -133,6 +133,161 @@ fn aggregate_files_complexity(
     });
     files
 }
+/// Iter 29: pure helper for the `refactor_candidates` op. Takes a
+/// candidate set already filtered to function-like nodes with
+/// complexity payloads, plus a `(file → file-level commit count)`
+/// map. Computes per-axis means + population stddevs (divide by N to
+/// keep zero-stddev handling tight), produces z-scores, sorts by the
+/// mean composite descending, truncates to `limit`, and stamps a
+/// `tier` label per the post-cap rule (top 10% high / next 15% medium
+/// / rest low). Sets fewer than 10 entries collapse to all-high
+/// (degenerate small project).
+///
+/// Extracted so the ranking logic is unit-testable without spinning
+/// up an `AppState` / canonical graph.
+fn compute_refactor_candidates(
+    candidates: &[RefactorCandidateInput],
+    churn_map: &std::collections::HashMap<std::path::PathBuf, u32>,
+    limit: usize,
+) -> Vec<djinn_control_plane::bridge::RefactorCandidate> {
+    use djinn_control_plane::bridge::RefactorCandidate;
+
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    // Resolve churn for every candidate up front so the mean/stddev
+    // pass and the per-row z-score pass walk the same numbers.
+    let churn_for: Vec<u32> = candidates
+        .iter()
+        .map(|c| {
+            churn_map
+                .get(std::path::Path::new(&c.file))
+                .copied()
+                .unwrap_or(0)
+        })
+        .collect();
+
+    let n = candidates.len() as f64;
+    let mean_cog: f64 =
+        candidates.iter().map(|c| f64::from(c.cognitive)).sum::<f64>() / n;
+    let mean_churn: f64 = churn_for.iter().map(|c| f64::from(*c)).sum::<f64>() / n;
+    let mean_pr: f64 = candidates.iter().map(|c| c.page_rank).sum::<f64>() / n;
+
+    // Population stddev (divide by N) — a sample stddev would need
+    // N>=2 and special-case 1-element sets; population stays correct
+    // at every N and zero-variance sets cleanly degenerate to 0.
+    let var_cog: f64 = candidates
+        .iter()
+        .map(|c| (f64::from(c.cognitive) - mean_cog).powi(2))
+        .sum::<f64>()
+        / n;
+    let var_churn: f64 = churn_for
+        .iter()
+        .map(|c| (f64::from(*c) - mean_churn).powi(2))
+        .sum::<f64>()
+        / n;
+    let var_pr: f64 = candidates
+        .iter()
+        .map(|c| (c.page_rank - mean_pr).powi(2))
+        .sum::<f64>()
+        / n;
+    let std_cog = var_cog.sqrt();
+    let std_churn = var_churn.sqrt();
+    let std_pr = var_pr.sqrt();
+
+    let z = |x: f64, mean: f64, std: f64| -> f64 {
+        if std > 1e-9 { (x - mean) / std } else { 0.0 }
+    };
+
+    let mut out: Vec<RefactorCandidate> = candidates
+        .iter()
+        .zip(churn_for.iter())
+        .map(|(c, churn)| {
+            let z_cog = z(f64::from(c.cognitive), mean_cog, std_cog);
+            let z_churn = z(f64::from(*churn), mean_churn, std_churn);
+            let z_pr = z(c.page_rank, mean_pr, std_pr);
+            let composite = (z_cog + z_churn + z_pr) / 3.0;
+            RefactorCandidate {
+                key: c.key.clone(),
+                display_name: c.display_name.clone(),
+                file: c.file.clone(),
+                start_line: c.start_line,
+                end_line: c.end_line,
+                composite_score: composite,
+                // Tier filled in below post-sort.
+                tier: String::new(),
+                cognitive: c.cognitive,
+                cyclomatic: c.cyclomatic,
+                churn_commits: *churn,
+                page_rank: c.page_rank,
+                z_cognitive: z_cog,
+                z_churn,
+                z_page_rank: z_pr,
+            }
+        })
+        .collect();
+
+    // Sort by composite desc, then a deterministic tiebreaker on
+    // display_name then key so equal-score sets ship in stable order.
+    out.sort_by(|a, b| {
+        b.composite_score
+            .partial_cmp(&a.composite_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.display_name.cmp(&b.display_name))
+            .then_with(|| a.key.cmp(&b.key))
+    });
+    out.truncate(limit);
+    assign_refactor_tiers(&mut out);
+    out
+}
+
+/// Per-candidate input row for [`compute_refactor_candidates`]. Plain
+/// data so the helper stays decoupled from `RepoDependencyGraph` /
+/// canonical-graph types and can be exercised by unit tests directly.
+#[derive(Debug, Clone)]
+struct RefactorCandidateInput {
+    key: String,
+    display_name: String,
+    file: String,
+    start_line: u32,
+    end_line: u32,
+    cognitive: u16,
+    cyclomatic: u16,
+    page_rank: f64,
+}
+
+/// Iter 29: stamp a `tier` label on each entry of an already-sorted
+/// `refactor_candidates` set. Top 10% = `"high"`, next 15% = `"medium"`,
+/// rest = `"low"`. Tier counts are rounded to nearest integer; for
+/// `limit=30` that's 3 high / 4 medium / 23 low. Sets with fewer than
+/// 10 candidates collapse to all-high (degenerate small project).
+fn assign_refactor_tiers(out: &mut [djinn_control_plane::bridge::RefactorCandidate]) {
+    if out.is_empty() {
+        return;
+    }
+    let n = out.len();
+    if n < 10 {
+        for entry in out.iter_mut() {
+            entry.tier = "high".to_string();
+        }
+        return;
+    }
+    let high_cnt = ((n as f64) * 0.10).round() as usize;
+    let medium_cnt = ((n as f64) * 0.15).round() as usize;
+    let high_cnt = high_cnt.min(n);
+    let medium_cnt = medium_cnt.min(n - high_cnt);
+    for (i, entry) in out.iter_mut().enumerate() {
+        entry.tier = if i < high_cnt {
+            "high".to_string()
+        } else if i < high_cnt + medium_cnt {
+            "medium".to_string()
+        } else {
+            "low".to_string()
+        };
+    }
+}
+
 use petgraph::visit::EdgeRef;
 use djinn_agent::actors::coordinator::CoordinatorHandle;
 use djinn_agent::actors::slot::SlotPoolHandle;
@@ -2046,6 +2201,127 @@ impl RepoGraphOps for RepoGraphBridge {
                 Ok(ComplexityResult::Files(files))
             }
         }
+    }
+
+    async fn refactor_candidates(
+        &self,
+        ctx: &ProjectCtx,
+        since_days: Option<u32>,
+        file_glob: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RefactorCandidate>, String> {
+        use djinn_db::CommitFileChangeRepository;
+        use djinn_graph::scip_parser::ScipSymbolKind;
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+
+        // Iter 29: composite refactor-priority op. Joins three signals
+        // (cognitive complexity, file-level churn, PageRank) on the
+        // function-like canonical-graph nodes and returns a top-`limit`
+        // ranking by mean z-score. See [`compute_refactor_candidates`]
+        // for the pure ranking logic.
+        let since_days_window = since_days.unwrap_or(90).clamp(1, 365);
+        let limit = limit.clamp(1, 200);
+
+        let (graph, ranking, _sccs) = djinn_graph::canonical_graph::load_canonical_graph(
+            &self.state,
+            &ctx.id,
+            &ctx.clone_path,
+        )
+        .await?;
+
+        let file_matcher = match file_glob {
+            Some(pattern) => Some(
+                globset::Glob::new(pattern)
+                    .map_err(|e| format!("invalid file_glob '{pattern}': {e}"))?
+                    .compile_matcher(),
+            ),
+            None => None,
+        };
+        let exclusions = self.state.mcp_state_graph_exclusions(&ctx.id).await;
+
+        // Build a `node_index → page_rank` lookup once. The
+        // canonical ranking is pagerank-sorted, so a HashMap pass is
+        // O(N) once and O(1) per candidate.
+        let mut pagerank_for: HashMap<petgraph::graph::NodeIndex, f64> =
+            HashMap::with_capacity(ranking.nodes.len());
+        for ranked in &ranking.nodes {
+            pagerank_for.insert(ranked.node_index, ranked.page_rank);
+        }
+
+        // Walk every function-like node carrying complexity. Skip the
+        // same node-classes the iter-28 `complexity` op skips, plus
+        // the test/external flags (the spec calls out filtering tests
+        // / externals when those flags are present; our nodes always
+        // have them).
+        let mut candidate_inputs: Vec<RefactorCandidateInput> = Vec::new();
+        for node_index in graph.graph().node_indices() {
+            let node = graph.node(node_index);
+            if node.is_external || node.is_test {
+                continue;
+            }
+            let Some(metrics) = node.complexity else { continue };
+            let Some(symbol_kind) = node.symbol_kind.as_ref() else {
+                continue;
+            };
+            if !matches!(
+                symbol_kind,
+                ScipSymbolKind::Function | ScipSymbolKind::Method | ScipSymbolKind::Constructor
+            ) {
+                continue;
+            }
+            let Some(file_path) = node.file_path.as_ref() else {
+                continue;
+            };
+            let file_str = file_path.display().to_string();
+            if let Some(matcher) = &file_matcher
+                && !matcher.is_match(&file_str)
+            {
+                continue;
+            }
+            let key = format_node_key(&node.id);
+            if exclusions.excludes(&key, Some(&file_str), &node.display_name) {
+                continue;
+            }
+            let (start_line, end_line) = graph
+                .range_for_node(node_index, file_path)
+                .unwrap_or((0, 0));
+            let page_rank = pagerank_for.get(&node_index).copied().unwrap_or(0.0);
+            candidate_inputs.push(RefactorCandidateInput {
+                key,
+                display_name: node.display_name.clone(),
+                file: file_str,
+                start_line,
+                end_line,
+                cognitive: metrics.cognitive,
+                cyclomatic: metrics.cyclomatic,
+                page_rank,
+            });
+        }
+
+        if candidate_inputs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Fetch churn — file-level commit counts over the window.
+        // The repository clamps `limit` to 500; for refactor_candidates
+        // we want every relevant file's count, so we pass the upper
+        // bound. Files outside the top 500 churned default to 0
+        // (which yields a negative z_churn — correct for "this file
+        // changes less than average").
+        let since = since_days_to_cutoff(Some(since_days_window));
+        let churn_repo = CommitFileChangeRepository::new(self.state.db().clone());
+        let churn_rows = churn_repo
+            .churn(&ctx.id, 500, since.as_deref())
+            .await
+            .map_err(|e| format!("refactor_candidates churn lookup: {e}"))?;
+        let mut churn_map: HashMap<PathBuf, u32> = HashMap::with_capacity(churn_rows.len());
+        for row in churn_rows {
+            let count = row.commit_count.max(0) as u32;
+            churn_map.insert(PathBuf::from(row.file_path), count);
+        }
+
+        Ok(compute_refactor_candidates(&candidate_inputs, &churn_map, limit))
     }
 
     async fn metrics_at(
@@ -5080,5 +5356,210 @@ pub(crate) mod graph_bridge_tests {
         let json = serde_json::to_value(&result).expect("serialize");
         assert!(json.is_array(), "Functions should serialize as bare array: {json}");
         assert_eq!(json.as_array().unwrap().len(), 1);
+    }
+
+    // ── Iter 29: refactor_candidates composite ranking ────────────────────
+
+    fn refactor_input(
+        key: &str,
+        display_name: &str,
+        file: &str,
+        cognitive: u16,
+        cyclomatic: u16,
+        page_rank: f64,
+    ) -> super::RefactorCandidateInput {
+        super::RefactorCandidateInput {
+            key: key.to_string(),
+            display_name: display_name.to_string(),
+            file: file.to_string(),
+            start_line: 1,
+            end_line: 10,
+            cognitive,
+            cyclomatic,
+            page_rank,
+        }
+    }
+
+    #[test]
+    fn refactor_candidates_composite_ranks_top_function_iter29() {
+        // Three functions with monotonically-increasing signals across
+        // all three axes. Function B (cognitive=10, churn=20, pr=0.5)
+        // tops every signal AND the composite z-score; the ranker
+        // must surface it at index 0.
+        use std::collections::HashMap;
+        let candidates = vec![
+            refactor_input("symbol:a", "a", "src/a.rs", 1, 1, 0.1),
+            refactor_input("symbol:b", "b", "src/b.rs", 10, 8, 0.5),
+            refactor_input("symbol:c", "c", "src/c.rs", 5, 4, 0.2),
+        ];
+        let mut churn_map: HashMap<std::path::PathBuf, u32> = HashMap::new();
+        churn_map.insert(std::path::PathBuf::from("src/a.rs"), 1);
+        churn_map.insert(std::path::PathBuf::from("src/b.rs"), 20);
+        churn_map.insert(std::path::PathBuf::from("src/c.rs"), 5);
+
+        let out = super::compute_refactor_candidates(&candidates, &churn_map, 30);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].display_name, "b", "B should be the top refactor target");
+        assert_eq!(out[0].cognitive, 10);
+        assert_eq!(out[0].churn_commits, 20);
+        // Score is the mean of three z-scores; with B at the top of
+        // every axis the composite must be strictly positive.
+        assert!(out[0].composite_score > 0.0, "B composite should be > 0");
+    }
+
+    #[test]
+    fn refactor_candidates_zero_stddev_returns_zero_z_iter29() {
+        // Degenerate small-project shape: every function has the same
+        // cognitive / churn / pagerank. Stddev across each axis is 0;
+        // the helper must clamp z-scores to 0 (not produce NaN), and
+        // the composite score for every entry must be exactly 0.
+        // Order is stable on the display_name tiebreaker.
+        use std::collections::HashMap;
+        let candidates = vec![
+            refactor_input("symbol:a", "alpha", "src/x.rs", 5, 3, 0.2),
+            refactor_input("symbol:b", "beta", "src/x.rs", 5, 3, 0.2),
+            refactor_input("symbol:c", "gamma", "src/x.rs", 5, 3, 0.2),
+        ];
+        let mut churn_map: HashMap<std::path::PathBuf, u32> = HashMap::new();
+        churn_map.insert(std::path::PathBuf::from("src/x.rs"), 7);
+
+        let out = super::compute_refactor_candidates(&candidates, &churn_map, 30);
+        assert_eq!(out.len(), 3);
+        for entry in &out {
+            assert_eq!(entry.composite_score, 0.0, "composite should be 0: {entry:?}");
+            assert_eq!(entry.z_cognitive, 0.0);
+            assert_eq!(entry.z_churn, 0.0);
+            assert_eq!(entry.z_page_rank, 0.0);
+        }
+        // Stable order: alphabetical by display_name on the
+        // composite-score tie.
+        assert_eq!(out[0].display_name, "alpha");
+        assert_eq!(out[1].display_name, "beta");
+        assert_eq!(out[2].display_name, "gamma");
+    }
+
+    #[test]
+    fn refactor_candidates_tier_assignment_iter29() {
+        // Build 20 candidates with monotonically-increasing cognitive +
+        // churn so the composite ranks them in the same order. After
+        // sorting:
+        //   - 10% × 20 = 2 entries get tier="high"
+        //   - 15% × 20 = 3 entries get tier="medium"
+        //   - the remaining 15 get tier="low"
+        use std::collections::HashMap;
+        let mut candidates = Vec::new();
+        let mut churn_map: HashMap<std::path::PathBuf, u32> = HashMap::new();
+        for i in 0..20 {
+            // Higher i → higher cognitive AND higher churn → higher composite.
+            let key = format!("symbol:{i:02}");
+            let display = format!("fn_{i:02}");
+            let file = format!("src/f{i:02}.rs");
+            candidates.push(refactor_input(
+                &key,
+                &display,
+                &file,
+                u16::try_from(i + 1).unwrap(),
+                1,
+                f64::from(i),
+            ));
+            churn_map.insert(std::path::PathBuf::from(&file), u32::try_from(i + 1).unwrap());
+        }
+        let out = super::compute_refactor_candidates(&candidates, &churn_map, 20);
+        assert_eq!(out.len(), 20);
+        let high_count = out.iter().filter(|c| c.tier == "high").count();
+        let medium_count = out.iter().filter(|c| c.tier == "medium").count();
+        let low_count = out.iter().filter(|c| c.tier == "low").count();
+        assert_eq!(high_count, 2, "10% of 20 = 2 high");
+        assert_eq!(medium_count, 3, "15% of 20 = 3 medium");
+        assert_eq!(low_count, 15, "rest are low");
+        // Top entries are the high tier; bottom entries are low.
+        assert_eq!(out[0].tier, "high");
+        assert_eq!(out[1].tier, "high");
+        assert_eq!(out[2].tier, "medium");
+        assert_eq!(out[3].tier, "medium");
+        assert_eq!(out[4].tier, "medium");
+        assert_eq!(out[5].tier, "low");
+        assert_eq!(out[19].tier, "low");
+    }
+
+    #[test]
+    fn refactor_candidates_small_set_all_high_iter29() {
+        // Sets with fewer than 10 candidates collapse to all-high
+        // (degenerate small project). The 10/15/75 split needs enough
+        // entries for the rounding to be meaningful.
+        use std::collections::HashMap;
+        let candidates = vec![
+            refactor_input("symbol:a", "a", "src/a.rs", 5, 3, 0.2),
+            refactor_input("symbol:b", "b", "src/b.rs", 8, 4, 0.3),
+        ];
+        let churn_map: HashMap<std::path::PathBuf, u32> = HashMap::new();
+
+        let out = super::compute_refactor_candidates(&candidates, &churn_map, 30);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].tier, "high");
+        assert_eq!(out[1].tier, "high");
+    }
+
+    #[test]
+    fn refactor_candidates_missing_file_in_churn_yields_zero_iter29() {
+        // Spec: a function whose file isn't in the churn map gets
+        // churn_commits=0 (not skipped). With one function in the map
+        // (high churn) and one absent (zero churn), the absent
+        // function gets a negative z_churn — correct, "this file
+        // changes less than average".
+        use std::collections::HashMap;
+        let candidates = vec![
+            refactor_input("symbol:a", "a", "src/in_map.rs", 5, 3, 0.2),
+            refactor_input("symbol:b", "b", "src/missing.rs", 5, 3, 0.2),
+        ];
+        let mut churn_map: HashMap<std::path::PathBuf, u32> = HashMap::new();
+        churn_map.insert(std::path::PathBuf::from("src/in_map.rs"), 50);
+
+        let out = super::compute_refactor_candidates(&candidates, &churn_map, 30);
+        assert_eq!(out.len(), 2);
+        // The missing-file function inherits churn_commits=0.
+        let missing = out.iter().find(|c| c.display_name == "b").unwrap();
+        assert_eq!(missing.churn_commits, 0);
+        assert!(missing.z_churn < 0.0, "absent file should have negative z_churn");
+        // The in-map function has positive z_churn.
+        let present = out.iter().find(|c| c.display_name == "a").unwrap();
+        assert_eq!(present.churn_commits, 50);
+        assert!(present.z_churn > 0.0, "high-churn file should have positive z_churn");
+    }
+
+    #[test]
+    fn refactor_candidates_empty_input_returns_empty_iter29() {
+        // No candidates → empty Vec (success, not error). Caller must
+        // tolerate empty results without a special-case branch.
+        use std::collections::HashMap;
+        let out = super::compute_refactor_candidates(&[], &HashMap::new(), 30);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn refactor_candidates_truncates_to_limit_iter29() {
+        // Limit caps the returned set; the surviving entries are the
+        // top-`limit` by composite score.
+        use std::collections::HashMap;
+        let mut candidates = Vec::new();
+        let mut churn_map: HashMap<std::path::PathBuf, u32> = HashMap::new();
+        for i in 0..50 {
+            let key = format!("symbol:{i:02}");
+            let display = format!("fn_{i:02}");
+            let file = format!("src/f{i:02}.rs");
+            candidates.push(refactor_input(
+                &key,
+                &display,
+                &file,
+                u16::try_from(i + 1).unwrap(),
+                1,
+                f64::from(i),
+            ));
+            churn_map.insert(std::path::PathBuf::from(&file), u32::try_from(i + 1).unwrap());
+        }
+        let out = super::compute_refactor_candidates(&candidates, &churn_map, 5);
+        assert_eq!(out.len(), 5);
+        // Top entry is the highest-index candidate (largest signals).
+        assert_eq!(out[0].display_name, "fn_49");
     }
 }

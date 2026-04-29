@@ -898,6 +898,20 @@ async fn call_code_graph_inner(
                 "complexity": result,
             })
         }
+        "refactor_candidates" => {
+            // Iter 29: composite refactor-priority ranking — fuses
+            // cognitive × churn × pagerank into a single z-score and
+            // returns the top function-level targets.
+            let limit = p.limit.unwrap_or(30);
+            let candidates = graph_ops
+                .refactor_candidates(&ctx, p.since_days, p.file_glob.as_deref(), limit)
+                .await?;
+            serde_json::json!({
+                "since_days": p.since_days,
+                "file_glob": p.file_glob,
+                "refactor_candidates": candidates,
+            })
+        }
         "blast_radius" => {
             // v8: first-class "what breaks if I change this" op.
             // Bundles `neighbors(incoming, group_by=file)` for direct
@@ -966,7 +980,7 @@ async fn call_code_graph_inner(
                  'search', 'cycles', 'orphans', 'path', 'edges', \
                  'describe', 'context', 'capabilities', 'blast_radius', \
                  'boundary_check', 'cochange', 'churn', 'hotspots', \
-                 'complexity', 'api_surface', 'metrics_at', 'dead_symbols', \
+                 'complexity', 'refactor_candidates', 'api_surface', 'metrics_at', 'dead_symbols', \
                  'deprecated_callers', 'touches_hot_path', 'coupling_hubs', \
                  'status', 'snapshot', 'symbols_at', 'diff_touches', \
                  'detect_changes'"
@@ -1160,7 +1174,7 @@ fn code_graph_capabilities() -> serde_json::Value {
             "search", "cycles", "orphans", "path", "edges",
             "describe", "context", "capabilities", "blast_radius",
             "boundary_check", "cochange", "churn", "hotspots",
-            "complexity", "api_surface", "metrics_at", "dead_symbols",
+            "complexity", "refactor_candidates", "api_surface", "metrics_at", "dead_symbols",
             "deprecated_callers", "touches_hot_path", "coupling_hubs",
             "status", "snapshot", "symbols_at", "diff_touches",
             "detect_changes",

@@ -541,6 +541,15 @@ mod tests {
         ) -> Result<djinn_control_plane::bridge::ComplexityResult, String> {
             StubRepoGraph.complexity(ctx, t, sb, fg, l).await
         }
+        async fn refactor_candidates(
+            &self,
+            ctx: &ProjectCtx,
+            sd: Option<u32>,
+            fg: Option<&str>,
+            l: usize,
+        ) -> Result<Vec<djinn_control_plane::bridge::RefactorCandidate>, String> {
+            StubRepoGraph.refactor_candidates(ctx, sd, fg, l).await
+        }
         async fn metrics_at(
             &self,
             ctx: &ProjectCtx,

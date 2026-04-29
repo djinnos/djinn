@@ -14,8 +14,8 @@ use crate::bridge::{
     DeadSymbolEntry, DeprecatedHit, DetectedChangesResult, EdgeEntry, FileGroupEntry,
     GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry, ImpactEntry, ImpactResult,
     MetricsAtResult, NeighborsResult, OrphanEntry, PathResult, ProjectCtx, RankedNode,
-    ResolveOutcome, SearchHit, SnapshotPayload, SymbolAtHit, SymbolContext, SymbolDescription,
-    TouchedSymbol,
+    RefactorCandidate, ResolveOutcome, SearchHit, SnapshotPayload, SymbolAtHit, SymbolContext,
+    SymbolDescription, TouchedSymbol,
 };
 use crate::server::DjinnMcpServer;
 use crate::tools::graph_exclusions::GraphExclusions;
@@ -439,6 +439,17 @@ pub struct ComplexityResponse {
     pub next_step: Option<String>,
 }
 
+/// Iter 29: response for the `refactor_candidates` op. The discriminator
+/// is `refactor_candidates` so the untagged enum stays disambiguable
+/// from every other variant. Wrapping rather than flattening matches
+/// the iter-28 `complexity` convention.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct RefactorCandidatesResponse {
+    pub refactor_candidates: Vec<RefactorCandidate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
+}
+
 /// Response for the `metrics_at` op.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct MetricsAtResponse {
@@ -576,6 +587,9 @@ pub enum CodeGraphResponse {
     Hotspots(HotspotsResponse),
     /// Iter 28: complexity ranking (functions or files).
     Complexity(ComplexityResponse),
+    /// Iter 29: composite refactor-priority ranking (cognitive × churn ×
+    /// pagerank z-scores). Discriminator field `refactor_candidates`.
+    RefactorCandidates(RefactorCandidatesResponse),
     MetricsAt(MetricsAtResponse),
     DeadSymbols(DeadSymbolsResponse),
     DeprecatedCallers(DeprecatedCallersResponse),
@@ -680,6 +694,17 @@ fn compute_next_step_hint(op: &str, response: &CodeGraphResponse) -> String {
             }
             _ => FALLBACK_NEXT_STEP.to_string(),
         },
+        // Iter 29: refactor_candidates → top entries are highest-priority
+        // refactor targets (high cognitive + high churn + high pagerank).
+        // Steer the caller into `context` on the worst offender.
+        ("refactor_candidates", CodeGraphResponse::RefactorCandidates(r))
+            if !r.refactor_candidates.is_empty() =>
+        {
+            "Top entries are highest-priority refactor targets (high cognitive + \
+             high churn + high pagerank). Call code_graph context name=<key> \
+             to inspect before changing."
+                .to_string()
+        }
         // PR D2: nudge the caller toward `context` on a top-PageRank
         // node. Truncation is the common case for medium repos, so the
         // hint focuses on drilling into the cap rather than expanding
@@ -724,6 +749,7 @@ fn next_step_slot(response: &mut CodeGraphResponse) -> &mut Option<String> {
         CodeGraphResponse::BoundaryCheck(r) => &mut r.next_step,
         CodeGraphResponse::Hotspots(r) => &mut r.next_step,
         CodeGraphResponse::Complexity(r) => &mut r.next_step,
+        CodeGraphResponse::RefactorCandidates(r) => &mut r.next_step,
         CodeGraphResponse::MetricsAt(r) => &mut r.next_step,
         CodeGraphResponse::DeadSymbols(r) => &mut r.next_step,
         CodeGraphResponse::DeprecatedCallers(r) => &mut r.next_step,
@@ -1024,7 +1050,7 @@ fn pick_next_step_target(symbols: &[crate::bridge::DetectedTouchedSymbol]) -> Op
 impl DjinnMcpServer {
     /// Query the repository dependency graph built from SCIP indexer output.
     #[tool(
-        description = "Query the repository dependency graph built from SCIP indexer output and the commit-based file-coupling index. Operations: neighbors (edges in/out of a node, with optional group_by=file rollup), ranked (top nodes; sort_by pagerank/in_degree/out_degree/total_degree), impact (transitive dependents, with optional group_by=file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup), cycles (strongly-connected components), orphans (zero-incoming-reference nodes, with visibility filter), path (shortest dependency path), edges (enumerate edges by from_glob/to_glob), symbols_at (given file+line range, return SCIP symbols whose definition range encloses those lines — diff-hunk → symbol lookup), diff_touches (given a list of changed line ranges parsed from `git diff --unified=0 base..head`, return every base-graph symbol touched, with fan-in/fan-out and file grouping; the base graph is always current main — this op does NOT build a head graph), detect_changes (given from_sha + to_sha [or a changed_files list], return touched symbols + their PageRank tier [High/Medium/Low quartile] + per-file rollup; shells out to `git diff --unified=0 from_sha..to_sha` server-side and maps hunks via symbols_enclosing — replaces the architect's manual diff inspection), describe (symbol signature/documentation without an LSP round trip), context (PR C1: 360° symbol view — categorized incoming/outgoing dicts [calls/reads/writes/extends/implements/...], plus structured method_metadata when SCIP populates it; pass include_content=true to include the symbol body. Each category list is hard-capped at 30 entries), status (peek at the persisted canonical graph cache; never warms), api_surface (list every public symbol with fan-in/fan-out and a used-outside-crate signal), boundary_check (edge-based architecture rule scanner over from_glob→to_glob pairs; returns forbidden violations), hotspots (file churn × centrality ranking over a configurable window; top_symbols per file), complexity (rank functions or files by complexity metric — target: functions|files, sort_by: cognitive|cyclomatic|nloc|max_nesting|param_count, file_glob, limit), metrics_at (scalar graph snapshot: node/edge/cycle counts, god-object floor, orphans, public API and doc coverage), dead_symbols (no-incoming-edge-from-entry-points enumeration; confidence=high|med|low), deprecated_callers (symbols whose signature/documentation contains #[deprecated] or @deprecated, with caller list), touches_hot_path (given entry and sink SCIP keys, report which queried symbols sit on any entry→sink shortest path), coupling (files most frequently co-edited with `file`, sourced from the per-commit change log; returns co-edit count, last co-edit timestamp, and up to three supporting SHAs per peer), churn (top files by distinct-commit count over an optional `since_days` window; returns commit count, cumulative insertions/deletions, and last-touched timestamp), coupling_hotspots (top file PAIRS by co-edit count project-wide; returns [{file_a,file_b,co_edits,last_co_edit}]; respects `since_days` and `max_files_per_commit` [default 15] — useful for spotting implicit coupling between distant parts of the tree), coupling_hubs (top FILES by cumulative coupling across all partners; returns [{file_path,total_coupling,partner_count}] — change-propagation risk map, higher total_coupling means a touch to this file is more likely to require touching many others), snapshot (PR D2: full graph snapshot capped by PageRank tier — returns {snapshot:{project_id,git_head,generated_at,truncated,total_nodes,total_edges,node_cap,nodes,edges}}; default cap 2000 nodes [Sigma WebGL ceiling], settable via `limit` up to 10k. Drives the `/code-graph` UI's force-directed render). All coupling / churn outputs are filtered through the project's `project_graph_exclusions` glob list at query time, so tuning exclusions takes effect without re-ingesting."
+        description = "Query the repository dependency graph built from SCIP indexer output and the commit-based file-coupling index. Operations: neighbors (edges in/out of a node, with optional group_by=file rollup), ranked (top nodes; sort_by pagerank/in_degree/out_degree/total_degree), impact (transitive dependents, with optional group_by=file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup), cycles (strongly-connected components), orphans (zero-incoming-reference nodes, with visibility filter), path (shortest dependency path), edges (enumerate edges by from_glob/to_glob), symbols_at (given file+line range, return SCIP symbols whose definition range encloses those lines — diff-hunk → symbol lookup), diff_touches (given a list of changed line ranges parsed from `git diff --unified=0 base..head`, return every base-graph symbol touched, with fan-in/fan-out and file grouping; the base graph is always current main — this op does NOT build a head graph), detect_changes (given from_sha + to_sha [or a changed_files list], return touched symbols + their PageRank tier [High/Medium/Low quartile] + per-file rollup; shells out to `git diff --unified=0 from_sha..to_sha` server-side and maps hunks via symbols_enclosing — replaces the architect's manual diff inspection), describe (symbol signature/documentation without an LSP round trip), context (PR C1: 360° symbol view — categorized incoming/outgoing dicts [calls/reads/writes/extends/implements/...], plus structured method_metadata when SCIP populates it; pass include_content=true to include the symbol body. Each category list is hard-capped at 30 entries), status (peek at the persisted canonical graph cache; never warms), api_surface (list every public symbol with fan-in/fan-out and a used-outside-crate signal), boundary_check (edge-based architecture rule scanner over from_glob→to_glob pairs; returns forbidden violations), hotspots (file churn × centrality ranking over a configurable window; top_symbols per file), complexity (rank functions or files by complexity metric — target: functions|files, sort_by: cognitive|cyclomatic|nloc|max_nesting|param_count, file_glob, limit), refactor_candidates (composite refactor-priority ranking — fuses cognitive complexity × file-level churn × PageRank into a single z-score and surfaces the top function-level targets; respects since_days [default 90, clamped 1..=365], file_glob, limit [default 30, clamped 1..=200]; each entry carries the composite score, a tier label [high/medium/low], and the underlying raw + z-score signals so callers can re-rank locally), metrics_at (scalar graph snapshot: node/edge/cycle counts, god-object floor, orphans, public API and doc coverage), dead_symbols (no-incoming-edge-from-entry-points enumeration; confidence=high|med|low), deprecated_callers (symbols whose signature/documentation contains #[deprecated] or @deprecated, with caller list), touches_hot_path (given entry and sink SCIP keys, report which queried symbols sit on any entry→sink shortest path), coupling (files most frequently co-edited with `file`, sourced from the per-commit change log; returns co-edit count, last co-edit timestamp, and up to three supporting SHAs per peer), churn (top files by distinct-commit count over an optional `since_days` window; returns commit count, cumulative insertions/deletions, and last-touched timestamp), coupling_hotspots (top file PAIRS by co-edit count project-wide; returns [{file_a,file_b,co_edits,last_co_edit}]; respects `since_days` and `max_files_per_commit` [default 15] — useful for spotting implicit coupling between distant parts of the tree), coupling_hubs (top FILES by cumulative coupling across all partners; returns [{file_path,total_coupling,partner_count}] — change-propagation risk map, higher total_coupling means a touch to this file is more likely to require touching many others), snapshot (PR D2: full graph snapshot capped by PageRank tier — returns {snapshot:{project_id,git_head,generated_at,truncated,total_nodes,total_edges,node_cap,nodes,edges}}; default cap 2000 nodes [Sigma WebGL ceiling], settable via `limit` up to 10k. Drives the `/code-graph` UI's force-directed render). All coupling / churn outputs are filtered through the project's `project_graph_exclusions` glob list at query time, so tuning exclusions takes effect without re-ingesting."
     )]
     pub async fn code_graph(
         &self,
@@ -1206,6 +1232,7 @@ impl DjinnMcpServer {
             "boundary_check" => self.code_graph_boundary_check(ctx, params).await,
             "hotspots" => self.code_graph_hotspots(ctx, params).await,
             "complexity" => self.code_graph_complexity(ctx, params).await,
+            "refactor_candidates" => self.code_graph_refactor_candidates(ctx, params).await,
             "metrics_at" => self.code_graph_metrics_at(ctx, params).await,
             "dead_symbols" => self.code_graph_dead_symbols(ctx, params).await,
             "deprecated_callers" => self.code_graph_deprecated_callers(ctx, params).await,
@@ -1222,7 +1249,7 @@ impl DjinnMcpServer {
                  'symbols_at', 'diff_touches', 'detect_changes', \
                  'describe', 'context', 'status', \
                  'api_surface', 'boundary_check', 'hotspots', 'complexity', \
-                 'metrics_at', \
+                 'refactor_candidates', 'metrics_at', \
                  'dead_symbols', 'deprecated_callers', 'touches_hot_path', \
                  'coupling', 'churn', 'coupling_hotspots', 'coupling_hubs', \
                  'snapshot'"
@@ -2025,6 +2052,34 @@ impl DjinnMcpServer {
         }))
     }
 
+    /// Handler for `operation = "refactor_candidates"` (iter 29).
+    /// Composite ranking that fuses cognitive complexity, file-level
+    /// churn, and PageRank z-scores. Reuses `since_days` (default 90,
+    /// clamped to `[1, 365]` server-side), `file_glob`, and `limit`
+    /// (default 30, clamped to `[1, 200]`).
+    async fn code_graph_refactor_candidates(
+        &self,
+        ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let since_days_u32 = params
+            .since_days
+            .map(|d| u32::try_from(d.max(0)).unwrap_or(0));
+        let limit = params.limit.unwrap_or(30).max(0) as usize;
+        let limit = limit.clamp(1, 200);
+        let candidates = self
+            .state
+            .repo_graph()
+            .refactor_candidates(ctx, since_days_u32, params.file_glob.as_deref(), limit)
+            .await?;
+        Ok(CodeGraphResponse::RefactorCandidates(
+            RefactorCandidatesResponse {
+                refactor_candidates: candidates,
+                next_step: None,
+            },
+        ))
+    }
+
     /// Handler for `operation = "metrics_at"`.
     async fn code_graph_metrics_at(
         &self,
@@ -2770,6 +2825,25 @@ mod tests {
     }
 
     #[test]
+    fn parses_refactor_candidates_params_from_json() {
+        // Iter 29: since_days / file_glob / limit all reuse existing
+        // CodeGraphParams fields. No new params are introduced — the
+        // op rides on the same shared shape iter 28's complexity uses.
+        let json = serde_json::json!({
+            "operation": "refactor_candidates",
+            "project": "/workspace/repo",
+            "since_days": 60,
+            "file_glob": "server/src/**/*.rs",
+            "limit": 25,
+        });
+        let params: CodeGraphParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.operation, "refactor_candidates");
+        assert_eq!(params.since_days, Some(60));
+        assert_eq!(params.file_glob.as_deref(), Some("server/src/**/*.rs"));
+        assert_eq!(params.limit, Some(25));
+    }
+
+    #[test]
     fn parses_metrics_at_params_from_json() {
         let json = serde_json::json!({
             "operation": "metrics_at",
@@ -2980,6 +3054,7 @@ mod tests {
             CodeGraphResponse::BoundaryCheck(r) => r.next_step.as_deref(),
             CodeGraphResponse::Hotspots(r) => r.next_step.as_deref(),
             CodeGraphResponse::Complexity(r) => r.next_step.as_deref(),
+            CodeGraphResponse::RefactorCandidates(r) => r.next_step.as_deref(),
             CodeGraphResponse::MetricsAt(r) => r.next_step.as_deref(),
             CodeGraphResponse::DeadSymbols(r) => r.next_step.as_deref(),
             CodeGraphResponse::DeprecatedCallers(r) => r.next_step.as_deref(),

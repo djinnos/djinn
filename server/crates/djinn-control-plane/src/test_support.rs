@@ -362,6 +362,15 @@ impl RepoGraphOps for StubRepoGraph {
     ) -> std::result::Result<crate::bridge::ComplexityResult, String> {
         Ok(crate::bridge::ComplexityResult::Functions(Vec::new()))
     }
+    async fn refactor_candidates(
+        &self,
+        _ctx: &ProjectCtx,
+        _since_days: Option<u32>,
+        _file_glob: Option<&str>,
+        _limit: usize,
+    ) -> std::result::Result<Vec<crate::bridge::RefactorCandidate>, String> {
+        Ok(Vec::new())
+    }
     async fn metrics_at(
         &self,
         _ctx: &ProjectCtx,

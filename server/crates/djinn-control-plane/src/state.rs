@@ -427,6 +427,15 @@ pub mod stubs {
         ) -> Result<crate::bridge::ComplexityResult, String> {
             Ok(crate::bridge::ComplexityResult::Functions(vec![]))
         }
+        async fn refactor_candidates(
+            &self,
+            _: &crate::bridge::ProjectCtx,
+            _: Option<u32>,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<crate::bridge::RefactorCandidate>, String> {
+            Ok(vec![])
+        }
         async fn metrics_at(
             &self,
             _: &crate::bridge::ProjectCtx,

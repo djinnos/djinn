@@ -392,6 +392,15 @@ impl RepoGraphOps for StubRepoGraphOps {
     ) -> Result<bridge::ComplexityResult, String> {
         Err("complexity not available in agent bridge — use MCP server".into())
     }
+    async fn refactor_candidates(
+        &self,
+        _: &ProjectCtx,
+        _: Option<u32>,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<bridge::RefactorCandidate>, String> {
+        Err("refactor_candidates not available in agent bridge — use MCP server".into())
+    }
     async fn metrics_at(&self, _: &ProjectCtx) -> Result<MetricsAtResult, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }

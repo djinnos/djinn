@@ -258,7 +258,7 @@ expression: tool_schemas_architect()
   },
   {
     "concurrent_safe": true,
-    "description": "Query the SCIP-built repository dependency graph. Set `operation` to one of the enum values; most ops accept optional filters (kind_filter, group_by, limit, min_confidence). Call `operation=capabilities` for the full per-op param shapes + defaults. Quick guide: neighbors / ranked / impact / implementations / search / cycles / orphans / path / edges — basic graph queries (impact defaults: depth=2, min_confidence=0.85, behavioural edges only). symbols_at / diff_touches / detect_changes — line-range → touched symbols. describe / context — single-symbol detail (context = bucketed incoming/outgoing edges). status / metrics_at / snapshot — graph health + introspection. api_surface / dead_symbols / deprecated_callers — public surface health. boundary_check / blast_radius / touches_hot_path — change-impact analysis. hotspots / cochange / churn / coupling_hubs — git-coupling × PageRank centrality. complexity — rank functions or files by cognitive/cyclomatic/nloc complexity.",
+    "description": "Query the SCIP-built repository dependency graph. Set `operation` to one of the enum values; most ops accept optional filters (kind_filter, group_by, limit, min_confidence). Call `operation=capabilities` for the full per-op param shapes + defaults. Quick guide: neighbors / ranked / impact / implementations / search / cycles / orphans / path / edges — basic graph queries (impact defaults: depth=2, min_confidence=0.85, behavioural edges only). symbols_at / diff_touches / detect_changes — line-range → touched symbols. describe / context — single-symbol detail (context = bucketed incoming/outgoing edges). status / metrics_at / snapshot — graph health + introspection. api_surface / dead_symbols / deprecated_callers — public surface health. boundary_check / blast_radius / touches_hot_path — change-impact analysis. hotspots / cochange / churn / coupling_hubs — git-coupling × PageRank centrality. complexity — rank functions or files by cognitive/cyclomatic/nloc complexity. refactor_candidates — composite refactor-priority ranking (cognitive × churn × pagerank z-score).",
     "inputSchema": {
       "properties": {
         "changed_ranges": {
@@ -398,6 +398,7 @@ expression: tool_schemas_architect()
             "blast_radius",
             "hotspots",
             "complexity",
+            "refactor_candidates",
             "cochange",
             "churn",
             "coupling_hubs",

@@ -543,6 +543,32 @@ async fn code_graph_dispatch_complexity_reaches_graph_ops() {
     );
 }
 
+/// Iter 29 refactor_candidates op: dispatches through
+/// `RepoGraphOps::refactor_candidates` and surfaces the unavailability
+/// error when the agent stub is in play. Confirms the new arm is wired.
+#[tokio::test]
+async fn code_graph_dispatch_refactor_candidates_reaches_graph_ops() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-refactor-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let err = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "refactor_candidates",
+            "project_path": worktree.path().to_string_lossy(),
+            "since_days": 60,
+            "limit": 5,
+        }),
+        worktree.path(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("refactor_candidates not available"),
+        "refactor_candidates should reach the bridge stub, got: {err}"
+    );
+}
+
 /// v8 final batch: 5 trait-delegation ops (status / snapshot /
 /// symbols_at / diff_touches / detect_changes). Same pattern.
 #[tokio::test]

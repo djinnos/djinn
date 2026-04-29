@@ -1698,6 +1698,16 @@ mod tests {
             Err("unused in test".into())
         }
 
+        async fn refactor_candidates(
+            &self,
+            _: &ProjectCtx,
+            _: Option<u32>,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<djinn_control_plane::bridge::RefactorCandidate>, String> {
+            Err("unused in test".into())
+        }
+
         async fn metrics_at(&self, _: &ProjectCtx) -> Result<MetricsAtResult, String> {
             Err("unused in test".into())
         }
