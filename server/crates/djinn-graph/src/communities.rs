@@ -602,6 +602,7 @@ mod tests {
             documentation: vec![],
             signature_parts: None,
             is_test: false,
+            complexity: None,
         };
 
         let nodes = vec![

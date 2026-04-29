@@ -6,6 +6,7 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef as PetgraphEdgeRef;
 use serde::{Deserialize, Serialize};
 
+use crate::complexity::{ComplexityMetrics, ComplexityWalker};
 use crate::scip_parser::{
     ParsedScipIndex, ScipFile, ScipOccurrence, ScipRelationship, ScipRelationshipKind, ScipSymbol,
     ScipSymbolKind, ScipSymbolRole, ScipVisibility,
@@ -58,7 +59,16 @@ const PAGE_RANK_ITERATIONS: usize = 25;
 ///   contain the polluted node set; the version bump forces a re-warm so
 ///   the on-disk cache reflects the cleaner graph. Filter predicate:
 ///   see `crate::scip_parser::is_function_scoped_variable`.
-pub const REPO_GRAPH_ARTIFACT_VERSION: u32 = 8;
+/// - v9: per-function complexity metrics (iteration 26) — adds
+///   `complexity: Option<ComplexityMetrics>` to every `RepoGraphNode`.
+///   Populated for function-like symbols whose host file the
+///   [`ComplexityWalker`] can parse (currently Rust; more languages
+///   land in iter 24/25). Old v8 blobs do not carry the field;
+///   `#[serde(default)]` lets them deserialize as `None`, but the
+///   version bump still forces a re-warm so caches reflect the
+///   freshly-computed metrics rather than running indefinitely with
+///   `None` everywhere.
+pub const REPO_GRAPH_ARTIFACT_VERSION: u32 = 9;
 
 // ── Edge confidence floor table (PR A2) ────────────────────────────────────
 //
@@ -422,6 +432,17 @@ impl RepoDependencyGraph {
         if crate::processes::process_detection_enabled() {
             let processes = crate::processes::detect_processes(&mut graph);
             graph.set_processes(processes);
+        }
+        // Iteration 26: attach per-function complexity metrics
+        // (cyclomatic, cognitive, nloc, max_nesting, param_count) to
+        // every function-like graph node. Reads source files from the
+        // project root supplied to `build_with_source`; without a root
+        // (i.e. `Self::build` for synthetic-fixture unit tests) the
+        // closure short-circuits and complexity stays `None`.
+        if let Some(root) = project_root.map(|p| p.to_path_buf()) {
+            attach_complexity_metrics(&mut graph, |rel| {
+                std::fs::read_to_string(root.join(rel)).ok()
+            });
         }
         graph
     }
@@ -815,6 +836,7 @@ impl RepoDependencyGraph {
             documentation: Vec::new(),
             signature_parts: None,
             is_test: false,
+            complexity: None,
         };
         let idx = self.graph.add_node(node);
         self.node_lookup.insert(key, idx);
@@ -844,6 +866,7 @@ impl RepoDependencyGraph {
             documentation: Vec::new(),
             signature_parts: None,
             is_test: false,
+            complexity: None,
         };
         let idx = self.graph.add_node(node);
         self.node_lookup.insert(key, idx);
@@ -986,6 +1009,19 @@ pub struct RepoGraphNode {
     /// symbols restored from pre-PR-F1 (v2 or earlier) artifacts.
     #[serde(default)]
     pub is_test: bool,
+    /// Iteration 26: per-function complexity metrics (cyclomatic, cognitive,
+    /// nloc, max_nesting, param_count) computed by
+    /// [`crate::complexity::ComplexityWalker`] over the host file's tree-
+    /// sitter AST. Populated only for function-like SCIP symbols
+    /// (`Function` / `Method` / `Constructor`) and only when the file's
+    /// language is supported by the walker AND a tree-sitter range can be
+    /// matched against the SCIP definition. `None` for file nodes,
+    /// non-function symbols, unsupported languages, and for any node
+    /// restored from a pre-iteration-26 (v8 or earlier) artifact —
+    /// `#[serde(default)]` keeps the deserialization tolerant in that
+    /// case, but the version bump forces a re-warm.
+    #[serde(default)]
+    pub complexity: Option<ComplexityMetrics>,
 }
 
 impl RepoGraphNode {
@@ -1402,6 +1438,7 @@ impl RepoDependencyGraphBuilder {
             documentation: Vec::new(),
             signature_parts: None,
             is_test: false,
+            complexity: None,
         };
         let node_index = self.graph.add_node(node);
         self.node_lookup.insert(key, node_index);
@@ -1437,6 +1474,7 @@ impl RepoDependencyGraphBuilder {
             documentation: symbol.documentation.clone(),
             signature_parts: symbol.signature_parts.clone(),
             is_test: false,
+            complexity: None,
         };
         let node_index = self.graph.add_node(node);
         self.node_lookup.insert(key, node_index);
@@ -1512,6 +1550,7 @@ impl RepoDependencyGraphBuilder {
             documentation: Vec::new(),
             signature_parts: None,
             is_test: false,
+            complexity: None,
         };
         let key = node.id.clone();
         let node_index = self.graph.add_node(node);
@@ -1653,6 +1692,156 @@ fn build_process_lookup(
         }
     }
     out
+}
+
+/// True for SCIP symbol kinds whose host is a function declaration in the
+/// tree-sitter sense — i.e. `ComplexityWalker::analyze_file` will produce
+/// at most one [`crate::complexity::FunctionMetrics`] entry per such
+/// symbol when the file's language is supported.
+fn is_function_like_symbol_kind(kind: Option<&ScipSymbolKind>) -> bool {
+    matches!(
+        kind,
+        Some(ScipSymbolKind::Function)
+            | Some(ScipSymbolKind::Method)
+            | Some(ScipSymbolKind::Constructor)
+    )
+}
+
+/// Iteration 26: attach per-function [`ComplexityMetrics`] to every
+/// function-like symbol node in `graph`. Source text is fetched via
+/// `load_source(relative_path)`, which is expected to return UTF-8
+/// content or `None` (file missing / outside the project root / not
+/// UTF-8). Languages unsupported by [`ComplexityWalker`] are silently
+/// skipped (the walker returns an empty vec).
+///
+/// Matching strategy: for every `FunctionMetrics` produced from a file,
+/// pick the first function-like graph node in that file whose 1-indexed
+/// `SymbolRange` overlaps the walker's 0-indexed `[start_line,
+/// end_line]` window. When `name` is set on both sides we prefer a
+/// node whose `display_name` matches (the SCIP `display_name` and
+/// tree-sitter `name` field can drift slightly across indexers — e.g.
+/// `Type::method` vs `method` — so a name match wins outright but its
+/// absence is not fatal).
+fn attach_complexity_metrics<F>(graph: &mut RepoDependencyGraph, mut load_source: F)
+where
+    F: FnMut(&Path) -> Option<String>,
+{
+    // Collect candidate files first: any file with at least one function-
+    // like symbol node and a non-empty `language`. The symbol_ranges
+    // sidecar already keys on PathBuf and gives us 1-indexed inclusive
+    // ranges per node, so we use it as the iteration root.
+    let candidates: Vec<(PathBuf, String, Vec<(NodeIndex, u32, u32, Option<String>)>)> = graph
+        .symbol_ranges_by_file()
+        .filter_map(|(path, ranges)| {
+            // Take the first function-like node we find in this file just
+            // to read the language hint (every node in a file shares the
+            // SCIP `Document.language`, so any one works). Skip files
+            // without a function-like node — nothing to compute.
+            let mut entries: Vec<(NodeIndex, u32, u32, Option<String>)> = Vec::new();
+            let mut language: Option<String> = None;
+            for range in ranges {
+                let node = graph.node(range.node);
+                if !is_function_like_symbol_kind(node.symbol_kind.as_ref()) {
+                    continue;
+                }
+                if language.is_none() {
+                    language = node.language.clone();
+                }
+                entries.push((
+                    range.node,
+                    range.start_line,
+                    range.end_line,
+                    Some(node.display_name.clone()),
+                ));
+            }
+            let lang = language?;
+            if entries.is_empty() {
+                return None;
+            }
+            Some((path.to_path_buf(), lang, entries))
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        return;
+    }
+
+    let mut walker = ComplexityWalker::new();
+    for (rel_path, language, mut nodes) in candidates {
+        let Some(source) = load_source(&rel_path) else {
+            continue;
+        };
+        let metrics = walker.analyze_file(&language, &source);
+        if metrics.is_empty() {
+            continue;
+        }
+        // Track which node indices we have already populated so two
+        // FunctionMetrics whose ranges overlap the same SCIP enclosing
+        // range don't fight over it.
+        let mut consumed: BTreeSet<NodeIndex> = BTreeSet::new();
+        for fm in metrics {
+            // SCIP ranges are 1-indexed inclusive (see record_symbol_range);
+            // walker ranges are 0-indexed, end-line inclusive on the
+            // declaration's last line. Bring both into the SCIP frame.
+            let fm_start = fm.start_line.saturating_add(1);
+            let fm_end = fm.end_line.saturating_add(1);
+
+            // Overlap = SCIP[start..=end] ∩ walker[start..=end] non-empty.
+            let mut name_hit: Option<usize> = None;
+            let mut overlap_hit: Option<usize> = None;
+            for (i, (node_idx, scip_start, scip_end, display_name)) in nodes.iter().enumerate() {
+                if consumed.contains(node_idx) {
+                    continue;
+                }
+                let overlaps = *scip_start <= fm_end && *scip_end >= fm_start;
+                if !overlaps {
+                    continue;
+                }
+                if name_hit.is_none() {
+                    if let (Some(disp), Some(fn_name)) = (display_name.as_deref(), fm.name.as_deref())
+                    {
+                        if names_match(disp, fn_name) {
+                            name_hit = Some(i);
+                        }
+                    }
+                }
+                if overlap_hit.is_none() {
+                    overlap_hit = Some(i);
+                }
+            }
+            let chosen = name_hit.or(overlap_hit);
+            let Some(idx_in_nodes) = chosen else {
+                continue;
+            };
+            let node_idx = nodes[idx_in_nodes].0;
+            consumed.insert(node_idx);
+            graph.graph_mut_unchecked()[node_idx].complexity = Some(fm.metrics);
+        }
+        // Drop bookkeeping for this file — keeps memory flat across large
+        // candidate sets.
+        nodes.clear();
+    }
+}
+
+/// Loose name-match between a SCIP `display_name` and a tree-sitter
+/// `name` field. SCIP indexers occasionally prefix the receiver type
+/// (`Foo::bar`, `Foo.bar`), while tree-sitter only sees the bare
+/// identifier — accept either when the suffix lines up.
+fn names_match(scip_display: &str, ts_name: &str) -> bool {
+    if scip_display == ts_name {
+        return true;
+    }
+    if let Some((_, tail)) = scip_display.rsplit_once("::") {
+        if tail == ts_name {
+            return true;
+        }
+    }
+    if let Some((_, tail)) = scip_display.rsplit_once('.') {
+        if tail == ts_name {
+            return true;
+        }
+    }
+    false
 }
 
 /// Minimal serializable artifact capturing the per-file and per-symbol graph
@@ -3818,5 +4007,185 @@ mod tests {
             !hits.is_empty(),
             "JSON-round-tripped graph must preserve symbol_ranges"
         );
+    }
+
+    // ── iter 26: complexity metrics post-pass ─────────────────────────────
+
+    /// Build a Rust SCIP fixture with two function symbols whose enclosing
+    /// ranges line up with `source` so the post-build complexity walker
+    /// can pair them by overlap.
+    fn complexity_fixture(source: &str) -> ParsedScipIndex {
+        // Both `simple` and `nested` start at the top of file in `source`;
+        // we hard-code the ranges to match the literal layout below.
+        // `simple`: lines 1..=4 (1-indexed inclusive after normalization),
+        // `nested`: lines 6..=15.
+        let simple_sym = ScipSymbol {
+            symbol: "scip-rust pkg src/lib.rs `simple`().".to_string(),
+            kind: Some(ScipSymbolKind::Function),
+            display_name: Some("simple".to_string()),
+            signature: Some("fn simple()".to_string()),
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+            signature_parts: None,
+        };
+        let nested_sym = ScipSymbol {
+            symbol: "scip-rust pkg src/lib.rs `nested`().".to_string(),
+            kind: Some(ScipSymbolKind::Function),
+            display_name: Some("nested".to_string()),
+            signature: Some("fn nested(a: i32, b: i32)".to_string()),
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+            signature_parts: None,
+        };
+
+        // `definition_with_enclosing` takes 0-indexed wire ranges and the
+        // builder bumps them to 1-indexed inclusive — see
+        // `record_symbol_range`. So a fn whose body spans 1-indexed
+        // inclusive lines [1,4] is encoded as (0, 3) here.
+        let _ = source; // silence unused if the layout drifts; lines pinned below.
+
+        ParsedScipIndex {
+            metadata: ScipMetadata {
+                project_root: Some("file:///workspace/repo".to_string()),
+                tool_name: Some("scip-rust".to_string()),
+                tool_version: Some("test".to_string()),
+            },
+            files: vec![ScipFile {
+                language: "rust".to_string(),
+                relative_path: PathBuf::from("src/lib.rs"),
+                definitions: vec![
+                    definition_with_enclosing(&simple_sym.symbol, 0, 2),
+                    definition_with_enclosing(&nested_sym.symbol, 4, 13),
+                ],
+                references: vec![],
+                occurrences: vec![],
+                symbols: vec![simple_sym, nested_sym],
+            }],
+            external_symbols: vec![],
+        }
+    }
+
+    /// Source whose tree-sitter ranges align with `complexity_fixture`:
+    ///   `simple`: 0-indexed rows 0..=2  (1-indexed 1..=3)
+    ///   `nested`: 0-indexed rows 4..=13 (1-indexed 5..=14)
+    /// The body of `nested` carries an `if` inside an `if` inside a `for`
+    /// inside an `if`: cognitive = 1 + 2 + 3 + 4 = 10
+    /// (matches `complexity::tests::deeply_nested_chains_correctly`).
+    const COMPLEXITY_FIXTURE_SOURCE: &str = "fn simple() {\n    let _ = 1;\n}\n\nfn nested(a: i32, b: i32) {\n    if a > 0 {\n        if b > 0 {\n            for _ in 0..a {\n                if b == 1 {\n                }\n            }\n        }\n    }\n}\n";
+
+    #[test]
+    fn build_with_source_attaches_complexity_to_function_nodes() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let abs = tempdir.path().join("src/lib.rs");
+        std::fs::create_dir_all(abs.parent().unwrap()).expect("mkdir");
+        std::fs::write(&abs, COMPLEXITY_FIXTURE_SOURCE).expect("write");
+
+        let graph = RepoDependencyGraph::build_with_source(
+            &[complexity_fixture(COMPLEXITY_FIXTURE_SOURCE)],
+            Some(tempdir.path()),
+        );
+
+        let simple_idx = graph
+            .symbol_node("scip-rust pkg src/lib.rs `simple`().")
+            .expect("simple node");
+        let nested_idx = graph
+            .symbol_node("scip-rust pkg src/lib.rs `nested`().")
+            .expect("nested node");
+
+        let simple = graph.node(simple_idx);
+        let nested = graph.node(nested_idx);
+
+        let simple_metrics = simple.complexity.expect("simple has metrics");
+        assert_eq!(simple_metrics.cyclomatic, 1);
+        assert_eq!(simple_metrics.cognitive, 0);
+
+        let nested_metrics = nested.complexity.expect("nested has metrics");
+        assert_eq!(nested_metrics.cognitive, 1 + 2 + 3 + 4);
+        assert_eq!(nested_metrics.param_count, 2);
+        assert_eq!(nested_metrics.max_nesting, 4);
+    }
+
+    #[test]
+    fn build_without_source_leaves_complexity_unset() {
+        // `build` (no project_root) is the synthetic-fixture path used by
+        // most unit tests in this file. The post-pass must short-circuit
+        // gracefully — no panic, no metrics, just `None` everywhere.
+        let graph = RepoDependencyGraph::build(&[complexity_fixture(
+            COMPLEXITY_FIXTURE_SOURCE,
+        )]);
+        let simple_idx = graph
+            .symbol_node("scip-rust pkg src/lib.rs `simple`().")
+            .expect("simple node");
+        assert!(graph.node(simple_idx).complexity.is_none());
+    }
+
+    #[test]
+    fn complexity_round_trips_through_artifact() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let abs = tempdir.path().join("src/lib.rs");
+        std::fs::create_dir_all(abs.parent().unwrap()).expect("mkdir");
+        std::fs::write(&abs, COMPLEXITY_FIXTURE_SOURCE).expect("write");
+
+        let graph = RepoDependencyGraph::build_with_source(
+            &[complexity_fixture(COMPLEXITY_FIXTURE_SOURCE)],
+            Some(tempdir.path()),
+        );
+
+        let artifact = graph.to_artifact();
+        assert_eq!(artifact.version, REPO_GRAPH_ARTIFACT_VERSION);
+
+        let restored = RepoDependencyGraph::from_artifact(&artifact);
+        let nested_idx = restored
+            .symbol_node("scip-rust pkg src/lib.rs `nested`().")
+            .expect("nested node restored");
+        let metrics = restored
+            .node(nested_idx)
+            .complexity
+            .expect("metrics survive round-trip");
+        assert_eq!(metrics.cognitive, 1 + 2 + 3 + 4);
+        assert_eq!(metrics.param_count, 2);
+    }
+
+    #[test]
+    fn complexity_skips_files_with_unsupported_language() {
+        // A Go file pinned at 1..=3, but the walker only knows Rust at
+        // iter 26's launch; the post-pass must skip silently rather
+        // than panic, leaving `complexity = None` on every node.
+        let go_source = "package m\n\nfunc f() {}\n";
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let abs = tempdir.path().join("src/m.go");
+        std::fs::create_dir_all(abs.parent().unwrap()).expect("mkdir");
+        std::fs::write(&abs, go_source).expect("write");
+
+        let go_sym = ScipSymbol {
+            symbol: "scip-go pkg src/m.go `f`().".to_string(),
+            kind: Some(ScipSymbolKind::Function),
+            display_name: Some("f".to_string()),
+            signature: None,
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+            signature_parts: None,
+        };
+        let index = ParsedScipIndex {
+            metadata: ScipMetadata::default(),
+            files: vec![ScipFile {
+                language: "go".to_string(),
+                relative_path: PathBuf::from("src/m.go"),
+                definitions: vec![definition_with_enclosing(&go_sym.symbol, 2, 2)],
+                references: vec![],
+                occurrences: vec![],
+                symbols: vec![go_sym],
+            }],
+            external_symbols: vec![],
+        };
+
+        let graph = RepoDependencyGraph::build_with_source(&[index], Some(tempdir.path()));
+        let f_idx = graph
+            .symbol_node("scip-go pkg src/m.go `f`().")
+            .expect("go fn node");
+        assert!(graph.node(f_idx).complexity.is_none());
     }
 }
