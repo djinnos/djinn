@@ -4,8 +4,14 @@
 # `go install golang.org/dl/go1.22` suffices when workspaces differ.
 #
 # Inputs (env):
-#   GO_VERSION   — required. e.g. "1.22".
-#   SCIP_INDEXER — optional. "scip-go" → `go install github.com/sourcegraph/scip-go/cmd/scip-go@latest`.
+#   GO_VERSION       — required. e.g. "1.22".
+#   SCIP_INDEXER     — optional. "scip-go" → installs the indexer at
+#                      `${SCIP_GO_VERSION}` (default `latest`).
+#   SCIP_GO_VERSION  — optional. Module-proxy version selector, e.g.
+#                      `v0.2.3` or `latest`. Pin to a specific tag when
+#                      `@latest` regresses (verified panic in v0.2.4 on
+#                      certain Go monorepos — see project memory
+#                      `project_complexity_feature.md`'s SCIP-go note).
 set -euo pipefail
 
 : "${GO_VERSION:?GO_VERSION is required, e.g. \"1.22\"}"
@@ -58,5 +64,5 @@ if [ "${SCIP_INDEXER:-}" = "scip-go" ]; then
     export PATH="/usr/local/go/bin:${PATH}"
     # scip-go moved from github.com/sourcegraph/scip-go to github.com/scip-code/scip-go;
     # fetching via the old path fails because v0.2.3's go.mod declares the new one.
-    GOPATH=/go go install github.com/scip-code/scip-go/cmd/scip-go@latest
+    GOPATH=/go go install "github.com/scip-code/scip-go/cmd/scip-go@${SCIP_GO_VERSION:-latest}"
 fi

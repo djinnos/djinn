@@ -2,10 +2,14 @@
 # Install one or more Python versions via uv's standalone Python builds.
 #
 # Inputs (env):
-#   PYTHON_VERSIONS  — required. Space-separated: "3.11 3.12".
-#   DEFAULT_PYTHON   — optional. Defaults to the first PYTHON_VERSIONS entry.
-#   SCIP_INDEXER     — optional. "scip-python" → `uv pip install scip-python`
-#                      into the default environment.
+#   PYTHON_VERSIONS      — required. Space-separated: "3.11 3.12".
+#   DEFAULT_PYTHON       — optional. Defaults to the first PYTHON_VERSIONS entry.
+#   SCIP_INDEXER         — optional. "scip-python" → installs the indexer
+#                          at `${SCIP_PYTHON_VERSION}` (default = PyPI latest).
+#   SCIP_PYTHON_VERSION  — optional. Pin scip-python to a specific PyPI
+#                          version, e.g. `0.6.6`. Defaults to whatever
+#                          `uv tool install scip-python` resolves on the
+#                          build host (PyPI `latest`).
 set -euo pipefail
 
 : "${PYTHON_VERSIONS:?PYTHON_VERSIONS is required (space-separated majors, e.g. \"3.12\")}"
@@ -36,5 +40,9 @@ EOF
 chmod 0644 /etc/profile.d/30-python.sh
 
 if [ "${SCIP_INDEXER:-}" = "scip-python" ]; then
-    uv tool install scip-python
+    if [ -n "${SCIP_PYTHON_VERSION:-}" ]; then
+        uv tool install "scip-python==${SCIP_PYTHON_VERSION}"
+    else
+        uv tool install scip-python
+    fi
 fi
