@@ -3,19 +3,16 @@ name = "djinn-agent-worker"
 version = "0.1.0"
 edition = "2024"
 
-# Binary-only crate: the worker exists to be executed inside the
-# `LocalDockerRuntime` container.  No library surface is published — every
-# helper lives under `src/` and is exercised through the integration tests.
-# Depending on `djinn-agent` from here would create a cycle
-# (`djinn-agent` will depend on this crate transitively through the runtime
-# wiring in PR 6/7), so we deliberately stop at `djinn-supervisor` +
-# `djinn-runtime` + `djinn-workspace` + `djinn-core`.
+# Statically links `djinn-agent` to reuse the in-process supervisor + stage
+# execution drivers inside the per-task-run Pod. Coordinator / LSP / MCP code
+# paths are linked but not instantiated.
 
 [[bin]]
 name = "djinn-agent-worker"
 path = "src/main.rs"
 
 [dependencies]
+djinn-agent = { path = "../djinn-agent" }
 djinn-core = { path = "../djinn-core" }
 djinn-db = { path = "../djinn-db" }
 djinn-graph = { path = "../djinn-graph" }

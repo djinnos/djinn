@@ -1112,6 +1112,7 @@ dependencies = [
  "async-trait",
  "bincode",
  "clap",
+ "djinn-agent",
  "djinn-core",
  "djinn-db",
  "djinn-graph",
