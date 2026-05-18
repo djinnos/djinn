@@ -36,27 +36,19 @@ use djinn_workspace::MirrorManager;
 /// `RuntimeKind::Test`.  The runner holds onto everything needed to
 /// materialize a fresh supervisor per run:
 ///
-/// - `task_runs` — the repo the supervisor writes the `task_run` row into.
 /// - `mirror` — the shared [`MirrorManager`] used for the ephemeral clone.
 /// - `services` — the already-wired `Arc<dyn SupervisorServices>` that carries
 ///   the in-process `AgentContext` (and any test-only provider override).
+///   The `task_run` row writes route through `services.create_task_run` /
+///   `services.update_task_run_status` as of Phase 4.
 pub struct SupervisorTaskRunner {
-    task_runs: Arc<djinn_db::TaskRunRepository>,
     mirror: Arc<MirrorManager>,
     services: Arc<dyn SupervisorServices>,
 }
 
 impl SupervisorTaskRunner {
-    pub fn new(
-        task_runs: Arc<djinn_db::TaskRunRepository>,
-        mirror: Arc<MirrorManager>,
-        services: Arc<dyn SupervisorServices>,
-    ) -> Self {
-        Self {
-            task_runs,
-            mirror,
-            services,
-        }
+    pub fn new(mirror: Arc<MirrorManager>, services: Arc<dyn SupervisorServices>) -> Self {
+        Self { mirror, services }
     }
 }
 
@@ -72,11 +64,7 @@ impl TaskRunner for SupervisorTaskRunner {
         // `TestRuntime` is cooperative and redundant here.  `TestRuntime`
         // still aborts the spawned task on `cancel` as a hard backstop, so
         // bounded teardown is preserved.
-        let supervisor = TaskRunSupervisor::new(
-            self.task_runs.clone(),
-            self.mirror.clone(),
-            self.services.clone(),
-        );
+        let supervisor = TaskRunSupervisor::new(self.mirror.clone(), self.services.clone());
         supervisor
             .run(spec)
             .await

@@ -227,7 +227,7 @@ async fn supervisor_clones_from_mirror_without_worktrees() {
     let agent_ctx = test_agent_context(db.clone());
     let task_runs = Arc::new(TaskRunRepository::new(db.clone()));
     let services = services_for_agent_context(agent_ctx, cancel.clone());
-    let supervisor = TaskRunSupervisor::new(task_runs.clone(), mirror.clone(), services);
+    let supervisor = TaskRunSupervisor::new(mirror.clone(), services);
 
     // 5. Spike flow = single Architect stage — minimizes reply_loop surface.
     let spec = TaskRunSpec {
@@ -476,7 +476,7 @@ async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
         cancel.clone(),
         stub.clone() as Arc<dyn LlmProvider>,
     );
-    let supervisor = TaskRunSupervisor::new(task_runs.clone(), mirror.clone(), services);
+    let supervisor = TaskRunSupervisor::new(mirror.clone(), services);
 
     let spec = TaskRunSpec {
         task_id: task.id.clone(),

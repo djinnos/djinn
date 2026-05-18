@@ -29,8 +29,6 @@
 use std::sync::Arc;
 
 use djinn_core::models::{TaskRunStatus, TaskRunTrigger};
-use djinn_db::TaskRunRepository;
-use djinn_db::repositories::task_run::CreateTaskRunParams;
 use djinn_workspace::{EphemeralWorkspaceError, MirrorError, MirrorManager};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -77,6 +75,12 @@ pub enum SupervisorError {
 
     #[error("load task: {0}")]
     LoadTask(String),
+
+    #[error("create task_run: {0}")]
+    CreateTaskRun(String),
+
+    #[error("update task_run status: {0}")]
+    UpdateTaskRunStatus(String),
 
     #[error("stage: {0}")]
     Stage(#[from] StageError),
@@ -136,23 +140,22 @@ impl StageOutcome {
 // ── TaskRunSupervisor ────────────────────────────────────────────────────────
 
 pub struct TaskRunSupervisor {
-    task_runs: Arc<TaskRunRepository>,
     mirror: Arc<MirrorManager>,
     services: Arc<dyn SupervisorServices>,
 }
 
 impl TaskRunSupervisor {
     /// Construct a supervisor bound to the given services.
-    pub fn new(
-        task_runs: Arc<TaskRunRepository>,
-        mirror: Arc<MirrorManager>,
-        services: Arc<dyn SupervisorServices>,
-    ) -> Self {
-        Self {
-            task_runs,
-            mirror,
-            services,
-        }
+    ///
+    /// Phase 4 of `~/.claude/plans/phase2-worker-execution-architecture.md`:
+    /// the supervisor no longer holds an `Arc<TaskRunRepository>` directly.
+    /// `task_run` row writes are routed through
+    /// [`SupervisorServices::create_task_run`] /
+    /// [`SupervisorServices::update_task_run_status`] so the worker pod —
+    /// which has no DB connection — can construct a supervisor and ship
+    /// those writes back through the RPC channel.
+    pub fn new(mirror: Arc<MirrorManager>, services: Arc<dyn SupervisorServices>) -> Self {
+        Self { mirror, services }
     }
 
     /// Drive a task-run from start to terminal state.
@@ -167,17 +170,18 @@ impl TaskRunSupervisor {
             "task-run starting"
         );
 
-        self.task_runs
-            .create(CreateTaskRunParams {
-                id: &run_id,
-                project_id: &spec.project_id,
-                task_id: &spec.task_id,
-                trigger_type: &trigger_str,
+        self.services
+            .create_task_run(SerializableCreateTaskRunParams {
+                id: run_id.clone(),
+                project_id: spec.project_id.clone(),
+                task_id: spec.task_id.clone(),
+                trigger_type: trigger_str.clone(),
                 status: None,
                 workspace_path: None,
                 mirror_ref: None,
             })
-            .await?;
+            .await
+            .map_err(SupervisorError::CreateTaskRun)?;
 
         let workspace = self
             .mirror
@@ -284,9 +288,10 @@ impl TaskRunSupervisor {
             TaskRunOutcome::Failed { .. } => TaskRunStatus::Failed,
             TaskRunOutcome::Interrupted => TaskRunStatus::Interrupted,
         };
-        self.task_runs
-            .update_status(&run_id, terminal_status)
-            .await?;
+        self.services
+            .update_task_run_status(run_id.clone(), terminal_status)
+            .await
+            .map_err(SupervisorError::UpdateTaskRunStatus)?;
 
         info!(task_run_id = %run_id, ?outcome, "task-run finished");
         Ok(TaskRunReport {

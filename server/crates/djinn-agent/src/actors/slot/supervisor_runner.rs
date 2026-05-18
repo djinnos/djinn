@@ -141,10 +141,6 @@ pub(crate) async fn run_supervisor_dispatch(
             );
         }
     };
-    let task_runs = Arc::new(djinn_db::repositories::task_run::TaskRunRepository::new(
-        app_state.db.clone(),
-    ));
-
     let runtime_kind = runtime_kind();
 
     let runtime: Arc<dyn SessionRuntime> = match runtime_kind {
@@ -179,7 +175,7 @@ pub(crate) async fn run_supervisor_dispatch(
         }
         RuntimeKind::Test => {
             let services = services_for_agent_context(app_state.clone(), kill.clone());
-            let runner = SupervisorTaskRunner::new(task_runs.clone(), mirror.clone(), services);
+            let runner = SupervisorTaskRunner::new(mirror.clone(), services);
             Arc::new(TestRuntime::new(runner))
         }
     };
