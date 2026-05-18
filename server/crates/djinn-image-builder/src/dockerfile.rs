@@ -343,16 +343,33 @@ const DOTNET_SCIP_INDEXER: &str = "scip-dotnet";
 
 // Version pins for SCIP indexers. `"latest"` means the Go-module-proxy /
 // PyPI / npm `latest` tag at build time. Bump these consts to roll
-// forward; pin to a known-good tag (e.g. `"v0.2.3"`) when an upstream
-// `@latest` regresses. See `project_scip_indexer_versions.md` in user
-// memory for the running list of known regressions.
-const SCIP_GO_VERSION: &str = "latest";
+// forward; pin to a known-good tag when an upstream `@latest` regresses.
+// See `project_scip_indexer_versions.md` in user memory for the running
+// list of known regressions.
+//
+// Known regressions:
+//   - scip-go v0.2.4 panics on some Go monorepos:
+//     `runtime error: index out of range [0] with length 0` in
+//     `internal/index/scip.go:221` (`indexVisitPackages`). Fixed in
+//     v0.2.6 via the panic-to-error conversions in upstream PR #196
+//     and the test-only-dir fix in #255 — hence the pin below.
+//
+// Format notes (per each install-*.sh):
+//   - scip-go: Go module-proxy selector, leading `v` (e.g. `v0.2.6`).
+//   - scip-java / scip-clang: GitHub release tag, leading `v`.
+//   - scip-ruby: RubyGems version, BARE number (no leading `v`); the
+//     upstream tag is `scip-ruby-v0.4.7` but the gem ships as `0.4.7`.
+//   - scip-dotnet: NuGet version for `dotnet tool install --version`,
+//     BARE number (no leading `v`).
+//   - scip-python: PyPI version, BARE number (no leading `v`).
+//   - scip-typescript: npm version, BARE number (no leading `v`).
+const SCIP_GO_VERSION: &str = "v0.2.6";
 const SCIP_PYTHON_VERSION: &str = "latest";
 const SCIP_TYPESCRIPT_VERSION: &str = "latest";
-const SCIP_JAVA_VERSION: &str = "latest";
-const SCIP_CLANG_VERSION: &str = "latest";
-const SCIP_RUBY_VERSION: &str = "latest";
-const SCIP_DOTNET_VERSION: &str = "latest";
+const SCIP_JAVA_VERSION: &str = "v0.12.3";
+const SCIP_CLANG_VERSION: &str = "v0.4.0";
+const SCIP_RUBY_VERSION: &str = "0.4.7";
+const SCIP_DOTNET_VERSION: &str = "0.2.14";
 
 fn emit_python_block(df: &mut String, languages: &Languages, config: &EnvironmentConfig) {
     let Some(python) = &languages.python else { return };
