@@ -38,7 +38,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
-use djinn_core::models::Task;
+use djinn_core::models::{Task, TaskRunStatus};
 use djinn_runtime::wire::{ControlMsg, WorkspaceRef, read_frame, write_frame};
 use djinn_workspace::Workspace;
 use thiserror::Error;
@@ -51,7 +51,8 @@ use tracing::{debug, error, info, warn};
 
 use super::SupervisorServices;
 use super::wire::{
-    AuthHelloMsg, AuthResultMsg, Frame, FramePayload, ServiceRpcRequest, ServiceRpcResponse,
+    AuthHelloMsg, AuthResultMsg, Frame, FramePayload, SerializableCreateTaskRunParams,
+    ServiceRpcRequest, ServiceRpcResponse,
 };
 use crate::{RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec};
 
@@ -367,6 +368,37 @@ impl SupervisorServices for RpcServices {
             },
         }
     }
+
+    async fn create_task_run(
+        &self,
+        params: SerializableCreateTaskRunParams,
+    ) -> Result<(), String> {
+        match self
+            .roundtrip(ServiceRpcRequest::CreateTaskRun { params })
+            .await
+        {
+            Ok(ServiceRpcResponse::CreateTaskRun(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn update_task_run_status(
+        &self,
+        run_id: String,
+        status: TaskRunStatus,
+    ) -> Result<(), String> {
+        match self
+            .roundtrip(ServiceRpcRequest::UpdateTaskRunStatus { run_id, status })
+            .await
+        {
+            Ok(ServiceRpcResponse::UpdateTaskRunStatus(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 // ── Reader / writer loops ────────────────────────────────────────────────────
@@ -508,6 +540,25 @@ impl SupervisorServices for UnimplementedRpcServices {
     async fn open_pr(&self, _spec: &TaskRunSpec, _task: &Task) -> TaskRunOutcome {
         unimplemented!("UnimplementedRpcServices::open_pr — construct RpcServices for real RPC")
     }
+
+    async fn create_task_run(
+        &self,
+        _params: SerializableCreateTaskRunParams,
+    ) -> Result<(), String> {
+        unimplemented!(
+            "UnimplementedRpcServices::create_task_run — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn update_task_run_status(
+        &self,
+        _run_id: String,
+        _status: TaskRunStatus,
+    ) -> Result<(), String> {
+        unimplemented!(
+            "UnimplementedRpcServices::update_task_run_status — construct RpcServices for real RPC"
+        )
+    }
 }
 
 #[cfg(test)]
@@ -567,6 +618,126 @@ mod tests {
         let _ = bg.reader.await;
         let _ = bg.writer.await;
         let _ = server_task.await;
+    }
+
+    /// Round-trip a `create_task_run` RPC through an in-memory Unix socket
+    /// pair.  The server half asserts the params shape and answers Ok(()).
+    #[tokio::test]
+    async fn create_task_run_roundtrip_over_unixpair() {
+        let (client, server) = UnixStream::pair().expect("pair");
+
+        let server_task = tokio::spawn(async move {
+            let (mut read, mut write) = server.into_split();
+            let frame: Frame = read_frame(&mut read).await.expect("read request");
+            match frame.payload {
+                FramePayload::Rpc(ServiceRpcRequest::CreateTaskRun { params }) => {
+                    assert_eq!(params.id, "run-create-rt");
+                    assert_eq!(params.project_id, "p1");
+                    assert_eq!(params.task_id, "t1");
+                    assert_eq!(params.trigger_type, "new_task");
+                    assert_eq!(params.status.as_deref(), Some("running"));
+                    let reply = Frame {
+                        correlation_id: frame.correlation_id,
+                        payload: FramePayload::RpcReply(ServiceRpcResponse::CreateTaskRun(Ok(()))),
+                    };
+                    write_frame(&mut write, &reply).await.expect("write reply");
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        });
+
+        let cancel = CancellationToken::new();
+        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
+        let params = SerializableCreateTaskRunParams {
+            id: "run-create-rt".into(),
+            project_id: "p1".into(),
+            task_id: "t1".into(),
+            trigger_type: "new_task".into(),
+            status: Some("running".into()),
+            workspace_path: None,
+            mirror_ref: None,
+        };
+        services
+            .create_task_run(params)
+            .await
+            .expect("create_task_run ok");
+
+        cancel.cancel();
+        let _ = bg.reader.await;
+        let _ = bg.writer.await;
+        let _ = server_task.await;
+    }
+
+    /// Round-trip an `update_task_run_status` RPC through an in-memory Unix
+    /// socket pair.  Exercises both the Ok and Err reply legs.
+    #[tokio::test]
+    async fn update_task_run_status_roundtrip_over_unixpair() {
+        // ── leg 1: Ok ───────────────────────────────────────────────────
+        let (client, server) = UnixStream::pair().expect("pair");
+        let server_task = tokio::spawn(async move {
+            let (mut read, mut write) = server.into_split();
+            let frame: Frame = read_frame(&mut read).await.expect("read request");
+            match frame.payload {
+                FramePayload::Rpc(ServiceRpcRequest::UpdateTaskRunStatus { run_id, status }) => {
+                    assert_eq!(run_id, "run-update-rt");
+                    assert_eq!(status, TaskRunStatus::Completed);
+                    let reply = Frame {
+                        correlation_id: frame.correlation_id,
+                        payload: FramePayload::RpcReply(ServiceRpcResponse::UpdateTaskRunStatus(
+                            Ok(()),
+                        )),
+                    };
+                    write_frame(&mut write, &reply).await.expect("write reply");
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        });
+
+        let cancel = CancellationToken::new();
+        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
+        services
+            .update_task_run_status("run-update-rt".into(), TaskRunStatus::Completed)
+            .await
+            .expect("update_task_run_status ok");
+
+        cancel.cancel();
+        let _ = bg.reader.await;
+        let _ = bg.writer.await;
+        let _ = server_task.await;
+
+        // ── leg 2: Err — server returns Err(String), client surfaces it ──
+        let (client2, server2) = UnixStream::pair().expect("pair");
+        let server_task2 = tokio::spawn(async move {
+            let (mut read, mut write) = server2.into_split();
+            let frame: Frame = read_frame(&mut read).await.expect("read request");
+            match frame.payload {
+                FramePayload::Rpc(ServiceRpcRequest::UpdateTaskRunStatus { run_id, status }) => {
+                    assert_eq!(run_id, "run-update-err");
+                    assert_eq!(status, TaskRunStatus::Failed);
+                    let reply = Frame {
+                        correlation_id: frame.correlation_id,
+                        payload: FramePayload::RpcReply(ServiceRpcResponse::UpdateTaskRunStatus(
+                            Err("no such run".into()),
+                        )),
+                    };
+                    write_frame(&mut write, &reply).await.expect("write reply");
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        });
+
+        let cancel2 = CancellationToken::new();
+        let (services2, bg2) = RpcServices::from_unix_stream(client2, cancel2.clone());
+        let err = services2
+            .update_task_run_status("run-update-err".into(), TaskRunStatus::Failed)
+            .await
+            .expect_err("Err leg");
+        assert_eq!(err, "no such run");
+
+        cancel2.cancel();
+        let _ = bg2.reader.await;
+        let _ = bg2.writer.await;
+        let _ = server_task2.await;
     }
 
     fn fixture_task() -> Task {

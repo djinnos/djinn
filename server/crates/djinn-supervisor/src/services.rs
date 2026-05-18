@@ -9,7 +9,7 @@
 //!   trait layout ahead of PR 4/5.
 
 use async_trait::async_trait;
-use djinn_core::models::Task;
+use djinn_core::models::{Task, TaskRunStatus};
 use djinn_workspace::Workspace;
 use tokio_util::sync::CancellationToken;
 
@@ -18,6 +18,8 @@ use crate::{RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec};
 pub mod rpc;
 pub mod server;
 pub mod wire;
+
+pub use wire::SerializableCreateTaskRunParams;
 
 /// Dependencies shared across every stage in a task-run.
 ///
@@ -51,4 +53,23 @@ pub trait SupervisorServices: Send + Sync + 'static {
     /// `ConflictRetry` flows that reached the end of their role sequence
     /// cleanly.
     async fn open_pr(&self, spec: &TaskRunSpec, task: &Task) -> TaskRunOutcome;
+
+    /// Persist a new `task_run` row.  Phase 4 will switch
+    /// [`crate::TaskRunSupervisor::run`] off its direct
+    /// `Arc<TaskRunRepository>` and onto this RPC so the worker pod (which
+    /// has no DB connection) can ship the same write through the existing
+    /// `SupervisorServices` channel.  Dead code until Phase 4.
+    async fn create_task_run(
+        &self,
+        params: SerializableCreateTaskRunParams,
+    ) -> Result<(), String>;
+
+    /// Update the terminal `status` (and `ended_at`) of a `task_run` row.
+    /// Phase 4 will swap the supervisor's `task_runs.update_status` call
+    /// for this method.  Dead code until Phase 4.
+    async fn update_task_run_status(
+        &self,
+        run_id: String,
+        status: TaskRunStatus,
+    ) -> Result<(), String>;
 }

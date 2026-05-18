@@ -16,7 +16,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use djinn_core::models::Task;
+use djinn_core::models::{Task, TaskRunStatus};
+use djinn_db::TaskRunRepository;
+use djinn_db::repositories::task_run::CreateTaskRunParams;
+use djinn_supervisor::services::SerializableCreateTaskRunParams;
 use djinn_supervisor::{
     RoleKind, StageError, StageOutcome, SupervisorServices, TaskRunOutcome, TaskRunSpec,
 };
@@ -31,6 +34,14 @@ use crate::supervisor_impl::{SupervisorCallbackContext, execute_stage, superviso
 /// lifecycle helpers inside `djinn-agent`.
 pub struct DirectServices {
     callbacks: SupervisorCallbackContext,
+    /// Bound to the same `Database` carried in `callbacks.agent_context`.
+    /// Phase 3 adds this so [`SupervisorServices::create_task_run`] and
+    /// [`SupervisorServices::update_task_run_status`] can persist
+    /// `task_run` rows in-process; until Phase 4 cuts the
+    /// `TaskRunSupervisor::run` body over to the trait, these methods are
+    /// dead code (the supervisor still calls `task_runs.create()` /
+    /// `task_runs.update_status()` directly).
+    task_runs: Arc<TaskRunRepository>,
 }
 
 impl DirectServices {
@@ -49,12 +60,14 @@ impl DirectServices {
         cancel: CancellationToken,
         provider_override: Option<Arc<dyn LlmProvider>>,
     ) -> Self {
+        let task_runs = Arc::new(TaskRunRepository::new(agent_context.db.clone()));
         Self {
             callbacks: SupervisorCallbackContext {
                 agent_context,
                 cancel,
                 provider_override,
             },
+            task_runs,
         }
     }
 }
@@ -84,5 +97,35 @@ impl SupervisorServices for DirectServices {
 
     async fn open_pr(&self, spec: &TaskRunSpec, task: &Task) -> TaskRunOutcome {
         supervisor_pr_open(spec, task, &self.callbacks).await
+    }
+
+    async fn create_task_run(
+        &self,
+        params: SerializableCreateTaskRunParams,
+    ) -> Result<(), String> {
+        self.task_runs
+            .create(CreateTaskRunParams {
+                id: params.id.as_str(),
+                project_id: params.project_id.as_str(),
+                task_id: params.task_id.as_str(),
+                trigger_type: params.trigger_type.as_str(),
+                status: params.status.as_deref(),
+                workspace_path: params.workspace_path.as_deref(),
+                mirror_ref: params.mirror_ref.as_deref(),
+            })
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn update_task_run_status(
+        &self,
+        run_id: String,
+        status: TaskRunStatus,
+    ) -> Result<(), String> {
+        self.task_runs
+            .update_status(&run_id, status)
+            .await
+            .map_err(|e| e.to_string())
     }
 }

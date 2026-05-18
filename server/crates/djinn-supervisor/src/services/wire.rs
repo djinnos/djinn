@@ -31,7 +31,7 @@
 //! helpers live in `djinn-runtime::wire` so both the launcher server side and
 //! the worker client side use the same reader/writer pair.
 
-use djinn_core::models::Task;
+use djinn_core::models::{Task, TaskRunStatus};
 use djinn_runtime::wire::{ControlMsg, WorkerEvent, WorkspaceRef};
 use serde::{Deserialize, Serialize};
 
@@ -89,6 +89,30 @@ pub struct AuthHelloMsg {
     pub token: String,
 }
 
+/// Borrow-free serde-friendly twin of
+/// [`djinn_db::repositories::task_run::CreateTaskRunParams<'_>`].
+///
+/// The repo struct stores `&str` fields so SQL parameter binding stays
+/// zero-copy; sending it across the bincode wire requires owned `String`s.
+/// The shapes line up 1:1 — adapt by `.as_str()` on the host before
+/// constructing the repo params.  Introduced in Phase 3 of
+/// `~/.claude/plans/phase2-worker-execution-architecture.md`; dead code
+/// until Phase 4 wires the supervisor's
+/// [`crate::TaskRunSupervisor::run`] body off
+/// [`djinn_db::TaskRunRepository`] and onto
+/// [`crate::SupervisorServices::create_task_run`].
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SerializableCreateTaskRunParams {
+    pub id: String,
+    pub project_id: String,
+    pub task_id: String,
+    pub trigger_type: String,
+    /// Initial status; `None` defaults to `"running"` on the host side.
+    pub status: Option<String>,
+    pub workspace_path: Option<String>,
+    pub mirror_ref: Option<String>,
+}
+
 /// Contents of an [`FramePayload::AuthResult`] handshake reply.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AuthResultMsg {
@@ -118,6 +142,13 @@ pub enum ServiceRpcRequest {
     },
     /// [`crate::SupervisorServices::open_pr`].
     OpenPr { spec: TaskRunSpec, task: Task },
+    /// [`crate::SupervisorServices::create_task_run`].  Phase 3 wire
+    /// surface; dead until Phase 4 actually drives this from the worker.
+    CreateTaskRun {
+        params: SerializableCreateTaskRunParams,
+    },
+    /// [`crate::SupervisorServices::update_task_run_status`].
+    UpdateTaskRunStatus { run_id: String, status: TaskRunStatus },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -132,6 +163,8 @@ pub enum ServiceRpcResponse {
     LoadTask(Result<Task, String>),
     ExecuteStage(Result<StageOutcome, StageError>),
     OpenPr(TaskRunOutcome),
+    CreateTaskRun(Result<(), String>),
+    UpdateTaskRunStatus(Result<(), String>),
     /// Transport-level failure — not produced by normal operation.
     Err(String),
 }
@@ -327,6 +360,114 @@ mod tests {
             FramePayload::AuthHello(AuthHelloMsg { task_run_id, token }) => {
                 assert_eq!(task_run_id, "run-7");
                 assert_eq!(token, "kubeSA-bearer-xyz");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_task_run_request_roundtrip() {
+        let params = SerializableCreateTaskRunParams {
+            id: "run-create-1".into(),
+            project_id: "p1".into(),
+            task_id: "t1".into(),
+            trigger_type: "new_task".into(),
+            status: Some("running".into()),
+            workspace_path: Some("/workspace".into()),
+            mirror_ref: Some("refs/mirror/p1".into()),
+        };
+        let f = Frame {
+            correlation_id: 11,
+            payload: FramePayload::Rpc(ServiceRpcRequest::CreateTaskRun {
+                params: params.clone(),
+            }),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back.correlation_id, 11);
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::CreateTaskRun { params: got }) => {
+                assert_eq!(got, params);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_task_run_reply_roundtrip() {
+        let resp = ServiceRpcResponse::CreateTaskRun(Ok(()));
+        let f = Frame {
+            correlation_id: 11,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::CreateTaskRun(Ok(()))) => {}
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // Err branch too.
+        let resp = ServiceRpcResponse::CreateTaskRun(Err("duplicate id".into()));
+        let f = Frame {
+            correlation_id: 11,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::CreateTaskRun(Err(e))) => {
+                assert_eq!(e, "duplicate id");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_task_run_status_request_roundtrip() {
+        let f = Frame {
+            correlation_id: 12,
+            payload: FramePayload::Rpc(ServiceRpcRequest::UpdateTaskRunStatus {
+                run_id: "run-1".into(),
+                status: TaskRunStatus::Completed,
+            }),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back.correlation_id, 12);
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::UpdateTaskRunStatus { run_id, status }) => {
+                assert_eq!(run_id, "run-1");
+                assert_eq!(status, TaskRunStatus::Completed);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_task_run_status_reply_roundtrip() {
+        let resp = ServiceRpcResponse::UpdateTaskRunStatus(Ok(()));
+        let f = Frame {
+            correlation_id: 12,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::UpdateTaskRunStatus(Ok(()))) => {}
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        let resp = ServiceRpcResponse::UpdateTaskRunStatus(Err("not found".into()));
+        let f = Frame {
+            correlation_id: 12,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::UpdateTaskRunStatus(Err(e))) => {
+                assert_eq!(e, "not found");
             }
             other => panic!("unexpected: {other:?}"),
         }

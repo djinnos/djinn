@@ -48,7 +48,8 @@ pub use services::server::{
     serve_on_tcp, serve_on_unix_socket,
 };
 pub use services::wire::{
-    AuthHelloMsg, AuthResultMsg, Frame, FramePayload, ServiceRpcRequest, ServiceRpcResponse,
+    AuthHelloMsg, AuthResultMsg, Frame, FramePayload, SerializableCreateTaskRunParams,
+    ServiceRpcRequest, ServiceRpcResponse,
 };
 
 // Re-export runtime spec types at the crate root so the thin

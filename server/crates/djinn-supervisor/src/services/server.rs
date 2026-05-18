@@ -1048,6 +1048,14 @@ async fn dispatch(
             let outcome = services.open_pr(&spec, &task).await;
             ServiceRpcResponse::OpenPr(outcome)
         }
+        ServiceRpcRequest::CreateTaskRun { params } => {
+            let result = services.create_task_run(params).await;
+            ServiceRpcResponse::CreateTaskRun(result)
+        }
+        ServiceRpcRequest::UpdateTaskRunStatus { run_id, status } => {
+            let result = services.update_task_run_status(run_id, status).await;
+            ServiceRpcResponse::UpdateTaskRunStatus(result)
+        }
     }
 }
 
@@ -1096,6 +1104,21 @@ mod tests {
         }
 
         async fn open_pr(&self, _spec: &TaskRunSpec, _task: &Task) -> TaskRunOutcome {
+            unimplemented!("not exercised in server tests")
+        }
+
+        async fn create_task_run(
+            &self,
+            _params: super::super::wire::SerializableCreateTaskRunParams,
+        ) -> Result<(), String> {
+            unimplemented!("not exercised in server tests")
+        }
+
+        async fn update_task_run_status(
+            &self,
+            _run_id: String,
+            _status: djinn_core::models::TaskRunStatus,
+        ) -> Result<(), String> {
             unimplemented!("not exercised in server tests")
         }
     }
