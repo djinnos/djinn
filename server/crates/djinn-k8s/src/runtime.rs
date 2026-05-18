@@ -1010,6 +1010,19 @@ mod tests {
             async fn open_pr(&self, _: &TaskRunSpec, _: &Task) -> SupTaskRunOutcome {
                 unimplemented!()
             }
+            async fn create_task_run(
+                &self,
+                _: djinn_supervisor::SerializableCreateTaskRunParams,
+            ) -> Result<(), String> {
+                unimplemented!()
+            }
+            async fn update_task_run_status(
+                &self,
+                _: String,
+                _: djinn_core::models::TaskRunStatus,
+            ) -> Result<(), String> {
+                unimplemented!()
+            }
         }
 
         let services: Arc<dyn SupervisorServices> = Arc::new(NoopServices {

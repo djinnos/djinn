@@ -112,6 +112,14 @@ pub fn build_task_run_job(
             env_var("DJINN_SPEC_PATH", SPEC_MOUNT_FILE),
             env_var("DJINN_TOKEN_PATH", TOKEN_MOUNT_FILE),
             env_var("DJINN_TASK_RUN_ID", &task_run_id_str),
+            // TMPDIR points the supervisor's TempDir::new() (used by
+            // mirror.clone_ephemeral) at the writable /workspace emptyDir
+            // instead of the container's tmpfs root, which has stricter
+            // size limits.
+            env_var("TMPDIR", WORKSPACE_MOUNT_DIR),
+            // DJINN_MIRROR_ROOT is read by the in-Pod MirrorManager so the
+            // worker clones from /mirror without a hard-coded path.
+            env_var("DJINN_MIRROR_ROOT", MIRROR_MOUNT_DIR),
         ]),
         volume_mounts: Some(vec![
             volume_mount(VOLUME_SPEC, SPEC_MOUNT_DIR, Some(true)),
@@ -367,6 +375,11 @@ mod tests {
         assert_eq!(
             envs.get("DJINN_TASK_RUN_ID").copied(),
             Some(task_run_id.to_string().as_str())
+        );
+        assert_eq!(envs.get("TMPDIR").copied(), Some(WORKSPACE_MOUNT_DIR));
+        assert_eq!(
+            envs.get("DJINN_MIRROR_ROOT").copied(),
+            Some(MIRROR_MOUNT_DIR)
         );
 
         // Volume mounts: 5 from the pre-env-config layout + the
