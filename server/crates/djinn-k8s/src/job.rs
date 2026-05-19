@@ -41,7 +41,10 @@ pub const CREDENTIALS_MOUNT_FILE: &str = "/var/run/djinn/credentials.bin";
 pub const TOKEN_MOUNT_DIR: &str = "/var/run/secrets/tokens";
 /// Path where the projected token is read by the worker.
 pub const TOKEN_MOUNT_FILE: &str = "/var/run/secrets/tokens/djinn";
-/// Mount path for the read-only mirror PVC.
+/// Mount path for the mirror PVC. Mounted RW so the worker can push
+/// its task_branch back to the mirror before delegating open_pr —
+/// otherwise the host's `squash_merge_via_mirror` can't find the
+/// worker's commits.
 pub const MIRROR_MOUNT_DIR: &str = "/mirror";
 /// Mount path for the writeable shared cache PVC.
 pub const CACHE_MOUNT_DIR: &str = "/cache";
@@ -64,7 +67,7 @@ pub const CREDENTIALS_SECRET_KEY: &str = "credentials.bin";
 pub const VOLUME_SPEC: &str = "spec";
 /// Volume name for the projected ServiceAccount token.
 pub const VOLUME_AUTH_TOKEN: &str = "auth-token";
-/// Volume name for the read-only mirror PVC.
+/// Volume name for the mirror PVC.
 pub const VOLUME_MIRROR: &str = "mirror";
 /// Volume name for the writeable shared cache PVC.
 pub const VOLUME_CACHE: &str = "cache";
@@ -119,7 +122,12 @@ pub fn build_task_run_job(
         volume_mounts: Some(vec![
             volume_mount(VOLUME_SPEC, SPEC_MOUNT_DIR, Some(true)),
             volume_mount(VOLUME_AUTH_TOKEN, TOKEN_MOUNT_DIR, Some(true)),
-            volume_mount(VOLUME_MIRROR, MIRROR_MOUNT_DIR, Some(true)),
+            // Mirror PVC is mounted RW so the worker can push the
+            // task_branch back to the mirror before delegating open_pr.
+            // The mirror PVC is ReadWriteMany (deploy/helm/djinn/values.yaml)
+            // so concurrent workers writing distinct, uniquely-named
+            // task_branches do not conflict.
+            volume_mount(VOLUME_MIRROR, MIRROR_MOUNT_DIR, Some(false)),
             volume_mount(VOLUME_CACHE, CACHE_MOUNT_DIR, None),
             volume_mount(VOLUME_WORKSPACE, WORKSPACE_MOUNT_DIR, None),
             crate::env_config::env_config_volume_mount(),
@@ -182,7 +190,11 @@ pub fn build_task_run_job(
             name: VOLUME_MIRROR.to_string(),
             persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
                 claim_name: config.mirror_pvc.clone(),
-                read_only: Some(true),
+                // RW so the worker can push its task_branch back to the
+                // mirror before delegating open_pr. See the matching
+                // VolumeMount comment above for the cross-Pod safety
+                // argument.
+                read_only: Some(false),
             }),
             ..Volume::default()
         },
@@ -488,7 +500,7 @@ mod tests {
         let expected_mounts: [(&str, &str, Option<bool>); 6] = [
             (VOLUME_SPEC, SPEC_MOUNT_DIR, Some(true)),
             (VOLUME_AUTH_TOKEN, TOKEN_MOUNT_DIR, Some(true)),
-            (VOLUME_MIRROR, MIRROR_MOUNT_DIR, Some(true)),
+            (VOLUME_MIRROR, MIRROR_MOUNT_DIR, Some(false)),
             (VOLUME_CACHE, CACHE_MOUNT_DIR, None),
             (VOLUME_WORKSPACE, WORKSPACE_MOUNT_DIR, None),
             (
@@ -548,14 +560,15 @@ mod tests {
         assert_eq!(sa_token.expiration_seconds, Some(TOKEN_EXPIRATION_SECONDS));
         assert_eq!(sa_token.path, "djinn");
 
-        // mirror → PVC (read-only).
+        // mirror → PVC (read-write so the worker can push its task_branch
+        // back to the mirror before delegating open_pr).
         let mirror_volume = &volumes[2];
         let mirror_pvc = mirror_volume
             .persistent_volume_claim
             .as_ref()
             .expect("mirror volume is PVC");
         assert_eq!(mirror_pvc.claim_name, cfg.mirror_pvc);
-        assert_eq!(mirror_pvc.read_only, Some(true));
+        assert_eq!(mirror_pvc.read_only, Some(false));
 
         // cache → PVC (writeable).
         let cache_volume = &volumes[3];

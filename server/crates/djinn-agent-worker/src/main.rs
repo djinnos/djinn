@@ -337,7 +337,8 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
 
     // 6. Construct the in-Pod `MirrorManager`. `clone_ephemeral` resolves
     //    against `DJINN_MIRROR_ROOT` (the launcher sets this to `/mirror`,
-    //    the PVC-backed read-only bind mount the host populated).
+    //    the PVC-backed RW bind mount the host populated; the worker also
+    //    pushes its task_branch back here before delegating open_pr).
     let mirror_root = std::env::var("DJINN_MIRROR_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/mirror"));
