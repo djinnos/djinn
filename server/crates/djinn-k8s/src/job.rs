@@ -115,21 +115,7 @@ pub fn build_task_run_job(
             crate::warm_job::WARM_COMMAND_BIN.to_string(),
             "task-run".to_string(),
         ]),
-        env: Some(vec![
-            env_var("DJINN_SERVER_ADDR", &config.server_addr),
-            env_var("DJINN_SPEC_PATH", SPEC_MOUNT_FILE),
-            env_var("DJINN_CREDENTIALS_PATH", CREDENTIALS_MOUNT_FILE),
-            env_var("DJINN_TOKEN_PATH", TOKEN_MOUNT_FILE),
-            env_var("DJINN_TASK_RUN_ID", &task_run_id_str),
-            // TMPDIR points the supervisor's TempDir::new() (used by
-            // mirror.clone_ephemeral) at the writable /workspace emptyDir
-            // instead of the container's tmpfs root, which has stricter
-            // size limits.
-            env_var("TMPDIR", WORKSPACE_MOUNT_DIR),
-            // DJINN_MIRROR_ROOT is read by the in-Pod MirrorManager so the
-            // worker clones from /mirror without a hard-coded path.
-            env_var("DJINN_MIRROR_ROOT", MIRROR_MOUNT_DIR),
-        ]),
+        env: Some(build_task_run_env(config, &task_run_id_str)),
         volume_mounts: Some(vec![
             volume_mount(VOLUME_SPEC, SPEC_MOUNT_DIR, Some(true)),
             volume_mount(VOLUME_AUTH_TOKEN, TOKEN_MOUNT_DIR, Some(true)),
@@ -262,6 +248,50 @@ fn job_labels(task_run_id: &str) -> BTreeMap<String, String> {
         COMPONENT_TASK_RUN_WORKER.to_string(),
     );
     labels
+}
+
+/// Build the container env-var list for the task-run Pod.
+///
+/// The first block carries spec/credential paths, the task-run id, and
+/// the workspace knobs (`TMPDIR`, `DJINN_MIRROR_ROOT`). The second block
+/// forwards the server's DB configuration so the worker's
+/// `bootstrap_warm_database()` connects to the same Dolt/MySQL instance
+/// as the server — otherwise it falls back to
+/// `mysql://root@127.0.0.1:3306/djinn` (single-node dev default) and the
+/// connection fails silently in any real cluster. Mirrors the warm-Pod
+/// pattern in `warm_job.rs`.
+fn build_task_run_env(config: &KubernetesConfig, task_run_id_str: &str) -> Vec<EnvVar> {
+    let mut env = vec![
+        env_var("DJINN_SERVER_ADDR", &config.server_addr),
+        env_var("DJINN_SPEC_PATH", SPEC_MOUNT_FILE),
+        env_var("DJINN_CREDENTIALS_PATH", CREDENTIALS_MOUNT_FILE),
+        env_var("DJINN_TOKEN_PATH", TOKEN_MOUNT_FILE),
+        env_var("DJINN_TASK_RUN_ID", task_run_id_str),
+        // TMPDIR points the supervisor's TempDir::new() (used by
+        // mirror.clone_ephemeral) at the writable /workspace emptyDir
+        // instead of the container's tmpfs root, which has stricter
+        // size limits.
+        env_var("TMPDIR", WORKSPACE_MOUNT_DIR),
+        // DJINN_MIRROR_ROOT is read by the in-Pod MirrorManager so the
+        // worker clones from /mirror without a hard-coded path.
+        env_var("DJINN_MIRROR_ROOT", MIRROR_MOUNT_DIR),
+    ];
+    // Forward the server's DB configuration so the worker's
+    // `bootstrap_warm_database()` opens the same Dolt/MySQL instance the
+    // server uses. Without these the worker falls back to
+    // `mysql://root@127.0.0.1:3306/djinn` (single-node dev default) and
+    // helpers like `resolve_role_overrides` / `build_prompt_context`
+    // start failing with cryptic errors mid-run. Mirrors warm_job.rs.
+    if let Some(url) = config.database_url.as_deref() {
+        env.push(env_var("DJINN_MYSQL_URL", url));
+    }
+    if let Some(backend) = config.database_backend.as_deref() {
+        env.push(env_var("DJINN_DB_BACKEND", backend));
+    }
+    if let Some(flavor) = config.database_flavor.as_deref() {
+        env.push(env_var("DJINN_MYSQL_FLAVOR", flavor));
+    }
+    env
 }
 
 fn env_var(name: &str, value: &str) -> EnvVar {
@@ -402,6 +432,22 @@ mod tests {
             envs.get("DJINN_MIRROR_ROOT").copied(),
             Some(MIRROR_MOUNT_DIR)
         );
+        // DB env vars are gated on the corresponding config fields being
+        // `Some`. `for_testing()` leaves them `None`, so they should be
+        // absent here — see `forwards_db_env_vars_when_configured` for
+        // the populated-config case.
+        assert!(
+            !envs.contains_key("DJINN_MYSQL_URL"),
+            "DJINN_MYSQL_URL must be absent when database_url is None"
+        );
+        assert!(
+            !envs.contains_key("DJINN_DB_BACKEND"),
+            "DJINN_DB_BACKEND must be absent when database_backend is None"
+        );
+        assert!(
+            !envs.contains_key("DJINN_MYSQL_FLAVOR"),
+            "DJINN_MYSQL_FLAVOR must be absent when database_flavor is None"
+        );
 
         // Volume mounts: 5 from the pre-env-config layout + the
         // environment-config mount added in P4.
@@ -521,5 +567,46 @@ mod tests {
             limits.get("memory").map(|q| q.0.as_str()),
             Some(cfg.memory_limit.as_str())
         );
+    }
+
+    /// When the server's `KubernetesConfig` has the DB connection vars
+    /// populated, the task-run Pod must forward them so the worker's
+    /// `bootstrap_warm_database()` connects to the same Dolt instance
+    /// as the launcher — mirroring the warm-Pod behaviour.
+    #[test]
+    fn forwards_db_env_vars_when_configured() {
+        let mut cfg = KubernetesConfig::for_testing();
+        cfg.database_url = Some("mysql://djinn@dolt.djinn.svc:3306/djinn".into());
+        cfg.database_backend = Some("dolt".into());
+        cfg.database_flavor = Some("dolt".into());
+
+        let job = build_task_run_job(
+            &cfg,
+            &Uuid::now_v7(),
+            "proj-xyz",
+            "djinn-taskrun-test",
+            "registry.example:5000/djinn-project-p:abc123def456",
+        );
+
+        let pod = job
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .expect("pod spec set");
+        let container = &pod.containers[0];
+        let envs: BTreeMap<&str, &str> = container
+            .env
+            .as_ref()
+            .expect("container.env set")
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().expect("env value")))
+            .collect();
+
+        assert_eq!(
+            envs.get("DJINN_MYSQL_URL").copied(),
+            Some("mysql://djinn@dolt.djinn.svc:3306/djinn")
+        );
+        assert_eq!(envs.get("DJINN_DB_BACKEND").copied(), Some("dolt"));
+        assert_eq!(envs.get("DJINN_MYSQL_FLAVOR").copied(), Some("dolt"));
     }
 }

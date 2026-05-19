@@ -117,9 +117,12 @@ impl KubernetesConfig {
     ///
     /// The three DB vars are read from djinn-server's own environment (the
     /// Helm chart projects them via `envFrom: configMap djinn-config`) and
-    /// are forwarded onto the warm Pod container so `warm-graph` talks to
-    /// the same backing store. Task-run Pods don't need them — they speak
-    /// to djinn-server over RPC, not the DB directly.
+    /// are forwarded onto both the warm Pod container (so `warm-graph`
+    /// talks to the same backing store) and the task-run Pod container
+    /// (so the worker's `bootstrap_warm_database()` opens the same Dolt
+    /// instance and helpers like `resolve_role_overrides` /
+    /// `build_prompt_context` succeed mid-run instead of falling back to
+    /// the single-node `mysql://root@127.0.0.1:3306/djinn` default).
     ///
     /// A malformed `DJINN_K8S_TTL_SECONDS` is logged at `warn` and falls
     /// back to the default — the runtime still boots.
