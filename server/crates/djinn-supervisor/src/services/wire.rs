@@ -33,7 +33,6 @@
 
 use djinn_core::models::{SessionRecord, SessionStatus, Task, TaskRunStatus};
 use djinn_runtime::wire::{ControlMsg, WorkerEvent, WorkspaceRef};
-use djinn_stack::environment::EnvironmentConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::{RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec};
@@ -342,7 +341,16 @@ pub enum ServiceRpcResponse {
     CreateSession(Result<SessionRecord, String>),
     PublishSessionMessage(Result<(), String>),
     /// Phase 6d — project environment-config response.
-    GetEnvironmentConfig(Result<EnvironmentConfig, String>),
+    ///
+    /// `Ok` carries the JSON-encoded `EnvironmentConfig` as an opaque
+    /// string. `EnvironmentConfig` embeds `HookCommand`, which uses
+    /// `#[serde(untagged)]` to keep the on-disk / Dolt JSON shape
+    /// devcontainer-compatible (a hook is either a shell string, an
+    /// argv array, or a named map). Bincode rejects untagged enums
+    /// with `DeserializeAnyNotSupported`, so we ship the JSON
+    /// representation verbatim and re-parse on receive. Disk + Dolt
+    /// persistence shape stays untouched.
+    GetEnvironmentConfig(Result<String, String>),
     /// Phase 6a-redux — host-side LLM invocation response.
     ///
     /// `Ok` carries the JSON-encoded `LlmResponse` as an opaque string.
@@ -963,18 +971,60 @@ mod tests {
 
     #[test]
     fn get_environment_config_reply_roundtrip() {
-        let cfg = EnvironmentConfig::empty();
-        let resp = ServiceRpcResponse::GetEnvironmentConfig(Ok(cfg));
+        // Pre-fix, this worked only because `EnvironmentConfig::empty()`
+        // ships zero `HookCommand`s. Build a config WITH all three
+        // untagged-enum HookCommand variants (Shell, Exec, Parallel) to
+        // prove the opaque-JSON wire shape survives the trap shape
+        // production sees once `lifecycle.*` lists are non-empty.
+        use djinn_stack::environment::{
+            EnvironmentConfig, HookCommand, LifecycleHooks,
+        };
+        let mut parallel = std::collections::BTreeMap::new();
+        parallel.insert("install".into(), HookCommand::Shell("pip install -e .".into()));
+        parallel.insert(
+            "index".into(),
+            HookCommand::Exec(vec!["scip-python".into(), "index".into()]),
+        );
+        let cfg = EnvironmentConfig {
+            lifecycle: LifecycleHooks {
+                post_build: vec![HookCommand::Shell("echo build".into())],
+                pre_anything: vec![HookCommand::Exec(vec![
+                    "bash".into(),
+                    "-lc".into(),
+                    "echo ready".into(),
+                ])],
+                pre_task: vec![HookCommand::Parallel(parallel)],
+                pre_verification: vec![],
+            },
+            ..EnvironmentConfig::empty()
+        };
+        let cfg_json =
+            serde_json::to_string(&cfg).expect("encode EnvironmentConfig");
+        let resp = ServiceRpcResponse::GetEnvironmentConfig(Ok(cfg_json.clone()));
         let f = Frame {
             correlation_id: 33,
             payload: FramePayload::RpcReply(resp),
         };
         let bytes = bincode::serialize(&f).unwrap();
-        let back: Frame = bincode::deserialize(&bytes).unwrap();
-        assert!(matches!(
-            back.payload,
-            FramePayload::RpcReply(ServiceRpcResponse::GetEnvironmentConfig(Ok(_)))
-        ));
+        let back: Frame = bincode::deserialize(&bytes).expect(
+            "GetEnvironmentConfig with non-empty HookCommand lists must roundtrip via bincode \
+             (regression guard for the #[serde(untagged)] HookCommand DeserializeAnyNotSupported trap)",
+        );
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::GetEnvironmentConfig(Ok(got))) => {
+                assert_eq!(got, cfg_json);
+                let cfg_back: EnvironmentConfig =
+                    serde_json::from_str(&got).expect("re-parse config");
+                assert_eq!(cfg_back.lifecycle.post_build.len(), 1);
+                assert_eq!(cfg_back.lifecycle.pre_anything.len(), 1);
+                assert_eq!(cfg_back.lifecycle.pre_task.len(), 1);
+                assert!(matches!(
+                    cfg_back.lifecycle.pre_task[0],
+                    HookCommand::Parallel(_)
+                ));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[test]

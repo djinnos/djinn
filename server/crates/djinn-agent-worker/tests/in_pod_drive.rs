@@ -299,14 +299,14 @@ async fn handle_rpc(
         ServiceRpcRequest::GetEnvironmentConfig { project_id } => {
             audit.lock().await.get_environment_config += 1;
             let _ = project_id;
-            // Return an empty config now that `EnvironmentConfig`
-            // bincode-roundtrips cleanly (the `skip_serializing_if`
-            // attrs on its `Option<*Language>` fields were dropped — see
-            // `server/crates/djinn-stack/src/environment.rs`). This
-            // exercises the real wire path end-to-end.
-            ServiceRpcResponse::GetEnvironmentConfig(Ok(
-                djinn_stack::environment::EnvironmentConfig::empty(),
-            ))
+            // The wire variant ships an opaque JSON-encoded
+            // `EnvironmentConfig` string (HookCommand's `#[serde(untagged)]`
+            // representation is bincode-fatal — see
+            // `server/crates/djinn-supervisor/src/services/wire.rs`).
+            let cfg = djinn_stack::environment::EnvironmentConfig::empty();
+            let cfg_json =
+                serde_json::to_string(&cfg).expect("encode EnvironmentConfig");
+            ServiceRpcResponse::GetEnvironmentConfig(Ok(cfg_json))
         }
         ServiceRpcRequest::GetModelContextWindow { model_id } => {
             audit.lock().await.get_model_context_window += 1;

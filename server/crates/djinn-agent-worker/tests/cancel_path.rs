@@ -248,12 +248,12 @@ async fn start_fake_server(
                             ServiceRpcResponse::PublishSessionMessage(Ok(()))
                         }
                         ServiceRpcRequest::GetEnvironmentConfig { .. } => {
-                            // Return Err so the worker's
+                            // Cancellation-path test doesn't care about the
+                            // config shape — return Err so the worker's
                             // `WorkerSupervisorServices::get_environment_config`
                             // degrades to a local `EnvironmentConfig::empty()`
-                            // and avoids the wire bincode roundtrip — see the
-                            // comment in `in_pod_drive.rs` for the underlying
-                            // `EnvironmentConfig` bincode issue.
+                            // and keeps the test focused on the cancel
+                            // signal rather than environment plumbing.
                             ServiceRpcResponse::GetEnvironmentConfig(Err(
                                 "fake server: degrade to local empty config".into(),
                             ))

@@ -1091,7 +1091,17 @@ async fn dispatch(
             ServiceRpcResponse::PublishSessionMessage(result)
         }
         ServiceRpcRequest::GetEnvironmentConfig { project_id } => {
-            let result = services.get_environment_config(project_id).await;
+            // Encode the EnvironmentConfig as opaque JSON for the wire
+            // (HookCommand's `#[serde(untagged)]` representation is
+            // bincode-fatal). Disk + Dolt persistence shape is unchanged.
+            let result = services
+                .get_environment_config(project_id)
+                .await
+                .and_then(|cfg| {
+                    serde_json::to_string(&cfg).map_err(|e| {
+                        format!("encode environment_config for rpc: {e}")
+                    })
+                });
             ServiceRpcResponse::GetEnvironmentConfig(result)
         }
         ServiceRpcRequest::InvokeLlm {

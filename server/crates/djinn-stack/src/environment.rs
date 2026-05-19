@@ -316,12 +316,16 @@ impl Default for EnvironmentConfig {
 
 // ---- languages ----------------------------------------------------------
 
-// NOTE: `skip_serializing_if = "Option::is_none"` was intentionally stripped
-// from the language fields below. The attribute is JSON-only — bincode is
-// positional and reads garbage from the next field's slot when a serializer
-// skips a slot the deserializer expects. `EnvironmentConfig` crosses the
-// worker ↔ host wire via `ServiceRpcResponse::GetEnvironmentConfig`, so every
-// `Option<*Language>` field must serialise its `None` discriminant byte.
+// NOTE: `skip_serializing_if = "Option::is_none"` is intentionally absent on
+// the language fields below. The attribute is JSON-only and bincode-fatal:
+// bincode is positional and reads garbage from the next field's slot when a
+// serializer skips a slot the deserializer expects. `EnvironmentConfig` no
+// longer crosses bincode directly (`ServiceRpcResponse::GetEnvironmentConfig`
+// ships an opaque JSON-encoded `String` after the 2026-05-19 wire fix —
+// `HookCommand`'s `#[serde(untagged)]` representation can't survive bincode
+// either, so the whole config travels as JSON), but keeping the explicit
+// `Option`-discriminant serialization preserves bincode-safety for any
+// future direct embedding (and matches the SerializableDjinnEvent pattern).
 // `#[serde(default)]` is preserved so JSON deserialisation still tolerates
 // missing keys in older Dolt rows.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]

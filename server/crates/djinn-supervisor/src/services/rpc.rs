@@ -516,7 +516,11 @@ impl SupervisorServices for RpcServices {
             .roundtrip(ServiceRpcRequest::GetEnvironmentConfig { project_id })
             .await
         {
-            Ok(ServiceRpcResponse::GetEnvironmentConfig(result)) => result,
+            Ok(ServiceRpcResponse::GetEnvironmentConfig(Ok(payload))) => {
+                serde_json::from_str::<djinn_stack::environment::EnvironmentConfig>(&payload)
+                    .map_err(|e| format!("rpc decode get_environment_config reply: {e}"))
+            }
+            Ok(ServiceRpcResponse::GetEnvironmentConfig(Err(e))) => Err(e),
             Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
             Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
             Err(e) => Err(e),
@@ -1562,10 +1566,11 @@ mod tests {
                 FramePayload::Rpc(ServiceRpcRequest::GetEnvironmentConfig { project_id }) => {
                     assert_eq!(project_id, "p1");
                     let cfg = djinn_stack::environment::EnvironmentConfig::empty();
+                    let cfg_json = serde_json::to_string(&cfg).expect("encode cfg");
                     let reply = Frame {
                         correlation_id: frame.correlation_id,
                         payload: FramePayload::RpcReply(ServiceRpcResponse::GetEnvironmentConfig(
-                            Ok(cfg),
+                            Ok(cfg_json),
                         )),
                     };
                     write_frame(&mut write, &reply).await.expect("write reply");
