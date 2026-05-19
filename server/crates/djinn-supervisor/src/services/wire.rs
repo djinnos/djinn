@@ -162,8 +162,9 @@ pub enum ServiceRpcRequest {
     },
     /// [`crate::SupervisorServices::open_pr`].
     OpenPr { spec: TaskRunSpec, task: Task },
-    /// [`crate::SupervisorServices::create_task_run`].  Phase 3 wire
-    /// surface; dead until Phase 4 actually drives this from the worker.
+    /// [`crate::SupervisorServices::create_task_run`].  Wire surface added
+    /// in Phase 3; driven by `TaskRunSupervisor::run` as of Phase 4 (commit
+    /// `a6bd7e1a4`).
     CreateTaskRun {
         params: SerializableCreateTaskRunParams,
     },

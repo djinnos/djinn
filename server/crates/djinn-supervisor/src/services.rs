@@ -55,19 +55,18 @@ pub trait SupervisorServices: Send + Sync + 'static {
     /// cleanly.
     async fn open_pr(&self, spec: &TaskRunSpec, task: &Task) -> TaskRunOutcome;
 
-    /// Persist a new `task_run` row.  Phase 4 will switch
-    /// [`crate::TaskRunSupervisor::run`] off its direct
-    /// `Arc<TaskRunRepository>` and onto this RPC so the worker pod (which
-    /// has no DB connection) can ship the same write through the existing
-    /// `SupervisorServices` channel.  Dead code until Phase 4.
+    /// Persist a new `task_run` row.  Implemented in Phase 4 (commit
+    /// `a6bd7e1a4`); called by [`crate::TaskRunSupervisor::run`] so the
+    /// worker pod (which has no DB connection) can ship the write through
+    /// the existing `SupervisorServices` channel.
     async fn create_task_run(
         &self,
         params: SerializableCreateTaskRunParams,
     ) -> Result<(), String>;
 
     /// Update the terminal `status` (and `ended_at`) of a `task_run` row.
-    /// Phase 4 will swap the supervisor's `task_runs.update_status` call
-    /// for this method.  Dead code until Phase 4.
+    /// Implemented in Phase 4 (commit `a6bd7e1a4`); replaces the
+    /// supervisor's direct `task_runs.update_status` call.
     async fn update_task_run_status(
         &self,
         run_id: String,
