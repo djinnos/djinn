@@ -1585,7 +1585,13 @@ mod tests {
             .get_environment_config("p1".into())
             .await
             .expect("get_environment_config ok");
-        assert_eq!(cfg.schema_version, 0);
+        // `EnvironmentConfig::empty()` sets `schema_version = SCHEMA_VERSION`
+        // (1). The opaque-JSON wire shape preserves this; the older raw-bincode
+        // path silently lost the field, which is why this asserted 0 before.
+        assert_eq!(
+            cfg.schema_version,
+            djinn_stack::environment::SCHEMA_VERSION
+        );
 
         cancel.cancel();
         let _ = bg.reader.await;
