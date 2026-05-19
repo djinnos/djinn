@@ -17,9 +17,11 @@
 //!    provider injected via `provider_override`, so the in-tree per-stage
 //!    executor skips its catalog/vault path entirely.
 //!
-//! `invoke_llm` is forwarded to RPC for parity but the worker never calls it
-//! in the supervisor drive — the host-side `DirectServices` keeps the
-//! method live for chat-tool invocations.
+//! `invoke_llm` is `unreachable!()` on the worker — the worker builds
+//! providers locally from Secret-mounted credentials and calls
+//! `provider.stream(..)` directly from the reply loop. The trait method
+//! itself stays because the host-side `DirectServices` impl uses it for
+//! chat-tool invocations.
 //!
 //! ## AgentContext caveat
 //!
@@ -348,17 +350,21 @@ impl SupervisorServices for WorkerSupervisorServices {
 
     async fn invoke_llm(
         &self,
-        model_id: String,
-        conversation: Conversation,
-        tools: Vec<serde_json::Value>,
-        tool_choice: Option<ToolChoice>,
+        _model_id: String,
+        _conversation: Conversation,
+        _tools: Vec<serde_json::Value>,
+        _tool_choice: Option<ToolChoice>,
     ) -> Result<LlmResponse, String> {
-        // The worker no longer routes its own provider calls through this RPC
-        // — Phase 7b builds providers in-Pod. The method is kept callable for
-        // symmetry with `DirectServices` (host-side chat-tool invocations).
-        self.rpc
-            .invoke_llm(model_id, conversation, tools, tool_choice)
-            .await
+        // Worker builds providers locally from Secret-mounted credentials
+        // (Phase 7a/b) and calls `provider.stream(..)` directly from the
+        // reply loop — it never routes LLM invocations through services.
+        // The trait method itself stays because `DirectServices` uses it on
+        // the host-side chat path. Any worker-side call here is a bug;
+        // surface it as a loud panic instead of a silent RPC roundtrip.
+        unreachable!(
+            "WorkerSupervisorServices::invoke_llm — worker uses local provider; \
+             chat path is host-only via DirectServices"
+        )
     }
 
     async fn update_session_status(
