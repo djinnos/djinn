@@ -1032,6 +1032,27 @@ mod tests {
             async fn pick_any_default_model(&self) -> Result<Option<String>, String> {
                 unimplemented!()
             }
+            async fn create_session(
+                &self,
+                _: djinn_supervisor::services::SerializableCreateSessionParams,
+            ) -> Result<djinn_core::models::SessionRecord, String> {
+                unimplemented!()
+            }
+            async fn publish_session_message(
+                &self,
+                _: String,
+                _: String,
+                _: String,
+                _: serde_json::Value,
+            ) -> Result<(), String> {
+                unimplemented!()
+            }
+            async fn get_environment_config(
+                &self,
+                _: String,
+            ) -> Result<djinn_stack::environment::EnvironmentConfig, String> {
+                unimplemented!()
+            }
         }
 
         let services: Arc<dyn SupervisorServices> = Arc::new(NoopServices {

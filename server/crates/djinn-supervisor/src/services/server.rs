@@ -1070,6 +1070,25 @@ async fn dispatch(
             let result = services.pick_any_default_model().await;
             ServiceRpcResponse::PickAnyDefaultModel(result)
         }
+        ServiceRpcRequest::CreateSession { params } => {
+            let result = services.create_session(params).await;
+            ServiceRpcResponse::CreateSession(result)
+        }
+        ServiceRpcRequest::PublishSessionMessage {
+            session_id,
+            task_id,
+            agent_type,
+            message,
+        } => {
+            let result = services
+                .publish_session_message(session_id, task_id, agent_type, message)
+                .await;
+            ServiceRpcResponse::PublishSessionMessage(result)
+        }
+        ServiceRpcRequest::GetEnvironmentConfig { project_id } => {
+            let result = services.get_environment_config(project_id).await;
+            ServiceRpcResponse::GetEnvironmentConfig(result)
+        }
     }
 }
 
@@ -1148,6 +1167,30 @@ mod tests {
         }
 
         async fn pick_any_default_model(&self) -> Result<Option<String>, String> {
+            unimplemented!("not exercised in server tests")
+        }
+
+        async fn create_session(
+            &self,
+            _params: super::super::wire::SerializableCreateSessionParams,
+        ) -> Result<djinn_core::models::SessionRecord, String> {
+            unimplemented!("not exercised in server tests")
+        }
+
+        async fn publish_session_message(
+            &self,
+            _session_id: String,
+            _task_id: String,
+            _agent_type: String,
+            _message: serde_json::Value,
+        ) -> Result<(), String> {
+            unimplemented!("not exercised in server tests")
+        }
+
+        async fn get_environment_config(
+            &self,
+            _project_id: String,
+        ) -> Result<djinn_stack::environment::EnvironmentConfig, String> {
             unimplemented!("not exercised in server tests")
         }
     }

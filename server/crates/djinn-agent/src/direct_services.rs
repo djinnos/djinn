@@ -19,10 +19,17 @@ use async_trait::async_trait;
 use djinn_core::models::{Task, TaskRunStatus};
 use djinn_db::TaskRunRepository;
 use djinn_db::repositories::task_run::CreateTaskRunParams;
-use djinn_supervisor::services::SerializableCreateTaskRunParams;
+use djinn_supervisor::services::{
+    SerializableCreateSessionParams, SerializableCreateTaskRunParams,
+};
 use djinn_supervisor::{
     RoleKind, StageError, StageOutcome, SupervisorServices, TaskRunOutcome, TaskRunSpec,
 };
+use djinn_core::events::DjinnEventEnvelope;
+use djinn_core::models::SessionRecord;
+use djinn_db::SessionRepository;
+use djinn_db::repositories::session::CreateSessionParams;
+use djinn_stack::environment::EnvironmentConfig;
 use djinn_workspace::Workspace;
 use tokio_util::sync::CancellationToken;
 
@@ -176,5 +183,54 @@ impl SupervisorServices for DirectServices {
             }
         }
         Ok(None)
+    }
+
+    async fn create_session(
+        &self,
+        params: SerializableCreateSessionParams,
+    ) -> Result<SessionRecord, String> {
+        let ctx = &self.callbacks.agent_context;
+        let repo = SessionRepository::new(ctx.db.clone(), ctx.event_bus.clone());
+        repo.create(CreateSessionParams {
+            project_id: params.project_id.as_str(),
+            task_id: params.task_id.as_deref(),
+            model: params.model.as_str(),
+            agent_type: params.agent_type.as_str(),
+            metadata_json: params.metadata_json.as_deref(),
+            task_run_id: params.task_run_id.as_deref(),
+        })
+        .await
+        .map_err(|e| e.to_string())
+    }
+
+    async fn publish_session_message(
+        &self,
+        session_id: String,
+        task_id: String,
+        agent_type: String,
+        message: serde_json::Value,
+    ) -> Result<(), String> {
+        self.callbacks
+            .agent_context
+            .event_bus
+            .send(DjinnEventEnvelope::session_message(
+                &session_id,
+                &task_id,
+                &agent_type,
+                &message,
+            ));
+        Ok(())
+    }
+
+    async fn get_environment_config(
+        &self,
+        project_id: String,
+    ) -> Result<EnvironmentConfig, String> {
+        let cfg = crate::verification::environment::environment_config_for_project_id(
+            &self.callbacks.agent_context.db,
+            &project_id,
+        )
+        .await;
+        Ok(cfg)
     }
 }

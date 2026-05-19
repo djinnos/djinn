@@ -159,6 +159,30 @@ impl SupervisorServices for FakeServices {
     async fn pick_any_default_model(&self) -> Result<Option<String>, String> {
         unimplemented!("not exercised in PR 2 integration tests")
     }
+
+    async fn create_session(
+        &self,
+        _params: djinn_supervisor::services::SerializableCreateSessionParams,
+    ) -> Result<djinn_core::models::SessionRecord, String> {
+        unimplemented!("not exercised in PR 2 integration tests")
+    }
+
+    async fn publish_session_message(
+        &self,
+        _session_id: String,
+        _task_id: String,
+        _agent_type: String,
+        _message: serde_json::Value,
+    ) -> Result<(), String> {
+        unimplemented!("not exercised in PR 2 integration tests")
+    }
+
+    async fn get_environment_config(
+        &self,
+        _project_id: String,
+    ) -> Result<djinn_stack::environment::EnvironmentConfig, String> {
+        unimplemented!("not exercised in PR 2 integration tests")
+    }
 }
 
 /// Bind `serve_on_tcp` to `127.0.0.1:0`, return the resolved `(SocketAddr,

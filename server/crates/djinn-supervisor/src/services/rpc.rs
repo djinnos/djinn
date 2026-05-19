@@ -440,6 +440,59 @@ impl SupervisorServices for RpcServices {
             Err(e) => Err(e),
         }
     }
+
+    async fn create_session(
+        &self,
+        params: crate::services::SerializableCreateSessionParams,
+    ) -> Result<djinn_core::models::SessionRecord, String> {
+        match self
+            .roundtrip(ServiceRpcRequest::CreateSession { params })
+            .await
+        {
+            Ok(ServiceRpcResponse::CreateSession(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn publish_session_message(
+        &self,
+        session_id: String,
+        task_id: String,
+        agent_type: String,
+        message: serde_json::Value,
+    ) -> Result<(), String> {
+        match self
+            .roundtrip(ServiceRpcRequest::PublishSessionMessage {
+                session_id,
+                task_id,
+                agent_type,
+                message,
+            })
+            .await
+        {
+            Ok(ServiceRpcResponse::PublishSessionMessage(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn get_environment_config(
+        &self,
+        project_id: String,
+    ) -> Result<djinn_stack::environment::EnvironmentConfig, String> {
+        match self
+            .roundtrip(ServiceRpcRequest::GetEnvironmentConfig { project_id })
+            .await
+        {
+            Ok(ServiceRpcResponse::GetEnvironmentConfig(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 // ── Reader / writer loops ────────────────────────────────────────────────────
@@ -619,6 +672,36 @@ impl SupervisorServices for UnimplementedRpcServices {
     async fn pick_any_default_model(&self) -> Result<Option<String>, String> {
         unimplemented!(
             "UnimplementedRpcServices::pick_any_default_model — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn create_session(
+        &self,
+        _params: crate::services::SerializableCreateSessionParams,
+    ) -> Result<djinn_core::models::SessionRecord, String> {
+        unimplemented!(
+            "UnimplementedRpcServices::create_session — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn publish_session_message(
+        &self,
+        _session_id: String,
+        _task_id: String,
+        _agent_type: String,
+        _message: serde_json::Value,
+    ) -> Result<(), String> {
+        unimplemented!(
+            "UnimplementedRpcServices::publish_session_message — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn get_environment_config(
+        &self,
+        _project_id: String,
+    ) -> Result<djinn_stack::environment::EnvironmentConfig, String> {
+        unimplemented!(
+            "UnimplementedRpcServices::get_environment_config — construct RpcServices for real RPC"
         )
     }
 }
@@ -1009,6 +1092,151 @@ mod tests {
         let _ = bg2.reader.await;
         let _ = bg2.writer.await;
         let _ = server_task2.await;
+    }
+
+    /// Round-trip a `create_session` RPC through an in-memory Unix pair.
+    #[tokio::test]
+    async fn create_session_roundtrip_over_unixpair() {
+        use crate::services::SerializableCreateSessionParams;
+        let (client, server) = UnixStream::pair().expect("pair");
+        let server_task = tokio::spawn(async move {
+            let (mut read, mut write) = server.into_split();
+            let frame: Frame = read_frame(&mut read).await.expect("read request");
+            match frame.payload {
+                FramePayload::Rpc(ServiceRpcRequest::CreateSession { params }) => {
+                    assert_eq!(params.project_id, "p1");
+                    let rec = djinn_core::models::SessionRecord {
+                        id: "s1".into(),
+                        project_id: Some(params.project_id.clone()),
+                        task_id: params.task_id.clone(),
+                        model_id: params.model.clone(),
+                        agent_type: params.agent_type.clone(),
+                        started_at: "now".into(),
+                        ended_at: None,
+                        status: "running".into(),
+                        tokens_in: 0,
+                        tokens_out: 0,
+                        task_run_id: params.task_run_id.clone(),
+                        title: None,
+                    };
+                    let reply = Frame {
+                        correlation_id: frame.correlation_id,
+                        payload: FramePayload::RpcReply(ServiceRpcResponse::CreateSession(Ok(
+                            rec,
+                        ))),
+                    };
+                    write_frame(&mut write, &reply).await.expect("write reply");
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        });
+
+        let cancel = CancellationToken::new();
+        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
+        let params = SerializableCreateSessionParams {
+            project_id: "p1".into(),
+            task_id: Some("t1".into()),
+            model: "anthropic/claude-opus-4-7".into(),
+            agent_type: "planner".into(),
+            metadata_json: None,
+            task_run_id: Some("run-1".into()),
+        };
+        let got = services
+            .create_session(params)
+            .await
+            .expect("create_session ok");
+        assert_eq!(got.id, "s1");
+        assert_eq!(got.task_run_id.as_deref(), Some("run-1"));
+
+        cancel.cancel();
+        let _ = bg.reader.await;
+        let _ = bg.writer.await;
+        let _ = server_task.await;
+    }
+
+    /// Round-trip a `publish_session_message` RPC through an in-memory Unix pair.
+    #[tokio::test]
+    async fn publish_session_message_roundtrip_over_unixpair() {
+        let (client, server) = UnixStream::pair().expect("pair");
+        let server_task = tokio::spawn(async move {
+            let (mut read, mut write) = server.into_split();
+            let frame: Frame = read_frame(&mut read).await.expect("read request");
+            match frame.payload {
+                FramePayload::Rpc(ServiceRpcRequest::PublishSessionMessage {
+                    session_id,
+                    task_id,
+                    agent_type,
+                    message,
+                }) => {
+                    assert_eq!(session_id, "s1");
+                    assert_eq!(task_id, "t1");
+                    assert_eq!(agent_type, "worker");
+                    assert_eq!(message["role"], "assistant");
+                    let reply = Frame {
+                        correlation_id: frame.correlation_id,
+                        payload: FramePayload::RpcReply(
+                            ServiceRpcResponse::PublishSessionMessage(Ok(())),
+                        ),
+                    };
+                    write_frame(&mut write, &reply).await.expect("write reply");
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        });
+
+        let cancel = CancellationToken::new();
+        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
+        services
+            .publish_session_message(
+                "s1".into(),
+                "t1".into(),
+                "worker".into(),
+                serde_json::json!({"role": "assistant", "content": "hi"}),
+            )
+            .await
+            .expect("publish_session_message ok");
+
+        cancel.cancel();
+        let _ = bg.reader.await;
+        let _ = bg.writer.await;
+        let _ = server_task.await;
+    }
+
+    /// Round-trip a `get_environment_config` RPC through an in-memory Unix pair.
+    #[tokio::test]
+    async fn get_environment_config_roundtrip_over_unixpair() {
+        let (client, server) = UnixStream::pair().expect("pair");
+        let server_task = tokio::spawn(async move {
+            let (mut read, mut write) = server.into_split();
+            let frame: Frame = read_frame(&mut read).await.expect("read request");
+            match frame.payload {
+                FramePayload::Rpc(ServiceRpcRequest::GetEnvironmentConfig { project_id }) => {
+                    assert_eq!(project_id, "p1");
+                    let cfg = djinn_stack::environment::EnvironmentConfig::empty();
+                    let reply = Frame {
+                        correlation_id: frame.correlation_id,
+                        payload: FramePayload::RpcReply(ServiceRpcResponse::GetEnvironmentConfig(
+                            Ok(cfg),
+                        )),
+                    };
+                    write_frame(&mut write, &reply).await.expect("write reply");
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        });
+
+        let cancel = CancellationToken::new();
+        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
+        let cfg = services
+            .get_environment_config("p1".into())
+            .await
+            .expect("get_environment_config ok");
+        assert_eq!(cfg.schema_version, 0);
+
+        cancel.cancel();
+        let _ = bg.reader.await;
+        let _ = bg.writer.await;
+        let _ = server_task.await;
     }
 
     fn fixture_task() -> Task {

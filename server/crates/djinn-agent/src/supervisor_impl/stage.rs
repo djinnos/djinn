@@ -64,8 +64,6 @@
 use std::sync::Arc;
 
 use djinn_core::models::{SessionStatus, Task};
-use djinn_db::SessionRepository;
-use djinn_db::repositories::session::CreateSessionParams;
 use djinn_runtime::spec::{RoleKind, TaskRunSpec};
 use djinn_supervisor::{StageError, StageOutcome, SupervisorServices};
 use djinn_workspace::Workspace;
@@ -220,12 +218,13 @@ pub(crate) async fn execute_stage(
     // ── Setup commands + verification context ────────────────────────────────
     // Pre-verification hooks come from `lifecycle.pre_verification`,
     // rules from `verification.rules`. Missing / malformed configs degrade
-    // to empty lists (see `verification::environment`).
-    let env_config = crate::verification::environment::environment_config_for_project_id(
-        &agent_context.db,
-        &task.project_id,
-    )
-    .await;
+    // to empty lists (see `verification::environment`). Phase 6d routes the
+    // DB lookup through `SupervisorServices` so the worker (Phase 7) gets
+    // it via RPC without opening its own DB pool.
+    let env_config = services
+        .get_environment_config(task.project_id.clone())
+        .await
+        .map_err(|e| StageError::Setup(format!("env_config: {e}")))?;
     let SetupAndVerificationContext {
         prompt_setup_commands,
         prompt_verification_commands,
@@ -272,23 +271,31 @@ pub(crate) async fn execute_stage(
     .await;
 
     // ── Create the session record linked to the task-run ─────────────────────
-    let session_repo =
-        SessionRepository::new(agent_context.db.clone(), agent_context.event_bus.clone());
-    let session_record = match session_repo
-        .create(CreateSessionParams {
-            project_id: &task.project_id,
-            task_id: Some(&task.id),
-            model: &model_id,
-            agent_type: role_name,
+    // Phase 6c routes session creation through `SupervisorServices` so the
+    // in-Pod worker never opens its own DB connection.  Host-side
+    // `DirectServices` delegates to `SessionRepository::create` verbatim.
+    let session_record = services
+        .create_session(djinn_supervisor::services::SerializableCreateSessionParams {
+            project_id: task.project_id.clone(),
+            task_id: Some(task.id.clone()),
+            model: model_id.clone(),
+            agent_type: role_name.to_string(),
             metadata_json: None,
-            task_run_id: Some(task_run_id),
+            task_run_id: Some(task_run_id.to_string()),
         })
         .await
-    {
-        Ok(r) => r,
-        Err(e) => return Err(StageError::SessionCreate(e.to_string())),
-    };
+        .map_err(StageError::SessionCreate)?;
     let session_id = session_record.id.clone();
+    // The two `session_repo.update(...)` call sites below still go through
+    // `SessionRepository` directly. Phase 6c stopped at `create_session`;
+    // extracting `update_session_status` is tracked as a follow-up so we
+    // can finish 6c/6d without growing the diff. The worker will hit the
+    // unimplemented path until that extraction lands, but the in-process
+    // host path (DirectServices) keeps working unchanged.
+    let session_repo = djinn_db::SessionRepository::new(
+        agent_context.db.clone(),
+        agent_context.event_bus.clone(),
+    );
 
     // ── Build the LLM provider ───────────────────────────────────────────────
     // Soft fallback: a missing catalog entry surfaces as `Err`, which we map to

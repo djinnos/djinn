@@ -31,8 +31,9 @@
 //! helpers live in `djinn-runtime::wire` so both the launcher server side and
 //! the worker client side use the same reader/writer pair.
 
-use djinn_core::models::{Task, TaskRunStatus};
+use djinn_core::models::{SessionRecord, Task, TaskRunStatus};
 use djinn_runtime::wire::{ControlMsg, WorkerEvent, WorkspaceRef};
+use djinn_stack::environment::EnvironmentConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::{RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec};
@@ -113,6 +114,25 @@ pub struct SerializableCreateTaskRunParams {
     pub mirror_ref: Option<String>,
 }
 
+/// Borrow-free serde-friendly twin of
+/// [`djinn_db::repositories::session::CreateSessionParams<'_>`].
+///
+/// Phase 6c extraction (per
+/// `~/.claude/plans/phase2-worker-execution-architecture.md`). The repo
+/// struct stores `&str` fields so SQL parameter binding stays zero-copy;
+/// sending it across the bincode wire requires owned `String`s. The shapes
+/// line up 1:1 — adapt by `.as_str()` / `.as_deref()` on the host before
+/// constructing the repo params.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SerializableCreateSessionParams {
+    pub project_id: String,
+    pub task_id: Option<String>,
+    pub model: String,
+    pub agent_type: String,
+    pub metadata_json: Option<String>,
+    pub task_run_id: Option<String>,
+}
+
 /// Contents of an [`FramePayload::AuthResult`] handshake reply.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AuthResultMsg {
@@ -158,6 +178,22 @@ pub enum ServiceRpcRequest {
     /// [`crate::SupervisorServices::pick_any_default_model`].
     /// Phase 6b — catalog read extraction.
     PickAnyDefaultModel,
+    /// [`crate::SupervisorServices::create_session`].  Phase 6c — session
+    /// persistence extraction.
+    CreateSession {
+        params: SerializableCreateSessionParams,
+    },
+    /// [`crate::SupervisorServices::publish_session_message`].  Phase 6c —
+    /// session persistence extraction.
+    PublishSessionMessage {
+        session_id: String,
+        task_id: String,
+        agent_type: String,
+        message: serde_json::Value,
+    },
+    /// [`crate::SupervisorServices::get_environment_config`].  Phase 6d —
+    /// project environment-config extraction.
+    GetEnvironmentConfig { project_id: String },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -178,6 +214,11 @@ pub enum ServiceRpcResponse {
     GetModelContextWindow(Result<i64, String>),
     GetProviderBaseUrl(Result<String, String>),
     PickAnyDefaultModel(Result<Option<String>, String>),
+    /// Phase 6c — session persistence responses.
+    CreateSession(Result<SessionRecord, String>),
+    PublishSessionMessage(Result<(), String>),
+    /// Phase 6d — project environment-config response.
+    GetEnvironmentConfig(Result<EnvironmentConfig, String>),
     /// Transport-level failure — not produced by normal operation.
     Err(String),
 }
@@ -632,6 +673,144 @@ mod tests {
         assert!(matches!(
             back.payload,
             FramePayload::RpcReply(ServiceRpcResponse::PickAnyDefaultModel(Ok(None)))
+        ));
+    }
+
+    #[test]
+    fn create_session_request_roundtrip() {
+        let params = SerializableCreateSessionParams {
+            project_id: "p1".into(),
+            task_id: Some("t1".into()),
+            model: "anthropic/claude-opus-4-7".into(),
+            agent_type: "planner".into(),
+            metadata_json: None,
+            task_run_id: Some("run-1".into()),
+        };
+        let f = Frame {
+            correlation_id: 31,
+            payload: FramePayload::Rpc(ServiceRpcRequest::CreateSession {
+                params: params.clone(),
+            }),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back.correlation_id, 31);
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::CreateSession { params: got }) => {
+                assert_eq!(got, params);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_session_reply_roundtrip() {
+        let session = SessionRecord {
+            id: "s1".into(),
+            project_id: Some("p1".into()),
+            task_id: Some("t1".into()),
+            model_id: "anthropic/claude-opus-4-7".into(),
+            agent_type: "planner".into(),
+            started_at: "2026-05-18T00:00:00Z".into(),
+            ended_at: None,
+            status: "running".into(),
+            tokens_in: 0,
+            tokens_out: 0,
+            task_run_id: Some("run-1".into()),
+            title: None,
+        };
+        let resp = ServiceRpcResponse::CreateSession(Ok(session.clone()));
+        let f = Frame {
+            correlation_id: 31,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::CreateSession(Ok(got))) => {
+                assert_eq!(got.id, "s1");
+                assert_eq!(got.task_run_id.as_deref(), Some("run-1"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publish_session_message_request_roundtrip() {
+        let msg = serde_json::json!({ "role": "assistant", "content": "hi" });
+        let f = Frame {
+            correlation_id: 32,
+            payload: FramePayload::Rpc(ServiceRpcRequest::PublishSessionMessage {
+                session_id: "s1".into(),
+                task_id: "t1".into(),
+                agent_type: "worker".into(),
+                message: msg.clone(),
+            }),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::PublishSessionMessage {
+                session_id,
+                task_id,
+                agent_type,
+                message,
+            }) => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(task_id, "t1");
+                assert_eq!(agent_type, "worker");
+                assert_eq!(message, msg);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publish_session_message_reply_roundtrip() {
+        let resp = ServiceRpcResponse::PublishSessionMessage(Ok(()));
+        let f = Frame {
+            correlation_id: 32,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        assert!(matches!(
+            back.payload,
+            FramePayload::RpcReply(ServiceRpcResponse::PublishSessionMessage(Ok(())))
+        ));
+    }
+
+    #[test]
+    fn get_environment_config_request_roundtrip() {
+        let f = Frame {
+            correlation_id: 33,
+            payload: FramePayload::Rpc(ServiceRpcRequest::GetEnvironmentConfig {
+                project_id: "p1".into(),
+            }),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::GetEnvironmentConfig { project_id }) => {
+                assert_eq!(project_id, "p1");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_environment_config_reply_roundtrip() {
+        let cfg = EnvironmentConfig::empty();
+        let resp = ServiceRpcResponse::GetEnvironmentConfig(Ok(cfg));
+        let f = Frame {
+            correlation_id: 33,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        assert!(matches!(
+            back.payload,
+            FramePayload::RpcReply(ServiceRpcResponse::GetEnvironmentConfig(Ok(_)))
         ));
     }
 

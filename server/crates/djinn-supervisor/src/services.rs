@@ -9,7 +9,8 @@
 //!   trait layout ahead of PR 4/5.
 
 use async_trait::async_trait;
-use djinn_core::models::{Task, TaskRunStatus};
+use djinn_core::models::{SessionRecord, Task, TaskRunStatus};
+use djinn_stack::environment::EnvironmentConfig;
 use djinn_workspace::Workspace;
 use tokio_util::sync::CancellationToken;
 
@@ -19,7 +20,7 @@ pub mod rpc;
 pub mod server;
 pub mod wire;
 
-pub use wire::SerializableCreateTaskRunParams;
+pub use wire::{SerializableCreateSessionParams, SerializableCreateTaskRunParams};
 
 /// Dependencies shared across every stage in a task-run.
 ///
@@ -105,4 +106,44 @@ pub trait SupervisorServices: Send + Sync + 'static {
     /// `list_models(..)` directly. Returns `Ok(None)` when the catalog has
     /// no providers / no models.
     async fn pick_any_default_model(&self) -> Result<Option<String>, String>;
+
+    /// Create a new `session` row linked to the given task-run and emit
+    /// the `session.started` SSE event.
+    ///
+    /// Phase 6c extraction — replaces direct
+    /// `SessionRepository::new(agent_context.db, agent_context.event_bus).create(..)`
+    /// in `supervisor_impl::stage`. Worker-side stubs round-trip this so the
+    /// in-Pod supervisor never opens its own DB connection.
+    async fn create_session(
+        &self,
+        params: SerializableCreateSessionParams,
+    ) -> Result<SessionRecord, String>;
+
+    /// Publish a `session.message` SSE event for the given session.
+    ///
+    /// Phase 6c extraction — replaces direct
+    /// `agent_context.event_bus.send(DjinnEventEnvelope::session_message(..))`
+    /// in `actors::slot::reply_loop`. The publish is fire-and-forget on the
+    /// host (the event bus has its own back-pressure handling); the RPC
+    /// returns `Ok(())` once the host has accepted the event.
+    async fn publish_session_message(
+        &self,
+        session_id: String,
+        task_id: String,
+        agent_type: String,
+        message: serde_json::Value,
+    ) -> Result<(), String>;
+
+    /// Fetch the project's `environment_config` blob (lifecycle hooks,
+    /// verification rules, language toolchains).
+    ///
+    /// Phase 6d extraction — replaces direct
+    /// `verification::environment::environment_config_for_project_id(&agent_context.db, ..)`
+    /// in `supervisor_impl::stage`. Returns `EnvironmentConfig::empty()`
+    /// (wrapped in `Ok`) for missing-project / parse-failure paths to match
+    /// the existing helper's degrade-to-empty semantics.
+    async fn get_environment_config(
+        &self,
+        project_id: String,
+    ) -> Result<EnvironmentConfig, String>;
 }
