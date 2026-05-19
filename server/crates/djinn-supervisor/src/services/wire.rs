@@ -288,21 +288,25 @@ pub enum ServiceRpcRequest {
     /// [`crate::SupervisorServices::tool_github_search`]. Phase 7-followup
     /// gap-3 — workers have no GitHub App credentials mounted; this RPC
     /// runs the tool host-side.
+    ///
+    /// `arguments` is shipped as an opaque JSON `String` (the JSON-encoded
+    /// `serde_json::Map<String, serde_json::Value>`) for bincode safety —
+    /// see the comment on `PublishSessionMessage.message`.
     ToolGithubSearch {
         project_id: Option<String>,
-        arguments: serde_json::Map<String, serde_json::Value>,
+        arguments: String,
     },
     /// [`crate::SupervisorServices::tool_github_fetch_file`]. Phase 7-followup
-    /// gap-3.
+    /// gap-3. `arguments` is opaque JSON; see `ToolGithubSearch`.
     ToolGithubFetchFile {
         project_id: Option<String>,
-        arguments: serde_json::Map<String, serde_json::Value>,
+        arguments: String,
     },
     /// [`crate::SupervisorServices::tool_ci_job_log`]. Phase 7-followup
-    /// gap-3.
+    /// gap-3. `arguments` is opaque JSON; see `ToolGithubSearch`.
     ToolCiJobLog {
         session_task_id: Option<String>,
-        arguments: serde_json::Map<String, serde_json::Value>,
+        arguments: String,
     },
 }
 
@@ -336,11 +340,15 @@ pub enum ServiceRpcResponse {
     /// Phase 7-followup gap-2 — fire-and-forget event-bridge ack.
     EmitDjinnEvent(Result<(), String>),
     /// Phase 7-followup gap-3 — host-side `github_search` tool result.
-    ToolGithubSearch(Result<serde_json::Value, String>),
+    /// `Ok` carries opaque JSON (the JSON-encoded `serde_json::Value`);
+    /// see `ServiceRpcRequest::ToolGithubSearch` for the rationale.
+    ToolGithubSearch(Result<String, String>),
     /// Phase 7-followup gap-3 — host-side `github_fetch_file` tool result.
-    ToolGithubFetchFile(Result<serde_json::Value, String>),
+    /// `Ok` carries opaque JSON; see `ToolGithubSearch`.
+    ToolGithubFetchFile(Result<String, String>),
     /// Phase 7-followup gap-3 — host-side `ci_job_log` tool result.
-    ToolCiJobLog(Result<serde_json::Value, String>),
+    /// `Ok` carries opaque JSON; see `ToolGithubSearch`.
+    ToolCiJobLog(Result<String, String>),
     /// Transport-level failure — not produced by normal operation.
     Err(String),
 }
@@ -1142,51 +1150,67 @@ mod tests {
 
     #[test]
     fn tool_github_search_roundtrip() {
-        let mut args = serde_json::Map::new();
-        args.insert("query".into(), serde_json::json!("fn foo"));
+        // Exercise the untagged-enum-internals trap with a nested
+        // argument shape that a Value field would have silently corrupted.
+        let args_value = serde_json::json!({
+            "query": "fn foo",
+            "filters": {"language": "rust", "nested": [1, 2, 3]},
+        });
+        let args_str = args_value.to_string();
         let f = Frame {
             correlation_id: 61,
             payload: FramePayload::Rpc(ServiceRpcRequest::ToolGithubSearch {
                 project_id: Some("p1".into()),
-                arguments: args.clone(),
+                arguments: args_str.clone(),
             }),
         };
         let bytes = bincode::serialize(&f).unwrap();
-        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).expect(
+            "ToolGithubSearch with nested JSON arguments must roundtrip via bincode \
+             (regression guard for the serde_json::Map DeserializeAnyNotSupported trap)",
+        );
         match back.payload {
             FramePayload::Rpc(ServiceRpcRequest::ToolGithubSearch {
                 project_id,
                 arguments,
             }) => {
                 assert_eq!(project_id.as_deref(), Some("p1"));
-                assert_eq!(arguments, args);
+                let parsed: serde_json::Value = serde_json::from_str(&arguments).unwrap();
+                assert_eq!(parsed, args_value);
             }
             other => panic!("unexpected: {other:?}"),
         }
 
-        let resp = ServiceRpcResponse::ToolGithubSearch(Ok(serde_json::json!({"items": []})));
+        // Response leg — opaque-JSON-encoded Ok payload survives bincode.
+        let resp_payload = serde_json::json!({"items": [{"name": "foo"}]}).to_string();
+        let resp = ServiceRpcResponse::ToolGithubSearch(Ok(resp_payload.clone()));
         let f = Frame {
             correlation_id: 61,
             payload: FramePayload::RpcReply(resp),
         };
         let bytes = bincode::serialize(&f).unwrap();
         let back: Frame = bincode::deserialize(&bytes).unwrap();
-        assert!(matches!(
-            back.payload,
-            FramePayload::RpcReply(ServiceRpcResponse::ToolGithubSearch(Ok(_)))
-        ));
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::ToolGithubSearch(Ok(got))) => {
+                assert_eq!(got, resp_payload);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[test]
     fn tool_github_fetch_file_roundtrip() {
-        let mut args = serde_json::Map::new();
-        args.insert("repo".into(), serde_json::json!("octocat/Hello"));
-        args.insert("path".into(), serde_json::json!("README.md"));
+        let args_value = serde_json::json!({
+            "repo": "octocat/Hello",
+            "path": "README.md",
+            "options": {"ref": "main"},
+        });
+        let args_str = args_value.to_string();
         let f = Frame {
             correlation_id: 62,
             payload: FramePayload::Rpc(ServiceRpcRequest::ToolGithubFetchFile {
                 project_id: None,
-                arguments: args.clone(),
+                arguments: args_str.clone(),
             }),
         };
         let bytes = bincode::serialize(&f).unwrap();
@@ -1197,7 +1221,8 @@ mod tests {
                 arguments,
             }) => {
                 assert_eq!(project_id, None);
-                assert_eq!(arguments, args);
+                let parsed: serde_json::Value = serde_json::from_str(&arguments).unwrap();
+                assert_eq!(parsed, args_value);
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -1205,13 +1230,16 @@ mod tests {
 
     #[test]
     fn tool_ci_job_log_roundtrip() {
-        let mut args = serde_json::Map::new();
-        args.insert("job_id".into(), serde_json::json!(12345));
+        let args_value = serde_json::json!({
+            "job_id": 12345,
+            "filters": {"levels": ["error", "warn"]},
+        });
+        let args_str = args_value.to_string();
         let f = Frame {
             correlation_id: 63,
             payload: FramePayload::Rpc(ServiceRpcRequest::ToolCiJobLog {
                 session_task_id: Some("t1".into()),
-                arguments: args.clone(),
+                arguments: args_str.clone(),
             }),
         };
         let bytes = bincode::serialize(&f).unwrap();
@@ -1222,7 +1250,8 @@ mod tests {
                 arguments,
             }) => {
                 assert_eq!(session_task_id.as_deref(), Some("t1"));
-                assert_eq!(arguments, args);
+                let parsed: serde_json::Value = serde_json::from_str(&arguments).unwrap();
+                assert_eq!(parsed, args_value);
             }
             other => panic!("unexpected: {other:?}"),
         }

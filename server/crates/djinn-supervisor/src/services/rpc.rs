@@ -589,6 +589,9 @@ impl SupervisorServices for RpcServices {
         project_id: Option<String>,
         arguments: serde_json::Map<String, serde_json::Value>,
     ) -> Result<serde_json::Value, String> {
+        // Opaque JSON encode — `serde_json::Map` contains `Value`s whose
+        // untagged-enum internals trip bincode.
+        let arguments = serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string());
         match self
             .roundtrip(ServiceRpcRequest::ToolGithubSearch {
                 project_id,
@@ -596,7 +599,11 @@ impl SupervisorServices for RpcServices {
             })
             .await
         {
-            Ok(ServiceRpcResponse::ToolGithubSearch(result)) => result,
+            Ok(ServiceRpcResponse::ToolGithubSearch(Ok(payload))) => {
+                serde_json::from_str::<serde_json::Value>(&payload)
+                    .map_err(|e| format!("rpc decode tool_github_search reply: {e}"))
+            }
+            Ok(ServiceRpcResponse::ToolGithubSearch(Err(e))) => Err(e),
             Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
             Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
             Err(e) => Err(e),
@@ -608,6 +615,7 @@ impl SupervisorServices for RpcServices {
         project_id: Option<String>,
         arguments: serde_json::Map<String, serde_json::Value>,
     ) -> Result<serde_json::Value, String> {
+        let arguments = serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string());
         match self
             .roundtrip(ServiceRpcRequest::ToolGithubFetchFile {
                 project_id,
@@ -615,7 +623,11 @@ impl SupervisorServices for RpcServices {
             })
             .await
         {
-            Ok(ServiceRpcResponse::ToolGithubFetchFile(result)) => result,
+            Ok(ServiceRpcResponse::ToolGithubFetchFile(Ok(payload))) => {
+                serde_json::from_str::<serde_json::Value>(&payload)
+                    .map_err(|e| format!("rpc decode tool_github_fetch_file reply: {e}"))
+            }
+            Ok(ServiceRpcResponse::ToolGithubFetchFile(Err(e))) => Err(e),
             Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
             Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
             Err(e) => Err(e),
@@ -627,6 +639,7 @@ impl SupervisorServices for RpcServices {
         session_task_id: Option<String>,
         arguments: serde_json::Map<String, serde_json::Value>,
     ) -> Result<serde_json::Value, String> {
+        let arguments = serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string());
         match self
             .roundtrip(ServiceRpcRequest::ToolCiJobLog {
                 session_task_id,
@@ -634,7 +647,11 @@ impl SupervisorServices for RpcServices {
             })
             .await
         {
-            Ok(ServiceRpcResponse::ToolCiJobLog(result)) => result,
+            Ok(ServiceRpcResponse::ToolCiJobLog(Ok(payload))) => {
+                serde_json::from_str::<serde_json::Value>(&payload)
+                    .map_err(|e| format!("rpc decode tool_ci_job_log reply: {e}"))
+            }
+            Ok(ServiceRpcResponse::ToolCiJobLog(Err(e))) => Err(e),
             Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
             Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
             Err(e) => Err(e),

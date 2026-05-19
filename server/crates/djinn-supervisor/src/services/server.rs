@@ -1124,26 +1124,43 @@ async fn dispatch(
             project_id,
             arguments,
         } => {
-            let result = services.tool_github_search(project_id, arguments).await;
+            let arguments = parse_opaque_map(&arguments);
+            let result = services
+                .tool_github_search(project_id, arguments)
+                .await
+                .map(|v| serde_json::to_string(&v).unwrap_or_else(|_| "null".to_string()));
             ServiceRpcResponse::ToolGithubSearch(result)
         }
         ServiceRpcRequest::ToolGithubFetchFile {
             project_id,
             arguments,
         } => {
+            let arguments = parse_opaque_map(&arguments);
             let result = services
                 .tool_github_fetch_file(project_id, arguments)
-                .await;
+                .await
+                .map(|v| serde_json::to_string(&v).unwrap_or_else(|_| "null".to_string()));
             ServiceRpcResponse::ToolGithubFetchFile(result)
         }
         ServiceRpcRequest::ToolCiJobLog {
             session_task_id,
             arguments,
         } => {
-            let result = services.tool_ci_job_log(session_task_id, arguments).await;
+            let arguments = parse_opaque_map(&arguments);
+            let result = services
+                .tool_ci_job_log(session_task_id, arguments)
+                .await
+                .map(|v| serde_json::to_string(&v).unwrap_or_else(|_| "null".to_string()));
             ServiceRpcResponse::ToolCiJobLog(result)
         }
     }
+}
+
+/// Re-parse a wire-shipped opaque JSON `Map` payload. Malformed JSON
+/// falls back to an empty map — the trait surface keeps the ergonomic
+/// `Map<String, Value>` type even when the wire round-trips a string.
+fn parse_opaque_map(s: &str) -> serde_json::Map<String, serde_json::Value> {
+    serde_json::from_str(s).unwrap_or_default()
 }
 
 #[cfg(test)]
