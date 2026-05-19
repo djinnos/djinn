@@ -127,8 +127,22 @@ pub struct SerializableCreateTaskRunParams {
 ///
 /// `from_sync` is intentionally omitted: the host emits the value with
 /// `from_sync = false` (the worker is not the sync channel), matching the
-/// `#[serde(skip)]` on the canonical struct. `payload` is shipped as
-/// `serde_json::Value` so it stays opaque on the worker side.
+/// `#[serde(skip)]` on the canonical struct.
+///
+/// `payload` is shipped as an opaque JSON `String` rather than
+/// `serde_json::Value` because bincode is a positional codec that rejects
+/// `serde_json::Value`'s untagged-enum representation with
+/// `"does not support deserialize_any"`. The host re-parses it via
+/// `serde_json::from_str` in `DirectServices::emit_djinn_event`. Same logic
+/// drove the `OAuthConfigWire` pattern in `djinn-agent`'s slot helpers.
+///
+/// `id` / `project_id` keep the `Option<String>` type but intentionally do
+/// NOT carry `#[serde(skip_serializing_if = "Option::is_none")]` — that
+/// attribute is JSON-only. Bincode encodes `Option` as a single discriminant
+/// byte followed by the inner payload when `Some`; if the serializer skips
+/// the field, the deserializer reads garbage from the next field's slot.
+/// Every envelope with both Options unset (e.g. `activity.logged`)
+/// silently corrupted on the wire before this fix.
 ///
 /// Introduced in the Phase 7-followup gap-2 wiring so worker-side
 /// `event_bus.send(..)` calls (in `reply_loop` / `streaming`) reach the
@@ -137,21 +151,23 @@ pub struct SerializableCreateTaskRunParams {
 pub struct SerializableDjinnEvent {
     pub entity_type: String,
     pub action: String,
-    pub payload: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// JSON-serialised `serde_json::Value`. Opaque on the wire; the host
+    /// re-parses via `serde_json::from_str` before forwarding to the
+    /// broadcast bus.
+    pub payload: String,
     pub id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
 }
 
 impl SerializableDjinnEvent {
     /// Lossy snapshot of a [`djinn_core::events::DjinnEventEnvelope`] —
-    /// drops `from_sync` (the wire path is implicitly `from_sync = false`).
+    /// drops `from_sync` (the wire path is implicitly `from_sync = false`)
+    /// and serialises `payload` to an opaque JSON string for bincode safety.
     pub fn from_envelope(envelope: &djinn_core::events::DjinnEventEnvelope) -> Self {
         Self {
             entity_type: envelope.entity_type.to_string(),
             action: envelope.action.to_string(),
-            payload: envelope.payload.clone(),
+            payload: serde_json::to_string(&envelope.payload).unwrap_or_default(),
             id: envelope.id.clone(),
             project_id: envelope.project_id.clone(),
         }
@@ -1020,10 +1036,14 @@ mod tests {
 
     #[test]
     fn emit_djinn_event_request_roundtrip() {
+        let payload_str = serde_json::json!({
+            "session_id":"s1","task_id":"t1","agent_type":"worker","message":{"role":"assistant"}
+        })
+        .to_string();
         let event = SerializableDjinnEvent {
             entity_type: "session".into(),
             action: "message".into(),
-            payload: serde_json::json!({"session_id":"s1","task_id":"t1","agent_type":"worker","message":{"role":"assistant"}}),
+            payload: payload_str,
             id: None,
             project_id: Some("p1".into()),
         };
@@ -1038,6 +1058,44 @@ mod tests {
         match back.payload {
             FramePayload::Rpc(ServiceRpcRequest::EmitDjinnEvent { event: got }) => {
                 assert_eq!(got, event);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// The load-bearing roundtrip: before the fix, `id: None` +
+    /// `project_id: None` (as emitted by `activity.logged` envelopes
+    /// during worker teardown) silently produced an under-sized bincode
+    /// body that deserialised as "unexpected end of file". The
+    /// `skip_serializing_if` attribute is JSON-only; bincode is positional
+    /// and needs every field slot populated. Keep this test as the canary.
+    #[test]
+    fn emit_djinn_event_request_roundtrip_with_both_options_none() {
+        let payload_str = serde_json::json!({"kind": "activity", "msg": "tearing down"})
+            .to_string();
+        let event = SerializableDjinnEvent {
+            entity_type: "activity".into(),
+            action: "logged".into(),
+            payload: payload_str,
+            id: None,
+            project_id: None,
+        };
+        let f = Frame {
+            correlation_id: 99,
+            payload: FramePayload::Rpc(ServiceRpcRequest::EmitDjinnEvent {
+                event: event.clone(),
+            }),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).expect(
+            "EmitDjinnEvent with id=None, project_id=None must roundtrip via bincode \
+             (regression guard for the JSON-only skip_serializing_if attribute)",
+        );
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::EmitDjinnEvent { event: got }) => {
+                assert_eq!(got, event);
+                assert!(got.id.is_none());
+                assert!(got.project_id.is_none());
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -1158,7 +1216,11 @@ mod tests {
         let wire = SerializableDjinnEvent::from_envelope(&env);
         assert_eq!(wire.entity_type, "session");
         assert_eq!(wire.action, "message");
-        assert_eq!(wire.payload["session_id"], "s1");
+        // `payload` is an opaque JSON string on the wire — re-parse to
+        // assert the underlying shape rather than index a `Value` directly.
+        let parsed: serde_json::Value =
+            serde_json::from_str(&wire.payload).expect("payload is valid JSON");
+        assert_eq!(parsed["session_id"], "s1");
         assert_eq!(wire.id, None);
         assert_eq!(wire.project_id, None);
     }

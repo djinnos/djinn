@@ -443,6 +443,13 @@ fn intern_envelope(
         ("task", "deleted") => ("task", "deleted"),
         _ => return Err((entity_type, action)),
     };
+    // `payload` crosses the wire as an opaque JSON string — bincode can't
+    // round-trip `serde_json::Value`'s untagged-enum representation. Re-parse
+    // here so downstream SSE subscribers see a real `Value` again. A
+    // malformed string (shouldn't happen in practice — the producer uses
+    // `serde_json::to_string` on a `Value`) degrades to `Value::Null` rather
+    // than dropping the whole event.
+    let payload = serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null);
     Ok(DjinnEventEnvelope {
         entity_type: et,
         action: ac,
@@ -462,13 +469,14 @@ mod tests {
         let wire = SerializableDjinnEvent {
             entity_type: "session".into(),
             action: "message".into(),
-            payload: serde_json::json!({"role": "assistant"}),
+            payload: serde_json::json!({"role": "assistant"}).to_string(),
             id: None,
             project_id: Some("p1".into()),
         };
         let env = intern_envelope(wire).expect("known pair");
         assert_eq!(env.entity_type, "session");
         assert_eq!(env.action, "message");
+        assert_eq!(env.payload["role"], "assistant");
         // Static strs from string literals collide with the constructor's
         // pinned addresses — pointer-equality is the strongest assertion
         // that we routed through the known arm.
@@ -480,7 +488,7 @@ mod tests {
         let wire = SerializableDjinnEvent {
             entity_type: "unknown_entity".into(),
             action: "weird_action".into(),
-            payload: serde_json::Value::Null,
+            payload: serde_json::Value::Null.to_string(),
             id: None,
             project_id: None,
         };
