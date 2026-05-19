@@ -40,30 +40,6 @@
 //! asserts the worker reached that terminal state. This is the
 //! load-bearing assertion: the provider error proves the worker tried to
 //! call the LLM locally, not via the host's `invoke_llm` RPC.
-//!
-//! ## Bincode wire-shape bugs (worked around in the fake server)
-//!
-//! Two wire-shape bugs in `djinn-supervisor` / `djinn-stack` are exercised
-//! here. Both leak into the fake server as `bincode::deserialize` errors
-//! that the test smooths over (see the `loop` body below for the details):
-//!
-//! 1. `SerializableDjinnEvent.payload: serde_json::Value` — `Value` uses
-//!    untagged enum variants which bincode rejects ("does not support
-//!    `deserialize_any`"). The `id` / `project_id` Options on the same
-//!    struct also carry `#[serde(skip_serializing_if = "Option::is_none")]`,
-//!    a JSON-only attribute that breaks the positional bincode encoding.
-//!    The fake server synthesises a stub reply for undecodable frames so
-//!    the worker's teardown doesn't deadlock awaiting a reply that
-//!    `rpc.emit_djinn_event` will never see.
-//! 2. `EnvironmentConfig` carries `#[serde(skip_serializing_if = …)]` on
-//!    its `Option<*Language>` fields, same bincode problem. The fake
-//!    server returns `Err` for `GetEnvironmentConfig` so the worker
-//!    degrades to its local `EnvironmentConfig::empty()` and never reads
-//!    the broken payload.
-//!
-//! Both should be fixed in the wire layer (probably by encoding the
-//! offending payloads as opaque JSON strings, matching the
-//! `OAuthConfigWire` pattern in `djinn-agent`'s slot helpers).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -223,80 +199,9 @@ async fn start_fake_server(
         //    if the worker ever routes them via RPC instead of running them
         //    locally.
         loop {
-            // Read the length-prefixed frame body manually so a bincode
-            // deserialize failure on ONE frame doesn't tear the connection
-            // down — the framing layer (4-byte big-endian length + body)
-            // stays in sync even when an individual frame body can't be
-            // decoded. The current `EmitDjinnEvent` payload
-            // (`SerializableDjinnEvent`) carries
-            // `#[serde(skip_serializing_if = "Option::is_none")]` on its
-            // `id` / `project_id` fields, which is a JSON-only attribute
-            // that breaks the positional bincode encoding when those
-            // optionals are None — the resulting body is under-sized and
-            // bincode bails with "unexpected end of file". The worker's
-            // teardown emits an `activity` event with both Options set to
-            // None, hits the bug, and the fake server would otherwise
-            // close the stream just as the worker is about to write its
-            // `TerminalReport` event frame.
-            use tokio::io::AsyncReadExt;
-            let mut len_buf = [0u8; 4];
-            if stream.read_exact(&mut len_buf).await.is_err() {
-                return;
-            }
-            let len = u32::from_be_bytes(len_buf) as usize;
-            let mut body = vec![0u8; len];
-            if stream.read_exact(&mut body).await.is_err() {
-                return;
-            }
-            let frame: Frame = match bincode::deserialize(&body) {
+            let frame: Frame = match read_frame(&mut stream).await {
                 Ok(f) => f,
-                Err(e) => {
-                    // The worker is blocked awaiting a reply for THIS
-                    // frame's correlation_id. Events that fire during the
-                    // worker's teardown (`activity logged` envelopes with
-                    // both `id` and `project_id` set to `None`) hit two
-                    // bincode incompatibilities in
-                    // `djinn_supervisor::services::wire::SerializableDjinnEvent`:
-                    //
-                    // 1. The `id` / `project_id` fields carry
-                    //    `#[serde(skip_serializing_if = "Option::is_none")]`,
-                    //    a JSON-only attribute. With bincode's positional
-                    //    encoding those Nones produce an under-sized body
-                    //    that deserializes as "unexpected end of file".
-                    // 2. The `payload: serde_json::Value` field uses
-                    //    `serde_json`'s untagged enum variants, which
-                    //    bincode rejects with the error surfaced here
-                    //    ("does not support deserialize_any"). Cf.
-                    //    `SerializableDjinnEvent` in
-                    //    `server/crates/djinn-supervisor/src/services/wire.rs`.
-                    //
-                    // Both are production wire-shape bugs that should be
-                    // fixed in `djinn-supervisor` (replace
-                    // `serde_json::Value` with `String`, drop the
-                    // `skip_serializing_if` attributes). Until they are,
-                    // synthesise a reply so the worker's
-                    // `rpc.emit_djinn_event(..).await` unparks instead of
-                    // deadlocking the teardown — without this, the
-                    // background spawn holds an `Arc<RpcServices>` whose
-                    // mpsc keeps the writer alive, and `main.rs` parks
-                    // forever on `background.writer.await`.
-                    let _ = e;
-                    if body.len() >= 8 {
-                        let cid = u64::from_le_bytes(
-                            body[..8].try_into().expect("frame header u64"),
-                        );
-                        let reply = Frame {
-                            correlation_id: cid,
-                            payload: FramePayload::RpcReply(
-                                ServiceRpcResponse::EmitDjinnEvent(Ok(())),
-                            ),
-                        };
-                        if write_frame(&mut stream, &reply).await.is_err() {
-                            return;
-                        }
-                    }
-                    continue;
-                }
+                Err(_) => return,
             };
             let cid = frame.correlation_id;
             match frame.payload {
@@ -394,19 +299,13 @@ async fn handle_rpc(
         ServiceRpcRequest::GetEnvironmentConfig { project_id } => {
             audit.lock().await.get_environment_config += 1;
             let _ = project_id;
-            // Return Err so the worker's WorkerSupervisorServices::
-            // get_environment_config degrades to a local
-            // `EnvironmentConfig::empty()` and skips the bincode roundtrip
-            // of the wire payload. The `EnvironmentConfig` struct does not
-            // currently bincode-roundtrip cleanly (every `Option<Language>`
-            // field carries `#[serde(skip_serializing_if = "Option::is_none")]`,
-            // which is a JSON-only attribute that breaks the positional
-            // bincode encoding — under-writing yields "unexpected end of
-            // file" on deserialize). That's a separate bug in `djinn-stack`
-            // that should be fixed via a wire-mirror struct, but it's out
-            // of scope for the test un-ignore.
-            ServiceRpcResponse::GetEnvironmentConfig(Err(
-                "fake server: degrade to local empty config".into(),
+            // Return an empty config now that `EnvironmentConfig`
+            // bincode-roundtrips cleanly (the `skip_serializing_if`
+            // attrs on its `Option<*Language>` fields were dropped — see
+            // `server/crates/djinn-stack/src/environment.rs`). This
+            // exercises the real wire path end-to-end.
+            ServiceRpcResponse::GetEnvironmentConfig(Ok(
+                djinn_stack::environment::EnvironmentConfig::empty(),
             ))
         }
         ServiceRpcRequest::GetModelContextWindow { model_id } => {
