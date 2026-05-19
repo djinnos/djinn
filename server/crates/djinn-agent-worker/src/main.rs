@@ -1,19 +1,23 @@
 //! `djinn-agent-worker` — the binary the `KubernetesRuntime` launches inside
 //! each per-task-run Pod.
 //!
-//! Phase 2 K8s PR 2 of `/home/fernando/.claude/plans/phase2-k8s-scaffolding.md`.
+//! Phase 2 K8s scaffolding (originally PR 2 of
+//! `/home/fernando/.claude/plans/phase2-k8s-scaffolding.md`) plus the Phase
+//! 7b cut-over from `~/.claude/plans/phase2-worker-execution-architecture.md`
+//! that lights up real in-Pod supervisor drive.
 //!
-//! ## What this binary does (PR 2 shape)
+//! ## What this binary does
 //!
 //! 1. Reads its environment (or matching flags): `DJINN_SERVER_ADDR`,
-//!    `DJINN_SPEC_PATH`, `DJINN_TOKEN_PATH`, `DJINN_TASK_RUN_ID`,
-//!    `DJINN_WORKSPACE_PATH`.  The launcher projects those values onto the
-//!    Pod as container env vars; `clap`'s `env` integration keeps the
-//!    out-of-cluster invocation path usable by integration tests that spawn
-//!    the binary with an `env()` bag instead of flags.
+//!    `DJINN_SPEC_PATH`, `DJINN_CREDENTIALS_PATH`, `DJINN_TOKEN_PATH`,
+//!    `DJINN_TASK_RUN_ID`, `DJINN_WORKSPACE_PATH`. The launcher projects
+//!    those onto the Pod as container env vars; `clap`'s `env` integration
+//!    keeps the out-of-cluster invocation path usable by integration tests
+//!    that spawn the binary with an `env()` bag instead of flags.
 //! 2. Reads the bincode-serialized [`TaskRunSpec`] from `DJINN_SPEC_PATH`
 //!    (mounted read-only from the per-task-run Secret at
-//!    `/var/run/djinn/spec.bin` in-cluster).
+//!    `/var/run/djinn/spec.bin` in-cluster) and the bincode-serialised
+//!    [`ResolvedCredentials`] from `DJINN_CREDENTIALS_PATH`.
 //! 3. Reads the bearer token from `DJINN_TOKEN_PATH` (the kubelet projects a
 //!    rotating ServiceAccount token at `/var/run/secrets/tokens/djinn`).
 //! 4. Dials djinn-server's ClusterIP Service via
@@ -21,61 +25,65 @@
 //!    [`djinn_supervisor::FramePayload::AuthHello`] carrying
 //!    `(task_run_id, token)` and awaits an accepted
 //!    [`djinn_supervisor::FramePayload::AuthResult`] before entering the
-//!    shared bincode-RPC dispatch loop.  Every `SupervisorServices` trait
-//!    call from here on is a round-trip over that TCP connection.
+//!    shared bincode-RPC dispatch loop.
 //! 5. Attaches to the bind-mounted `/workspace` the launcher materialised
 //!    (`Workspace::attach_existing`) — no re-clone inside the Pod.
-//! 6. Invokes `services.load_task(spec.task_id)` to prove the full
-//!    request/reply round-trip works end-to-end.  A future PR swaps this
-//!    placeholder driver for the full `TaskRunSupervisor::new(...).run(spec)`
-//!    (the supervisor needs a real `TaskRunRepository` + `MirrorManager`
-//!    which we won't plumb into the worker until PR 6/7).
-//! 7. Emits the terminal [`TaskRunReport`] as a
+//! 6. Constructs a [`WorkerSupervisorServices`] which delegates every
+//!    host-bound trait method (DB writes, SSE publish, PR open, …) to the
+//!    RPC connection and runs `execute_stage` LOCALLY against a worker-built
+//!    provider per role.
+//! 7. Hands the services + the in-Pod [`MirrorManager`] to
+//!    `TaskRunSupervisor::new(...).run(spec)` to drive the role sequence end
+//!    to end.
+//! 8. Emits the terminal [`TaskRunReport`] as a
 //!    [`djinn_runtime::WorkerEvent::TerminalReport`] frame on the same RPC
-//!    connection (correlation id `0`) so the launcher's per-task-run
-//!    dispatch can pair it with the `KubernetesRuntime::teardown` path.
-//!    The legacy stdout-frame fallback was retired with Phase 2.1 — worker
-//!    and server images ship together, so there is no staged rollout.
+//!    connection so the launcher's per-task-run dispatch can pair it with
+//!    the `KubernetesRuntime::teardown` path.
 //!
 //! ## What this binary deliberately does NOT do
 //!
-//! * No `TaskRunSupervisor::run` drive — PR 6/7.
-//! * No Kubernetes-API calls.  The worker never speaks to the apiserver; it
+//! * No Kubernetes-API calls. The worker never speaks to the apiserver; it
 //!   only dials the djinn-server Service and trusts the in-cluster DNS +
 //!   bearer-token handshake for auth.
 //! * No stdin spec slurp, no Unix-domain socket dial — those are retired
-//!   with this PR's K8s-only cut-over.  The unix-socket path survives on
-//!   the launcher side ([`djinn_supervisor::serve_on_unix_socket`]) for
+//!   with the K8s-only cut-over. The unix-socket path survives on the
+//!   launcher side ([`djinn_supervisor::serve_on_unix_socket`]) for
 //!   in-process tests, but no production worker dials it.
 //!
-//! ## Why we don't depend on `djinn-agent` or `djinn-k8s`
+//! ## Why we depend on `djinn-agent`
 //!
-//! The worker lives behind an RPC boundary; linking `djinn-agent` would
-//! drag in the whole actor framework, coordinator, LSP manager, etc. — the
-//! exact surface we're trying to keep host-side.  Linking `djinn-k8s` would
-//! pull kube-rs + k8s-openapi into the Pod image for no benefit — the
-//! worker's only authenticated peer is djinn-server over the
-//! handshake-guarded TCP connection, not the apiserver.  Only
-//! `djinn-supervisor` + `djinn-runtime` + `djinn-workspace` + `djinn-core`
-//! cross the boundary.
+//! Phase 7b reuses the in-tree per-stage executor
+//! (`djinn_agent::supervisor::worker_execute_stage`) so the worker drives
+//! real provider streams against the bind-mounted workspace without
+//! duplicating the lifecycle / prompt / reply-loop bodies. `djinn-k8s` is
+//! still excluded — the worker's only authenticated peer is djinn-server
+//! over the handshake-guarded TCP connection, not the apiserver.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod lifecycle;
+mod worker_services;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use djinn_agent::context::AgentContext;
+use djinn_agent::file_time::FileTime;
+use djinn_agent::lsp::LspManager;
+use djinn_agent::roles::RoleRegistry;
 use djinn_core::events::EventBus;
 use djinn_db::{Database, DatabaseConnectConfig, MysqlBackendFlavor, MysqlDatabaseConfig};
-use djinn_runtime::{
-    ResolvedCredentials, RoleKind, TaskRunOutcome, TaskRunReport, TaskRunSpec, WorkerEvent,
-};
-use djinn_supervisor::{RpcServices, SupervisorServices};
-use djinn_workspace::Workspace;
+use djinn_provider::catalog::{CatalogService, HealthTracker};
+use djinn_runtime::{ResolvedCredentials, RoleKind, TaskRunSpec, WorkerEvent};
+use djinn_supervisor::{RpcServices, SupervisorServices, TaskRunSupervisor};
+use djinn_workspace::{MirrorManager, Workspace};
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
+
+use worker_services::WorkerSupervisorServices;
 
 /// Top-level arg parser for the worker binary.
 ///
@@ -244,13 +252,9 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     info!(task_id = %spec.task_id, flow = ?spec.flow, "received spec");
 
     // 1b. Slurp the per-role credentials bundle off the same Secret mount
-    //     (Phase 7a). Decoded but not yet used — `drive_placeholder` still
-    //     runs through the host-side RPC fallback. Phase 7b will hand this
-    //     to a `WorkerSupervisorServices` that constructs providers in-Pod.
-    //
-    //     `let _credentials` silences `unused_variables` until 7b lights up
-    //     the consumer; the bincode roundtrip still validates that the host
-    //     shipped a well-formed payload.
+    //     (Phase 7a). Phase 7b hands these to `WorkerSupervisorServices` so
+    //     `execute_stage` can build providers locally without round-tripping
+    //     vault keys through the host.
     let credentials_bytes = tokio::fs::read(&args.credentials_path)
         .await
         .with_context(|| {
@@ -259,9 +263,9 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
                 args.credentials_path.display()
             )
         })?;
-    let _credentials: ResolvedCredentials = bincode::deserialize(&credentials_bytes)
+    let credentials: ResolvedCredentials = bincode::deserialize(&credentials_bytes)
         .context("bincode deserialize ResolvedCredentials")?;
-    let role_keys: Vec<&'static str> = _credentials
+    let role_keys: Vec<&'static str> = credentials
         .roles()
         .copied()
         .map(RoleKind::as_str)
@@ -269,7 +273,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     info!(
         roles = ?role_keys,
         bytes = credentials_bytes.len(),
-        "received per-role credentials bundle (Phase 7a; not yet consumed)"
+        "received per-role credentials bundle"
     );
 
     // 2. Read the projected ServiceAccount token.  Kubelet-projected tokens
@@ -309,27 +313,54 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
         .context("attach workspace")?;
     info!(path = %workspace.path().display(), branch = %workspace.branch(), "workspace attached");
 
-    // 5. Wrap the RpcServices as `Arc<dyn SupervisorServices>` — the shape
-    //    `TaskRunSupervisor::new` consumes.  PR 6/7 will hand this `Arc` to
-    //    a real supervisor that also owns a `TaskRunRepository` +
-    //    `MirrorManager`.
-    let services: Arc<dyn SupervisorServices> = rpc.clone();
+    // 5. Build the in-Pod `WorkerSupervisorServices` around the RPC connection
+    //    + resolved credentials. `execute_stage` runs locally in the Pod;
+    //    every other trait method delegates to djinn-server over the same
+    //    TCP connection so the worker never opens its own DB / vault / event
+    //    bus.
+    //
+    //    The `AgentContext` carries the in-Pod database connection the
+    //    per-stage executor threads through helpers that still touch the DB
+    //    directly (`resolve_role_overrides`, `build_prompt_context`,
+    //    `spawn_post_session_work`). Phase 7-followup: route those reads
+    //    through `SupervisorServices` too so the worker can run without a
+    //    local Database connection.
+    let in_pod_db = bootstrap_warm_database()
+        .context("bootstrap in-Pod database for WorkerSupervisorServices")?;
+    let agent_context = build_worker_agent_context(in_pod_db);
+    let worker_services: Arc<dyn SupervisorServices> = Arc::new(WorkerSupervisorServices::new(
+        rpc.clone(),
+        credentials,
+        cancel.clone(),
+        agent_context,
+    ));
 
-    // 6. Drive — today just a `load_task` round-trip.  PR 6/7 plugs the full
-    //    `TaskRunSupervisor::new(...).run(spec).await` in here.
-    let report = drive_placeholder(&services, &spec)
+    // 6. Construct the in-Pod `MirrorManager`. `clone_ephemeral` resolves
+    //    against `DJINN_MIRROR_ROOT` (the launcher sets this to `/mirror`,
+    //    the PVC-backed read-only bind mount the host populated).
+    let mirror_root = std::env::var("DJINN_MIRROR_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/mirror"));
+    let mirror = Arc::new(MirrorManager::new(mirror_root));
+
+    // 7. Drive the real supervisor end-to-end. Stage execution is local;
+    //    every host-bound trait call (DB writes, SSE publish, PR open)
+    //    round-trips over RPC.
+    let supervisor = TaskRunSupervisor::new(mirror, worker_services.clone());
+    let report = supervisor
+        .run(spec.clone())
         .await
-        .context("placeholder supervisor drive")?;
+        .context("task-run supervisor drive")?;
 
-    // 7. Ship the terminal report back to the launcher as a `WorkerEvent::
-    //    TerminalReport` on the same RPC connection (Phase 2.1).  The
-    //    launcher's `KubernetesRuntime::teardown` drains the pending
-    //    connection's event channel looking for this frame and uses it as
-    //    the authoritative terminal report, falling back to Job-status
-    //    polling only if the stream closes without emitting one.  Best-effort:
-    //    if the writer task already exited (e.g. the launcher tore the
-    //    connection down first) we log the drop but still exit zero — the
-    //    Job-status fallback on the launcher side covers that case.
+    // 8. Ship the terminal report back to the launcher as a `WorkerEvent::
+    //    TerminalReport` on the same RPC connection. The launcher's
+    //    `KubernetesRuntime::teardown` drains the pending connection's event
+    //    channel looking for this frame and uses it as the authoritative
+    //    terminal report, falling back to Job-status polling only if the
+    //    stream closes without emitting one. Best-effort: if the writer
+    //    task already exited (e.g. the launcher tore the connection down
+    //    first) we log the drop but still exit zero — the Job-status
+    //    fallback on the launcher side covers that case.
     if let Err(e) = rpc
         .emit_event(WorkerEvent::TerminalReport(report))
         .await
@@ -340,7 +371,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
         );
     }
 
-    // 8. Shut down the RPC background tasks cleanly.
+    // 9. Shut down the RPC background tasks cleanly.
     //
     //    Order matters: drop every `Arc<RpcServices>` handle (which owns
     //    the outbound `mpsc::Sender<Frame>`) *before* signalling the
@@ -352,7 +383,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     //    cancel branch and tear the connection down before the event left
     //    the process — the launcher would then fall back to Job-status
     //    polling even on the happy path.
-    drop(services);
+    drop(worker_services);
     drop(rpc);
     let _ = background.writer.await;
     // Reader still needs an explicit cancel — it's parked on a read that
@@ -364,26 +395,31 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     Ok(())
 }
 
-/// Placeholder driver — calls `services.load_task` through the real RPC
-/// wire to prove the round-trip works, then synthesises an `Interrupted`
-/// report.  Replaced by `TaskRunSupervisor::new(...).run(spec).await` in
-/// PR 6/7 once the supervisor can be instantiated with a `TaskRunRepository`
-/// and `MirrorManager` that reach the host side over the same RPC.
-async fn drive_placeholder(
-    services: &Arc<dyn SupervisorServices>,
-    spec: &TaskRunSpec,
-) -> Result<TaskRunReport> {
-    let task = services
-        .load_task(spec.task_id.clone())
-        .await
-        .map_err(|e| anyhow::anyhow!("load_task: {e}"))?;
-    info!(task_id = %task.id, title = %task.title, "round-tripped load_task");
-
-    Ok(TaskRunReport {
-        task_run_id: String::new(),
-        outcome: TaskRunOutcome::Interrupted,
-        stages_completed: Vec::<RoleKind>::new(),
-    })
+/// Build the in-Pod `AgentContext` the per-stage executor threads through
+/// helpers that still touch the DB directly. Most fields are no-ops on the
+/// worker; `db` carries the in-Pod connection bootstrapped via
+/// `bootstrap_warm_database`. See the module docs for the Phase 7-followup
+/// that aims to eliminate this seam entirely.
+fn build_worker_agent_context(db: Database) -> AgentContext {
+    AgentContext {
+        db,
+        event_bus: EventBus::noop(),
+        git_actors: Arc::new(Mutex::new(HashMap::new())),
+        verifying_tasks: Arc::new(std::sync::Mutex::new(HashSet::new())),
+        role_registry: Arc::new(RoleRegistry::new()),
+        health_tracker: HealthTracker::new(),
+        file_time: Arc::new(FileTime::new()),
+        lsp: LspManager::new(),
+        catalog: CatalogService::new(),
+        coordinator: Arc::new(tokio::sync::Mutex::new(None)),
+        active_tasks: Default::default(),
+        task_ops_project_path_override: None,
+        working_root: None,
+        graph_warmer: None,
+        repo_graph_ops: None,
+        mirror: None,
+        rpc_registry: None,
+    }
 }
 
 /// Drive the `warm-graph <project_id>` subcommand end-to-end.

@@ -719,7 +719,7 @@ pub struct OAuthCapabilitiesWire {
 }
 
 impl OAuthConfigWire {
-    fn from_provider_config(cfg: &djinn_provider::provider::ProviderConfig) -> Self {
+    pub fn from_provider_config(cfg: &djinn_provider::provider::ProviderConfig) -> Self {
         use djinn_provider::provider::{AuthMethod, FormatFamily};
         let auth = match &cfg.auth {
             AuthMethod::BearerToken(t) => OAuthAuthMethodWire::BearerToken(t.clone()),
@@ -748,6 +748,45 @@ impl OAuthConfigWire {
             capabilities: OAuthCapabilitiesWire {
                 streaming: cfg.capabilities.streaming,
                 max_tokens_default: cfg.capabilities.max_tokens_default,
+            },
+        }
+    }
+
+    /// Inverse of [`OAuthConfigWire::from_provider_config`]: reconstitute a
+    /// live [`djinn_provider::provider::ProviderConfig`] from the wire mirror.
+    /// Used by `djinn-agent-worker` (Phase 7b) to rebuild an OAuth-derived
+    /// provider config that was shipped over the Secret mount as opaque JSON.
+    ///
+    /// `telemetry` and `session_affinity_key` are left at the wire-encoded
+    /// values; the worker overrides them per-stage before constructing the
+    /// concrete provider client.
+    pub fn to_provider_config(self) -> djinn_provider::provider::ProviderConfig {
+        use djinn_provider::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig};
+        let auth = match self.auth {
+            OAuthAuthMethodWire::BearerToken(t) => AuthMethod::BearerToken(t),
+            OAuthAuthMethodWire::ApiKeyHeader { header, key } => {
+                AuthMethod::ApiKeyHeader { header, key }
+            }
+            OAuthAuthMethodWire::NoAuth => AuthMethod::NoAuth,
+        };
+        let format_family = match self.format_family {
+            OAuthFormatFamilyWire::OpenAI => FormatFamily::OpenAI,
+            OAuthFormatFamilyWire::OpenAIResponses => FormatFamily::OpenAIResponses,
+            OAuthFormatFamilyWire::Anthropic => FormatFamily::Anthropic,
+            OAuthFormatFamilyWire::Google => FormatFamily::Google,
+        };
+        ProviderConfig {
+            base_url: self.base_url,
+            auth,
+            format_family,
+            model_id: self.model_id,
+            context_window: self.context_window,
+            telemetry: None,
+            session_affinity_key: self.session_affinity_key,
+            provider_headers: self.provider_headers,
+            capabilities: ProviderCapabilities {
+                streaming: self.capabilities.streaming,
+                max_tokens_default: self.capabilities.max_tokens_default,
             },
         }
     }

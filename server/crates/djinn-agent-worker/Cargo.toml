@@ -16,6 +16,7 @@ djinn-agent = { path = "../djinn-agent" }
 djinn-core = { path = "../djinn-core" }
 djinn-db = { path = "../djinn-db" }
 djinn-graph = { path = "../djinn-graph" }
+djinn-provider = { path = "../djinn-provider" }
 djinn-runtime = { path = "../djinn-runtime" }
 djinn-stack = { path = "../djinn-stack" }
 djinn-supervisor = { path = "../djinn-supervisor" }
@@ -33,6 +34,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 workspace-hack.workspace = true
 
 [dev-dependencies]
-djinn-provider = { path = "../djinn-provider" }
+futures = "0.3"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }

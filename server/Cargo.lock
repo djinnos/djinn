@@ -1121,6 +1121,7 @@ dependencies = [
  "djinn-stack",
  "djinn-supervisor",
  "djinn-workspace",
+ "futures",
  "serde",
  "serde_json",
  "tempfile",
