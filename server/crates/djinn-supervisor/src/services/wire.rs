@@ -31,7 +31,7 @@
 //! helpers live in `djinn-runtime::wire` so both the launcher server side and
 //! the worker client side use the same reader/writer pair.
 
-use djinn_core::models::{SessionRecord, Task, TaskRunStatus};
+use djinn_core::models::{SessionRecord, SessionStatus, Task, TaskRunStatus};
 use djinn_runtime::wire::{ControlMsg, WorkerEvent, WorkspaceRef};
 use djinn_stack::environment::EnvironmentConfig;
 use serde::{Deserialize, Serialize};
@@ -203,6 +203,15 @@ pub enum ServiceRpcRequest {
         tools: Vec<serde_json::Value>,
         tool_choice: Option<djinn_provider::provider::ToolChoice>,
     },
+    /// [`crate::SupervisorServices::update_session_status`].  Phase 6e —
+    /// finishes the session-persistence extraction started in 6c so
+    /// `supervisor_impl::stage` no longer constructs a `SessionRepository`.
+    UpdateSessionStatus {
+        session_id: String,
+        status: SessionStatus,
+        tokens_in: i64,
+        tokens_out: i64,
+    },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -230,6 +239,8 @@ pub enum ServiceRpcResponse {
     GetEnvironmentConfig(Result<EnvironmentConfig, String>),
     /// Phase 6a-redux — host-side LLM invocation response.
     InvokeLlm(Result<djinn_provider::provider::LlmResponse, String>),
+    /// Phase 6e — session status update response.
+    UpdateSessionStatus(Result<(), String>),
     /// Transport-level failure — not produced by normal operation.
     Err(String),
 }
@@ -884,6 +895,50 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn update_session_status_request_roundtrip() {
+        let f = Frame {
+            correlation_id: 42,
+            payload: FramePayload::Rpc(ServiceRpcRequest::UpdateSessionStatus {
+                session_id: "s1".into(),
+                status: SessionStatus::Completed,
+                tokens_in: 1234,
+                tokens_out: 567,
+            }),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::UpdateSessionStatus {
+                session_id,
+                status,
+                tokens_in,
+                tokens_out,
+            }) => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(status, SessionStatus::Completed);
+                assert_eq!(tokens_in, 1234);
+                assert_eq!(tokens_out, 567);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_session_status_reply_roundtrip() {
+        let resp = ServiceRpcResponse::UpdateSessionStatus(Ok(()));
+        let f = Frame {
+            correlation_id: 42,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        assert!(matches!(
+            back.payload,
+            FramePayload::RpcReply(ServiceRpcResponse::UpdateSessionStatus(Ok(())))
+        ));
     }
 
     #[test]

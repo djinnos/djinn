@@ -183,6 +183,26 @@ impl SupervisorServices for FakeServices {
     ) -> Result<djinn_stack::environment::EnvironmentConfig, String> {
         unimplemented!("not exercised in PR 2 integration tests")
     }
+
+    async fn invoke_llm(
+        &self,
+        _model_id: String,
+        _conversation: djinn_provider::message::Conversation,
+        _tools: Vec<serde_json::Value>,
+        _tool_choice: Option<djinn_provider::provider::ToolChoice>,
+    ) -> Result<djinn_provider::provider::LlmResponse, String> {
+        unimplemented!("not exercised in PR 2 integration tests")
+    }
+
+    async fn update_session_status(
+        &self,
+        _session_id: String,
+        _status: djinn_core::models::SessionStatus,
+        _tokens_in: i64,
+        _tokens_out: i64,
+    ) -> Result<(), String> {
+        unimplemented!("not exercised in PR 2 integration tests")
+    }
 }
 
 /// Bind `serve_on_tcp` to `127.0.0.1:0`, return the resolved `(SocketAddr,

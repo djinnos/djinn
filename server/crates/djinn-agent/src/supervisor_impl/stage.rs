@@ -286,16 +286,6 @@ pub(crate) async fn execute_stage(
         .await
         .map_err(StageError::SessionCreate)?;
     let session_id = session_record.id.clone();
-    // The two `session_repo.update(...)` call sites below still go through
-    // `SessionRepository` directly. Phase 6c stopped at `create_session`;
-    // extracting `update_session_status` is tracked as a follow-up so we
-    // can finish 6c/6d without growing the diff. The worker will hit the
-    // unimplemented path until that extraction lands, but the in-process
-    // host path (DirectServices) keeps working unchanged.
-    let session_repo = djinn_db::SessionRepository::new(
-        agent_context.db.clone(),
-        agent_context.event_bus.clone(),
-    );
 
     // ── Build the LLM provider ───────────────────────────────────────────────
     // Soft fallback: a missing catalog entry surfaces as `Err`, which we map to
@@ -345,8 +335,8 @@ pub(crate) async fn execute_stage(
                 })
             }
             None => {
-                let _ = session_repo
-                    .update(&session_id, SessionStatus::Failed, 0, 0)
+                let _ = services
+                    .update_session_status(session_id.clone(), SessionStatus::Failed, 0, 0)
                     .await;
                 return Err(StageError::ModelResolution(
                     "no provider credential resolved for model".into(),
@@ -405,8 +395,8 @@ pub(crate) async fn execute_stage(
     } else {
         SessionStatus::Failed
     };
-    if let Err(e) = session_repo
-        .update(&session_id, session_status, tokens_in, tokens_out)
+    if let Err(e) = services
+        .update_session_status(session_id.clone(), session_status, tokens_in, tokens_out)
         .await
     {
         tracing::warn!(

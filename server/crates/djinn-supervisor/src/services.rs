@@ -163,4 +163,21 @@ pub trait SupervisorServices: Send + Sync + 'static {
         tools: Vec<serde_json::Value>,
         tool_choice: Option<djinn_provider::provider::ToolChoice>,
     ) -> Result<djinn_provider::provider::LlmResponse, String>;
+
+    /// Update an existing `session` row's status + token counts and re-emit
+    /// its `session` SSE event.
+    ///
+    /// Phase 6e extraction — replaces the two `SessionRepository::update(..)`
+    /// call sites in `supervisor_impl::stage` (the only remaining direct
+    /// `SessionRepository` use there). Worker-side stubs round-trip this so
+    /// the in-Pod supervisor never opens its own DB connection. Caller
+    /// doesn't need the returned `SessionRecord`, so we return `()` and let
+    /// the SSE side-effect carry the update outward.
+    async fn update_session_status(
+        &self,
+        session_id: String,
+        status: djinn_core::models::SessionStatus,
+        tokens_in: i64,
+        tokens_out: i64,
+    ) -> Result<(), String>;
 }

@@ -334,4 +334,19 @@ impl SupervisorServices for DirectServices {
         }
         Ok(response)
     }
+
+    async fn update_session_status(
+        &self,
+        session_id: String,
+        status: djinn_core::models::SessionStatus,
+        tokens_in: i64,
+        tokens_out: i64,
+    ) -> Result<(), String> {
+        let ctx = &self.callbacks.agent_context;
+        let repo = SessionRepository::new(ctx.db.clone(), ctx.event_bus.clone());
+        repo.update(&session_id, status, tokens_in, tokens_out)
+            .await
+            .map(|_record| ())
+            .map_err(|e| e.to_string())
+    }
 }

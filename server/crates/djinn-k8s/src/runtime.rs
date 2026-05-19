@@ -1062,6 +1062,15 @@ mod tests {
             ) -> Result<djinn_provider::provider::LlmResponse, String> {
                 unimplemented!()
             }
+            async fn update_session_status(
+                &self,
+                _: String,
+                _: djinn_core::models::SessionStatus,
+                _: i64,
+                _: i64,
+            ) -> Result<(), String> {
+                unimplemented!()
+            }
         }
 
         let services: Arc<dyn SupervisorServices> = Arc::new(NoopServices {

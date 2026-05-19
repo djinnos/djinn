@@ -1100,6 +1100,17 @@ async fn dispatch(
                 .await;
             ServiceRpcResponse::InvokeLlm(result)
         }
+        ServiceRpcRequest::UpdateSessionStatus {
+            session_id,
+            status,
+            tokens_in,
+            tokens_out,
+        } => {
+            let result = services
+                .update_session_status(session_id, status, tokens_in, tokens_out)
+                .await;
+            ServiceRpcResponse::UpdateSessionStatus(result)
+        }
     }
 }
 
@@ -1212,6 +1223,16 @@ mod tests {
             _tools: Vec<serde_json::Value>,
             _tool_choice: Option<djinn_provider::provider::ToolChoice>,
         ) -> Result<djinn_provider::provider::LlmResponse, String> {
+            unimplemented!("not exercised in server tests")
+        }
+
+        async fn update_session_status(
+            &self,
+            _session_id: String,
+            _status: djinn_core::models::SessionStatus,
+            _tokens_in: i64,
+            _tokens_out: i64,
+        ) -> Result<(), String> {
             unimplemented!("not exercised in server tests")
         }
     }

@@ -516,6 +516,29 @@ impl SupervisorServices for RpcServices {
             Err(e) => Err(e),
         }
     }
+
+    async fn update_session_status(
+        &self,
+        session_id: String,
+        status: djinn_core::models::SessionStatus,
+        tokens_in: i64,
+        tokens_out: i64,
+    ) -> Result<(), String> {
+        match self
+            .roundtrip(ServiceRpcRequest::UpdateSessionStatus {
+                session_id,
+                status,
+                tokens_in,
+                tokens_out,
+            })
+            .await
+        {
+            Ok(ServiceRpcResponse::UpdateSessionStatus(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 // ── Reader / writer loops ────────────────────────────────────────────────────
@@ -737,6 +760,18 @@ impl SupervisorServices for UnimplementedRpcServices {
     ) -> Result<djinn_provider::provider::LlmResponse, String> {
         unimplemented!(
             "UnimplementedRpcServices::invoke_llm — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn update_session_status(
+        &self,
+        _session_id: String,
+        _status: djinn_core::models::SessionStatus,
+        _tokens_in: i64,
+        _tokens_out: i64,
+    ) -> Result<(), String> {
+        unimplemented!(
+            "UnimplementedRpcServices::update_session_status — construct RpcServices for real RPC"
         )
     }
 }
