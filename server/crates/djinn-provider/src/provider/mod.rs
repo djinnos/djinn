@@ -4,6 +4,7 @@ pub mod telemetry;
 
 use std::pin::Pin;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::message::{ContentBlock, Conversation};
@@ -11,7 +12,7 @@ use crate::message::{ContentBlock, Conversation};
 // ─── Token usage ──────────────────────────────────────────────────────────────
 
 /// Token counts extracted from a provider API response.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TokenUsage {
     pub input: u32,
     pub output: u32,
@@ -20,7 +21,7 @@ pub struct TokenUsage {
 // ─── Stream events ────────────────────────────────────────────────────────────
 
 /// Events yielded by the streaming response from an LLM provider.
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StreamEvent {
     /// A content delta (text token or complete tool use block).
     Delta(ContentBlock),
@@ -31,6 +32,36 @@ pub enum StreamEvent {
     Usage(TokenUsage),
     /// End-of-stream sentinel.
     Done,
+}
+
+// ─── Non-streaming LLM response ───────────────────────────────────────────────
+
+/// Terminal aggregate of a single provider call.
+///
+/// Phase 6a-redux — the wire-shape returned by
+/// [`crate::services::SupervisorServices::invoke_llm`]. The host collects a
+/// provider's [`StreamEvent`] stream into this shape so the worker (Phase 7)
+/// can call into the host's vault-resident provider without itself ever
+/// holding the API key.
+///
+/// `content` is the merged set of assistant content blocks (text + tool_use
+/// deltas) accumulated during the stream — i.e. what the consumer would have
+/// appended to the conversation had it consumed the stream itself.
+/// `thinking` is the model's chain-of-thought, stored separately because
+/// providers stream it through `StreamEvent::Thinking` rather than as
+/// `ContentBlock::Thinking` deltas. `usage` is the last `StreamEvent::Usage`
+/// observed (or `Default::default()` if none was emitted).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LlmResponse {
+    /// Assistant content blocks — text + complete `ToolUse` blocks accumulated
+    /// from `StreamEvent::Delta` events.
+    pub content: Vec<ContentBlock>,
+    /// Chain-of-thought stream concatenated into a single string. Empty when
+    /// the model did not emit any thinking events.
+    pub thinking: String,
+    /// Token usage report; `Default::default()` if the provider did not emit
+    /// a `StreamEvent::Usage` frame.
+    pub usage: TokenUsage,
 }
 
 // ─── Provider capabilities ───────────────────────────────────────────────────
@@ -114,7 +145,7 @@ pub enum FormatFamily {
     Google,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ToolChoice {
     Auto,
     Required,

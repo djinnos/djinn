@@ -194,6 +194,15 @@ pub enum ServiceRpcRequest {
     /// [`crate::SupervisorServices::get_environment_config`].  Phase 6d —
     /// project environment-config extraction.
     GetEnvironmentConfig { project_id: String },
+    /// [`crate::SupervisorServices::invoke_llm`].  Phase 6a-redux —
+    /// host-side LLM invocation. The worker (Phase 7) will use this to keep
+    /// vault credentials off the worker side.
+    InvokeLlm {
+        model_id: String,
+        conversation: djinn_provider::message::Conversation,
+        tools: Vec<serde_json::Value>,
+        tool_choice: Option<djinn_provider::provider::ToolChoice>,
+    },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -219,6 +228,8 @@ pub enum ServiceRpcResponse {
     PublishSessionMessage(Result<(), String>),
     /// Phase 6d — project environment-config response.
     GetEnvironmentConfig(Result<EnvironmentConfig, String>),
+    /// Phase 6a-redux — host-side LLM invocation response.
+    InvokeLlm(Result<djinn_provider::provider::LlmResponse, String>),
     /// Transport-level failure — not produced by normal operation.
     Err(String),
 }
@@ -812,6 +823,67 @@ mod tests {
             back.payload,
             FramePayload::RpcReply(ServiceRpcResponse::GetEnvironmentConfig(Ok(_)))
         ));
+    }
+
+    #[test]
+    fn invoke_llm_request_roundtrip() {
+        use djinn_provider::message::{Conversation, Message};
+        use djinn_provider::provider::ToolChoice;
+        let mut conv = Conversation::new();
+        conv.push(Message::user("hello"));
+        let f = Frame {
+            correlation_id: 41,
+            payload: FramePayload::Rpc(ServiceRpcRequest::InvokeLlm {
+                model_id: "anthropic/claude-opus-4-7".into(),
+                conversation: conv,
+                tools: vec![serde_json::json!({"name": "noop"})],
+                tool_choice: Some(ToolChoice::Auto),
+            }),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::InvokeLlm {
+                model_id,
+                conversation,
+                tools,
+                tool_choice,
+            }) => {
+                assert_eq!(model_id, "anthropic/claude-opus-4-7");
+                assert_eq!(conversation.len(), 1);
+                assert_eq!(tools.len(), 1);
+                assert_eq!(tool_choice, Some(ToolChoice::Auto));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invoke_llm_reply_roundtrip() {
+        use djinn_core::message::ContentBlock;
+        use djinn_provider::provider::{LlmResponse, TokenUsage};
+        let resp = ServiceRpcResponse::InvokeLlm(Ok(LlmResponse {
+            content: vec![ContentBlock::text("hi back")],
+            thinking: String::new(),
+            usage: TokenUsage {
+                input: 12,
+                output: 7,
+            },
+        }));
+        let f = Frame {
+            correlation_id: 41,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::InvokeLlm(Ok(r))) => {
+                assert_eq!(r.usage.input, 12);
+                assert_eq!(r.usage.output, 7);
+                assert_eq!(r.content.len(), 1);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[test]

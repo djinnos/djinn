@@ -34,8 +34,13 @@ use djinn_workspace::Workspace;
 use tokio_util::sync::CancellationToken;
 
 use crate::context::AgentContext;
-use djinn_provider::provider::LlmProvider;
+use djinn_provider::message::Conversation;
+use djinn_provider::provider::{
+    LlmProvider, LlmResponse, ProviderConfig, StreamEvent, TokenUsage, ToolChoice,
+    create_provider,
+};
 use crate::supervisor_impl::{SupervisorCallbackContext, execute_stage, supervisor_pr_open};
+use futures::StreamExt;
 
 /// In-process `SupervisorServices` impl that delegates straight to the
 /// lifecycle helpers inside `djinn-agent`.
@@ -232,5 +237,101 @@ impl SupervisorServices for DirectServices {
         )
         .await;
         Ok(cfg)
+    }
+
+    async fn invoke_llm(
+        &self,
+        model_id: String,
+        conversation: Conversation,
+        tools: Vec<serde_json::Value>,
+        tool_choice: Option<ToolChoice>,
+    ) -> Result<LlmResponse, String> {
+        // Resolve model + credential from the catalog + vault. The
+        // task_id slot is a synthetic identifier used only for telemetry /
+        // event-bus correlation; there is no real Task row backing this
+        // host-side invocation.
+        let synthetic_task_id = format!("invoke_llm:{model_id}");
+        let resolved = crate::actors::slot::lifecycle::model_resolution::resolve_model_and_credential(
+            &model_id,
+            &synthetic_task_id,
+            &self.callbacks.agent_context,
+        )
+        .await
+        .map_err(|e| e.reason)?;
+
+        // Build the provider from the resolved credential. Mirrors the
+        // construction in `supervisor_impl::stage` — minus the session
+        // affinity key (we have no session here).
+        let context_window = self
+            .get_model_context_window(model_id.clone())
+            .await
+            .unwrap_or(0)
+            .max(0) as u32;
+        let telemetry_meta = crate::actors::slot::helpers::build_telemetry_meta(
+            "invoke_llm",
+            &synthetic_task_id,
+        );
+        let provider: Box<dyn LlmProvider> = match resolved.provider_credential {
+            Some(crate::actors::slot::helpers::ProviderCredential::OAuthConfig(mut cfg)) => {
+                cfg.model_id = resolved.model_name.clone();
+                cfg.context_window = context_window;
+                cfg.telemetry = Some(telemetry_meta);
+                cfg.session_affinity_key = None;
+                create_provider(*cfg)
+            }
+            Some(crate::actors::slot::helpers::ProviderCredential::ApiKey(_, api_key)) => {
+                let format_family = crate::actors::slot::helpers::format_family_for_provider(
+                    &resolved.catalog_provider_id,
+                    &resolved.model_name,
+                );
+                let base_url = self
+                    .get_provider_base_url(resolved.catalog_provider_id.clone())
+                    .await
+                    .unwrap_or_else(|_| {
+                        crate::actors::slot::helpers::default_base_url(
+                            &resolved.catalog_provider_id,
+                        )
+                    });
+                create_provider(ProviderConfig {
+                    base_url,
+                    auth: crate::actors::slot::helpers::auth_method_for_provider(
+                        &resolved.catalog_provider_id,
+                        &api_key,
+                    ),
+                    format_family,
+                    model_id: resolved.model_name.clone(),
+                    context_window,
+                    telemetry: Some(telemetry_meta),
+                    session_affinity_key: None,
+                    provider_headers: Default::default(),
+                    capabilities: crate::actors::slot::helpers::capabilities_for_provider(
+                        &resolved.catalog_provider_id,
+                    ),
+                })
+            }
+            None => {
+                return Err("no provider credential resolved for model".into());
+            }
+        };
+
+        // Drive the stream to completion and collect the terminal aggregate.
+        let mut stream = provider
+            .stream(&conversation, &tools, tool_choice)
+            .await
+            .map_err(|e| format!("provider stream init failed: {e}"))?;
+        let mut response = LlmResponse {
+            content: Vec::new(),
+            thinking: String::new(),
+            usage: TokenUsage::default(),
+        };
+        while let Some(ev) = stream.next().await {
+            match ev.map_err(|e| format!("provider stream error: {e}"))? {
+                StreamEvent::Delta(block) => response.content.push(block),
+                StreamEvent::Thinking(s) => response.thinking.push_str(&s),
+                StreamEvent::Usage(u) => response.usage = u,
+                StreamEvent::Done => break,
+            }
+        }
+        Ok(response)
     }
 }

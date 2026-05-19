@@ -493,6 +493,29 @@ impl SupervisorServices for RpcServices {
             Err(e) => Err(e),
         }
     }
+
+    async fn invoke_llm(
+        &self,
+        model_id: String,
+        conversation: djinn_provider::message::Conversation,
+        tools: Vec<serde_json::Value>,
+        tool_choice: Option<djinn_provider::provider::ToolChoice>,
+    ) -> Result<djinn_provider::provider::LlmResponse, String> {
+        match self
+            .roundtrip(ServiceRpcRequest::InvokeLlm {
+                model_id,
+                conversation,
+                tools,
+                tool_choice,
+            })
+            .await
+        {
+            Ok(ServiceRpcResponse::InvokeLlm(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 // ── Reader / writer loops ────────────────────────────────────────────────────
@@ -702,6 +725,18 @@ impl SupervisorServices for UnimplementedRpcServices {
     ) -> Result<djinn_stack::environment::EnvironmentConfig, String> {
         unimplemented!(
             "UnimplementedRpcServices::get_environment_config — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn invoke_llm(
+        &self,
+        _model_id: String,
+        _conversation: djinn_provider::message::Conversation,
+        _tools: Vec<serde_json::Value>,
+        _tool_choice: Option<djinn_provider::provider::ToolChoice>,
+    ) -> Result<djinn_provider::provider::LlmResponse, String> {
+        unimplemented!(
+            "UnimplementedRpcServices::invoke_llm — construct RpcServices for real RPC"
         )
     }
 }
@@ -1195,6 +1230,66 @@ mod tests {
             )
             .await
             .expect("publish_session_message ok");
+
+        cancel.cancel();
+        let _ = bg.reader.await;
+        let _ = bg.writer.await;
+        let _ = server_task.await;
+    }
+
+    /// Round-trip an `invoke_llm` RPC through an in-memory Unix pair.
+    #[tokio::test]
+    async fn invoke_llm_roundtrip_over_unixpair() {
+        use djinn_core::message::ContentBlock;
+        use djinn_provider::message::{Conversation, Message};
+        use djinn_provider::provider::{LlmResponse, TokenUsage, ToolChoice};
+
+        let (client, server) = UnixStream::pair().expect("pair");
+        let server_task = tokio::spawn(async move {
+            let (mut read, mut write) = server.into_split();
+            let frame: Frame = read_frame(&mut read).await.expect("read request");
+            match frame.payload {
+                FramePayload::Rpc(ServiceRpcRequest::InvokeLlm {
+                    model_id,
+                    conversation,
+                    tools,
+                    tool_choice,
+                }) => {
+                    assert_eq!(model_id, "anthropic/claude-opus-4-7");
+                    assert_eq!(conversation.len(), 1);
+                    assert_eq!(tools.len(), 0);
+                    assert_eq!(tool_choice, Some(ToolChoice::Auto));
+                    let resp = LlmResponse {
+                        content: vec![ContentBlock::text("pong")],
+                        thinking: String::new(),
+                        usage: TokenUsage { input: 5, output: 4 },
+                    };
+                    let reply = Frame {
+                        correlation_id: frame.correlation_id,
+                        payload: FramePayload::RpcReply(ServiceRpcResponse::InvokeLlm(Ok(resp))),
+                    };
+                    write_frame(&mut write, &reply).await.expect("write reply");
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        });
+
+        let cancel = CancellationToken::new();
+        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
+        let mut conv = Conversation::new();
+        conv.push(Message::user("ping"));
+        let got = services
+            .invoke_llm(
+                "anthropic/claude-opus-4-7".into(),
+                conv,
+                vec![],
+                Some(ToolChoice::Auto),
+            )
+            .await
+            .expect("invoke_llm ok");
+        assert_eq!(got.usage.input, 5);
+        assert_eq!(got.usage.output, 4);
+        assert_eq!(got.content.len(), 1);
 
         cancel.cancel();
         let _ = bg.reader.await;

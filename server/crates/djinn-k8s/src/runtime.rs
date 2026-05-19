@@ -1053,6 +1053,15 @@ mod tests {
             ) -> Result<djinn_stack::environment::EnvironmentConfig, String> {
                 unimplemented!()
             }
+            async fn invoke_llm(
+                &self,
+                _: String,
+                _: djinn_provider::message::Conversation,
+                _: Vec<serde_json::Value>,
+                _: Option<djinn_provider::provider::ToolChoice>,
+            ) -> Result<djinn_provider::provider::LlmResponse, String> {
+                unimplemented!()
+            }
         }
 
         let services: Arc<dyn SupervisorServices> = Arc::new(NoopServices {

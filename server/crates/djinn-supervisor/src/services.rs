@@ -146,4 +146,21 @@ pub trait SupervisorServices: Send + Sync + 'static {
         &self,
         project_id: String,
     ) -> Result<EnvironmentConfig, String>;
+
+    /// Invoke an LLM provider once, host-side, and return the terminal
+    /// aggregate of its stream as an [`djinn_provider::provider::LlmResponse`].
+    ///
+    /// Phase 6a-redux — the host keeps vault keys and constructs the provider
+    /// from the catalog row; the worker (Phase 7) calls this method instead
+    /// of `provider.stream(..)` so it never holds the API key. The reply-loop
+    /// call site in `actors::slot::reply_loop` still calls
+    /// `provider.stream(..)` directly today; the RPC method is dead code
+    /// until Phase 7 wires the worker side.
+    async fn invoke_llm(
+        &self,
+        model_id: String,
+        conversation: djinn_provider::message::Conversation,
+        tools: Vec<serde_json::Value>,
+        tool_choice: Option<djinn_provider::provider::ToolChoice>,
+    ) -> Result<djinn_provider::provider::LlmResponse, String>;
 }

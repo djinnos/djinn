@@ -1089,6 +1089,17 @@ async fn dispatch(
             let result = services.get_environment_config(project_id).await;
             ServiceRpcResponse::GetEnvironmentConfig(result)
         }
+        ServiceRpcRequest::InvokeLlm {
+            model_id,
+            conversation,
+            tools,
+            tool_choice,
+        } => {
+            let result = services
+                .invoke_llm(model_id, conversation, tools, tool_choice)
+                .await;
+            ServiceRpcResponse::InvokeLlm(result)
+        }
     }
 }
 
@@ -1191,6 +1202,16 @@ mod tests {
             &self,
             _project_id: String,
         ) -> Result<djinn_stack::environment::EnvironmentConfig, String> {
+            unimplemented!("not exercised in server tests")
+        }
+
+        async fn invoke_llm(
+            &self,
+            _model_id: String,
+            _conversation: djinn_provider::message::Conversation,
+            _tools: Vec<serde_json::Value>,
+            _tool_choice: Option<djinn_provider::provider::ToolChoice>,
+        ) -> Result<djinn_provider::provider::LlmResponse, String> {
             unimplemented!("not exercised in server tests")
         }
     }
