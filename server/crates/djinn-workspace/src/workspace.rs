@@ -144,6 +144,34 @@ impl Workspace {
     /// lifecycle points in supervisor code.
     pub fn teardown(self) {}
 
+    /// Push the named branch from this workspace to its `origin` remote.
+    ///
+    /// Called by the worker after a task-run completes its stages but
+    /// before `open_pr` — so the host's `squash_merge_via_mirror` can find
+    /// the worker's commits in the mirror.  Without this, the worker's
+    /// commits live only in the ephemeral TempDir clone (whose origin is
+    /// the mirror) and vanish when the Pod exits.
+    ///
+    /// Idempotent: if the branch has no new commits beyond what `origin`
+    /// already has, the push is a no-op.  If the push fails (origin is
+    /// read-only, network error, etc.), returns the underlying
+    /// [`djinn_git::GitError`].
+    ///
+    /// Refspec is `branch:branch`; the source must be a local ref in this
+    /// workspace.
+    pub async fn push_to_origin(&self, branch: &str) -> Result<(), djinn_git::GitError> {
+        djinn_git::run_git_command(
+            self.root.path().to_path_buf(),
+            vec![
+                "push".into(),
+                "origin".into(),
+                format!("{branch}:{branch}"),
+            ],
+        )
+        .await
+        .map(|_| ())
+    }
+
     async fn run_git(
         &self,
         args: &[&str],
