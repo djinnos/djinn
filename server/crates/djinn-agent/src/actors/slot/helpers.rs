@@ -648,6 +648,111 @@ pub enum ProviderCredential {
     OAuthConfig(Box<djinn_provider::provider::ProviderConfig>),
 }
 
+impl ProviderCredential {
+    /// Convert into a wire-friendly [`djinn_runtime::SerializableCredential`]
+    /// suitable for shipping into a worker Pod via the per-task-run K8s
+    /// Secret (Phase 7a).
+    ///
+    /// API-key credentials pass through unchanged. OAuth-derived
+    /// [`djinn_provider::provider::ProviderConfig`] payloads are projected
+    /// onto an [`OAuthConfigWire`] serde mirror and JSON-encoded — the
+    /// upstream `ProviderConfig` (and its `AuthMethod` /
+    /// `ProviderCapabilities` constituents) deliberately do not implement
+    /// `Serialize`, so the wire mirror is the load-bearing seam keeping
+    /// `djinn-provider` free of a serde-everywhere derive sprawl.
+    pub fn to_serializable(&self) -> djinn_runtime::SerializableCredential {
+        match self {
+            ProviderCredential::ApiKey(key_name, api_key) => {
+                djinn_runtime::SerializableCredential::ApiKey {
+                    key_name: key_name.clone(),
+                    api_key: api_key.clone(),
+                }
+            }
+            ProviderCredential::OAuthConfig(cfg) => {
+                let wire = OAuthConfigWire::from_provider_config(cfg);
+                let config_json = serde_json::to_string(&wire)
+                    .expect("OAuthConfigWire serialization cannot fail");
+                djinn_runtime::SerializableCredential::OAuthConfig { config_json }
+            }
+        }
+    }
+}
+
+/// Serde-friendly mirror of [`djinn_provider::provider::ProviderConfig`] used
+/// exclusively to encode the OAuth-derived variant of [`ProviderCredential`]
+/// into a wire blob (Phase 7a).
+///
+/// The worker (Phase 7b) will deserialise this and reconstruct a live
+/// `ProviderConfig` — the two-way translation lives outside this file because
+/// the worker links a different subset of crates than the coordinator.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct OAuthConfigWire {
+    pub base_url: String,
+    pub auth: OAuthAuthMethodWire,
+    pub format_family: OAuthFormatFamilyWire,
+    pub model_id: String,
+    pub context_window: u32,
+    pub session_affinity_key: Option<String>,
+    pub provider_headers: std::collections::HashMap<String, String>,
+    pub capabilities: OAuthCapabilitiesWire,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub enum OAuthAuthMethodWire {
+    BearerToken(String),
+    ApiKeyHeader { header: String, key: String },
+    NoAuth,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub enum OAuthFormatFamilyWire {
+    OpenAI,
+    OpenAIResponses,
+    Anthropic,
+    Google,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct OAuthCapabilitiesWire {
+    pub streaming: bool,
+    pub max_tokens_default: Option<u32>,
+}
+
+impl OAuthConfigWire {
+    fn from_provider_config(cfg: &djinn_provider::provider::ProviderConfig) -> Self {
+        use djinn_provider::provider::{AuthMethod, FormatFamily};
+        let auth = match &cfg.auth {
+            AuthMethod::BearerToken(t) => OAuthAuthMethodWire::BearerToken(t.clone()),
+            AuthMethod::ApiKeyHeader { header, key } => OAuthAuthMethodWire::ApiKeyHeader {
+                header: header.clone(),
+                key: key.clone(),
+            },
+            AuthMethod::NoAuth => OAuthAuthMethodWire::NoAuth,
+        };
+        let format_family = match cfg.format_family {
+            FormatFamily::OpenAI => OAuthFormatFamilyWire::OpenAI,
+            FormatFamily::OpenAIResponses => OAuthFormatFamilyWire::OpenAIResponses,
+            FormatFamily::Anthropic => OAuthFormatFamilyWire::Anthropic,
+            FormatFamily::Google => OAuthFormatFamilyWire::Google,
+        };
+        Self {
+            base_url: cfg.base_url.clone(),
+            auth,
+            format_family,
+            model_id: cfg.model_id.clone(),
+            context_window: cfg.context_window,
+            // `telemetry` is intentionally dropped — it is per-call metadata
+            // (task_id / agent_type / session_id) the worker rebuilds locally.
+            session_affinity_key: cfg.session_affinity_key.clone(),
+            provider_headers: cfg.provider_headers.clone(),
+            capabilities: OAuthCapabilitiesWire {
+                streaming: cfg.capabilities.streaming,
+                max_tokens_default: cfg.capabilities.max_tokens_default,
+            },
+        }
+    }
+}
+
 pub async fn load_provider_credential(
     provider_id: &str,
     app_state: &AgentContext,

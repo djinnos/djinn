@@ -39,7 +39,7 @@ use std::time::Duration;
 use djinn_core::models::TaskRunTrigger;
 use djinn_k8s::config::KubernetesConfig;
 use djinn_k8s::runtime::KubernetesRuntime;
-use djinn_runtime::{SessionRuntime, SupervisorFlow, TaskRunSpec};
+use djinn_runtime::{ResolvedCredentials, SessionRuntime, SupervisorFlow, TaskRunSpec};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Secret;
 use kube::api::{Api, DeleteParams};
@@ -147,10 +147,11 @@ async fn kind_smoke_prepare_then_cancel() {
     let runtime = KubernetesRuntime::from_client(client.clone(), config.clone(), registry);
 
     let spec = sample_spec("task-kind-smoke-prep");
+    let credentials = ResolvedCredentials::default();
 
     // 1) prepare: handle with a populated pod_ref pointing at the Job.
     let handle = runtime
-        .prepare(&spec)
+        .prepare(&spec, &credentials)
         .await
         .expect("kind_smoke: prepare() should succeed against a live kind cluster");
     let job_name = handle
@@ -228,10 +229,11 @@ async fn kind_smoke_runtime_lifecycle() {
     let runtime = KubernetesRuntime::from_client(client.clone(), config.clone(), registry);
 
     let spec = sample_spec("task-kind-smoke-life");
+    let credentials = ResolvedCredentials::default();
 
     // 1) prepare.
     let handle = runtime
-        .prepare(&spec)
+        .prepare(&spec, &credentials)
         .await
         .expect("kind_smoke: prepare()");
     let job_name = handle

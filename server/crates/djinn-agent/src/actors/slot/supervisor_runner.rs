@@ -33,14 +33,16 @@ use tokio_util::sync::CancellationToken;
 
 use djinn_core::models::TaskRunTrigger;
 use djinn_db::{TaskRepository, task_branch_name};
-use djinn_runtime::{BiStream, SessionRuntime, StreamEvent, TestRuntime};
+use djinn_runtime::{BiStream, ResolvedCredentials, SessionRuntime, StreamEvent, TestRuntime};
 
 use crate::actors::slot::lifecycle::model_resolution::resolve_role_model_preference;
 use crate::context::AgentContext;
 use crate::runtime_bridge::{RuntimeKind, SupervisorTaskRunner, runtime_kind};
 use crate::supervisor::{RoleKind, SupervisorFlow, TaskRunSpec, services_for_agent_context};
 
-use super::helpers::{conflict_context_for_dispatch, default_target_branch};
+use super::helpers::{
+    conflict_context_for_dispatch, default_target_branch, load_provider_credential, parse_model_id,
+};
 
 /// Default slot-dispatch runner.
 ///
@@ -130,6 +132,35 @@ pub(crate) async fn run_supervisor_dispatch(
         model_id_per_role,
     };
 
+    // ── Resolve per-role provider credentials (Phase 7a) ──────────────────
+    //
+    // The host pulls every role's credential from the vault (or OAuth token
+    // store) and ships them into the worker Pod via the per-task-run K8s
+    // Secret. Fast-fail on resolution errors so the operator sees a clean
+    // dispatch-time failure in session logs instead of a Pod that crash-loops
+    // because the model client can't authenticate.
+    let mut credentials = ResolvedCredentials::default();
+    for role in spec.flow.role_sequence() {
+        let model_id = spec
+            .model_id_per_role
+            .get(role)
+            .cloned()
+            .unwrap_or_else(|| model_id.clone());
+        let (provider_id, _model_name) = parse_model_id(&model_id).map_err(|e| {
+            anyhow::anyhow!(
+                "supervisor dispatch: cannot parse model id `{model_id}` for role {role:?}: {e}"
+            )
+        })?;
+        let cred = load_provider_credential(&provider_id, &app_state)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "supervisor dispatch: load_provider_credential({provider_id}) for role {role:?}: {e}"
+                )
+            })?;
+        credentials.insert(*role, cred.to_serializable());
+    }
+
     // ── Resolve the runtime ───────────────────────────────────────────────
     let mirror = match app_state.mirror.as_ref() {
         Some(m) => m.clone(),
@@ -182,7 +213,7 @@ pub(crate) async fn run_supervisor_dispatch(
 
     // ── Drive prepare → (await report) → teardown ─────────────────────────
     let handle = runtime
-        .prepare(&spec)
+        .prepare(&spec, &credentials)
         .await
         .map_err(|e| anyhow::anyhow!("runtime.prepare failed: {e}"))?;
 

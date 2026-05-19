@@ -33,6 +33,10 @@ pub const COMPONENT_TASK_RUN_WORKER: &str = "task-run-worker";
 pub const SPEC_MOUNT_DIR: &str = "/var/run/djinn";
 /// Full path to the bincode-encoded `TaskRunSpec` file inside the worker.
 pub const SPEC_MOUNT_FILE: &str = "/var/run/djinn/spec.bin";
+/// Full path to the bincode-encoded `ResolvedCredentials` file inside the
+/// worker. Lives on the same Secret volume as `SPEC_MOUNT_FILE` so the
+/// existing mount covers both keys (Phase 7a).
+pub const CREDENTIALS_MOUNT_FILE: &str = "/var/run/djinn/credentials.bin";
 /// Mount directory for the projected ServiceAccount token.
 pub const TOKEN_MOUNT_DIR: &str = "/var/run/secrets/tokens";
 /// Path where the projected token is read by the worker.
@@ -48,9 +52,13 @@ pub const TOKEN_AUDIENCE: &str = "djinn";
 /// Token expiration requested from the kubelet, in seconds.
 pub const TOKEN_EXPIRATION_SECONDS: i64 = 3600;
 
-/// Name of the single key inside the per-task-run Secret that carries the
+/// Name of the key inside the per-task-run Secret that carries the
 /// bincode-encoded [`djinn_runtime::TaskRunSpec`].
 pub const SPEC_SECRET_KEY: &str = "spec.bin";
+
+/// Name of the key inside the per-task-run Secret that carries the
+/// bincode-encoded [`djinn_runtime::ResolvedCredentials`] (Phase 7a).
+pub const CREDENTIALS_SECRET_KEY: &str = "credentials.bin";
 
 /// Volume name for the mounted spec Secret.
 pub const VOLUME_SPEC: &str = "spec";
@@ -110,6 +118,7 @@ pub fn build_task_run_job(
         env: Some(vec![
             env_var("DJINN_SERVER_ADDR", &config.server_addr),
             env_var("DJINN_SPEC_PATH", SPEC_MOUNT_FILE),
+            env_var("DJINN_CREDENTIALS_PATH", CREDENTIALS_MOUNT_FILE),
             env_var("DJINN_TOKEN_PATH", TOKEN_MOUNT_FILE),
             env_var("DJINN_TASK_RUN_ID", &task_run_id_str),
             // TMPDIR points the supervisor's TempDir::new() (used by
@@ -151,11 +160,18 @@ pub fn build_task_run_job(
             name: VOLUME_SPEC.to_string(),
             secret: Some(SecretVolumeSource {
                 secret_name: Some(secret_name.to_string()),
-                items: Some(vec![KeyToPath {
-                    key: SPEC_SECRET_KEY.to_string(),
-                    path: SPEC_SECRET_KEY.to_string(),
-                    ..KeyToPath::default()
-                }]),
+                items: Some(vec![
+                    KeyToPath {
+                        key: SPEC_SECRET_KEY.to_string(),
+                        path: SPEC_SECRET_KEY.to_string(),
+                        ..KeyToPath::default()
+                    },
+                    KeyToPath {
+                        key: CREDENTIALS_SECRET_KEY.to_string(),
+                        path: CREDENTIALS_SECRET_KEY.to_string(),
+                        ..KeyToPath::default()
+                    },
+                ]),
                 optional: Some(false),
                 default_mode: Some(0o0400),
             }),
@@ -369,6 +385,11 @@ mod tests {
             Some("/var/run/djinn/spec.bin")
         );
         assert_eq!(
+            envs.get("DJINN_CREDENTIALS_PATH").copied(),
+            Some("/var/run/djinn/credentials.bin"),
+            "Phase 7a: worker reads credentials.bin from the same Secret mount"
+        );
+        assert_eq!(
             envs.get("DJINN_TOKEN_PATH").copied(),
             Some("/var/run/secrets/tokens/djinn")
         );
@@ -429,9 +450,12 @@ mod tests {
         assert_eq!(secret_src.optional, Some(false));
         assert_eq!(secret_src.default_mode, Some(0o0400));
         let items = secret_src.items.as_ref().expect("secret items set");
-        assert_eq!(items.len(), 1);
+        // Phase 7a: two keys — `spec.bin` and `credentials.bin`.
+        assert_eq!(items.len(), 2);
         assert_eq!(items[0].key, SPEC_SECRET_KEY);
         assert_eq!(items[0].path, SPEC_SECRET_KEY);
+        assert_eq!(items[1].key, CREDENTIALS_SECRET_KEY);
+        assert_eq!(items[1].path, CREDENTIALS_SECRET_KEY);
 
         // auth-token → projected with a ServiceAccountToken source.
         let token_volume = &volumes[1];

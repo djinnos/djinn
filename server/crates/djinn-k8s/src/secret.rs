@@ -1,17 +1,23 @@
 //! Per-task-run `Secret` manifest builder + owner-reference helper.
 //!
-//! The Secret carries exactly one key, `spec.bin`, holding a bincode-encoded
-//! [`djinn_runtime::TaskRunSpec`]. The worker container reads it from a
-//! read-only mount (see `job.rs`). PR 3 cross-links the Secret's
-//! `ownerReferences` back at the Job so kubernetes GCs the Secret together
-//! with its Job.
+//! The Secret carries two keys today (Phase 7a):
+//!
+//! - `spec.bin` — bincode-encoded [`djinn_runtime::TaskRunSpec`].
+//! - `credentials.bin` — bincode-encoded
+//!   [`djinn_runtime::ResolvedCredentials`] (per-role LLM provider
+//!   credentials resolved host-side at dispatch).
+//!
+//! The worker container reads both from the same read-only mount (see
+//! `job.rs`). PR 3 cross-links the Secret's `ownerReferences` back at the
+//! Job so kubernetes GCs the Secret together with its Job.
 //!
 //! See `plans/phase2-k8s-scaffolding.md` ("Spec delivery swap: stdin →
-//! mounted file") for why we stopped piping the spec over stdin.
+//! mounted file") for why we stopped piping the spec over stdin, and
+//! `plans/phase7a-design-secret-mount-creds.md` for the credentials hop.
 
 use std::collections::BTreeMap;
 
-use djinn_runtime::TaskRunSpec;
+use djinn_runtime::{ResolvedCredentials, TaskRunSpec};
 use k8s_openapi::ByteString;
 use k8s_openapi::api::core::v1::Secret;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
@@ -36,8 +42,16 @@ pub const LABEL_COMPONENT: &str = "djinn.app/component";
 /// `/var/run/djinn/spec.bin`.
 pub const SPEC_DATA_KEY: &str = "spec.bin";
 
+/// Key under which the bincode-encoded [`ResolvedCredentials`] are stored
+/// inside `Secret.data`. Must match the filename the Job mounts at
+/// `/var/run/djinn/credentials.bin` (see `job.rs::CREDENTIALS_MOUNT_FILE`).
+/// Phase 7a — worker reads + logs the role keys at startup; full provider
+/// construction lands in Phase 7b.
+pub const CREDENTIALS_DATA_KEY: &str = "credentials.bin";
+
 /// Build the per-task-run `Secret` that carries the bincode-serialized
-/// [`TaskRunSpec`] on its `spec.bin` key.
+/// [`TaskRunSpec`] on its `spec.bin` key plus the bincode-serialized
+/// [`ResolvedCredentials`] on its `credentials.bin` key.
 ///
 /// The Secret name mirrors the Job name (`djinn-taskrun-{task_run_id}`) so
 /// the Job manifest can reference it by construction without a round-trip.
@@ -47,11 +61,17 @@ pub fn build_task_run_secret(
     namespace: &str,
     task_run_id: &Uuid,
     spec: &TaskRunSpec,
+    credentials: &ResolvedCredentials,
 ) -> Result<Secret, SecretError> {
-    let encoded = bincode::serialize(spec)?;
+    let encoded_spec = bincode::serialize(spec)?;
+    let encoded_credentials = bincode::serialize(credentials)?;
 
     let mut data = BTreeMap::new();
-    data.insert(SPEC_DATA_KEY.to_string(), ByteString(encoded));
+    data.insert(SPEC_DATA_KEY.to_string(), ByteString(encoded_spec));
+    data.insert(
+        CREDENTIALS_DATA_KEY.to_string(),
+        ByteString(encoded_credentials),
+    );
 
     let mut labels = BTreeMap::new();
     labels.insert(LABEL_TASK_RUN_ID.to_string(), task_run_id.to_string());
@@ -100,7 +120,9 @@ mod tests {
     use std::collections::HashMap;
 
     use djinn_core::models::TaskRunTrigger;
-    use djinn_runtime::{SupervisorFlow, TaskRunSpec};
+    use djinn_runtime::{
+        ResolvedCredentials, RoleKind, SerializableCredential, SupervisorFlow, TaskRunSpec,
+    };
 
     #[test]
     fn task_run_secret_roundtrips_bincoded_spec() {
@@ -115,8 +137,17 @@ mod tests {
             model_id_per_role: HashMap::new(),
         };
 
+        let mut credentials = ResolvedCredentials::default();
+        credentials.insert(
+            RoleKind::Worker,
+            SerializableCredential::ApiKey {
+                key_name: "ANTHROPIC_API_KEY".into(),
+                api_key: "sk-ant-fake".into(),
+            },
+        );
+
         let task_run_id = Uuid::now_v7();
-        let secret = build_task_run_secret("djinn", &task_run_id, &spec)
+        let secret = build_task_run_secret("djinn", &task_run_id, &spec, &credentials)
             .expect("build per-task-run Secret");
 
         // Name: matches task_run_resource_name() and starts with the prefix.
@@ -148,6 +179,10 @@ mod tests {
         // Payload: `spec.bin` key carries a bincode-encoded TaskRunSpec.
         let data = secret.data.as_ref().expect("data present");
         assert!(data.contains_key(SPEC_DATA_KEY));
+        assert!(
+            data.contains_key(CREDENTIALS_DATA_KEY),
+            "credentials.bin must be present (Phase 7a)"
+        );
 
         let payload_bytes = &data.get(SPEC_DATA_KEY).expect("spec.bin entry").0;
         let round_trip: TaskRunSpec =
@@ -159,6 +194,15 @@ mod tests {
         assert_eq!(round_trip.task_branch, spec.task_branch);
         assert_eq!(round_trip.flow, spec.flow);
         assert_eq!(round_trip.model_id_per_role, spec.model_id_per_role);
+
+        // credentials.bin roundtrips back to the same `ResolvedCredentials`.
+        let cred_bytes = &data
+            .get(CREDENTIALS_DATA_KEY)
+            .expect("credentials.bin entry")
+            .0;
+        let round_trip_creds: ResolvedCredentials =
+            bincode::deserialize(cred_bytes).expect("deserialize ResolvedCredentials");
+        assert_eq!(round_trip_creds, credentials);
 
         // Owner reference helper produces the right parent pointer.
         let owner = job_owner_reference("djinn-taskrun-test", "uid-123");

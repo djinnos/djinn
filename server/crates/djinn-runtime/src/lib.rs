@@ -19,6 +19,7 @@
 //! `djinn-agent-worker` (PR 5) to link against `djinn-runtime` +
 //! `djinn-supervisor` without pulling in the coordinator's actor framework.
 
+pub mod credentials;
 pub mod handle;
 pub mod session_runtime;
 pub mod spec;
@@ -29,6 +30,7 @@ pub mod wire;
 #[cfg(any(test, feature = "test-runtime"))]
 pub mod test_runtime;
 
+pub use credentials::{ResolvedCredentials, SerializableCredential};
 pub use handle::RunHandle;
 pub use session_runtime::{RuntimeError, SessionRuntime};
 pub use warmer::{GraphWarmerService, WarmerError};

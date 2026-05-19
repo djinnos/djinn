@@ -41,6 +41,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
+use crate::credentials::ResolvedCredentials;
 use crate::handle::RunHandle;
 use crate::session_runtime::{RuntimeError, SessionRuntime};
 use crate::spec::{TaskRunOutcome, TaskRunReport, TaskRunSpec};
@@ -215,7 +216,15 @@ impl Default for TestRuntime {
 
 #[async_trait]
 impl SessionRuntime for TestRuntime {
-    async fn prepare(&self, spec: &TaskRunSpec) -> Result<RunHandle, RuntimeError> {
+    async fn prepare(
+        &self,
+        spec: &TaskRunSpec,
+        _credentials: &ResolvedCredentials,
+    ) -> Result<RunHandle, RuntimeError> {
+        // TestRuntime is in-process: callers reach the credential vault
+        // directly through `AgentContext`. The Secret-mount payload is a
+        // no-op here; the parameter exists purely for `dyn SessionRuntime`
+        // parity with `KubernetesRuntime::prepare`.
         let task_run_id = format!("test-{}", spec.task_id);
 
         *self.last_spec.lock().expect("mutex poisoned") = Some(spec.clone());
@@ -439,7 +448,10 @@ mod tests {
         });
 
         let spec = dummy_spec("happy");
-        let handle = rt.prepare(&spec).await.expect("prepare");
+        let handle = rt
+            .prepare(&spec, &ResolvedCredentials::default())
+            .await
+            .expect("prepare");
         assert_eq!(handle.task_run_id, "test-happy");
         assert!(handle.container_id.is_none());
         assert_eq!(rt.last_spec().unwrap().task_id, "happy");
@@ -494,7 +506,10 @@ mod tests {
         });
 
         let spec = dummy_spec("slow");
-        let handle = rt.prepare(&spec).await.expect("prepare");
+        let handle = rt
+            .prepare(&spec, &ResolvedCredentials::default())
+            .await
+            .expect("prepare");
 
         // Yield so the spawned runner has a chance to observe the
         // cancellation path rather than being aborted pre-start.
@@ -531,7 +546,10 @@ mod tests {
     async fn default_runner_preserves_pr1_behaviour() {
         let rt = TestRuntime::default();
         let spec = dummy_spec("t1");
-        let handle = rt.prepare(&spec).await.expect("prepare");
+        let handle = rt
+            .prepare(&spec, &ResolvedCredentials::default())
+            .await
+            .expect("prepare");
         assert_eq!(handle.task_run_id, "test-t1");
         let _ = rt.attach_stdio(&handle).await.expect("attach");
         let report = rt.teardown(handle).await.expect("teardown");

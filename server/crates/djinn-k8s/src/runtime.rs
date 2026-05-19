@@ -44,8 +44,8 @@ use async_trait::async_trait;
 use djinn_db::{Database, ProjectImageStatus, ProjectRepository};
 use djinn_runtime::wire::ControlMsg;
 use djinn_runtime::{
-    BiStream, RoleKind, RunHandle, RuntimeError, SessionRuntime, StreamEvent, StreamFrame,
-    TaskRunOutcome, TaskRunReport, TaskRunSpec,
+    BiStream, ResolvedCredentials, RoleKind, RunHandle, RuntimeError, SessionRuntime, StreamEvent,
+    StreamFrame, TaskRunOutcome, TaskRunReport, TaskRunSpec,
 };
 use djinn_supervisor::{ConnectionRegistry, Frame, FramePayload, PendingConnection};
 use k8s_openapi::api::batch::v1::Job;
@@ -218,7 +218,11 @@ impl SessionRuntime for KubernetesRuntime {
     ///
     /// Does NOT bind any listener — the launcher owns the TCP listener and
     /// advertises its address through `config.server_addr`.
-    async fn prepare(&self, spec: &TaskRunSpec) -> Result<RunHandle, RuntimeError> {
+    async fn prepare(
+        &self,
+        spec: &TaskRunSpec,
+        credentials: &ResolvedCredentials,
+    ) -> Result<RunHandle, RuntimeError> {
         let task_run_id = Uuid::now_v7();
         let task_run_id_str = task_run_id.to_string();
         let ns = &self.config.namespace;
@@ -276,8 +280,9 @@ impl SessionRuntime for KubernetesRuntime {
             .await
             .insert(task_run_id_str.clone(), pending);
 
-        // 1. Build + create the per-task-run Secret.
-        let secret = match build_task_run_secret(ns, &task_run_id, spec) {
+        // 1. Build + create the per-task-run Secret. Carries both `spec.bin`
+        //    and `credentials.bin` (Phase 7a).
+        let secret = match build_task_run_secret(ns, &task_run_id, spec, credentials) {
             Ok(s) => s,
             Err(e) => {
                 self.drop_pending(&task_run_id_str).await;
@@ -882,7 +887,7 @@ mod tests {
         use std::collections::HashMap;
 
         use djinn_core::models::TaskRunTrigger;
-        use djinn_runtime::{SupervisorFlow, TaskRunSpec};
+        use djinn_runtime::{ResolvedCredentials, SupervisorFlow, TaskRunSpec};
 
         use crate::secret::task_run_resource_name;
 
@@ -899,9 +904,15 @@ mod tests {
             flow: SupervisorFlow::NewTask,
             model_id_per_role: HashMap::new(),
         };
+        let credentials = ResolvedCredentials::default();
 
-        let secret = crate::secret::build_task_run_secret(&cfg.namespace, &task_run_id, &spec)
-            .expect("build per-task-run Secret");
+        let secret = crate::secret::build_task_run_secret(
+            &cfg.namespace,
+            &task_run_id,
+            &spec,
+            &credentials,
+        )
+        .expect("build per-task-run Secret");
         let job = crate::job::build_task_run_job(
             &cfg,
             &task_run_id,

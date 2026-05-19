@@ -17,6 +17,7 @@
 use async_trait::async_trait;
 use thiserror::Error;
 
+use crate::credentials::ResolvedCredentials;
 use crate::handle::RunHandle;
 use crate::spec::{TaskRunReport, TaskRunSpec};
 use crate::stream::BiStream;
@@ -71,7 +72,16 @@ pub trait SessionRuntime: Send + Sync {
     /// Materialise the run environment — clone the workspace, start the
     /// container, open the IPC socket — and return a handle the caller
     /// threads into the remaining methods.
-    async fn prepare(&self, spec: &TaskRunSpec) -> Result<RunHandle, RuntimeError>;
+    ///
+    /// `credentials` carries the per-role LLM provider credentials the host
+    /// resolved at dispatch time (Phase 7a). Kubernetes-backed runtimes
+    /// project these into the worker Pod via a Secret-mount; in-process
+    /// test runtimes are free to ignore them.
+    async fn prepare(
+        &self,
+        spec: &TaskRunSpec,
+        credentials: &ResolvedCredentials,
+    ) -> Result<RunHandle, RuntimeError>;
 
     /// Attach to the duplex stream created by `prepare`.  Called exactly
     /// once per handle after `prepare` returns.

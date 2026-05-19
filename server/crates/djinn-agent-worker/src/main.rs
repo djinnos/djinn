@@ -68,7 +68,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use djinn_core::events::EventBus;
 use djinn_db::{Database, DatabaseConnectConfig, MysqlBackendFlavor, MysqlDatabaseConfig};
-use djinn_runtime::{RoleKind, TaskRunOutcome, TaskRunReport, TaskRunSpec, WorkerEvent};
+use djinn_runtime::{
+    ResolvedCredentials, RoleKind, TaskRunOutcome, TaskRunReport, TaskRunSpec, WorkerEvent,
+};
 use djinn_supervisor::{RpcServices, SupervisorServices};
 use djinn_workspace::Workspace;
 use tokio_util::sync::CancellationToken;
@@ -133,6 +135,19 @@ struct WorkerDefaultArgs {
     /// read-only from the per-task-run Secret.
     #[arg(long, env = "DJINN_SPEC_PATH", default_value = "/var/run/djinn/spec.bin")]
     spec_path: PathBuf,
+
+    /// Path the launcher mounted the bincode-serialized
+    /// [`ResolvedCredentials`] at. Contractual default is
+    /// `/var/run/djinn/credentials.bin` — projected read-only from the
+    /// same per-task-run Secret as `spec.bin` (Phase 7a). The worker only
+    /// reads + logs the role keys today; live provider construction lands
+    /// in Phase 7b.
+    #[arg(
+        long,
+        env = "DJINN_CREDENTIALS_PATH",
+        default_value = "/var/run/djinn/credentials.bin"
+    )]
+    credentials_path: PathBuf,
 
     /// Path the kubelet projected the rotating ServiceAccount token at.
     /// Contractual default is `/var/run/secrets/tokens/djinn` (audience =
@@ -213,6 +228,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     info!(
         server = %args.server_addr,
         spec = %args.spec_path.display(),
+        credentials = %args.credentials_path.display(),
         token = %args.token_path.display(),
         task_run_id = %args.task_run_id,
         workspace = %args.workspace_path.display(),
@@ -226,6 +242,35 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     let spec: TaskRunSpec =
         bincode::deserialize(&spec_bytes).context("bincode deserialize TaskRunSpec")?;
     info!(task_id = %spec.task_id, flow = ?spec.flow, "received spec");
+
+    // 1b. Slurp the per-role credentials bundle off the same Secret mount
+    //     (Phase 7a). Decoded but not yet used — `drive_placeholder` still
+    //     runs through the host-side RPC fallback. Phase 7b will hand this
+    //     to a `WorkerSupervisorServices` that constructs providers in-Pod.
+    //
+    //     `let _credentials` silences `unused_variables` until 7b lights up
+    //     the consumer; the bincode roundtrip still validates that the host
+    //     shipped a well-formed payload.
+    let credentials_bytes = tokio::fs::read(&args.credentials_path)
+        .await
+        .with_context(|| {
+            format!(
+                "read ResolvedCredentials from {}",
+                args.credentials_path.display()
+            )
+        })?;
+    let _credentials: ResolvedCredentials = bincode::deserialize(&credentials_bytes)
+        .context("bincode deserialize ResolvedCredentials")?;
+    let role_keys: Vec<&'static str> = _credentials
+        .roles()
+        .copied()
+        .map(RoleKind::as_str)
+        .collect();
+    info!(
+        roles = ?role_keys,
+        bytes = credentials_bytes.len(),
+        "received per-role credentials bundle (Phase 7a; not yet consumed)"
+    );
 
     // 2. Read the projected ServiceAccount token.  Kubelet-projected tokens
     //    typically land without a trailing newline but be defensive — the
