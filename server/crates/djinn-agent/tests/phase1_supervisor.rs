@@ -83,6 +83,7 @@ fn test_agent_context(db: Database) -> AgentContext {
         repo_graph_ops: None,
         mirror: None,
         rpc_registry: None,
+        default_project_id: None,
     }
 }
 

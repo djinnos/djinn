@@ -291,6 +291,7 @@ impl CoordinatorActor {
                             repo_graph_ops: None,
                             mirror: self.mirror.clone(),
                             rpc_registry: None,
+                            default_project_id: None,
                         };
                         health::sweep_stale_resources(&self.db, &app_state).await;
                         self.last_stale_sweep = StdInstant::now();

@@ -983,6 +983,11 @@ impl AppState {
             ))),
             mirror: Some(self.inner.mirror.clone()),
             rpc_registry: Some(self.inner.rpc_registry.clone()),
+            // Host-side AgentContext serves multiple projects (chat surface
+            // + dispatcher); caller MUST disambiguate via the `project`
+            // tool arg. Only the K8s worker (one-project-per-Pod) sets
+            // this in build_worker_agent_context.
+            default_project_id: None,
         }
     }
 

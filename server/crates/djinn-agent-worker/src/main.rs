@@ -327,7 +327,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     //    local Database connection.
     let in_pod_db = bootstrap_warm_database()
         .context("bootstrap in-Pod database for WorkerSupervisorServices")?;
-    let agent_context = build_worker_agent_context(in_pod_db, rpc.clone());
+    let agent_context = build_worker_agent_context(in_pod_db, rpc.clone(), spec.project_id.clone());
     let worker_services: Arc<dyn SupervisorServices> = Arc::new(WorkerSupervisorServices::new(
         rpc.clone(),
         credentials,
@@ -409,7 +409,11 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
 /// installed `EventBus::noop()` here and every
 /// `event_bus.send(..)` call in `actors::slot::reply_loop` / `streaming`
 /// silently vanished.
-fn build_worker_agent_context(db: Database, rpc: Arc<RpcServices>) -> AgentContext {
+fn build_worker_agent_context(
+    db: Database,
+    rpc: Arc<RpcServices>,
+    project_id: String,
+) -> AgentContext {
     use djinn_core::events::DjinnEventEnvelope;
     use djinn_supervisor::services::SerializableDjinnEvent;
     let rpc_for_bus = rpc.clone();
@@ -445,6 +449,13 @@ fn build_worker_agent_context(db: Database, rpc: Arc<RpcServices>) -> AgentConte
         repo_graph_ops: None,
         mirror: None,
         rpc_registry: None,
+        // The K8s worker only ever serves one project per Pod, so default
+        // every multi-project-aware tool call (epic_show, epic_tasks,
+        // task_*, …) to spec.project_id. Without this the LLM has to
+        // remember to pass `project` to every call or burn tokens
+        // retrying past the "project is required when multiple projects
+        // are configured" error from helpers::resolve_project_id_for_agent_tools.
+        default_project_id: Some(project_id),
     }
 }
 

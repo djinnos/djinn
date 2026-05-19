@@ -1343,6 +1343,7 @@ impl CoordinatorActor {
             repo_graph_ops: None,
             mirror: self.mirror.clone(),
             rpc_registry: None,
+            default_project_id: None,
         };
 
         // Use Reopen as a sentinel for "leave in approved / retry next tick".

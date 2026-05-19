@@ -92,6 +92,16 @@ pub struct AgentContext {
     /// launcher's TCP listener share a single registry that way.  `None`
     /// in test contexts that never exercise the K8s runtime.
     pub rpc_registry: Option<Arc<djinn_supervisor::ConnectionRegistry>>,
+    /// Default project_id for tool calls that don't pass `project` explicitly.
+    /// Set on the K8s worker side from `TaskRunSpec.project_id` so the worker —
+    /// which only ever serves one project per Pod — doesn't need the LLM to
+    /// remember to pass a `project` arg to every multi-project-aware tool
+    /// (epic_show, epic_tasks, task_*, etc.). Without this, tools fall through
+    /// to "project is required when multiple projects are configured" and
+    /// burn LLM tokens on retries. `None` in host-side AgentContexts (chat
+    /// surface + multi-project planners) where the caller IS expected to
+    /// disambiguate.
+    pub default_project_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -95,6 +95,15 @@ pub(super) async fn resolve_project_id_for_agent_tools(
         return project_id.await;
     }
 
+    // Fall back to AgentContext.default_project_id — the K8s worker sets
+    // this from spec.project_id so per-Pod single-project tool calls don't
+    // need the LLM to remember the project arg.
+    if let Some(default_id) = state.default_project_id.as_deref()
+        && !default_id.is_empty()
+    {
+        return Ok(default_id.to_string());
+    }
+
     let repo = ProjectRepository::new(state.db.clone(), state.event_bus.clone());
     let projects = repo.list().await.map_err(|e| e.to_string())?;
     match projects.as_slice() {
