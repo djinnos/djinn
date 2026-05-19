@@ -125,6 +125,16 @@ pub(crate) async fn run_reply_loop(
 
     // Register activity tracker — stall detection uses this to kill idle sessions.
     let activity_ts = app_state.register_activity(task_id);
+    // Separate clock for the throttled worker→host activity-touch RPC.
+    // The host's coordinator stall poller reads its OWN ActivityTracker, not
+    // the worker's `activity_ts` above (K8s workers build a fresh empty
+    // tracker at startup — see agent-worker main.rs). Calls to
+    // `services.touch_activity(..)` route over RPC on the worker side
+    // (`WorkerSupervisorServices` → `DirectServices::touch_activity`) and
+    // bridge the two trackers. Initialised to 0 so the first touch always
+    // fires immediately; subsequent touches throttle to once per
+    // `TOUCH_ACTIVITY_RPC_INTERVAL_SECS` (in streaming.rs).
+    let last_rpc_touch = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     // Session-scoped stash for full tool outputs that exceed truncation limits.
     // The agent can navigate stashed outputs via `output_view` and `output_grep`.
@@ -325,6 +335,8 @@ pub(crate) async fn run_reply_loop(
                 cancel,
                 global_cancel,
                 activity_ts: &activity_ts,
+                last_rpc_touch: &last_rpc_touch,
+                services,
                 compaction_attempts,
                 current_context_tokens: &mut current_context_tokens,
                 total_tokens_in: &mut total_tokens_in,
@@ -633,6 +645,22 @@ pub(crate) async fn run_reply_loop(
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
                 activity_ts.store(now, Ordering::Relaxed);
+                // Also bridge to the host's ActivityTracker. Unthrottled
+                // here because this fires at most once per LLM turn that
+                // dispatched tools — a tiny fraction of the per-token
+                // stream-event volume that streaming.rs throttles. Update
+                // `last_rpc_touch` so the streaming loop on the next turn
+                // doesn't re-touch immediately. Fire-and-forget — local
+                // tracker still serves worker diagnostics.
+                last_rpc_touch.store(now, Ordering::Relaxed);
+                if let Err(e) = services.touch_activity(task_id.to_string()).await {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        error = %e,
+                        "reply_loop: post-tool touch_activity RPC failed; \
+                         host stall poller may see stale idle for this turn"
+                    );
+                }
             }
 
             // Push a user message containing all tool results.

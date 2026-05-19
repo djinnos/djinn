@@ -147,6 +147,7 @@ struct RpcAuditLog {
     invoke_llm_attempts: usize,
     open_pr: usize,
     emit_djinn_event: usize,
+    touch_activity: usize,
     terminal_report: Option<djinn_runtime::TaskRunReport>,
 }
 
@@ -352,6 +353,11 @@ async fn handle_rpc(
         }
         ServiceRpcRequest::ToolCiJobLog { .. } => {
             ServiceRpcResponse::ToolCiJobLog(Err("fake server: tool_ci_job_log not wired".into()))
+        }
+        ServiceRpcRequest::TouchActivity { task_id } => {
+            audit.lock().await.touch_activity += 1;
+            let _ = task_id;
+            ServiceRpcResponse::TouchActivity(Ok(()))
         }
     }
 }

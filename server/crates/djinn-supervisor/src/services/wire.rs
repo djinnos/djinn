@@ -317,6 +317,11 @@ pub enum ServiceRpcRequest {
         session_task_id: Option<String>,
         arguments: String,
     },
+    /// [`crate::SupervisorServices::touch_activity`]. Phase 7-followup
+    /// BLOCKER — bridges worker-side activity-tracker touches into the
+    /// host's tracker so the coordinator's stall poller doesn't reap a
+    /// long-running K8s worker mid-flow.
+    TouchActivity { task_id: String },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -373,6 +378,8 @@ pub enum ServiceRpcResponse {
     /// Phase 7-followup gap-3 — host-side `ci_job_log` tool result.
     /// `Ok` carries opaque JSON; see `ToolGithubSearch`.
     ToolCiJobLog(Result<String, String>),
+    /// Phase 7-followup BLOCKER — fire-and-forget activity-touch ack.
+    TouchActivity(Result<(), String>),
     /// Transport-level failure — not produced by normal operation.
     Err(String),
 }
@@ -1384,6 +1391,54 @@ mod tests {
         assert_eq!(parsed["session_id"], "s1");
         assert_eq!(wire.id, None);
         assert_eq!(wire.project_id, None);
+    }
+
+    #[test]
+    fn touch_activity_request_roundtrip() {
+        let f = Frame {
+            correlation_id: 71,
+            payload: FramePayload::Rpc(ServiceRpcRequest::TouchActivity {
+                task_id: "task-77".into(),
+            }),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back.correlation_id, 71);
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::TouchActivity { task_id }) => {
+                assert_eq!(task_id, "task-77");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn touch_activity_reply_roundtrip() {
+        let resp = ServiceRpcResponse::TouchActivity(Ok(()));
+        let f = Frame {
+            correlation_id: 71,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        assert!(matches!(
+            back.payload,
+            FramePayload::RpcReply(ServiceRpcResponse::TouchActivity(Ok(())))
+        ));
+
+        let resp = ServiceRpcResponse::TouchActivity(Err("unknown task".into()));
+        let f = Frame {
+            correlation_id: 71,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::TouchActivity(Err(e))) => {
+                assert_eq!(e, "unknown task");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[test]

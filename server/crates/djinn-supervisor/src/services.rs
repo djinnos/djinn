@@ -229,4 +229,28 @@ pub trait SupervisorServices: Send + Sync + 'static {
     /// publish is fire-and-forget — the RPC reply is `Ok(())` once the
     /// host has accepted the event.
     async fn emit_djinn_event(&self, event: SerializableDjinnEvent) -> Result<(), String>;
+
+    /// Touch the host's ActivityTracker for the given task_id so the
+    /// coordinator's stall poller (enforce_session_stall_timeout, 5-min
+    /// worker / 10-min architect threshold) doesn't reap a long-running
+    /// worker mid-flow. Worker calls this from reply_loop on every LLM
+    /// turn + tool call. Host-side DirectServices forwards to
+    /// agent_context.touch_activity(task_id).
+    ///
+    /// Fire-and-forget shape — never returns Err (any RPC transport
+    /// failure is silently logged on the host side; we'd rather risk
+    /// the false-stall than fail a worker on transient flakes).
+    ///
+    /// Phase 7-followup BLOCKER for the smoke test: K8s workers
+    /// construct a fresh empty ActivityTracker at startup
+    /// (agent-worker main.rs build of AgentContext), so calls to
+    /// `app_state.register_activity(task_id)` /
+    /// `activity_ts.store(..)` in `actors::slot::reply_loop` only
+    /// touch the WORKER's local tracker. The host's coordinator
+    /// stall poller reads `app_state.idle_seconds(task_id)` from its
+    /// OWN tracker — sees `None` — falls back to wall-clock since
+    /// `session.started_at` — and kills every worker session at the
+    /// 5-minute mark, mid-LLM-stream. This RPC bridges the two
+    /// trackers so the host's poller stays accurate.
+    async fn touch_activity(&self, task_id: String) -> Result<(), String>;
 }

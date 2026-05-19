@@ -1109,6 +1109,9 @@ mod tests {
             ) -> Result<serde_json::Value, String> {
                 unimplemented!()
             }
+            async fn touch_activity(&self, _: String) -> Result<(), String> {
+                unimplemented!()
+            }
         }
 
         let services: Arc<dyn SupervisorServices> = Arc::new(NoopServices {

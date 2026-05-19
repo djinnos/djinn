@@ -377,6 +377,10 @@ impl SupervisorServices for WorkerSupervisorServices {
         self.rpc.emit_djinn_event(event).await
     }
 
+    async fn touch_activity(&self, task_id: String) -> Result<(), String> {
+        self.rpc.touch_activity(task_id).await
+    }
+
     async fn tool_github_search(
         &self,
         project_id: Option<String>,

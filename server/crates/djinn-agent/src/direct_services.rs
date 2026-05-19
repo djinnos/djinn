@@ -389,6 +389,11 @@ impl SupervisorServices for DirectServices {
         .await
     }
 
+    async fn touch_activity(&self, task_id: String) -> Result<(), String> {
+        self.callbacks.agent_context.touch_activity(&task_id);
+        Ok(())
+    }
+
     async fn emit_djinn_event(&self, event: SerializableDjinnEvent) -> Result<(), String> {
         match intern_envelope(event) {
             Ok(envelope) => {

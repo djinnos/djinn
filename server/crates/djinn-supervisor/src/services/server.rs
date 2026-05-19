@@ -1179,6 +1179,10 @@ async fn dispatch(
                 .map(|v| serde_json::to_string(&v).unwrap_or_else(|_| "null".to_string()));
             ServiceRpcResponse::ToolCiJobLog(result)
         }
+        ServiceRpcRequest::TouchActivity { task_id } => {
+            let result = services.touch_activity(task_id).await;
+            ServiceRpcResponse::TouchActivity(result)
+        }
     }
 }
 
@@ -1339,6 +1343,10 @@ mod tests {
             _session_task_id: Option<String>,
             _arguments: serde_json::Map<String, serde_json::Value>,
         ) -> Result<serde_json::Value, String> {
+            unimplemented!("not exercised in server tests")
+        }
+
+        async fn touch_activity(&self, _task_id: String) -> Result<(), String> {
             unimplemented!("not exercised in server tests")
         }
     }

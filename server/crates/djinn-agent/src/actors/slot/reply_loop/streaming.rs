@@ -65,11 +65,35 @@ pub(super) struct StreamLoopContext<'a> {
     pub cancel: &'a tokio_util::sync::CancellationToken,
     pub global_cancel: &'a tokio_util::sync::CancellationToken,
     pub activity_ts: &'a Arc<AtomicU64>,
+    /// Last unix-second the worker fired a `services.touch_activity`
+    /// RPC to the host's ActivityTracker. Throttled to once per
+    /// `TOUCH_ACTIVITY_RPC_INTERVAL_SECS` so the per-StreamEvent loop
+    /// doesn't flood the host with one round-trip per token. The
+    /// host's stall threshold is 5 minutes (workers); a 30s
+    /// inter-touch budget leaves ~10x headroom for transient
+    /// transport flakes without false-stalling. The local
+    /// `activity_ts.store(..)` still fires on every event for
+    /// worker-side diagnostics.
+    pub last_rpc_touch: &'a Arc<AtomicU64>,
+    /// Host-side / worker-side `SupervisorServices` handle. On the
+    /// host this resolves to `DirectServices` and the touch is a
+    /// local atomic write; on the worker it resolves to
+    /// `WorkerSupervisorServices` and routes over RPC. Fire-and-
+    /// forget — transient errors are swallowed with a warn log
+    /// because the local tracker still serves worker diagnostics.
+    pub services: &'a dyn djinn_supervisor::SupervisorServices,
     pub compaction_attempts: u32,
     pub current_context_tokens: &'a mut u32,
     pub total_tokens_in: &'a mut u32,
     pub total_tokens_out: &'a mut u32,
 }
+
+/// Throttle interval for the worker→host activity-touch RPC in the
+/// per-StreamEvent loop. 30 seconds is well under the host's 5-minute
+/// stall threshold so a single skipped touch (due to throttling) can
+/// never alone trip the stall poller; the next stream event ticks the
+/// clock and fires the RPC fresh.
+const TOUCH_ACTIVITY_RPC_INTERVAL_SECS: u64 = 30;
 
 pub(super) async fn consume_provider_stream(
     mut ctx: StreamLoopContext<'_>,
@@ -117,6 +141,22 @@ pub(super) async fn consume_provider_stream(
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
                 ctx.activity_ts.store(now, Ordering::Relaxed);
+
+                // Bridge to the host's ActivityTracker so the
+                // coordinator's stall poller sees the worker stay
+                // active. Throttled to avoid one RPC per token.
+                let last = ctx.last_rpc_touch.load(Ordering::Relaxed);
+                if now.saturating_sub(last) >= TOUCH_ACTIVITY_RPC_INTERVAL_SECS {
+                    ctx.last_rpc_touch.store(now, Ordering::Relaxed);
+                    if let Err(e) = ctx.services.touch_activity(ctx.task_id.to_string()).await {
+                        tracing::warn!(
+                            task_id = %ctx.task_id,
+                            error = %e,
+                            "reply_loop::streaming: touch_activity RPC failed; \
+                             host stall poller may see stale idle for this turn"
+                        );
+                    }
+                }
 
                 match evt {
                     StreamEvent::Delta(ContentBlock::Text { text }) => {

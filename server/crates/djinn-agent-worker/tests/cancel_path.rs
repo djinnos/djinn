@@ -299,6 +299,9 @@ async fn start_fake_server(
                         ServiceRpcRequest::ToolCiJobLog { .. } => {
                             ServiceRpcResponse::ToolCiJobLog(Err("not wired".into()))
                         }
+                        ServiceRpcRequest::TouchActivity { .. } => {
+                            ServiceRpcResponse::TouchActivity(Ok(()))
+                        }
                     };
                     let reply = Frame {
                         correlation_id,

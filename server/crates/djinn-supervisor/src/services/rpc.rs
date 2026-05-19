@@ -673,6 +673,23 @@ impl SupervisorServices for RpcServices {
             Err(e) => Err(e),
         }
     }
+
+    async fn touch_activity(&self, task_id: String) -> Result<(), String> {
+        // Fire-and-forget shape: we still round-trip (so the host can
+        // ack reception), but a transport flake is swallowed by the
+        // reply-loop caller via `.unwrap_or_else(..)`. Mirrors
+        // `publish_session_message`'s pattern minus the opaque-JSON
+        // encoding (no payload).
+        match self
+            .roundtrip(ServiceRpcRequest::TouchActivity { task_id })
+            .await
+        {
+            Ok(ServiceRpcResponse::TouchActivity(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 // ── Reader / writer loops ────────────────────────────────────────────────────
@@ -981,6 +998,12 @@ impl SupervisorServices for UnimplementedRpcServices {
     ) -> Result<serde_json::Value, String> {
         unimplemented!(
             "UnimplementedRpcServices::tool_ci_job_log — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn touch_activity(&self, _task_id: String) -> Result<(), String> {
+        unimplemented!(
+            "UnimplementedRpcServices::touch_activity — construct RpcServices for real RPC"
         )
     }
 }
