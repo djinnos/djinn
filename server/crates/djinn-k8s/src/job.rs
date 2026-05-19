@@ -207,6 +207,12 @@ pub fn build_task_run_job(
         restart_policy: Some("Never".to_string()),
         containers: vec![container],
         volumes: Some(volumes),
+        // Give the worker enough time after SIGTERM to flush its final
+        // RPC frame (TerminalReport) before SIGKILL — K8s default 30s is
+        // tight when the supervisor is mid-stream over a slow link.
+        termination_grace_period_seconds: Some(
+            config.task_run_termination_grace_period_seconds,
+        ),
         ..PodSpec::default()
     };
 
@@ -229,6 +235,14 @@ pub fn build_task_run_job(
             template,
             backoff_limit: Some(0),
             ttl_seconds_after_finished: Some(config.ttl_seconds_after_finished),
+            // Cap total Pod wall-clock so a stuck RPC connection or
+            // runaway LLM stream can't keep the worker alive forever
+            // (TTL doesn't fire until the Pod exits). `i64` per the
+            // upstream `JobSpec` type, but we accept `u64` in config to
+            // make negative deadlines unrepresentable.
+            active_deadline_seconds: Some(
+                config.task_run_active_deadline_seconds as i64,
+            ),
             ..JobSpec::default()
         }),
         ..Job::default()
@@ -352,6 +366,13 @@ mod tests {
         let spec = job.spec.as_ref().expect("job.spec set");
         assert_eq!(spec.backoff_limit, Some(0));
         assert_eq!(spec.ttl_seconds_after_finished, Some(300));
+        // activeDeadlineSeconds caps total Pod wall-clock — see Gap 4 in
+        // the Phase 7 worker-functionality audit.
+        assert_eq!(
+            spec.active_deadline_seconds,
+            Some(cfg.task_run_active_deadline_seconds as i64),
+        );
+        assert_eq!(spec.active_deadline_seconds, Some(3600));
 
         // Pod template mirrors labels.
         let template_labels = spec
@@ -373,6 +394,14 @@ mod tests {
         let pod = spec.template.spec.as_ref().expect("template.spec set");
         assert_eq!(pod.restart_policy.as_deref(), Some("Never"));
         assert_eq!(pod.service_account_name.as_deref(), Some("djinn-taskrun"));
+        // terminationGracePeriodSeconds: the worker needs slack after
+        // SIGTERM to flush a final RPC frame (TerminalReport) before the
+        // kubelet escalates to SIGKILL — see Gap 4.
+        assert_eq!(
+            pod.termination_grace_period_seconds,
+            Some(cfg.task_run_termination_grace_period_seconds),
+        );
+        assert_eq!(pod.termination_grace_period_seconds, Some(60));
 
         // Exactly one container named "worker".
         assert_eq!(pod.containers.len(), 1);

@@ -20,8 +20,9 @@ use std::collections::BTreeMap;
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     Container, EmptyDirVolumeSource, EnvVar, PersistentVolumeClaimVolumeSource, PodSpec,
-    PodTemplateSpec, Volume, VolumeMount,
+    PodTemplateSpec, ResourceRequirements, Volume, VolumeMount,
 };
+use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use uuid::Uuid;
 
@@ -148,6 +149,30 @@ exec {bin} warm-graph "{project_id}"
             },
             crate::env_config::env_config_volume_mount(),
         ]),
+        // Warm Pod was previously unbounded — SCIP indexer subprocesses
+        // can spike CPU/memory fast on a medium Rust workspace. Set
+        // explicit requests + limits so the kubelet has scheduling +
+        // OOM signals (see Gap 4 of the Phase 7 audit).
+        resources: Some(ResourceRequirements {
+            requests: Some(BTreeMap::from([
+                (
+                    "cpu".to_string(),
+                    Quantity(config.warm_cpu_request.clone()),
+                ),
+                (
+                    "memory".to_string(),
+                    Quantity(config.warm_memory_request.clone()),
+                ),
+            ])),
+            limits: Some(BTreeMap::from([
+                ("cpu".to_string(), Quantity(config.warm_cpu_limit.clone())),
+                (
+                    "memory".to_string(),
+                    Quantity(config.warm_memory_limit.clone()),
+                ),
+            ])),
+            ..ResourceRequirements::default()
+        }),
         ..Container::default()
     };
 
@@ -362,6 +387,37 @@ mod tests {
             Some(true),
             "env-config CM must be optional so Pods start pre-P6 when the CM doesn't exist yet"
         );
+
+        // Resource requests/limits from `warm_*` config knobs (Gap 4) —
+        // without these the warm Pod runs unbounded and SCIP indexers
+        // can spike CPU/memory under the kubelet's nose.
+        let resources = container
+            .resources
+            .as_ref()
+            .expect("warm container.resources set");
+        let requests = resources.requests.as_ref().expect("requests set");
+        assert_eq!(
+            requests.get("cpu").map(|q| q.0.as_str()),
+            Some(cfg.warm_cpu_request.as_str())
+        );
+        assert_eq!(
+            requests.get("memory").map(|q| q.0.as_str()),
+            Some(cfg.warm_memory_request.as_str())
+        );
+        let limits = resources.limits.as_ref().expect("limits set");
+        assert_eq!(
+            limits.get("cpu").map(|q| q.0.as_str()),
+            Some(cfg.warm_cpu_limit.as_str())
+        );
+        assert_eq!(
+            limits.get("memory").map(|q| q.0.as_str()),
+            Some(cfg.warm_memory_limit.as_str())
+        );
+        // Defaults pin the documented values.
+        assert_eq!(cfg.warm_cpu_request, "1");
+        assert_eq!(cfg.warm_cpu_limit, "2");
+        assert_eq!(cfg.warm_memory_request, "2Gi");
+        assert_eq!(cfg.warm_memory_limit, "4Gi");
     }
 
     #[test]

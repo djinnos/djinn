@@ -60,6 +60,33 @@ pub struct KubernetesConfig {
     /// `database_backend`; kept distinct because the warm binary accepts
     /// independent values (e.g. talking MySQL protocol to a Dolt server).
     pub database_flavor: Option<String>,
+    /// Maximum wall-clock seconds a task-run Pod may live before the
+    /// kubelet terminates it (`activeDeadlineSeconds` on the Job). Without
+    /// this, a stuck RPC connection or runaway LLM stream can keep the Pod
+    /// alive indefinitely — the Job's `ttl_seconds_after_finished` only
+    /// fires after the Pod exits, so a hung worker leaks compute forever.
+    /// Default 3600s (1 hour) is generous for normal task runs.
+    pub task_run_active_deadline_seconds: u64,
+    /// `terminationGracePeriodSeconds` on the task-run Pod. K8s default 30s
+    /// is tight when the worker still has a `TerminalReport` frame to
+    /// flush over RPC before SIGTERM is escalated to SIGKILL; truncated
+    /// reports make post-mortem debugging hard. Default 60s.
+    pub task_run_termination_grace_period_seconds: i64,
+    /// CPU request on the warm Pod container. The canonical-graph pipeline
+    /// spawns SCIP indexer subprocesses (rust-analyzer, scip-go, etc.) that
+    /// can spike CPU; without a request the scheduler has no fairness
+    /// signal and the Pod can be evicted under contention. Default `1`.
+    pub warm_cpu_request: String,
+    /// CPU limit on the warm Pod container. Caps the indexer subprocesses
+    /// so they don't starve neighbours on the same node. Default `2`.
+    pub warm_cpu_limit: String,
+    /// Memory request on the warm Pod container. SCIP index buffers for a
+    /// medium-sized Rust workspace already crest 1 GiB; reserving 2 GiB
+    /// keeps the kubelet from killing the Pod under memory pressure.
+    pub warm_memory_request: String,
+    /// Memory limit on the warm Pod container. Hard ceiling so a runaway
+    /// indexer can't OOM the node. Default `4Gi`.
+    pub warm_memory_limit: String,
 }
 
 impl KubernetesConfig {
@@ -84,6 +111,12 @@ impl KubernetesConfig {
             database_url: None,
             database_backend: None,
             database_flavor: None,
+            task_run_active_deadline_seconds: 3600,
+            task_run_termination_grace_period_seconds: 60,
+            warm_cpu_request: "1".into(),
+            warm_cpu_limit: "2".into(),
+            warm_memory_request: "2Gi".into(),
+            warm_memory_limit: "4Gi".into(),
         }
     }
 
@@ -114,6 +147,12 @@ impl KubernetesConfig {
     /// | `DJINN_MYSQL_URL` | `database_url` | _(unset → warm Pod uses default `mysql://root@127.0.0.1:3306/djinn`)_ |
     /// | `DJINN_DB_BACKEND` | `database_backend` | _(unset)_ |
     /// | `DJINN_MYSQL_FLAVOR` | `database_flavor` | _(unset)_ |
+    /// | `DJINN_K8S_TASK_RUN_ACTIVE_DEADLINE_SECONDS` | `task_run_active_deadline_seconds` | `3600` (parsed as `u64`) |
+    /// | `DJINN_K8S_TASK_RUN_TERMINATION_GRACE_PERIOD_SECONDS` | `task_run_termination_grace_period_seconds` | `60` (parsed as `i64`) |
+    /// | `DJINN_K8S_WARM_CPU_REQUEST` | `warm_cpu_request` | `1` |
+    /// | `DJINN_K8S_WARM_CPU_LIMIT` | `warm_cpu_limit` | `2` |
+    /// | `DJINN_K8S_WARM_MEMORY_REQUEST` | `warm_memory_request` | `2Gi` |
+    /// | `DJINN_K8S_WARM_MEMORY_LIMIT` | `warm_memory_limit` | `4Gi` |
     ///
     /// The three DB vars are read from djinn-server's own environment (the
     /// Helm chart projects them via `envFrom: configMap djinn-config`) and
@@ -200,6 +239,38 @@ impl KubernetesConfig {
         cfg.database_flavor = std::env::var("DJINN_MYSQL_FLAVOR")
             .ok()
             .filter(|v| !v.is_empty());
+        if let Ok(v) = std::env::var("DJINN_K8S_TASK_RUN_ACTIVE_DEADLINE_SECONDS") {
+            match v.parse::<u64>() {
+                Ok(n) => cfg.task_run_active_deadline_seconds = n,
+                Err(e) => tracing::warn!(
+                    value = %v,
+                    error = %e,
+                    "DJINN_K8S_TASK_RUN_ACTIVE_DEADLINE_SECONDS not a valid u64 — keeping default"
+                ),
+            }
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_TASK_RUN_TERMINATION_GRACE_PERIOD_SECONDS") {
+            match v.parse::<i64>() {
+                Ok(n) => cfg.task_run_termination_grace_period_seconds = n,
+                Err(e) => tracing::warn!(
+                    value = %v,
+                    error = %e,
+                    "DJINN_K8S_TASK_RUN_TERMINATION_GRACE_PERIOD_SECONDS not a valid i64 — keeping default"
+                ),
+            }
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_WARM_CPU_REQUEST") {
+            cfg.warm_cpu_request = v;
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_WARM_CPU_LIMIT") {
+            cfg.warm_cpu_limit = v;
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_WARM_MEMORY_REQUEST") {
+            cfg.warm_memory_request = v;
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_WARM_MEMORY_LIMIT") {
+            cfg.warm_memory_limit = v;
+        }
         cfg
     }
 }
