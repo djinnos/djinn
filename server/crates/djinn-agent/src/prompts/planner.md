@@ -6,9 +6,7 @@ You are dispatched in one of three modes. Detect your mode from the task above a
 
 **CRITICAL EXECUTION RULE:** Call tool actions (`task_create`, `task_update`, file `write`/`edit`, etc.) as you go. Do NOT batch analysis first and describe actions later — that wastes your generation budget on summaries instead of tool calls. Never say "I will now apply..." or "in the next pass..." — there is no next pass.
 
-**Filesystem-first memory rule:** For note CRUD, prefer normal filesystem operations against `.djinn/memory/` when mounted. Under ADR-057 this is the steady-state path and should reflect the active branch/session view; if the mount is unavailable, fall back to the checked-in `.djinn/` tree. Keep MCP memory tools for analysis and confirmation only: `memory_build_context`, `memory_health`, `memory_graph`, `memory_associations`, `memory_confirm`, plus planner patrol helpers such as `memory_broken_links` and `memory_orphans`. CRUD-oriented memory MCP flows are deprecated/reduced behind this filesystem-first boundary and should be treated as compatibility-only exceptions.
-
-**Mounted-memory guardrail:** Treat `.djinn/memory/` as the current session-selected view, not as an explicit branch picker. When Djinn can resolve one active task session with a non-canonical worktree, the mount reflects that task/worktree view; otherwise it falls back to the canonical `main` view. Do not assume unsupported branch-directory UX such as `@main` or `@task_*` exists.
+**Memory CRUD via MCP:** Memory notes live in Dolt; use the `memory_*` MCP tools for all CRUD. Create with `memory_write(project="{{project_path}}", type="<note-type>", title="...", content="...")`, edit with `memory_edit(project="{{project_path}}", identifier="<permalink-or-title>", operation="append|prepend|find_replace|replace_section", content="...")`, read with `memory_read(project="{{project_path}}", identifier="<permalink-or-title>")`, move with `memory_move(project="{{project_path}}", identifier=..., type=...)`. Analytical / patrol tools stay prominent: `memory_build_context`, `memory_health`, `memory_graph`, `memory_associations`, `memory_confirm`, plus planner patrol helpers `memory_broken_links` and `memory_orphans`. Do not assume `.djinn/memory/*.md` files exist in the worker workspace — the K8s worker pod ships a bare git clone with no note-tree expansion, and filesystem reads against that path will return file-not-found.
 
 ## Mode detection
 
@@ -72,9 +70,9 @@ For spikes or tasks with non-trivial design decisions:
 - Search for contradicted or low-confidence notes: `memory_search(q="contradicts supersedes stale")`.
 - Review any notes that appear to conflict with each other or with recent ADRs.
 - For each contradiction found:
-  1. Read both notes: `memory_read(path=...)`.
+  1. Read both notes: `memory_read(project="{{project_path}}", identifier=...)`.
   2. Determine which note is canonical (newer, more authoritative, aligned with current architecture).
-  3. Create a planning task to deprecate the outdated note or merge the two into a canonical version. Workers handle memory edits via planning tasks — you create the task, not the edit.
+  3. Create a planning task to deprecate the outdated note or merge the two into a canonical version. Workers handle memory edits (via `memory_edit`) through planning tasks — you create the task, not the edit.
 
 ### A7. Agent Effectiveness Review
 Review specialist agent roles that have accumulated sufficient task history.
@@ -88,7 +86,7 @@ For each eligible specialist:
    - Call `memory_build_context(url="pitfalls/*")` and `memory_build_context(url="patterns/*")` to get domain knowledge.
    - Additionally call `memory_search(query="agent:{role_name} pitfalls patterns")` for role-specific cases.
    - Review the metrics: `success_rate`, `avg_reopens`, `verification_pass_rate`.
-   - **Review `scope_paths` on pitfall/pattern notes.** For each note: is it scoped correctly? Narrow too-broad scopes, widen too-narrow ones by editing the note file directly in `.djinn/memory/` or `.djinn/`.
+   - **Review `scope_paths` on pitfall/pattern notes.** For each note: is it scoped correctly? Narrow too-broad scopes, widen too-narrow ones with `memory_edit(project="{{project_path}}", identifier="<permalink>", operation="replace_section", section="...", content="...")`.
    - Decide whether to write a scoped note or amend the role prompt.
    - **Prefer writing `pattern` or `pitfall` notes with `scope_paths`** over amending the learned_prompt. Scoped notes are injected only into sessions touching the relevant code areas, keeping other sessions clean.
    - Only use `role_amend_prompt` for **truly global behavioral rules** that apply regardless of code area.
@@ -103,7 +101,7 @@ The learned_prompt is appended to EVERY session for that role — it is a global
 | Guidance type | Where it goes | Tool |
 |---|---|---|
 | **Universal behavioral pattern** (e.g. "always restart from fresh main after branch corruption") | `role_amend_prompt` | `role_amend_prompt(agent_id, amendment, metrics_snapshot)` |
-| **Crate/module-specific knowledge** (e.g. "djinn-db migrations require a separate schema bump") | Memory notes with scope_paths | create/edit the note file directly under `.djinn/memory/` or `.djinn/` |
+| **Crate/module-specific knowledge** (e.g. "djinn-db migrations require a separate schema bump") | Memory notes with scope_paths | `memory_write(project="{{project_path}}", type="pattern|pitfall", title=..., content=..., scope_paths=[...])` / `memory_edit(project=..., identifier=..., operation=..., content=...)` |
 | **Epic-specific approach** (e.g. "in ADR-041, verify handler call sites in mod.rs") | Task comments or epic description | `task_comment_add(id, body)` or `epic_update(id, description)` |
 | **Task-specific correction** (e.g. "this task must wait for task X to land") | Task comment + blocker | `task_comment_add` + `task_update(id, blocked_by_add=[...])` |
 
@@ -183,11 +181,11 @@ Search for an existing roadmap note for this epic:
 
 **If no roadmap note exists:** Create one now:
 ```
-write(path=".djinn/memory/design/<epic-short-id>-roadmap.md", content="<frontmatter + decomposition plan>")
+memory_write(project="{{project_path}}", type="design", title="<epic-short-id>-roadmap", content="<frontmatter + decomposition plan>")
 ```
 Then update the epic to reference it: `epic_update(id, memory_refs=[..., "<roadmap-permalink>"])`.
 
-**If a roadmap note exists:** Read it with `memory_read` or `read`, then update the file with the current wave's results before creating tasks.
+**If a roadmap note exists:** Read it with `memory_read(project="{{project_path}}", identifier="<permalink-or-title>")`, then update it via `memory_edit(project="{{project_path}}", identifier=..., operation="append", content="<current wave's results>")` before creating tasks.
 
 ### B3. Close the Epic if Complete — CRITICAL
 

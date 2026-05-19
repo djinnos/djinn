@@ -34,12 +34,10 @@ When resolving merge conflicts, you will see conflict information populated in t
 2. **Read the task** — understand what needs to be done from the description, design, and acceptance criteria.
 3. **Check memory** — look up any ADRs or patterns referenced in the design field.
 4. **Read before editing** — Before modifying any file, read it with the `read` tool. The edit and write tools will reject changes to files you haven't read. If you need to understand an API, struct, or enum before using it, read the file that defines it.
-5. **Use filesystem note CRUD first** — For note creation/editing, prefer normal file operations (`read`, `write`, `edit`, `apply_patch`, plus `shell` helpers) against the mounted memory tree at `.djinn/memory/` when available. That mount is the ADR-057 steady-state path and, when enabled, reflects the current task/session branch view. If the mount is unavailable, use the checked-in `.djinn/` note files instead. Reserve MCP memory tools for analytical retrieval and confirmation flows — especially `memory_build_context`, and in broader role surfaces `memory_health`, `memory_graph`, `memory_associations`, and `memory_confirm` — or explicit compatibility-only fallbacks.
-6. **Treat `.djinn/memory/` as a session view, not a branch selector** — The mounted tree reflects the current task/worktree view when Djinn can resolve one active task session for the project. If it cannot resolve that context, or the active session is still on the canonical project root, the mount falls back to the canonical `main` view.
-7. **Do not invent unsupported branch UX** — This ADR-057 slice does not expose `@main`, `@task_*`, symlink switching, or other explicit branch directories. If you need a guaranteed canonical read, use the checked-in `.djinn/` tree or analytical MCP reads instead of assuming the mount stayed on `main`.
-8. **Implement** — write the code following the design approach exactly as specified.
-9. **Verify completeness** — ensure ALL acceptance criteria are met, ALL code changes written and saved. If you have only read files, planned, or partially implemented, YOU ARE NOT DONE — keep writing code.
-10. **Submit work** — call `submit_work(task_id="{{task_id}}", summary="...")` with a summary of what you did, the files you changed, and any remaining concerns. **This is the only way to end your session. Do NOT call submit_work until all implementation is complete.**
+5. **Use `memory_*` MCP tools for note CRUD** — Memory notes live in Dolt. Create/read/edit/move notes with `memory_write`, `memory_read`, `memory_edit`, `memory_move`, and search with `memory_search`. Do not try to `read` or `write` files under `.djinn/memory/` — the worker workspace is a bare git clone with no note-tree expansion, so those reads return file-not-found. Analytical flows (`memory_build_context`, `memory_health`, `memory_graph`, `memory_associations`, `memory_confirm`) continue to be the right call when you want retrieval or confirmation rather than CRUD.
+6. **Implement** — write the code following the design approach exactly as specified.
+7. **Verify completeness** — ensure ALL acceptance criteria are met, ALL code changes written and saved. If you have only read files, planned, or partially implemented, YOU ARE NOT DONE — keep writing code.
+8. **Submit work** — call `submit_work(task_id="{{task_id}}", summary="...")` with a summary of what you did, the files you changed, and any remaining concerns. **This is the only way to end your session. Do NOT call submit_work until all implementation is complete.**
 
 
 ## Research and Spike Deliverables
@@ -47,17 +45,17 @@ When resolving merge conflicts, you will see conflict information populated in t
 If this task's `issue_type` is `research`, your **primary deliverable is a memory note**, not code changes:
 
 1. Investigate the topic using `read`, `shell`, `lsp`, and `memory_search`/`memory_read` to gather evidence
-2. Write your findings as a note file under `.djinn/memory/` when mounted, or the checked-in `.djinn/` tree otherwise, using `write`/`edit`/`apply_patch`
+2. Write your findings as a memory note with `memory_write(project="{{project_path}}", type="research", title="...", content="...")`
 3. **Always include task traceability** in the note content (e.g. `Originated from task {{task_id}}`)
-4. If findings are extensive, create the note first then use `edit`/`apply_patch` to add sections incrementally
+4. If findings are extensive, create the note first then use `memory_edit(project="{{project_path}}", identifier="<permalink>", operation="append", content="...")` to add sections incrementally
 5. Call `submit_work` with a summary referencing the memory note permalink
 
 If this task's `issue_type` is `spike`, your **primary deliverable is a memory note** describing the technical investigation:
 
 1. Investigate the topic using `read`, `shell`, `lsp`, and `memory_search`/`memory_read` to gather evidence
-2. Write your findings as a note file under `.djinn/memory/` when mounted, or the checked-in `.djinn/` tree otherwise, using `write`/`edit`/`apply_patch`
+2. Write your findings as a memory note with `memory_write(project="{{project_path}}", type="tech_spike", title="...", content="...")`
 3. **Always include task traceability** in the note content (e.g. `Originated from task {{task_id}}`)
-4. If findings are extensive, create the note first then use `edit`/`apply_patch` to add sections incrementally
+4. If findings are extensive, create the note first then use `memory_edit(project="{{project_path}}", identifier="<permalink>", operation="append", content="...")` to add sections incrementally
 5. Call `submit_work` with a summary referencing the memory note permalink
 
 For research and spike tasks, a well-written memory note IS the successful deliverable. Code changes are not expected.

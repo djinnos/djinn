@@ -527,8 +527,8 @@ mod tests {
         assert!(prompt.contains("/home/user/project"));
         assert!(prompt.contains("/home/user/project/.djinn/worktrees/t123"));
         assert!(prompt.contains("issue_type` is `research`"));
-        assert!(prompt.contains(".djinn/memory/"));
-        assert!(prompt.contains("write`/`edit`/`apply_patch`"));
+        assert!(prompt.contains("memory_write"));
+        assert!(prompt.contains("memory_edit"));
         assert!(prompt.contains("Originated from task task-123"));
         // No un-substituted placeholders
         assert!(!prompt.contains("{{"));
@@ -789,24 +789,26 @@ mod tests {
     }
 
     #[test]
-    fn worker_prompt_documents_filesystem_first_memory_boundary() {
+    fn worker_prompt_routes_memory_crud_through_mcp() {
         let task = make_task();
         let ctx = make_ctx();
         let prompt = render_prompt(AgentType::Worker, &task, &ctx);
 
         assert!(
-            prompt.contains("ADR-057 steady-state path"),
-            "worker prompt should describe the ADR-057 mounted-memory boundary"
+            prompt.contains("memory_*") && prompt.contains("Memory notes live in Dolt"),
+            "worker prompt should direct note CRUD through the memory_* MCP tools"
         );
         assert!(
-            prompt.contains("reflects the current task/session branch view"),
-            "worker prompt should describe branch-aware mounted-memory behavior"
+            prompt.contains("memory_write")
+                && prompt.contains("memory_read")
+                && prompt.contains("memory_edit"),
+            "worker prompt should call out the memory CRUD MCP tools by name"
         );
         assert!(
             prompt.contains("memory_graph")
                 && prompt.contains("memory_associations")
                 && prompt.contains("memory_confirm"),
-            "worker prompt should call out retained analytical memory tools even when they are not worker CRUD tools"
+            "worker prompt should retain analytical memory tools even when they are not CRUD tools"
         );
     }
 
@@ -855,11 +857,11 @@ mod tests {
             prompt.contains("memory_graph")
                 && prompt.contains("memory_associations")
                 && prompt.contains("memory_confirm"),
-            "planner prompt should distinguish retained analytical tools from deprecated CRUD flows"
+            "planner prompt should keep analytical memory tools alongside CRUD MCP tools"
         );
         assert!(
-            prompt.contains("active branch/session view"),
-            "planner prompt should describe the mounted memory runtime expectation"
+            prompt.contains("Memory notes live in Dolt"),
+            "planner prompt should state that note CRUD lives in Dolt via memory_* MCP tools"
         );
     }
 
@@ -926,11 +928,11 @@ mod tests {
             prompt.contains("memory_graph")
                 && prompt.contains("memory_associations")
                 && prompt.contains("memory_confirm"),
-            "architect prompt should document retained analytical memory tools at the ADR-057 boundary"
+            "architect prompt should document the retained analytical memory tools"
         );
         assert!(
-            prompt.contains("filesystem-first at `.djinn/memory/`"),
-            "architect prompt should describe the filesystem-first mounted-memory boundary"
+            prompt.contains("memory_write") && prompt.contains("memory_edit"),
+            "architect prompt should route note CRUD through memory_* MCP tools"
         );
     }
 
