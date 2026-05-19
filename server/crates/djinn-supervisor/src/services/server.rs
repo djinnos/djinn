@@ -1080,6 +1080,11 @@ async fn dispatch(
             agent_type,
             message,
         } => {
+            // Re-parse the opaque JSON string back into a Value before
+            // calling through to the trait surface (which keeps the
+            // ergonomic Value type). Bad JSON falls back to Null.
+            let message = serde_json::from_str::<serde_json::Value>(&message)
+                .unwrap_or(serde_json::Value::Null);
             let result = services
                 .publish_session_message(session_id, task_id, agent_type, message)
                 .await;

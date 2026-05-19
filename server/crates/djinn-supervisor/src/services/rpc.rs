@@ -489,6 +489,9 @@ impl SupervisorServices for RpcServices {
         agent_type: String,
         message: serde_json::Value,
     ) -> Result<(), String> {
+        // Opaque JSON encode for bincode safety — `serde_json::Value`'s
+        // untagged-enum internals trip `DeserializeAnyNotSupported`.
+        let message = serde_json::to_string(&message).unwrap_or_else(|_| "null".to_string());
         match self
             .roundtrip(ServiceRpcRequest::PublishSessionMessage {
                 session_id,
@@ -1414,7 +1417,11 @@ mod tests {
                     assert_eq!(session_id, "s1");
                     assert_eq!(task_id, "t1");
                     assert_eq!(agent_type, "worker");
-                    assert_eq!(message["role"], "assistant");
+                    // `message` is opaque JSON over the wire — re-parse
+                    // before asserting the field shape.
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(&message).expect("valid JSON");
+                    assert_eq!(parsed["role"], "assistant");
                     let reply = Frame {
                         correlation_id: frame.correlation_id,
                         payload: FramePayload::RpcReply(

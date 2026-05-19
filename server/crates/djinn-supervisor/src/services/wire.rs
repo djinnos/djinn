@@ -246,11 +246,18 @@ pub enum ServiceRpcRequest {
     },
     /// [`crate::SupervisorServices::publish_session_message`].  Phase 6c —
     /// session persistence extraction.
+    ///
+    /// `message` is shipped as an opaque JSON `String` rather than a
+    /// `serde_json::Value` because bincode is a positional codec that
+    /// rejects `serde_json::Value`'s untagged-enum internals with
+    /// `DeserializeAnyNotSupported`. The host re-parses via
+    /// `serde_json::from_str` in `DirectServices::publish_session_message`.
+    /// Same logic drove the `SerializableDjinnEvent.payload` shape.
     PublishSessionMessage {
         session_id: String,
         task_id: String,
         agent_type: String,
-        message: serde_json::Value,
+        message: String,
     },
     /// [`crate::SupervisorServices::get_environment_config`].  Phase 6d —
     /// project environment-config extraction.
@@ -852,18 +859,31 @@ mod tests {
 
     #[test]
     fn publish_session_message_request_roundtrip() {
-        let msg = serde_json::json!({ "role": "assistant", "content": "hi" });
+        // Use a non-trivial nested payload to exercise the untagged-enum
+        // internals trap — `serde_json::Value` is bincode-fatal when
+        // shipped directly, hence the opaque-JSON-string wire shape.
+        let msg = serde_json::json!({
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "hi"},
+                {"type": "tool_use", "input": {"nested": {"array": [1, 2, 3]}}},
+            ],
+        });
+        let msg_str = msg.to_string();
         let f = Frame {
             correlation_id: 32,
             payload: FramePayload::Rpc(ServiceRpcRequest::PublishSessionMessage {
                 session_id: "s1".into(),
                 task_id: "t1".into(),
                 agent_type: "worker".into(),
-                message: msg.clone(),
+                message: msg_str.clone(),
             }),
         };
         let bytes = bincode::serialize(&f).unwrap();
-        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).expect(
+            "PublishSessionMessage with nested JSON payload must roundtrip via bincode \
+             (regression guard for the serde_json::Value DeserializeAnyNotSupported trap)",
+        );
         match back.payload {
             FramePayload::Rpc(ServiceRpcRequest::PublishSessionMessage {
                 session_id,
@@ -874,7 +894,11 @@ mod tests {
                 assert_eq!(session_id, "s1");
                 assert_eq!(task_id, "t1");
                 assert_eq!(agent_type, "worker");
-                assert_eq!(message, msg);
+                assert_eq!(message, msg_str);
+                // Re-parse the wire-shipped string back into a Value and
+                // assert the structural equivalence the host would see.
+                let parsed: serde_json::Value = serde_json::from_str(&message).unwrap();
+                assert_eq!(parsed, msg);
             }
             other => panic!("unexpected: {other:?}"),
         }
