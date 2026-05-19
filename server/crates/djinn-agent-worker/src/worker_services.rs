@@ -32,7 +32,8 @@
 //! a Phase 7-followup. See the integration test in
 //! `tests/in_pod_drive.rs` for what currently surfaces.
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use djinn_agent::actors::slot::helpers::{
@@ -63,6 +64,16 @@ pub struct WorkerSupervisorServices {
     credentials: ResolvedCredentials,
     cancel: CancellationToken,
     agent_context: AgentContext,
+    /// Path of the supervisor-created ephemeral [`Workspace`], captured the
+    /// first time `execute_stage` is invoked.  Used by `open_pr` to
+    /// reconstruct a [`Workspace`] handle (via [`Workspace::attach_existing`])
+    /// so we can push the worker's `task_branch` back to the mirror before
+    /// delegating the PR-open RPC to the host.
+    ///
+    /// `Mutex<Option<_>>` rather than `OnceLock` because the value is owned
+    /// behind `&self` from inside an `async_trait` method and the mutex
+    /// guard is dropped before any `.await`.
+    captured_workspace_path: Mutex<Option<PathBuf>>,
 }
 
 impl WorkerSupervisorServices {
@@ -81,6 +92,7 @@ impl WorkerSupervisorServices {
             credentials,
             cancel,
             agent_context,
+            captured_workspace_path: Mutex::new(None),
         }
     }
 }
@@ -162,6 +174,19 @@ impl SupervisorServices for WorkerSupervisorServices {
         task_run_id: &str,
         spec: &TaskRunSpec,
     ) -> Result<StageOutcome, StageError> {
+        // Snapshot the supervisor's workspace path on the first stage so
+        // `open_pr` can push the worker's task_branch back to the mirror
+        // before delegating the host RPC.  The supervisor passes the same
+        // `&Workspace` to every stage, so capturing on the first call is
+        // sufficient; subsequent calls overwrite with the same path.
+        {
+            let mut slot = self
+                .captured_workspace_path
+                .lock()
+                .expect("captured_workspace_path mutex poisoned");
+            *slot = Some(workspace.path().to_path_buf());
+        }
+
         let cred = self.credentials.per_role.get(&role_kind).ok_or_else(|| {
             StageError::ModelResolution(format!(
                 "no credential mounted for role {}",
@@ -196,6 +221,67 @@ impl SupervisorServices for WorkerSupervisorServices {
     }
 
     async fn open_pr(&self, spec: &TaskRunSpec, task: &Task) -> TaskRunOutcome {
+        // Push the worker's task_branch from the supervisor's ephemeral
+        // workspace into the mirror so the host's
+        // `squash_merge_via_mirror` (called from the host-side `open_pr`
+        // we delegate to below) can find our commits. Without this, the
+        // worker's commits live only in the ephemeral TempDir clone (whose
+        // origin is the mirror) and vanish when the Pod exits, so the PR
+        // open fails with "task_branch has no commits".
+        let captured_path = {
+            self.captured_workspace_path
+                .lock()
+                .expect("captured_workspace_path mutex poisoned")
+                .clone()
+        };
+        match captured_path {
+            Some(path) => match Workspace::attach_existing(&path, spec.task_branch.clone()) {
+                Ok(ws) => {
+                    if let Err(e) = ws.push_to_origin(&spec.task_branch).await {
+                        tracing::error!(
+                            error = %e,
+                            branch = %spec.task_branch,
+                            path = %path.display(),
+                            "worker_services::open_pr: failed to push task_branch to mirror"
+                        );
+                        return TaskRunOutcome::Failed {
+                            stage: "pr_open".into(),
+                            reason: format!(
+                                "worker failed to push task_branch '{}' to mirror: {e}",
+                                spec.task_branch
+                            ),
+                        };
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        branch = %spec.task_branch,
+                        path = %path.display(),
+                        "worker_services::open_pr: failed to attach workspace for push"
+                    );
+                    return TaskRunOutcome::Failed {
+                        stage: "pr_open".into(),
+                        reason: format!(
+                            "worker failed to attach workspace at {} for task_branch '{}' push: {e}",
+                            path.display(),
+                            spec.task_branch
+                        ),
+                    };
+                }
+            },
+            None => {
+                // No stage ever ran (sequence empty / supervisor short-
+                // circuited).  Nothing to push; fall through to the host
+                // RPC, which will surface its own "no commits" error if
+                // appropriate.
+                tracing::warn!(
+                    branch = %spec.task_branch,
+                    "worker_services::open_pr: no captured workspace path; \
+                     skipping push (no stage ran?)"
+                );
+            }
+        }
         self.rpc.open_pr(spec, task).await
     }
 
