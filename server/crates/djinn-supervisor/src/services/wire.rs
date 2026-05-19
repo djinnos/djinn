@@ -265,10 +265,20 @@ pub enum ServiceRpcRequest {
     /// [`crate::SupervisorServices::invoke_llm`].  Phase 6a-redux —
     /// host-side LLM invocation. The worker (Phase 7) will use this to keep
     /// vault credentials off the worker side.
+    ///
+    /// `conversation` + `tools` are shipped as opaque JSON `String`s for
+    /// bincode safety: both pull in `serde_json::Value` (directly in
+    /// `tools`; transitively via `ContentBlock::ToolUse.input` and
+    /// `MessageMeta.provider_data` inside the conversation) and
+    /// `ContentBlock`'s internally-tagged enum representation, neither
+    /// of which the positional bincode codec can `deserialize_any`.
+    /// The host re-parses both via `serde_json::from_str` before
+    /// invoking the trait method, which keeps the ergonomic typed
+    /// surface unchanged.
     InvokeLlm {
         model_id: String,
-        conversation: djinn_provider::message::Conversation,
-        tools: Vec<serde_json::Value>,
+        conversation: String,
+        tools: String,
         tool_choice: Option<djinn_provider::provider::ToolChoice>,
     },
     /// [`crate::SupervisorServices::update_session_status`].  Phase 6e —
@@ -334,7 +344,13 @@ pub enum ServiceRpcResponse {
     /// Phase 6d — project environment-config response.
     GetEnvironmentConfig(Result<EnvironmentConfig, String>),
     /// Phase 6a-redux — host-side LLM invocation response.
-    InvokeLlm(Result<djinn_provider::provider::LlmResponse, String>),
+    ///
+    /// `Ok` carries the JSON-encoded `LlmResponse` as an opaque string.
+    /// `LlmResponse` contains `Vec<ContentBlock>`, whose internally-tagged
+    /// enum representation and `ToolUse.input: serde_json::Value` field
+    /// both blow up bincode's positional codec with
+    /// `DeserializeAnyNotSupported`. The host re-parses on receive.
+    InvokeLlm(Result<String, String>),
     /// Phase 6e — session status update response.
     UpdateSessionStatus(Result<(), String>),
     /// Phase 7-followup gap-2 — fire-and-forget event-bridge ack.
@@ -965,19 +981,40 @@ mod tests {
     fn invoke_llm_request_roundtrip() {
         use djinn_provider::message::{Conversation, Message};
         use djinn_provider::provider::ToolChoice;
+        // Build a conversation with a ToolUse content block — the
+        // internally-tagged ContentBlock + ToolUse.input Value combo is
+        // the exact shape that broke bincode pre-fix.
         let mut conv = Conversation::new();
         conv.push(Message::user("hello"));
+        conv.push(Message {
+            role: djinn_core::message::Role::Assistant,
+            content: vec![djinn_core::message::ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "lookup".into(),
+                input: serde_json::json!({"nested": {"array": [1, 2, 3]}}),
+            }],
+            metadata: None,
+        });
+        let conv_str = serde_json::to_string(&conv).unwrap();
+        let tools_value = vec![serde_json::json!({
+            "name": "lookup",
+            "schema": {"type": "object", "properties": {"x": {"type": "string"}}},
+        })];
+        let tools_str = serde_json::to_string(&tools_value).unwrap();
         let f = Frame {
             correlation_id: 41,
             payload: FramePayload::Rpc(ServiceRpcRequest::InvokeLlm {
                 model_id: "anthropic/claude-opus-4-7".into(),
-                conversation: conv,
-                tools: vec![serde_json::json!({"name": "noop"})],
+                conversation: conv_str.clone(),
+                tools: tools_str.clone(),
                 tool_choice: Some(ToolChoice::Auto),
             }),
         };
         let bytes = bincode::serialize(&f).unwrap();
-        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).expect(
+            "InvokeLlm with nested Conversation/tools must roundtrip via bincode \
+             (regression guard for ContentBlock + serde_json::Value DeserializeAnyNotSupported)",
+        );
         match back.payload {
             FramePayload::Rpc(ServiceRpcRequest::InvokeLlm {
                 model_id,
@@ -986,9 +1023,16 @@ mod tests {
                 tool_choice,
             }) => {
                 assert_eq!(model_id, "anthropic/claude-opus-4-7");
-                assert_eq!(conversation.len(), 1);
-                assert_eq!(tools.len(), 1);
+                assert_eq!(conversation, conv_str);
+                assert_eq!(tools, tools_str);
                 assert_eq!(tool_choice, Some(ToolChoice::Auto));
+                // Re-parse and confirm structural fidelity end-to-end.
+                let conv_back: Conversation =
+                    serde_json::from_str(&conversation).unwrap();
+                assert_eq!(conv_back.len(), 2);
+                let tools_back: Vec<serde_json::Value> =
+                    serde_json::from_str(&tools).unwrap();
+                assert_eq!(tools_back, tools_value);
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -998,14 +1042,26 @@ mod tests {
     fn invoke_llm_reply_roundtrip() {
         use djinn_core::message::ContentBlock;
         use djinn_provider::provider::{LlmResponse, TokenUsage};
-        let resp = ServiceRpcResponse::InvokeLlm(Ok(LlmResponse {
-            content: vec![ContentBlock::text("hi back")],
+        // Build a non-trivial response with a ToolUse block — proves the
+        // opaque-JSON-string wire shape survives the ContentBlock +
+        // Value combo that broke before.
+        let llm_resp = LlmResponse {
+            content: vec![
+                ContentBlock::text("hi back"),
+                ContentBlock::ToolUse {
+                    id: "call_2".into(),
+                    name: "echo".into(),
+                    input: serde_json::json!({"k": [1, 2]}),
+                },
+            ],
             thinking: String::new(),
             usage: TokenUsage {
                 input: 12,
                 output: 7,
             },
-        }));
+        };
+        let payload_str = serde_json::to_string(&llm_resp).unwrap();
+        let resp = ServiceRpcResponse::InvokeLlm(Ok(payload_str.clone()));
         let f = Frame {
             correlation_id: 41,
             payload: FramePayload::RpcReply(resp),
@@ -1013,10 +1069,12 @@ mod tests {
         let bytes = bincode::serialize(&f).unwrap();
         let back: Frame = bincode::deserialize(&bytes).unwrap();
         match back.payload {
-            FramePayload::RpcReply(ServiceRpcResponse::InvokeLlm(Ok(r))) => {
+            FramePayload::RpcReply(ServiceRpcResponse::InvokeLlm(Ok(got))) => {
+                assert_eq!(got, payload_str);
+                let r: LlmResponse = serde_json::from_str(&got).unwrap();
                 assert_eq!(r.usage.input, 12);
                 assert_eq!(r.usage.output, 7);
-                assert_eq!(r.content.len(), 1);
+                assert_eq!(r.content.len(), 2);
             }
             other => panic!("unexpected: {other:?}"),
         }

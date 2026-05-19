@@ -1100,9 +1100,25 @@ async fn dispatch(
             tools,
             tool_choice,
         } => {
-            let result = services
-                .invoke_llm(model_id, conversation, tools, tool_choice)
-                .await;
+            // Re-parse the wire-shipped opaque JSON strings. Malformed
+            // input becomes an `Err` reply so the worker surfaces the
+            // protocol mishap rather than seeing a silent empty
+            // conversation / empty tool list.
+            let result = match (
+                serde_json::from_str::<djinn_provider::message::Conversation>(&conversation),
+                serde_json::from_str::<Vec<serde_json::Value>>(&tools),
+            ) {
+                (Ok(conv), Ok(tool_vec)) => services
+                    .invoke_llm(model_id, conv, tool_vec, tool_choice)
+                    .await
+                    .and_then(|resp| {
+                        serde_json::to_string(&resp).map_err(|e| {
+                            format!("encode invoke_llm reply for rpc: {e}")
+                        })
+                    }),
+                (Err(e), _) => Err(format!("rpc decode invoke_llm.conversation: {e}")),
+                (_, Err(e)) => Err(format!("rpc decode invoke_llm.tools: {e}")),
+            };
             ServiceRpcResponse::InvokeLlm(result)
         }
         ServiceRpcRequest::UpdateSessionStatus {

@@ -530,16 +530,28 @@ impl SupervisorServices for RpcServices {
         tools: Vec<serde_json::Value>,
         tool_choice: Option<djinn_provider::provider::ToolChoice>,
     ) -> Result<djinn_provider::provider::LlmResponse, String> {
+        // Opaque JSON encode — `Conversation` carries `ContentBlock`
+        // (internally-tagged + `serde_json::Value`) and `MessageMeta`
+        // with `skip_serializing_if`, both bincode-fatal. `tools` is a
+        // raw `Vec<Value>`. Both are JSON-stringified for the wire.
+        let conversation_str = serde_json::to_string(&conversation)
+            .map_err(|e| format!("encode conversation for rpc: {e}"))?;
+        let tools_str = serde_json::to_string(&tools)
+            .map_err(|e| format!("encode tools for rpc: {e}"))?;
         match self
             .roundtrip(ServiceRpcRequest::InvokeLlm {
                 model_id,
-                conversation,
-                tools,
+                conversation: conversation_str,
+                tools: tools_str,
                 tool_choice,
             })
             .await
         {
-            Ok(ServiceRpcResponse::InvokeLlm(result)) => result,
+            Ok(ServiceRpcResponse::InvokeLlm(Ok(payload))) => {
+                serde_json::from_str::<djinn_provider::provider::LlmResponse>(&payload)
+                    .map_err(|e| format!("rpc decode invoke_llm reply: {e}"))
+            }
+            Ok(ServiceRpcResponse::InvokeLlm(Err(e))) => Err(e),
             Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
             Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
             Err(e) => Err(e),
@@ -1488,17 +1500,27 @@ mod tests {
                     tool_choice,
                 }) => {
                     assert_eq!(model_id, "anthropic/claude-opus-4-7");
-                    assert_eq!(conversation.len(), 1);
-                    assert_eq!(tools.len(), 0);
+                    // `conversation` / `tools` are opaque JSON over the
+                    // wire — parse before asserting structural shape.
+                    let conv_back: Conversation =
+                        serde_json::from_str(&conversation).expect("conversation JSON");
+                    assert_eq!(conv_back.len(), 1);
+                    let tools_back: Vec<serde_json::Value> =
+                        serde_json::from_str(&tools).expect("tools JSON");
+                    assert_eq!(tools_back.len(), 0);
                     assert_eq!(tool_choice, Some(ToolChoice::Auto));
                     let resp = LlmResponse {
                         content: vec![ContentBlock::text("pong")],
                         thinking: String::new(),
                         usage: TokenUsage { input: 5, output: 4 },
                     };
+                    let payload_str =
+                        serde_json::to_string(&resp).expect("encode resp");
                     let reply = Frame {
                         correlation_id: frame.correlation_id,
-                        payload: FramePayload::RpcReply(ServiceRpcResponse::InvokeLlm(Ok(resp))),
+                        payload: FramePayload::RpcReply(ServiceRpcResponse::InvokeLlm(Ok(
+                            payload_str,
+                        ))),
                     };
                     write_frame(&mut write, &reply).await.expect("write reply");
                 }
