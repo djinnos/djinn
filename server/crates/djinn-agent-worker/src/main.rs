@@ -374,15 +374,18 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     // 9. Shut down the RPC background tasks cleanly.
     //
     //    Order matters: drop every `Arc<RpcServices>` handle (which owns
-    //    the outbound `mpsc::Sender<Frame>`) *before* signalling the
-    //    supervisor-wide cancel.  Dropping the last sender makes the writer
-    //    loop's `rx.recv().await` return `None`, so it drains any remaining
-    //    frames (including the TerminalReport we just queued) before
-    //    shutting down the write half.  If we fired `cancel.cancel()`
-    //    first, the writer's `tokio::select!` would take its `biased`
-    //    cancel branch and tear the connection down before the event left
-    //    the process — the launcher would then fall back to Job-status
-    //    polling even on the happy path.
+    //    the outbound `mpsc::Sender<Frame>`) *before* awaiting the writer.
+    //    Dropping the last sender makes the writer loop's
+    //    `rx.recv().await` return `None`, so it shuts down the write half
+    //    cleanly.  If any `Arc<dyn SupervisorServices>` still pointed at
+    //    the inner `WorkerSupervisorServices` (which carries a
+    //    `rpc: Arc<RpcServices>` field), the sender would stay alive and
+    //    the writer would wait forever.
+    //
+    //    `supervisor` holds the second `Arc<dyn SupervisorServices>`
+    //    clone (taken at line construction); drop it first so the chain
+    //    `supervisor → worker_services_clone → rpc → Sender` releases.
+    drop(supervisor);
     drop(worker_services);
     drop(rpc);
     let _ = background.writer.await;

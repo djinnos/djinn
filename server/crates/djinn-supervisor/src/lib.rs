@@ -170,7 +170,21 @@ impl TaskRunSupervisor {
             "task-run starting"
         );
 
-        self.services
+        // RPC-failure-during-cancellation policy: when any host-bound RPC
+        // fails *and* the shared cancel token is already set, treat the
+        // failure as the user-initiated cancel path (build an Interrupted
+        // report) instead of bubbling a SupervisorError that would make
+        // the worker exit non-zero.  When cancel is NOT set, the failure
+        // stays fatal — that's a genuine RPC malfunction worth surfacing.
+        //
+        // The early-cancel branches still hand off through
+        // `finalize_interrupted`, which always attempts the terminal
+        // `update_task_run_status` RPC.  Without that, a cancel arriving
+        // during `create_task_run` or `load_task` would skip the status
+        // write entirely and leave the host's `task_runs` row stuck at
+        // `running`.
+        if let Err(e) = self
+            .services
             .create_task_run(SerializableCreateTaskRunParams {
                 id: run_id.clone(),
                 project_id: spec.project_id.clone(),
@@ -181,7 +195,17 @@ impl TaskRunSupervisor {
                 mirror_ref: None,
             })
             .await
-            .map_err(SupervisorError::CreateTaskRun)?;
+        {
+            if self.services.cancel().is_cancelled() {
+                debug!(
+                    task_run_id = %run_id,
+                    error = %e,
+                    "create_task_run failed during cancellation"
+                );
+                return self.finalize_interrupted(run_id, vec![]).await;
+            }
+            return Err(SupervisorError::CreateTaskRun(e));
+        }
 
         let workspace = self
             .mirror
@@ -189,11 +213,20 @@ impl TaskRunSupervisor {
             .await?;
         debug!(task_run_id = %run_id, path = ?workspace.path(), "ephemeral workspace ready");
 
-        let task = self
-            .services
-            .load_task(spec.task_id.clone())
-            .await
-            .map_err(SupervisorError::LoadTask)?;
+        let task = match self.services.load_task(spec.task_id.clone()).await {
+            Ok(task) => task,
+            Err(e) => {
+                if self.services.cancel().is_cancelled() {
+                    debug!(
+                        task_run_id = %run_id,
+                        error = %e,
+                        "load_task failed during cancellation"
+                    );
+                    return self.finalize_interrupted(run_id, vec![]).await;
+                }
+                return Err(SupervisorError::LoadTask(e));
+            }
+        };
 
         let sequence = spec.flow.role_sequence();
         let mut completed: Vec<RoleKind> = Vec::new();
@@ -206,10 +239,33 @@ impl TaskRunSupervisor {
                     break;
                 }
 
-                let stage_outcome = self
+                let stage_outcome = match self
                     .services
                     .execute_stage(&task, &workspace, role_kind, &run_id, &spec)
-                    .await?;
+                    .await
+                {
+                    Ok(o) => o,
+                    Err(e) => {
+                        // Stage failure during an in-flight cancellation
+                        // is the expected shape: `execute_stage` saw the
+                        // CancellationToken flip and tore its provider /
+                        // RPC dependencies down with an error.  Surface
+                        // an Interrupted outcome rather than a fatal
+                        // SupervisorError so the worker exits cleanly.
+                        if self.services.cancel().is_cancelled() {
+                            debug!(
+                                task_run_id = %run_id,
+                                error = %e,
+                                role = %role_kind.as_str(),
+                                "execute_stage failed during cancellation; \
+                                 returning Interrupted outcome"
+                            );
+                            result = Some(TaskRunOutcome::Interrupted);
+                            break;
+                        }
+                        return Err(SupervisorError::from(e));
+                    }
+                };
 
                 last_stage_role = Some(role_kind);
                 completed.push(role_kind);
@@ -288,16 +344,74 @@ impl TaskRunSupervisor {
             TaskRunOutcome::Failed { .. } => TaskRunStatus::Failed,
             TaskRunOutcome::Interrupted => TaskRunStatus::Interrupted,
         };
-        self.services
+        // On the cancellation path the host-bound RPC channel may already
+        // be torn down (the reader loop saw `Control(Cancel)` and the
+        // writer's `cancelled()` branch shut the write half).  In that
+        // case `update_task_run_status` returns a transport-level error
+        // and we must still produce an `Interrupted` `TaskRunReport` so
+        // the worker exits cleanly and the host's per-task-run dispatch
+        // can pair it with the `KubernetesRuntime::teardown` path.  When
+        // cancel is NOT set, an update_task_run_status failure stays
+        // fatal — that's a genuine RPC malfunction worth surfacing.
+        if let Err(e) = self
+            .services
             .update_task_run_status(run_id.clone(), terminal_status)
             .await
-            .map_err(SupervisorError::UpdateTaskRunStatus)?;
+        {
+            if self.services.cancel().is_cancelled() {
+                debug!(
+                    task_run_id = %run_id,
+                    error = %e,
+                    "update_task_run_status failed during cancellation; \
+                     proceeding with Interrupted report"
+                );
+            } else {
+                return Err(SupervisorError::UpdateTaskRunStatus(e));
+            }
+        }
 
         info!(task_run_id = %run_id, ?outcome, "task-run finished");
         Ok(TaskRunReport {
             task_run_id: run_id,
             outcome,
             stages_completed: completed,
+        })
+    }
+
+    /// Best-effort terminal status write for an early-cancelled run.
+    ///
+    /// Called from `run` when a host-bound RPC fails *during* an active
+    /// cancellation, before the supervisor would otherwise reach the
+    /// stage for-loop's natural cancel-check (and therefore before the
+    /// trailing `update_task_run_status` at the bottom of `run`).  The
+    /// helper always attempts the terminal RPC so the host's
+    /// `task_runs.status` row flips to `interrupted` regardless of which
+    /// stage tripped the cancel.  A failure on this last RPC is
+    /// swallowed — the cancellation IS the success, and a transport
+    /// error here just means the host's per-task-run dispatch will fall
+    /// back to its Job-status polling path.
+    async fn finalize_interrupted(
+        &self,
+        run_id: String,
+        stages_completed: Vec<RoleKind>,
+    ) -> Result<TaskRunReport, SupervisorError> {
+        if let Err(e) = self
+            .services
+            .update_task_run_status(run_id.clone(), TaskRunStatus::Interrupted)
+            .await
+        {
+            debug!(
+                task_run_id = %run_id,
+                error = %e,
+                "finalize_interrupted: update_task_run_status failed; \
+                 host will fall back to Job-status polling"
+            );
+        }
+        info!(task_run_id = %run_id, "task-run interrupted (early-cancel path)");
+        Ok(TaskRunReport {
+            task_run_id: run_id,
+            outcome: TaskRunOutcome::Interrupted,
+            stages_completed,
         })
     }
 }

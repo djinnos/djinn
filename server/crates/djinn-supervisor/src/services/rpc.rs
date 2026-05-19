@@ -271,6 +271,18 @@ impl RpcServices {
     /// matching reply.  Returns a transport-level error if the socket closed
     /// before a reply arrived or the response variant did not match the
     /// request shape.
+    ///
+    /// The reply wait is cancel-aware: if the shared `CancellationToken`
+    /// fires (e.g. the host sent `Control(Cancel)` and the reader loop
+    /// flipped the token before the writer could deliver this request, or
+    /// the writer raced ahead but the reader exited before the reply
+    /// arrived), the await unparks with a typed transport error instead of
+    /// hanging forever waiting on a oneshot whose sender will never be
+    /// driven.  Without this guard, a `Control(Cancel)` arriving mid-
+    /// roundtrip would deadlock the worker: the writer's `cancelled()`
+    /// branch tears down the write half and drops `rx`, but the in-flight
+    /// `oneshot::Receiver` still sees the matching sender alive in
+    /// `pending`, so `rx.await` waits forever.
     async fn roundtrip(&self, req: ServiceRpcRequest) -> Result<ServiceRpcResponse, String> {
         let correlation_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel::<ServiceRpcResponse>();
@@ -286,11 +298,25 @@ impl RpcServices {
             return Err("rpc writer task dropped".into());
         }
 
-        rx.await.map_err(|_| {
-            // Reader task dropped the oneshot without replying — usually
-            // because the socket closed before the reply arrived.
-            format!("rpc reply channel closed (correlation_id={correlation_id})")
-        })
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => {
+                // Best-effort: pop our oneshot so the reader-loop drain
+                // doesn't try to deliver a reply that's already abandoned.
+                self.pending.lock().await.remove(&correlation_id);
+                Err(format!(
+                    "rpc roundtrip cancelled before reply (correlation_id={correlation_id})"
+                ))
+            }
+            reply = rx => {
+                reply.map_err(|_| {
+                    // Reader task dropped the oneshot without replying —
+                    // usually because the socket closed before the reply
+                    // arrived.
+                    format!("rpc reply channel closed (correlation_id={correlation_id})")
+                })
+            }
+        }
     }
 }
 
@@ -619,12 +645,20 @@ async fn reader_loop<R>(mut read_half: R, pending: PendingMap, cancel: Cancellat
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
-    loop {
+    // Loop until cancellation or socket close, then drain `pending` on the
+    // way out so blocked `roundtrip()` callers fail with a transport error
+    // instead of hanging on a `oneshot::Receiver` whose `Sender` will never
+    // be polled.  Without this drain, a host-initiated `Control(Cancel)`
+    // arriving mid-roundtrip would deadlock the worker: the reader exits
+    // on the next iteration's `biased; cancelled()` branch, the writer
+    // tears down its half, and the in-flight `rx.await` in `roundtrip`
+    // waits forever for a reply that can no longer arrive.
+    let outcome: Result<(), ()> = loop {
         tokio::select! {
             biased;
             _ = cancel.cancelled() => {
                 debug!("rpc reader: cancelled");
-                return;
+                break Ok(());
             }
             res = read_frame::<_, Frame>(&mut read_half) => {
                 match res {
@@ -646,7 +680,7 @@ where
                         FramePayload::Control(ControlMsg::Shutdown) => {
                             debug!("rpc reader: received Shutdown control frame");
                             cancel.cancel();
-                            return;
+                            break Ok(());
                         }
                         other => {
                             debug!(?other, "rpc reader: unhandled frame on worker-side");
@@ -654,40 +688,68 @@ where
                     },
                     Err(e) => {
                         debug!(error = %e, "rpc reader: stream closed");
-                        return;
+                        break Ok(());
                     }
                 }
             }
         }
+    };
+    let _ = outcome;
+
+    // Drain every pending oneshot so any `roundtrip()` parked on `rx.await`
+    // wakes up with a transport error rather than hanging indefinitely.
+    let drained: Vec<(u64, _)> = {
+        let mut map = pending.lock().await;
+        map.drain().collect()
+    };
+    for (correlation_id, tx) in drained {
+        // Dropping `tx` (the oneshot sender) closes the channel so the
+        // matching `rx.await` returns `Err`; `roundtrip()` already maps
+        // that to a "rpc reply channel closed" transport error.
+        let _ = tx;
+        debug!(
+            correlation_id,
+            "rpc reader: dropped pending reply on shutdown"
+        );
     }
 }
 
 async fn writer_loop<W>(
     mut write_half: W,
     mut rx: mpsc::Receiver<Frame>,
-    cancel: CancellationToken,
+    _cancel: CancellationToken,
 ) where
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    // Unlike the reader, the writer does NOT exit eagerly on cancel.  On a
+    // host-initiated `Control(Cancel)` the supervisor still needs to
+    // round-trip its terminal `update_task_run_status` frame and (if the
+    // RPC connection is still healthy) emit a `WorkerEvent::TerminalReport`
+    // before tearing the connection down.  An eager `cancelled()` branch
+    // here would race that path: the writer would shut the write half
+    // *before* the supervisor's frames landed on `rx`, causing the
+    // terminal status update to be silently dropped from the host's
+    // perspective.
+    //
+    // Instead the writer exits when `rx` closes — i.e. when every
+    // `Arc<RpcServices>` (and therefore every clone of `self.tx`) has
+    // been dropped.  Worker `main.rs` enforces that ordering on the
+    // happy-path teardown: drop the `Arc`s, await this task, *then* fire
+    // `cancel.cancel()` so the reader can exit too.  The cancel-driven
+    // teardown reaches the writer transitively, by the same drop chain.
+    //
+    // `cancel` stays in the signature for shape compatibility (every
+    // constructor already threads one in) and to preserve the option of
+    // a future grace-period shutdown timer.
     loop {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                debug!("rpc writer: cancelled");
-                let _ = write_half.shutdown().await;
-                return;
-            }
-            frame = rx.recv() => {
-                let Some(frame) = frame else {
-                    debug!("rpc writer: outbound channel closed");
-                    let _ = write_half.shutdown().await;
-                    return;
-                };
-                if let Err(e) = write_frame(&mut write_half, &frame).await {
-                    error!(error = %e, "rpc writer: failed to write frame");
-                    return;
-                }
-            }
+        let Some(frame) = rx.recv().await else {
+            debug!("rpc writer: outbound channel closed");
+            let _ = write_half.shutdown().await;
+            return;
+        };
+        if let Err(e) = write_frame(&mut write_half, &frame).await {
+            error!(error = %e, "rpc writer: failed to write frame");
+            return;
         }
     }
 }
