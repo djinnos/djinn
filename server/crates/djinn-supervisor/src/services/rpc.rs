@@ -198,7 +198,53 @@ impl RpcServices {
         token: String,
         cancel: CancellationToken,
     ) -> Result<(Arc<Self>, RpcBackgroundTasks), ConnectTcpError> {
-        let mut stream = TcpStream::connect(&addr).await?;
+        // Retry the TCP dial with exponential backoff so the worker tolerates
+        // launcher races: the dispatch path can create the worker Job within
+        // milliseconds of the launcher boot, before the launcher's TCP
+        // listener on :8443 has bound. Without retry, a single
+        // "Connection refused" kills the task-run (Job backoff_limit=0 means
+        // no K8s-level retry). Total budget: ~30s across 7 attempts at
+        // 100ms / 200ms / 400ms / 1s / 2s / 5s / 10s.
+        let mut stream = {
+            let backoff_ms: [u64; 7] = [100, 200, 400, 1000, 2000, 5000, 10000];
+            let mut attempt = 0usize;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        return Err(ConnectTcpError::Io(io_other(
+                            "connect_tcp cancelled before dial succeeded".to_string(),
+                        )));
+                    }
+                    res = TcpStream::connect(&addr) => match res {
+                        Ok(s) => break s,
+                        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused
+                                  || e.kind() == std::io::ErrorKind::TimedOut
+                                  || e.kind() == std::io::ErrorKind::NotFound // DNS not-resolvable yet
+                            => {
+                            if attempt >= backoff_ms.len() {
+                                return Err(ConnectTcpError::Io(io_other(format!(
+                                    "connect_tcp: launcher unreachable after {} attempts ({}s budget): {e}",
+                                    backoff_ms.len() + 1,
+                                    backoff_ms.iter().sum::<u64>() / 1000,
+                                ))));
+                            }
+                            let delay = backoff_ms[attempt];
+                            attempt += 1;
+                            tracing::warn!(
+                                %addr,
+                                attempt,
+                                next_retry_ms = delay,
+                                error = %e,
+                                "connect_tcp: launcher not yet listening; retrying",
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                        }
+                        Err(e) => return Err(ConnectTcpError::Io(e)),
+                    }
+                }
+            }
+        };
         info!(%addr, %task_run_id, "tcp dialed launcher; sending AuthHello");
 
         // 1. Send the AuthHello on correlation_id 0.
