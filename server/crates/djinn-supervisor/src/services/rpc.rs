@@ -539,6 +539,21 @@ impl SupervisorServices for RpcServices {
             Err(e) => Err(e),
         }
     }
+
+    async fn emit_djinn_event(
+        &self,
+        event: crate::services::SerializableDjinnEvent,
+    ) -> Result<(), String> {
+        match self
+            .roundtrip(ServiceRpcRequest::EmitDjinnEvent { event })
+            .await
+        {
+            Ok(ServiceRpcResponse::EmitDjinnEvent(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 // ── Reader / writer loops ────────────────────────────────────────────────────
@@ -772,6 +787,15 @@ impl SupervisorServices for UnimplementedRpcServices {
     ) -> Result<(), String> {
         unimplemented!(
             "UnimplementedRpcServices::update_session_status — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn emit_djinn_event(
+        &self,
+        _event: crate::services::SerializableDjinnEvent,
+    ) -> Result<(), String> {
+        unimplemented!(
+            "UnimplementedRpcServices::emit_djinn_event — construct RpcServices for real RPC"
         )
     }
 }

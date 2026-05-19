@@ -114,6 +114,50 @@ pub struct SerializableCreateTaskRunParams {
     pub mirror_ref: Option<String>,
 }
 
+/// Serde-friendly twin of [`djinn_core::events::DjinnEventEnvelope`].
+///
+/// The canonical envelope stores `entity_type` and `action` as
+/// `&'static str` because every constructor on the host side is a
+/// statically-known event family — that lets host-side actors pattern-match
+/// on the pair without allocating. The worker → host RPC path doesn't have
+/// that luxury (the wire deserialises into owned `String`s), so this wire
+/// twin is what crosses the TCP frame and the host's
+/// `DirectServices::emit_djinn_event` interns the strings back into the
+/// known static-str pair before forwarding to the broadcast bus.
+///
+/// `from_sync` is intentionally omitted: the host emits the value with
+/// `from_sync = false` (the worker is not the sync channel), matching the
+/// `#[serde(skip)]` on the canonical struct. `payload` is shipped as
+/// `serde_json::Value` so it stays opaque on the worker side.
+///
+/// Introduced in the Phase 7-followup gap-2 wiring so worker-side
+/// `event_bus.send(..)` calls (in `reply_loop` / `streaming`) reach the
+/// host's SSE subscribers instead of vanishing into the worker's noop bus.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SerializableDjinnEvent {
+    pub entity_type: String,
+    pub action: String,
+    pub payload: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+impl SerializableDjinnEvent {
+    /// Lossy snapshot of a [`djinn_core::events::DjinnEventEnvelope`] —
+    /// drops `from_sync` (the wire path is implicitly `from_sync = false`).
+    pub fn from_envelope(envelope: &djinn_core::events::DjinnEventEnvelope) -> Self {
+        Self {
+            entity_type: envelope.entity_type.to_string(),
+            action: envelope.action.to_string(),
+            payload: envelope.payload.clone(),
+            id: envelope.id.clone(),
+            project_id: envelope.project_id.clone(),
+        }
+    }
+}
+
 /// Borrow-free serde-friendly twin of
 /// [`djinn_db::repositories::session::CreateSessionParams<'_>`].
 ///
@@ -213,6 +257,11 @@ pub enum ServiceRpcRequest {
         tokens_in: i64,
         tokens_out: i64,
     },
+    /// [`crate::SupervisorServices::emit_djinn_event`].  Phase 7-followup
+    /// gap-2 — bridges worker-side `event_bus.send(..)` calls to the host's
+    /// broadcast bus so SSE subscribers (web UI session live-feed) see
+    /// session-message / token-update / lifecycle events in real time.
+    EmitDjinnEvent { event: SerializableDjinnEvent },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -242,6 +291,8 @@ pub enum ServiceRpcResponse {
     InvokeLlm(Result<djinn_provider::provider::LlmResponse, String>),
     /// Phase 6e — session status update response.
     UpdateSessionStatus(Result<(), String>),
+    /// Phase 7-followup gap-2 — fire-and-forget event-bridge ack.
+    EmitDjinnEvent(Result<(), String>),
     /// Transport-level failure — not produced by normal operation.
     Err(String),
 }
@@ -940,6 +991,63 @@ mod tests {
             back.payload,
             FramePayload::RpcReply(ServiceRpcResponse::UpdateSessionStatus(Ok(())))
         ));
+    }
+
+    #[test]
+    fn emit_djinn_event_request_roundtrip() {
+        let event = SerializableDjinnEvent {
+            entity_type: "session".into(),
+            action: "message".into(),
+            payload: serde_json::json!({"session_id":"s1","task_id":"t1","agent_type":"worker","message":{"role":"assistant"}}),
+            id: None,
+            project_id: Some("p1".into()),
+        };
+        let f = Frame {
+            correlation_id: 51,
+            payload: FramePayload::Rpc(ServiceRpcRequest::EmitDjinnEvent {
+                event: event.clone(),
+            }),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::EmitDjinnEvent { event: got }) => {
+                assert_eq!(got, event);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn emit_djinn_event_reply_roundtrip() {
+        let resp = ServiceRpcResponse::EmitDjinnEvent(Ok(()));
+        let f = Frame {
+            correlation_id: 51,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        assert!(matches!(
+            back.payload,
+            FramePayload::RpcReply(ServiceRpcResponse::EmitDjinnEvent(Ok(())))
+        ));
+    }
+
+    #[test]
+    fn serializable_djinn_event_from_envelope() {
+        use djinn_core::events::DjinnEventEnvelope;
+        let env = DjinnEventEnvelope::session_message(
+            "s1",
+            "t1",
+            "worker",
+            &serde_json::json!({"role": "assistant"}),
+        );
+        let wire = SerializableDjinnEvent::from_envelope(&env);
+        assert_eq!(wire.entity_type, "session");
+        assert_eq!(wire.action, "message");
+        assert_eq!(wire.payload["session_id"], "s1");
+        assert_eq!(wire.id, None);
+        assert_eq!(wire.project_id, None);
     }
 
     #[test]

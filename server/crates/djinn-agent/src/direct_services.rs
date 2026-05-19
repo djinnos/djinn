@@ -20,7 +20,7 @@ use djinn_core::models::{Task, TaskRunStatus};
 use djinn_db::TaskRunRepository;
 use djinn_db::repositories::task_run::CreateTaskRunParams;
 use djinn_supervisor::services::{
-    SerializableCreateSessionParams, SerializableCreateTaskRunParams,
+    SerializableCreateSessionParams, SerializableCreateTaskRunParams, SerializableDjinnEvent,
 };
 use djinn_supervisor::{
     RoleKind, StageError, StageOutcome, SupervisorServices, TaskRunOutcome, TaskRunSpec,
@@ -348,5 +348,104 @@ impl SupervisorServices for DirectServices {
             .await
             .map(|_record| ())
             .map_err(|e| e.to_string())
+    }
+
+    async fn emit_djinn_event(&self, event: SerializableDjinnEvent) -> Result<(), String> {
+        match intern_envelope(event) {
+            Ok(envelope) => {
+                self.callbacks.agent_context.event_bus.send(envelope);
+                Ok(())
+            }
+            Err(unknown_pair) => {
+                // Unknown (entity_type, action) — drop with a log instead of
+                // leaking the strings. New worker-emitted events need a row
+                // in the `intern_envelope` match before they can cross the
+                // wire. This keeps the host immune to drift from
+                // future worker additions without a coordinated update.
+                tracing::warn!(
+                    entity_type = %unknown_pair.0,
+                    action = %unknown_pair.1,
+                    "emit_djinn_event: dropping unknown (entity_type, action) pair from worker"
+                );
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Intern the wire form's `(entity_type, action)` back into the static-str
+/// shape `DjinnEventEnvelope` expects.
+///
+/// The set of distinct pairs the worker can emit is bounded (see
+/// `event_bus.send(..)` call sites in `actors::slot::reply_loop` /
+/// `streaming` / `verification` / `lifecycle/setup` /
+/// `lifecycle/model_resolution`). Unknown pairs return `Err((entity_type,
+/// action))` so the caller can log + drop rather than leaking strings into
+/// the static lifetime.
+fn intern_envelope(
+    wire: SerializableDjinnEvent,
+) -> Result<DjinnEventEnvelope, (String, String)> {
+    let SerializableDjinnEvent {
+        entity_type,
+        action,
+        payload,
+        id,
+        project_id,
+    } = wire;
+    let (et, ac): (&'static str, &'static str) = match (entity_type.as_str(), action.as_str()) {
+        ("session", "message") => ("session", "message"),
+        ("session", "token_update") => ("session", "token_update"),
+        ("session", "dispatched") => ("session", "dispatched"),
+        ("verification", "step") => ("verification", "step"),
+        ("lifecycle", "step") => ("lifecycle", "step"),
+        ("activity", "logged") => ("activity", "logged"),
+        ("task", "updated") => ("task", "updated"),
+        ("task", "created") => ("task", "created"),
+        ("task", "deleted") => ("task", "deleted"),
+        _ => return Err((entity_type, action)),
+    };
+    Ok(DjinnEventEnvelope {
+        entity_type: et,
+        action: ac,
+        payload,
+        id,
+        project_id,
+        from_sync: false,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SerializableDjinnEvent, intern_envelope};
+
+    #[test]
+    fn intern_envelope_session_message_keeps_static_strs() {
+        let wire = SerializableDjinnEvent {
+            entity_type: "session".into(),
+            action: "message".into(),
+            payload: serde_json::json!({"role": "assistant"}),
+            id: None,
+            project_id: Some("p1".into()),
+        };
+        let env = intern_envelope(wire).expect("known pair");
+        assert_eq!(env.entity_type, "session");
+        assert_eq!(env.action, "message");
+        // Static strs from string literals collide with the constructor's
+        // pinned addresses — pointer-equality is the strongest assertion
+        // that we routed through the known arm.
+        assert!(std::ptr::eq(env.entity_type.as_ptr(), "session".as_ptr()));
+    }
+
+    #[test]
+    fn intern_envelope_unknown_pair_errors() {
+        let wire = SerializableDjinnEvent {
+            entity_type: "unknown_entity".into(),
+            action: "weird_action".into(),
+            payload: serde_json::Value::Null,
+            id: None,
+            project_id: None,
+        };
+        let err = intern_envelope(wire).expect_err("unknown pair must error");
+        assert_eq!(err, ("unknown_entity".into(), "weird_action".into()));
     }
 }

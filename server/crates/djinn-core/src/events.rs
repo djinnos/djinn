@@ -395,6 +395,34 @@ impl EventBus {
     pub fn noop() -> Self {
         EventBus(std::sync::Arc::new(|_| {}))
     }
+
+    /// Build an `EventBus` whose `send` delegates to the caller-supplied
+    /// closure on a freshly-spawned tokio task.
+    ///
+    /// Used by `djinn-agent-worker` to bridge worker-emitted envelopes onto
+    /// its host-bound `RpcServices::emit_djinn_event` call without blocking
+    /// the calling stage on the RPC round-trip (which would deadlock the
+    /// reply-loop's streaming path).
+    ///
+    /// The closure must be `Fn + Send + Sync + 'static` because the
+    /// underlying `Arc<dyn Fn>` is shared across every clone of the bus and
+    /// invoked from arbitrary contexts (repository writes, stage drivers,
+    /// background actor loops).
+    pub fn spawning<F, Fut>(f: F) -> Self
+    where
+        F: Fn(DjinnEventEnvelope) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let f = std::sync::Arc::new(f);
+        EventBus(std::sync::Arc::new(move |event| {
+            let f = f.clone();
+            // Spawn-and-forget: the caller does not care about the result;
+            // any RPC-level errors are logged by the closure body.
+            tokio::spawn(async move {
+                f(event).await;
+            });
+        }))
+    }
 }
 
 #[cfg(test)]

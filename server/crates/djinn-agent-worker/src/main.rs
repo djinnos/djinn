@@ -327,7 +327,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     //    local Database connection.
     let in_pod_db = bootstrap_warm_database()
         .context("bootstrap in-Pod database for WorkerSupervisorServices")?;
-    let agent_context = build_worker_agent_context(in_pod_db);
+    let agent_context = build_worker_agent_context(in_pod_db, rpc.clone());
     let worker_services: Arc<dyn SupervisorServices> = Arc::new(WorkerSupervisorServices::new(
         rpc.clone(),
         credentials,
@@ -398,12 +398,34 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
 /// Build the in-Pod `AgentContext` the per-stage executor threads through
 /// helpers that still touch the DB directly. Most fields are no-ops on the
 /// worker; `db` carries the in-Pod connection bootstrapped via
-/// `bootstrap_warm_database`. See the module docs for the Phase 7-followup
-/// that aims to eliminate this seam entirely.
-fn build_worker_agent_context(db: Database) -> AgentContext {
+/// `bootstrap_warm_database`, and `event_bus` bridges every emitted
+/// envelope onto the existing RPC connection so the host's SSE subscribers
+/// (web UI session live-feed) see worker-side activity in real time.
+/// Gap-2 of the Phase 7-followup: before the bridge landed, the worker
+/// installed `EventBus::noop()` here and every
+/// `event_bus.send(..)` call in `actors::slot::reply_loop` / `streaming`
+/// silently vanished.
+fn build_worker_agent_context(db: Database, rpc: Arc<RpcServices>) -> AgentContext {
+    use djinn_core::events::DjinnEventEnvelope;
+    use djinn_supervisor::services::SerializableDjinnEvent;
+    let rpc_for_bus = rpc.clone();
+    let event_bus = EventBus::spawning(move |envelope: DjinnEventEnvelope| {
+        let rpc = rpc_for_bus.clone();
+        async move {
+            let wire = SerializableDjinnEvent::from_envelope(&envelope);
+            if let Err(e) = rpc.emit_djinn_event(wire).await {
+                tracing::warn!(
+                    entity_type = %envelope.entity_type,
+                    action = %envelope.action,
+                    error = %e,
+                    "worker EventBus bridge: emit_djinn_event RPC failed"
+                );
+            }
+        }
+    });
     AgentContext {
         db,
-        event_bus: EventBus::noop(),
+        event_bus,
         git_actors: Arc::new(Mutex::new(HashMap::new())),
         verifying_tasks: Arc::new(std::sync::Mutex::new(HashSet::new())),
         role_registry: Arc::new(RoleRegistry::new()),

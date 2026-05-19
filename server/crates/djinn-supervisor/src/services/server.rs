@@ -1111,6 +1111,10 @@ async fn dispatch(
                 .await;
             ServiceRpcResponse::UpdateSessionStatus(result)
         }
+        ServiceRpcRequest::EmitDjinnEvent { event } => {
+            let result = services.emit_djinn_event(event).await;
+            ServiceRpcResponse::EmitDjinnEvent(result)
+        }
     }
 }
 
@@ -1232,6 +1236,13 @@ mod tests {
             _status: djinn_core::models::SessionStatus,
             _tokens_in: i64,
             _tokens_out: i64,
+        ) -> Result<(), String> {
+            unimplemented!("not exercised in server tests")
+        }
+
+        async fn emit_djinn_event(
+            &self,
+            _event: super::super::wire::SerializableDjinnEvent,
         ) -> Result<(), String> {
             unimplemented!("not exercised in server tests")
         }

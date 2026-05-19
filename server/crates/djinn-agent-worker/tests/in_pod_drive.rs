@@ -150,6 +150,7 @@ struct RpcAuditLog {
     execute_stage_attempts: usize,
     invoke_llm_attempts: usize,
     open_pr: usize,
+    emit_djinn_event: usize,
     terminal_report: Option<djinn_runtime::TaskRunReport>,
 }
 
@@ -333,6 +334,11 @@ async fn handle_rpc(
             ServiceRpcResponse::OpenPr(TaskRunOutcome::Closed {
                 reason: "fake server open_pr stub".into(),
             })
+        }
+        ServiceRpcRequest::EmitDjinnEvent { event } => {
+            audit.lock().await.emit_djinn_event += 1;
+            let _ = event;
+            ServiceRpcResponse::EmitDjinnEvent(Ok(()))
         }
     }
 }

@@ -49,7 +49,7 @@ use djinn_provider::provider::{
 use djinn_runtime::{ResolvedCredentials, RoleKind, SerializableCredential};
 use djinn_stack::environment::EnvironmentConfig;
 use djinn_supervisor::services::{
-    SerializableCreateSessionParams, SerializableCreateTaskRunParams,
+    SerializableCreateSessionParams, SerializableCreateTaskRunParams, SerializableDjinnEvent,
 };
 use djinn_supervisor::{
     RpcServices, StageError, StageOutcome, SupervisorServices, TaskRunOutcome, TaskRunSpec,
@@ -285,5 +285,9 @@ impl SupervisorServices for WorkerSupervisorServices {
         self.rpc
             .update_session_status(session_id, status, tokens_in, tokens_out)
             .await
+    }
+
+    async fn emit_djinn_event(&self, event: SerializableDjinnEvent) -> Result<(), String> {
+        self.rpc.emit_djinn_event(event).await
     }
 }

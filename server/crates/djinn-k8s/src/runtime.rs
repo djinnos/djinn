@@ -1082,6 +1082,12 @@ mod tests {
             ) -> Result<(), String> {
                 unimplemented!()
             }
+            async fn emit_djinn_event(
+                &self,
+                _: djinn_supervisor::services::SerializableDjinnEvent,
+            ) -> Result<(), String> {
+                unimplemented!()
+            }
         }
 
         let services: Arc<dyn SupervisorServices> = Arc::new(NoopServices {

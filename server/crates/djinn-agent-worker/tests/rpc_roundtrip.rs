@@ -203,6 +203,13 @@ impl SupervisorServices for FakeServices {
     ) -> Result<(), String> {
         unimplemented!("not exercised in PR 2 integration tests")
     }
+
+    async fn emit_djinn_event(
+        &self,
+        _event: djinn_supervisor::services::SerializableDjinnEvent,
+    ) -> Result<(), String> {
+        unimplemented!("not exercised in PR 2 integration tests")
+    }
 }
 
 /// Bind `serve_on_tcp` to `127.0.0.1:0`, return the resolved `(SocketAddr,

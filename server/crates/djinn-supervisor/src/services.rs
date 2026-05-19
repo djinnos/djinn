@@ -20,7 +20,9 @@ pub mod rpc;
 pub mod server;
 pub mod wire;
 
-pub use wire::{SerializableCreateSessionParams, SerializableCreateTaskRunParams};
+pub use wire::{
+    SerializableCreateSessionParams, SerializableCreateTaskRunParams, SerializableDjinnEvent,
+};
 
 /// Dependencies shared across every stage in a task-run.
 ///
@@ -179,4 +181,20 @@ pub trait SupervisorServices: Send + Sync + 'static {
         tokens_in: i64,
         tokens_out: i64,
     ) -> Result<(), String>;
+
+    /// Forward a worker-emitted [`SerializableDjinnEvent`] to the host's
+    /// broadcast bus so SSE subscribers (web UI live-feed) see it in real
+    /// time.
+    ///
+    /// Phase 7-followup gap-2 — the worker's local `event_bus` is
+    /// `EventBus::noop()`, so every `event_bus.send(..)` call in
+    /// `actors::slot::reply_loop` / `streaming` (session_message,
+    /// session_token_update) would otherwise vanish on the worker side.
+    /// `WorkerSupervisorServices` delegates this over the existing TCP
+    /// connection; `DirectServices` reconstructs a canonical
+    /// `DjinnEventEnvelope` (interning the known `(entity_type, action)`
+    /// pair to static-str) and sends it on the host's `event_bus`. The
+    /// publish is fire-and-forget — the RPC reply is `Ok(())` once the
+    /// host has accepted the event.
+    async fn emit_djinn_event(&self, event: SerializableDjinnEvent) -> Result<(), String>;
 }
