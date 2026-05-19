@@ -225,6 +225,23 @@ pub fn build_task_run_job(
         termination_grace_period_seconds: Some(
             config.task_run_termination_grace_period_seconds,
         ),
+        // Force the worker to run as uid 10001 (the djinn user baked
+        // into the agent-runtime base image — see
+        // server/docker/djinn-agent-runtime.Dockerfile) so it matches
+        // the uid that owns the shared /mirror PVC. The per-project
+        // devcontainer image layers `USER root` for apt-installs and
+        // never restores USER djinn, so without this override the
+        // worker runs as uid 0 and git 2.35.2+ rejects /mirror with
+        // "dubious ownership". GIT_CONFIG_VALUE_0=* via env vars (set
+        // in build_task_run_env) was tried first and silently failed
+        // — git apparently disregards wildcard safe.directory from
+        // env, only honoring it from file config. fsGroup doesn't
+        // apply to PVCs (only to emptyDir / configMap volumes).
+        security_context: Some(k8s_openapi::api::core::v1::PodSecurityContext {
+            run_as_user: Some(10001),
+            run_as_group: Some(10001),
+            ..Default::default()
+        }),
         ..PodSpec::default()
     };
 
