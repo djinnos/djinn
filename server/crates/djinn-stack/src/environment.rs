@@ -316,24 +316,32 @@ impl Default for EnvironmentConfig {
 
 // ---- languages ----------------------------------------------------------
 
+// NOTE: `skip_serializing_if = "Option::is_none"` was intentionally stripped
+// from the language fields below. The attribute is JSON-only — bincode is
+// positional and reads garbage from the next field's slot when a serializer
+// skips a slot the deserializer expects. `EnvironmentConfig` crosses the
+// worker ↔ host wire via `ServiceRpcResponse::GetEnvironmentConfig`, so every
+// `Option<*Language>` field must serialise its `None` discriminant byte.
+// `#[serde(default)]` is preserved so JSON deserialisation still tolerates
+// missing keys in older Dolt rows.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Languages {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub rust: Option<RustLanguage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub node: Option<NodeLanguage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub python: Option<PythonLanguage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub go: Option<GoLanguage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub java: Option<JavaLanguage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub ruby: Option<RubyLanguage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub dotnet: Option<DotnetLanguage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub clang: Option<ClangLanguage>,
 }
 
@@ -387,7 +395,10 @@ impl RustLanguage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct NodeLanguage {
     pub default_version: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // `skip_serializing_if` dropped — `NodeLanguage` rides the bincode wire
+    // inside `EnvironmentConfig`, and JSON-only skip attributes break the
+    // positional codec. See the comment on `Languages`.
+    #[serde(default)]
     pub default_package_manager: Option<String>,
 }
 
@@ -473,11 +484,14 @@ impl ClangLanguage {
 pub struct Workspace {
     pub root: String,
     pub language: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // `skip_serializing_if` dropped on all three Options — `Workspace` rides
+    // the bincode wire inside `EnvironmentConfig`. See the comment on
+    // `Languages` above for the full rationale.
+    #[serde(default)]
     pub toolchain: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub package_manager: Option<String>,
 }
 
