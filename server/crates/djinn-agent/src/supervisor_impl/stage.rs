@@ -67,7 +67,7 @@ use djinn_core::models::{SessionStatus, Task};
 use djinn_db::SessionRepository;
 use djinn_db::repositories::session::CreateSessionParams;
 use djinn_runtime::spec::{RoleKind, TaskRunSpec};
-use djinn_supervisor::{StageError, StageOutcome};
+use djinn_supervisor::{StageError, StageOutcome, SupervisorServices};
 use djinn_workspace::Workspace;
 
 use crate::AgentType;
@@ -111,6 +111,7 @@ pub(crate) async fn execute_stage(
     task_run_id: &str,
     spec: &TaskRunSpec,
     callbacks: &SupervisorCallbackContext,
+    services: &dyn SupervisorServices,
 ) -> Result<StageOutcome, StageError> {
     let role = role_arc_for(role_kind);
     let role_name = role.config().name;
@@ -166,15 +167,21 @@ pub(crate) async fn execute_stage(
     //      well-formed.
     let model_id = match spec.model_id_per_role.get(&role_kind).cloned() {
         Some(m) => m,
-        None => match default_model_for_role(role_name, agent_context) {
-            Some(m) => m,
-            None if provider_override.is_some() => "test/supervisor-stub".to_string(),
-            None => {
-                return Err(StageError::ModelResolution(format!(
-                    "no model registered for role '{role_name}' in the provider catalog"
-                )));
+        None => {
+            let fallback = services
+                .pick_any_default_model()
+                .await
+                .map_err(StageError::ModelResolution)?;
+            match fallback {
+                Some(m) => m,
+                None if provider_override.is_some() => "test/supervisor-stub".to_string(),
+                None => {
+                    return Err(StageError::ModelResolution(format!(
+                        "no model registered for role '{role_name}' in the provider catalog"
+                    )));
+                }
             }
-        },
+        }
     };
 
     // ── Model + credential ───────────────────────────────────────────────────
@@ -284,10 +291,12 @@ pub(crate) async fn execute_stage(
     let session_id = session_record.id.clone();
 
     // ── Build the LLM provider ───────────────────────────────────────────────
-    let context_window = agent_context
-        .catalog
-        .find_model(&model_id)
-        .map(|m| m.context_window)
+    // Soft fallback: a missing catalog entry surfaces as `Err`, which we map to
+    // `0` so the downstream provider builder still gets a sentinel — matches the
+    // pre-Phase-6b `unwrap_or(0)` behaviour.
+    let context_window = services
+        .get_model_context_window(model_id.clone())
+        .await
         .unwrap_or(0);
 
     let provider_arc: Option<Arc<dyn LlmProvider>> = provider_override;
@@ -308,14 +317,14 @@ pub(crate) async fn execute_stage(
             Some(ProviderCredential::ApiKey(_key_name, api_key)) => {
                 let format_family =
                     format_family_for_provider(&resolved.catalog_provider_id, &resolved.model_name);
-                let base_url = agent_context
-                    .catalog
-                    .list_providers()
-                    .iter()
-                    .find(|p| p.id == resolved.catalog_provider_id)
-                    .map(|p| p.base_url.clone())
-                    .filter(|u| !u.is_empty())
-                    .unwrap_or_else(|| default_base_url(&resolved.catalog_provider_id));
+                // Soft fallback: a missing catalog entry (or empty base_url)
+                // surfaces as `Err`, which we map to `default_base_url` —
+                // matches the pre-Phase-6b `.filter(|u| !u.is_empty()).unwrap_or_else(..)`
+                // behaviour.
+                let base_url = services
+                    .get_provider_base_url(resolved.catalog_provider_id.clone())
+                    .await
+                    .unwrap_or_else(|_| default_base_url(&resolved.catalog_provider_id));
                 create_provider(ProviderConfig {
                     base_url,
                     auth: auth_method_for_provider(&resolved.catalog_provider_id, &api_key),
@@ -532,17 +541,6 @@ fn extract_reason(payload: &Option<serde_json::Value>) -> Option<String> {
             && !v.is_empty()
         {
             return Some(v.to_string());
-        }
-    }
-    None
-}
-
-/// Phase 1 model lookup: pick any model from the catalog.
-fn default_model_for_role(_role_name: &str, app_state: &AgentContext) -> Option<String> {
-    let catalog = &app_state.catalog;
-    for provider in catalog.list_providers() {
-        if let Some(model) = catalog.list_models(&provider.id).first() {
-            return Some(format!("{}/{}", provider.id, model.id));
         }
     }
     None

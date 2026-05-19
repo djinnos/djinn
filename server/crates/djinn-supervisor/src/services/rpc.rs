@@ -399,6 +399,47 @@ impl SupervisorServices for RpcServices {
             Err(e) => Err(e),
         }
     }
+
+    async fn get_model_context_window(&self, model_id: String) -> Result<i64, String> {
+        match self
+            .roundtrip(ServiceRpcRequest::GetModelContextWindow { model_id })
+            .await
+        {
+            Ok(ServiceRpcResponse::GetModelContextWindow(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn get_provider_base_url(
+        &self,
+        catalog_provider_id: String,
+    ) -> Result<String, String> {
+        match self
+            .roundtrip(ServiceRpcRequest::GetProviderBaseUrl {
+                catalog_provider_id,
+            })
+            .await
+        {
+            Ok(ServiceRpcResponse::GetProviderBaseUrl(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn pick_any_default_model(&self) -> Result<Option<String>, String> {
+        match self
+            .roundtrip(ServiceRpcRequest::PickAnyDefaultModel)
+            .await
+        {
+            Ok(ServiceRpcResponse::PickAnyDefaultModel(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 // ── Reader / writer loops ────────────────────────────────────────────────────
@@ -557,6 +598,27 @@ impl SupervisorServices for UnimplementedRpcServices {
     ) -> Result<(), String> {
         unimplemented!(
             "UnimplementedRpcServices::update_task_run_status — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn get_model_context_window(&self, _model_id: String) -> Result<i64, String> {
+        unimplemented!(
+            "UnimplementedRpcServices::get_model_context_window — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn get_provider_base_url(
+        &self,
+        _catalog_provider_id: String,
+    ) -> Result<String, String> {
+        unimplemented!(
+            "UnimplementedRpcServices::get_provider_base_url — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn pick_any_default_model(&self) -> Result<Option<String>, String> {
+        unimplemented!(
+            "UnimplementedRpcServices::pick_any_default_model — construct RpcServices for real RPC"
         )
     }
 }
@@ -733,6 +795,215 @@ mod tests {
             .await
             .expect_err("Err leg");
         assert_eq!(err, "no such run");
+
+        cancel2.cancel();
+        let _ = bg2.reader.await;
+        let _ = bg2.writer.await;
+        let _ = server_task2.await;
+    }
+
+    /// Round-trip a `get_model_context_window` RPC through an in-memory
+    /// Unix socket pair.  Exercises both the Ok and Err reply legs.
+    #[tokio::test]
+    async fn get_model_context_window_roundtrip_over_unixpair() {
+        // ── leg 1: Ok ───────────────────────────────────────────────────
+        let (client, server) = UnixStream::pair().expect("pair");
+        let server_task = tokio::spawn(async move {
+            let (mut read, mut write) = server.into_split();
+            let frame: Frame = read_frame(&mut read).await.expect("read request");
+            match frame.payload {
+                FramePayload::Rpc(ServiceRpcRequest::GetModelContextWindow { model_id }) => {
+                    assert_eq!(model_id, "anthropic/claude-opus-4-7");
+                    let reply = Frame {
+                        correlation_id: frame.correlation_id,
+                        payload: FramePayload::RpcReply(
+                            ServiceRpcResponse::GetModelContextWindow(Ok(200_000)),
+                        ),
+                    };
+                    write_frame(&mut write, &reply).await.expect("write reply");
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        });
+
+        let cancel = CancellationToken::new();
+        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
+        let got = services
+            .get_model_context_window("anthropic/claude-opus-4-7".into())
+            .await
+            .expect("get_model_context_window ok");
+        assert_eq!(got, 200_000);
+
+        cancel.cancel();
+        let _ = bg.reader.await;
+        let _ = bg.writer.await;
+        let _ = server_task.await;
+
+        // ── leg 2: Err — surfaces "model not found" ─────────────────────
+        let (client2, server2) = UnixStream::pair().expect("pair");
+        let server_task2 = tokio::spawn(async move {
+            let (mut read, mut write) = server2.into_split();
+            let frame: Frame = read_frame(&mut read).await.expect("read request");
+            match frame.payload {
+                FramePayload::Rpc(ServiceRpcRequest::GetModelContextWindow { .. }) => {
+                    let reply = Frame {
+                        correlation_id: frame.correlation_id,
+                        payload: FramePayload::RpcReply(
+                            ServiceRpcResponse::GetModelContextWindow(Err("model not found".into())),
+                        ),
+                    };
+                    write_frame(&mut write, &reply).await.expect("write reply");
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        });
+
+        let cancel2 = CancellationToken::new();
+        let (services2, bg2) = RpcServices::from_unix_stream(client2, cancel2.clone());
+        let err = services2
+            .get_model_context_window("missing/model".into())
+            .await
+            .expect_err("Err leg");
+        assert_eq!(err, "model not found");
+
+        cancel2.cancel();
+        let _ = bg2.reader.await;
+        let _ = bg2.writer.await;
+        let _ = server_task2.await;
+    }
+
+    /// Round-trip a `get_provider_base_url` RPC through an in-memory Unix
+    /// socket pair.  Exercises both the Ok and Err reply legs.
+    #[tokio::test]
+    async fn get_provider_base_url_roundtrip_over_unixpair() {
+        let (client, server) = UnixStream::pair().expect("pair");
+        let server_task = tokio::spawn(async move {
+            let (mut read, mut write) = server.into_split();
+            let frame: Frame = read_frame(&mut read).await.expect("read request");
+            match frame.payload {
+                FramePayload::Rpc(ServiceRpcRequest::GetProviderBaseUrl {
+                    catalog_provider_id,
+                }) => {
+                    assert_eq!(catalog_provider_id, "anthropic");
+                    let reply = Frame {
+                        correlation_id: frame.correlation_id,
+                        payload: FramePayload::RpcReply(ServiceRpcResponse::GetProviderBaseUrl(
+                            Ok("https://api.anthropic.com".into()),
+                        )),
+                    };
+                    write_frame(&mut write, &reply).await.expect("write reply");
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        });
+
+        let cancel = CancellationToken::new();
+        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
+        let got = services
+            .get_provider_base_url("anthropic".into())
+            .await
+            .expect("get_provider_base_url ok");
+        assert_eq!(got, "https://api.anthropic.com");
+
+        cancel.cancel();
+        let _ = bg.reader.await;
+        let _ = bg.writer.await;
+        let _ = server_task.await;
+
+        // ── Err leg ─────────────────────────────────────────────────────
+        let (client2, server2) = UnixStream::pair().expect("pair");
+        let server_task2 = tokio::spawn(async move {
+            let (mut read, mut write) = server2.into_split();
+            let frame: Frame = read_frame(&mut read).await.expect("read request");
+            match frame.payload {
+                FramePayload::Rpc(ServiceRpcRequest::GetProviderBaseUrl { .. }) => {
+                    let reply = Frame {
+                        correlation_id: frame.correlation_id,
+                        payload: FramePayload::RpcReply(ServiceRpcResponse::GetProviderBaseUrl(
+                            Err("provider not found".into()),
+                        )),
+                    };
+                    write_frame(&mut write, &reply).await.expect("write reply");
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        });
+
+        let cancel2 = CancellationToken::new();
+        let (services2, bg2) = RpcServices::from_unix_stream(client2, cancel2.clone());
+        let err = services2
+            .get_provider_base_url("no-such-provider".into())
+            .await
+            .expect_err("Err leg");
+        assert_eq!(err, "provider not found");
+
+        cancel2.cancel();
+        let _ = bg2.reader.await;
+        let _ = bg2.writer.await;
+        let _ = server_task2.await;
+    }
+
+    /// Round-trip a `pick_any_default_model` RPC through an in-memory Unix
+    /// socket pair.  Exercises both the Some and None reply legs.
+    #[tokio::test]
+    async fn pick_any_default_model_roundtrip_over_unixpair() {
+        let (client, server) = UnixStream::pair().expect("pair");
+        let server_task = tokio::spawn(async move {
+            let (mut read, mut write) = server.into_split();
+            let frame: Frame = read_frame(&mut read).await.expect("read request");
+            match frame.payload {
+                FramePayload::Rpc(ServiceRpcRequest::PickAnyDefaultModel) => {
+                    let reply = Frame {
+                        correlation_id: frame.correlation_id,
+                        payload: FramePayload::RpcReply(ServiceRpcResponse::PickAnyDefaultModel(
+                            Ok(Some("openai/gpt-4o-mini".into())),
+                        )),
+                    };
+                    write_frame(&mut write, &reply).await.expect("write reply");
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        });
+
+        let cancel = CancellationToken::new();
+        let (services, bg) = RpcServices::from_unix_stream(client, cancel.clone());
+        let got = services
+            .pick_any_default_model()
+            .await
+            .expect("pick_any_default_model ok");
+        assert_eq!(got.as_deref(), Some("openai/gpt-4o-mini"));
+
+        cancel.cancel();
+        let _ = bg.reader.await;
+        let _ = bg.writer.await;
+        let _ = server_task.await;
+
+        // ── None leg ────────────────────────────────────────────────────
+        let (client2, server2) = UnixStream::pair().expect("pair");
+        let server_task2 = tokio::spawn(async move {
+            let (mut read, mut write) = server2.into_split();
+            let frame: Frame = read_frame(&mut read).await.expect("read request");
+            match frame.payload {
+                FramePayload::Rpc(ServiceRpcRequest::PickAnyDefaultModel) => {
+                    let reply = Frame {
+                        correlation_id: frame.correlation_id,
+                        payload: FramePayload::RpcReply(ServiceRpcResponse::PickAnyDefaultModel(
+                            Ok(None),
+                        )),
+                    };
+                    write_frame(&mut write, &reply).await.expect("write reply");
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        });
+
+        let cancel2 = CancellationToken::new();
+        let (services2, bg2) = RpcServices::from_unix_stream(client2, cancel2.clone());
+        let got = services2
+            .pick_any_default_model()
+            .await
+            .expect("pick_any_default_model ok");
+        assert!(got.is_none());
 
         cancel2.cancel();
         let _ = bg2.reader.await;

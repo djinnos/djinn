@@ -72,4 +72,37 @@ pub trait SupervisorServices: Send + Sync + 'static {
         run_id: String,
         status: TaskRunStatus,
     ) -> Result<(), String>;
+
+    /// Look up a model's context window (in tokens) from the provider
+    /// catalog by full `"providerID/modelID"` identifier.
+    ///
+    /// Phase 6b extraction — replaces direct
+    /// `agent_context.catalog.find_model(..)` reads in
+    /// `supervisor_impl::stage` and `direct_services`. Returns
+    /// `Err("model not found")` when the catalog has no matching entry;
+    /// callers may treat that as a soft fallback to `0`.
+    async fn get_model_context_window(&self, model_id: String) -> Result<i64, String>;
+
+    /// Look up a provider's `base_url` from the provider catalog by
+    /// catalog provider id.
+    ///
+    /// Phase 6b extraction — replaces direct
+    /// `agent_context.catalog.list_providers()...find(..)` reads in
+    /// `supervisor_impl::stage` and `direct_services`. Returns
+    /// `Err("provider not found")` (or `Err("provider has empty base_url")`)
+    /// when the catalog has no matching entry; callers may treat that as a
+    /// signal to fall back to `actors::slot::helpers::default_base_url`.
+    async fn get_provider_base_url(
+        &self,
+        catalog_provider_id: String,
+    ) -> Result<String, String>;
+
+    /// Pick any available `"providerID/modelID"` from the catalog as a
+    /// fallback default model.
+    ///
+    /// Phase 6b extraction — replaces the legacy `default_model_for_role`
+    /// helper which walked `app_state.catalog.list_providers()` /
+    /// `list_models(..)` directly. Returns `Ok(None)` when the catalog has
+    /// no providers / no models.
+    async fn pick_any_default_model(&self) -> Result<Option<String>, String>;
 }

@@ -1023,6 +1023,15 @@ mod tests {
             ) -> Result<(), String> {
                 unimplemented!()
             }
+            async fn get_model_context_window(&self, _: String) -> Result<i64, String> {
+                unimplemented!()
+            }
+            async fn get_provider_base_url(&self, _: String) -> Result<String, String> {
+                unimplemented!()
+            }
+            async fn pick_any_default_model(&self) -> Result<Option<String>, String> {
+                unimplemented!()
+            }
         }
 
         let services: Arc<dyn SupervisorServices> = Arc::new(NoopServices {

@@ -92,7 +92,16 @@ impl SupervisorServices for DirectServices {
         task_run_id: &str,
         spec: &TaskRunSpec,
     ) -> Result<StageOutcome, StageError> {
-        execute_stage(task, workspace, role_kind, task_run_id, spec, &self.callbacks).await
+        execute_stage(
+            task,
+            workspace,
+            role_kind,
+            task_run_id,
+            spec,
+            &self.callbacks,
+            self,
+        )
+        .await
     }
 
     async fn open_pr(&self, spec: &TaskRunSpec, task: &Task) -> TaskRunOutcome {
@@ -127,5 +136,45 @@ impl SupervisorServices for DirectServices {
             .update_status(&run_id, status)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    async fn get_model_context_window(&self, model_id: String) -> Result<i64, String> {
+        self.callbacks
+            .agent_context
+            .catalog
+            .find_model(&model_id)
+            .map(|m| m.context_window)
+            .ok_or_else(|| format!("model not found in catalog: {model_id}"))
+    }
+
+    async fn get_provider_base_url(
+        &self,
+        catalog_provider_id: String,
+    ) -> Result<String, String> {
+        let base_url = self
+            .callbacks
+            .agent_context
+            .catalog
+            .list_providers()
+            .iter()
+            .find(|p| p.id == catalog_provider_id)
+            .map(|p| p.base_url.clone())
+            .ok_or_else(|| format!("provider not found in catalog: {catalog_provider_id}"))?;
+        if base_url.is_empty() {
+            return Err(format!(
+                "provider has empty base_url in catalog: {catalog_provider_id}"
+            ));
+        }
+        Ok(base_url)
+    }
+
+    async fn pick_any_default_model(&self) -> Result<Option<String>, String> {
+        let catalog = &self.callbacks.agent_context.catalog;
+        for provider in catalog.list_providers() {
+            if let Some(model) = catalog.list_models(&provider.id).first() {
+                return Ok(Some(format!("{}/{}", provider.id, model.id)));
+            }
+        }
+        Ok(None)
     }
 }

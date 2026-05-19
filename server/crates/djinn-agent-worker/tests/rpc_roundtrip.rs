@@ -129,6 +129,36 @@ impl SupervisorServices for FakeServices {
     async fn open_pr(&self, _spec: &TaskRunSpec, _task: &Task) -> TaskRunOutcome {
         unimplemented!("not exercised in PR 2 integration tests")
     }
+
+    async fn create_task_run(
+        &self,
+        _params: djinn_supervisor::SerializableCreateTaskRunParams,
+    ) -> Result<(), String> {
+        unimplemented!("not exercised in PR 2 integration tests")
+    }
+
+    async fn update_task_run_status(
+        &self,
+        _run_id: String,
+        _status: djinn_core::models::TaskRunStatus,
+    ) -> Result<(), String> {
+        unimplemented!("not exercised in PR 2 integration tests")
+    }
+
+    async fn get_model_context_window(&self, _model_id: String) -> Result<i64, String> {
+        unimplemented!("not exercised in PR 2 integration tests")
+    }
+
+    async fn get_provider_base_url(
+        &self,
+        _catalog_provider_id: String,
+    ) -> Result<String, String> {
+        unimplemented!("not exercised in PR 2 integration tests")
+    }
+
+    async fn pick_any_default_model(&self) -> Result<Option<String>, String> {
+        unimplemented!("not exercised in PR 2 integration tests")
+    }
 }
 
 /// Bind `serve_on_tcp` to `127.0.0.1:0`, return the resolved `(SocketAddr,

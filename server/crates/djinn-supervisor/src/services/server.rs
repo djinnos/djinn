@@ -1056,6 +1056,20 @@ async fn dispatch(
             let result = services.update_task_run_status(run_id, status).await;
             ServiceRpcResponse::UpdateTaskRunStatus(result)
         }
+        ServiceRpcRequest::GetModelContextWindow { model_id } => {
+            let result = services.get_model_context_window(model_id).await;
+            ServiceRpcResponse::GetModelContextWindow(result)
+        }
+        ServiceRpcRequest::GetProviderBaseUrl {
+            catalog_provider_id,
+        } => {
+            let result = services.get_provider_base_url(catalog_provider_id).await;
+            ServiceRpcResponse::GetProviderBaseUrl(result)
+        }
+        ServiceRpcRequest::PickAnyDefaultModel => {
+            let result = services.pick_any_default_model().await;
+            ServiceRpcResponse::PickAnyDefaultModel(result)
+        }
     }
 }
 
@@ -1119,6 +1133,21 @@ mod tests {
             _run_id: String,
             _status: djinn_core::models::TaskRunStatus,
         ) -> Result<(), String> {
+            unimplemented!("not exercised in server tests")
+        }
+
+        async fn get_model_context_window(&self, _model_id: String) -> Result<i64, String> {
+            unimplemented!("not exercised in server tests")
+        }
+
+        async fn get_provider_base_url(
+            &self,
+            _catalog_provider_id: String,
+        ) -> Result<String, String> {
+            unimplemented!("not exercised in server tests")
+        }
+
+        async fn pick_any_default_model(&self) -> Result<Option<String>, String> {
             unimplemented!("not exercised in server tests")
         }
     }

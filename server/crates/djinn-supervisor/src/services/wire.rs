@@ -149,6 +149,15 @@ pub enum ServiceRpcRequest {
     },
     /// [`crate::SupervisorServices::update_task_run_status`].
     UpdateTaskRunStatus { run_id: String, status: TaskRunStatus },
+    /// [`crate::SupervisorServices::get_model_context_window`].
+    /// Phase 6b — catalog read extraction.
+    GetModelContextWindow { model_id: String },
+    /// [`crate::SupervisorServices::get_provider_base_url`].
+    /// Phase 6b — catalog read extraction.
+    GetProviderBaseUrl { catalog_provider_id: String },
+    /// [`crate::SupervisorServices::pick_any_default_model`].
+    /// Phase 6b — catalog read extraction.
+    PickAnyDefaultModel,
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -165,6 +174,10 @@ pub enum ServiceRpcResponse {
     OpenPr(TaskRunOutcome),
     CreateTaskRun(Result<(), String>),
     UpdateTaskRunStatus(Result<(), String>),
+    /// Phase 6b — catalog read responses.
+    GetModelContextWindow(Result<i64, String>),
+    GetProviderBaseUrl(Result<String, String>),
+    PickAnyDefaultModel(Result<Option<String>, String>),
     /// Transport-level failure — not produced by normal operation.
     Err(String),
 }
@@ -471,6 +484,155 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn get_model_context_window_request_roundtrip() {
+        let f = Frame {
+            correlation_id: 21,
+            payload: FramePayload::Rpc(ServiceRpcRequest::GetModelContextWindow {
+                model_id: "anthropic/claude-opus-4-7".into(),
+            }),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back.correlation_id, 21);
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::GetModelContextWindow { model_id }) => {
+                assert_eq!(model_id, "anthropic/claude-opus-4-7");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_model_context_window_reply_roundtrip() {
+        let resp = ServiceRpcResponse::GetModelContextWindow(Ok(200_000));
+        let f = Frame {
+            correlation_id: 21,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::GetModelContextWindow(Ok(n))) => {
+                assert_eq!(n, 200_000);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        let resp = ServiceRpcResponse::GetModelContextWindow(Err("not found".into()));
+        let f = Frame {
+            correlation_id: 21,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::GetModelContextWindow(Err(e))) => {
+                assert_eq!(e, "not found");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_provider_base_url_request_roundtrip() {
+        let f = Frame {
+            correlation_id: 22,
+            payload: FramePayload::Rpc(ServiceRpcRequest::GetProviderBaseUrl {
+                catalog_provider_id: "anthropic".into(),
+            }),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back.correlation_id, 22);
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::GetProviderBaseUrl {
+                catalog_provider_id,
+            }) => {
+                assert_eq!(catalog_provider_id, "anthropic");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_provider_base_url_reply_roundtrip() {
+        let resp =
+            ServiceRpcResponse::GetProviderBaseUrl(Ok("https://api.anthropic.com".into()));
+        let f = Frame {
+            correlation_id: 22,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::GetProviderBaseUrl(Ok(u))) => {
+                assert_eq!(u, "https://api.anthropic.com");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        let resp = ServiceRpcResponse::GetProviderBaseUrl(Err("no such provider".into()));
+        let f = Frame {
+            correlation_id: 22,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::GetProviderBaseUrl(Err(e))) => {
+                assert_eq!(e, "no such provider");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pick_any_default_model_request_roundtrip() {
+        let f = Frame {
+            correlation_id: 23,
+            payload: FramePayload::Rpc(ServiceRpcRequest::PickAnyDefaultModel),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back.correlation_id, 23);
+        assert!(matches!(
+            back.payload,
+            FramePayload::Rpc(ServiceRpcRequest::PickAnyDefaultModel)
+        ));
+    }
+
+    #[test]
+    fn pick_any_default_model_reply_roundtrip() {
+        let resp = ServiceRpcResponse::PickAnyDefaultModel(Ok(Some(
+            "openai/gpt-4o-mini".into(),
+        )));
+        let f = Frame {
+            correlation_id: 23,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::PickAnyDefaultModel(Ok(Some(m)))) => {
+                assert_eq!(m, "openai/gpt-4o-mini");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        let resp = ServiceRpcResponse::PickAnyDefaultModel(Ok(None));
+        let f = Frame {
+            correlation_id: 23,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        assert!(matches!(
+            back.payload,
+            FramePayload::RpcReply(ServiceRpcResponse::PickAnyDefaultModel(Ok(None)))
+        ));
     }
 
     #[test]
