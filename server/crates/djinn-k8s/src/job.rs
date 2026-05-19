@@ -317,6 +317,18 @@ fn build_task_run_env(config: &KubernetesConfig, task_run_id_str: &str) -> Vec<E
     if let Some(flavor) = config.database_flavor.as_deref() {
         env.push(env_var("DJINN_MYSQL_FLAVOR", flavor));
     }
+    // Force git to trust the cross-UID-owned /mirror PVC. The per-project
+    // image runs as root by default (USER reset by language-toolchain
+    // layers), so the worker process sees the /mirror dir as
+    // 10001:10001 — git 2.35.2+ rejects that with "dubious ownership"
+    // unless safe.directory is set. We inject the env vars at the Pod
+    // level so the worker process inherits them; the worker's Rust code
+    // also sets them per-Command (run_git_command), but the Pod-level
+    // env is the belt-and-suspenders that guarantees any subprocess
+    // tree gets them.
+    env.push(env_var("GIT_CONFIG_COUNT", "1"));
+    env.push(env_var("GIT_CONFIG_KEY_0", "safe.directory"));
+    env.push(env_var("GIT_CONFIG_VALUE_0", "*"));
     env
 }
 
