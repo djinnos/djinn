@@ -27,6 +27,16 @@ fn lower_process_priority(cmd: &mut tokio::process::Command) {
     }
 }
 
+/// Set GIT_CONFIG_COUNT=1 + GIT_CONFIG_KEY_0/VALUE_0 on `cmd` so git accepts
+/// any repo regardless of cross-UID ownership. Env vars (not `-c` flag) so
+/// that inner git subprocesses spawned by `git clone --local` also inherit
+/// the rule.
+fn apply_safe_directory_env(cmd: &mut tokio::process::Command) {
+    cmd.env("GIT_CONFIG_COUNT", "1");
+    cmd.env("GIT_CONFIG_KEY_0", "safe.directory");
+    cmd.env("GIT_CONFIG_VALUE_0", "*");
+}
+
 #[cfg(not(unix))]
 fn lower_process_priority(_cmd: &mut tokio::process::Command) {}
 
@@ -185,15 +195,20 @@ pub struct MergeResult {
 pub async fn run_git_command(path: PathBuf, args: Vec<String>) -> Result<CommandOutput, GitError> {
     use std::process::Stdio;
     let mut cmd = tokio::process::Command::new("git");
-    // Inject `-c safe.directory=*` ahead of every subcommand so git trusts
-    // any path we hand it — needed because the K8s worker Pod runs as a
-    // different UID than the user that owns the shared /mirror PVC, and
-    // git 2.35.2+ rejects mixed-UID repos by default with
+    // Inject `safe.directory=*` via env vars so git trusts any path we
+    // hand it — needed because the K8s worker Pod runs as a different
+    // UID than the user that owns the shared /mirror PVC, and git
+    // 2.35.2+ rejects mixed-UID repos by default with
     //   `fatal: detected dubious ownership in repository at '<path>'`.
-    // Cheap on the host (git just adds the rule to its in-memory config
-    // for this invocation) and avoids per-Pod GIT_CONFIG_* env wiring.
-    cmd.args(["-c", "safe.directory=*"])
-        .args(&args)
+    // We use the env-var form (GIT_CONFIG_COUNT=1 + GIT_CONFIG_KEY_0 +
+    // GIT_CONFIG_VALUE_0) rather than `-c safe.directory=*` because
+    // `git clone --local` spawns an inner git subprocess against the
+    // source repo that does NOT inherit the outer git's -c flags, only
+    // env vars. Cheap on the host (just adds the rule to in-memory
+    // config for this invocation chain) and avoids per-Pod
+    // GIT_CONFIG_* wiring at the K8s manifest level.
+    apply_safe_directory_env(&mut cmd);
+    cmd.args(&args)
         .current_dir(&path)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -234,8 +249,8 @@ pub async fn run_git_command_with_timeout(
 
     let mut cmd = tokio::process::Command::new("git");
     // Same safe.directory injection as run_git_command — see docs there.
-    cmd.args(["-c", "safe.directory=*"])
-        .args(&args)
+    apply_safe_directory_env(&mut cmd);
+    cmd.args(&args)
         .current_dir(&path)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
