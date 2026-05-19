@@ -7,16 +7,13 @@
 //! supervisor, causing the supervisor to short-circuit with
 //! [`djinn_runtime::TaskRunOutcome::Interrupted`] and exit cleanly.
 //!
-//! ## Why the test is `#[ignore]` by default
+//! ## Dolt dependency
 //!
-//! Same constraint as `in_pod_drive.rs`: the worker still bootstraps an in-Pod
+//! Same constraint as `in_pod_drive.rs`: the worker bootstraps an in-Pod
 //! `Database` via `bootstrap_warm_database()`, so a live Dolt at
-//! `127.0.0.1:3307` (or `DJINN_TEST_MYSQL_URL`) is required.  See the
-//! Phase 7-followup note in `in_pod_drive.rs` — when the `AgentContext.db`
-//! seam is removed, this test can drop `#[ignore]`.
-//!
-//! Run explicitly with:
-//!   `cargo test -p djinn-agent-worker --test cancel_path -- --ignored`
+//! `127.0.0.1:3307` (or `DJINN_TEST_MYSQL_URL`) is required — matches the
+//! `make test` convention shared with `djinn-agent`'s
+//! `phase1_supervisor` integration test.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -251,8 +248,14 @@ async fn start_fake_server(
                             ServiceRpcResponse::PublishSessionMessage(Ok(()))
                         }
                         ServiceRpcRequest::GetEnvironmentConfig { .. } => {
-                            ServiceRpcResponse::GetEnvironmentConfig(Ok(
-                                djinn_stack::environment::EnvironmentConfig::empty(),
+                            // Return Err so the worker's
+                            // `WorkerSupervisorServices::get_environment_config`
+                            // degrades to a local `EnvironmentConfig::empty()`
+                            // and avoids the wire bincode roundtrip — see the
+                            // comment in `in_pod_drive.rs` for the underlying
+                            // `EnvironmentConfig` bincode issue.
+                            ServiceRpcResponse::GetEnvironmentConfig(Err(
+                                "fake server: degrade to local empty config".into(),
                             ))
                         }
                         ServiceRpcRequest::GetModelContextWindow { .. } => {
@@ -362,15 +365,10 @@ async fn start_fake_server(
 /// exits cleanly with a `TaskRunOutcome::Interrupted` terminal report and
 /// never reached `open_pr`.
 ///
-/// Marked `#[ignore]` because the worker still bootstraps an in-Pod
-/// `Database` via `bootstrap_warm_database()`, which needs Dolt at
-/// `127.0.0.1:3307` (or `DJINN_TEST_MYSQL_URL`). Same constraint as
-/// `in_pod_drive.rs`.
-///
-/// Run explicitly with
-///   `cargo test -p djinn-agent-worker --test cancel_path -- --ignored`.
+/// Needs Dolt at `127.0.0.1:3307` (the `make test` test instance) because
+/// the worker bootstraps an in-Pod `Database` via
+/// `bootstrap_warm_database()`. Same constraint as `in_pod_drive.rs`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "phase 10 followup: requires Dolt at :3307 + still depends on AgentContext.db seam"]
 async fn worker_observes_host_initiated_cancel() {
     // 1. Source repo + bare mirror.
     let source_dir = TempDir::new().expect("tempdir source");
