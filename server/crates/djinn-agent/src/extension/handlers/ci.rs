@@ -6,7 +6,7 @@ use super::*;
 /// returned as-is. When the result exceeds the tool-result size limit, the
 /// reply-loop automatically stashes the full output and the worker can
 /// paginate with `output_view` / `output_grep`.
-pub(super) async fn call_ci_job_log(
+pub(crate) async fn call_ci_job_log(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     session_task_id: Option<&str>,

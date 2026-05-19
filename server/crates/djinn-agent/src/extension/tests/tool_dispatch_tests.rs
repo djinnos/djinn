@@ -165,6 +165,7 @@ async fn call_tool_dispatches_task_create_with_public_response_shape() {
 
     let response = call_tool(
         &state,
+        &crate::test_helpers::test_services(),
         "task_create",
         Some(
             serde_json::json!({
@@ -245,6 +246,7 @@ async fn call_tool_dispatches_task_update_with_public_response_shape() {
 
     let response = call_tool(
         &state,
+        &crate::test_helpers::test_services(),
         "task_update",
         Some(
             serde_json::json!({
@@ -337,6 +339,7 @@ async fn call_tool_dispatches_comment_and_transition_flows() {
 
     let comment = call_tool(
         &state,
+        &crate::test_helpers::test_services(),
         "task_comment_add",
         Some(
             serde_json::json!({
@@ -381,6 +384,7 @@ async fn call_tool_dispatches_comment_and_transition_flows() {
 
     let transitioned = call_tool(
         &state,
+        &crate::test_helpers::test_services(),
         "task_transition",
         Some(
             serde_json::json!({
@@ -426,6 +430,7 @@ async fn call_tool_dispatches_agent_ops_through_shared_agent_seam() {
 
     let create_response = call_tool(
         &state,
+        &crate::test_helpers::test_services(),
         "agent_create",
         Some(
             serde_json::json!({
@@ -474,6 +479,7 @@ async fn call_tool_dispatches_agent_ops_through_shared_agent_seam() {
 
     let metrics_response = call_tool(
         &state,
+        &crate::test_helpers::test_services(),
         "agent_metrics",
         Some(
             serde_json::json!({

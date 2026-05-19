@@ -262,6 +262,25 @@ pub enum ServiceRpcRequest {
     /// broadcast bus so SSE subscribers (web UI session live-feed) see
     /// session-message / token-update / lifecycle events in real time.
     EmitDjinnEvent { event: SerializableDjinnEvent },
+    /// [`crate::SupervisorServices::tool_github_search`]. Phase 7-followup
+    /// gap-3 — workers have no GitHub App credentials mounted; this RPC
+    /// runs the tool host-side.
+    ToolGithubSearch {
+        project_id: Option<String>,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    },
+    /// [`crate::SupervisorServices::tool_github_fetch_file`]. Phase 7-followup
+    /// gap-3.
+    ToolGithubFetchFile {
+        project_id: Option<String>,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    },
+    /// [`crate::SupervisorServices::tool_ci_job_log`]. Phase 7-followup
+    /// gap-3.
+    ToolCiJobLog {
+        session_task_id: Option<String>,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -293,6 +312,12 @@ pub enum ServiceRpcResponse {
     UpdateSessionStatus(Result<(), String>),
     /// Phase 7-followup gap-2 — fire-and-forget event-bridge ack.
     EmitDjinnEvent(Result<(), String>),
+    /// Phase 7-followup gap-3 — host-side `github_search` tool result.
+    ToolGithubSearch(Result<serde_json::Value, String>),
+    /// Phase 7-followup gap-3 — host-side `github_fetch_file` tool result.
+    ToolGithubFetchFile(Result<serde_json::Value, String>),
+    /// Phase 7-followup gap-3 — host-side `ci_job_log` tool result.
+    ToolCiJobLog(Result<serde_json::Value, String>),
     /// Transport-level failure — not produced by normal operation.
     Err(String),
 }
@@ -1031,6 +1056,94 @@ mod tests {
             back.payload,
             FramePayload::RpcReply(ServiceRpcResponse::EmitDjinnEvent(Ok(())))
         ));
+    }
+
+    #[test]
+    fn tool_github_search_roundtrip() {
+        let mut args = serde_json::Map::new();
+        args.insert("query".into(), serde_json::json!("fn foo"));
+        let f = Frame {
+            correlation_id: 61,
+            payload: FramePayload::Rpc(ServiceRpcRequest::ToolGithubSearch {
+                project_id: Some("p1".into()),
+                arguments: args.clone(),
+            }),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::ToolGithubSearch {
+                project_id,
+                arguments,
+            }) => {
+                assert_eq!(project_id.as_deref(), Some("p1"));
+                assert_eq!(arguments, args);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        let resp = ServiceRpcResponse::ToolGithubSearch(Ok(serde_json::json!({"items": []})));
+        let f = Frame {
+            correlation_id: 61,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        assert!(matches!(
+            back.payload,
+            FramePayload::RpcReply(ServiceRpcResponse::ToolGithubSearch(Ok(_)))
+        ));
+    }
+
+    #[test]
+    fn tool_github_fetch_file_roundtrip() {
+        let mut args = serde_json::Map::new();
+        args.insert("repo".into(), serde_json::json!("octocat/Hello"));
+        args.insert("path".into(), serde_json::json!("README.md"));
+        let f = Frame {
+            correlation_id: 62,
+            payload: FramePayload::Rpc(ServiceRpcRequest::ToolGithubFetchFile {
+                project_id: None,
+                arguments: args.clone(),
+            }),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::ToolGithubFetchFile {
+                project_id,
+                arguments,
+            }) => {
+                assert_eq!(project_id, None);
+                assert_eq!(arguments, args);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_ci_job_log_roundtrip() {
+        let mut args = serde_json::Map::new();
+        args.insert("job_id".into(), serde_json::json!(12345));
+        let f = Frame {
+            correlation_id: 63,
+            payload: FramePayload::Rpc(ServiceRpcRequest::ToolCiJobLog {
+                session_task_id: Some("t1".into()),
+                arguments: args.clone(),
+            }),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::ToolCiJobLog {
+                session_task_id,
+                arguments,
+            }) => {
+                assert_eq!(session_task_id.as_deref(), Some("t1"));
+                assert_eq!(arguments, args);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[test]

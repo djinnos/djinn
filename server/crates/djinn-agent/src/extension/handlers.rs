@@ -45,7 +45,7 @@ mod task_admin;
 mod task_epic;
 mod workspace;
 
-use ci::call_ci_job_log;
+pub(crate) use ci::call_ci_job_log;
 pub(crate) use code_intel::{
     call_code_graph, call_github_fetch_file, call_github_search, call_lsp,
 };
@@ -70,6 +70,7 @@ pub(crate) use workspace::{call_read, call_shell, call_write};
 
 pub(super) async fn dispatch_tool_call<T>(
     state: &AgentContext,
+    services: &dyn djinn_supervisor::SupervisorServices,
     tool_call: &T,
     worktree_path: &Path,
     allowed_schemas: Option<&[serde_json::Value]>,
@@ -216,7 +217,19 @@ where
             call_agent_amend_prompt(state, &call.arguments, &worktree_project_path).await
         }
         "agent_create" => call_agent_create(state, &call.arguments, &worktree_project_path).await,
-        "ci_job_log" => call_ci_job_log(state, &call.arguments, session_task_id).await,
+        "ci_job_log" => {
+            // Route through SupervisorServices so worker-side sessions
+            // (no GitHub credentials mounted in-Pod) round-trip the call
+            // to djinn-server via RPC. Host-side `DirectServices` re-enters
+            // `call_ci_job_log` against the local AgentContext + GitHub
+            // installation token. Single code path host + worker.
+            services
+                .tool_ci_job_log(
+                    session_task_id.map(str::to_string),
+                    call.arguments.clone().unwrap_or_default(),
+                )
+                .await
+        }
         "shell" => {
             let root = state.working_root_for(worktree_path);
             call_shell(&call.arguments, &root).await
@@ -250,9 +263,21 @@ where
             let pid = project_id.as_deref().unwrap_or("");
             call_code_graph(state, &call.arguments, pid, &root_str).await
         }
-        "github_search" => call_github_search(state, &call.arguments, project_id.as_deref()).await,
+        "github_search" => {
+            services
+                .tool_github_search(
+                    project_id.clone(),
+                    call.arguments.clone().unwrap_or_default(),
+                )
+                .await
+        }
         "github_fetch_file" => {
-            call_github_fetch_file(state, &call.arguments, project_id.as_deref()).await
+            services
+                .tool_github_fetch_file(
+                    project_id.clone(),
+                    call.arguments.clone().unwrap_or_default(),
+                )
+                .await
         }
         other => {
             if let Some(registry) = mcp_registry

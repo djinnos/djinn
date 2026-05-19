@@ -12,6 +12,7 @@ async fn code_graph_tool(
 ) -> Result<serde_json::Value, String> {
     call_tool(
         state,
+        &crate::test_helpers::test_services(),
         "code_graph",
         args.as_object()
             .expect("code_graph args must be an object")

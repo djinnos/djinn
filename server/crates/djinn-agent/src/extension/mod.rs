@@ -30,6 +30,7 @@ pub(crate) use tool_defs::{
 /// ```
 pub(crate) async fn call_tool(
     state: &AgentContext,
+    services: &dyn djinn_supervisor::SupervisorServices,
     name: &str,
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
@@ -40,6 +41,7 @@ pub(crate) async fn call_tool(
     let synthetic = serde_json::json!({ "name": name, "arguments": arguments });
     handlers::dispatch_tool_call(
         state,
+        services,
         &synthetic,
         worktree_path,
         None,

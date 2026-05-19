@@ -554,6 +554,63 @@ impl SupervisorServices for RpcServices {
             Err(e) => Err(e),
         }
     }
+
+    async fn tool_github_search(
+        &self,
+        project_id: Option<String>,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        match self
+            .roundtrip(ServiceRpcRequest::ToolGithubSearch {
+                project_id,
+                arguments,
+            })
+            .await
+        {
+            Ok(ServiceRpcResponse::ToolGithubSearch(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn tool_github_fetch_file(
+        &self,
+        project_id: Option<String>,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        match self
+            .roundtrip(ServiceRpcRequest::ToolGithubFetchFile {
+                project_id,
+                arguments,
+            })
+            .await
+        {
+            Ok(ServiceRpcResponse::ToolGithubFetchFile(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn tool_ci_job_log(
+        &self,
+        session_task_id: Option<String>,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        match self
+            .roundtrip(ServiceRpcRequest::ToolCiJobLog {
+                session_task_id,
+                arguments,
+            })
+            .await
+        {
+            Ok(ServiceRpcResponse::ToolCiJobLog(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 // ── Reader / writer loops ────────────────────────────────────────────────────
@@ -796,6 +853,36 @@ impl SupervisorServices for UnimplementedRpcServices {
     ) -> Result<(), String> {
         unimplemented!(
             "UnimplementedRpcServices::emit_djinn_event — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn tool_github_search(
+        &self,
+        _project_id: Option<String>,
+        _arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        unimplemented!(
+            "UnimplementedRpcServices::tool_github_search — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn tool_github_fetch_file(
+        &self,
+        _project_id: Option<String>,
+        _arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        unimplemented!(
+            "UnimplementedRpcServices::tool_github_fetch_file — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn tool_ci_job_log(
+        &self,
+        _session_task_id: Option<String>,
+        _arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        unimplemented!(
+            "UnimplementedRpcServices::tool_ci_job_log — construct RpcServices for real RPC"
         )
     }
 }

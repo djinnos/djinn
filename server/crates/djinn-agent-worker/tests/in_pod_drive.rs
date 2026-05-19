@@ -340,6 +340,17 @@ async fn handle_rpc(
             let _ = event;
             ServiceRpcResponse::EmitDjinnEvent(Ok(()))
         }
+        ServiceRpcRequest::ToolGithubSearch { .. } => {
+            ServiceRpcResponse::ToolGithubSearch(Err("fake server: tool_github_search not wired".into()))
+        }
+        ServiceRpcRequest::ToolGithubFetchFile { .. } => {
+            ServiceRpcResponse::ToolGithubFetchFile(Err(
+                "fake server: tool_github_fetch_file not wired".into(),
+            ))
+        }
+        ServiceRpcRequest::ToolCiJobLog { .. } => {
+            ServiceRpcResponse::ToolCiJobLog(Err("fake server: tool_ci_job_log not wired".into()))
+        }
     }
 }
 

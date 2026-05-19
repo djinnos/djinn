@@ -1088,6 +1088,27 @@ mod tests {
             ) -> Result<(), String> {
                 unimplemented!()
             }
+            async fn tool_github_search(
+                &self,
+                _: Option<String>,
+                _: serde_json::Map<String, serde_json::Value>,
+            ) -> Result<serde_json::Value, String> {
+                unimplemented!()
+            }
+            async fn tool_github_fetch_file(
+                &self,
+                _: Option<String>,
+                _: serde_json::Map<String, serde_json::Value>,
+            ) -> Result<serde_json::Value, String> {
+                unimplemented!()
+            }
+            async fn tool_ci_job_log(
+                &self,
+                _: Option<String>,
+                _: serde_json::Map<String, serde_json::Value>,
+            ) -> Result<serde_json::Value, String> {
+                unimplemented!()
+            }
         }
 
         let services: Arc<dyn SupervisorServices> = Arc::new(NoopServices {

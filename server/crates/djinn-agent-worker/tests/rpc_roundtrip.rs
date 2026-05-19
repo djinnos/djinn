@@ -210,6 +210,30 @@ impl SupervisorServices for FakeServices {
     ) -> Result<(), String> {
         unimplemented!("not exercised in PR 2 integration tests")
     }
+
+    async fn tool_github_search(
+        &self,
+        _project_id: Option<String>,
+        _arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        unimplemented!("not exercised in PR 2 integration tests")
+    }
+
+    async fn tool_github_fetch_file(
+        &self,
+        _project_id: Option<String>,
+        _arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        unimplemented!("not exercised in PR 2 integration tests")
+    }
+
+    async fn tool_ci_job_log(
+        &self,
+        _session_task_id: Option<String>,
+        _arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        unimplemented!("not exercised in PR 2 integration tests")
+    }
 }
 
 /// Bind `serve_on_tcp` to `127.0.0.1:0`, return the resolved `(SocketAddr,

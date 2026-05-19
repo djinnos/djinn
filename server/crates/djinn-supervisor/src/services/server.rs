@@ -1115,6 +1115,29 @@ async fn dispatch(
             let result = services.emit_djinn_event(event).await;
             ServiceRpcResponse::EmitDjinnEvent(result)
         }
+        ServiceRpcRequest::ToolGithubSearch {
+            project_id,
+            arguments,
+        } => {
+            let result = services.tool_github_search(project_id, arguments).await;
+            ServiceRpcResponse::ToolGithubSearch(result)
+        }
+        ServiceRpcRequest::ToolGithubFetchFile {
+            project_id,
+            arguments,
+        } => {
+            let result = services
+                .tool_github_fetch_file(project_id, arguments)
+                .await;
+            ServiceRpcResponse::ToolGithubFetchFile(result)
+        }
+        ServiceRpcRequest::ToolCiJobLog {
+            session_task_id,
+            arguments,
+        } => {
+            let result = services.tool_ci_job_log(session_task_id, arguments).await;
+            ServiceRpcResponse::ToolCiJobLog(result)
+        }
     }
 }
 
@@ -1244,6 +1267,30 @@ mod tests {
             &self,
             _event: super::super::wire::SerializableDjinnEvent,
         ) -> Result<(), String> {
+            unimplemented!("not exercised in server tests")
+        }
+
+        async fn tool_github_search(
+            &self,
+            _project_id: Option<String>,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!("not exercised in server tests")
+        }
+
+        async fn tool_github_fetch_file(
+            &self,
+            _project_id: Option<String>,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!("not exercised in server tests")
+        }
+
+        async fn tool_ci_job_log(
+            &self,
+            _session_task_id: Option<String>,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
             unimplemented!("not exercised in server tests")
         }
     }

@@ -80,6 +80,7 @@ async fn run_with_provider(
             cancel,
             global_cancel: cancel,
             app_state,
+            services: &crate::test_helpers::test_services(),
             mcp_registry: None,
             active_skill_names: &[],
             active_mcp_server_names: &[],

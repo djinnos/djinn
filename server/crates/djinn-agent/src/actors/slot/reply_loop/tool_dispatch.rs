@@ -90,6 +90,11 @@ pub(super) fn extract_stash_content(tool_name: &str, value: &serde_json::Value) 
 
 pub(super) struct ToolDispatchContext<'a> {
     pub app_state: &'a crate::context::AgentContext,
+    /// `SupervisorServices` handle used by the host-only tool subset
+    /// (`github_search`, `github_fetch_file`, `ci_job_log`) to route over
+    /// RPC when the reply loop runs inside a worker Pod. See the parent
+    /// `ReplyLoopContext::services` doc for context.
+    pub services: &'a dyn djinn_supervisor::SupervisorServices,
     pub task_id: &'a str,
     pub worktree_path: &'a std::path::Path,
     pub role_name: &'a str,
@@ -149,6 +154,7 @@ pub(super) async fn dispatch_single_tool<'a>(
     tool_span: Option<djinn_provider::provider::telemetry::ToolSpan>,
     stash: Arc<Mutex<OutputStash>>,
     app_state: &'a crate::context::AgentContext,
+    services: &'a dyn djinn_supervisor::SupervisorServices,
     task_id: &'a str,
     worktree_path: &'a std::path::Path,
     role_name: &'a str,
@@ -272,6 +278,7 @@ pub(super) async fn dispatch_single_tool<'a>(
 
     let mut result = extension::call_tool(
         app_state,
+        services,
         &name,
         args.clone(),
         worktree_path,
@@ -297,6 +304,7 @@ pub(super) async fn dispatch_single_tool<'a>(
                     tokio::time::sleep(backoff).await;
                     result = extension::call_tool(
                         app_state,
+                        services,
                         &name,
                         args.clone(),
                         worktree_path,
@@ -406,6 +414,7 @@ pub(super) fn make_tool_future<'a>(
         tool_span,
         stash,
         ctx.app_state,
+        ctx.services,
         ctx.task_id,
         ctx.worktree_path,
         ctx.role_name,

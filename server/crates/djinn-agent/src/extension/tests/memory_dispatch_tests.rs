@@ -34,6 +34,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
 
     let search_response = call_tool(
         &state,
+        &crate::test_helpers::test_services(),
         "memory_search",
         Some(
             serde_json::json!({
@@ -67,6 +68,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
 
     let read_response = call_tool(
         &state,
+        &crate::test_helpers::test_services(),
         "memory_read",
         Some(
             serde_json::json!({
@@ -99,6 +101,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
 
     let list_response = call_tool(
         &state,
+        &crate::test_helpers::test_services(),
         "memory_list",
         Some(
             serde_json::json!({
@@ -132,6 +135,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
 
     let context_response = call_tool(
         &state,
+        &crate::test_helpers::test_services(),
         "memory_build_context",
         Some(
             serde_json::json!({
@@ -190,6 +194,7 @@ async fn call_tool_architect_dispatches_memory_move_for_proposed_adr_recovery() 
 
     let moved = call_tool(
         &state,
+        &crate::test_helpers::test_services(),
         "memory_move",
         Some(
             serde_json::json!({
@@ -248,6 +253,7 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
 
     let broken_links_no_arg = call_tool(
         &state,
+        &crate::test_helpers::test_services(),
         "memory_broken_links",
         Some(
             serde_json::json!({ "project": project.slug() })
@@ -271,6 +277,7 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
 
     let broken_links_empty_folder = call_tool(
         &state,
+        &crate::test_helpers::test_services(),
         "memory_broken_links",
         Some(
             serde_json::json!({ "project": project.slug(), "folder": "" })
@@ -294,6 +301,7 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
 
     let orphans_no_arg = call_tool(
         &state,
+        &crate::test_helpers::test_services(),
         "memory_orphans",
         Some(
             serde_json::json!({ "project": project.slug() })
@@ -317,6 +325,7 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
 
     let orphans_empty_folder = call_tool(
         &state,
+        &crate::test_helpers::test_services(),
         "memory_orphans",
         Some(
             serde_json::json!({ "project": project.slug(), "folder": "" })
@@ -352,6 +361,7 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
 
     let created = call_tool(
         &state,
+        &crate::test_helpers::test_services(),
         "memory_write",
         Some(
             serde_json::json!({
@@ -379,6 +389,7 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
 
     let edited = call_tool(
         &state,
+        &crate::test_helpers::test_services(),
         "memory_edit",
         Some(
             serde_json::json!({
@@ -445,6 +456,7 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
 
     let created = call_tool(
         &state,
+        &crate::test_helpers::test_services(),
         "memory_write",
         Some(
             serde_json::json!({
@@ -472,6 +484,7 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
 
     let edited = call_tool(
         &state,
+        &crate::test_helpers::test_services(),
         "memory_edit",
         Some(
             serde_json::json!({
@@ -545,6 +558,7 @@ async fn call_tool_dispatches_registered_mcp_tool_success() {
 
     let response = call_tool(
         &state,
+        &crate::test_helpers::test_services(),
         "web_search",
         Some(
             serde_json::json!({
@@ -599,6 +613,7 @@ async fn call_tool_memory_current_requirement_targets_canonical_project_root_fro
 
     let edited = call_tool(
         &state,
+        &crate::test_helpers::test_services(),
         "memory_edit",
         Some(
             serde_json::json!({
@@ -669,6 +684,7 @@ async fn call_tool_dispatches_registered_mcp_tool_error() {
 
     let error = call_tool(
         &state,
+        &crate::test_helpers::test_services(),
         "web_fetch",
         Some(
             serde_json::json!({

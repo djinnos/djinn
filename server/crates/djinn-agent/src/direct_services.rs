@@ -350,6 +350,45 @@ impl SupervisorServices for DirectServices {
             .map_err(|e| e.to_string())
     }
 
+    async fn tool_github_search(
+        &self,
+        project_id: Option<String>,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        crate::extension::handlers::call_github_search(
+            &self.callbacks.agent_context,
+            &Some(arguments),
+            project_id.as_deref(),
+        )
+        .await
+    }
+
+    async fn tool_github_fetch_file(
+        &self,
+        project_id: Option<String>,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        crate::extension::handlers::call_github_fetch_file(
+            &self.callbacks.agent_context,
+            &Some(arguments),
+            project_id.as_deref(),
+        )
+        .await
+    }
+
+    async fn tool_ci_job_log(
+        &self,
+        session_task_id: Option<String>,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        crate::extension::handlers::call_ci_job_log(
+            &self.callbacks.agent_context,
+            &Some(arguments),
+            session_task_id.as_deref(),
+        )
+        .await
+    }
+
     async fn emit_djinn_event(&self, event: SerializableDjinnEvent) -> Result<(), String> {
         match intern_envelope(event) {
             Ok(envelope) => {

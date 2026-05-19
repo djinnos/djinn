@@ -380,6 +380,7 @@ pub(crate) async fn execute_stage(
             cancel: &callbacks.cancel,
             global_cancel: &callbacks.cancel,
             app_state: agent_context,
+            services,
             mcp_registry: mcp_registry.as_ref(),
             active_skill_names: &effective_skills,
             active_mcp_server_names: &effective_mcp_servers,

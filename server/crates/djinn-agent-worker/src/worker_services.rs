@@ -290,4 +290,28 @@ impl SupervisorServices for WorkerSupervisorServices {
     async fn emit_djinn_event(&self, event: SerializableDjinnEvent) -> Result<(), String> {
         self.rpc.emit_djinn_event(event).await
     }
+
+    async fn tool_github_search(
+        &self,
+        project_id: Option<String>,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        self.rpc.tool_github_search(project_id, arguments).await
+    }
+
+    async fn tool_github_fetch_file(
+        &self,
+        project_id: Option<String>,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        self.rpc.tool_github_fetch_file(project_id, arguments).await
+    }
+
+    async fn tool_ci_job_log(
+        &self,
+        session_task_id: Option<String>,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        self.rpc.tool_ci_job_log(session_task_id, arguments).await
+    }
 }

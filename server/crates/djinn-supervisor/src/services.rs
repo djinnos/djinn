@@ -182,6 +182,38 @@ pub trait SupervisorServices: Send + Sync + 'static {
         tokens_out: i64,
     ) -> Result<(), String>;
 
+    /// Run the `github_search` chat-extension tool host-side and return its
+    /// JSON result.
+    ///
+    /// Phase 7-followup gap-3 — workers have no GitHub App credentials
+    /// mounted, so any in-Pod reply-loop that calls `github_search` would
+    /// previously fail. `WorkerSupervisorServices` routes this over the
+    /// existing RPC connection; `DirectServices` runs it locally against
+    /// the host's `GitHubApiClient`. Same code path on host + worker.
+    async fn tool_github_search(
+        &self,
+        project_id: Option<String>,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String>;
+
+    /// Run the `github_fetch_file` chat-extension tool host-side. See
+    /// [`Self::tool_github_search`] for the routing rationale.
+    async fn tool_github_fetch_file(
+        &self,
+        project_id: Option<String>,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String>;
+
+    /// Run the `ci_job_log` chat-extension tool host-side. Reads activity
+    /// rows for the given session task id, resolves the installation token,
+    /// fetches + cleans the GitHub Actions job log. See
+    /// [`Self::tool_github_search`] for the routing rationale.
+    async fn tool_ci_job_log(
+        &self,
+        session_task_id: Option<String>,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, String>;
+
     /// Forward a worker-emitted [`SerializableDjinnEvent`] to the host's
     /// broadcast bus so SSE subscribers (web UI live-feed) see it in real
     /// time.

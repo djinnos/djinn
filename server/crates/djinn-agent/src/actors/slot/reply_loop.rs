@@ -75,6 +75,12 @@ pub(crate) struct ReplyLoopContext<'a> {
     pub cancel: &'a tokio_util::sync::CancellationToken,
     pub global_cancel: &'a tokio_util::sync::CancellationToken,
     pub app_state: &'a crate::context::AgentContext,
+    /// `SupervisorServices` handle used for routing host-only tool calls
+    /// (`github_search`, `github_fetch_file`, `ci_job_log`) over RPC when the
+    /// reply loop runs inside a worker Pod. On the host the same handle
+    /// resolves to `DirectServices` and runs the call locally — same code
+    /// path for both sides.
+    pub services: &'a dyn djinn_supervisor::SupervisorServices,
     /// Optional MCP tool registry for dispatching tools to external MCP servers.
     pub mcp_registry: Option<&'a crate::mcp_client::McpToolRegistry>,
     /// Skill names active in this session (for Langfuse metadata).
@@ -109,6 +115,7 @@ pub(crate) async fn run_reply_loop(
         cancel,
         global_cancel,
         app_state,
+        services,
         mcp_registry,
         active_skill_names,
         active_mcp_server_names,
@@ -295,6 +302,7 @@ pub(crate) async fn run_reply_loop(
 
             let dispatch_ctx = ToolDispatchContext {
                 app_state,
+                services,
                 task_id,
                 worktree_path,
                 role_name,
@@ -938,6 +946,7 @@ mod tests {
         ]);
 
         let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+        let test_services = test_helpers::test_services();
         let worktree_path = std::path::PathBuf::from("/tmp");
         let mut conv = Conversation::new();
         conv.push(Message::system("You are a worker."));
@@ -959,6 +968,7 @@ mod tests {
                 cancel: &cancel,
                 global_cancel: &cancel,
                 app_state: &app_state,
+                services: &test_services,
                 mcp_registry: None,
                 active_skill_names: &[],
                 active_mcp_server_names: &[],
@@ -1026,6 +1036,7 @@ mod tests {
         ]);
 
         let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+        let test_services = test_helpers::test_services();
         let worktree_path = std::path::PathBuf::from("/tmp");
         let mut conv = Conversation::new();
         conv.push(Message::system("You are a worker."));
@@ -1047,6 +1058,7 @@ mod tests {
                 cancel: &cancel,
                 global_cancel: &cancel,
                 app_state: &app_state,
+                services: &test_services,
                 mcp_registry: None,
                 active_skill_names: &[],
                 active_mcp_server_names: &[],
@@ -1146,6 +1158,7 @@ mod tests {
         };
 
         let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+        let test_services = test_helpers::test_services();
         let worktree_path = std::path::PathBuf::from("/tmp");
         let mut conv = Conversation::new();
         conv.push(Message::system("You are a worker."));
@@ -1167,6 +1180,7 @@ mod tests {
                 cancel: &cancel,
                 global_cancel: &cancel,
                 app_state: &app_state,
+                services: &test_services,
                 mcp_registry: None,
                 active_skill_names: &[],
                 active_mcp_server_names: &[],
@@ -1367,6 +1381,7 @@ mod tests {
         }]);
 
         let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+        let test_services = test_helpers::test_services();
         let worktree_path = std::path::PathBuf::from("/tmp");
         let mut conv = Conversation::new();
         conv.push(Message::system("You are a worker."));
@@ -1388,6 +1403,7 @@ mod tests {
                 cancel: &cancel,
                 global_cancel: &cancel,
                 app_state: &app_state,
+                services: &test_services,
                 mcp_registry: None,
                 active_skill_names: &[],
                 active_mcp_server_names: &[],
@@ -1425,6 +1441,7 @@ mod tests {
         ]);
 
         let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+        let test_services = test_helpers::test_services();
         let worktree_path = std::path::PathBuf::from("/tmp");
         let mut conv = Conversation::new();
         conv.push(Message::system("You are a worker."));
@@ -1446,6 +1463,7 @@ mod tests {
                 cancel: &cancel,
                 global_cancel: &cancel,
                 app_state: &app_state,
+                services: &test_services,
                 mcp_registry: None,
                 active_skill_names: &[],
                 active_mcp_server_names: &[],
@@ -1495,6 +1513,7 @@ mod tests {
         ]);
 
         let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+        let test_services = test_helpers::test_services();
         let worktree_path = std::path::PathBuf::from("/tmp");
         let mut conv = Conversation::new();
         conv.push(Message::system("You are a worker."));
@@ -1516,6 +1535,7 @@ mod tests {
                 cancel: &cancel,
                 global_cancel: &cancel,
                 app_state: &app_state,
+                services: &test_services,
                 mcp_registry: None,
                 active_skill_names: &[],
                 active_mcp_server_names: &[],
@@ -1590,6 +1610,7 @@ mod tests {
         };
 
         let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+        let test_services = test_helpers::test_services();
         let worktree_path = std::path::PathBuf::from("/tmp");
         let mut conv = Conversation::new();
         conv.push(Message::system("You are a worker."));
@@ -1611,6 +1632,7 @@ mod tests {
                 cancel: &cancel,
                 global_cancel: &cancel,
                 app_state: &app_state,
+                services: &test_services,
                 mcp_registry: None,
                 active_skill_names: &[],
                 active_mcp_server_names: &[],

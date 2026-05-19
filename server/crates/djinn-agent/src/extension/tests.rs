@@ -43,3 +43,4 @@ fn tool_schema<'a>(schemas: &'a [serde_json::Value], name: &str) -> &'a serde_js
         .find(|schema| schema.get("name").and_then(|n| n.as_str()) == Some(name))
         .expect("tool schema present")
 }
+

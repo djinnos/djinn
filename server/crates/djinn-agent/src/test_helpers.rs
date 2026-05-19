@@ -86,6 +86,16 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> AgentC
     }
 }
 
+/// Cheap `SupervisorServices` stub for tests that exercise `call_tool`
+/// against the non-host-bound tool subset (lsp, memory, code_graph, …).
+/// Panics if the test ends up invoking any trait method; the three
+/// host-only tools (`github_search`, `github_fetch_file`, `ci_job_log`)
+/// would route through it, but no test in this crate exercises those
+/// today.
+pub fn test_services() -> djinn_supervisor::services::rpc::UnimplementedRpcServices {
+    djinn_supervisor::services::rpc::UnimplementedRpcServices::new()
+}
+
 pub async fn create_test_project(db: &Database) -> Project {
     let repo = ProjectRepository::new(db.clone(), test_events());
     let id = uuid::Uuid::now_v7();

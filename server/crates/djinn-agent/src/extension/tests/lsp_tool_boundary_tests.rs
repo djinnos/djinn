@@ -12,6 +12,7 @@ async fn lsp_tool(
 ) -> Result<serde_json::Value, String> {
     call_tool(
         state,
+        &crate::test_helpers::test_services(),
         "lsp",
         args.as_object()
             .expect("lsp args must be an object")
