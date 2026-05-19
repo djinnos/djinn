@@ -1037,7 +1037,11 @@ mod tests {
         let task = result.expect("load_task ok");
         assert_eq!(task.id, "hello-task");
 
-        // Drain the background tasks so the test exits cleanly.
+        // Drop the `Arc<RpcServices>` (and its inner `mpsc::Sender<Frame>`)
+        // BEFORE awaiting the writer — otherwise the writer's `rx.recv()`
+        // never returns `None` and the test hangs.  Same drop-ordering
+        // bug Phase 10 fixed in `djinn-agent-worker/src/main.rs`.
+        drop(services);
         cancel.cancel();
         let _ = bg.reader.await;
         let _ = bg.writer.await;
@@ -1086,6 +1090,11 @@ mod tests {
             .await
             .expect("create_task_run ok");
 
+        // Drop the `Arc<RpcServices>` (and its inner `mpsc::Sender<Frame>`)
+        // BEFORE awaiting the writer — otherwise the writer's `rx.recv()`
+        // never returns `None` and the test hangs.  Same drop-ordering
+        // bug Phase 10 fixed in `djinn-agent-worker/src/main.rs`.
+        drop(services);
         cancel.cancel();
         let _ = bg.reader.await;
         let _ = bg.writer.await;
@@ -1124,6 +1133,11 @@ mod tests {
             .await
             .expect("update_task_run_status ok");
 
+        // Drop the `Arc<RpcServices>` (and its inner `mpsc::Sender<Frame>`)
+        // BEFORE awaiting the writer — otherwise the writer's `rx.recv()`
+        // never returns `None` and the test hangs.  Same drop-ordering
+        // bug Phase 10 fixed in `djinn-agent-worker/src/main.rs`.
+        drop(services);
         cancel.cancel();
         let _ = bg.reader.await;
         let _ = bg.writer.await;
@@ -1158,6 +1172,7 @@ mod tests {
             .expect_err("Err leg");
         assert_eq!(err, "no such run");
 
+        drop(services2);
         cancel2.cancel();
         let _ = bg2.reader.await;
         let _ = bg2.writer.await;
@@ -1196,6 +1211,11 @@ mod tests {
             .expect("get_model_context_window ok");
         assert_eq!(got, 200_000);
 
+        // Drop the `Arc<RpcServices>` (and its inner `mpsc::Sender<Frame>`)
+        // BEFORE awaiting the writer — otherwise the writer's `rx.recv()`
+        // never returns `None` and the test hangs.  Same drop-ordering
+        // bug Phase 10 fixed in `djinn-agent-worker/src/main.rs`.
+        drop(services);
         cancel.cancel();
         let _ = bg.reader.await;
         let _ = bg.writer.await;
@@ -1228,6 +1248,7 @@ mod tests {
             .expect_err("Err leg");
         assert_eq!(err, "model not found");
 
+        drop(services2);
         cancel2.cancel();
         let _ = bg2.reader.await;
         let _ = bg2.writer.await;
@@ -1267,6 +1288,11 @@ mod tests {
             .expect("get_provider_base_url ok");
         assert_eq!(got, "https://api.anthropic.com");
 
+        // Drop the `Arc<RpcServices>` (and its inner `mpsc::Sender<Frame>`)
+        // BEFORE awaiting the writer — otherwise the writer's `rx.recv()`
+        // never returns `None` and the test hangs.  Same drop-ordering
+        // bug Phase 10 fixed in `djinn-agent-worker/src/main.rs`.
+        drop(services);
         cancel.cancel();
         let _ = bg.reader.await;
         let _ = bg.writer.await;
@@ -1299,6 +1325,7 @@ mod tests {
             .expect_err("Err leg");
         assert_eq!(err, "provider not found");
 
+        drop(services2);
         cancel2.cancel();
         let _ = bg2.reader.await;
         let _ = bg2.writer.await;
@@ -1335,6 +1362,11 @@ mod tests {
             .expect("pick_any_default_model ok");
         assert_eq!(got.as_deref(), Some("openai/gpt-4o-mini"));
 
+        // Drop the `Arc<RpcServices>` (and its inner `mpsc::Sender<Frame>`)
+        // BEFORE awaiting the writer — otherwise the writer's `rx.recv()`
+        // never returns `None` and the test hangs.  Same drop-ordering
+        // bug Phase 10 fixed in `djinn-agent-worker/src/main.rs`.
+        drop(services);
         cancel.cancel();
         let _ = bg.reader.await;
         let _ = bg.writer.await;
@@ -1367,6 +1399,7 @@ mod tests {
             .expect("pick_any_default_model ok");
         assert!(got.is_none());
 
+        drop(services2);
         cancel2.cancel();
         let _ = bg2.reader.await;
         let _ = bg2.writer.await;
@@ -1427,6 +1460,11 @@ mod tests {
         assert_eq!(got.id, "s1");
         assert_eq!(got.task_run_id.as_deref(), Some("run-1"));
 
+        // Drop the `Arc<RpcServices>` (and its inner `mpsc::Sender<Frame>`)
+        // BEFORE awaiting the writer — otherwise the writer's `rx.recv()`
+        // never returns `None` and the test hangs.  Same drop-ordering
+        // bug Phase 10 fixed in `djinn-agent-worker/src/main.rs`.
+        drop(services);
         cancel.cancel();
         let _ = bg.reader.await;
         let _ = bg.writer.await;
@@ -1479,6 +1517,11 @@ mod tests {
             .await
             .expect("publish_session_message ok");
 
+        // Drop the `Arc<RpcServices>` (and its inner `mpsc::Sender<Frame>`)
+        // BEFORE awaiting the writer — otherwise the writer's `rx.recv()`
+        // never returns `None` and the test hangs.  Same drop-ordering
+        // bug Phase 10 fixed in `djinn-agent-worker/src/main.rs`.
+        drop(services);
         cancel.cancel();
         let _ = bg.reader.await;
         let _ = bg.writer.await;
@@ -1549,6 +1592,11 @@ mod tests {
         assert_eq!(got.usage.output, 4);
         assert_eq!(got.content.len(), 1);
 
+        // Drop the `Arc<RpcServices>` (and its inner `mpsc::Sender<Frame>`)
+        // BEFORE awaiting the writer — otherwise the writer's `rx.recv()`
+        // never returns `None` and the test hangs.  Same drop-ordering
+        // bug Phase 10 fixed in `djinn-agent-worker/src/main.rs`.
+        drop(services);
         cancel.cancel();
         let _ = bg.reader.await;
         let _ = bg.writer.await;
@@ -1593,6 +1641,11 @@ mod tests {
             djinn_stack::environment::SCHEMA_VERSION
         );
 
+        // Drop the `Arc<RpcServices>` (and its inner `mpsc::Sender<Frame>`)
+        // BEFORE awaiting the writer — otherwise the writer's `rx.recv()`
+        // never returns `None` and the test hangs.  Same drop-ordering
+        // bug Phase 10 fixed in `djinn-agent-worker/src/main.rs`.
+        drop(services);
         cancel.cancel();
         let _ = bg.reader.await;
         let _ = bg.writer.await;
