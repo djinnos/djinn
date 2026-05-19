@@ -167,14 +167,26 @@ pub fn build_task_run_job(
                     },
                 ]),
                 optional: Some(false),
-                default_mode: Some(0o0400),
+                // 0444 (world-read) instead of 0400 so the worker process —
+                // forced to runAsUser=10001 above so it can access the
+                // /mirror PVC — can still read these files. They're owned
+                // by root by default and 0400 means owner-only. The Pod
+                // boundary is the security perimeter; within a single
+                // container, world-read on the mounted Secret is fine.
+                default_mode: Some(0o0444),
             }),
             ..Volume::default()
         },
         Volume {
             name: VOLUME_AUTH_TOKEN.to_string(),
             projected: Some(ProjectedVolumeSource {
-                default_mode: Some(0o0400),
+                // 0444 (world-read) instead of 0400 so the worker process —
+                // forced to runAsUser=10001 above so it can access the
+                // /mirror PVC — can still read these files. They're owned
+                // by root by default and 0400 means owner-only. The Pod
+                // boundary is the security perimeter; within a single
+                // container, world-read on the mounted Secret is fine.
+                default_mode: Some(0o0444),
                 sources: Some(vec![VolumeProjection {
                     service_account_token: Some(ServiceAccountTokenProjection {
                         audience: Some(TOKEN_AUDIENCE.to_string()),
