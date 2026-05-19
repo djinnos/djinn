@@ -185,7 +185,15 @@ pub struct MergeResult {
 pub async fn run_git_command(path: PathBuf, args: Vec<String>) -> Result<CommandOutput, GitError> {
     use std::process::Stdio;
     let mut cmd = tokio::process::Command::new("git");
-    cmd.args(&args)
+    // Inject `-c safe.directory=*` ahead of every subcommand so git trusts
+    // any path we hand it — needed because the K8s worker Pod runs as a
+    // different UID than the user that owns the shared /mirror PVC, and
+    // git 2.35.2+ rejects mixed-UID repos by default with
+    //   `fatal: detected dubious ownership in repository at '<path>'`.
+    // Cheap on the host (git just adds the rule to its in-memory config
+    // for this invocation) and avoids per-Pod GIT_CONFIG_* env wiring.
+    cmd.args(["-c", "safe.directory=*"])
+        .args(&args)
         .current_dir(&path)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -225,7 +233,9 @@ pub async fn run_git_command_with_timeout(
     use tokio::io::AsyncReadExt;
 
     let mut cmd = tokio::process::Command::new("git");
-    cmd.args(&args)
+    // Same safe.directory injection as run_git_command — see docs there.
+    cmd.args(["-c", "safe.directory=*"])
+        .args(&args)
         .current_dir(&path)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
