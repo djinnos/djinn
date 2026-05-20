@@ -304,11 +304,17 @@ async fn push_task_branch_to_github(
         .map_err(|e| GitError::Other(anyhow::anyhow!("clone_ephemeral {task_branch}: {e}")))?;
     let wt = workspace.path_buf();
 
+    // Plain `--force` (not `--force-with-lease`). The push target is a
+    // direct GitHub URL, not a configured remote — so there's no
+    // remote-tracking ref for `--force-with-lease` to compare against,
+    // and git rejects with `[rejected] task/X -> task/X (stale info)`
+    // every time. We unconditionally own the task_branch on origin
+    // (only djinn pushes there); `--force` is the right semantic.
     let push_out = run_git_command(
         wt.clone(),
         vec![
             "push".into(),
-            "--force-with-lease".into(),
+            "--force".into(),
             push_url.to_string(),
             format!("{task_branch}:refs/heads/{task_branch}"),
         ],
