@@ -484,6 +484,24 @@ pub(crate) async fn execute_stage(
                             },
                         }
                     }
+                    // Reviewer session ended naturally without calling
+                    // submit_review (LLM stopped emitting before invoking the
+                    // finalize tool). Treat as a hard rejection so the task
+                    // re-dispatches a fresh reviewer instead of silently
+                    // approving unreviewed code.
+                    "" => {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            task_run_id = %task_run_id,
+                            "Reviewer session ended without calling submit_review; treating as rejection so a fresh reviewer runs"
+                        );
+                        StageOutcome::ReviewerRejected {
+                            feedback: "Reviewer session ended without calling submit_review — \
+                                       you MUST call submit_review with verdict=\"approve\" \
+                                       or verdict=\"reject\" before ending your session."
+                                .to_string(),
+                        }
+                    }
                     "request_lead" => StageOutcome::Escalate {
                         reason: extract_reason(&final_output.finalize_payload)
                             .unwrap_or_else(|| "reviewer escalated to lead".into()),

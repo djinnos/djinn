@@ -18,13 +18,15 @@
 //! 4. Creates (or adopts/reopens) a GitHub PR for the squashed commit.
 
 use djinn_db::{ProjectRepository, TaskRepository};
+use djinn_git::GitError;
 use djinn_provider::github_api::{CreatePrParams, GitHubApiClient, PrState};
 use djinn_provider::github_app::{app_id as github_app_id, installations::get_installation_token};
 use djinn_runtime::spec::{TaskRunOutcome, TaskRunSpec};
+use djinn_workspace::MirrorManager;
 
 use super::SupervisorCallbackContext;
 use crate::actors::slot::helpers::default_target_branch;
-use crate::task_merge::{build_app_push_url, squash_merge_via_mirror};
+use crate::task_merge::build_app_push_url;
 
 /// Open (or adopt) a GitHub PR for the completed task-run.
 ///
@@ -123,36 +125,31 @@ pub(crate) async fn supervisor_pr_open(
     };
     let message = format!("{}({}): {}", commit_type, task.short_id, task.title);
 
-    let merge_result = match squash_merge_via_mirror(
+    // Push the worker's task_branch from the mirror to the GitHub remote
+    // so the PR's head ref exists. We deliberately do NOT call
+    // squash_merge_via_mirror here — it pushes the squashed commit directly
+    // to refs/heads/main, which branch-protected repos (Quality Gate etc.)
+    // reject ("Changes must be made through a pull request"). The PR flow
+    // below handles landing the change properly via human/CI review.
+    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let head_sha = match push_task_branch_to_github(
         mirror.as_ref(),
         &spec.project_id,
         &spec.task_branch,
-        &merge_target,
-        &message,
-        Some(&push_url),
+        &push_url,
     )
     .await
     {
-        Ok(r) => r,
+        Ok(sha) => sha,
         Err(e) => {
             return TaskRunOutcome::Failed {
                 stage: "pr_open".into(),
-                reason: format!("squash merge failed: {e}"),
+                reason: format!("push task_branch to GitHub failed: {e}"),
             };
         }
     };
-
-    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    if let Err(e) = task_repo
-        .set_merge_commit_sha(&task.id, &merge_result.commit_sha)
-        .await
-    {
-        tracing::warn!(
-            task_id = %task.id,
-            error = %e,
-            "supervisor PR-open: failed to persist merge_commit_sha (non-fatal)"
-        );
-    }
+    let _ = &message;
+    let merge_result_commit_sha = head_sha;
 
     let pr_title = format!("{}({}): {}", commit_type, task.short_id, task.title);
     let pr_body = format!(
@@ -259,12 +256,47 @@ pub(crate) async fn supervisor_pr_open(
         task_id = %task.short_id,
         pr_url = %pr.html_url,
         pr_number = pr.number,
-        commit_sha = %merge_result.commit_sha,
+        commit_sha = %merge_result_commit_sha,
         "Supervisor: PR opened"
     );
 
     TaskRunOutcome::PrOpened {
         url: pr.html_url,
-        sha: merge_result.commit_sha,
+        sha: merge_result_commit_sha,
     }
+}
+
+/// Push the worker's task_branch from the mirror clone up to GitHub via
+/// the App-installation push URL. Returns the HEAD SHA on success.
+async fn push_task_branch_to_github(
+    mirror: &MirrorManager,
+    project_id: &str,
+    task_branch: &str,
+    push_url: &str,
+) -> Result<String, GitError> {
+    use djinn_git::run_git_command;
+    let workspace = mirror
+        .clone_ephemeral(project_id, task_branch)
+        .await
+        .map_err(|e| GitError::Other(anyhow::anyhow!("clone_ephemeral {task_branch}: {e}")))?;
+    let wt = workspace.path_buf();
+
+    let push_out = run_git_command(
+        wt.clone(),
+        vec![
+            "push".into(),
+            "--force-with-lease".into(),
+            push_url.to_string(),
+            format!("{task_branch}:refs/heads/{task_branch}"),
+        ],
+    )
+    .await?;
+    let _ = push_out;
+
+    let head_out = run_git_command(
+        wt.clone(),
+        vec!["rev-parse".into(), "HEAD".into()],
+    )
+    .await?;
+    Ok(head_out.stdout.trim().to_string())
 }

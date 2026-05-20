@@ -16,6 +16,24 @@ pub(super) async fn call_task_transition(
     };
     let action = TransitionAction::parse(&p.action).map_err(|e| e.to_string())?;
 
+    // Block agents from using `close` directly. The Close transition records
+    // `close_reason="completed"`, which is the "work actually landed on main"
+    // signal — only the supervisor's open_pr / pr_merge path is allowed to
+    // fire it (after a real merge_commit_sha is produced). Letting the
+    // lead/planner call it lets them fake a "merged" status for tasks whose
+    // PR was never opened, which silently mass-closes the wave. Force the
+    // agent to use `force_close` with an explicit reason instead.
+    if action == TransitionAction::Close {
+        return Ok(serde_json::json!({
+            "error": "close is not callable by agents — it marks the task as merged-to-main \
+                      and is reserved for the supervisor's PR-merge path. If the task is \
+                      done because work already landed on a different branch/PR, use \
+                      force_close with a reason explaining what landed; if you're closing a \
+                      decomposed or redundant task, use force_close with replacement_task_ids \
+                      and/or a reason."
+        }));
+    }
+
     // Lead approve: transition to approved; coordinator handles PR creation separately.
     if action == TransitionAction::LeadApprove {
         if task.status != TaskStatus::InLeadIntervention.as_str() {
@@ -52,6 +70,34 @@ pub(super) async fn call_task_transition(
         if !has_replacements && !has_reason {
             return Ok(serde_json::json!({
                 "error": "force_close requires either replacement_task_ids (array of subtask IDs created as replacements) or a reason string explaining why the task is being closed (e.g. work already landed on main, task is redundant)."
+            }));
+        }
+
+        // Worker tasks (issue_type=task/bug/feature) must produce a real merged PR
+        // before they can be closed. The planner/lead patrol previously used a
+        // bare "reason" to mass-close tasks whose reviewer just approved them but
+        // whose PR never actually opened — making it look like the wave landed
+        // when nothing reached the remote. Block that path explicitly: if the
+        // task is a full-lifecycle issue_type AND merge_commit_sha is null AND
+        // no replacement_task_ids are provided, refuse the force_close.
+        let task_uses_full_lifecycle = matches!(
+            task.issue_type.as_str(),
+            "task" | "bug" | "feature" | "decomposition"
+        );
+        let has_merge_sha = task
+            .merge_commit_sha
+            .as_ref()
+            .is_some_and(|s| !s.is_empty());
+        if task_uses_full_lifecycle && !has_merge_sha && !has_replacements {
+            return Ok(serde_json::json!({
+                "error": format!(
+                    "task '{}' (issue_type={}) has no merge_commit_sha and no replacement_task_ids — \
+                     force_close with a bare reason is not allowed for worker tasks. Either provide \
+                     replacement_task_ids (decomposition) or wait for the PR to open + merge. If the \
+                     work genuinely landed on a different branch/PR, set merge_commit_sha first via \
+                     the supervisor PR-merge flow.",
+                    task.short_id, task.issue_type
+                )
             }));
         }
 
