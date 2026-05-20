@@ -1401,6 +1401,44 @@ impl CoordinatorActor {
 
         for task in tasks {
 
+            // K8s flow: the supervisor body already opened the PR via
+            // supervisor_pr_open + fired pr_created → the task is stuck at
+            // approved only because that final transition raced and
+            // didn't land. The legacy task_merge::merge_and_transition
+            // path below would try to re-open the same PR via a
+            // direct-from-mirror push that fails with "local branch
+            // task/X does not exist" (mirror layout differs from what
+            // task_merge expects). Just flip the status to pr_draft so
+            // pr_poller can take over CI tracking. Cheap, idempotent,
+            // and avoids the every-30s-error spam on the UI.
+            if task.pr_url.as_deref().is_some_and(|u| !u.is_empty()) {
+                let task_repo = self.task_repo();
+                if let Err(e) = task_repo
+                    .transition(
+                        &task.id,
+                        TransitionAction::PrCreated,
+                        "coordinator",
+                        "system",
+                        None,
+                        None,
+                    )
+                    .await
+                {
+                    tracing::debug!(
+                        task_id = %task.short_id,
+                        error = %e,
+                        "CoordinatorActor: approved task already has PR — pr_created transition skipped"
+                    );
+                } else {
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        pr_url = %task.pr_url.as_deref().unwrap_or(""),
+                        "CoordinatorActor: approved task already has PR — flipped to pr_draft for pr_poller"
+                    );
+                }
+                continue;
+            }
+
             // Simple-lifecycle tasks normally close directly, but sessions that
             // produced durable artifacts (file changes, memory writes, or task
             // comments pointing at .djinn paths) must survive as branch/PR
