@@ -253,4 +253,32 @@ pub trait SupervisorServices: Send + Sync + 'static {
     /// 5-minute mark, mid-LLM-stream. This RPC bridges the two
     /// trackers so the host's poller stays accurate.
     async fn touch_activity(&self, task_id: String) -> Result<(), String>;
+
+    /// Apply a [`djinn_core::models::TransitionAction`] to the given task
+    /// on the host. The supervisor stage loop calls this at every stage
+    /// boundary so the task walks its full status machine
+    /// (`Start` → `SubmitTaskReview` → `TaskReviewStart` →
+    /// `TaskReviewApprove` / `TaskReviewReject` → `PrCreated`) even on
+    /// the K8s path where the supervisor body has no direct DB access.
+    ///
+    /// `action` is the wire-string form parsed by
+    /// `TransitionAction::parse`. `reason` is required only for actions
+    /// whose `requires_reason()` returns true (the host enforces this
+    /// and surfaces `InvalidTransition` if missing).
+    ///
+    /// Failures arrive as `Err(String)`:
+    /// - parse failures (`"unknown transition action: ..."`),
+    /// - state-machine validation (`"... is only valid from ..."`),
+    /// - DB / transport errors.
+    ///
+    /// Callers SHOULD treat `InvalidTransition` as a soft skip
+    /// (idempotency: a re-dispatched task may already be in the target
+    /// state) and log-only on transport failures rather than failing
+    /// the run.
+    async fn transition_task(
+        &self,
+        task_id: String,
+        action: String,
+        reason: Option<String>,
+    ) -> Result<(), String>;
 }

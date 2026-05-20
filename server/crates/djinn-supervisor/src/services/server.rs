@@ -1183,6 +1183,14 @@ async fn dispatch(
             let result = services.touch_activity(task_id).await;
             ServiceRpcResponse::TouchActivity(result)
         }
+        ServiceRpcRequest::TransitionTask {
+            task_id,
+            action,
+            reason,
+        } => {
+            let result = services.transition_task(task_id, action, reason).await;
+            ServiceRpcResponse::TransitionTask(result)
+        }
     }
 }
 
@@ -1347,6 +1355,15 @@ mod tests {
         }
 
         async fn touch_activity(&self, _task_id: String) -> Result<(), String> {
+            unimplemented!("not exercised in server tests")
+        }
+
+        async fn transition_task(
+            &self,
+            _task_id: String,
+            _action: String,
+            _reason: Option<String>,
+        ) -> Result<(), String> {
             unimplemented!("not exercised in server tests")
         }
     }

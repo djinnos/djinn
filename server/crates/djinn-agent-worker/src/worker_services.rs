@@ -387,6 +387,15 @@ impl SupervisorServices for WorkerSupervisorServices {
         self.rpc.touch_activity(task_id).await
     }
 
+    async fn transition_task(
+        &self,
+        task_id: String,
+        action: String,
+        reason: Option<String>,
+    ) -> Result<(), String> {
+        self.rpc.transition_task(task_id, action, reason).await
+    }
+
     async fn tool_github_search(
         &self,
         project_id: Option<String>,

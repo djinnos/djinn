@@ -302,6 +302,9 @@ async fn start_fake_server(
                         ServiceRpcRequest::TouchActivity { .. } => {
                             ServiceRpcResponse::TouchActivity(Ok(()))
                         }
+                        ServiceRpcRequest::TransitionTask { .. } => {
+                            ServiceRpcResponse::TransitionTask(Ok(()))
+                        }
                     };
                     let reply = Frame {
                         correlation_id,

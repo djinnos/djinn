@@ -28,7 +28,12 @@ const RECONNECT_MULTIPLIER = 2;
 
 export function useEventSource(projectId?: string | null) {
   const selectedProject = useSelectedProject();
-  const isAll = projectId === ALL_PROJECTS;
+  // No projectId passed AND no global selection → default to ALL_PROJECTS.
+  // Without this fallback, a fresh load with `selectedProjectId === null`
+  // sends useEventSource down the "wait for slug" branch that never fires
+  // (isAll=false, selectedProjectSlug=null), so the Kanban board renders
+  // empty until the user opens /memory and clicks a project.
+  const isAll = projectId === ALL_PROJECTS || (projectId == null && !selectedProject);
   const selectedProjectSlug =
     isAll || !selectedProject
       ? null
@@ -98,9 +103,14 @@ export function useEventSource(projectId?: string | null) {
     // When the project slug isn't available yet (projects still loading),
     // subscribe directly to the project store so we hydrate as soon as
     // the slug resolves — without relying on a React re-render to re-run
-    // this effect.
+    // this effect. Also arms the subscription in the implicit-all-projects
+    // case (no projectId and no global selection) so the board hydrates
+    // as soon as the project list lands.
     let unsubProjectSlug: (() => void) | undefined;
-    if (!selectedProjectSlug && projectId) {
+    const initialProjectsCount = projectStore.getState().projects.length;
+    const needsProjectFallback =
+      (!selectedProjectSlug && projectId != null) || (isAll && initialProjectsCount === 0);
+    if (needsProjectFallback) {
       unsubProjectSlug = projectStore.subscribe((state) => {
         if (!isActive) return;
         if (isAll) {

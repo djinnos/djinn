@@ -232,6 +232,15 @@ impl SupervisorServices for FakeServices {
     async fn touch_activity(&self, _task_id: String) -> Result<(), String> {
         unimplemented!("not exercised on the auth-rejection path")
     }
+
+    async fn transition_task(
+        &self,
+        _task_id: String,
+        _action: String,
+        _reason: Option<String>,
+    ) -> Result<(), String> {
+        unimplemented!("not exercised on the auth-rejection path")
+    }
 }
 
 /// Bind `serve_on_tcp` to `127.0.0.1:0`, return the resolved `(SocketAddr,

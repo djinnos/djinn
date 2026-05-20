@@ -736,6 +736,27 @@ impl SupervisorServices for RpcServices {
             Err(e) => Err(e),
         }
     }
+
+    async fn transition_task(
+        &self,
+        task_id: String,
+        action: String,
+        reason: Option<String>,
+    ) -> Result<(), String> {
+        match self
+            .roundtrip(ServiceRpcRequest::TransitionTask {
+                task_id,
+                action,
+                reason,
+            })
+            .await
+        {
+            Ok(ServiceRpcResponse::TransitionTask(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 // ── Reader / writer loops ────────────────────────────────────────────────────
@@ -1050,6 +1071,17 @@ impl SupervisorServices for UnimplementedRpcServices {
     async fn touch_activity(&self, _task_id: String) -> Result<(), String> {
         unimplemented!(
             "UnimplementedRpcServices::touch_activity — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn transition_task(
+        &self,
+        _task_id: String,
+        _action: String,
+        _reason: Option<String>,
+    ) -> Result<(), String> {
+        unimplemented!(
+            "UnimplementedRpcServices::transition_task — construct RpcServices for real RPC"
         )
     }
 }

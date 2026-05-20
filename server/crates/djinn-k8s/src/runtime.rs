@@ -1115,6 +1115,14 @@ mod tests {
             async fn touch_activity(&self, _: String) -> Result<(), String> {
                 unimplemented!()
             }
+            async fn transition_task(
+                &self,
+                _: String,
+                _: String,
+                _: Option<String>,
+            ) -> Result<(), String> {
+                unimplemented!()
+            }
         }
 
         let services: Arc<dyn SupervisorServices> = Arc::new(NoopServices {

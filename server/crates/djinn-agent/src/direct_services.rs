@@ -394,6 +394,32 @@ impl SupervisorServices for DirectServices {
         Ok(())
     }
 
+    async fn transition_task(
+        &self,
+        task_id: String,
+        action: String,
+        reason: Option<String>,
+    ) -> Result<(), String> {
+        use djinn_core::models::TransitionAction;
+        use djinn_db::TaskRepository;
+        let parsed = TransitionAction::parse(&action).map_err(|e| e.to_string())?;
+        let repo = TaskRepository::new(
+            self.callbacks.agent_context.db.clone(),
+            self.callbacks.agent_context.event_bus.clone(),
+        );
+        repo.transition(
+            &task_id,
+            parsed,
+            "supervisor",
+            "system",
+            reason.as_deref(),
+            None,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
     async fn emit_djinn_event(&self, event: SerializableDjinnEvent) -> Result<(), String> {
         match intern_envelope(event) {
             Ok(envelope) => {

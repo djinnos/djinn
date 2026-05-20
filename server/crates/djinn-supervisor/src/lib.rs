@@ -254,6 +254,35 @@ impl TaskRunSupervisor {
                     break;
                 }
 
+                // Walk the task through its DB status machine. Pre-stage
+                // transitions move the row from open → in_progress (Worker)
+                // or needs_task_review → in_task_review (Reviewer) so the
+                // host-side planner stops seeing the task as "still open
+                // work" and re-dispatching during the run. Failure is
+                // logged-and-skipped — a re-dispatched run may already be
+                // in the target status, which is `InvalidTransition` on
+                // the second call but functionally idempotent.
+                let pre_stage_action: Option<&'static str> = match role_kind {
+                    RoleKind::Worker => Some("start"),
+                    RoleKind::Reviewer => Some("task_review_start"),
+                    _ => None,
+                };
+                if let Some(action) = pre_stage_action
+                    && let Err(e) = self
+                        .services
+                        .transition_task(spec.task_id.clone(), action.into(), None)
+                        .await
+                {
+                    tracing::warn!(
+                        task_run_id = %run_id,
+                        task_id = %spec.task_id,
+                        role = %role_kind.as_str(),
+                        action = %action,
+                        error = %e,
+                        "supervisor: pre-stage status transition skipped (likely already in target state)"
+                    );
+                }
+
                 let stage_outcome = match self
                     .services
                     .execute_stage(&task, &workspace, role_kind, &run_id, &spec)
@@ -326,12 +355,51 @@ impl TaskRunSupervisor {
                                 );
                             }
                         }
+                        // Worker finished cleanly → submit_task_review
+                        // (in_progress → needs_task_review). Architect has no
+                        // analogous transition in the current state machine.
+                        if role_kind == RoleKind::Worker
+                            && let Err(e) = self
+                                .services
+                                .transition_task(
+                                    spec.task_id.clone(),
+                                    "submit_task_review".into(),
+                                    None,
+                                )
+                                .await
+                        {
+                            tracing::warn!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                error = %e,
+                                "supervisor: post-worker submit_task_review transition skipped"
+                            );
+                        }
                     }
-                    StageOutcome::PlannerExecute
-                    | StageOutcome::ReviewerApproved
-                    | StageOutcome::VerifierPassed => {
+                    StageOutcome::ReviewerApproved => {
+                        // Reviewer signed off → task_review_approve
+                        // (in_task_review → approved). The host's PR-open
+                        // path then fires pr_created (approved → pr_draft).
+                        if let Err(e) = self
+                            .services
+                            .transition_task(
+                                spec.task_id.clone(),
+                                "task_review_approve".into(),
+                                None,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                error = %e,
+                                "supervisor: task_review_approve transition skipped"
+                            );
+                        }
+                    }
+                    StageOutcome::PlannerExecute | StageOutcome::VerifierPassed => {
                         // Advance to the next stage. No file changes expected
-                        // from planner/reviewer/verifier — they're read-only.
+                        // from planner/verifier — they're read-only.
                     }
                     StageOutcome::PlannerClose { reason } => {
                         result = Some(TaskRunOutcome::Closed { reason });
@@ -342,6 +410,27 @@ impl TaskRunSupervisor {
                         break;
                     }
                     StageOutcome::ReviewerRejected { feedback } => {
+                        // Reviewer rejected → task_review_reject
+                        // (in_task_review → open). The reject action
+                        // requires_reason, so pass the feedback string. The
+                        // failed-run TaskRunOutcome reason includes the same
+                        // feedback for caller log parity.
+                        if let Err(e) = self
+                            .services
+                            .transition_task(
+                                spec.task_id.clone(),
+                                "task_review_reject".into(),
+                                Some(feedback.clone()),
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                error = %e,
+                                "supervisor: task_review_reject transition skipped"
+                            );
+                        }
                         result = Some(TaskRunOutcome::Failed {
                             stage: "reviewer".into(),
                             reason: format!("review rejected: {feedback}"),

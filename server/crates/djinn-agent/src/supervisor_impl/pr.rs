@@ -252,6 +252,29 @@ pub(crate) async fn supervisor_pr_open(
         );
     }
 
+    // Walk the task into the PR-aware status (approved → pr_draft) so the
+    // host's dispatcher stops treating it as "still open work" and
+    // re-spawning a worker the moment supervisor_pr_open returns. The
+    // post-PR side (PrUndraft / PrMerge / PrCiFailed / PrChangesRequested)
+    // is driven by `pr_poller` on every coordinator tick.
+    if let Err(e) = task_repo
+        .transition(
+            &task.id,
+            djinn_core::models::TransitionAction::PrCreated,
+            "supervisor",
+            "system",
+            None,
+            None,
+        )
+        .await
+    {
+        tracing::warn!(
+            task_id = %task.id,
+            error = %e,
+            "supervisor PR-open: pr_created transition skipped (task may not be in approved state — check earlier stage-loop transitions)"
+        );
+    }
+
     tracing::info!(
         task_id = %task.short_id,
         pr_url = %pr.html_url,

@@ -322,6 +322,16 @@ pub enum ServiceRpcRequest {
     /// host's tracker so the coordinator's stall poller doesn't reap a
     /// long-running K8s worker mid-flow.
     TouchActivity { task_id: String },
+    /// [`crate::SupervisorServices::transition_task`]. Lets the in-Pod
+    /// supervisor walk the task through its status machine (Start →
+    /// SubmitTaskReview → TaskReviewStart → TaskReviewApprove/Reject →
+    /// PrCreated) at stage boundaries. `action` is the wire-string form
+    /// parsed by `TransitionAction::parse` on the host.
+    TransitionTask {
+        task_id: String,
+        action: String,
+        reason: Option<String>,
+    },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -380,6 +390,10 @@ pub enum ServiceRpcResponse {
     ToolCiJobLog(Result<String, String>),
     /// Phase 7-followup BLOCKER — fire-and-forget activity-touch ack.
     TouchActivity(Result<(), String>),
+    /// Supervisor-driven task-status transition ack. `Err(String)` carries
+    /// the host's parse/transition error (e.g. invalid wire action, or
+    /// `InvalidTransition` from the state machine).
+    TransitionTask(Result<(), String>),
     /// Transport-level failure — not produced by normal operation.
     Err(String),
 }
@@ -1436,6 +1450,62 @@ mod tests {
         match back.payload {
             FramePayload::RpcReply(ServiceRpcResponse::TouchActivity(Err(e))) => {
                 assert_eq!(e, "unknown task");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transition_task_request_roundtrip() {
+        let f = Frame {
+            correlation_id: 99,
+            payload: FramePayload::Rpc(ServiceRpcRequest::TransitionTask {
+                task_id: "task-77".into(),
+                action: "task_review_approve".into(),
+                reason: Some("looks good".into()),
+            }),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back.correlation_id, 99);
+        match back.payload {
+            FramePayload::Rpc(ServiceRpcRequest::TransitionTask {
+                task_id,
+                action,
+                reason,
+            }) => {
+                assert_eq!(task_id, "task-77");
+                assert_eq!(action, "task_review_approve");
+                assert_eq!(reason.as_deref(), Some("looks good"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transition_task_reply_roundtrip() {
+        let resp = ServiceRpcResponse::TransitionTask(Ok(()));
+        let f = Frame {
+            correlation_id: 99,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        assert!(matches!(
+            back.payload,
+            FramePayload::RpcReply(ServiceRpcResponse::TransitionTask(Ok(())))
+        ));
+
+        let resp = ServiceRpcResponse::TransitionTask(Err("InvalidTransition".into()));
+        let f = Frame {
+            correlation_id: 99,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::TransitionTask(Err(e))) => {
+                assert_eq!(e, "InvalidTransition");
             }
             other => panic!("unexpected: {other:?}"),
         }

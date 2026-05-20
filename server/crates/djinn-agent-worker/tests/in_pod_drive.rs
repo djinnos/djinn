@@ -359,6 +359,14 @@ async fn handle_rpc(
             let _ = task_id;
             ServiceRpcResponse::TouchActivity(Ok(()))
         }
+        ServiceRpcRequest::TransitionTask {
+            task_id,
+            action,
+            reason,
+        } => {
+            let _ = (task_id, action, reason);
+            ServiceRpcResponse::TransitionTask(Ok(()))
+        }
     }
 }
 
