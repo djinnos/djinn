@@ -326,6 +326,27 @@ impl CoordinatorActor {
         self.last_dispatched
             .retain(|_, instant| instant.elapsed() < RAPID_FAILURE_THRESHOLD);
 
+        // Bug #18 guard: skip any task that already has a running session.
+        // Without this the coordinator tick re-dispatches the same task every
+        // minute while a worker pod is still doing real work, racking up
+        // duplicate K8s Jobs and burning tokens.
+        let active_task_ids: HashSet<String> = match SessionRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        )
+        .list_active()
+        .await
+        {
+            Ok(sessions) => sessions
+                .into_iter()
+                .filter_map(|s| s.task_id)
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "CoordinatorActor: failed to load active sessions for dispatch guard; proceeding without it");
+                HashSet::new()
+            }
+        };
+
         // Cache readiness per project across this dispatch pass so we don't
         // hammer the DB on every task.
         let gate_enabled = readiness_gate_enabled();
@@ -335,6 +356,13 @@ impl CoordinatorActor {
             if let Some(project_id) = project_filter
                 && task.project_id != project_id
             {
+                continue;
+            }
+            if active_task_ids.contains(&task.id) {
+                tracing::debug!(
+                    task_id = %task.short_id,
+                    "CoordinatorActor: task already has an active session, skipping dispatch"
+                );
                 continue;
             }
             if gate_enabled {
@@ -539,11 +567,15 @@ impl CoordinatorActor {
             }
         };
 
-        /// Default stall timeout: 5 minutes for all agent types.
-        const STALL_TIMEOUT_SECS: u64 = 5 * 60;
-        /// Architect sessions get a longer timeout (10 minutes) because patrol
-        /// reviews involve reading many files and epics sequentially.
-        const ARCHITECT_STALL_TIMEOUT_SECS: u64 = 10 * 60;
+        /// Default stall timeout: 30 minutes. Real worker sessions spend long
+        /// stretches in LLM reasoning or `cargo build`/`cargo test` with no
+        /// activity-log entries; the previous 5-minute cap killed worker pods
+        /// mid-edit and destroyed their ephemeral workspaces before they could
+        /// commit (no PR ever opens).
+        const STALL_TIMEOUT_SECS: u64 = 30 * 60;
+        /// Architect sessions kept on the same 30-minute budget — patrol
+        /// reviews are similarly read-heavy and don't need a shorter clock.
+        const ARCHITECT_STALL_TIMEOUT_SECS: u64 = 30 * 60;
 
         // Collect active task IDs so we can prune stall_killed entries for
         // sessions that have finished cleaning up.

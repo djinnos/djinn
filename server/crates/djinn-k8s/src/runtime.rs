@@ -81,7 +81,12 @@ const TEARDOWN_EVENTS_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// typically finish in well under 60s, but the supervisor occasionally
 /// ships tasks that post-process large diffs and we'd rather surface a
 /// clean timeout than an indeterminate hang.
-const TEARDOWN_POLL_TIMEOUT: Duration = Duration::from_secs(300);
+// Long enough to cover a full dev session (plan → code → cargo test → submit).
+// The supervisor calls teardown immediately after `attach_stdio` for K8s and then
+// polls the Job for terminal state; if this fires before the worker exits, the
+// task-run is declared a failure and the planner is re-dispatched on a fresh
+// workspace, losing in-progress code changes.
+const TEARDOWN_POLL_TIMEOUT: Duration = Duration::from_secs(3600);
 /// Poll interval used inside [`poll_job_terminal_state`].
 const TEARDOWN_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -845,15 +850,13 @@ mod tests {
         assert_object_safe::<dyn SessionRuntime>();
     }
 
-    /// Confirms the polling helper's timeout constant matches the plan's
-    /// 5-minute cap guidance so a regression shrinking or inflating it
-    /// won't go unnoticed.
+    /// The teardown poll must cover a full dev session: too short and the
+    /// supervisor reaps in-flight worker pods (bug #18 regression). Allow up
+    /// to 2h so future tuning has headroom.
     #[test]
     fn teardown_timeout_is_bounded() {
-        // Plan §teardown pins this at five minutes. Allow a small window
-        // either side so minor tuning doesn't force a test update.
-        assert!(TEARDOWN_POLL_TIMEOUT >= Duration::from_secs(60));
-        assert!(TEARDOWN_POLL_TIMEOUT <= Duration::from_secs(600));
+        assert!(TEARDOWN_POLL_TIMEOUT >= Duration::from_secs(600));
+        assert!(TEARDOWN_POLL_TIMEOUT <= Duration::from_secs(7200));
         assert!(TEARDOWN_POLL_INTERVAL < TEARDOWN_POLL_TIMEOUT);
     }
 

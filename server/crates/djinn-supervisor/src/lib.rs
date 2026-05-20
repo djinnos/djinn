@@ -29,7 +29,7 @@
 use std::sync::Arc;
 
 use djinn_core::models::{TaskRunStatus, TaskRunTrigger};
-use djinn_workspace::{EphemeralWorkspaceError, MirrorError, MirrorManager};
+use djinn_workspace::{EphemeralWorkspaceError, GitIdentity, MirrorError, MirrorManager};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, info};
@@ -228,6 +228,21 @@ impl TaskRunSupervisor {
             }
         };
 
+        // The ephemeral workspace is cloned on spec.base_branch; create the
+        // task_branch as a local ref now so commits in this run land on it
+        // and `push_to_origin(task_branch)` has something to push. Without
+        // this, all worker stages commit to the base branch and the eventual
+        // push fails with `src refspec task/<short_id> does not match any`.
+        if let Err(e) = workspace.ensure_branch(&spec.task_branch).await {
+            tracing::warn!(
+                task_run_id = %run_id,
+                task_id = %spec.task_id,
+                branch = %spec.task_branch,
+                error = %e,
+                "supervisor: ensure_branch failed (push will likely fail later)"
+            );
+        }
+
         let sequence = spec.flow.role_sequence();
         let mut completed: Vec<RoleKind> = Vec::new();
         let outcome = {
@@ -271,12 +286,52 @@ impl TaskRunSupervisor {
                 completed.push(role_kind);
 
                 match stage_outcome {
-                    StageOutcome::WorkerDone
-                    | StageOutcome::PlannerExecute
+                    StageOutcome::WorkerDone | StageOutcome::ArchitectDone => {
+                        // The worker/architect just wrote files. Auto-commit
+                        // before advancing so the verifier sees real changes
+                        // and `push_to_origin` has something to push. Empty
+                        // diffs are a no-op (workspace.commit returns false).
+                        let identity = GitIdentity {
+                            name: "djinn-bot",
+                            email: "bot@djinn.local",
+                        };
+                        let message = format!(
+                            "{}: {}",
+                            task.short_id, task.title
+                        );
+                        match workspace.commit(&message, identity).await {
+                            Ok(true) => {
+                                tracing::info!(
+                                    task_id = %task.short_id,
+                                    task_run_id = %run_id,
+                                    role = %role_kind.as_str(),
+                                    "supervisor: committed worker/architect changes"
+                                );
+                            }
+                            Ok(false) => {
+                                tracing::debug!(
+                                    task_id = %task.short_id,
+                                    task_run_id = %run_id,
+                                    role = %role_kind.as_str(),
+                                    "supervisor: no changes to commit after stage"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    task_id = %task.short_id,
+                                    task_run_id = %run_id,
+                                    role = %role_kind.as_str(),
+                                    error = %e,
+                                    "supervisor: workspace.commit failed (continuing to next stage)"
+                                );
+                            }
+                        }
+                    }
+                    StageOutcome::PlannerExecute
                     | StageOutcome::ReviewerApproved
-                    | StageOutcome::VerifierPassed
-                    | StageOutcome::ArchitectDone => {
-                        // Advance to the next stage.
+                    | StageOutcome::VerifierPassed => {
+                        // Advance to the next stage. No file changes expected
+                        // from planner/reviewer/verifier — they're read-only.
                     }
                     StageOutcome::PlannerClose { reason } => {
                         result = Some(TaskRunOutcome::Closed { reason });
@@ -310,8 +365,23 @@ impl TaskRunSupervisor {
                 }
             }
 
+            info!(
+                task_run_id = %run_id,
+                task_id = %spec.task_id,
+                flow = ?spec.flow,
+                last_stage_role = ?last_stage_role,
+                result_is_some = result.is_some(),
+                "supervisor: stage loop exited; computing final outcome"
+            );
             match result {
-                Some(r) => r,
+                Some(r) => {
+                    info!(
+                        task_run_id = %run_id,
+                        outcome = ?r,
+                        "supervisor: early-exit outcome from stage loop"
+                    );
+                    r
+                }
                 None => {
                     // All stages completed successfully.  Spike / Planning
                     // have no PR semantics; the merge-landing flows go
@@ -329,7 +399,19 @@ impl TaskRunSupervisor {
                         SupervisorFlow::NewTask
                         | SupervisorFlow::ReviewResponse
                         | SupervisorFlow::ConflictRetry => {
-                            self.services.open_pr(&spec, &task).await
+                            info!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                flow = ?spec.flow,
+                                "supervisor: invoking services.open_pr"
+                            );
+                            let outcome = self.services.open_pr(&spec, &task).await;
+                            info!(
+                                task_run_id = %run_id,
+                                outcome = ?outcome,
+                                "supervisor: services.open_pr returned"
+                            );
+                            outcome
                         }
                     }
                 }

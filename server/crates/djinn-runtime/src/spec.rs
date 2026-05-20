@@ -82,9 +82,16 @@ impl SupervisorFlow {
 pub fn role_sequence(flow: SupervisorFlow) -> &'static [RoleKind] {
     use RoleKind::*;
     match flow {
-        SupervisorFlow::NewTask => &[Planner, Worker, Reviewer, Verifier],
+        // Worker → Reviewer → (PR opens). The Verifier stage is unimplemented
+        // (stage.rs returns "verifier stage not yet wired"); add it back as
+        // the middle hop once `verify_commit` is plumbed in. For now the
+        // reviewer is the only gate before PR.
+        // The wave-planner already broke the work down upstream, so no
+        // upfront Planner stage here.
+        SupervisorFlow::NewTask => &[Worker, Reviewer],
         SupervisorFlow::ReviewResponse | SupervisorFlow::ConflictRetry => {
-            &[Worker, Reviewer, Verifier]
+            // Verifier currently stubbed; matches NewTask shape.
+            &[Worker, Reviewer]
         }
         SupervisorFlow::Spike => &[Architect],
         SupervisorFlow::Planning => &[Planner],
@@ -141,16 +148,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_task_flow_is_four_stages() {
-        assert_eq!(
-            SupervisorFlow::NewTask.role_sequence(),
-            &[
-                RoleKind::Planner,
-                RoleKind::Worker,
-                RoleKind::Reviewer,
-                RoleKind::Verifier
-            ]
-        );
+    fn new_task_flow_skips_planner() {
+        // Planner ran upstream as a Planning task; NewTask is the worker's
+        // domain and doesn't re-plan. Verifier dropped for now while the
+        // supervisor stage is stubbed.
+        let seq = SupervisorFlow::NewTask.role_sequence();
+        assert!(!seq.contains(&RoleKind::Planner));
+        assert_eq!(seq, &[RoleKind::Worker, RoleKind::Reviewer]);
     }
 
     #[test]

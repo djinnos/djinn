@@ -144,6 +144,21 @@ impl Workspace {
     /// lifecycle points in supervisor code.
     pub fn teardown(self) {}
 
+    /// Ensure the named branch exists and is checked out.
+    ///
+    /// Uses `git checkout -B <branch>` which:
+    /// - Creates the branch from current HEAD if it doesn't exist.
+    /// - Resets it to current HEAD if it does (idempotent).
+    /// - Checks it out in either case.
+    ///
+    /// Needed because [`crate::MirrorManager::clone_ephemeral`] clones the
+    /// mirror on `base_branch`; the worker's commits and the eventual
+    /// `push_to_origin(task_branch)` need `task_branch` to actually exist as
+    /// a local ref pointing at the worker's commits.
+    pub async fn ensure_branch(&self, branch: &str) -> Result<(), EphemeralWorkspaceError> {
+        self.run_git(&["checkout", "-B", branch], &[]).await.map(|_| ())
+    }
+
     /// Push the named branch from this workspace to its `origin` remote.
     ///
     /// Called by the worker after a task-run completes its stages but

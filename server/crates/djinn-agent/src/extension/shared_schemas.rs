@@ -10,7 +10,7 @@ pub(crate) fn serialize_tool_schema(tool: RmcpTool, concurrent_safe: bool) -> se
 pub(crate) fn tool_memory_move() -> RmcpTool {
     RmcpTool::new(
         "memory_move".to_string(),
-        "Compatibility fallback for note moves when filesystem rename semantics are unavailable. Prefer filesystem note CRUD via the mounted memory tree or checked-in `.djinn/` files. When mounted, `.djinn/memory/` reflects the current session-selected task/worktree view and falls back to canonical `main` when no task view is available; no explicit branch directories are exposed in this slice. Updates permalink and resolves inbound links. Use type=\"proposed_adr\" to recover a mis-routed ADR draft into .djinn/decisions/proposed/ without raw shell relocation.".to_string(),
+        "Move a memory note to a different type. Memory notes live in Dolt — this is the canonical way to relocate them; do not attempt filesystem rename. Updates the permalink and resolves inbound links automatically. Use type=\"proposed_adr\" to recover a mis-routed ADR draft.".to_string(),
         object!({
             "type": "object",
             "required": ["identifier", "type"],
@@ -254,7 +254,7 @@ pub(crate) fn tool_memory_list() -> RmcpTool {
 pub(crate) fn tool_memory_write() -> RmcpTool {
     RmcpTool::new(
         "memory_write".to_string(),
-        "Compatibility fallback for note creation when filesystem writes are unavailable. Prefer filesystem note CRUD via the mounted memory tree or checked-in `.djinn/` files. When mounted, `.djinn/memory/` reflects the current session-selected task/worktree view and falls back to canonical `main` when no task view is available; no explicit branch directories are exposed in this slice. Type is required and determines storage folder (adr->decisions/, pattern->patterns/, case->cases/, pitfall->pitfalls/, research->research/, requirement->requirements/, reference->reference/, design->design/, tech_spike->research/technical, session->research/sessions). Singleton types (brief, roadmap) write a fixed file — one per project. Use [[wikilinks]] in content to connect notes.".to_string(),
+        "Create a new memory note. Memory notes live in Dolt — this is the canonical way to author them; do not attempt filesystem writes. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief [singleton], roadmap [singleton]). Use [[wikilinks]] in content to connect notes.".to_string(),
         object!({
             "type": "object",
             "required": ["title", "content", "type"],
@@ -262,7 +262,7 @@ pub(crate) fn tool_memory_write() -> RmcpTool {
                 "title": {"type": "string", "description": "Note title"},
                 "content": {"type": "string", "description": "Markdown content of the note. Use [[wikilinks]] to connect to other notes."},
                 "type": {"type": "string", "description": "Note type: adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief (singleton), roadmap (singleton)"},
-                "status": {"type": "string", "description": "Optional explicit status. For ADRs, use \"proposed\" to route into .djinn/decisions/proposed/."},
+                "status": {"type": "string", "description": "Optional explicit status. For ADRs, use \"proposed\" to mark it as an in-flight proposal."},
                 "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags for categorisation"}
             }
         }),
@@ -272,7 +272,7 @@ pub(crate) fn tool_memory_write() -> RmcpTool {
 pub(crate) fn tool_memory_edit() -> RmcpTool {
     RmcpTool::new(
         "memory_edit".to_string(),
-        "Compatibility fallback for note edits when filesystem writes are unavailable. Prefer filesystem note CRUD via the mounted memory tree or checked-in `.djinn/` files. When mounted, `.djinn/memory/` reflects the current session-selected task/worktree view and falls back to canonical `main` when no task view is available; no explicit branch directories are exposed in this slice. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section).".to_string(),
+        "Edit an existing memory note in-place. Memory notes live in Dolt — this is the canonical way to amend them; do not attempt filesystem writes. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section).".to_string(),
         object!({
             "type": "object",
             "required": ["identifier", "operation", "content"],

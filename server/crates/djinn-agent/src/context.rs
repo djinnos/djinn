@@ -587,11 +587,28 @@ impl AgentContext {
                 // rev().take(2) yields [repo, owner]; flip them.
                 let repo_name = &owner_repo[0];
                 let owner_name = &owner_repo[1];
-                repo.get_by_github(owner_name, repo_name)
+                match repo
+                    .get_by_github(owner_name, repo_name)
                     .await
                     .map_err(|repo_error| ErrorResponse::new(repo_error.to_string()))?
                     .map(|p| p.id)
-                    .ok_or(error)
+                {
+                    Some(id) => Ok(id),
+                    None => {
+                        // K8s worker fallback: the worktree path
+                        // (/workspace/.tmpXXX) won't reverse-parse into
+                        // owner/repo, but the pod is single-project so the
+                        // spec.project_id default applies.
+                        if let Some(default_id) = self
+                            .default_project_id
+                            .as_deref()
+                            .filter(|s| !s.is_empty())
+                        {
+                            return Ok(default_id.to_string());
+                        }
+                        Err(error)
+                    }
+                }
             }
         }
     }

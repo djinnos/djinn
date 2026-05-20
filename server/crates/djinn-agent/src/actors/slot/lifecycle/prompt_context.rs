@@ -220,7 +220,10 @@ pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> Pro
                     let mut ctx_lines = vec![
                         format!("**Epic:** {} ({})", epic.title, epic.short_id),
                         format!("**Description:** {}", epic.description),
-                        format!("**Memory refs:** {}", epic.memory_refs),
+                        format!(
+                            "**Memory refs:** call `epic_show({})` then `memory_read(identifier=<ref>)` for each — memory notes live in Dolt, not on disk.",
+                            epic.short_id
+                        ),
                     ];
                     // Load sibling tasks
                     if let Ok(result) = task_repo_ctx

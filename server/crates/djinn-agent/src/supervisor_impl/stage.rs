@@ -463,9 +463,14 @@ pub(crate) async fn execute_stage(
                             .and_then(|p| p.get("verdict"))
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
+                        // Accept both present-tense ("approve"/"reject") and
+                        // past-tense ("approved"/"rejected") forms — gpt-5.x
+                        // consistently emits past-tense in the submit_review
+                        // payload, which previously fell through to the "Failed"
+                        // arm and broke open_pr for every review.
                         match verdict {
-                            "approve" => StageOutcome::ReviewerApproved,
-                            "reject" => StageOutcome::ReviewerRejected {
+                            "approve" | "approved" => StageOutcome::ReviewerApproved,
+                            "reject" | "rejected" => StageOutcome::ReviewerRejected {
                                 feedback: final_output
                                     .finalize_payload
                                     .as_ref()

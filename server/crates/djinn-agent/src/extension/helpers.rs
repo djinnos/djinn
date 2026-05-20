@@ -78,29 +78,36 @@ pub(super) async fn resolve_project_id_for_agent_tools(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<String, String> {
-    let project_id = arguments
+    let explicit_project = arguments
         .as_ref()
         .and_then(|map| map.get("project"))
         .and_then(|value| value.as_str())
-        .filter(|value| !value.is_empty())
-        .map(|project| async move {
-            let repo = ProjectRepository::new(state.db.clone(), state.event_bus.clone());
-            repo.resolve(project)
-                .await
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("project not found: {project}"))
-        });
+        .filter(|value| !value.is_empty());
 
-    if let Some(project_id) = project_id {
-        return project_id.await;
+    // K8s worker sets default_project_id from spec.project_id so a single-project
+    // pod never needs the LLM to remember the project arg.
+    let default_id = state
+        .default_project_id
+        .as_deref()
+        .filter(|s| !s.is_empty());
+
+    if let Some(project) = explicit_project {
+        let repo = ProjectRepository::new(state.db.clone(), state.event_bus.clone());
+        match repo.resolve(project).await.map_err(|e| e.to_string())? {
+            Some(id) => return Ok(id),
+            None => {
+                // LLM passed a bogus value (often the worktree path like
+                // /workspace/.tmpXXX). Fall back to the pod's default project
+                // rather than failing the tool call.
+                if let Some(default_id) = default_id {
+                    return Ok(default_id.to_string());
+                }
+                return Err(format!("project not found: {project}"));
+            }
+        }
     }
 
-    // Fall back to AgentContext.default_project_id — the K8s worker sets
-    // this from spec.project_id so per-Pod single-project tool calls don't
-    // need the LLM to remember the project arg.
-    if let Some(default_id) = state.default_project_id.as_deref()
-        && !default_id.is_empty()
-    {
+    if let Some(default_id) = default_id {
         return Ok(default_id.to_string());
     }
 

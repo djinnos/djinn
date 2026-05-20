@@ -106,19 +106,21 @@ impl CoordinatorActor {
         let originating_adr_section = match epic.originating_adr_id.as_deref() {
             Some(adr) if !adr.is_empty() => format!(
                 "\nOriginating ADR: `{adr}` — this epic was spawned from an \
-                 accepted proposal. Read the ADR for architectural rationale, \
-                 acceptance criteria, and the work shape it sketches before \
-                 creating tasks. Use `memory_read(\"{adr}\")` or look under \
-                 `.djinn/decisions/` for the full document."
+                 accepted proposal. Call `memory_read(identifier=\"{adr}\")` \
+                 for the architectural rationale, acceptance criteria, and the \
+                 work shape it sketches before creating tasks."
             ),
             _ => String::new(),
         };
         let design = format!(
-            "Epic: {} ({})\nEpic memory_refs: {}{}\n\n\
-             Use `epic_show({})` to read full epic context and memory_refs.\n\
-             Use `build_context` enriched with session reflections from \
-             previously completed tasks under this epic.",
-            epic.title, epic.short_id, epic.memory_refs, originating_adr_section, epic.short_id
+            "Epic: {} ({}){}\n\n\
+             Call `epic_show({})` to load the epic's memory_refs, then \
+             `memory_read(identifier=<each-ref>)` for each one to pull context. \
+             Call `build_context` for session reflections from previously \
+             completed tasks under this epic. Memory notes live in Dolt — \
+             reach them only through the `memory_*` MCP tools, not by reading \
+             files.",
+            epic.title, epic.short_id, originating_adr_section, epic.short_id
         );
 
         let ac = serde_json::json!([
