@@ -367,6 +367,51 @@ impl TaskRunSupervisor {
                                     role = %role_kind.as_str(),
                                     "supervisor: committed worker/architect changes"
                                 );
+                                // Push the new commit to the mirror IMMEDIATELY
+                                // — before the subsequent stage (reviewer) runs
+                                // and before the post-stage transitions fire.
+                                // Without this, the worker's commits live only
+                                // in the ephemeral workspace until open_pr's
+                                // own push_to_origin runs at the very end. If
+                                // anything cancels between now and open_pr
+                                // (server restart, planner kill, cancel-token
+                                // race), the commits are LOST and the host's
+                                // coordinator-tick supervisor_pr_open sees
+                                // the stale mirror task_branch — pushing the
+                                // OLD commit to the PR. Observed on avoy:
+                                // worker fixed CI failure in cycle 2, but PR
+                                // #502 stayed pinned to cycle 1's commit
+                                // because the supervisor body never reached
+                                // its terminal open_pr.
+                                //
+                                // Eager push makes the commit durable to
+                                // the mirror right after the stage that
+                                // produced it. Idempotent (refspec
+                                // task_branch:task_branch). Best-effort —
+                                // a push failure here only means we'll
+                                // re-try at open_pr time; the run keeps
+                                // going.
+                                if let Err(e) = workspace
+                                    .push_to_origin(&spec.task_branch)
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        task_id = %task.short_id,
+                                        task_run_id = %run_id,
+                                        role = %role_kind.as_str(),
+                                        branch = %spec.task_branch,
+                                        error = %e,
+                                        "supervisor: eager push_to_origin failed (open_pr will retry)"
+                                    );
+                                } else {
+                                    tracing::debug!(
+                                        task_id = %task.short_id,
+                                        task_run_id = %run_id,
+                                        role = %role_kind.as_str(),
+                                        branch = %spec.task_branch,
+                                        "supervisor: pushed worker commit to mirror eagerly"
+                                    );
+                                }
                             }
                             Ok(false) => {
                                 tracing::debug!(
