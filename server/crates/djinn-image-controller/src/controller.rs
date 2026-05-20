@@ -283,6 +283,33 @@ impl ImageController {
 
         let created_job = match existing {
             Some(existing) => {
+                // If the existing Job already Succeeded, the watcher's
+                // state-change event already flipped status to Ready —
+                // and falling through to set status=Building below would
+                // overwrite that, never to be re-flipped (watcher only
+                // fires on Job state transitions, which already happened).
+                // That's the "status stuck at building" loop we
+                // reproduced when a retrigger nulls hash AFTER a Job
+                // completed. Detect it here and reconcile status to
+                // Ready inline.
+                if is_job_succeeded(&existing) {
+                    info!(
+                        project_id,
+                        hash = %hash_prefix,
+                        job = %job_name,
+                        namespace = %self.config.namespace,
+                        "image_controller: build Job already Succeeded — reconciling status to Ready (watcher already fired)"
+                    );
+                    let image = ProjectImage {
+                        tag: Some(image_tag.clone()),
+                        hash: Some(new_hash.to_string()),
+                        status: ProjectImageStatus::READY.into(),
+                        last_error: None,
+                    };
+                    repo.set_project_image(project_id, &image).await?;
+                    drop(permit);
+                    return Ok(());
+                }
                 info!(
                     project_id,
                     hash = %hash_prefix,
@@ -474,6 +501,29 @@ fn is_job_failed(job: &Job) -> bool {
             conds
                 .iter()
                 .any(|c| c.type_ == "Failed" && c.status == "True")
+        })
+        .unwrap_or(false)
+}
+
+/// Whether a build Job has Succeeded (≥1 successful Pod or Complete
+/// condition true). Mirror of [`is_job_failed`] used by the reconcile
+/// path to detect "already-built" Jobs and avoid the
+/// ready→building→ready loop the watcher can't recover from on its own
+/// (watcher only fires on Job state transitions, which already happened).
+fn is_job_succeeded(job: &Job) -> bool {
+    let Some(status) = job.status.as_ref() else {
+        return false;
+    };
+    if status.succeeded.unwrap_or(0) >= 1 {
+        return true;
+    }
+    status
+        .conditions
+        .as_ref()
+        .map(|conds| {
+            conds
+                .iter()
+                .any(|c| c.type_ == "Complete" && c.status == "True")
         })
         .unwrap_or(false)
 }
