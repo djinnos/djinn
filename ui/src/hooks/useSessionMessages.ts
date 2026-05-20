@@ -231,6 +231,22 @@ export function useSessionMessages(taskId: string | null, projectSlug: string | 
               timestamp: entry.timestamp,
             });
           }
+        } else if (entry.event_type === "pr_creation_failed") {
+          // Supervisor's PR-open path or task_merge's push step failed —
+          // surface the reason as a failed command card so the user sees
+          // why no PR was opened (e.g. "local branch task/X does not exist",
+          // "GitHub PR creation failed: ..."). Otherwise the entry was
+          // dropped silently and the task looked stuck with no explanation.
+          const reason = ((entry.payload as Record<string, unknown>)?.reason as string) ?? "";
+          if (reason) {
+            entries.push({
+              kind: "command",
+              name: "pr_open",
+              body: reason,
+              passed: false,
+              timestamp: entry.timestamp,
+            });
+          }
         }
       }
 
