@@ -587,6 +587,32 @@ impl TaskRunSupervisor {
                         break;
                     }
                     StageOutcome::Failed { reason } => {
+                        // Planner patrol tasks (issue_type=review) must close
+                        // even on Failed — the LLM sometimes finishes without
+                        // calling submit_grooming (StageOutcome::Failed via
+                        // "finalized via unexpected tool", or no finalize at
+                        // all), and the task otherwise stays `open` and the
+                        // coordinator re-dispatches it every ~30s in a tight
+                        // loop. Observed on n6k8 "Planner patrol: board
+                        // health review" after k4my had the same pattern.
+                        if role_kind == RoleKind::Planner
+                            && task.issue_type == "review"
+                            && let Err(e) = self
+                                .services
+                                .transition_task(
+                                    spec.task_id.clone(),
+                                    "close".into(),
+                                    Some(reason.clone()),
+                                )
+                                .await
+                        {
+                            tracing::warn!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                error = %e,
+                                "supervisor: planner-Failed close transition skipped"
+                            );
+                        }
                         result = Some(TaskRunOutcome::Failed {
                             stage: role_kind.as_str().into(),
                             reason,
