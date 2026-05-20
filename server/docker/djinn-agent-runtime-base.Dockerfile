@@ -113,8 +113,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         sccache \
     && rm -rf /var/lib/apt/lists/*
 
-# Rustup → /usr/local/{cargo,rustup}. World-readable so the non-root user
-# below can invoke cargo/rustc without a chown.
+# Rustup installs into /usr/local at image-build time (root). We then relocate
+# RUSTUP_HOME to /cache/rustup at runtime so the non-root `djinn` user can
+# install workspace-pinned toolchains (e.g. a repo's rust-toolchain.toml
+# declares `1.94.1`) without falling back to writing into the workspace
+# itself — which is what caused worker PRs to commit `.rustup/toolchains/**`
+# and `.cargo/bin/rustup` as diff junk that reviewers kept rejecting.
+#
+# Build-time install still uses /usr/local/rustup so the layer caches across
+# rebuilds; entrypoint logic in djinn-agent-runtime.Dockerfile seeds
+# /cache/rustup from it on first start (cheap one-time copy, then persistent
+# via the /cache PVC).
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:/opt/node/bin:$PATH
@@ -134,7 +143,7 @@ COPY --from=lsp /usr/local/bin/rust-analyzer /usr/local/bin/rust-analyzer
 # server image so shared PVCs (mirrors, cache) mount cleanly on both sides.
 RUN groupadd --system --gid 10001 djinn \
     && useradd --system --uid 10001 --gid 10001 --home /home/djinn --create-home --shell /usr/sbin/nologin djinn \
-    && mkdir -p /workspace /mirror /cache/cargo /cache/pnpm /cache/pip /cache/sccache /var/run/djinn \
+    && mkdir -p /workspace /mirror /cache/cargo /cache/pnpm /cache/pip /cache/sccache /cache/rustup /var/run/djinn \
     && chown -R djinn:djinn /workspace /cache /var/run/djinn /home/djinn
 
 # Per-run env defaults. Overridable by the Job spec (K8sRuntime) or the
@@ -157,7 +166,8 @@ ENV CARGO_HOME=/cache/cargo \
     CARGO_TARGET_DIR=/workspace/target \
     PNPM_STORE_DIR=/cache/pnpm \
     PIP_CACHE_DIR=/cache/pip \
-    RUSTUP_HOME=/usr/local/rustup \
+    RUSTUP_HOME=/cache/rustup \
+    RUSTUP_SEED_DIR=/usr/local/rustup \
     RUSTC_WRAPPER=sccache \
     SCCACHE_DIR=/cache/sccache \
     SCCACHE_CACHE_SIZE=10G \
