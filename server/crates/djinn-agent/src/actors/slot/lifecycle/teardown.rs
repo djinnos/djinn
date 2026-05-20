@@ -99,16 +99,24 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
                 .await;
         }
 
-        let transition = if final_result_ok {
-            role.on_complete(&task_id, &final_output, &app_state).await
-        } else if let Some(reason) = final_error {
-            Some(((role.config().release_action)(), Some(reason)))
-        } else {
-            Some(((role.config().release_action)(), None))
-        };
+        // K8s flow: the djinn-supervisor stage loop is the SOLE transition
+        // authority. The legacy role.on_complete() returned actions like
+        // SubmitVerification / SubmitTaskReview that raced with the supervisor
+        // body's Start / submit_task_review / task_review_approve calls,
+        // moving the task into `verifying` before the supervisor's
+        // submit_task_review could fire (then bouncing it back to `open`
+        // because the worker pod has no MirrorManager). Pass None so
+        // apply_transition_and_dispatch only does its trigger-next-dispatch
+        // bookkeeping and the no-op log.
+        //
+        // `final_error` and `final_result_ok` are intentionally unused here
+        // for the same reason — the supervisor body decides ReviewerRejected
+        // / VerifierFailed / Failed and fires the matching transition itself.
+        let _ = final_result_ok;
+        let _ = &final_error;
 
         apply_transition_and_dispatch(
-            transition,
+            None,
             &task_id,
             &project_path,
             &role,
