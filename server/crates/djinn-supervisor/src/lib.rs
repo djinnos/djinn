@@ -207,11 +207,42 @@ impl TaskRunSupervisor {
             return Err(SupervisorError::CreateTaskRun(e));
         }
 
-        let workspace = self
+        // Try to clone on task_branch first (preserves prior cycle's commits
+        // in the mirror — workspace.push_to_origin writes them back after
+        // each successful run). Fall back to base_branch only on the very
+        // first cycle of a task, when task_branch doesn't exist yet.
+        //
+        // The previous shape ("always clone on base_branch + ensure_branch")
+        // silently RESET task_branch to base_branch's HEAD on every re-run,
+        // throwing away every prior cycle's worker progress. Observed on
+        // task avoy: 3/3 ACs met in cycle 1, dropped to 1/3 in cycle 2 after
+        // CI bounced the task back to open.
+        let workspace = match self
             .mirror
-            .clone_ephemeral(&spec.project_id, &spec.base_branch)
-            .await?;
-        debug!(task_run_id = %run_id, path = ?workspace.path(), "ephemeral workspace ready");
+            .clone_ephemeral(&spec.project_id, &spec.task_branch)
+            .await
+        {
+            Ok(ws) => {
+                debug!(
+                    task_run_id = %run_id,
+                    branch = %spec.task_branch,
+                    path = ?ws.path(),
+                    "ephemeral workspace ready (continuing on existing task_branch)"
+                );
+                ws
+            }
+            Err(e) => {
+                debug!(
+                    task_run_id = %run_id,
+                    branch = %spec.task_branch,
+                    error = %e,
+                    "task_branch not in mirror; cloning on base_branch (first cycle)"
+                );
+                self.mirror
+                    .clone_ephemeral(&spec.project_id, &spec.base_branch)
+                    .await?
+            }
+        };
 
         let task = match self.services.load_task(spec.task_id.clone()).await {
             Ok(task) => task,
@@ -228,11 +259,11 @@ impl TaskRunSupervisor {
             }
         };
 
-        // The ephemeral workspace is cloned on spec.base_branch; create the
-        // task_branch as a local ref now so commits in this run land on it
-        // and `push_to_origin(task_branch)` has something to push. Without
-        // this, all worker stages commit to the base branch and the eventual
-        // push fails with `src refspec task/<short_id> does not match any`.
+        // First-cycle clone landed us on base_branch (or a re-clone where
+        // task_branch doesn't yet exist locally). `git checkout -B
+        // task/<short_id>` from base_branch's HEAD bootstraps a fresh
+        // task branch; on the task_branch clone path it's a no-op (the
+        // branch is already checked out from the mirror's HEAD).
         if let Err(e) = workspace.ensure_branch(&spec.task_branch).await {
             tracing::warn!(
                 task_run_id = %run_id,
@@ -398,11 +429,77 @@ impl TaskRunSupervisor {
                         }
                     }
                     StageOutcome::PlannerExecute | StageOutcome::VerifierPassed => {
-                        // Advance to the next stage. No file changes expected
-                        // from planner/verifier — they're read-only.
+                        // Planner finished a "decision=execute" submit_grooming —
+                        // close the planning/review task so the coordinator's
+                        // ready-task sweep doesn't keep re-dispatching it. The
+                        // legacy slot lifecycle used to do this via
+                        // role.on_complete → apply_transition_and_dispatch;
+                        // commit 4de6f49c7 stripped that to fix the
+                        // worker/reviewer race and accidentally left planner
+                        // tasks dispatching every ~30s in a tight loop
+                        // (observed on patrol planning task k4my: 10 sessions
+                        // in 8 minutes).
+                        //
+                        // Mirrors the planner role's on_complete:
+                        //   planning|decomposition → submit_for_merge (→ approved)
+                        //   review                 → close (patrol artifact)
+                        //   other                  → no transition
+                        if role_kind == RoleKind::Planner {
+                            let action = match task.issue_type.as_str() {
+                                "planning" | "decomposition" => Some("submit_for_merge"),
+                                "review" => Some("close"),
+                                _ => None,
+                            };
+                            if let Some(action) = action
+                                && let Err(e) = self
+                                    .services
+                                    .transition_task(
+                                        spec.task_id.clone(),
+                                        action.into(),
+                                        None,
+                                    )
+                                    .await
+                            {
+                                tracing::warn!(
+                                    task_run_id = %run_id,
+                                    task_id = %spec.task_id,
+                                    issue_type = %task.issue_type,
+                                    action = %action,
+                                    error = %e,
+                                    "supervisor: post-planner transition skipped"
+                                );
+                            }
+                        }
                     }
                     StageOutcome::PlannerClose { reason } => {
-                        result = Some(TaskRunOutcome::Closed { reason });
+                        result = Some(TaskRunOutcome::Closed { reason: reason.clone() });
+                        // Also fire a real DB transition so the task row
+                        // matches the run outcome. Same issue-type-aware
+                        // routing as PlannerExecute.
+                        if role_kind == RoleKind::Planner {
+                            let action = match task.issue_type.as_str() {
+                                "planning" | "decomposition" | "review" => Some("close"),
+                                _ => None,
+                            };
+                            if let Some(action) = action
+                                && let Err(e) = self
+                                    .services
+                                    .transition_task(
+                                        spec.task_id.clone(),
+                                        action.into(),
+                                        Some(reason),
+                                    )
+                                    .await
+                            {
+                                tracing::warn!(
+                                    task_run_id = %run_id,
+                                    task_id = %spec.task_id,
+                                    action = %action,
+                                    error = %e,
+                                    "supervisor: planner-close transition skipped"
+                                );
+                            }
+                        }
                         break;
                     }
                     StageOutcome::Escalate { reason } => {
