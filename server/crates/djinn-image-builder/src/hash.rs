@@ -52,11 +52,16 @@ pub fn compute_environment_hash(
     let config_json = canonical_json(config);
 
     let mut hasher = Sha256::new();
-    // Bumped v1→v2 when emit_path() changed RUSTUP_HOME from
-    // /usr/local/rustup (read-only) to /cache/rustup (writable PVC).
-    // Same env_config inputs would otherwise hash identically and reuse
-    // the pre-fix image, leaving workers with the old broken layout.
-    hasher.update(b"env-config/v2\0");
+    // v2→v3: the v2 attempt moved RUSTUP_HOME to /cache/rustup, but
+    // /cache is a runtime PVC mount that overlays whatever the image
+    // baked at /cache — so install-rust.sh wrote to a layer that was
+    // hidden by the empty PVC at startup, leaving workers with no
+    // cargo/rustup at all. v3 keeps RUSTUP_HOME at the baked-in
+    // /usr/local/rustup and makes it world-writable via emit_cleanup
+    // so workspace-pinned toolchains (rust-toolchain.toml → 1.94.1)
+    // can still be installed at session time without spilling into
+    // the workspace.
+    hasher.update(b"env-config/v3\0");
     hasher.update(config_json.as_bytes());
     hasher.update([0u8]);
     hasher.update(script_sha.as_bytes());

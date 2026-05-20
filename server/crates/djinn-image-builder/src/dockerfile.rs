@@ -170,23 +170,19 @@ const IMAGE_PATH: &str =
 
 fn emit_path(df: &mut String) {
     writeln!(df, "ENV PATH={IMAGE_PATH}").unwrap();
-    // RUSTUP_HOME must point at a writable cache directory so workspaces
-    // pinning non-stable toolchains (rust-toolchain.toml → e.g. 1.94.1)
-    // can install them via rustup. Pointing it at /usr/local/rustup
-    // (read-only for the non-root djinn user) made rustup fall back to
-    // writing toolchain installs into the workspace itself, polluting
-    // every worker-authored PR diff with `.rustup/toolchains/**`,
-    // `.cargo/bin/rustup`, `.bin/sccache` etc. The base image's
-    // entrypoint seeds /cache/rustup from /usr/local/rustup (read-only
-    // build-time install) on first start; runtime writes go to the PVC.
-    // CARGO_HOME stays at /cache/cargo so the registry persists across
-    // runs (same pattern that already worked).
-    writeln!(
-        df,
-        "ENV RUSTUP_HOME=/cache/rustup CARGO_HOME=/cache/cargo \
-         RUSTUP_SEED_DIR=/usr/local/rustup"
-    )
-    .unwrap();
+    // Keep RUSTUP_HOME at the baked-in /usr/local/rustup so the
+    // build-time install-rust.sh writes there (the rustup install is in
+    // the image layer, not a PVC mount — /cache IS a PVC mount at
+    // runtime, so putting RUSTUP_HOME there would hide the toolchain
+    // entirely behind an empty PVC overlay).
+    //
+    // Workspace toolchains pinned in rust-toolchain.toml (e.g. 1.94.1)
+    // need a writable RUSTUP_HOME, which we make possible by chmod-ing
+    // the directory world-writable in the cleanup pass — see
+    // `emit_cleanup`. That keeps stable readable to everyone AND lets
+    // the non-root djinn user `rustup install <pinned>` at session
+    // time without falling back to spilling .rustup/ into the workspace.
+    writeln!(df, "ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo").unwrap();
     writeln!(df, "ENV GOPATH=/go GOROOT=/usr/local/go").unwrap();
 }
 
@@ -513,6 +509,20 @@ fn emit_hook_as_run(df: &mut String, hook: &HookCommand) {
 
 fn emit_cleanup(df: &mut String) {
     writeln!(df, "RUN rm -rf /tmp/djinn-scripts").unwrap();
+    // Make RUSTUP_HOME + CARGO_HOME writable for the non-root djinn user
+    // so workspace-pinned toolchains (rust-toolchain.toml → e.g. 1.94.1)
+    // can be installed at session time without rustup falling back to
+    // .rustup/ inside the workspace. We keep the install paths at
+    // /usr/local/{rustup,cargo} because they live in image layers (not a
+    // PVC mount), so the baked-in stable toolchain stays visible at
+    // runtime. Best-effort — directories may not exist for
+    // language-less image variants; `|| true` keeps the build clean.
+    writeln!(
+        df,
+        "RUN [ -d /usr/local/rustup ] && chmod -R a+rwX /usr/local/rustup || true; \
+         [ -d /usr/local/cargo ] && chmod -R a+rwX /usr/local/cargo || true"
+    )
+    .unwrap();
 }
 
 // ---- small helpers ------------------------------------------------------
