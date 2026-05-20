@@ -170,7 +170,23 @@ const IMAGE_PATH: &str =
 
 fn emit_path(df: &mut String) {
     writeln!(df, "ENV PATH={IMAGE_PATH}").unwrap();
-    writeln!(df, "ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo").unwrap();
+    // RUSTUP_HOME must point at a writable cache directory so workspaces
+    // pinning non-stable toolchains (rust-toolchain.toml → e.g. 1.94.1)
+    // can install them via rustup. Pointing it at /usr/local/rustup
+    // (read-only for the non-root djinn user) made rustup fall back to
+    // writing toolchain installs into the workspace itself, polluting
+    // every worker-authored PR diff with `.rustup/toolchains/**`,
+    // `.cargo/bin/rustup`, `.bin/sccache` etc. The base image's
+    // entrypoint seeds /cache/rustup from /usr/local/rustup (read-only
+    // build-time install) on first start; runtime writes go to the PVC.
+    // CARGO_HOME stays at /cache/cargo so the registry persists across
+    // runs (same pattern that already worked).
+    writeln!(
+        df,
+        "ENV RUSTUP_HOME=/cache/rustup CARGO_HOME=/cache/cargo \
+         RUSTUP_SEED_DIR=/usr/local/rustup"
+    )
+    .unwrap();
     writeln!(df, "ENV GOPATH=/go GOROOT=/usr/local/go").unwrap();
 }
 

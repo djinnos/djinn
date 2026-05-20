@@ -52,7 +52,11 @@ pub fn compute_environment_hash(
     let config_json = canonical_json(config);
 
     let mut hasher = Sha256::new();
-    hasher.update(b"env-config/v1\0");
+    // Bumped v1→v2 when emit_path() changed RUSTUP_HOME from
+    // /usr/local/rustup (read-only) to /cache/rustup (writable PVC).
+    // Same env_config inputs would otherwise hash identically and reuse
+    // the pre-fix image, leaving workers with the old broken layout.
+    hasher.update(b"env-config/v2\0");
     hasher.update(config_json.as_bytes());
     hasher.update([0u8]);
     hasher.update(script_sha.as_bytes());
