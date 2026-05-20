@@ -1401,44 +1401,6 @@ impl CoordinatorActor {
 
         for task in tasks {
 
-            // K8s flow: the supervisor body already opened the PR via
-            // supervisor_pr_open + fired pr_created → the task is stuck at
-            // approved only because that final transition raced and
-            // didn't land. The legacy task_merge::merge_and_transition
-            // path below would try to re-open the same PR via a
-            // direct-from-mirror push that fails with "local branch
-            // task/X does not exist" (mirror layout differs from what
-            // task_merge expects). Just flip the status to pr_draft so
-            // pr_poller can take over CI tracking. Cheap, idempotent,
-            // and avoids the every-30s-error spam on the UI.
-            if task.pr_url.as_deref().is_some_and(|u| !u.is_empty()) {
-                let task_repo = self.task_repo();
-                if let Err(e) = task_repo
-                    .transition(
-                        &task.id,
-                        TransitionAction::PrCreated,
-                        "coordinator",
-                        "system",
-                        None,
-                        None,
-                    )
-                    .await
-                {
-                    tracing::debug!(
-                        task_id = %task.short_id,
-                        error = %e,
-                        "CoordinatorActor: approved task already has PR — pr_created transition skipped"
-                    );
-                } else {
-                    tracing::info!(
-                        task_id = %task.short_id,
-                        pr_url = %task.pr_url.as_deref().unwrap_or(""),
-                        "CoordinatorActor: approved task already has PR — flipped to pr_draft for pr_poller"
-                    );
-                }
-                continue;
-            }
-
             // Simple-lifecycle tasks normally close directly, but sessions that
             // produced durable artifacts (file changes, memory writes, or task
             // comments pointing at .djinn paths) must survive as branch/PR
@@ -1488,63 +1450,74 @@ impl CoordinatorActor {
                 task_id = %task.short_id,
                 task_uuid = %task.id,
                 project_id = %task.project_id,
-                "CoordinatorActor: processing approved task for PR creation"
+                "CoordinatorActor: processing approved task for PR push/open"
             );
 
-            let result = task_merge::merge_and_transition(
-                &task.id,
-                &app_state,
-                &APPROVED_MERGE_ACTIONS,
-                None, // no verification gate
-            )
-            .await;
-
-            match result {
-                Some((action, reason)) if action == SKIP_SENTINEL => {
-                    // Transient failure — leave in approved, retry next tick.
-                    tracing::debug!(
-                        task_id = %task.short_id,
-                        "CoordinatorActor: approved task PR/merge deferred (will retry)"
-                    );
-                    // Surface PR creation errors so board_health can display them.
-                    if let Some(ref err) = reason {
-                        self.pr_errors.insert(task.project_id.clone(), err.clone());
-                        self.publish_status();
-                    }
-                }
-                Some((action, reason)) => {
-                    // PR created successfully — clear any stored error.
+            // K8s flow: instead of the legacy task_merge::merge_and_transition
+            // (which relied on a worktree layout the K8s mirror doesn't have,
+            // and was spam-logging "local branch task/X does not exist" every
+            // 30s), call supervisor_pr_open directly.
+            //
+            // supervisor_pr_open is idempotent for re-cycles:
+            //   1. Clones the mirror on task_branch (preserves prior cycles'
+            //      commits — the supervisor body pushes them back via
+            //      workspace.push_to_origin on each successful run).
+            //   2. Force-pushes refs/heads/task_branch to origin → updates
+            //      the existing PR's head commit (triggers fresh CI).
+            //   3. list_pulls_by_head_with_state finds the existing PR
+            //      and reuses it instead of creating a new one.
+            //   4. Fires the PrCreated DB transition (approved → pr_draft).
+            //
+            // The supervisor body's own open_pr can race with this tick.
+            // That's fine: whichever fires first wins, the second is a
+            // no-op force-push (same SHA) and an InvalidTransition skip.
+            let spec = djinn_runtime::TaskRunSpec {
+                task_id: task.id.clone(),
+                project_id: task.project_id.clone(),
+                trigger: djinn_core::models::TaskRunTrigger::NewTask,
+                base_branch: crate::actors::slot::helpers::default_target_branch(
+                    &task.project_id,
+                    &app_state,
+                )
+                .await,
+                task_branch: format!("task/{}", task.short_id),
+                flow: djinn_runtime::SupervisorFlow::NewTask,
+                model_id_per_role: std::collections::HashMap::new(),
+            };
+            let callbacks = crate::supervisor_impl::SupervisorCallbackContext {
+                agent_context: app_state.clone(),
+                cancel: tokio_util::sync::CancellationToken::new(),
+                provider_override: None,
+            };
+            let outcome =
+                crate::supervisor_impl::supervisor_pr_open(&spec, &task, &callbacks).await;
+            match outcome {
+                djinn_runtime::TaskRunOutcome::PrOpened { url, sha } => {
                     self.pr_errors.remove(&task.project_id);
-                    if let Err(e) = repo
-                        .transition(
-                            &task.id,
-                            action.clone(),
-                            "coordinator",
-                            "system",
-                            reason.as_deref(),
-                            None,
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            task_id = %task.short_id,
-                            action = ?action,
-                            error = %e,
-                            "CoordinatorActor: failed to transition approved task"
-                        );
-                    } else {
-                        tracing::info!(
-                            task_id = %task.short_id,
-                            action = ?action,
-                            "CoordinatorActor: approved task transitioned"
-                        );
-                    }
+                    self.publish_status();
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        pr_url = %url,
+                        commit_sha = %sha,
+                        "CoordinatorActor: pushed latest task_branch to PR (re-cycle commits propagated)"
+                    );
                 }
-                None => {
-                    // merge_and_transition returned None — unexpected, log and skip.
+                djinn_runtime::TaskRunOutcome::Failed { stage, reason } => {
+                    self.pr_errors
+                        .insert(task.project_id.clone(), reason.clone());
+                    self.publish_status();
                     tracing::warn!(
                         task_id = %task.short_id,
-                        "CoordinatorActor: merge_and_transition returned None for approved task"
+                        stage = %stage,
+                        error = %reason,
+                        "CoordinatorActor: supervisor_pr_open failed (will retry next tick)"
+                    );
+                }
+                other => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        outcome = ?other,
+                        "CoordinatorActor: supervisor_pr_open returned unexpected outcome"
                     );
                 }
             }
