@@ -1079,6 +1079,80 @@ pub(crate) async fn squash_merge_via_mirror(
     Ok(MergeResult { commit_sha })
 }
 
+/// Best-effort detection of which files would conflict if `task_branch` were
+/// merged into `target_branch` right now, by trial-merging against the local
+/// bare mirror.
+///
+/// Used by the PR poller when GitHub reports `mergeable == false` so we can
+/// populate `merge_conflict_metadata` with the conflicting file list; without
+/// it, the worker re-dispatch picks `SupervisorFlow::NewTask` instead of
+/// `ConflictRetry` and the worker keeps fixing CI failures while the actual
+/// conflict against the target branch never gets resolved.
+///
+/// Returns `Ok(files)` (non-empty on conflict, empty if the mirror disagrees
+/// with GitHub — typically a stale `origin/{target_branch}` ref) or `Err` if
+/// the trial merge couldn't run at all.  The ephemeral workspace is dropped
+/// at the end of the call.
+pub(crate) async fn detect_pr_conflict_files(
+    mirror: &MirrorManager,
+    project_id: &str,
+    task_branch: &str,
+    target_branch: &str,
+) -> Result<Vec<String>, GitError> {
+    let workspace = mirror
+        .clone_ephemeral(project_id, target_branch)
+        .await
+        .map_err(|e| GitError::Other(anyhow::anyhow!("clone_ephemeral: {e}")))?;
+    let wt = workspace.path_buf();
+
+    // `git merge` insists on a user identity even when no commit is recorded.
+    let (bot_name, bot_email) = bot_identity();
+    let _ = djinn_git::run_git_command(
+        wt.clone(),
+        vec!["config".into(), "user.name".into(), bot_name],
+    )
+    .await;
+    let _ = djinn_git::run_git_command(
+        wt.clone(),
+        vec!["config".into(), "user.email".into(), bot_email],
+    )
+    .await;
+
+    djinn_git::run_git_command(
+        wt.clone(),
+        vec![
+            "fetch".into(),
+            "origin".into(),
+            format!("{task_branch}:refs/remotes/origin/{task_branch}"),
+        ],
+    )
+    .await?;
+
+    // `merge --squash` matches the landing semantics in `squash_merge_via_mirror`
+    // and approximates what GitHub's `mergeable` check evaluates: cleanly fold
+    // target + task into a single tree.  Without `--no-commit` git would try to
+    // record the merge; `--squash` stops short, leaving the index conflicted on
+    // failure.  The TempDir is discarded at function exit so no `merge --abort`
+    // is necessary.
+    let merge_result = djinn_git::run_git_command(
+        wt.clone(),
+        vec![
+            "merge".into(),
+            "--squash".into(),
+            format!("origin/{task_branch}"),
+        ],
+    )
+    .await;
+
+    match merge_result {
+        Ok(_) => Ok(Vec::new()),
+        Err(GitError::CommandFailed { .. }) => {
+            Ok(djinn_git::unmerged_files(wt).await.unwrap_or_default())
+        }
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

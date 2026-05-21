@@ -29,7 +29,7 @@
 use std::sync::Arc;
 
 use djinn_core::models::{TaskRunStatus, TaskRunTrigger};
-use djinn_workspace::{EphemeralWorkspaceError, GitIdentity, MirrorError, MirrorManager};
+use djinn_workspace::{EphemeralWorkspaceError, GitIdentity, MergeOutcome, MirrorError, MirrorManager};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, info};
@@ -272,6 +272,50 @@ impl TaskRunSupervisor {
                 error = %e,
                 "supervisor: ensure_branch failed (push will likely fail later)"
             );
+        }
+
+        // ConflictRetry pre-merge.  Without this the K8s worker pod sees a
+        // clean checkout of task_branch and gets a list of conflicting file
+        // paths in its prompt but no on-disk merge state — and dutifully
+        // refixes the latest CI signal in the activity log instead of
+        // resolving the conflict, because the conflict is invisible to its
+        // editing tools.  Doing `git merge --no-commit --no-ff origin/<base>`
+        // here leaves standard <<<<<<<<=======>>>>>>>> markers on disk in the
+        // conflicting files for the worker to edit out, and leaves
+        // `.git/MERGE_HEAD` set so the post-worker auto-commit produces a
+        // proper merge commit.  Failures are logged-and-skipped: the worker
+        // still runs (just without the merge state), preserving the previous
+        // behavior for that path.
+        if spec.trigger == TaskRunTrigger::ConflictRetry {
+            match workspace.try_merge(&spec.base_branch).await {
+                Ok(MergeOutcome::Clean) => {
+                    info!(
+                        task_run_id = %run_id,
+                        task_id = %spec.task_id,
+                        target = %spec.base_branch,
+                        "supervisor: ConflictRetry pre-merge applied cleanly; staged result will be committed alongside any worker edits"
+                    );
+                }
+                Ok(MergeOutcome::Conflicts { files }) => {
+                    info!(
+                        task_run_id = %run_id,
+                        task_id = %spec.task_id,
+                        target = %spec.base_branch,
+                        conflict_count = files.len(),
+                        conflicting_files = ?files,
+                        "supervisor: ConflictRetry pre-merge left conflicts in worker workspace"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_run_id = %run_id,
+                        task_id = %spec.task_id,
+                        target = %spec.base_branch,
+                        error = %e,
+                        "supervisor: ConflictRetry pre-merge failed; worker will run without merge state on disk"
+                    );
+                }
+            }
         }
 
         let sequence = spec.flow.role_sequence();

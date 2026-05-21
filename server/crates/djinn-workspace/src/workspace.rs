@@ -24,6 +24,18 @@ pub struct GitIdentity<'a> {
     pub email: &'a str,
 }
 
+/// Result of a [`Workspace::try_merge`] attempt.
+#[derive(Debug, Clone)]
+pub enum MergeOutcome {
+    /// Merge applied cleanly. Changes are staged in the index (no commit
+    /// created — caller's normal `commit` path picks them up as a merge
+    /// commit because `.git/MERGE_HEAD` is set).
+    Clean,
+    /// Merge stopped on conflicts. The conflicting files are left on disk
+    /// with standard git markers (`<<<<<<<`, `=======`, `>>>>>>>`).
+    Conflicts { files: Vec<String> },
+}
+
 /// How the workspace's on-disk root is owned.
 ///
 /// `Owned` drops the underlying `TempDir` when the workspace is dropped —
@@ -157,6 +169,72 @@ impl Workspace {
     /// a local ref pointing at the worker's commits.
     pub async fn ensure_branch(&self, branch: &str) -> Result<(), EphemeralWorkspaceError> {
         self.run_git(&["checkout", "-B", branch], &[]).await.map(|_| ())
+    }
+
+    /// Fetch `target_branch` from `origin` and attempt a no-fast-forward merge
+    /// into the currently checked-out branch, stopping short of the commit.
+    ///
+    /// Used by the supervisor on `ConflictRetry` runs so the worker pod sees
+    /// the merge state (with conflict markers in files) when it inspects the
+    /// workspace, instead of just a clean checkout of `task_branch` and a list
+    /// of file paths in its prompt.
+    ///
+    /// `--no-commit` leaves the result staged so the subsequent worker stage's
+    /// auto-commit in the supervisor body produces a merge commit (because
+    /// `.git/MERGE_HEAD` is still set). `--no-ff` ensures a real merge
+    /// commit even when `target_branch` is strictly ahead — keeps the topology
+    /// predictable for the reviewer.
+    ///
+    /// Returns:
+    /// - `Ok(MergeOutcome::Clean)` — merge applied without conflicts.
+    /// - `Ok(MergeOutcome::Conflicts { files })` — merge stopped on conflicts;
+    ///   the workspace is mid-merge with markers on disk.
+    /// - `Err(_)` — fetch failed, or git merge failed for reasons other than
+    ///   conflicts (e.g. unknown ref). Caller should log-and-skip rather than
+    ///   abort the run.
+    pub async fn try_merge(
+        &self,
+        target_branch: &str,
+    ) -> Result<MergeOutcome, EphemeralWorkspaceError> {
+        self.run_git(&["fetch", "origin", target_branch], &[]).await?;
+
+        // `git merge` validates the committer identity at the start of the
+        // operation even with `--no-commit`, so we must supply it here.  The
+        // values match what `commit` injects so any merge commit produced by
+        // the subsequent auto-commit stage carries a consistent author.
+        let merge_ref = format!("origin/{target_branch}");
+        let mut cmd = Command::new("git");
+        cmd.arg("-C")
+            .arg(self.root.path())
+            .args(["merge", "--no-commit", "--no-ff", &merge_ref])
+            .env("GIT_AUTHOR_NAME", "djinn-bot")
+            .env("GIT_AUTHOR_EMAIL", "bot@djinn.local")
+            .env("GIT_COMMITTER_NAME", "djinn-bot")
+            .env("GIT_COMMITTER_EMAIL", "bot@djinn.local");
+        let output = cmd.output().await?;
+        if output.status.success() {
+            return Ok(MergeOutcome::Clean);
+        }
+
+        let unmerged = self
+            .run_git(&["diff", "--name-only", "--diff-filter=U"], &[])
+            .await?;
+        let files: Vec<String> = unmerged
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+
+        if files.is_empty() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(EphemeralWorkspaceError::Git(format!(
+                "git merge --no-commit --no-ff {merge_ref}: {}",
+                stderr.trim()
+            )));
+        }
+
+        Ok(MergeOutcome::Conflicts { files })
     }
 
     /// Push the named branch from this workspace to its `origin` remote.

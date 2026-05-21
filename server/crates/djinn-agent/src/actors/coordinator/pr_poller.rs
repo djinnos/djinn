@@ -248,10 +248,13 @@ impl CoordinatorActor {
                     pr = pull_number,
                     "PR poller: draft PR has merge conflicts → reopening task for rework"
                 );
+                let reason = self
+                    .build_pr_conflict_reason(&task.short_id, &task.project_id)
+                    .await;
                 self.apply_pr_transition(
                     &task.id,
                     TransitionAction::PrConflict,
-                    Some("PR has merge conflicts"),
+                    Some(&reason),
                 )
                 .await;
                 self.pr_status_cache.remove(&task.id);
@@ -525,10 +528,13 @@ impl CoordinatorActor {
                     pr = pull_number,
                     "PR poller: PR has merge conflicts → reopening task for rework"
                 );
+                let reason = self
+                    .build_pr_conflict_reason(&task.short_id, &task.project_id)
+                    .await;
                 self.apply_pr_transition(
                     &task.id,
                     TransitionAction::PrConflict,
-                    Some("PR has merge conflicts"),
+                    Some(&reason),
                 )
                 .await;
                 self.pr_status_cache.remove(&task.id);
@@ -995,6 +1001,70 @@ impl CoordinatorActor {
                 error = %e,
                 "PR poller: failed to apply task transition"
             );
+        }
+    }
+
+    /// Build the `PrConflict` transition reason for a task whose PR was just
+    /// flagged `mergeable == false` by GitHub.
+    ///
+    /// When the local mirror can reproduce the conflict, returns
+    /// `merge_conflict:{JSON}` so the task's `merge_conflict_metadata` column
+    /// (and from there `conflict_context_for_dispatch`) picks up the file
+    /// list and `SupervisorFlow::ConflictRetry` is selected on re-dispatch.
+    /// Otherwise (no mirror configured, mirror stale, trial merge errored)
+    /// falls back to a plain string — the task still transitions to `open`,
+    /// just without the structured payload.
+    async fn build_pr_conflict_reason(&self, task_short_id: &str, project_id: &str) -> String {
+        const FALLBACK: &str = "PR has merge conflicts";
+
+        let Some(mirror) = self.mirror.as_ref() else {
+            return FALLBACK.to_string();
+        };
+
+        let project_repo = djinn_db::ProjectRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let target_branch = match project_repo.get_config(project_id).await {
+            Ok(Some(cfg)) => cfg.target_branch,
+            _ => "main".to_string(),
+        };
+        let task_branch = format!("task/{task_short_id}");
+
+        let files = match crate::task_merge::detect_pr_conflict_files(
+            mirror,
+            project_id,
+            &task_branch,
+            &target_branch,
+        )
+        .await
+        {
+            Ok(files) if !files.is_empty() => files,
+            Ok(_) => {
+                tracing::info!(
+                    task_short_id,
+                    "PR poller: local trial merge found no conflicts (mirror likely stale on target branch); using plain reason"
+                );
+                return FALLBACK.to_string();
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_short_id,
+                    error = %e,
+                    "PR poller: trial merge against mirror failed; using plain reason"
+                );
+                return FALLBACK.to_string();
+            }
+        };
+
+        let meta = serde_json::json!({
+            "conflicting_files": files,
+            "base_branch": task_branch,
+            "merge_target": target_branch,
+        });
+        match serde_json::to_string(&meta) {
+            Ok(json) => format!("merge_conflict:{json}"),
+            Err(_) => FALLBACK.to_string(),
         }
     }
 
