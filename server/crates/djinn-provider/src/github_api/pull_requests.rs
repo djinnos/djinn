@@ -546,4 +546,45 @@ impl GitHubApiClient {
 
         Ok(json)
     }
+
+    /// Delete a git ref on the remote repository.
+    ///
+    /// `ref_name` is the ref *without* the leading `refs/` prefix — pass
+    /// `"heads/<branch>"` for branches, `"tags/<tag>"` for tags. GitHub's
+    /// own PR-cleanup path (and our `cleanup_task_branches_post_close`)
+    /// uses this to wipe the task branch after merge / force-close so
+    /// the mirror and the remote both stop dragging the dead ref around.
+    ///
+    /// Idempotent: GitHub returns 422 when the ref doesn't exist; we treat
+    /// that as success.
+    pub async fn delete_ref(&self, owner: &str, repo: &str, ref_name: &str) -> Result<()> {
+        let url = format!(
+            "{}/repos/{}/{}/git/refs/{}",
+            self.base_url, owner, repo, ref_name
+        );
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .delete(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        let status = resp.status();
+        if status.is_success() || status.as_u16() == 422 {
+            return Ok(());
+        }
+        let body = resp.text().await.unwrap_or_default();
+        Err(anyhow!("delete_ref failed ({}): {}", status, body))
+    }
 }

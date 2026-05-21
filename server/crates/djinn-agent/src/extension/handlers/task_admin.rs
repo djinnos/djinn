@@ -150,6 +150,8 @@ pub(super) async fn call_task_transition(
         .map_err(|e| e.to_string())?;
     let project_id = project_id_for_path(state, project_path).await?;
     let server = djinn_control_plane::server::DjinnMcpServer::new(state.to_mcp_state());
+    let task_id_for_cleanup = task.id.clone();
+    let cleanup_action = action.clone();
     let Json(response) = shared_transition_task(
         &server,
         &project_id,
@@ -163,6 +165,27 @@ pub(super) async fn call_task_transition(
         },
     )
     .await;
+
+    // Branch hygiene: when a lead / admin / planner-patrol caller force-closes
+    // a task, delete the task branch on both the local mirror and the GitHub
+    // remote so it doesn't sit on the mirror as a dead ref and an open PR.
+    // Best-effort: errors are logged inside `cleanup_task_branches_post_close`
+    // and never block the response.
+    if cleanup_action == TransitionAction::ForceClose
+        && matches!(
+            response,
+            djinn_control_plane::tools::task_tools::ErrorOr::Ok(_)
+        )
+    {
+        crate::task_merge::cleanup_task_branches_post_close(
+            &task_id_for_cleanup,
+            &state.db,
+            &state.event_bus,
+            state.mirror.as_deref(),
+        )
+        .await;
+    }
+
     error_or_to_value(response, task_response_to_value)
 }
 

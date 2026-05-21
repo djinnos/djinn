@@ -992,6 +992,7 @@ impl CoordinatorActor {
         reason: Option<&str>,
     ) {
         let task_repo = self.task_repo();
+        let cleanup_action = action.clone();
         if let Err(e) = task_repo
             .transition(task_id, action, "system", "pr_poller", reason, None)
             .await
@@ -1001,6 +1002,24 @@ impl CoordinatorActor {
                 error = %e,
                 "PR poller: failed to apply task transition"
             );
+            return;
+        }
+        // Branch hygiene: once the task is closed (merged or force-closed via
+        // any pr_poller path), delete the task branch on both the local mirror
+        // and the GitHub remote.  Without this, stale `task/<short_id>` refs
+        // pile up on every mirror clone and on GitHub.  Best-effort.
+        if matches!(
+            cleanup_action,
+            TransitionAction::PrMerge | TransitionAction::ForceClose
+        ) {
+            let event_bus = crate::events::event_bus_for(&self.events_tx);
+            crate::task_merge::cleanup_task_branches_post_close(
+                task_id,
+                &self.db,
+                &event_bus,
+                self.mirror.as_deref(),
+            )
+            .await;
         }
     }
 
@@ -1277,7 +1296,7 @@ async fn resolve_installation_client(
 /// Parse a GitHub PR URL into `(owner, repo, pull_number)`.
 ///
 /// Handles URLs of the form `https://github.com/{owner}/{repo}/pull/{number}`.
-fn parse_pr_url(url: &str) -> Option<(String, String, u64)> {
+pub(crate) fn parse_pr_url(url: &str) -> Option<(String, String, u64)> {
     let path = url.strip_prefix("https://github.com/")?;
     let mut parts = path.splitn(5, '/');
     let owner = parts.next()?;

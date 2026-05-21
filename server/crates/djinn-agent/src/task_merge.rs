@@ -841,6 +841,112 @@ pub(crate) async fn interrupt_paused_worker_session(task_id: &str, app_state: &A
     }
 }
 
+/// Best-effort cleanup of the task branch on the local mirror and on the
+/// GitHub remote after the task transitions to `closed` (either via
+/// `PrMerge` or any `ForceClose` path — lead intervention, admin tool,
+/// PR-closed-without-merge detection).
+///
+/// Idempotent and non-fatal: any failure is logged and swallowed so the
+/// close transition is never blocked on cleanup.  When a branch is already
+/// gone from either side, GitHub returns 422 (treated as success by
+/// `delete_ref`) and `git update-ref -d` exits non-zero, which we log and
+/// move on from.
+///
+/// Why both sides:
+/// - Local mirror: leaves `refs/heads/task/<short_id>` pointing at a dead
+///   commit forever otherwise; `clone_ephemeral`s see it on every dispatch.
+/// - GitHub remote: GitHub doesn't auto-delete head branches unless the
+///   repo has "automatically delete head branches" enabled.  Deleting the
+///   ref via API also closes any PR still open on that head — exactly the
+///   behavior we want for lead-supersede force-closes where the PR was
+///   left open as garbage.
+pub(crate) async fn cleanup_task_branches_post_close(
+    task_id: &str,
+    db: &djinn_db::Database,
+    event_bus: &djinn_core::events::EventBus,
+    mirror: Option<&MirrorManager>,
+) {
+    let task_repo = TaskRepository::new(db.clone(), event_bus.clone());
+    let Ok(Some(task)) = task_repo.get(task_id).await else {
+        return;
+    };
+    let task_branch = format!("task/{}", task.short_id);
+
+    // ── Local mirror ────────────────────────────────────────────────────
+    if let Some(mirror) = mirror {
+        let mirror_path = mirror.mirror_path(&task.project_id);
+        if mirror_path.exists() {
+            match djinn_git::run_git_command(
+                mirror_path.clone(),
+                vec![
+                    "update-ref".into(),
+                    "-d".into(),
+                    format!("refs/heads/{task_branch}"),
+                ],
+            )
+            .await
+            {
+                Ok(_) => {
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        branch = %task_branch,
+                        "post-close cleanup: deleted task branch from mirror"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        branch = %task_branch,
+                        error = %e,
+                        "post-close cleanup: failed to delete task branch from mirror"
+                    );
+                }
+            }
+        }
+    }
+
+    // ── GitHub remote ──────────────────────────────────────────────────
+    let Some(pr_url) = task.pr_url.as_deref() else {
+        return;
+    };
+    let Some((owner, repo, _pull)) =
+        crate::actors::coordinator::pr_poller::parse_pr_url(pr_url)
+    else {
+        return;
+    };
+    if github_app_id().is_err() {
+        return;
+    }
+    let project_repo = ProjectRepository::new(db.clone(), event_bus.clone());
+    let installation_id = match project_repo.get_installation_id(&task.project_id).await {
+        Ok(Some(id)) => id,
+        _ => return,
+    };
+    let client = GitHubApiClient::for_installation(installation_id);
+    let ref_name = format!("heads/{task_branch}");
+    match client.delete_ref(&owner, &repo, &ref_name).await {
+        Ok(()) => {
+            tracing::info!(
+                task_id = %task.short_id,
+                owner = %owner,
+                repo = %repo,
+                branch = %task_branch,
+                "post-close cleanup: deleted task branch on GitHub"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task.short_id,
+                owner = %owner,
+                repo = %repo,
+                branch = %task_branch,
+                error = %e,
+                "post-close cleanup: failed to delete task branch on GitHub"
+            );
+        }
+    }
+}
+
 pub(crate) async fn resolve_project_path_for_id(
     project_id: &str,
     app_state: &AgentContext,
