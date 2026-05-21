@@ -251,7 +251,14 @@ pub(crate) async fn execute_stage(
     // `role_for_epic_check` stays the injected base role because the
     // `needs_epic_context` contract is about what the flow-enum role does,
     // not what the specialist's prompt variant says.
-    let project_path_str = worktree_path.display().to_string();
+    //
+    // {{project_path}} feeds MCP tool calls (`memory_*`, `build_context`, etc.)
+    // as the `project=...` argument. ProjectRepository::resolve accepts UUIDs
+    // and `owner/repo` slugs but NOT filesystem paths. The worktree path
+    // (`/workspace/.tmpXXX` in K8s pods) is not a registered project, so
+    // feeding it here caused every memory-tool call from the planner to fail
+    // with "project not found" and the planner re-dispatched in a tight loop.
+    let project_path_str = task.project_id.clone();
     let PromptContext { system_prompt, .. } = build_prompt_context(PromptContextInputs {
         task,
         runtime_role: runtime_role.as_ref(),
@@ -437,7 +444,11 @@ pub(crate) async fn execute_stage(
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
                         match decision {
-                            "execute" => StageOutcome::PlannerExecute,
+                            // Empty (LLM omitted the field) and "execute" both
+                            // mean "wave was created or board work continues" —
+                            // mapping empty → Failed here looped every planner
+                            // task whose prompt drifted off the decision field.
+                            "" | "execute" => StageOutcome::PlannerExecute,
                             "close" => StageOutcome::PlannerClose {
                                 reason: extract_reason(&final_output.finalize_payload)
                                     .unwrap_or_else(|| "planner closed task".into()),

@@ -72,6 +72,11 @@ pub struct SubmitGrooming {
     /// finishing a review-type patrol task. Minutes between 5 and 60 inclusive;
     /// ignored for non-patrol Planner dispatches.
     pub next_patrol_minutes: Option<u32>,
+    /// Outcome decision read by the supervisor: "execute" (dispatch the wave),
+    /// "close" (epic complete, close the planning task), or "escalate" (board
+    /// state needs human attention). Optional — supervisor defaults to
+    /// "execute" when omitted so a missing field doesn't loop the planner.
+    pub decision: Option<String>,
 }
 
 /// MCP tool descriptor for the Worker finalize tool.
@@ -191,6 +196,11 @@ pub fn tool_submit_grooming() -> RmcpTool {
                     "minimum": 5,
                     "maximum": 60,
                     "description": "Planner patrol only (per ADR-051 §1): minutes until the next board-health patrol should run (5-60). Set when the current task is a review-type patrol (`issue_type=\"review\"`, title contains \"patrol\"). Omit for decomposition or intervention sessions."
+                },
+                "decision": {
+                    "type": "string",
+                    "enum": ["execute", "close", "escalate"],
+                    "description": "Outcome decision: 'execute' = wave was created or board work continues (coordinator dispatches the new tasks); 'close' = epic is complete and the planning task should close (set `reason` in summary); 'escalate' = board state needs human attention. Optional — defaults to 'execute' when omitted."
                 }
             }
         }),

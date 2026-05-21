@@ -1,6 +1,5 @@
 ---
 source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
-assertion_line: 236
 expression: tool_schemas_planner()
 ---
 [
@@ -969,6 +968,15 @@ expression: tool_schemas_planner()
     "description": "Signal that the grooming session is complete. Report per-task actions taken. Your session ends after this call.",
     "inputSchema": {
       "properties": {
+        "decision": {
+          "description": "Outcome decision: 'execute' = wave was created or board work continues (coordinator dispatches the new tasks); 'close' = epic is complete and the planning task should close (set `reason` in summary); 'escalate' = board state needs human attention. Optional — defaults to 'execute' when omitted.",
+          "enum": [
+            "execute",
+            "close",
+            "escalate"
+          ],
+          "type": "string"
+        },
         "next_patrol_minutes": {
           "description": "Planner patrol only (per ADR-051 §1): minutes until the next board-health patrol should run (5-60). Set when the current task is a review-type patrol (`issue_type=\"review\"`, title contains \"patrol\"). Omit for decomposition or intervention sessions.",
           "maximum": 60,

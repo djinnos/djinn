@@ -108,6 +108,18 @@ where
                 break;
             }
         }
+        // K8s worker pods set `default_project_id` from their spec — fall
+        // back to it when the LLM passed a bogus value (most commonly the
+        // worktree path `/workspace/.tmpXXX`) so memory_*, build_context,
+        // and other project-scoped tools keep working instead of returning
+        // "project not found" and looping the planner.
+        if resolved.is_none()
+            && let Some(default_id) = state.default_project_id.as_deref()
+            && !default_id.is_empty()
+            && let Ok(Some(proj)) = repo.get(default_id).await
+        {
+            resolved = Some(proj);
+        }
         resolved
     };
     let project_id = project.as_ref().map(|project| project.id.clone());

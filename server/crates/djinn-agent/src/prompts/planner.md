@@ -195,7 +195,7 @@ Then update the epic to reference it: `epic_update(id, memory_refs=[..., "<roadm
 - No remaining work items are described in the roadmap.
 - Memory refs or session reflections indicate the codebase already satisfies the epic's done criteria.
 
-**If the epic is complete:** Call `epic_close(id)` immediately, then `submit_grooming(summary="Epic complete — closed.")`. Do NOT create new tasks for a completed epic. Failing to close a completed epic causes an infinite planning loop — the coordinator will dispatch you repeatedly for an epic that has no remaining work.
+**If the epic is complete:** Call `epic_close(id)` immediately, then `submit_grooming(summary="Epic complete — closed.", decision="close")`. The `decision="close"` is REQUIRED to close THIS planning task — without it the coordinator will re-dispatch you on the same epic forever. Do NOT create new tasks for a completed epic. Failing to set `decision="close"` (or omitting `epic_close`) causes an infinite planning loop.
 
 **If a few tasks remain open but their acceptance criteria appear already met by the codebase:** Verify this yourself using `shell` and `read` (you have read-only codebase access). If confirmed, close them with `task_transition(id, "close")`, then close the epic. **NEVER create a worker task to verify or close other tasks or the epic — that is YOUR job.** Workers write code; you manage task and epic lifecycle.
 
