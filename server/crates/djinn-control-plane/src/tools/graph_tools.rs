@@ -208,6 +208,46 @@ pub struct CodeGraphParams {
     pub target: Option<String>,
 }
 
+impl CodeGraphParams {
+    /// Coerce `Some("")` to `None` on every `Option<String>` input.
+    ///
+    /// Why: MCP clients (and chat-side LLMs in particular) often serialize
+    /// tool calls with every schema field present, defaulting unset
+    /// optionals to `""`. Downstream handlers that build a glob from
+    /// `Some("")` get an "empty pattern" matcher that matches nothing,
+    /// silently filtering all results. Normalizing at the param boundary
+    /// turns these into `None` so every op sees the same shape regardless
+    /// of caller behavior.
+    pub fn normalize(&mut self) {
+        fn clear(opt: &mut Option<String>) {
+            if opt.as_deref().is_some_and(str::is_empty) {
+                *opt = None;
+            }
+        }
+        clear(&mut self.key);
+        clear(&mut self.direction);
+        clear(&mut self.kind_filter);
+        clear(&mut self.query);
+        clear(&mut self.from);
+        clear(&mut self.to);
+        clear(&mut self.from_glob);
+        clear(&mut self.to_glob);
+        clear(&mut self.visibility);
+        clear(&mut self.sort_by);
+        clear(&mut self.group_by);
+        clear(&mut self.edge_kind);
+        clear(&mut self.file);
+        clear(&mut self.module_glob);
+        clear(&mut self.confidence);
+        clear(&mut self.file_glob);
+        clear(&mut self.kind_hint);
+        clear(&mut self.from_sha);
+        clear(&mut self.to_sha);
+        clear(&mut self.mode);
+        clear(&mut self.target);
+    }
+}
+
 // ── Response types ──────────────────────────────────────────────────────────────
 
 // NOTE: previously `result: NeighborsResult` was `#[serde(flatten)]`, but
@@ -1056,6 +1096,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(mut params): Parameters<CodeGraphParams>,
     ) -> Json<ErrorOr<CodeGraphResponse>> {
+        params.normalize();
         // Resolve `project` (UUID or slug) to (project_id, clone_path)
         // once here; inner handlers read the pre-populated `project_id`
         // and `project_path` fields without hitting the DB again.

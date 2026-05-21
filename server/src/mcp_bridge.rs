@@ -1818,7 +1818,7 @@ impl RepoGraphOps for RepoGraphBridge {
                 ));
             }
         };
-        let module_matcher = match module_glob {
+        let module_matcher = match module_glob.filter(|s| !s.is_empty()) {
             Some(pattern) => Some(
                 globset::Glob::new(pattern)
                     .map_err(|e| format!("invalid module_glob '{pattern}': {e}"))?
@@ -2049,7 +2049,7 @@ impl RepoGraphOps for RepoGraphBridge {
             }
         }
 
-        let file_matcher = match file_glob {
+        let file_matcher = match file_glob.filter(|s| !s.is_empty()) {
             Some(pattern) => Some(
                 globset::Glob::new(pattern)
                     .map_err(|e| format!("invalid file_glob '{pattern}': {e}"))?
@@ -2132,7 +2132,7 @@ impl RepoGraphOps for RepoGraphBridge {
         )
         .await?;
 
-        let file_matcher = match file_glob {
+        let file_matcher = match file_glob.filter(|s| !s.is_empty()) {
             Some(pattern) => Some(
                 globset::Glob::new(pattern)
                     .map_err(|e| format!("invalid file_glob '{pattern}': {e}"))?
@@ -2230,7 +2230,7 @@ impl RepoGraphOps for RepoGraphBridge {
         )
         .await?;
 
-        let file_matcher = match file_glob {
+        let file_matcher = match file_glob.filter(|s| !s.is_empty()) {
             Some(pattern) => Some(
                 globset::Glob::new(pattern)
                     .map_err(|e| format!("invalid file_glob '{pattern}': {e}"))?

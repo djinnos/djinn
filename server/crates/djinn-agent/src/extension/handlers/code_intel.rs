@@ -232,6 +232,7 @@ pub(crate) async fn call_code_graph(
     project_path: &str,
 ) -> Result<serde_json::Value, String> {
     let mut p: CodeGraphParams = parse_args(arguments)?;
+    p.normalize();
     let mcp_state = state.to_mcp_state();
     let graph_ops = mcp_state.repo_graph();
     // Build the resolved ProjectCtx once; pass by reference to each op.

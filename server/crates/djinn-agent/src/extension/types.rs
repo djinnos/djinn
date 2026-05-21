@@ -389,6 +389,44 @@ pub(super) struct CodeGraphParams {
     pub target: Option<String>,
 }
 
+impl CodeGraphParams {
+    /// Coerce `Some("")` to `None` on every `Option<String>` input.
+    ///
+    /// Why: chat-side LLMs frequently emit tool calls with every schema
+    /// field present, defaulting unset optionals to `""`. Downstream
+    /// handlers that build a glob from `Some("")` get an "empty pattern"
+    /// matcher that matches nothing, silently filtering all results.
+    /// Normalizing at the param boundary turns these into `None`, so
+    /// every op sees the same shape regardless of caller behavior.
+    pub(super) fn normalize(&mut self) {
+        fn clear(opt: &mut Option<String>) {
+            if opt.as_deref().is_some_and(str::is_empty) {
+                *opt = None;
+            }
+        }
+        clear(&mut self.key);
+        clear(&mut self.direction);
+        clear(&mut self.kind_filter);
+        clear(&mut self.query);
+        clear(&mut self.from);
+        clear(&mut self.to);
+        clear(&mut self.from_glob);
+        clear(&mut self.to_glob);
+        clear(&mut self.visibility);
+        clear(&mut self.sort_by);
+        clear(&mut self.group_by);
+        clear(&mut self.edge_kind);
+        clear(&mut self.kind_hint);
+        clear(&mut self.mode);
+        clear(&mut self.file_path);
+        clear(&mut self.confidence);
+        clear(&mut self.file_glob);
+        clear(&mut self.from_sha);
+        clear(&mut self.to_sha);
+        clear(&mut self.target);
+    }
+}
+
 /// v8 `diff_touches` input shape — mirrors
 /// `djinn_control_plane::bridge::ChangedRange`.
 ///
