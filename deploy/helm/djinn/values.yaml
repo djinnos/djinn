@@ -41,6 +41,17 @@ serviceAccount:
   # (audience `djinn`) is presented to djinn-server, which resolves identity
   # via the cluster TokenReview API.
   taskrun: djinn-taskrun
+  # Provider-agnostic annotation maps applied to each SA. Operators populate
+  # these with whatever their environment needs:
+  #   * EKS IRSA       — eks.amazonaws.com/role-arn: arn:aws:iam:...
+  #   * GKE Workload
+  #     Identity       — iam.gke.io/gcp-service-account: <sa>@<project>.iam.gserviceaccount.com
+  #   * AKS Workload
+  #     Identity       — azure.workload.identity/client-id: <uuid>
+  # The chart stays cloud-neutral; nothing here is rendered when the map is
+  # empty (the local-dev install path).
+  controllerAnnotations: {}
+  taskrunAnnotations: {}
 
 # -----------------------------------------------------------------------------
 # Service (for djinn-server)
@@ -278,7 +289,10 @@ imagePipeline:
   # by PR 5's build Job env.
   featureRef: "ghcr.io/djinnos/djinn-agent-worker:1"
   buildkitd:
-    image: moby/buildkit:v0.15.2-rootless
+    # djinn-buildkitd = moby/buildkit:rootless + ECR/GCR/ACR credential
+    # helpers baked in (see server/docker/djinn-buildkitd.Dockerfile).
+    # Override to plain moby/buildkit:rootless for the no-credHelpers path.
+    image: ghcr.io/djinnos/djinn-buildkitd:latest
     # gRPC port exposed on the buildkitd Service. Consumed by the build Job
     # via DOCKER_HOST=tcp://<svc>:<port>.
     port: 1234
@@ -289,6 +303,18 @@ imagePipeline:
     # is a managed HTTPS service (ECR, GHCR). Changing this toggles the
     # `buildkitd-config` ConfigMap + mount on/off.
     zotPlaintext: false
+    # Per-registry credential-helper map rendered into the docker config.json
+    # that buildkitd mounts at /home/user/.docker/config.json. Format:
+    #   <registry-host>: <helper-binary-suffix>
+    # e.g.
+    #   "981534455912.dkr.ecr.us-east-1.amazonaws.com": ecr-login
+    #   "us-east1-docker.pkg.dev":                       gcr
+    #   "myacr.azurecr.io":                              acr-env
+    # When non-empty, the chart-rendered config.json carries credHelpers
+    # instead of the inline Zot username/password. The helper binaries live
+    # in the djinn-buildkitd image; cloud identity (IRSA, Workload Identity,
+    # etc.) flows in via the SA annotations above.
+    credHelpers: {}
     resources:
       requests:
         cpu: "500m"
