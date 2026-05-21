@@ -323,6 +323,10 @@ imagePipeline:
         cpu: "2"
         memory: "8Gi"
   zot:
+    # In-cluster Zot OCI registry. Off by default — most cloud deployments
+    # use a managed registry (ECR/GCR/ACR) via `buildkitd.credHelpers`.
+    # Flip to true for local/kind/air-gapped installs.
+    enabled: false
     image: ghcr.io/project-zot/zot-linux-amd64:v2.1.0
     # HTTP port exposed on the Zot Service. v1 OCI distribution spec.
     port: 5000

@@ -1,4 +1,4 @@
-{{- if .Values.imagePipeline.enabled -}}
+{{- if and .Values.imagePipeline.enabled .Values.imagePipeline.zot.enabled -}}
 # Zot — CNCF OCI registry. Single-replica StatefulSet; RollingUpdate is
 # unsafe upstream because of a file-lock bug on shared storage, so we pin
 # to podManagementPolicy=OrderedReady + strategy-equivalent Recreate

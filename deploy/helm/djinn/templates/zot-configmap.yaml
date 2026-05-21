@@ -1,4 +1,4 @@
-{{- if .Values.imagePipeline.enabled -}}
+{{- if and .Values.imagePipeline.enabled .Values.imagePipeline.zot.enabled -}}
 # Zot registry configuration. Single rendered config.json mounted into the
 # StatefulSet at /etc/zot/config.json. Live GC (gcInterval, gcDelay) keeps
 # storage bounded without a restart; dedupe dedupes identical blobs across
