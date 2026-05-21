@@ -15,27 +15,22 @@ use crate::repositories::user::User;
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct UserAuthSessionRecord {
     pub token: String,
-    pub user_id: String,
+    /// FK into `users.id` — the stable UUID identity surrogate.
+    pub user_fk: String,
     pub github_login: String,
     pub github_name: Option<String>,
     pub github_avatar_url: Option<String>,
     pub github_access_token: String,
     pub created_at: String,
     pub expires_at: String,
-    /// Phase 1 nullable FK into `users.id`. `None` for legacy rows written
-    /// before Phase 2 backfill; Phase 2 will populate this on every login.
-    pub user_fk: Option<String>,
 }
 
 /// Input required to persist a freshly authenticated user.
-///
-/// Phase 1 keeps this struct shape-compatible with existing call sites in
-/// `auth.rs`. Phase 2 code paths that have already upserted a `users` row
-/// should prefer [`SessionAuthRepository::create_with_user_fk`] so the
-/// session is linked to the stable identity surrogate.
 pub struct CreateUserAuthSession<'a> {
     pub token: &'a str,
-    pub user_id: &'a str,
+    /// FK into `users.id`. The caller is responsible for having upserted
+    /// the `users` row before invoking this.
+    pub user_fk: &'a str,
     pub github_login: &'a str,
     pub github_name: Option<&'a str>,
     pub github_avatar_url: Option<&'a str>,
@@ -55,47 +50,27 @@ impl SessionAuthRepository {
     }
 
     pub async fn create(&self, params: CreateUserAuthSession<'_>) -> Result<UserAuthSessionRecord> {
-        self.create_internal(params, None).await
-    }
-
-    /// Like [`Self::create`] but also records the stable `users.id` surrogate
-    /// on the new session row via the `user_fk` column. Phase 2 rewires
-    /// `auth.rs` to call this once it has upserted the `users` row.
-    pub async fn create_with_user_fk(
-        &self,
-        params: CreateUserAuthSession<'_>,
-        user_fk: &str,
-    ) -> Result<UserAuthSessionRecord> {
-        self.create_internal(params, Some(user_fk)).await
-    }
-
-    async fn create_internal(
-        &self,
-        params: CreateUserAuthSession<'_>,
-        user_fk: Option<&str>,
-    ) -> Result<UserAuthSessionRecord> {
         self.db.ensure_initialized().await?;
 
         sqlx::query!(
             "INSERT INTO user_auth_sessions
-                (token, user_id, github_login, github_name, github_avatar_url,
+                (token, github_login, github_name, github_avatar_url,
                  github_access_token, expires_at, user_fk)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
             params.token,
-            params.user_id,
             params.github_login,
             params.github_name,
             params.github_avatar_url,
             params.github_access_token,
             params.expires_at,
-            user_fk,
+            params.user_fk,
         )
         .execute(self.db.pool())
         .await?;
 
         let row = sqlx::query_as!(
             UserAuthSessionRecord,
-            "SELECT token, user_id, github_login, github_name, github_avatar_url, \
+            "SELECT token, github_login, github_name, github_avatar_url, \
                     github_access_token, created_at, expires_at, user_fk \
              FROM user_auth_sessions WHERE token = ?",
             params.token,
@@ -110,7 +85,7 @@ impl SessionAuthRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             UserAuthSessionRecord,
-            "SELECT token, user_id, github_login, github_name, github_avatar_url, \
+            "SELECT token, github_login, github_name, github_avatar_url, \
                     github_access_token, created_at, expires_at, user_fk \
              FROM user_auth_sessions WHERE token = ?",
             token,
@@ -134,7 +109,7 @@ impl SessionAuthRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             UserAuthSessionRecord,
-            "SELECT token, user_id, github_login, github_name, github_avatar_url, \
+            "SELECT token, github_login, github_name, github_avatar_url, \
                     github_access_token, created_at, expires_at, user_fk \
              FROM user_auth_sessions \
              WHERE user_fk = ? \
@@ -149,16 +124,10 @@ impl SessionAuthRepository {
 
     /// Resolve a session plus its joined `User` row.
     ///
-    /// Returns:
-    ///   - `Ok(Some((session, user)))` for Phase 2 sessions that have
-    ///     `user_fk` populated.
-    ///   - `Ok(None)` when the token is unknown, expired-past-deletion, OR
-    ///     when the session row's `user_fk` is NULL (legacy Phase 1 rows).
-    ///     Phase 2 backfill eliminates that second case.
-    ///
-    /// Existing call sites should keep using [`Self::get_by_token`]; this
-    /// new method is reserved for code that wants the stable identity
-    /// record and must not fall back to the denormalised GitHub columns.
+    /// Returns `Ok(None)` when the token is unknown or expired past
+    /// deletion. After the migration 22 cut-over, every live session row
+    /// has a non-null `user_fk`, so the INNER JOIN never silently filters
+    /// otherwise-valid rows.
     pub async fn get_by_token_with_user(
         &self,
         token: &str,
@@ -168,7 +137,6 @@ impl SessionAuthRepository {
         let row = sqlx::query!(
             r#"SELECT
                  s.token               AS s_token,
-                 s.user_id             AS s_user_id,
                  s.github_login        AS s_github_login,
                  s.github_name         AS s_github_name,
                  s.github_avatar_url   AS s_github_avatar_url,
@@ -195,7 +163,6 @@ impl SessionAuthRepository {
         Ok(row.map(|r| {
             let session = UserAuthSessionRecord {
                 token: r.s_token,
-                user_id: r.s_user_id,
                 github_login: r.s_github_login,
                 github_name: r.s_github_name,
                 github_avatar_url: r.s_github_avatar_url,
@@ -258,17 +225,27 @@ impl SessionAuthRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repositories::user::UserRepository;
+
+    async fn seed_user(db: &Database, github_id: i64, login: &str) -> String {
+        UserRepository::new(db.clone())
+            .upsert_from_github(github_id, login, None, None)
+            .await
+            .unwrap()
+            .id
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn crud_roundtrip() {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
+        let user_fk = seed_user(&db, 1234, "octocat").await;
         let repo = SessionAuthRepository::new(db);
 
         let created = repo
             .create(CreateUserAuthSession {
                 token: "tok-abc",
-                user_id: "12345",
+                user_fk: &user_fk,
                 github_login: "octocat",
                 github_name: Some("Octo Cat"),
                 github_avatar_url: Some("https://example/a.png"),
@@ -278,10 +255,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(created.github_login, "octocat");
-        assert!(created.user_fk.is_none());
+        assert_eq!(created.user_fk, user_fk);
 
         let fetched = repo.get_by_token("tok-abc").await.unwrap().unwrap();
-        assert_eq!(fetched.user_id, "12345");
+        assert_eq!(fetched.user_fk, user_fk);
         assert_eq!(fetched.github_name.as_deref(), Some("Octo Cat"));
 
         let missing = repo.get_by_token("nope").await.unwrap();
@@ -296,11 +273,13 @@ mod tests {
     async fn delete_expired_sweeps_only_past_rows() {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
+        let user_a = seed_user(&db, 11, "a").await;
+        let user_b = seed_user(&db, 22, "b").await;
         let repo = SessionAuthRepository::new(db);
 
         repo.create(CreateUserAuthSession {
             token: "past",
-            user_id: "1",
+            user_fk: &user_a,
             github_login: "a",
             github_name: None,
             github_avatar_url: None,
@@ -311,7 +290,7 @@ mod tests {
         .unwrap();
         repo.create(CreateUserAuthSession {
             token: "future",
-            user_id: "2",
+            user_fk: &user_b,
             github_login: "b",
             github_name: None,
             github_avatar_url: None,
@@ -331,54 +310,22 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn get_by_token_with_user_joins_when_user_fk_set() {
-        use crate::repositories::user::UserRepository;
-
+    async fn get_by_token_with_user_returns_the_joined_user_row() {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
-        let users = UserRepository::new(db.clone());
+        let user_fk = seed_user(&db, 777, "joined-user").await;
         let sessions = SessionAuthRepository::new(db);
 
-        // Session without user_fk: join-path must return None.
         sessions
             .create(CreateUserAuthSession {
-                token: "legacy",
-                user_id: "legacy-uid",
-                github_login: "legacy-login",
-                github_name: None,
+                token: "linked",
+                user_fk: &user_fk,
+                github_login: "joined-user",
+                github_name: Some("Joined"),
                 github_avatar_url: None,
-                github_access_token: "gho_legacy",
+                github_access_token: "gho_linked",
                 expires_at: "2099-01-01T00:00:00.000Z",
             })
-            .await
-            .unwrap();
-        assert!(
-            sessions
-                .get_by_token_with_user("legacy")
-                .await
-                .unwrap()
-                .is_none(),
-            "sessions with NULL user_fk must not resolve via the join"
-        );
-
-        // Session with user_fk: join-path must return the joined User row.
-        let user = users
-            .upsert_from_github(777, "joined-user", Some("Joined"), None)
-            .await
-            .unwrap();
-        sessions
-            .create_with_user_fk(
-                CreateUserAuthSession {
-                    token: "linked",
-                    user_id: "linked-uid",
-                    github_login: "joined-user",
-                    github_name: Some("Joined"),
-                    github_avatar_url: None,
-                    github_access_token: "gho_linked",
-                    expires_at: "2099-01-01T00:00:00.000Z",
-                },
-                &user.id,
-            )
             .await
             .unwrap();
 
@@ -388,30 +335,23 @@ mod tests {
             .unwrap()
             .expect("linked session should resolve with its user row");
         assert_eq!(session.token, "linked");
-        assert_eq!(session.user_fk.as_deref(), Some(user.id.as_str()));
-        assert_eq!(joined.id, user.id);
+        assert_eq!(session.user_fk, user_fk);
+        assert_eq!(joined.id, user_fk);
         assert_eq!(joined.github_id, 777);
         assert_eq!(joined.github_login, "joined-user");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn latest_token_for_user_skips_expired_and_returns_most_recent() {
-        use crate::repositories::user::UserRepository;
-
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
-        let users = UserRepository::new(db.clone());
-        let sessions = SessionAuthRepository::new(db);
-
-        let user = users
-            .upsert_from_github(101, "live-user", None, None)
-            .await
-            .unwrap();
+        let user_fk = seed_user(&db, 101, "live-user").await;
+        let sessions = SessionAuthRepository::new(db.clone());
 
         // No sessions yet → None.
         assert!(
             sessions
-                .latest_token_for_user(&user.id)
+                .latest_token_for_user(&user_fk)
                 .await
                 .unwrap()
                 .is_none()
@@ -419,23 +359,20 @@ mod tests {
 
         // Expired session — must NOT be returned.
         sessions
-            .create_with_user_fk(
-                CreateUserAuthSession {
-                    token: "old",
-                    user_id: "u",
-                    github_login: "live-user",
-                    github_name: None,
-                    github_avatar_url: None,
-                    github_access_token: "gho_old",
-                    expires_at: "2000-01-01T00:00:00.000Z",
-                },
-                &user.id,
-            )
+            .create(CreateUserAuthSession {
+                token: "old",
+                user_fk: &user_fk,
+                github_login: "live-user",
+                github_name: None,
+                github_avatar_url: None,
+                github_access_token: "gho_old",
+                expires_at: "2000-01-01T00:00:00.000Z",
+            })
             .await
             .unwrap();
         assert!(
             sessions
-                .latest_token_for_user(&user.id)
+                .latest_token_for_user(&user_fk)
                 .await
                 .unwrap()
                 .is_none(),
@@ -444,23 +381,20 @@ mod tests {
 
         // Add a future-dated session — returned.
         sessions
-            .create_with_user_fk(
-                CreateUserAuthSession {
-                    token: "fresh",
-                    user_id: "u",
-                    github_login: "live-user",
-                    github_name: None,
-                    github_avatar_url: None,
-                    github_access_token: "gho_fresh",
-                    expires_at: "2099-01-01T00:00:00.000Z",
-                },
-                &user.id,
-            )
+            .create(CreateUserAuthSession {
+                token: "fresh",
+                user_fk: &user_fk,
+                github_login: "live-user",
+                github_name: None,
+                github_avatar_url: None,
+                github_access_token: "gho_fresh",
+                expires_at: "2099-01-01T00:00:00.000Z",
+            })
             .await
             .unwrap();
 
         let got = sessions
-            .latest_token_for_user(&user.id)
+            .latest_token_for_user(&user_fk)
             .await
             .unwrap()
             .expect("fresh session should resolve");
@@ -468,16 +402,46 @@ mod tests {
         assert_eq!(got.github_access_token, "gho_fresh");
 
         // Different user — must not see this user's token.
-        let other = users
-            .upsert_from_github(202, "other-user", None, None)
-            .await
-            .unwrap();
+        let other = seed_user(&db, 202, "other-user").await;
         assert!(
             sessions
-                .latest_token_for_user(&other.id)
+                .latest_token_for_user(&other)
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deleting_user_cascades_session() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let user_fk = seed_user(&db, 909, "casc").await;
+        let sessions = SessionAuthRepository::new(db.clone());
+
+        sessions
+            .create(CreateUserAuthSession {
+                token: "casc-tok",
+                user_fk: &user_fk,
+                github_login: "casc",
+                github_name: None,
+                github_avatar_url: None,
+                github_access_token: "gho_casc",
+                expires_at: "2099-01-01T00:00:00.000Z",
+            })
+            .await
+            .unwrap();
+        assert!(sessions.get_by_token("casc-tok").await.unwrap().is_some());
+
+        sqlx::query("DELETE FROM users WHERE id = ?")
+            .bind(&user_fk)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        assert!(
+            sessions.get_by_token("casc-tok").await.unwrap().is_none(),
+            "FK ON DELETE CASCADE should have wiped the session row"
         );
     }
 }

@@ -581,48 +581,39 @@ mod tests {
 
         // Both have live browser sessions linked via user_fk.
         sessions
-            .create_with_user_fk(
-                CreateUserAuthSession {
-                    token: "tok-alice",
-                    user_id: "alice",
-                    github_login: "alice",
-                    github_name: None,
-                    github_avatar_url: None,
-                    github_access_token: "gho_a",
-                    expires_at: "2099-01-01T00:00:00.000Z",
-                },
-                &alice.id,
-            )
+            .create(CreateUserAuthSession {
+                token: "tok-alice",
+                user_fk: &alice.id,
+                github_login: "alice",
+                github_name: None,
+                github_avatar_url: None,
+                github_access_token: "gho_a",
+                expires_at: "2099-01-01T00:00:00.000Z",
+            })
             .await
             .unwrap();
         sessions
-            .create_with_user_fk(
-                CreateUserAuthSession {
-                    token: "tok-bob-1",
-                    user_id: "bob",
-                    github_login: "bob",
-                    github_name: None,
-                    github_avatar_url: None,
-                    github_access_token: "gho_b",
-                    expires_at: "2099-01-01T00:00:00.000Z",
-                },
-                &bob.id,
-            )
+            .create(CreateUserAuthSession {
+                token: "tok-bob-1",
+                user_fk: &bob.id,
+                github_login: "bob",
+                github_name: None,
+                github_avatar_url: None,
+                github_access_token: "gho_b",
+                expires_at: "2099-01-01T00:00:00.000Z",
+            })
             .await
             .unwrap();
         sessions
-            .create_with_user_fk(
-                CreateUserAuthSession {
-                    token: "tok-bob-2",
-                    user_id: "bob",
-                    github_login: "bob",
-                    github_name: None,
-                    github_avatar_url: None,
-                    github_access_token: "gho_b2",
-                    expires_at: "2099-01-01T00:00:00.000Z",
-                },
-                &bob.id,
-            )
+            .create(CreateUserAuthSession {
+                token: "tok-bob-2",
+                user_fk: &bob.id,
+                github_login: "bob",
+                github_name: None,
+                github_avatar_url: None,
+                github_access_token: "gho_b2",
+                expires_at: "2099-01-01T00:00:00.000Z",
+            })
             .await
             .unwrap();
 

@@ -47,8 +47,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::server::AppState;
 use djinn_db::{
-    CreateUserAuthSession, NewOrgConfig, OrgConfigRepository, SessionAuthRepository,
-    UserAuthSessionRecord, UserRepository,
+    CreateUserAuthSession, NewOrgConfig, OrgConfigRepository, SessionAuthRepository, UserRepository,
 };
 use djinn_provider::github_app::jwt::mint_app_jwt_anyhow;
 
@@ -158,22 +157,13 @@ pub struct AuthenticatedUser {
     pub github_access_token: String,
 }
 
-impl From<UserAuthSessionRecord> for AuthenticatedUser {
-    fn from(row: UserAuthSessionRecord) -> Self {
-        Self {
-            id: row.user_id,
-            login: row.github_login,
-            name: row.github_name,
-            avatar_url: row.github_avatar_url,
-            session_token: row.token,
-            github_access_token: row.github_access_token,
-        }
-    }
-}
-
 /// Resolve a request's `djinn_session` cookie into an [`AuthenticatedUser`],
 /// if any. Returns `Ok(None)` for the unauthenticated case; returns `Err`
 /// only on database errors.
+///
+/// `id` is the stable `users.id` UUID surrogate, sourced from the joined
+/// `users` row — not the denormalised GitHub-numeric column that lived on
+/// `user_auth_sessions` before migration 22.
 pub async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
@@ -182,15 +172,22 @@ pub async fn authenticate(
         return Ok(None);
     };
     let repo = SessionAuthRepository::new(state.db().clone());
-    let Some(row) = repo.get_by_token(&token).await? else {
+    let Some((session, user)) = repo.get_by_token_with_user(&token).await? else {
         return Ok(None);
     };
-    if session_expired(&row.expires_at) {
+    if session_expired(&session.expires_at) {
         // Best-effort cleanup; ignore errors.
         let _ = repo.delete_by_token(&token).await;
         return Ok(None);
     }
-    Ok(Some(row.into()))
+    Ok(Some(AuthenticatedUser {
+        id: user.id,
+        login: user.github_login,
+        name: user.github_name,
+        avatar_url: user.github_avatar_url,
+        session_token: session.token,
+        github_access_token: session.github_access_token,
+    }))
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
@@ -208,42 +205,6 @@ struct MeResponse {
 }
 
 async fn me(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    // Phase 2: prefer the session→users join so we surface the stable
-    // `users.id` surrogate and pick up any renamed login/avatar from GitHub
-    // the next time `upsert_from_github` ran.
-    let Some(token) = extract_cookie(&headers, SESSION_COOKIE) else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-    let sessions = SessionAuthRepository::new(state.db().clone());
-
-    // Try the join path first. If the row has no `user_fk` (legacy Phase 1
-    // session), fall back to the flat fetch so we don't break already-signed-in
-    // browsers during the rollout.
-    match sessions.get_by_token_with_user(&token).await {
-        Ok(Some((session, user))) => {
-            if session_expired(&session.expires_at) {
-                let _ = sessions.delete_by_token(&token).await;
-                return StatusCode::UNAUTHORIZED.into_response();
-            }
-            let org_login = org_login_for_response(&state).await;
-            return Json(MeResponse {
-                id: user.id,
-                login: user.github_login,
-                name: user.github_name,
-                avatar_url: user.github_avatar_url,
-                org_login,
-            })
-            .into_response();
-        }
-        Ok(None) => {
-            // Either unknown token or legacy (user_fk IS NULL). Fall through.
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "auth /me: db error on joined fetch");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    }
-
     match authenticate(&state, &headers).await {
         Ok(Some(user)) => {
             let org_login = org_login_for_response(&state).await;
@@ -543,18 +504,15 @@ async fn github_callback(
     let expires_at = rfc3339_in(SESSION_TTL_SECS);
     let repo = SessionAuthRepository::new(state.db().clone());
     if let Err(e) = repo
-        .create_with_user_fk(
-            CreateUserAuthSession {
-                token: &token,
-                user_id: &user.id.to_string(),
-                github_login: &user.login,
-                github_name: user.name.as_deref(),
-                github_avatar_url: user.avatar_url.as_deref(),
-                github_access_token: &access_token,
-                expires_at: &expires_at,
-            },
-            &user_row.id,
-        )
+        .create(CreateUserAuthSession {
+            token: &token,
+            user_fk: &user_row.id,
+            github_login: &user.login,
+            github_name: user.name.as_deref(),
+            github_avatar_url: user.avatar_url.as_deref(),
+            github_access_token: &access_token,
+            expires_at: &expires_at,
+        })
         .await
     {
         tracing::error!(error = %e, "auth callback: failed to persist session");

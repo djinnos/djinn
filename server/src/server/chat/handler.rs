@@ -29,11 +29,13 @@ use super::{
     ToolResultPayload, apply_chat_skills,
 };
 use crate::server::AppState;
+use crate::server::auth::authenticate;
 use djinn_agent::actors::slot::{
     ProviderCredential, auth_method_for_provider, capabilities_for_provider, default_base_url,
     format_family_for_provider, load_provider_credential, parse_model_id,
 };
 use djinn_agent::chat_tools::ChatResolvedProject;
+use djinn_core::auth_context::{SESSION_USER_ID, SESSION_USER_TOKEN};
 use djinn_db::{SessionMessageRepository, SessionRepository};
 use djinn_provider::message::{ContentBlock, Conversation, Message, Role};
 use djinn_provider::provider::{LlmProvider, StreamEvent, TelemetryMeta, create_provider};
@@ -94,12 +96,30 @@ fn incoming_to_content_blocks(content: ChatContent) -> Vec<ContentBlock> {
 
 pub(super) async fn completions_handler_impl(
     state: AppState,
-    _headers: HeaderMap,
+    headers: HeaderMap,
     req: ChatCompletionRequest,
 ) -> Result<
     Sse<impl futures::Stream<Item = Result<Event, Infallible>>>,
     (axum::http::StatusCode, String),
 > {
+    // Resolve the authenticated user's GitHub access token and stable
+    // `users.id` (if any) so MCP tools spawned by the chat loop can stamp
+    // `created_by_user_id` on new epics/tasks/sessions via
+    // `current_user_id()`. Mirrors the wiring in `mcp_handler.rs`.
+    //
+    // Unauthenticated chat requests are not rejected (chat is a generic
+    // assistant endpoint and not all flows mutate the database); they
+    // simply leave the task-locals as None, which yields NULL
+    // attribution columns — same as background-agent-initiated writes.
+    let (user_token, user_id): (Option<String>, Option<String>) =
+        match authenticate(&state, &headers).await {
+            Ok(Some(user)) => (Some(user.github_access_token), Some(user.id)),
+            Ok(None) => (None, None),
+            Err(err) => {
+                tracing::warn!(error = %err, "chat completions: authenticate failed; proceeding unauth");
+                (None, None)
+            }
+        };
     if req.model.trim().is_empty() {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
@@ -371,20 +391,30 @@ pub(super) async fn completions_handler_impl(
     let session_id_for_loop = session_id.clone();
     let model_for_title = req.model.clone();
     tokio::spawn(async move {
-        run_chat_loop(
-            spawn_state,
-            provider,
-            conversation,
-            tool_schemas,
-            resolver,
-            mcp,
-            tx,
-            session_id_for_loop,
-            needs_title,
-            user_turn_for_title,
-            model_for_title,
-        )
-        .await;
+        // Scope the task-locals across the entire chat loop so any MCP
+        // tool dispatch inside it sees the user's identity via
+        // `current_user_id()` / `current_user_token()`.
+        SESSION_USER_TOKEN
+            .scope(
+                user_token,
+                SESSION_USER_ID.scope(
+                    user_id,
+                    run_chat_loop(
+                        spawn_state,
+                        provider,
+                        conversation,
+                        tool_schemas,
+                        resolver,
+                        mcp,
+                        tx,
+                        session_id_for_loop,
+                        needs_title,
+                        user_turn_for_title,
+                        model_for_title,
+                    ),
+                ),
+            )
+            .await;
     });
 
     Ok(Sse::new(ReceiverStream::new(rx).map(Ok)).keep_alive(KeepAlive::default()))
