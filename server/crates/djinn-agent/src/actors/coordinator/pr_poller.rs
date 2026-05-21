@@ -1,7 +1,7 @@
 use djinn_core::models::TransitionAction;
-use djinn_db::ActivityQuery;
+use djinn_db::{ActivityQuery, SessionAuthRepository, UserSettingsRepository};
 use djinn_provider::github_api::{
-    CheckRun, GitHubApiClient, MergeMethod, PrReviewFeedback, PrState,
+    CheckRun, GitHubApiClient, MergeMethod, PrReviewFeedback, PrState, UserTokenExpired,
 };
 
 use super::*;
@@ -600,6 +600,113 @@ impl CoordinatorActor {
                     }
                 }
                 continue;
+            }
+
+            // ── Auto-approve (per-user opt-in) ────────────────────────────────
+            // When the task's creator has `auto_approve_prs=true` and we have
+            // their live GitHub session token, POST an APPROVE review using
+            // their identity. Branch protection's "1 approval required" gate
+            // is what's left between us and the merge; the next poller tick
+            // sees the new approval state and falls through to the merge call
+            // naturally. Pinning `commit_id = current_sha` means a fresh push
+            // automatically invalidates the approval.
+            //
+            // Skipped silently when:
+            //  - the task is background-agent-created (`created_by_user_id IS NULL`)
+            //  - the user has the toggle off (or `user_settings` row missing)
+            //  - the user's session is expired or absent (we don't store refresh tokens)
+            //  - an approve attempt was already made on this exact SHA
+            //  - we already have an approval (re-approving is a no-op anyway)
+            if !has_approved
+                && self
+                    .auto_approve_attempted
+                    .get(&task.id)
+                    .is_none_or(|sha| sha != &current_sha)
+                && let Some(user_id) = self.task_created_by_user_id(&task.id).await
+            {
+                let us_repo = UserSettingsRepository::new(self.db.clone());
+                let toggle = match us_repo.get_or_default(&user_id).await {
+                    Ok(s) => s.auto_approve_prs,
+                    Err(e) => {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            user_id = %user_id,
+                            error = %e,
+                            "PR poller: user_settings read failed; skipping auto-approve"
+                        );
+                        false
+                    }
+                };
+                if toggle {
+                    let sa_repo = SessionAuthRepository::new(self.db.clone());
+                    let live_session = match sa_repo.latest_token_for_user(&user_id).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                user_id = %user_id,
+                                error = %e,
+                                "PR poller: session lookup failed; skipping auto-approve"
+                            );
+                            None
+                        }
+                    };
+                    if let Some(session) = live_session {
+                        let user_client =
+                            GitHubApiClient::for_user_token(session.github_access_token);
+                        match user_client
+                            .approve_pull_request(&owner, &repo, pull_number, &current_sha)
+                            .await
+                        {
+                            Ok(()) => {
+                                tracing::info!(
+                                    task_id = %task.short_id,
+                                    user_id = %user_id,
+                                    pr = pull_number,
+                                    sha = %current_sha,
+                                    "PR poller: auto-approved PR on user's behalf"
+                                );
+                                self.auto_approve_attempted
+                                    .insert(task.id.clone(), current_sha.clone());
+                                self.pr_status_cache.remove(&task.id);
+                                continue;
+                            }
+                            Err(e) => {
+                                // Suppress regardless of failure mode — same
+                                // SHA shouldn't be retried until the user
+                                // pushes a new commit.
+                                self.auto_approve_attempted
+                                    .insert(task.id.clone(), current_sha.clone());
+                                if e.downcast_ref::<UserTokenExpired>().is_some() {
+                                    tracing::info!(
+                                        task_id = %task.short_id,
+                                        user_id = %user_id,
+                                        pr = pull_number,
+                                        "PR poller: auto-approve skipped — user token expired (sign in to re-arm)"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        task_id = %task.short_id,
+                                        user_id = %user_id,
+                                        pr = pull_number,
+                                        error = %e,
+                                        "PR poller: auto-approve failed; falling through to wait for human approval"
+                                    );
+                                }
+                                // Fall through to the merge attempt below —
+                                // GitHub will reject if branch protection
+                                // requires an approval, which surfaces as a
+                                // normal merge failure in the existing path.
+                            }
+                        }
+                    } else {
+                        tracing::debug!(
+                            task_id = %task.short_id,
+                            user_id = %user_id,
+                            "PR poller: auto-approve skipped — no live session token for user"
+                        );
+                    }
+                }
             }
 
             // Either approved or no reviews — attempt squash merge.
@@ -1267,6 +1374,32 @@ impl CoordinatorActor {
                 error = %e,
                 "PR poller: failed to log CI failure comment"
             );
+        }
+    }
+
+    /// Side-query for the task's `created_by_user_id` column. The `Task`
+    /// model deliberately does not expose this column (added by migration 3
+    /// for attribution; only repositories and the auto-approve path need it),
+    /// so the auto-approve branch reads it directly here. Returns `None` for
+    /// background-agent-created tasks (column is NULL) or on DB error.
+    async fn task_created_by_user_id(&self, task_id: &str) -> Option<String> {
+        match sqlx::query_scalar!(
+            "SELECT created_by_user_id FROM tasks WHERE id = ?",
+            task_id,
+        )
+        .fetch_optional(self.db.pool())
+        .await
+        {
+            Ok(Some(opt)) => opt,
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    error = %e,
+                    "PR poller: failed to read created_by_user_id; treating as unattributed"
+                );
+                None
+            }
         }
     }
 }

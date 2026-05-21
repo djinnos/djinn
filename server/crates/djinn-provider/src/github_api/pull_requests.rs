@@ -382,6 +382,67 @@ impl GitHubApiClient {
         Ok(())
     }
 
+    /// Post an APPROVE review on a pull request, pinned to a specific commit.
+    ///
+    /// Used by the auto-approve path: the configured client *must* be built
+    /// with [`Self::for_user_token`] (the user's own GitHub token), because
+    /// the GitHub App identity that opened the PR cannot approve its own PR.
+    ///
+    /// `commit_id` is the head SHA the approval applies to. Pinning it means
+    /// a subsequent push to the branch automatically invalidates this review
+    /// — exactly the behavior we want for the race between "approve" and a
+    /// new commit landing before the next poller tick merges.
+    ///
+    /// GitHub returns 422 if the approver authored a commit on the PR (e.g.
+    /// the user pushed manually). Callers should handle 422 distinctly from
+    /// other failures so they don't retry indefinitely on the same SHA.
+    pub async fn approve_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+        commit_id: &str,
+    ) -> Result<()> {
+        let url = format!(
+            "{}/repos/{}/{}/pulls/{}/reviews",
+            self.base_url, owner, repo, pull_number
+        );
+        let body = serde_json::json!({
+            "commit_id": commit_id,
+            "event": "APPROVE",
+        });
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let body = body.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .post(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .json(&body)
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "approve_pull_request failed ({}): {}",
+                status,
+                body
+            ));
+        }
+        Ok(())
+    }
+
     /// Merge the base branch into a PR's head branch (the "Update branch"
     /// button on the GitHub UI).
     ///

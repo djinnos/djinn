@@ -110,6 +110,13 @@ pub(super) struct CoordinatorActor {
     /// `MERGE_RETRY_RECHECK_THRESHOLD` failures, the poller invalidates
     /// the CI SHA cache so it re-checks whether CI actually passed.
     pub(super) merge_fail_count: HashMap<String, u32>,
+    /// task_id → head SHA an auto-approve attempt was already made for
+    /// (regardless of success). Suppresses retries on the same SHA — needed
+    /// when GitHub returns 422 "Can not approve your own pull request" or
+    /// when the approval already landed and the next tick hasn't observed
+    /// it yet. Stale entries are harmless: a new push bumps the SHA and we
+    /// retry once on the new commit.
+    pub(super) auto_approve_attempted: HashMap<String, String>,
     /// Task IDs for which a stall-kill has already been issued.  Prevents
     /// repeated kill + activity-log spam while the async lifecycle cleanup
     /// is still in progress (the DB session record stays `running` until
@@ -190,6 +197,7 @@ impl CoordinatorActor {
             pr_status_cache: HashMap::new(),
             pr_draft_first_seen: HashMap::new(),
             merge_fail_count: HashMap::new(),
+            auto_approve_attempted: HashMap::new(),
             stall_killed: HashSet::new(),
             last_idle_consolidation: None,
             idle_consolidation_cancel: None,

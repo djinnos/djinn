@@ -278,3 +278,92 @@ async fn list_pulls_by_head_returns_empty_when_no_match() {
 
     assert!(prs.is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn approve_pull_request_success_pins_commit_id() {
+    // Auto-approve path. The matcher asserts BOTH that the bearer is the
+    // literal user token (not an installation mint) AND that the body pins
+    // `commit_id` so a subsequent push invalidates the approval.
+    use wiremock::matchers::body_json;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/repos/djinnos/server/pulls/501/reviews"))
+        .and(header("Authorization", "Bearer ghu_user_xyz"))
+        .and(body_json(serde_json::json!({
+            "commit_id": "deadbeef1234",
+            "event": "APPROVE",
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": 999,
+            "state": "APPROVED",
+            "commit_id": "deadbeef1234"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_user_token_with_base_url(
+        "ghu_user_xyz".to_string(),
+        server.uri(),
+    );
+    client
+        .approve_pull_request("djinnos", "server", 501, "deadbeef1234")
+        .await
+        .expect("approve_pull_request");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn approve_pull_request_422_self_approval_surfaces_error() {
+    // GitHub returns 422 with body `{"message":"Can not approve your own
+    // pull request"}` when the approver authored a commit on the PR.
+    // Caller (pr_poller) suppresses retries on this SHA; this test just
+    // verifies the error surfaces with the status + body intact.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/repos/djinnos/server/pulls/502/reviews"))
+        .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+            "message": "Can not approve your own pull request",
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_user_token_with_base_url(
+        "ghu_self".to_string(),
+        server.uri(),
+    );
+    let err = client
+        .approve_pull_request("djinnos", "server", 502, "abc")
+        .await
+        .expect_err("expected 422 to fail");
+    let msg = err.to_string();
+    assert!(msg.contains("422"), "error should mention 422: {msg}");
+    assert!(
+        msg.contains("Can not approve your own pull request"),
+        "error should preserve body: {msg}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn approve_pull_request_401_surfaces_user_token_expired() {
+    use crate::github_api::UserTokenExpired;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/repos/djinnos/server/pulls/503/reviews"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_user_token_with_base_url(
+        "ghu_expired".to_string(),
+        server.uri(),
+    );
+    let err = client
+        .approve_pull_request("djinnos", "server", 503, "abc")
+        .await
+        .expect_err("expected 401 to fail");
+    assert!(
+        err.downcast_ref::<UserTokenExpired>().is_some(),
+        "expected UserTokenExpired downcast, got: {err:?}"
+    );
+}
