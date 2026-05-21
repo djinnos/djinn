@@ -496,6 +496,14 @@ export namespace CodeGraphInputSchema {
    */
   symbols?: string[]
   /**
+   * Iter 28: target tier for the `complexity` op — `"functions"`
+   * (default) or `"files"`. The `functions` shape ranks individual
+   * function-like symbols; the `files` shape aggregates by file_path
+   * and returns per-file totals + worst-offender info. Reuses the
+   * shared `sort_by`, `file_glob`, and `limit` fields.
+   */
+  target?: string
+  /**
    * Destination node for `path`.
    */
   to?: string
@@ -4262,8 +4270,59 @@ export namespace TaskUpdateOutputSchema {
 
 }
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
+export namespace UserSettingsGetInputSchema {
+  export interface UserSettingsGetInput {
+  [k: string]: any
+  }
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update";
+}
+export type UserSettingsGetInput = UserSettingsGetInputSchema.UserSettingsGetInput;
+export namespace UserSettingsGetOutputSchema {
+  export interface UserSettingsGetOutput {
+  /**
+   * Auto-approve PRs that are otherwise ready to merge. When true, the
+   * poller POSTs an APPROVE review using this user's GitHub token at the
+   * moment the PR has CI green + no conflicts + no existing approvals.
+   * Defaults to false. Each task's `created_by_user_id` decides whose
+   * toggle applies; background-agent tasks (`created_by_user_id IS NULL`)
+   * are never auto-approved.
+   */
+  auto_approve_prs: boolean
+  error?: string
+  ok: boolean
+  /**
+   * `users.id` of the signed-in caller (echoed so the UI can sanity-check identity).
+   */
+  user_id?: string
+  [k: string]: any
+  }
+
+}
+export type UserSettingsGetOutput = UserSettingsGetOutputSchema.UserSettingsGetOutput;
+export namespace UserSettingsSetInputSchema {
+  export interface UserSettingsSetInput {
+  /**
+   * Enable or disable auto-approve. Omit to keep the current value.
+   */
+  auto_approve_prs?: boolean
+  [k: string]: any
+  }
+
+}
+export type UserSettingsSetInput = UserSettingsSetInputSchema.UserSettingsSetInput;
+export namespace UserSettingsSetOutputSchema {
+  export interface UserSettingsSetOutput {
+  applied: boolean
+  auto_approve_prs?: boolean
+  error?: string
+  ok: boolean
+  [k: string]: any
+  }
+
+}
+export type UserSettingsSetOutput = UserSettingsSetOutputSchema.UserSettingsSetOutput;
+
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "user_settings_get" | "user_settings_set";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -4364,6 +4423,8 @@ export interface McpToolMap {
   "task_timeline": { input: TaskTimelineInput; output: TaskTimelineOutput };
   "task_transition": { input: TaskTransitionInput; output: TaskTransitionOutput };
   "task_update": { input: TaskUpdateInput; output: TaskUpdateOutput };
+  "user_settings_get": { input: UserSettingsGetInput; output: UserSettingsGetOutput };
+  "user_settings_set": { input: UserSettingsSetInput; output: UserSettingsSetOutput };
 }
 
 export type McpToolInput<TName extends McpToolName> = McpToolMap[TName]["input"];

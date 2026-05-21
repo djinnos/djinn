@@ -8392,5 +8392,80 @@ expression: signatures
       "title": "ErrorOrTaskResponse",
       "type": "object"
     }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "UserSettingsGetParams",
+      "type": "object"
+    },
+    "name": "user_settings_get",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "auto_approve_prs": {
+          "description": "Auto-approve PRs that are otherwise ready to merge. When true, the\npoller POSTs an APPROVE review using this user's GitHub token at the\nmoment the PR has CI green + no conflicts + no existing approvals.\nDefaults to false. Each task's `created_by_user_id` decides whose\ntoggle applies; background-agent tasks (`created_by_user_id IS NULL`)\nare never auto-approved.",
+          "type": "boolean"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "user_id": {
+          "description": "`users.id` of the signed-in caller (echoed so the UI can sanity-check identity).",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok",
+        "auto_approve_prs"
+      ],
+      "title": "UserSettingsGetResponse",
+      "type": "object"
+    }
+  },
+  {
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "auto_approve_prs": {
+          "description": "Enable or disable auto-approve. Omit to keep the current value.",
+          "nullable": true,
+          "type": "boolean"
+        }
+      },
+      "title": "UserSettingsSetParams",
+      "type": "object"
+    },
+    "name": "user_settings_set",
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "applied": {
+          "type": "boolean"
+        },
+        "auto_approve_prs": {
+          "nullable": true,
+          "type": "boolean"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "applied"
+      ],
+      "title": "UserSettingsSetResponse",
+      "type": "object"
+    }
   }
 ]
