@@ -13,7 +13,7 @@
 #   * scripts/tilt/wrap-server-image.sh  — local-dev fast path
 #   * .github/workflows/release.yml      — GHCR publish
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive RUST_LOG=info
 

@@ -25,7 +25,7 @@
 ###############################################################################
 # Stage 1: fetch language-server tarballs into a throwaway layer.
 ###############################################################################
-FROM debian:bookworm-slim AS lsp
+FROM debian:trixie-slim AS lsp
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -78,9 +78,9 @@ RUN set -eux; \
 
 ###############################################################################
 # Stage 2: the base runtime image. Adds rustup, sccache, mold, clang on top
-# of debian:bookworm-slim + tini and carries the LSPs forward.
+# of debian:trixie-slim + tini and carries the LSPs forward.
 ###############################################################################
-FROM debian:bookworm-slim AS base
+FROM debian:trixie-slim AS base
 
 ENV DEBIAN_FRONTEND=noninteractive
 
