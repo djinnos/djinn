@@ -42,6 +42,7 @@ use crate::tools::session_tools::{
     TaskTimelineParams,
 };
 use crate::tools::settings_tools::{SettingsGetParams, SettingsResetParams, SettingsSetParams};
+use crate::tools::user_settings_tools::{UserSettingsGetParams, UserSettingsSetParams};
 use crate::tools::task_tools::{
     BoardHealthParams, BoardReconcileParams, ErrorOr, TaskActivityListParams,
     TaskBlockedListParams, TaskBlockersListParams, TaskClaimParams, TaskCommentAddParams,
@@ -320,6 +321,20 @@ impl DjinnMcpServer {
                 name,
                 self.settings_reset(Parameters(decode_args::<SettingsResetParams>(name, args)?))
                     .await,
+            ),
+            "user_settings_get" => map_json(
+                name,
+                self.user_settings_get(Parameters(decode_args::<UserSettingsGetParams>(
+                    name, args,
+                )?))
+                .await,
+            ),
+            "user_settings_set" => map_json(
+                name,
+                self.user_settings_set(Parameters(decode_args::<UserSettingsSetParams>(
+                    name, args,
+                )?))
+                .await,
             ),
             "system_ping" => map_json(name, self.system_ping().await),
             "memory_read" => map_json(
