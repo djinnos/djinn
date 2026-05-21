@@ -1,11 +1,27 @@
 use super::*;
 
+/// How long a `task_run` may stay in `running` without an `ended_at` before
+/// the periodic sweep flips it to `interrupted`. Must comfortably exceed the
+/// K8s Job `activeDeadlineSeconds` (3600s) + `terminationGracePeriodSeconds`
+/// (60s) + `ttlSecondsAfterFinished` (300s) so we never reap a still-live run
+/// whose pod is mid-termination.
+const STALE_TASK_RUN_THRESHOLD_SECS: i64 = 2 * 60 * 60;
+
+/// Startup-only threshold. Any `task_run` whose `started_at` is older than
+/// this at process boot is from a previous host instance — the worker Pod
+/// has lost its RPC channel and can't flush a terminal status. Tighter than
+/// the periodic threshold because there's no live-run ambiguity at cold
+/// start (we know our previous self is gone).
+const STARTUP_TASK_RUN_THRESHOLD_SECS: i64 = 10;
+
 // ─── Stale-resource sweep ────────────────────────────────────────────────────
 
 pub(super) async fn sweep_stale_resources(
     db: &djinn_db::Database,
     app_state: &crate::context::AgentContext,
 ) {
+    reap_stale_task_runs(db).await;
+
     let project_repo = ProjectRepository::new(db.clone(), app_state.event_bus.clone());
     let task_repo = TaskRepository::new(db.clone(), app_state.event_bus.clone());
     let session_repo = djinn_db::SessionRepository::new(db.clone(), app_state.event_bus.clone());
@@ -108,3 +124,58 @@ impl CoordinatorActor {
 // exists — the supervisor-driven dispatch path never creates task worktrees,
 // so there is nothing to GC.  The per-project task-branch cleanup kept here
 // is exercised end-to-end by the task_merge integration tests.
+
+// ─── Stale task_run sweep ────────────────────────────────────────────────────
+
+/// Flip `task_runs` rows still in `running` (with NULL `ended_at`) older than
+/// [`STALE_TASK_RUN_THRESHOLD_SECS`] to `interrupted`.
+///
+/// Catches the residue from worker pods that died without flushing their
+/// terminal `update_task_run_status` RPC (host crash mid-run, K8s SIGKILL
+/// past the termination grace, network partition). The per-task teardown
+/// reap in `supervisor_runner` covers the common case; this is the safety
+/// net for paths it can't see (host restart while pods are mid-flight, etc).
+async fn reap_stale_task_runs(db: &djinn_db::Database) {
+    reap_stale_task_runs_with_threshold(db, STALE_TASK_RUN_THRESHOLD_SECS, "periodic").await;
+}
+
+/// Startup variant: aggressive (~10s threshold) because any `running` row
+/// older than that at boot is from a prior process whose workers can no
+/// longer reach us.
+pub(super) async fn reap_stale_task_runs_for_startup(db: &djinn_db::Database) {
+    reap_stale_task_runs_with_threshold(db, STARTUP_TASK_RUN_THRESHOLD_SECS, "startup").await;
+}
+
+async fn reap_stale_task_runs_with_threshold(
+    db: &djinn_db::Database,
+    threshold_secs: i64,
+    reason: &'static str,
+) {
+    let cutoff = time::OffsetDateTime::now_utc() - time::Duration::seconds(threshold_secs);
+    let format = time::macros::format_description!(
+        "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+    );
+    let threshold_iso = match cutoff.format(&format) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "reap_stale_task_runs: failed to format threshold");
+            return;
+        }
+    };
+
+    let repo = djinn_db::repositories::task_run::TaskRunRepository::new(db.clone());
+    match repo.reap_stale_running(&threshold_iso).await {
+        Ok(ids) if !ids.is_empty() => {
+            tracing::warn!(
+                count = ids.len(),
+                threshold = %threshold_iso,
+                reason = reason,
+                "CoordinatorActor: reaped stale 'running' task_runs"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, reason = reason, "CoordinatorActor: reap_stale_task_runs failed");
+        }
+    }
+}

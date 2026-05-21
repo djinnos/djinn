@@ -84,6 +84,12 @@ local('bash scripts/kind/setup-kind.sh', quiet=False, echo_off=True)
 # Refuse to apply against anything other than the local kind cluster.
 allow_k8s_contexts(CLUSTER)
 
+# Default every resource to manual triggering. Initial `tilt up` still builds
+# them once; after that, file changes do NOT auto-rebuild — hit the refresh
+# arrow in the Tilt UI (or `tilt trigger <name>`) when you actually want a
+# rebuild. Keeps long compile loops from kicking off mid-edit.
+trigger_mode(TRIGGER_MODE_MANUAL)
+
 # --- djinn-agent-runtime base image --------------------------------------
 # Heavy base: LSPs (Node + rust-analyzer + pyright + typescript-language-
 # server), rustup + stable toolchain, sccache + mold + clang, non-root

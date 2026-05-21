@@ -382,6 +382,66 @@ impl GitHubApiClient {
         Ok(())
     }
 
+    /// Merge the base branch into a PR's head branch (the "Update branch"
+    /// button on the GitHub UI).
+    ///
+    /// Used when GitHub reports `mergeable_state == "behind"` on a repo that
+    /// requires up-to-date branches before merging: there are no conflicts,
+    /// but the branch-protection rule blocks merging until the head includes
+    /// the latest base. This merges base → head, which produces a new head
+    /// SHA and triggers a fresh CI run. The PR poller catches the new SHA on
+    /// the next tick and re-evaluates from scratch.
+    ///
+    /// `expected_head_sha` should be the head SHA observed when we decided
+    /// to update; GitHub will reject the call with 422 if the head has
+    /// already moved (worker pushed a new commit between fetch and update).
+    /// On success returns 202 Accepted with `{"message": ..., "url": ...}`.
+    pub async fn update_pull_request_branch(
+        &self,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+        expected_head_sha: &str,
+    ) -> Result<serde_json::Value> {
+        let url = format!(
+            "{}/repos/{}/{}/pulls/{}/update-branch",
+            self.base_url, owner, repo, pull_number
+        );
+        let body = serde_json::json!({
+            "expected_head_sha": expected_head_sha,
+        });
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let body = body.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .put(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .json(&body)
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "update_pull_request_branch failed ({}): {}",
+                status,
+                body
+            ));
+        }
+        Ok(resp.json().await.unwrap_or(serde_json::Value::Null))
+    }
+
     /// Merge a pull request via the REST API.
     pub async fn merge_pull_request(
         &self,

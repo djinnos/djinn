@@ -558,6 +558,44 @@ impl CoordinatorActor {
                 continue;
             }
 
+            // ── Branch up-to-date check ───────────────────────────────────────
+            // GitHub reports `mergeable_state == "behind"` when there are no
+            // conflicts (`mergeable == true`) but branch protection requires
+            // the head to include the latest base. Calling update-branch
+            // merges base → head (the equivalent of clicking GitHub's
+            // "Update branch" button), which bumps the head SHA and triggers
+            // a fresh CI run. We bail out of this tick and let the poller
+            // re-evaluate next time around once the new SHA settles.
+            if pr.mergeable_state.as_deref() == Some("behind") {
+                tracing::info!(
+                    task_id = %task.short_id,
+                    pr = pull_number,
+                    "PR poller: PR is behind base — calling update-branch and retrying next tick"
+                );
+                match gh_client
+                    .update_pull_request_branch(&owner, &repo, pull_number, &current_sha)
+                    .await
+                {
+                    Ok(_) => {
+                        // Head SHA will change; invalidate the CI cache so
+                        // next tick re-checks against the new commit, and
+                        // reset merge_fail_count since we're not actually
+                        // attempting a merge this tick.
+                        self.pr_status_cache.remove(&task.id);
+                        self.merge_fail_count.remove(&task.id);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            pr = pull_number,
+                            error = %e,
+                            "PR poller: update-branch failed (will retry next tick)"
+                        );
+                    }
+                }
+                continue;
+            }
+
             // Either approved or no reviews — attempt squash merge.
             tracing::info!(
                 task_id = %task.short_id,

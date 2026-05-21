@@ -31,9 +31,13 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use djinn_core::models::TaskRunTrigger;
+use djinn_core::models::{TaskRunStatus, TaskRunTrigger};
+use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::{TaskRepository, task_branch_name};
-use djinn_runtime::{BiStream, ResolvedCredentials, SessionRuntime, StreamEvent, TestRuntime};
+use djinn_runtime::{
+    BiStream, ResolvedCredentials, SessionRuntime, StreamEvent, TaskRunOutcome, TaskRunReport,
+    TestRuntime,
+};
 
 use crate::actors::slot::lifecycle::model_resolution::resolve_role_model_preference;
 use crate::context::AgentContext;
@@ -256,6 +260,20 @@ pub(crate) async fn run_supervisor_dispatch(
 
     let teardown = runtime.teardown(handle).await;
 
+    // Best-effort: if the in-pod supervisor died before sending its terminal
+    // `update_task_run_status` RPC (OOM, eviction, SIGKILL past the grace
+    // window), the matching `task_runs` row is still 'running' in the host
+    // DB. Stamp it now using the terminal status the teardown report
+    // synthesized — defaulting to `Interrupted` when the report is missing.
+    // Slot serialization means at most one in-flight run per task, so
+    // reaping by `task_id` finds exactly the right row.
+    let reap_status = teardown
+        .as_ref()
+        .ok()
+        .map(report_to_terminal_status)
+        .unwrap_or(TaskRunStatus::Interrupted);
+    reap_orphan_task_run(&app_state, &task.id, reap_status).await;
+
     match (report_result, teardown) {
         (Ok(()), Ok(report)) => {
             tracing::info!(
@@ -286,6 +304,46 @@ pub(crate) async fn run_supervisor_dispatch(
                 "supervisor dispatch: teardown failure"
             );
             Err(anyhow::anyhow!("runtime.teardown failed: {e}"))
+        }
+    }
+}
+
+fn report_to_terminal_status(report: &TaskRunReport) -> TaskRunStatus {
+    match &report.outcome {
+        TaskRunOutcome::PrOpened { .. }
+        | TaskRunOutcome::Closed { .. }
+        | TaskRunOutcome::Escalated { .. } => TaskRunStatus::Completed,
+        TaskRunOutcome::Failed { .. } => TaskRunStatus::Failed,
+        TaskRunOutcome::Interrupted => TaskRunStatus::Interrupted,
+    }
+}
+
+async fn reap_orphan_task_run(
+    app_state: &AgentContext,
+    task_id: &str,
+    terminal_status: TaskRunStatus,
+) {
+    let repo = TaskRunRepository::new(app_state.db.clone());
+    match repo.reap_running_for_task(task_id, terminal_status).await {
+        Ok(Some(run_id)) => {
+            tracing::warn!(
+                task_id = %task_id,
+                task_run_id = %run_id,
+                status = %terminal_status,
+                "supervisor dispatch: reaped orphan task_run row \
+                 (in-pod supervisor never sent terminal RPC)"
+            );
+        }
+        Ok(None) => {
+            // Common path: the in-pod supervisor's terminal RPC already
+            // flipped the row. Nothing to do.
+        }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task_id,
+                error = %e,
+                "supervisor dispatch: reap_running_for_task failed"
+            );
         }
     }
 }

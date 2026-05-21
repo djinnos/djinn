@@ -78,6 +78,7 @@ use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_runtime::{ResolvedCredentials, RoleKind, TaskRunSpec, WorkerEvent};
 use djinn_supervisor::{RpcServices, SupervisorServices, TaskRunSupervisor};
 use djinn_workspace::{MirrorManager, Workspace};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -297,6 +298,18 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     //    loop.  Any post-handshake `SupervisorServices` call round-trips over
     //    that same TCP connection.
     let cancel = CancellationToken::new();
+
+    // Wire SIGTERM / SIGINT into the supervisor's cancel token so the existing
+    // `finalize_interrupted` path runs and flushes a terminal
+    // `update_task_run_status(Interrupted)` RPC back to the host before the
+    // Pod exits. Without this, K8s' `activeDeadlineSeconds` / eviction /
+    // graceful-drain SIGTERM kills the runtime mid-flight and the host's
+    // task_runs row stays `running` forever.
+    //
+    // The K8s Job sets `terminationGracePeriodSeconds=60`, which is the
+    // window we have to drain the RPC before SIGKILL hits.
+    install_termination_handlers(cancel.clone(), args.task_run_id.clone());
+
     let server_addr = args.server_addr.clone();
     let (rpc, background) = RpcServices::connect_tcp(
         args.server_addr,
@@ -397,6 +410,44 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
 
     drop(workspace);
     Ok(())
+}
+
+/// Spawn background listeners for SIGTERM and SIGINT that flip `cancel` when
+/// the kubelet (or operator) signals shutdown. The supervisor body checks
+/// `cancel` between stages, exits its for-loop with `Interrupted`, and runs
+/// `finalize_interrupted` — which calls `update_task_run_status(Interrupted)`
+/// over the still-live RPC channel. The Pod's
+/// `terminationGracePeriodSeconds=60` gives that RPC time to land before
+/// SIGKILL.
+fn install_termination_handlers(cancel: CancellationToken, task_run_id: String) {
+    for (kind, label) in [
+        (SignalKind::terminate(), "SIGTERM"),
+        (SignalKind::interrupt(), "SIGINT"),
+    ] {
+        let mut stream = match signal(kind) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(
+                    signal = label,
+                    error = %e,
+                    "failed to install signal handler; supervisor will not see kubelet shutdowns"
+                );
+                continue;
+            }
+        };
+        let cancel = cancel.clone();
+        let task_run_id = task_run_id.clone();
+        tokio::spawn(async move {
+            if stream.recv().await.is_some() {
+                info!(
+                    signal = label,
+                    task_run_id = %task_run_id,
+                    "received termination signal; cancelling supervisor so the terminal RPC flushes"
+                );
+                cancel.cancel();
+            }
+        });
+    }
 }
 
 /// Build the in-Pod `AgentContext` the per-stage executor threads through

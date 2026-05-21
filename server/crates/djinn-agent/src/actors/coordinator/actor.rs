@@ -213,6 +213,13 @@ impl CoordinatorActor {
             );
         }
 
+        // Startup reap: any `task_runs` row still marked `running` from before
+        // this process started is, by definition, orphaned — the worker Pod
+        // that owned it can no longer flush a terminal RPC to us. Run the
+        // same sweep the 15-min tick uses so the dev UI / queries don't show
+        // weeks-old stale rows after every restart.
+        health::reap_stale_task_runs_for_startup(&self.db).await;
+
         loop {
             tokio::select! {
                 biased;

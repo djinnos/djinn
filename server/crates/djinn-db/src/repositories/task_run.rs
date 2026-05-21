@@ -117,6 +117,74 @@ impl TaskRunRepository {
         .await?)
     }
 
+    /// Flip the most-recent `running` row for `task_id` to `terminal_status`,
+    /// stamping `ended_at`. No-op if no such row exists.
+    ///
+    /// Called from the host-side teardown path after a K8s task-run finishes:
+    /// when the in-pod supervisor dies before sending its terminal
+    /// `update_task_run_status` RPC (OOM, eviction, SIGKILL past the
+    /// terminationGracePeriod), the row would otherwise stay `running` forever.
+    /// Operates on the most-recent row because slot-level serialization
+    /// guarantees at most one in-flight run per task at a time.
+    ///
+    /// Returns the id of the row that was flipped, if any.
+    pub async fn reap_running_for_task(
+        &self,
+        task_id: &str,
+        terminal_status: TaskRunStatus,
+    ) -> Result<Option<String>> {
+        if !terminal_status.is_terminal() {
+            return Ok(None);
+        }
+        self.db.ensure_initialized().await?;
+
+        let row: Option<String> = sqlx::query_scalar!(
+            "SELECT id FROM task_runs
+             WHERE task_id = ? AND `status` = 'running' AND ended_at IS NULL
+             ORDER BY started_at DESC LIMIT 1",
+            task_id
+        )
+        .fetch_optional(self.db.pool())
+        .await?;
+
+        if let Some(ref id) = row {
+            self.update_status(id, terminal_status).await?;
+        }
+        Ok(row)
+    }
+
+    /// Flip every `running` row whose `started_at` is older than
+    /// `stale_threshold` to `Interrupted`, stamping `ended_at`.
+    ///
+    /// Returns the ids of the rows that were flipped.
+    ///
+    /// Used by the coordinator's periodic sweep as a safety net for runs whose
+    /// pod was terminated without flushing a terminal RPC (and the per-task
+    /// teardown reap missed for any reason). The threshold should be larger
+    /// than the K8s Job `activeDeadlineSeconds` + termination grace so we
+    /// never reap a still-live run.
+    pub async fn reap_stale_running(
+        &self,
+        stale_threshold_iso: &str,
+    ) -> Result<Vec<String>> {
+        self.db.ensure_initialized().await?;
+
+        let ids: Vec<String> = sqlx::query_scalar!(
+            "SELECT id FROM task_runs
+             WHERE `status` = 'running'
+               AND ended_at IS NULL
+               AND started_at < ?",
+            stale_threshold_iso
+        )
+        .fetch_all(self.db.pool())
+        .await?;
+
+        for id in &ids {
+            self.update_status(id, TaskRunStatus::Interrupted).await?;
+        }
+        Ok(ids)
+    }
+
     /// Return the most recent non-null `workspace_path` recorded for any
     /// `task_run` that belongs to the given task. Replaces the former
     /// `SessionRepository::latest_worktree_path_for_task` now that workspace
@@ -367,5 +435,110 @@ mod tests {
             assert_eq!(run.task_id, task_id);
             assert_ne!(run.id, noise_id);
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reap_running_for_task_flips_most_recent_running_row() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = TaskRunRepository::new(db);
+
+        // Older completed run + newer running run for the same task.
+        let completed_id = new_run_id();
+        repo.create(CreateTaskRunParams {
+            id: &completed_id,
+            project_id: &project_id,
+            task_id: &task_id,
+            trigger_type: TaskRunTrigger::NewTask.as_str(),
+            status: None,
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+        repo.update_status(&completed_id, TaskRunStatus::Completed)
+            .await
+            .unwrap();
+
+        let running_id = new_run_id();
+        repo.create(CreateTaskRunParams {
+            id: &running_id,
+            project_id: &project_id,
+            task_id: &task_id,
+            trigger_type: TaskRunTrigger::NewTask.as_str(),
+            status: None,
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+
+        let reaped = repo
+            .reap_running_for_task(&task_id, TaskRunStatus::Interrupted)
+            .await
+            .unwrap();
+        assert_eq!(reaped.as_deref(), Some(running_id.as_str()));
+
+        let after = repo.get(&running_id).await.unwrap().unwrap();
+        assert_eq!(after.status, "interrupted");
+        assert!(after.ended_at.is_some());
+
+        // Already-terminal row untouched.
+        let completed = repo.get(&completed_id).await.unwrap().unwrap();
+        assert_eq!(completed.status, "completed");
+
+        // Second call is a no-op (nothing in 'running' anymore).
+        let again = repo
+            .reap_running_for_task(&task_id, TaskRunStatus::Interrupted)
+            .await
+            .unwrap();
+        assert!(again.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reap_running_for_task_ignores_non_terminal_status() {
+        let db = test_db();
+        let (_pid, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = TaskRunRepository::new(db);
+
+        let reaped = repo
+            .reap_running_for_task(&task_id, TaskRunStatus::Running)
+            .await
+            .unwrap();
+        assert!(reaped.is_none(), "non-terminal status must be a guard-no-op");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reap_stale_running_flips_rows_older_than_threshold() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = TaskRunRepository::new(db);
+
+        let stale_id = new_run_id();
+        repo.create(CreateTaskRunParams {
+            id: &stale_id,
+            project_id: &project_id,
+            task_id: &task_id,
+            trigger_type: TaskRunTrigger::NewTask.as_str(),
+            status: None,
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+
+        // Threshold in the future → every 'running' row is stale.
+        let future = "9999-01-01T00:00:00.000Z";
+        let ids = repo.reap_stale_running(future).await.unwrap();
+        assert_eq!(ids, vec![stale_id.clone()]);
+
+        let after = repo.get(&stale_id).await.unwrap().unwrap();
+        assert_eq!(after.status, "interrupted");
+        assert!(after.ended_at.is_some());
+
+        // Threshold in the past → no-op.
+        let past = "1970-01-01T00:00:00.000Z";
+        let ids = repo.reap_stale_running(past).await.unwrap();
+        assert!(ids.is_empty());
     }
 }
