@@ -2,28 +2,27 @@ import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTaskStore } from "@/stores/useTaskStore";
 import { useEpicStore } from "@/stores/useEpicStore";
-import { useSelectedProjectId, useProjects } from "@/stores/useProjectStore";
+import { useProjects } from "@/stores/useProjectStore";
 import { callMcpTool } from "@/api/mcpClient";
 import { toGraphData, type BlockerItem } from "@/components/graph/graph-adapter";
 import DependencyGraph from "@/components/graph/DependencyGraph";
 
 /**
- * Fetches blockers for all tasks in a project by calling task_blockers_list
- * for each task in parallel. Returns a map of taskId → BlockerItem[].
+ * Fetches blockers for a batch of (task_id, project_slug) pairs in parallel.
+ * task_blockers_list requires a project parameter, so we look up each task's
+ * project slug and call the tool with the right scope.
  */
 async function fetchAllBlockers(
-  taskIds: string[],
-  projectSlug: string,
+  pairs: Array<{ id: string; projectSlug: string }>,
 ): Promise<Map<string, BlockerItem[]>> {
   const result = new Map<string, BlockerItem[]>();
-  if (taskIds.length === 0) return result;
+  if (pairs.length === 0) return result;
 
-  // Batch in groups of 20 to avoid overwhelming the server
   const BATCH_SIZE = 20;
-  for (let i = 0; i < taskIds.length; i += BATCH_SIZE) {
-    const batch = taskIds.slice(i, i + BATCH_SIZE);
+  for (let i = 0; i < pairs.length; i += BATCH_SIZE) {
+    const batch = pairs.slice(i, i + BATCH_SIZE);
     const responses = await Promise.all(
-      batch.map(async (id) => {
+      batch.map(async ({ id, projectSlug }) => {
         try {
           const response = await callMcpTool("task_blockers_list", {
             id,
@@ -49,25 +48,39 @@ async function fetchAllBlockers(
 export function RoadmapPage() {
   const tasks = useTaskStore((state) => Array.from(state.tasks.values()));
   const epics = useEpicStore((state) => state.epics);
-  const selectedProjectId = useSelectedProjectId();
   const projects = useProjects();
 
-  const selectedProject = projects.find((p) => p.id === selectedProjectId);
-  const projectSlug = selectedProject
-    ? `${selectedProject.github_owner}/${selectedProject.github_repo}`
-    : null;
+  // Map project_id → slug so we can route each task's blocker fetch to the
+  // right project. (task_blockers_list still requires a project parameter.)
+  const projectSlugById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const p of projects) {
+      m.set(p.id, `${p.github_owner}/${p.github_repo}`);
+    }
+    return m;
+  }, [projects]);
 
-  // Collect IDs of non-epic tasks for blocker fetching
-  const taskIds = useMemo(
-    () => tasks.filter((t) => t.issue_type !== "epic").map((t) => t.id),
-    [tasks],
+  const blockerPairs = useMemo(() => {
+    const pairs: Array<{ id: string; projectSlug: string }> = [];
+    for (const t of tasks) {
+      if (t.issue_type === "epic") continue;
+      const slug = t.project_id ? projectSlugById.get(t.project_id) : undefined;
+      if (!slug) continue;
+      pairs.push({ id: t.id, projectSlug: slug });
+    }
+    return pairs;
+  }, [tasks, projectSlugById]);
+
+  const blockerPairsKey = useMemo(
+    () => blockerPairs.map((p) => `${p.id}@${p.projectSlug}`).join(","),
+    [blockerPairs],
   );
 
   // Fetch blockers for all tasks — cached and refreshed with tasks
   const { data: blockersByTask, isLoading: blockersLoading } = useQuery({
-    queryKey: ["roadmap-blockers", projectSlug, taskIds.join(",")],
-    queryFn: () => fetchAllBlockers(taskIds, projectSlug!),
-    enabled: !!projectSlug && taskIds.length > 0,
+    queryKey: ["roadmap-blockers", blockerPairsKey],
+    queryFn: () => fetchAllBlockers(blockerPairs),
+    enabled: blockerPairs.length > 0,
     staleTime: 30_000, // 30s — blockers change infrequently
     placeholderData: (prev) => prev,
   });

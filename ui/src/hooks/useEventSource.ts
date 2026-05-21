@@ -8,6 +8,11 @@
  * - Parses SSE event types: task_*, epic_*, project_* and emits to sseStore
  * - Tracks Last-Event-ID for replay on reconnect
  * - Manages connection status: connected | reconnecting | error
+ *
+ * Task/epic data is hydrated for ALL projects unconditionally. Per-page
+ * filtering (Kanban's project filter, Memory's selected project, etc.) is the
+ * responsibility of the page itself. This decouples the Kanban/Roadmap data
+ * scope from the global `selectedProjectId` used by Memory/Code Graph/Agents.
  */
 
 import { useEffect, useRef } from "react";
@@ -15,8 +20,8 @@ import { sseStore, type SSEEvent, type SSEEventType } from "../stores/sseStore";
 import { getServerBaseUrl } from "@/api/serverUrl";
 import { initSSEEventHandlers } from "../stores/sseEventHandlers";
 import { fetchKanbanSnapshot } from "@/api/server";
-import { useSelectedProject } from "@/stores/useProjectStore";
-import { projectStore, ALL_PROJECTS } from "@/stores/projectStore";
+import { useProjects } from "@/stores/useProjectStore";
+import { projectStore } from "@/stores/projectStore";
 import { taskStore } from "@/stores/taskStore";
 import { epicStore } from "@/stores/epicStore";
 import { resetMcpClient } from "@/api/mcpClient";
@@ -26,18 +31,15 @@ const INITIAL_RECONNECT_DELAY = 1000;
 const MAX_RECONNECT_DELAY = 30000;
 const RECONNECT_MULTIPLIER = 2;
 
-export function useEventSource(projectId?: string | null) {
-  const selectedProject = useSelectedProject();
-  // No projectId passed AND no global selection → default to ALL_PROJECTS.
-  // Without this fallback, a fresh load with `selectedProjectId === null`
-  // sends useEventSource down the "wait for slug" branch that never fires
-  // (isAll=false, selectedProjectSlug=null), so the Kanban board renders
-  // empty until the user opens /memory and clicks a project.
-  const isAll = projectId === ALL_PROJECTS || (projectId == null && !selectedProject);
-  const selectedProjectSlug =
-    isAll || !selectedProject
-      ? null
-      : `${selectedProject.github_owner}/${selectedProject.github_repo}`;
+export function useEventSource() {
+  const projects = useProjects();
+  // Re-run the effect when the *set* of projects changes (add/remove), not on
+  // every metadata edit. zustand returns a new array reference whenever any
+  // project field updates, so we key on a stable primitive instead.
+  const projectIdsKey = projects
+    .map((p) => p.id)
+    .sort()
+    .join(",");
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cleanupHandlersRef = useRef<(() => void) | null>(null);
@@ -79,16 +81,17 @@ export function useEventSource(projectId?: string | null) {
   useEffect(() => {
     let isActive = true;
 
-    // Clear stores immediately so stale data from previous project isn't shown
-    taskStore.getState().clearTasks();
-    epicStore.getState().clearEpics();
-
-    const hydrateSnapshot = async (projectSlug: string | null) => {
+    const hydrateSnapshot = async () => {
+      const slugs = projectStore
+        .getState()
+        .projects.map((p) => `${p.github_owner}/${p.github_repo}`);
+      if (slugs.length === 0) {
+        // Projects haven't loaded yet — projectIdsKey will change once they
+        // do, re-running this effect.
+        return;
+      }
       try {
-        const allSlugs = isAll
-          ? projectStore.getState().projects.map((p) => `${p.github_owner}/${p.github_repo}`)
-          : undefined;
-        const snapshot = await fetchKanbanSnapshot(projectSlug, allSlugs);
+        const snapshot = await fetchKanbanSnapshot(null, slugs);
         if (!isActive) return;
         taskStore.getState().setTasks(snapshot.tasks);
         epicStore.getState().setEpics(snapshot.epics);
@@ -100,50 +103,16 @@ export function useEventSource(projectId?: string | null) {
     // Initialize SSE event handlers (wire stores to SSE events)
     cleanupHandlersRef.current = initSSEEventHandlers();
 
-    // When the project slug isn't available yet (projects still loading),
-    // subscribe directly to the project store so we hydrate as soon as
-    // the slug resolves — without relying on a React re-render to re-run
-    // this effect. Also arms the subscription in the implicit-all-projects
-    // case (no projectId and no global selection) so the board hydrates
-    // as soon as the project list lands.
-    let unsubProjectSlug: (() => void) | undefined;
-    const initialProjectsCount = projectStore.getState().projects.length;
-    const needsProjectFallback =
-      (!selectedProjectSlug && projectId != null) || (isAll && initialProjectsCount === 0);
-    if (needsProjectFallback) {
-      unsubProjectSlug = projectStore.subscribe((state) => {
-        if (!isActive) return;
-        if (isAll) {
-          // ALL_PROJECTS mode: wait for projects to load, then hydrate all
-          const slugs = state.projects.map((p) => `${p.github_owner}/${p.github_repo}`);
-          if (slugs.length > 0) {
-            unsubProjectSlug?.();
-            unsubProjectSlug = undefined;
-            void hydrateSnapshot(null);
-          }
-        } else {
-          const project = state.getSelectedProject();
-          if (project?.github_owner && project?.github_repo) {
-            unsubProjectSlug?.();
-            unsubProjectSlug = undefined;
-            void hydrateSnapshot(`${project.github_owner}/${project.github_repo}`);
-          }
-        }
-      });
-    }
-
     const connect = async () => {
       try {
-        await hydrateSnapshot(selectedProjectSlug);
+        await hydrateSnapshot();
 
-        // Build URL with Last-Event-ID if available
+        // Build URL with Last-Event-ID if available. SSE is unfiltered —
+        // the Kanban needs live updates across all projects.
         let url = `${getServerBaseUrl()}/events`;
-        if (projectId && !isAll) {
-          url += `?project_id=${encodeURIComponent(projectId)}`;
-        }
         const lastEventId = sseStore.getState().lastEventId;
         if (lastEventId) {
-          url += (url.includes("?") ? "&" : "?") + `lastEventId=${encodeURIComponent(lastEventId)}`;
+          url += `?lastEventId=${encodeURIComponent(lastEventId)}`;
         }
 
         if (!isActive) return;
@@ -154,11 +123,7 @@ export function useEventSource(projectId?: string | null) {
         es.onopen = () => {
           if (!isActive) return;
           if (sseStore.getState().reconnectAttempt > 0) {
-            const current = projectStore.getState().getSelectedProject();
-            const currentSlug = current
-              ? `${current.github_owner}/${current.github_repo}`
-              : selectedProjectSlug;
-            void hydrateSnapshot(currentSlug);
+            void hydrateSnapshot();
           }
           sseStore.getState().resetReconnectAttempt();
           sseStore.getState().setConnected(true);
@@ -243,11 +208,7 @@ export function useEventSource(projectId?: string | null) {
             if (!isActive) return;
             try {
               if (eventType === "lagged") {
-                const current = projectStore.getState().getSelectedProject();
-                const currentSlug = current
-                  ? `${current.github_owner}/${current.github_repo}`
-                  : selectedProjectSlug;
-                void hydrateSnapshot(currentSlug);
+                void hydrateSnapshot();
                 return;
               }
 
@@ -316,7 +277,6 @@ export function useEventSource(projectId?: string | null) {
 
     return () => {
       isActive = false;
-      unsubProjectSlug?.();
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
       }
@@ -332,7 +292,7 @@ export function useEventSource(projectId?: string | null) {
         cleanupHandlersRef.current = null;
       }
     };
-  }, [projectId, selectedProjectSlug]);
+  }, [projectIdsKey]);
 
   return {
     eventSource: eventSourceRef.current,

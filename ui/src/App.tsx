@@ -16,7 +16,6 @@ import { ConnectionBanner } from "@/components/ConnectionBanner";
 import { AuthGate } from "@/components/AuthGate";
 import { useEffect, useRef } from "react";
 import { useProjectsBootstrap } from "@/hooks/useProjectsBootstrap";
-import { useSelectedProjectId } from "@/stores/useProjectStore";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { useProviderGateStore } from "@/stores/providerGateStore";
 import { ProviderOnboarding } from "@/components/ProviderOnboarding";
@@ -69,14 +68,13 @@ function MainLayout() {
 
 function AuthenticatedApp() {
   const { status } = useServerHealth();
-  const selectedProjectId = useSelectedProjectId();
   const { hasProvider, refresh: refreshGate } = useProviderGateStore();
   const { hasModels, refresh: refreshModelGate } = useModelGateStore();
   const { hasProject, refresh: refreshProjectGate } = useProjectGateStore();
   const hasConnectedOnce = useRef(false);
 
   useProjectsBootstrap(status);
-  useEventSource(selectedProjectId);
+  useEventSource();
 
   useEffect(() => {
     if (status === 'connected') {

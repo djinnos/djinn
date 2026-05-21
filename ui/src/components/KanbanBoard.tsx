@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useTaskStore } from "@/stores/useTaskStore";
 import { useEpicStore } from "@/stores/useEpicStore";
-import { useProjects, useSelectedProjectId } from "@/stores/useProjectStore";
+import { useProjects } from "@/stores/useProjectStore";
 import { taskStore } from "@/stores/taskStore";
 import type { Epic, Project, Task } from "@/api/types";
 import { TaskCard, DoneTaskRow } from "@/components/TaskCard";
@@ -331,7 +331,6 @@ export function KanbanBoard({
   const storeTasks = useTaskStore((state) => Array.from(state.tasks.values()));
   const storeEpics = useEpicStore((state) => state.epics);
   const projects = useProjects();
-  const selectedProjectId = useSelectedProjectId();
 
   const tasks = tasksProp ?? storeTasks;
   const epics = epicsProp ?? storeEpics;
@@ -415,21 +414,14 @@ export function KanbanBoard({
     navigate(`/task/${task.id}`);
   };
 
-  const selectedProject = projects.find((p) => p.id === selectedProjectId);
-
   const handleRefresh = useCallback(async () => {
     if (refreshing) return;
     setRefreshing(true);
     try {
-      const allSlugs = !selectedProject
-        ? projectStore
-            .getState()
-            .projects.map((p) => `${p.github_owner}/${p.github_repo}`)
-        : undefined;
-      const selectedSlug = selectedProject
-        ? `${selectedProject.github_owner}/${selectedProject.github_repo}`
-        : null;
-      const snapshot = await fetchKanbanSnapshot(selectedSlug, allSlugs);
+      const allSlugs = projectStore
+        .getState()
+        .projects.map((p) => `${p.github_owner}/${p.github_repo}`);
+      const snapshot = await fetchKanbanSnapshot(null, allSlugs);
       taskStore.getState().setTasks(snapshot.tasks);
       epicStore.getState().setEpics(snapshot.epics);
     } catch (error) {
@@ -437,14 +429,7 @@ export function KanbanBoard({
     } finally {
       setRefreshing(false);
     }
-  }, [selectedProject, refreshing]);
-
-  // Reset epic/project filters when global project selection changes
-  useEffect(() => {
-    setProjectFilters([]);
-    setEpicFilters([]);
-    setSelectedTask(null);
-  }, [selectedProjectId]);
+  }, [refreshing]);
 
   useEffect(() => {
     const timeout = setTimeout(() => setTextFilter(searchInput), 250);
@@ -492,6 +477,14 @@ export function KanbanBoard({
       ),
     [epics],
   );
+
+  const bannerSlugs = useMemo(() => {
+    const source =
+      projectFilters.length > 0
+        ? projects.filter((p) => projectFilters.includes(p.id))
+        : projects;
+    return source.map((p) => `${p.github_owner}/${p.github_repo}`);
+  }, [projects, projectFilters]);
 
   const ownerOptions = useMemo(() => {
     const owners = new Set<string>();
@@ -681,21 +674,9 @@ export function KanbanBoard({
         </div>
       </div>
 
-      <BoardHealthBanner
-        projectSlugs={
-          selectedProject
-            ? [`${selectedProject.github_owner}/${selectedProject.github_repo}`]
-            : projects.map((p) => `${p.github_owner}/${p.github_repo}`)
-        }
-      />
+      <BoardHealthBanner projectSlugs={bannerSlugs} />
 
-      <GitHubAppBanner
-        projectSlugs={
-          selectedProject
-            ? [`${selectedProject.github_owner}/${selectedProject.github_repo}`]
-            : projects.map((p) => `${p.github_owner}/${p.github_repo}`)
-        }
-      />
+      <GitHubAppBanner projectSlugs={bannerSlugs} />
 
       <div className="flex min-h-0 flex-1 overflow-x-auto pb-1">
         {STATUS_COLUMNS.map((column, colIdx) => {
