@@ -119,6 +119,34 @@ impl SessionAuthRepository {
         .await?)
     }
 
+    /// Return the most recently issued, non-expired session for `user_fk`,
+    /// or `None` when the user has no live session.
+    ///
+    /// Used by background paths (pr_poller's auto-approve branch) that act
+    /// on behalf of a specific user but run outside any HTTP session scope.
+    /// `expires_at` is the ISO-8601 string the auth flow wrote — comparing
+    /// against `DATE_FORMAT(NOW(3), …)` keeps the comparison in the same
+    /// lexicographic ISO format the column was sorted under.
+    pub async fn latest_token_for_user(
+        &self,
+        user_fk: &str,
+    ) -> Result<Option<UserAuthSessionRecord>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            UserAuthSessionRecord,
+            "SELECT token, user_id, github_login, github_name, github_avatar_url, \
+                    github_access_token, created_at, expires_at, user_fk \
+             FROM user_auth_sessions \
+             WHERE user_fk = ? \
+               AND expires_at > DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ') \
+             ORDER BY created_at DESC \
+             LIMIT 1",
+            user_fk,
+        )
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
     /// Resolve a session plus its joined `User` row.
     ///
     /// Returns:
@@ -364,5 +392,92 @@ mod tests {
         assert_eq!(joined.id, user.id);
         assert_eq!(joined.github_id, 777);
         assert_eq!(joined.github_login, "joined-user");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn latest_token_for_user_skips_expired_and_returns_most_recent() {
+        use crate::repositories::user::UserRepository;
+
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let users = UserRepository::new(db.clone());
+        let sessions = SessionAuthRepository::new(db);
+
+        let user = users
+            .upsert_from_github(101, "live-user", None, None)
+            .await
+            .unwrap();
+
+        // No sessions yet → None.
+        assert!(
+            sessions
+                .latest_token_for_user(&user.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // Expired session — must NOT be returned.
+        sessions
+            .create_with_user_fk(
+                CreateUserAuthSession {
+                    token: "old",
+                    user_id: "u",
+                    github_login: "live-user",
+                    github_name: None,
+                    github_avatar_url: None,
+                    github_access_token: "gho_old",
+                    expires_at: "2000-01-01T00:00:00.000Z",
+                },
+                &user.id,
+            )
+            .await
+            .unwrap();
+        assert!(
+            sessions
+                .latest_token_for_user(&user.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "expired sessions must be filtered out"
+        );
+
+        // Add a future-dated session — returned.
+        sessions
+            .create_with_user_fk(
+                CreateUserAuthSession {
+                    token: "fresh",
+                    user_id: "u",
+                    github_login: "live-user",
+                    github_name: None,
+                    github_avatar_url: None,
+                    github_access_token: "gho_fresh",
+                    expires_at: "2099-01-01T00:00:00.000Z",
+                },
+                &user.id,
+            )
+            .await
+            .unwrap();
+
+        let got = sessions
+            .latest_token_for_user(&user.id)
+            .await
+            .unwrap()
+            .expect("fresh session should resolve");
+        assert_eq!(got.token, "fresh");
+        assert_eq!(got.github_access_token, "gho_fresh");
+
+        // Different user — must not see this user's token.
+        let other = users
+            .upsert_from_github(202, "other-user", None, None)
+            .await
+            .unwrap();
+        assert!(
+            sessions
+                .latest_token_for_user(&other.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

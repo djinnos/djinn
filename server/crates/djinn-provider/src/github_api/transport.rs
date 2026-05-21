@@ -1,7 +1,17 @@
 use anyhow::{Result, anyhow};
 use reqwest::{Response, StatusCode};
+use thiserror::Error;
 
 use crate::github_api::{AuthMode, GitHubApiClient};
+
+/// Returned by [`GitHubApiClient::send_with_retry`] when a `UserToken`
+/// auth mode receives a 401. Callers can downcast via
+/// `err.downcast_ref::<UserTokenExpired>()` to skip the action gracefully
+/// (e.g. pr_poller falls back to "wait for human approval" instead of
+/// failing the run) without parsing error message strings.
+#[derive(Debug, Error)]
+#[error("GitHub user token expired or revoked")]
+pub struct UserTokenExpired;
 
 /// Maximum number of token-refresh retries on 401 responses.
 const MAX_REFRESH_RETRIES: u32 = 1;
@@ -27,6 +37,7 @@ impl GitHubApiClient {
                     })?;
                 Ok(tok.token)
             }
+            AuthMode::UserToken(token) => Ok(token.clone()),
         }
     }
 
@@ -68,6 +79,7 @@ impl GitHubApiClient {
                 let token = self.bearer_token().await?;
                 build_request(token).await
             }
+            AuthMode::UserToken(_) => Err(anyhow::Error::new(UserTokenExpired)),
         }
     }
 }

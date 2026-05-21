@@ -38,6 +38,7 @@ mod types;
 
 use reqwest::Client;
 
+pub use transport::UserTokenExpired;
 pub use types::{
     ActionsJob, ActionsJobStep, CheckAnnotation, CheckRun, CheckRunsResponse, CreatePrParams,
     GitHubUser, MergeMethod, PrRef, PrReview, PrReviewFeedback, PrState, PullRequest,
@@ -65,6 +66,14 @@ pub(super) enum AuthMode {
     SessionUser,
     /// Mint a GitHub App installation token for each call.
     Installation { installation_id: u64 },
+    /// Use a specific user GitHub access token supplied at client construction.
+    ///
+    /// For background coordinator paths (pr_poller, schedulers) that act on
+    /// behalf of a user but run outside any HTTP `SESSION_USER_TOKEN` scope.
+    /// On 401 the call returns an error tagged as user-token-expired rather
+    /// than retrying — caller decides whether to skip the action or surface
+    /// it to the user.
+    UserToken(String),
 }
 
 #[derive(Clone)]
@@ -100,6 +109,19 @@ impl GitHubApiClient {
     /// tests and self-hosted GitHub Enterprise).
     pub fn for_installation_with_base_url(installation_id: u64, base_url: String) -> Self {
         Self::build(AuthMode::Installation { installation_id }, base_url)
+    }
+
+    /// Create a client that authenticates with a literal user GitHub access
+    /// token. For background paths (pr_poller, scheduled jobs) that need to
+    /// act as a specific user but cannot read `SESSION_USER_TOKEN` because
+    /// they run outside an HTTP request.
+    pub fn for_user_token(token: String) -> Self {
+        Self::build(AuthMode::UserToken(token), GITHUB_API_BASE.to_string())
+    }
+
+    /// User-token constructor with a custom base URL (useful for tests).
+    pub fn for_user_token_with_base_url(token: String, base_url: String) -> Self {
+        Self::build(AuthMode::UserToken(token), base_url)
     }
 
     fn build(auth: AuthMode, base_url: String) -> Self {
