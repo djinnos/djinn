@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT id FROM task_runs\n             WHERE `status` = 'running'\n               AND ended_at IS NULL\n               AND started_at < ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 144
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "37950ab29902a6bb9fa7d009221dcabc1263f1096bc2e9a54553c5925dae3666"
+}
