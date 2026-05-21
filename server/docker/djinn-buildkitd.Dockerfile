@@ -21,7 +21,7 @@ FROM alpine:3.20 AS helpers
 
 ARG ECR_CRED_HELPER_VERSION=0.9.0
 ARG GCR_CRED_HELPER_VERSION=2.1.22
-ARG ACR_CRED_HELPER_VERSION=0.13.0
+ARG ACR_CRED_HELPER_VERSION=0.7.0
 
 RUN apk add --no-cache curl ca-certificates tar && mkdir -p /helpers
 
@@ -31,7 +31,7 @@ RUN curl -fsSL -o /helpers/docker-credential-ecr-login \
 RUN curl -fsSL "https://github.com/GoogleCloudPlatform/docker-credential-gcr/releases/download/v${GCR_CRED_HELPER_VERSION}/docker-credential-gcr_linux_amd64-${GCR_CRED_HELPER_VERSION}.tar.gz" \
     | tar -xz -C /helpers docker-credential-gcr
 
-RUN curl -fsSL "https://github.com/chrismellard/docker-credential-acr-env/releases/download/v${ACR_CRED_HELPER_VERSION}/docker-credential-acr-env_${ACR_CRED_HELPER_VERSION}_Linux_x86_64.tar.gz" \
+RUN curl -fsSL "https://github.com/chrismellard/docker-credential-acr-env/releases/download/${ACR_CRED_HELPER_VERSION}/docker-credential-acr-env_${ACR_CRED_HELPER_VERSION}_linux_amd64.tar.gz" \
     | tar -xz -C /helpers docker-credential-acr-env
 
 RUN chmod 0755 /helpers/*
