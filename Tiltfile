@@ -84,11 +84,11 @@ local('bash scripts/kind/setup-kind.sh', quiet=False, echo_off=True)
 # Refuse to apply against anything other than the local kind cluster.
 allow_k8s_contexts(CLUSTER)
 
-# Default every resource to manual triggering. Initial `tilt up` still builds
-# them once; after that, file changes do NOT auto-rebuild — hit the refresh
-# arrow in the Tilt UI (or `tilt trigger <name>`) when you actually want a
-# rebuild. Keeps long compile loops from kicking off mid-edit.
-trigger_mode(TRIGGER_MODE_MANUAL)
+# Only the slow recompile/bundle steps need to be manual — the cheap wrap
+# steps below (djinn-server image, djinn-agent-runtime image) stay AUTO so
+# they cascade-roll the pods as soon as djinn-binaries finishes. Hit the
+# refresh arrow on djinn-binaries (or `tilt trigger djinn-binaries`) when
+# you want a fresh compile; the rest follows automatically.
 
 # --- djinn-agent-runtime base image --------------------------------------
 # Heavy base: LSPs (Node + rust-analyzer + pyright + typescript-language-
@@ -103,6 +103,7 @@ local_resource(
     cmd='bash scripts/tilt/build-agent-runtime-base.sh',
     deps=['server/docker/djinn-agent-runtime-base.Dockerfile'],
     labels=['build'],
+    trigger_mode=TRIGGER_MODE_MANUAL,
 )
 
 # --- djinn UI (Vite production build, embedded into djinn-server) -------
@@ -133,6 +134,7 @@ local_resource(
     ],
     ignore=['ui/dist', 'ui/node_modules', 'ui/storybook-static'],
     labels=['build'],
+    trigger_mode=TRIGGER_MODE_MANUAL,
 )
 
 # --- djinn binaries ------------------------------------------------------
@@ -164,6 +166,7 @@ local_resource(
     ignore=['server/**/target', 'server/**/test-tmp'],
     resource_deps=['djinn-ui-dist'],
     labels=['build'],
+    trigger_mode=TRIGGER_MODE_MANUAL,
 )
 
 # --- djinn-server image --------------------------------------------------
@@ -223,6 +226,7 @@ local_resource(
     ]),
     deps=['server/docker/djinn-image-builder.Dockerfile'],
     labels=['build'],
+    trigger_mode=TRIGGER_MODE_MANUAL,
 )
 
 # --- helm override values -------------------------------------------------
