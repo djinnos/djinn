@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, name,\n                  github_owner AS \"github_owner!: String\",\n                  github_repo AS \"github_repo!: String\",\n                  created_at, target_branch,\n                  auto_merge AS \"auto_merge!: bool\",\n                  sync_enabled AS \"sync_enabled!: bool\",\n                  sync_remote\n           FROM projects WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "github_owner!: String",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "github_repo!: String",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "created_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "target_branch",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "auto_merge!: bool",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "sync_enabled!: bool",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "sync_remote",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "514e95e48e4c0f33404dd83a254b0dcf59651c8ccf134f8c0f29e8b9bc34fc9d"
+}

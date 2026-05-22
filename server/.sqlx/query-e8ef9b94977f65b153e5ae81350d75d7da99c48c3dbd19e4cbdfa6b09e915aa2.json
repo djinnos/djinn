@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT name, is_default AS \"is_default!: i64\" FROM agents WHERE project_id = $1 AND base_role = 'worker' ORDER BY name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "is_default!: i64",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "e8ef9b94977f65b153e5ae81350d75d7da99c48c3dbd19e4cbdfa6b09e915aa2"
+}
