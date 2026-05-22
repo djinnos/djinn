@@ -113,10 +113,20 @@ pub struct Database {
 }
 
 #[derive(Clone, Debug)]
-struct TestBranchInit {
-    server_prefix: String,
-    shared_db: String,
-    branch: String,
+enum TestBranchInit {
+    /// Legacy Dolt branching: a single shared `djinn_test` database with a
+    /// branch per test. Slated for deletion in Phase 2.
+    Dolt {
+        server_prefix: String,
+        shared_db: String,
+        branch: String,
+    },
+    /// MySQL template-clone isolation: per-test `djinn_test_<uuid>`
+    /// schema cloned from `djinn_test_template`.
+    Mysql {
+        server_prefix: String,
+        test_db: String,
+    },
 }
 
 /// Process-wide guard: the shared `djinn_test` database is created and
@@ -138,36 +148,33 @@ impl Database {
         }
     }
 
-    /// Open an isolated Dolt branch for a single test.
+    /// Open an isolated test database.
     ///
-    /// Uses one shared `djinn_test` database and creates a fresh branch per
-    /// caller (`t_{uuid_simple}`). A Dolt branch is an O(1) ref pointer, so
-    /// 500 concurrent tests cost ~1x the per-database RAM overhead (commit
-    /// graph + table file index) instead of 500x. The prior design created
-    /// a full DB per test and pushed the test-Dolt container past its 8 GiB
-    /// cap once branches accumulated.
+    /// Phase 1 of the Dolt → MySQL cutover supports two backends behind one
+    /// API:
     ///
-    /// Connects against `DJINN_TEST_MYSQL_URL` (default
-    /// `mysql://root@127.0.0.1:3307`, the isolated test Dolt on port 3307
-    /// from `docker compose`). The returned `Database` has a lazy pool: the
-    /// branch is not created until the first `ensure_initialized()` call.
+    /// * **MySQL** (when `DJINN_TEST_MYSQL_URL` is set, default in Phase 2):
+    ///   create a fresh `djinn_test_<uuid>` schema on `:3308` and clone the
+    ///   table definitions from the `djinn_test_template` schema, which was
+    ///   pre-built by `make test-db-mysql-template`. Cloning is sub-second
+    ///   because the mysql-test container is tmpfs-backed.
+    /// * **Dolt** (legacy fallback, kept until Phase 2 deletes it): create a
+    ///   fresh branch on the shared `djinn_test` database. Each new pool
+    ///   connection runs `USE djinn_test/<branch>` in `after_connect`.
     ///
-    /// ## Isolation
-    ///
-    /// Each new connection from the pool runs `USE djinn_test/<branch>` in
-    /// `after_connect`, so every query is pinned to this test's branch.
-    /// Writes on one branch are invisible to other branches.
-    ///
-    /// ## Cleanup
-    ///
-    /// Branches are leaked — they persist until `make test-db-clean` drops
-    /// all `t_*` branches, or `make test-db-reset` wipes the container. See
-    /// the note on `open_mysql` regarding why a `Drop` impl isn't viable
-    /// given `Database: Clone`.
+    /// Each test gets a UUIDv7-named container (database or branch) — no
+    /// collisions under `cargo nextest` parallelism.
     pub fn open_in_memory() -> DbResult<Self> {
-        let base_url = std::env::var("DJINN_TEST_MYSQL_URL")
-            .unwrap_or_else(|_| "mysql://root@127.0.0.1:3307".to_owned());
-        let server_prefix = strip_server_prefix(&base_url);
+        if let Ok(base) = std::env::var("DJINN_TEST_MYSQL_URL") {
+            return Self::open_in_memory_mysql(&base);
+        }
+        Self::open_in_memory_dolt()
+    }
+
+    /// Legacy Dolt-branch test isolation. See `open_in_memory` for context.
+    /// Slated for deletion in Phase 2 of the MySQL cutover.
+    fn open_in_memory_dolt() -> DbResult<Self> {
+        let server_prefix = "mysql://root@127.0.0.1:3307".to_owned();
         let shared_db = "djinn_test".to_owned();
         let branch = format!("t_{}", uuid::Uuid::now_v7().simple());
         // Pool connects to the shared DB; after_connect pins each conn to
@@ -180,10 +187,41 @@ impl Database {
                 flavor: MysqlBackendFlavor::Dolt,
             },
             4,
-            Some(TestBranchInit {
+            Some(TestBranchInit::Dolt {
                 server_prefix,
                 shared_db,
                 branch,
+            }),
+        )
+    }
+
+    /// MySQL template-clone test isolation.
+    ///
+    /// Takes the base URL (e.g. `mysql://root@127.0.0.1:3308`), strips any
+    /// trailing `/<db>` segment, then constructs an admin connection
+    /// against `<base>/mysql`, creates a fresh `djinn_test_<uuid>` schema,
+    /// and clones every table from `djinn_test_template` into it
+    /// (DDL + rows; the only seeded rows are in `_sqlx_migrations`).
+    ///
+    /// FK constraints are recreated by replaying each table's
+    /// `SHOW CREATE TABLE` output with `FOREIGN_KEY_CHECKS=0` for the
+    /// duration of the clone — `CREATE TABLE ... LIKE` would silently drop
+    /// the FK constraints, breaking ON DELETE CASCADE assumptions in many
+    /// repositories.
+    fn open_in_memory_mysql(base: &str) -> DbResult<Self> {
+        let server_prefix = strip_server_prefix(base);
+        let test_db = format!("djinn_test_{}", uuid::Uuid::now_v7().simple());
+        let url = format!("{server_prefix}/{test_db}");
+
+        Self::open_mysql_inner(
+            &MysqlDatabaseConfig {
+                url,
+                flavor: MysqlBackendFlavor::Mysql,
+            },
+            4,
+            Some(TestBranchInit::Mysql {
+                server_prefix,
+                test_db,
             }),
         )
     }
@@ -217,13 +255,28 @@ impl Database {
         max_connections: u32,
         test_branch: Option<TestBranchInit>,
     ) -> DbResult<Self> {
-        let opts = MySqlConnectOptions::from_str(&config.url)?;
+        let mut opts = MySqlConnectOptions::from_str(&config.url)?;
+        // For the MySQL test path, disable sqlx's prepared-statement cache.
+        // Parallel tests rapidly CREATE / DROP databases with the same table
+        // names (`djinn_test_<uuid>` instances cloned from the same
+        // template); MySQL's server-side statement cache then surfaces
+        // error 1615 ("Prepared statement needs to be re-prepared") when a
+        // cached statement is reused against a freshly-created twin schema.
+        // Disabling client-side caching forces a fresh PREPARE on each
+        // query, which is a small per-test overhead and eliminates the race.
+        // Production / Dolt paths keep caching on.
+        if matches!(test_branch, Some(TestBranchInit::Mysql { .. })) {
+            opts = opts.statement_cache_capacity(0);
+        }
         // Precompute the `USE db/branch` statement so the after_connect
-        // closure can be shared (no per-connection allocation).
-        let use_branch_stmt = test_branch.as_ref().map(|init| {
-            // Branch names are UUIDv7 hex (ASCII alphanumerics + underscore),
-            // shared_db is a const — safe to interpolate without quoting.
-            format!("USE {}/{}", init.shared_db, init.branch)
+        // closure can be shared (no per-connection allocation). Only the
+        // Dolt branch variant needs it — the MySQL template-clone path
+        // points the connection URL directly at `djinn_test_<uuid>`.
+        let use_branch_stmt = test_branch.as_ref().and_then(|init| match init {
+            TestBranchInit::Dolt {
+                shared_db, branch, ..
+            } => Some(format!("USE {shared_db}/{branch}")),
+            TestBranchInit::Mysql { .. } => None,
         });
         let pool = MySqlPoolOptions::new()
             .max_connections(max_connections)
@@ -408,25 +461,36 @@ impl Database {
         self.initialized
             .get_or_try_init(|| async move {
                 match test_branch {
-                    Some(init) => {
+                    Some(TestBranchInit::Dolt {
+                        server_prefix,
+                        shared_db,
+                        branch,
+                    }) => {
                         // Shared djinn_test DB + migrations on `main` —
                         // once per process, regardless of test fan-out.
                         SHARED_TEST_DB_INIT
                             .get_or_try_init(|| {
                                 init_shared_test_db(
-                                    init.server_prefix.clone(),
-                                    init.shared_db.clone(),
+                                    server_prefix.clone(),
+                                    shared_db.clone(),
                                 )
                             })
                             .await?;
                         // Per-instance: create the branch this test will
                         // write against. UUIDv7 names don't collide.
-                        create_test_branch(
-                            &init.server_prefix,
-                            &init.shared_db,
-                            &init.branch,
-                        )
-                        .await?;
+                        create_test_branch(&server_prefix, &shared_db, &branch).await?;
+                    }
+                    Some(TestBranchInit::Mysql {
+                        server_prefix,
+                        test_db,
+                    }) => {
+                        // Clone the pre-built `djinn_test_template` schema
+                        // into the per-test database. The template Job
+                        // (`make test-db-mysql-template`) must have run
+                        // already — if it hasn't, the clone fails with a
+                        // clear "Unknown database" error and the operator
+                        // knows what to do.
+                        clone_mysql_test_template(&server_prefix, &test_db).await?;
                     }
                     None => {
                         migrations::ensure_mysql_database_exists(&url).await?;
@@ -506,6 +570,162 @@ async fn create_test_branch(
     conn.execute(stmt.as_str()).await.map_err(DbError::from)?;
     conn.close().await.map_err(DbError::from)?;
     Ok(())
+}
+
+/// Clone `djinn_test_template` into a freshly-created per-test database.
+///
+/// `CREATE TABLE ... LIKE` would be simpler, but it does not copy FK
+/// constraints — and several repositories rely on `ON DELETE CASCADE`
+/// (tasks→projects, blockers→tasks, notes→projects, embeddings→notes,
+/// task_runs→tasks, etc.). Replaying each table's `SHOW CREATE TABLE`
+/// preserves indexes, FK constraints, FULLTEXT keys, defaults, and
+/// engine/charset settings exactly. `FOREIGN_KEY_CHECKS=0` is set on the
+/// admin connection for the duration so table order does not matter.
+async fn clone_mysql_test_template(server_prefix: &str, test_db: &str) -> DbResult<()> {
+    if !is_safe_database_identifier(test_db) {
+        return Err(DbError::InvalidData(format!(
+            "unsafe mysql database name `{test_db}`; only [A-Za-z0-9_] allowed",
+        )));
+    }
+
+    // Connect to the system `mysql` schema with a SINGLE connection,
+    // not a pool. We need `SET SESSION FOREIGN_KEY_CHECKS=0` to apply
+    // to every subsequent statement in this clone, and a pool would
+    // round-robin across connections that don't carry the SET. Using
+    // `MySqlConnection` (single conn) makes the session state stable.
+    use sqlx::ConnectOptions;
+    let admin_url = format!("{server_prefix}/mysql");
+    let opts = sqlx::mysql::MySqlConnectOptions::from_str(&admin_url)
+        .map_err(DbError::from)?;
+    let mut conn = opts.connect().await.map_err(DbError::from)?;
+
+    let result: DbResult<()> = async {
+        // Disable FK checks so CREATE TABLE statements can reference
+        // tables that don't exist yet (the natural ordering of
+        // SHOW CREATE TABLE output is by name, not by FK dependency
+        // graph). FK enforcement is restored implicitly when this
+        // connection drops — the per-test pool reconnects with the
+        // server default (FOREIGN_KEY_CHECKS=1) so production code
+        // paths see fully-enforced FKs.
+        sqlx::query("SET SESSION FOREIGN_KEY_CHECKS=0")
+            .execute(&mut conn)
+            .await
+            .map_err(DbError::from)?;
+
+        sqlx::query(format!("CREATE DATABASE `{test_db}`").as_str())
+            .execute(&mut conn)
+            .await
+            .map_err(DbError::from)?;
+
+        // Enumerate template tables (and views, though we expect none).
+        // MySQL 8 returns information_schema string columns as VARBINARY
+        // under utf8mb4_0900_ai_ci collation; sqlx will not decode that
+        // into `String`. CAST to CHAR makes the wire type unambiguous and
+        // is a no-op on the round-trip.
+        let tables: Vec<String> = sqlx::query_scalar(
+            "SELECT CAST(TABLE_NAME AS CHAR) \
+               FROM information_schema.tables \
+              WHERE TABLE_SCHEMA = 'djinn_test_template' \
+                AND TABLE_TYPE   = 'BASE TABLE'",
+        )
+        .fetch_all(&mut conn)
+        .await
+        .map_err(DbError::from)?;
+
+        for t in &tables {
+            // SHOW CREATE TABLE returns (Name, Create Table) on row 0.
+            // MySQL 8 returns the second column as VARBINARY (not VARCHAR)
+            // under the default utf8mb4_0900_ai_ci collation — sqlx is
+            // strict about that, so decode as `Vec<u8>` then parse UTF-8.
+            // The DDL string is always valid UTF-8.
+            let row: (String, Vec<u8>) = sqlx::query_as(&format!(
+                "SHOW CREATE TABLE `djinn_test_template`.`{t}`"
+            ))
+            .fetch_one(&mut conn)
+            .await
+            .map_err(DbError::from)?;
+            let mut ddl = String::from_utf8(row.1).map_err(|e| {
+                DbError::InvalidData(format!(
+                    "SHOW CREATE TABLE returned non-UTF8 bytes for `{t}`: {e}"
+                ))
+            })?;
+            // Rewrite `CREATE TABLE \`t\` (...)` to target the per-test
+            // schema. `SHOW CREATE TABLE` does not include the schema
+            // qualifier so a plain prefix substitution is safe.
+            let needle = format!("CREATE TABLE `{t}`");
+            let replacement = format!("CREATE TABLE `{test_db}`.`{t}`");
+            ddl = ddl.replacen(&needle, &replacement, 1);
+            sqlx::query(ddl.as_str())
+                .execute(&mut conn)
+                .await
+                .map_err(DbError::from)?;
+
+            // Copy data. Only `_sqlx_migrations` has rows in the
+            // template (the migrator records its own runs there); the
+            // other tables ship empty. We can't use `SELECT *` because
+            // some tables have GENERATED columns (e.g. `agents.default_key`
+            // which is VIRTUAL) — MySQL rejects any attempt to bind a value
+            // for those, even via SELECT *. Enumerate real columns from
+            // `information_schema.columns`, skipping anything with `extra`
+            // containing 'GENERATED'.
+            let real_cols: Vec<String> = sqlx::query_scalar(
+                "SELECT CAST(COLUMN_NAME AS CHAR) \
+                   FROM information_schema.columns \
+                  WHERE TABLE_SCHEMA = 'djinn_test_template' \
+                    AND TABLE_NAME   = ? \
+                    AND extra NOT LIKE '%GENERATED%' \
+                  ORDER BY ORDINAL_POSITION",
+            )
+            .bind(t)
+            .fetch_all(&mut conn)
+            .await
+            .map_err(DbError::from)?;
+            let col_list = real_cols
+                .iter()
+                .map(|c| format!("`{c}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let insert = format!(
+                "INSERT INTO `{test_db}`.`{t}` ({col_list}) \
+                 SELECT {col_list} FROM `djinn_test_template`.`{t}`"
+            );
+            sqlx::query(insert.as_str())
+                .execute(&mut conn)
+                .await
+                .map_err(DbError::from)?;
+        }
+        // Force MySQL to invalidate any cached table-metadata that may
+        // reference the prior-test version of `djinn_test_<uuid>` tables.
+        // Without this, subsequent FK-cascade DELETEs on the per-test pool
+        // hit error 1615 ("Prepared statement needs to be re-prepared")
+        // because the server-side dictionary still points at indexes from
+        // a DROPped sibling test's tables of the same name.
+        //
+        // NOTE: `FLUSH TABLES FROM <db>` is *not* valid MySQL 8 syntax —
+        // it has to be `FLUSH TABLES <db>.<t1>, <db>.<t2>, ...`. We have
+        // the table list in hand from the loop above so build the
+        // qualified form.
+        if !tables.is_empty() {
+            let flush_list = tables
+                .iter()
+                .map(|t| format!("`{test_db}`.`{t}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            sqlx::query(&format!("FLUSH TABLES {flush_list}"))
+                .execute(&mut conn)
+                .await
+                .map_err(DbError::from)?;
+        }
+        Ok(())
+    }
+    .await;
+
+    drop(conn);
+    result
+}
+
+fn is_safe_database_identifier(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Workspace-local tempdir helper retained for tests that still stage
@@ -655,23 +875,49 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn open_in_memory_generates_unique_branches() {
+    async fn open_in_memory_generates_unique_isolation_containers() {
         let a = Database::open_in_memory().unwrap();
         let b = Database::open_in_memory().unwrap();
-        // Every test shares the same underlying database but gets its own
-        // branch. Distinctness is at the branch level, not the URL.
-        let a_branch = a
+        // The Dolt variant gives each test a distinct branch; the MySQL
+        // variant gives each test a distinct database. Either way, two
+        // back-to-back `open_in_memory` calls produce different isolation
+        // identifiers.
+        let a_init = a
             .test_branch
             .as_ref()
             .expect("open_in_memory sets test_branch");
-        let b_branch = b
+        let b_init = b
             .test_branch
             .as_ref()
             .expect("open_in_memory sets test_branch");
-        assert_ne!(a_branch.branch, b_branch.branch);
-        assert!(a_branch.branch.starts_with("t_"));
-        assert_eq!(a_branch.shared_db, "djinn_test");
-        assert_eq!(a.bootstrap_info().target, b.bootstrap_info().target);
+        match (a_init, b_init) {
+            (
+                TestBranchInit::Dolt {
+                    shared_db: a_db,
+                    branch: a_br,
+                    ..
+                },
+                TestBranchInit::Dolt {
+                    branch: b_br, ..
+                },
+            ) => {
+                assert_ne!(a_br, b_br);
+                assert!(a_br.starts_with("t_"));
+                assert_eq!(a_db, "djinn_test");
+                assert_eq!(a.bootstrap_info().target, b.bootstrap_info().target);
+            }
+            (
+                TestBranchInit::Mysql { test_db: a_db, .. },
+                TestBranchInit::Mysql { test_db: b_db, .. },
+            ) => {
+                assert_ne!(a_db, b_db);
+                assert!(a_db.starts_with("djinn_test_"));
+                assert_ne!(a.bootstrap_info().target, b.bootstrap_info().target);
+            }
+            (left, right) => panic!(
+                "open_in_memory should pick one flavor per process, got {left:?} vs {right:?}"
+            ),
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

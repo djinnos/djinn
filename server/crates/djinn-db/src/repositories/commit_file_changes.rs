@@ -11,8 +11,39 @@
 //! — see that file for the rationale behind Dolt / VARCHAR timestamp /
 //! batched upsert patterns.
 
+use sha2::{Digest, Sha256};
+
 use crate::Result;
 use crate::database::Database;
+
+/// Compute the synthetic `event_key` PK for a `coupling_pair_events`
+/// row. SHA-256 of the natural composite identity tuple, joined by `:`.
+///
+/// The natural tuple `(project_id, file_a, file_b, commit_sha)` under
+/// utf8mb4 sums past InnoDB's 3072-byte key limit, so the schema (see
+/// migration 20) carries a synthetic CHAR(64) PK that the application
+/// populates. Same input → same hash → ON DUPLICATE KEY UPDATE retains
+/// the old "natural-key UPSERT no-op on replay" contract.
+///
+/// `pub` (not `pub(crate)`) because the sibling crate
+/// `djinn_graph::coupling_index` also writes to this table and needs
+/// the same helper. Hash collisions on SHA-256 are not a concern.
+pub fn coupling_event_key(
+    project_id: &str,
+    file_a: &str,
+    file_b: &str,
+    commit_sha: &str,
+) -> String {
+    let mut h = Sha256::new();
+    h.update(project_id.as_bytes());
+    h.update(b":");
+    h.update(file_a.as_bytes());
+    h.update(b":");
+    h.update(file_b.as_bytes());
+    h.update(b":");
+    h.update(commit_sha.as_bytes());
+    format!("{:x}", h.finalize())
+}
 
 /// One row in `commit_file_changes`.
 #[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
@@ -181,28 +212,35 @@ impl CommitFileChangeRepository {
         }
         self.db.ensure_initialized().await?;
 
-        // Dolt prepared-statement parameters cap is ~65k; 5 params per
-        // row leaves us well under the cap at 500-row batches.
+        // MySQL prepared-statement parameters cap is ~65k; 6 params per
+        // row leaves us well under the cap at 500-row batches. The
+        // first column is the synthetic SHA-256 PK (see migration 20
+        // and `coupling_event_key`) — populated by the application so
+        // the natural composite stays usable as a secondary index.
         let mut sql = String::from(
             "INSERT INTO coupling_pair_events \
-             (project_id, file_a, file_b, commit_sha, committed_at) VALUES ",
+             (event_key, project_id, file_a, file_b, commit_sha, committed_at) VALUES ",
         );
         for i in 0..events.len() {
             if i > 0 {
                 sql.push(',');
             }
-            sql.push_str("(?, ?, ?, ?, ?)");
+            sql.push_str("(?, ?, ?, ?, ?, ?)");
         }
-        // Replays must be no-ops. Touch any non-PK column with the
-        // same value so the UPSERT contract is satisfied without
-        // changing semantics on duplicate keys.
+        // Replays must be no-ops. The conflict is now on the synthetic
+        // event_key (the PK); same natural tuple → same key → same
+        // resolution path as the old composite PK gave us. Touch a
+        // non-PK column with the same value so the UPSERT contract is
+        // satisfied without changing semantics on duplicate keys.
         sql.push_str(
             " ON DUPLICATE KEY UPDATE committed_at = VALUES(committed_at)",
         );
 
         let mut query = sqlx::query(&sql);
         for e in events {
+            let key = coupling_event_key(&e.project_id, &e.file_a, &e.file_b, &e.commit_sha);
             query = query
+                .bind(key)
                 .bind(&e.project_id)
                 .bind(&e.file_a)
                 .bind(&e.file_b)

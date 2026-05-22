@@ -172,7 +172,12 @@ CREATE INDEX notes_type                  ON notes(note_type);
 CREATE INDEX notes_updated_at            ON notes(updated_at);
 CREATE INDEX notes_project_last_accessed ON notes(project_id, last_accessed);
 CREATE INDEX notes_project_content_hash  ON notes(project_id, content_hash);
-CREATE INDEX notes_project_folder_title  ON notes(project_id, folder, title);
+-- Title is VARCHAR(512); under utf8mb4 the composite index hits InnoDB's
+-- 3072-byte key limit. Cap title to its first 191 chars in the index —
+-- the prefix is unique enough for the lookup patterns this index serves
+-- (project-scoped folder/title prefix filtering). Dolt silently accepted
+-- the unprefixed version; real MySQL 8 rejects it.
+CREATE INDEX notes_project_folder_title  ON notes(project_id, folder, title(191));
 
 -- MySQL/Dolt replacement for the SQLite FTS5 shadow table + triggers.
 ALTER TABLE notes ADD FULLTEXT KEY notes_ft (title, content, tags);
@@ -400,11 +405,13 @@ CREATE INDEX idx_verification_results_project ON verification_results(project_id
 CREATE INDEX idx_verification_results_run     ON verification_results(run_id);
 
 -- ── repo_map_cache (per-worktree rendered repo map) ────────────────────────
--- Composite primary key with nullable worktree_path: MySQL tolerates NULL in
--- PRIMARY KEY only via UNIQUE KEY, so we use a synthetic surrogate key and a
--- unique index over the composite. Callers ON DUPLICATE KEY UPDATE against the
--- composite unique, so that is what matters.
+-- The composite identity is (project_id, project_path, worktree_path,
+-- commit_sha). Under utf8mb4 the raw VARCHAR widths sum past InnoDB's
+-- 3072-byte key limit, so identity is normalized into a SHA-256 hex
+-- digest column the application populates on insert and ON DUPLICATE
+-- KEY UPDATE against. Hash collisions on SHA-256 are not a concern.
 CREATE TABLE IF NOT EXISTS repo_map_cache (
+    cache_key         CHAR(64)     NOT NULL PRIMARY KEY,
     project_id        VARCHAR(36)  NOT NULL,
     project_path      VARCHAR(512) NOT NULL,
     worktree_path     VARCHAR(512) NOT NULL DEFAULT '',
@@ -413,9 +420,10 @@ CREATE TABLE IF NOT EXISTS repo_map_cache (
     token_estimate    BIGINT       NOT NULL,
     included_entries  BIGINT       NOT NULL,
     graph_artifact    LONGTEXT     NULL,
-    created_at        VARCHAR(64)  NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')),
-    PRIMARY KEY (project_id, project_path, worktree_path, commit_sha)
+    created_at        VARCHAR(64)  NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))
 );
+
+CREATE INDEX repo_map_cache_project_commit ON repo_map_cache(project_id, commit_sha);
 
 -- ── repo_graph_cache (canonical SCIP graph cache, ADR-050) ────────────────
 CREATE TABLE IF NOT EXISTS repo_graph_cache (

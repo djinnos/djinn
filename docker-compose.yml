@@ -28,3 +28,22 @@ services:
     # downstream test saw "UnexpectedEof". 8g keeps the full suite stable.
     mem_limit: 8g
     memswap_limit: 8g
+
+  # Phase 1 of the Dolt → MySQL cutover: a tmpfs-backed MySQL 8.4 instance
+  # tests can clone schema from in sub-second time. Lives alongside dolt-test
+  # until Phase 2 retires Dolt. Consumed by `make test-db-mysql-template`
+  # and any `cargo nextest` invocation with
+  # `DJINN_TEST_MYSQL_URL=mysql://root@127.0.0.1:3308` set.
+  mysql-test:
+    image: mysql:8.4
+    container_name: djinn-mysql-test
+    command:
+      - --innodb-flush-log-at-trx-commit=2
+      - --innodb-buffer-pool-size=512M
+      - --skip-log-bin
+      - --max-connections=500
+    environment:
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+      MYSQL_DATABASE: djinn
+    ports: ["127.0.0.1:3308:3306"]
+    tmpfs: ["/var/lib/mysql"]

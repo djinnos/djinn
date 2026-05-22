@@ -9,7 +9,7 @@ SERVER_DIR := $(CURDIR)/server
 # Dolt (docker-compose.yml → `dolt-test` service at :3307) plus the test
 # harness targets that depend on it.
 
-.PHONY: help dev test-db-migrate test-vault test-db-reset sqlx-prepare sqlx-check test test-all
+.PHONY: help dev test-db-migrate test-db-mysql-template test-vault test-db-reset sqlx-prepare sqlx-check test test-all
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -18,6 +18,13 @@ test-db-migrate: ## Ensure schema is applied to the test Dolt (:3307)
 	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features mysql,rustls"; exit 1; }
 	@until docker exec djinn-dolt-test dolt sql -q "SELECT 1" >/dev/null 2>&1; do sleep 1; done
 	@cd $(SERVER_DIR)/crates/djinn-db && DATABASE_URL=mysql://root@127.0.0.1:3307/djinn sqlx migrate run --source migrations_mysql >/dev/null
+
+test-db-mysql-template: ## Build the djinn_test_template DB MySQL clones from (Phase 1 cut-over scaffolding)
+	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features mysql,rustls"; exit 1; }
+	@until docker exec djinn-mysql-test mysql -uroot -e "SELECT 1" >/dev/null 2>&1; do echo "waiting for mysql-test..."; sleep 1; done
+	@docker exec djinn-mysql-test mysql -uroot -e "DROP DATABASE IF EXISTS djinn_test_template; CREATE DATABASE djinn_test_template"
+	@cd $(SERVER_DIR)/crates/djinn-db && DATABASE_URL=mysql://root@127.0.0.1:3308/djinn_test_template sqlx migrate run --source migrations_mysql >/dev/null
+	@echo "djinn_test_template ready"
 
 test-vault: ## Create the test-only vault key at $DJINN_VAULT_KEY_PATH (idempotent)
 	@mkdir -p /var/tmp/djinn-test-vault

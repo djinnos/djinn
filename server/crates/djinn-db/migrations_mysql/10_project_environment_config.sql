@@ -27,5 +27,10 @@
 -- emptiness as its trigger — any row where the column is still `'{}'` gets
 -- auto-seeded from the stack detector on first boot after cut-over.
 
+-- MySQL 8 rejects unparenthesised literal defaults on TEXT columns
+-- ("BLOB, TEXT, GEOMETRY or JSON column can't have a default value"). Wrap
+-- the literal in parens to make it an expression default — semantically
+-- identical and accepted by both MySQL 8 and Dolt. Other JSON columns
+-- (migrations 4, 7, 12) already use this form; this one was the outlier.
 ALTER TABLE projects
-    ADD COLUMN environment_config LONGTEXT NOT NULL DEFAULT '{}';
+    ADD COLUMN environment_config LONGTEXT NOT NULL DEFAULT ('{}');
