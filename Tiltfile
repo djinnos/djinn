@@ -19,7 +19,7 @@
 #     minio + langfuse-web/worker) that self-seeds a project + API keys via
 #     LANGFUSE_INIT_* on first boot, matching the pk/sk values.local.yaml
 #     feeds into djinn-server's env,
-#   - port-forwards :3000 (API/UI), :8443 (worker RPC), :3306 (Dolt),
+#   - port-forwards :3000 (API/UI), :8443 (worker RPC), :5432 (Postgres),
 #     :6333/:6334 (Qdrant), :5000 (Langfuse dashboard), and :9091 (MinIO
 #     console) so no manual kubectl port-forward terminals.
 #
@@ -311,8 +311,8 @@ k8s_resource(
     labels=['djinn'],
 )
 k8s_resource(
-    workload='djinn-mysql',
-    port_forwards=[port_forward(3306, 3306, name='mysql')],
+    workload='djinn-postgres',
+    port_forwards=[port_forward(5432, 5432, name='postgres')],
     labels=['infra'],
 )
 k8s_resource(

@@ -1,0 +1,20 @@
+{{- if .Values.postgres.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "djinn.serviceName.postgres" . }}
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.postgres.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  # Headless Service so the StatefulSet Pod gets a stable DNS name.
+  clusterIP: None
+  selector:
+    {{- include "djinn.postgres.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: postgres
+      port: {{ .Values.postgres.service.port }}
+      targetPort: postgres
+      protocol: TCP
+{{- end -}}

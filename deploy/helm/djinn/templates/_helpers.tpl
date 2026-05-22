@@ -69,16 +69,16 @@ app.kubernetes.io/component: server
 {{- end -}}
 
 {{/*
-MySQL component labels.
+Postgres component labels.
 */}}
-{{- define "djinn.mysql.labels" -}}
+{{- define "djinn.postgres.labels" -}}
 {{ include "djinn.labels" . }}
-app.kubernetes.io/component: mysql
+app.kubernetes.io/component: postgres
 {{- end -}}
 
-{{- define "djinn.mysql.selectorLabels" -}}
+{{- define "djinn.postgres.selectorLabels" -}}
 {{ include "djinn.selectorLabels" . }}
-app.kubernetes.io/component: mysql
+app.kubernetes.io/component: postgres
 {{- end -}}
 
 {{/*
@@ -194,18 +194,55 @@ directly and the in-cluster Zot Service name is ignored.
 {{- end -}}
 
 {{/*
-Service names (used inside DJINN_MYSQL_URL / QDRANT_URL env in configmap).
+Service names (used inside DJINN_DATABASE_URL / QDRANT_URL env in configmap).
 */}}
 {{- define "djinn.serviceName.server" -}}
 {{- printf "%s-server" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "djinn.serviceName.mysql" -}}
-{{- printf "%s-mysql" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- define "djinn.serviceName.postgres" -}}
+{{- printf "%s-postgres" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{- define "djinn.serviceName.qdrant" -}}
 {{- printf "%s-qdrant" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
+Database URL resolution.
+
+Precedence:
+  1. .Values.database.externalUrl — emit the literal URL (operator owns
+     the host:port + credentials, typically an RDS endpoint).
+  2. .Values.database.existingSecret — return empty string. Consumers
+     (configmap, deployment, job-migrate) test for existingSecret first
+     and wire DJINN_DATABASE_URL via valueFrom: secretKeyRef instead of
+     plumbing the secret value through this helper.
+  3. Bundled in-cluster Postgres — build the URL from
+     djinn.serviceName.postgres + namespace + the postgres.auth.password
+     value (defaulting to "djinn-local-dev" to match the StatefulSet's
+     default password).
+
+`djinn.databaseUrl.fromSecret` is the boolean-style "should we use
+secretKeyRef" check, intended for use in template `if` guards.
+*/}}
+{{- define "djinn.databaseUrl" -}}
+{{- if .Values.database.externalUrl -}}
+{{- .Values.database.externalUrl -}}
+{{- else if .Values.database.existingSecret -}}
+{{- /* Secret-backed URL is wired via valueFrom; helper returns empty. */ -}}
+{{- else -}}
+{{- $pw := default "djinn-local-dev" .Values.postgres.auth.password -}}
+{{- printf "postgres://djinn:%s@%s.%s.svc.cluster.local:%d/djinn"
+      $pw
+      (include "djinn.serviceName.postgres" .)
+      (include "djinn.namespace" .)
+      (.Values.postgres.service.port | int) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "djinn.databaseUrl.fromSecret" -}}
+{{- if .Values.database.existingSecret -}}true{{- end -}}
 {{- end -}}
 
 {{/*
