@@ -40,9 +40,9 @@ use reqwest::Client;
 
 pub use transport::UserTokenExpired;
 pub use types::{
-    ActionsJob, ActionsJobStep, CheckAnnotation, CheckRun, CheckRunsResponse, CreatePrParams,
-    GitHubUser, MergeMethod, PrRef, PrReview, PrReviewFeedback, PrState, PullRequest,
-    ReviewComment,
+    ActionsJob, ActionsJobStep, AutoMergeRequest, CheckAnnotation, CheckRun, CheckRunsResponse,
+    CreatePrParams, DequeueEvent, GitHubUser, MergeMethod, MergeQueueEntry, MergeQueueEntryState,
+    PrMergeQueueState, PrRef, PrReview, PrReviewFeedback, PrState, PullRequest, ReviewComment,
 };
 
 /// GitHub REST API v3 base URL.

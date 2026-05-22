@@ -846,6 +846,13 @@ pub(crate) async fn interrupt_paused_worker_session(task_id: &str, app_state: &A
 /// `PrMerge` or any `ForceClose` path — lead intervention, admin tool,
 /// PR-closed-without-merge detection).
 ///
+/// Auto-merge / merge-queue cleanup is *implicit*: deleting the PR branch
+/// on the remote closes the PR, which automatically cancels GitHub's
+/// auto-merge request and removes the PR from the repository merge queue.
+/// We deliberately don't call `disable_auto_merge` / `dequeue_pull_request`
+/// explicitly here — it would mean 2-3 extra GraphQL round-trips per
+/// close for no behavioral change in the happy path.
+///
 /// Idempotent and non-fatal: any failure is logged and swallowed so the
 /// close transition is never blocked on cleanup.  When a branch is already
 /// gone from either side, GitHub returns 422 (treated as success by

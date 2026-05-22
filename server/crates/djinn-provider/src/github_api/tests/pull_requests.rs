@@ -367,3 +367,189 @@ async fn approve_pull_request_401_surfaces_user_token_expired() {
         "expected UserTokenExpired downcast, got: {err:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disable_auto_merge_success() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(header("Authorization", "Bearer ghs_test_install"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "disablePullRequestAutoMerge": {
+                    "pullRequest": { "number": 42, "title": "feat: add feature" }
+                }
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    client
+        .disable_auto_merge("PR_node123")
+        .await
+        .expect("disable_auto_merge should succeed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disable_auto_merge_propagates_graphql_error() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "errors": [{
+                "type": "FORBIDDEN",
+                "message": "Pull request Auto merge is not allowed on this repository"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let err = client
+        .disable_auto_merge("PR_node123")
+        .await
+        .expect_err("GraphQL error should propagate");
+    assert!(format!("{err}").contains("not allowed on this repository"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dequeue_pull_request_success() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "dequeuePullRequest": {
+                    "mergeQueueEntry": null
+                }
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    client
+        .dequeue_pull_request("PR_node123")
+        .await
+        .expect("dequeue_pull_request should succeed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_pr_merge_queue_state_returns_queued_entry() {
+    use crate::github_api::MergeQueueEntryState;
+
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "mergeStateStatus": "CLEAN",
+                        "autoMergeRequest": {
+                            "enabledAt": "2026-05-21T22:00:00Z",
+                            "mergeMethod": "SQUASH"
+                        },
+                        "mergeQueueEntry": {
+                            "id": "MQE_abc",
+                            "state": "QUEUED",
+                            "position": 2,
+                            "estimatedTimeToMerge": 180,
+                            "solo": false
+                        },
+                        "timelineItems": { "nodes": [] }
+                    }
+                }
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let state = client
+        .get_pr_merge_queue_state("djinnos", "server", 42)
+        .await
+        .expect("state fetch should succeed");
+
+    assert_eq!(state.merge_state_status.as_deref(), Some("CLEAN"));
+    let entry = state.merge_queue_entry.expect("queue entry present");
+    assert_eq!(entry.id, "MQE_abc");
+    assert_eq!(entry.state, MergeQueueEntryState::Queued);
+    assert_eq!(entry.position, Some(2));
+    assert_eq!(entry.estimated_time_to_merge, Some(180));
+    assert!(state.auto_merge_request.is_some());
+    assert!(state.last_dequeue.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_pr_merge_queue_state_returns_dequeue_event_when_kicked() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "mergeStateStatus": "BLOCKED",
+                        "autoMergeRequest": null,
+                        "mergeQueueEntry": null,
+                        "timelineItems": {
+                            "nodes": [
+                                {
+                                    "__typename": "DequeuedEvent",
+                                    "reason": "CHECKS_FAILED",
+                                    "createdAt": "2026-05-21T22:30:00Z"
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let state = client
+        .get_pr_merge_queue_state("djinnos", "server", 42)
+        .await
+        .expect("state fetch should succeed");
+
+    assert!(state.merge_queue_entry.is_none());
+    assert!(state.auto_merge_request.is_none());
+    let dequeue = state.last_dequeue.expect("dequeue event present");
+    assert_eq!(dequeue.reason.as_deref(), Some("CHECKS_FAILED"));
+    assert_eq!(dequeue.created_at.as_deref(), Some("2026-05-21T22:30:00Z"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_pr_merge_queue_state_handles_missing_pr() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": { "repository": { "pullRequest": null } }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let err = client
+        .get_pr_merge_queue_state("djinnos", "server", 42)
+        .await
+        .expect_err("missing PR should error");
+    assert!(format!("{err}").contains("pullRequest not found"));
+}

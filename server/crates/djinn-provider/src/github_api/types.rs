@@ -180,3 +180,91 @@ pub struct PrReviewFeedback {
     /// Inline code comments from all reviewers.
     pub inline_comments: Vec<ReviewComment>,
 }
+
+/// State of a pull request's entry in the repository merge queue.
+///
+/// Maps to GitHub GraphQL `MergeQueueEntryState`. The PR transitions through
+/// these as the queue processes it; observing `Unmergeable` is the only state
+/// that signals failure — the rest are normal progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum MergeQueueEntryState {
+    Queued,
+    AwaitingChecks,
+    Locked,
+    Mergeable,
+    Unmergeable,
+}
+
+/// A pull request's current entry in the merge queue.
+///
+/// Returned by `get_pr_merge_queue_state` when the PR has been accepted into
+/// a queue. Absence (the wrapping `Option` being `None`) means the PR is not
+/// currently queued — either it hasn't been enqueued, it merged, or it was
+/// kicked out.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeQueueEntry {
+    /// GraphQL node ID for this entry. Used for `dequeue_pull_request`.
+    pub id: String,
+    pub state: MergeQueueEntryState,
+    /// 1-based position in the queue.
+    #[serde(default)]
+    pub position: Option<u32>,
+    /// Estimated seconds until the entry reaches the front of the queue.
+    #[serde(default)]
+    pub estimated_time_to_merge: Option<u32>,
+    /// True when the queue had to bisect down to running this PR alone
+    /// (other PRs in the original group were innocent).
+    #[serde(default)]
+    pub solo: Option<bool>,
+}
+
+/// Status of an active auto-merge request on a PR.
+///
+/// Set by `enable_auto_merge`. When this is `Some`, GitHub is watching for
+/// the PR to become mergeable and will enqueue/merge automatically — djinn
+/// just polls for completion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoMergeRequest {
+    /// ISO-8601 timestamp when auto-merge was enabled.
+    pub enabled_at: Option<String>,
+    /// `SQUASH`, `MERGE`, or `REBASE` — uppercase, as returned by GraphQL.
+    pub merge_method: Option<String>,
+}
+
+/// Combined merge-queue / auto-merge state for a PR.
+///
+/// Returned by `get_pr_merge_queue_state`. Use this in the poller to decide
+/// whether to wait, treat as failure, or fall back to manual merge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrMergeQueueState {
+    /// `CLEAN`, `BLOCKED`, `BEHIND`, `UNSTABLE`, `HAS_HOOKS`, `DIRTY`,
+    /// `UNKNOWN` — uppercase as returned by GraphQL. `BLOCKED` typically
+    /// means branch protection requires something we haven't satisfied yet.
+    pub merge_state_status: Option<String>,
+    /// `Some` once a queue has accepted the PR.
+    pub merge_queue_entry: Option<MergeQueueEntry>,
+    /// `Some` once `enable_auto_merge` has been called.
+    pub auto_merge_request: Option<AutoMergeRequest>,
+    /// Most recent dequeue event from the PR timeline, if any. Populated
+    /// when the queue evicted the PR — carries the reason and links to the
+    /// failing check runs on the merge-group ref.
+    pub last_dequeue: Option<DequeueEvent>,
+}
+
+/// A `DequeuedEvent` from the PR timeline — emitted when GitHub removes a PR
+/// from the merge queue (kicked out, manually dequeued, or branch updated).
+///
+/// `reason` is a free-form string from GitHub. Known values include
+/// `"BRANCH_INVALIDATED"`, `"CHECKS_FAILED"`, `"DEQUEUED"`, `"MERGE_CONFLICT"`,
+/// `"NO_RESPONSE"`, `"NOT_QUEUEABLE"`, `"QUEUE_CLEARED"`,
+/// `"ROLL_BACK"`, `"UNKNOWN_REMOVAL_REASON"` (matched verbatim from GraphQL).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DequeueEvent {
+    pub reason: Option<String>,
+    /// Merge-group ref the queue was running against when the dequeue
+    /// happened (e.g. `refs/heads/gh-readonly-queue/main/pr-524-abc…`).
+    /// Used to look up the failing check runs.
+    pub merge_group_ref: Option<String>,
+    pub created_at: Option<String>,
+}

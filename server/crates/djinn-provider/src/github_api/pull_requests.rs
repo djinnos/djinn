@@ -2,7 +2,8 @@ use anyhow::{Result, anyhow};
 
 use crate::github_api::transport::handle_rate_limit;
 use crate::github_api::{
-    CheckRunsResponse, CreatePrParams, GitHubApiClient, MergeMethod, PullRequest,
+    AutoMergeRequest, CheckRunsResponse, CreatePrParams, DequeueEvent, GitHubApiClient,
+    MergeMethod, MergeQueueEntry, MergeQueueEntryState, PrMergeQueueState, PullRequest,
 };
 
 impl GitHubApiClient {
@@ -231,6 +232,264 @@ impl GitHubApiClient {
             return Err(anyhow!("enable_auto_merge GraphQL error: {}", errors));
         }
         Ok(json)
+    }
+
+    /// Cancel an active auto-merge request on a PR.
+    ///
+    /// Mirrors [`Self::enable_auto_merge`] in reverse. Used on task
+    /// cancellation so a force-closed task doesn't leave a "merge when
+    /// ready" timer running on GitHub's side.
+    ///
+    /// Best-effort: GitHub returns an error if the PR has no active
+    /// auto-merge request (already merged, never enabled, etc.) which
+    /// callers should treat as success.
+    pub async fn disable_auto_merge(&self, node_id: &str) -> Result<()> {
+        let query = r#"
+            mutation DisableAutoMerge($pullRequestId: ID!) {
+                disablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId }) {
+                    pullRequest { number title }
+                }
+            }
+        "#;
+
+        let body = serde_json::json!({
+            "query": query,
+            "variables": { "pullRequestId": node_id },
+        });
+
+        let base_url = self.base_url.clone();
+        let resp = self
+            .send_with_retry(|token| {
+                let body = body.clone();
+                let http = self.http.clone();
+                let base_url = base_url.clone();
+                async move {
+                    let graphql_url = format!("{}/graphql", base_url);
+                    let resp = http
+                        .post(&graphql_url)
+                        .bearer_auth(&token)
+                        .json(&body)
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("disable_auto_merge failed ({}): {}", status, body));
+        }
+
+        let json: serde_json::Value = resp.json().await?;
+        if let Some(errors) = json.get("errors") {
+            return Err(anyhow!("disable_auto_merge GraphQL error: {}", errors));
+        }
+        Ok(())
+    }
+
+    /// Remove a pull request from the repository merge queue.
+    ///
+    /// `merge_queue_entry_id` is [`MergeQueueEntry::id`] from a prior
+    /// [`Self::get_pr_merge_queue_state`] call. Used on task cancellation
+    /// when the PR is already queued — disabling auto-merge alone won't
+    /// remove the existing queue entry.
+    pub async fn dequeue_pull_request(&self, pull_request_node_id: &str) -> Result<()> {
+        let query = r#"
+            mutation DequeuePullRequest($id: ID!) {
+                dequeuePullRequest(input: { id: $id }) {
+                    mergeQueueEntry { id state }
+                }
+            }
+        "#;
+
+        let body = serde_json::json!({
+            "query": query,
+            "variables": { "id": pull_request_node_id },
+        });
+
+        let base_url = self.base_url.clone();
+        let resp = self
+            .send_with_retry(|token| {
+                let body = body.clone();
+                let http = self.http.clone();
+                let base_url = base_url.clone();
+                async move {
+                    let graphql_url = format!("{}/graphql", base_url);
+                    let resp = http
+                        .post(&graphql_url)
+                        .bearer_auth(&token)
+                        .json(&body)
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("dequeue_pull_request failed ({}): {}", status, body));
+        }
+
+        let json: serde_json::Value = resp.json().await?;
+        if let Some(errors) = json.get("errors") {
+            return Err(anyhow!("dequeue_pull_request GraphQL error: {}", errors));
+        }
+        Ok(())
+    }
+
+    /// Fetch the merge-queue / auto-merge state for a PR via GraphQL.
+    ///
+    /// Returns the fields the REST `pulls/{n}` endpoint doesn't surface:
+    /// `mergeStateStatus`, the live `mergeQueueEntry`, the
+    /// `autoMergeRequest`, and the most recent `DequeuedEvent` (used to
+    /// surface failure diagnostics when the queue kicks a PR out).
+    pub async fn get_pr_merge_queue_state(
+        &self,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+    ) -> Result<PrMergeQueueState> {
+        let query = r#"
+            query PrMergeQueueState($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $number) {
+                        mergeStateStatus
+                        autoMergeRequest { enabledAt mergeMethod }
+                        mergeQueueEntry {
+                            id
+                            state
+                            position
+                            estimatedTimeToMerge
+                            solo
+                        }
+                        timelineItems(last: 20, itemTypes: [DEQUEUED_EVENT]) {
+                            nodes {
+                                __typename
+                                ... on DequeuedEvent {
+                                    reason
+                                    createdAt
+                                    enqueuer { __typename }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        "#;
+
+        let body = serde_json::json!({
+            "query": query,
+            "variables": { "owner": owner, "repo": repo, "number": pull_number },
+        });
+
+        let base_url = self.base_url.clone();
+        let resp = self
+            .send_with_retry(|token| {
+                let body = body.clone();
+                let http = self.http.clone();
+                let base_url = base_url.clone();
+                async move {
+                    let graphql_url = format!("{}/graphql", base_url);
+                    let resp = http
+                        .post(&graphql_url)
+                        .bearer_auth(&token)
+                        .json(&body)
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "get_pr_merge_queue_state failed ({}): {}",
+                status,
+                body
+            ));
+        }
+
+        let json: serde_json::Value = resp.json().await?;
+        if let Some(errors) = json.get("errors") {
+            return Err(anyhow!(
+                "get_pr_merge_queue_state GraphQL error: {}",
+                errors
+            ));
+        }
+
+        let pr = &json["data"]["repository"]["pullRequest"];
+        if pr.is_null() {
+            return Err(anyhow!(
+                "get_pr_merge_queue_state: pullRequest not found ({}/{}#{})",
+                owner,
+                repo,
+                pull_number
+            ));
+        }
+
+        let merge_state_status = pr["mergeStateStatus"].as_str().map(|s| s.to_string());
+
+        let auto_merge_request = if pr["autoMergeRequest"].is_object() {
+            Some(AutoMergeRequest {
+                enabled_at: pr["autoMergeRequest"]["enabledAt"]
+                    .as_str()
+                    .map(|s| s.to_string()),
+                merge_method: pr["autoMergeRequest"]["mergeMethod"]
+                    .as_str()
+                    .map(|s| s.to_string()),
+            })
+        } else {
+            None
+        };
+
+        let merge_queue_entry = if pr["mergeQueueEntry"].is_object() {
+            let state_str = pr["mergeQueueEntry"]["state"].as_str().unwrap_or("");
+            let state = serde_json::from_value::<MergeQueueEntryState>(
+                serde_json::Value::String(state_str.to_string()),
+            )
+            .ok();
+            let id = pr["mergeQueueEntry"]["id"].as_str().unwrap_or("").to_string();
+            state.map(|state| MergeQueueEntry {
+                id,
+                state,
+                position: pr["mergeQueueEntry"]["position"]
+                    .as_u64()
+                    .map(|n| n as u32),
+                estimated_time_to_merge: pr["mergeQueueEntry"]["estimatedTimeToMerge"]
+                    .as_u64()
+                    .map(|n| n as u32),
+                solo: pr["mergeQueueEntry"]["solo"].as_bool(),
+            })
+        } else {
+            None
+        };
+
+        let last_dequeue = pr["timelineItems"]["nodes"]
+            .as_array()
+            .and_then(|nodes| {
+                nodes
+                    .iter()
+                    .rev()
+                    .find(|n| n["__typename"] == "DequeuedEvent")
+            })
+            .map(|node| DequeueEvent {
+                reason: node["reason"].as_str().map(|s| s.to_string()),
+                merge_group_ref: None,
+                created_at: node["createdAt"].as_str().map(|s| s.to_string()),
+            });
+
+        Ok(PrMergeQueueState {
+            merge_state_status,
+            merge_queue_entry,
+            auto_merge_request,
+            last_dequeue,
+        })
     }
 
     /// Get a pull request along with its CI check runs.

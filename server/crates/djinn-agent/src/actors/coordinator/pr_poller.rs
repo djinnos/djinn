@@ -270,6 +270,20 @@ impl CoordinatorActor {
             );
             match gh_client.mark_pr_ready_for_review(&pr.node_id).await {
                 Ok(_) => {
+                    // Best-effort: enable auto-merge so GitHub handles
+                    // approval-and-checks gating + merge-queue enqueue.
+                    // If it fails (repo doesn't allow auto-merge, branch
+                    // protection refuses, etc.) the pr_review loop falls
+                    // back to the legacy REST merge path.
+                    enable_auto_merge_best_effort(
+                        gh_client,
+                        &task.short_id,
+                        pull_number,
+                        &pr.node_id,
+                        &pr.title,
+                    )
+                    .await;
+
                     self.apply_pr_transition(&task.id, TransitionAction::PrUndraft, None)
                         .await;
                     self.pr_status_cache.remove(&task.id);
@@ -709,6 +723,30 @@ impl CoordinatorActor {
                 }
             }
 
+            // ── Merge path: auto-merge (queue-aware) or legacy direct ─────────
+            // When GitHub's native auto-merge is enabled on the PR, GitHub
+            // handles the timing: it waits for approvals + checks, then
+            // either merges directly or enqueues into the repository merge
+            // queue. We just observe; on `UNMERGEABLE` or a failure-flavored
+            // dequeue event we surface it as `PrCiFailed`.
+            //
+            // When auto-merge isn't enabled (older PR, repo doesn't support
+            // it, mutation failed at undraft time), we fall back to the
+            // legacy REST merge call.
+            if pr.auto_merge.is_some() {
+                self.observe_auto_merge_state(
+                    gh_client,
+                    &task.id,
+                    &task.short_id,
+                    pr_url,
+                    &owner,
+                    &repo,
+                    pull_number,
+                )
+                .await;
+                continue;
+            }
+
             // Either approved or no reviews — attempt squash merge.
             tracing::info!(
                 task_id = %task.short_id,
@@ -733,6 +771,32 @@ impl CoordinatorActor {
                     self.merge_fail_count.remove(&task.id);
                 }
                 Err(e) => {
+                    // Merge-queue 405: the repo has a merge queue configured
+                    // and either someone else enqueued the PR or branch
+                    // protection routed our REST call through the queue.
+                    // Treat as "GitHub is handling it" — don't count as a
+                    // failure and try auto-merge enablement on the next tick.
+                    if is_merge_queue_405(&e) {
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            pr = pull_number,
+                            "PR poller: PR is already in merge queue — switching to observe mode"
+                        );
+                        // Best-effort: enable auto-merge so future ticks
+                        // hit the auto-merge observer path and stop trying
+                        // the REST merge endpoint.
+                        enable_auto_merge_best_effort(
+                            gh_client,
+                            &task.short_id,
+                            pull_number,
+                            &pr.node_id,
+                            &pr.title,
+                        )
+                        .await;
+                        self.merge_fail_count.remove(&task.id);
+                        continue;
+                    }
+
                     let count = self.merge_fail_count.entry(task.id.clone()).or_insert(0);
                     *count += 1;
                     tracing::warn!(
@@ -759,6 +823,180 @@ impl CoordinatorActor {
                 }
             }
         }
+    }
+
+    /// Observe the merge-queue / auto-merge state for a PR we've delegated
+    /// to GitHub's auto-merge.
+    ///
+    /// Three outcomes:
+    /// - PR is queued or auto-merge is still waiting on conditions → log
+    ///   once at DEBUG, return. No API spend beyond the state fetch.
+    /// - Queue evicted the PR (`UNMERGEABLE` or a failure-flavored
+    ///   `DequeuedEvent`) → fetch dequeue diagnostics, attach as PR review
+    ///   feedback, transition the task with `PrCiFailed`.
+    /// - State fetch failed → log warn, retry next tick.
+    async fn observe_auto_merge_state(
+        &mut self,
+        gh_client: &GitHubApiClient,
+        task_id: &str,
+        task_short_id: &str,
+        pr_url: &str,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+    ) {
+        let state = match gh_client
+            .get_pr_merge_queue_state(owner, repo, pull_number)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_short_id,
+                    pr = pull_number,
+                    error = %e,
+                    "PR poller: failed to fetch merge-queue state, will retry next tick"
+                );
+                return;
+            }
+        };
+
+        // ── In-queue states: just wait ────────────────────────────────────
+        if let Some(entry) = &state.merge_queue_entry {
+            use djinn_provider::github_api::MergeQueueEntryState as S;
+            match entry.state {
+                S::Queued | S::AwaitingChecks | S::Locked | S::Mergeable => {
+                    tracing::debug!(
+                        task_id = %task_short_id,
+                        pr = pull_number,
+                        state = ?entry.state,
+                        position = ?entry.position,
+                        "PR poller: PR in merge queue, awaiting GitHub"
+                    );
+                    return;
+                }
+                S::Unmergeable => {
+                    self.handle_queue_failure(
+                        task_id,
+                        task_short_id,
+                        pull_number,
+                        pr_url,
+                        state.last_dequeue.as_ref(),
+                        "merge_queue_unmergeable",
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+
+        // ── Not currently queued; check why ───────────────────────────────
+        // If GitHub still has an auto-merge request, it's just waiting for
+        // approvals or required checks — keep waiting.
+        if state.auto_merge_request.is_some() {
+            tracing::debug!(
+                task_id = %task_short_id,
+                pr = pull_number,
+                merge_state = ?state.merge_state_status,
+                "PR poller: auto-merge armed, awaiting approval/checks"
+            );
+            return;
+        }
+
+        // Auto-merge is no longer enabled and the PR isn't queued. Most
+        // commonly this means GitHub disabled auto-merge after a failed
+        // merge attempt. If we have a failure-flavored dequeue event,
+        // surface it. Otherwise fall through silently — next tick will
+        // re-enable auto-merge via the undraft path on a fresh push, or
+        // a human will intervene.
+        if let Some(dequeue) = &state.last_dequeue {
+            if dequeue_reason_is_failure(dequeue.reason.as_deref()) {
+                self.handle_queue_failure(
+                    task_id,
+                    task_short_id,
+                    pull_number,
+                    pr_url,
+                    Some(dequeue),
+                    "merge_queue_dequeued",
+                )
+                .await;
+                return;
+            }
+        }
+
+        tracing::debug!(
+            task_id = %task_short_id,
+            pr = pull_number,
+            merge_state = ?state.merge_state_status,
+            "PR poller: auto-merge disabled, not queued, no failure signal"
+        );
+    }
+
+    /// Common failure path for both `UNMERGEABLE` and post-dequeue failure
+    /// signals. Attaches structured feedback to the task activity log,
+    /// then transitions with `PrCiFailed` so a fresh worker iteration picks
+    /// it up.
+    async fn handle_queue_failure(
+        &mut self,
+        task_id: &str,
+        task_short_id: &str,
+        pull_number: u64,
+        pr_url: &str,
+        dequeue: Option<&djinn_provider::github_api::DequeueEvent>,
+        source: &str,
+    ) {
+        let reason = dequeue
+            .and_then(|d| d.reason.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        let created_at = dequeue.and_then(|d| d.created_at.clone());
+
+        tracing::warn!(
+            task_id = %task_short_id,
+            pr = pull_number,
+            source = %source,
+            reason = %reason,
+            "PR poller: merge queue rejected PR → reopening task for rework"
+        );
+
+        // Log a structured feedback entry so the worker prompt picks it up
+        // alongside ordinary PR review feedback.
+        let feedback_payload = serde_json::json!({
+            "pull_number": pull_number,
+            "pr_url": pr_url,
+            "source": source,
+            "dequeue_reason": reason,
+            "dequeue_at": created_at,
+        })
+        .to_string();
+        if let Err(e) = self
+            .task_repo()
+            .log_activity(
+                Some(task_id),
+                "system",
+                "system",
+                "merge_queue_rejection",
+                &feedback_payload,
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id = %task_short_id,
+                error = %e,
+                "PR poller: failed to log merge_queue_rejection activity"
+            );
+        }
+
+        let transition_reason = format!(
+            "merge queue rejected PR (reason: {reason}) — re-run with fresh CI feedback"
+        );
+        self.apply_pr_transition(
+            task_id,
+            TransitionAction::PrCiFailed,
+            Some(&transition_reason),
+        )
+        .await;
+        self.pr_status_cache.remove(task_id);
+        self.merge_fail_count.remove(task_id);
     }
 
     /// Attach PR review feedback to the task activity log, increment the
@@ -1426,6 +1664,85 @@ async fn resolve_installation_client(
     }
 }
 
+/// Recognise the merge-queue 405 from a REST `PUT /pulls/{n}/merge` error.
+///
+/// GitHub returns `405 Method Not Allowed` with body
+/// `"Pull Request is in the merge queue."` when a queue-enabled repo
+/// receives a direct merge call for a PR the queue is already handling.
+/// We treat this as "GitHub is handling it" rather than a failure.
+fn is_merge_queue_405(err: &anyhow::Error) -> bool {
+    let msg = format!("{err}");
+    msg.contains("405") && msg.contains("merge queue")
+}
+
+/// Determine if a `DequeuedEvent.reason` indicates a real failure that
+/// should kick the task back into the worker loop.
+///
+/// Reasons that are NOT failures: `"BRANCH_INVALIDATED"` (head moved —
+/// queue will pick up the new SHA), `"QUEUE_CLEARED"` (admin reset),
+/// `"DEQUEUED"` (manual intervention by a human).
+///
+/// All other reasons (CHECKS_FAILED, MERGE_CONFLICT, NO_RESPONSE,
+/// NOT_QUEUEABLE, ROLL_BACK, UNKNOWN_REMOVAL_REASON, anything new GitHub
+/// adds) are treated as failures by default — safer to surface a spurious
+/// re-run than to silently drop a real failure.
+fn dequeue_reason_is_failure(reason: Option<&str>) -> bool {
+    match reason {
+        None => false,
+        Some(r) => !matches!(r, "BRANCH_INVALIDATED" | "QUEUE_CLEARED" | "DEQUEUED"),
+    }
+}
+
+/// Enable GitHub's native auto-merge on a PR, soft-failing on errors.
+///
+/// Called immediately after `mark_pr_ready_for_review` so GitHub takes over
+/// gating: it watches required checks + approvals + branch-protection rules
+/// and either auto-merges or enqueues the PR into the repo merge queue.
+///
+/// Soft-fails because not every repo supports it:
+/// - "Pull request Auto merge is not allowed on this repository" — repo
+///   settings have auto-merge disabled.
+/// - Branch protection misconfigured.
+/// In those cases the legacy REST merge path in `poll_pr_review_tasks`
+/// takes over.
+async fn enable_auto_merge_best_effort(
+    gh_client: &GitHubApiClient,
+    task_short_id: &str,
+    pull_number: u64,
+    pr_node_id: &str,
+    pr_title: &str,
+) {
+    match gh_client
+        .enable_auto_merge(
+            "", // owner unused by GraphQL mutation
+            "", // repo unused by GraphQL mutation
+            pull_number,
+            MergeMethod::Squash,
+            pr_node_id,
+            pr_title,
+        )
+        .await
+    {
+        Ok(_) => {
+            tracing::info!(
+                task_id = %task_short_id,
+                pr = pull_number,
+                "PR poller: auto-merge enabled — GitHub will merge once approval+checks land"
+            );
+        }
+        Err(e) => {
+            // Already enabled (re-undraft) is harmless; other errors mean
+            // the repo can't auto-merge and we'll fall back to manual.
+            tracing::info!(
+                task_id = %task_short_id,
+                pr = pull_number,
+                error = %e,
+                "PR poller: auto-merge not enabled (will use legacy merge path)"
+            );
+        }
+    }
+}
+
 /// Parse a GitHub PR URL into `(owner, repo, pull_number)`.
 ///
 /// Handles URLs of the form `https://github.com/{owner}/{repo}/pull/{number}`.
@@ -1447,7 +1764,48 @@ pub(crate) fn parse_pr_url(url: &str) -> Option<(String, String, u64)> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_pr_url;
+    use super::{dequeue_reason_is_failure, is_merge_queue_405, parse_pr_url};
+
+    #[test]
+    fn is_merge_queue_405_matches_real_payload() {
+        let err = anyhow::anyhow!(
+            r#"merge_pull_request failed (405 Method Not Allowed): {{"message":"Pull Request is in the merge queue.","status":"405"}}"#
+        );
+        assert!(is_merge_queue_405(&err));
+    }
+
+    #[test]
+    fn is_merge_queue_405_ignores_unrelated_405s() {
+        let err = anyhow::anyhow!("merge_pull_request failed (405): {{\"message\":\"locked\"}}");
+        assert!(!is_merge_queue_405(&err));
+    }
+
+    #[test]
+    fn is_merge_queue_405_ignores_other_status_codes() {
+        let err = anyhow::anyhow!(
+            "merge_pull_request failed (422): Pull Request is in the merge queue."
+        );
+        // Not a 405 — must not match.
+        assert!(!is_merge_queue_405(&err));
+    }
+
+    #[test]
+    fn dequeue_reasons_classified_correctly() {
+        // Failures: anything not on the safe-list.
+        assert!(dequeue_reason_is_failure(Some("CHECKS_FAILED")));
+        assert!(dequeue_reason_is_failure(Some("MERGE_CONFLICT")));
+        assert!(dequeue_reason_is_failure(Some("NO_RESPONSE")));
+        assert!(dequeue_reason_is_failure(Some("NOT_QUEUEABLE")));
+        assert!(dequeue_reason_is_failure(Some("ROLL_BACK")));
+        assert!(dequeue_reason_is_failure(Some("UNKNOWN_REMOVAL_REASON")));
+        assert!(dequeue_reason_is_failure(Some("SOMETHING_NEW")));
+
+        // Non-failures: head moved, queue admin reset, manual intervention.
+        assert!(!dequeue_reason_is_failure(Some("BRANCH_INVALIDATED")));
+        assert!(!dequeue_reason_is_failure(Some("QUEUE_CLEARED")));
+        assert!(!dequeue_reason_is_failure(Some("DEQUEUED")));
+        assert!(!dequeue_reason_is_failure(None));
+    }
 
     #[test]
     fn parses_standard_pr_url() {
