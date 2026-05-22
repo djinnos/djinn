@@ -159,7 +159,7 @@ impl AgentRepository {
     pub async fn get_history(&self, role_id: &str) -> Result<Vec<LearnedPromptHistoryEntry>> {
         self.db.ensure_initialized().await?;
         let rows = sqlx::query!(
-            r#"SELECT id, proposed_text, action AS "action!", metrics_before::text AS "metrics_before!", metrics_after::text AS "metrics_after!", created_at
+            r#"SELECT id, proposed_text, action AS "action!", metrics_before::text AS "metrics_before?", metrics_after::text AS "metrics_after?", created_at
                  FROM learned_prompt_history
                  WHERE agent_id = $1
                  ORDER BY created_at DESC"#,
@@ -324,22 +324,29 @@ impl AgentRepository {
         let mcp_servers = input.mcp_servers.unwrap_or("[]");
         let skills = input.skills.unwrap_or("[]");
         let is_default_bool = input.is_default;
+        // JSONB columns require Value/Json. Parse the caller's string blobs once.
+        let system_prompt_value: serde_json::Value =
+            serde_json::from_str(input.system_prompt_extensions).unwrap_or_else(|_| serde_json::json!({}));
+        let mcp_servers_value: serde_json::Value =
+            serde_json::from_str(mcp_servers).unwrap_or_else(|_| serde_json::json!([]));
+        let skills_value: serde_json::Value =
+            serde_json::from_str(skills).unwrap_or_else(|_| serde_json::json!([]));
         sqlx::query!(
             "INSERT INTO agents (
                 id, project_id, name, base_role, description,
                 system_prompt_extensions, model_preference, verification_command,
                 mcp_servers, skills, is_default
-             ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9::jsonb, $10::jsonb, $11)",
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             id,
             project_id,
             input.name,
             input.base_role,
             input.description,
-            input.system_prompt_extensions,
+            system_prompt_value,
             input.model_preference,
             input.verification_command,
-            mcp_servers,
-            skills,
+            mcp_servers_value,
+            skills_value,
             is_default_bool
         )
         .execute(self.db.pool())
