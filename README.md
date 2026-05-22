@@ -83,8 +83,10 @@ pnpm install
 pnpm dev   # opens http://127.0.0.1:1420
 ```
 
-Set `VITE_DJINN_SERVER_URL` when running `pnpm dev` / `pnpm build` if the
-server is on a different host or port.
+The UI defaults to same-origin requests, so a deployed server (Helm, Tilt,
+etc.) just works behind any ingress with no rebuild. Set
+`VITE_DJINN_SERVER_URL` only when running the Vite dev server on a separate
+origin from the API.
 
 > Works with any LLM provider supported by [OpenCode](https://opencode.ai) — use your existing subscription plans or API keys.
 
