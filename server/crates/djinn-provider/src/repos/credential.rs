@@ -29,7 +29,7 @@ impl CredentialRepository {
         let encrypted = crypto::encrypt(raw_value)?;
         ensure_db!(self.db);
         let existing_id: Option<String> =
-            sqlx::query_scalar("SELECT id FROM credentials WHERE key_name = ?")
+            sqlx::query_scalar("SELECT id FROM credentials WHERE key_name = $1")
                 .bind(key_name)
                 .fetch_optional(self.db.pool())
                 .await?;
@@ -39,15 +39,15 @@ impl CredentialRepository {
         let is_new = existing_id.is_none();
 
         sqlx::query(
-            "INSERT INTO credentials (id, provider_id, key_name, encrypted_value,
+            r#"INSERT INTO credentials (id, provider_id, key_name, encrypted_value,
                                       created_at, updated_at)
-             VALUES (?, ?, ?, ?,
-                     DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'),
-                     DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))
-             ON DUPLICATE KEY UPDATE
-                 provider_id     = VALUES(provider_id),
-                 encrypted_value = VALUES(encrypted_value),
-                 updated_at      = VALUES(updated_at)",
+             VALUES ($1, $2, $3, $4,
+                     to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                     to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+             ON CONFLICT (key_name) DO UPDATE SET
+                 provider_id     = EXCLUDED.provider_id,
+                 encrypted_value = EXCLUDED.encrypted_value,
+                 updated_at      = EXCLUDED.updated_at"#,
         )
         .bind(&id)
         .bind(provider_id)
@@ -58,7 +58,7 @@ impl CredentialRepository {
 
         let cred = sqlx::query_as::<_, Credential>(
             "SELECT id, provider_id, key_name, created_at, updated_at
-             FROM credentials WHERE key_name = ?",
+             FROM credentials WHERE key_name = $1",
         )
         .bind(key_name)
         .fetch_one(self.db.pool())
@@ -91,13 +91,13 @@ impl CredentialRepository {
     pub async fn delete(&self, key_name: &str) -> Result<bool> {
         ensure_db!(self.db);
         let deleted_id: Option<String> =
-            sqlx::query_scalar("SELECT id FROM credentials WHERE key_name = ?")
+            sqlx::query_scalar("SELECT id FROM credentials WHERE key_name = $1")
                 .bind(key_name)
                 .fetch_optional(self.db.pool())
                 .await?;
 
         if let Some(ref id) = deleted_id {
-            sqlx::query("DELETE FROM credentials WHERE id = ?")
+            sqlx::query("DELETE FROM credentials WHERE id = $1")
                 .bind(id)
                 .execute(self.db.pool())
                 .await?;
@@ -117,7 +117,7 @@ impl CredentialRepository {
     pub async fn delete_by_provider(&self, provider_id: &str) -> Result<u64> {
         ensure_db!(self.db);
         let ids: Vec<String> =
-            sqlx::query_scalar("SELECT id FROM credentials WHERE provider_id = ?")
+            sqlx::query_scalar("SELECT id FROM credentials WHERE provider_id = $1")
                 .bind(provider_id)
                 .fetch_all(self.db.pool())
                 .await?;
@@ -126,7 +126,7 @@ impl CredentialRepository {
             return Ok(0);
         }
 
-        let result = sqlx::query("DELETE FROM credentials WHERE provider_id = ?")
+        let result = sqlx::query("DELETE FROM credentials WHERE provider_id = $1")
             .bind(provider_id)
             .execute(self.db.pool())
             .await?;
@@ -143,7 +143,7 @@ impl CredentialRepository {
     pub async fn exists(&self, key_name: &str) -> Result<bool> {
         ensure_db!(self.db);
         let found: Option<String> =
-            sqlx::query_scalar("SELECT id FROM credentials WHERE key_name = ?")
+            sqlx::query_scalar("SELECT id FROM credentials WHERE key_name = $1")
                 .bind(key_name)
                 .fetch_optional(self.db.pool())
                 .await?;
@@ -159,7 +159,7 @@ impl CredentialRepository {
     pub async fn get_encrypted_raw(&self, key_name: &str) -> Result<Option<Vec<u8>>> {
         ensure_db!(self.db);
         let blob: Option<Vec<u8>> =
-            sqlx::query_scalar("SELECT encrypted_value FROM credentials WHERE key_name = ?")
+            sqlx::query_scalar("SELECT encrypted_value FROM credentials WHERE key_name = $1")
                 .bind(key_name)
                 .fetch_optional(self.db.pool())
                 .await?;
@@ -173,7 +173,7 @@ impl CredentialRepository {
     pub async fn get_decrypted(&self, key_name: &str) -> Result<Option<String>> {
         ensure_db!(self.db);
         let blob: Option<Vec<u8>> =
-            sqlx::query_scalar("SELECT encrypted_value FROM credentials WHERE key_name = ?")
+            sqlx::query_scalar("SELECT encrypted_value FROM credentials WHERE key_name = $1")
                 .bind(key_name)
                 .fetch_optional(self.db.pool())
                 .await?;

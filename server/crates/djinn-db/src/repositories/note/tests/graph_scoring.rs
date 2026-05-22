@@ -497,8 +497,8 @@ async fn temporal_scores_higher_access_count_wins_same_age() {
 
     sqlx::query(
         r#"UPDATE notes
-         SET created_at = DATE_FORMAT(to_char((now() at time zone 'utc') - interval '1 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), '%Y-%m-%dT%H:%i:%s.%fZ'),
-             updated_at = DATE_FORMAT(to_char((now() at time zone 'utc') - interval '1 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), '%Y-%m-%dT%H:%i:%s.%fZ')
+         SET created_at = to_char((now() at time zone 'utc') - interval '1 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+             updated_at = to_char((now() at time zone 'utc') - interval '1 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
          WHERE id IN ($1, $2)"#,
     )
     .bind(&high.id)
@@ -551,7 +551,7 @@ async fn temporal_scores_recent_update_wins_same_access_count() {
         .await
         .unwrap();
 
-    sqlx::query(r#"UPDATE notes SET created_at = DATE_FORMAT(to_char((now() at time zone 'utc') - interval '30 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), '%Y-%m-%dT%H:%i:%s.%fZ') WHERE id IN ($1, $2)"#)
+    sqlx::query(r#"UPDATE notes SET created_at = to_char((now() at time zone 'utc') - interval '30 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE id IN ($1, $2)"#)
         .bind(&recent.id)
         .bind(&stale.id)
         .execute(db.pool())
@@ -566,7 +566,7 @@ async fn temporal_scores_recent_update_wins_same_access_count() {
     .await
     .unwrap();
 
-    sqlx::query(r#"UPDATE notes SET updated_at = DATE_FORMAT(to_char((now() at time zone 'utc') - interval '30 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), '%Y-%m-%dT%H:%i:%s.%fZ') WHERE id = $1"#)
+    sqlx::query(r#"UPDATE notes SET updated_at = to_char((now() at time zone 'utc') - interval '30 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE id = $1"#)
         .bind(&stale.id)
         .execute(db.pool())
         .await
@@ -618,8 +618,8 @@ async fn temporal_scores_edge_cases_are_finite() {
     sqlx::query(
         r#"UPDATE notes
          SET access_count = 0,
-             created_at = DATE_FORMAT(to_char((now() at time zone 'utc') - interval '365 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), '%Y-%m-%dT%H:%i:%s.%fZ'),
-             updated_at = DATE_FORMAT(to_char((now() at time zone 'utc') - interval '365 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), '%Y-%m-%dT%H:%i:%s.%fZ')
+             created_at = to_char((now() at time zone 'utc') - interval '365 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+             updated_at = to_char((now() at time zone 'utc') - interval '365 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
          WHERE id = $1"#,
     )
     .bind(&old.id)

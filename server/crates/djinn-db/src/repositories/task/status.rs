@@ -304,7 +304,7 @@ impl TaskRepository {
                     let from_task: Task =
                         task_select_where_id!(id).fetch_one(self.db.pool()).await?;
                     let closed_at_sql = if status == "closed" {
-                        "closed_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'),"
+                        r#"closed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),"#
                     } else {
                         ""
                     };

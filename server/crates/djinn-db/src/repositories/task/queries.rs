@@ -138,46 +138,8 @@ impl TaskRepository {
     /// List tasks ready to start: status='open' with no unresolved blockers.
     pub async fn list_ready(&self, query: ReadyQuery) -> Result<Vec<Task>> {
         self.db.ensure_initialized().await?;
-        let mut clauses: Vec<String> = vec![
-            "t.`status` = 'open'".to_owned(),
-            "NOT EXISTS (
-                 SELECT 1 FROM blockers b2
-                 JOIN tasks bt ON bt.id = b2.blocking_task_id
-                 WHERE b2.task_id = t.id
-                    AND bt.status != 'closed'
-             )"
-            .to_owned(),
-        ];
-        let mut params: Vec<SqlParam> = Vec::new();
-
-        if let Some(project_id) = &query.project_id {
-            clauses.push("t.project_id = ?".to_owned());
-            params.push(SqlParam::Text(project_id.clone()));
-        }
-
-        if let Some(it) = &query.issue_type {
-            if let Some(neg) = it.strip_prefix('!') {
-                clauses.push("t.issue_type != ?".to_owned());
-                params.push(SqlParam::Text(neg.to_owned()));
-            } else {
-                clauses.push("t.issue_type = ?".to_owned());
-                params.push(SqlParam::Text(it.clone()));
-            }
-        }
-        if let Some(lbl) = &query.label {
-            clauses.push("JSON_CONTAINS(CAST(t.labels AS JSON), JSON_QUOTE(?), '$')".to_owned());
-            params.push(SqlParam::Text(lbl.clone()));
-        }
-        if let Some(owner) = &query.owner {
-            clauses.push("t.owner = ?".to_owned());
-            params.push(SqlParam::Text(owner.clone()));
-        }
-        if let Some(pmax) = query.priority_max {
-            clauses.push("t.priority <= ?".to_owned());
-            params.push(SqlParam::Integer(pmax));
-        }
-
-        let where_sql = clauses.join(" AND ");
+        let (where_sql, params) = build_ready_where(&query, 0);
+        let limit_placeholder = format!("${}", params.len() + 1);
         // NOTE: dynamic SQL (WHERE clause built from optional filters) — compile-time check not possible
         let sql = format!(
             "SELECT t.id, t.project_id, t.short_id, t.epic_id, t.title, t.description, t.design,
@@ -191,7 +153,7 @@ impl TaskRepository {
              FROM tasks t
              WHERE {where_sql}
              ORDER BY t.priority ASC, t.created_at ASC
-             LIMIT $1"
+             LIMIT {limit_placeholder}"
         );
         let mut q = sqlx::query_as::<_, Task>(&sql);
         for p in params {
@@ -221,46 +183,7 @@ impl TaskRepository {
         let mut tx = self.db.pool().begin().await?;
 
         // Build the same WHERE as list_ready, then LIMIT 1 for the claim.
-        let mut clauses: Vec<String> = vec![
-            "t.`status` = 'open'".to_owned(),
-            "NOT EXISTS (
-                 SELECT 1 FROM blockers b2
-                 JOIN tasks bt ON bt.id = b2.blocking_task_id
-                 WHERE b2.task_id = t.id
-                    AND bt.status != 'closed'
-             )"
-            .to_owned(),
-        ];
-        let mut params: Vec<SqlParam> = Vec::new();
-
-        if let Some(project_id) = &query.project_id {
-            clauses.push("t.project_id = ?".to_owned());
-            params.push(SqlParam::Text(project_id.clone()));
-        }
-
-        if let Some(it) = &query.issue_type {
-            if let Some(neg) = it.strip_prefix('!') {
-                clauses.push("t.issue_type != ?".to_owned());
-                params.push(SqlParam::Text(neg.to_owned()));
-            } else {
-                clauses.push("t.issue_type = ?".to_owned());
-                params.push(SqlParam::Text(it.clone()));
-            }
-        }
-        if let Some(lbl) = &query.label {
-            clauses.push("JSON_CONTAINS(CAST(t.labels AS JSON), JSON_QUOTE(?), '$')".to_owned());
-            params.push(SqlParam::Text(lbl.clone()));
-        }
-        if let Some(owner) = &query.owner {
-            clauses.push("t.owner = ?".to_owned());
-            params.push(SqlParam::Text(owner.clone()));
-        }
-        if let Some(pmax) = query.priority_max {
-            clauses.push("t.priority <= ?".to_owned());
-            params.push(SqlParam::Integer(pmax));
-        }
-
-        let where_sql = clauses.join(" AND ");
+        let (where_sql, params) = build_ready_where(&query, 0);
         // NOTE: dynamic SQL (WHERE clause built from optional filters) — compile-time check not possible
         let sql = format!(
             "SELECT t.id, t.project_id, t.short_id, t.epic_id, t.title, t.description, t.design,
@@ -343,6 +266,7 @@ impl TaskRepository {
             &query.label,
             &query.text,
             &query.parent,
+            0,
         );
         let order_sql = sort_to_sql(&query.sort);
 
@@ -357,6 +281,8 @@ impl TaskRepository {
         }
         let total = total_q.fetch_one(self.db.pool()).await?;
 
+        let limit_ph = format!("${}", params.len() + 1);
+        let offset_ph = format!("${}", params.len() + 2);
         // NOTE: dynamic SQL (WHERE + ORDER clauses built from request) — compile-time check not possible
         let sql = format!(
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
@@ -369,7 +295,7 @@ impl TaskRepository {
                     (SELECT COUNT(*) FROM blockers b
                      JOIN tasks bt ON b.blocking_task_id = bt.id
                      WHERE b.task_id = tasks.id AND bt.status != 'closed') AS unresolved_blocker_count
-             FROM tasks WHERE {where_sql} ORDER BY {order_sql} LIMIT $1 OFFSET $2"#
+             FROM tasks WHERE {where_sql} ORDER BY {order_sql} LIMIT {limit_ph} OFFSET {offset_ph}"#
         );
         let mut task_q = sqlx::query_as::<_, Task>(&sql);
         for p in &params {
@@ -401,12 +327,13 @@ impl TaskRepository {
             &query.label,
             &query.text,
             &query.parent,
+            0,
         );
 
         match query.group_by.as_deref() {
             Some(gb) => {
                 let col = match gb {
-                    "status" => "`status`",
+                    "status" => "status",
                     "priority" => "priority",
                     "issue_type" => "issue_type",
                     "epic" => "epic_id",
@@ -416,7 +343,7 @@ impl TaskRepository {
                 };
                 // NOTE: dynamic SQL (group_by column chosen at runtime) — compile-time check not possible
                 let sql = format!(
-                    "SELECT COALESCE(CAST({col} AS CHAR), ''), COUNT(*)
+                    "SELECT COALESCE(CAST({col} AS TEXT), ''), COUNT(*)
                      FROM tasks WHERE {where_sql}
                      GROUP BY {col} ORDER BY COUNT(*) DESC, {col}"
                 );
@@ -701,7 +628,9 @@ impl TaskRepository {
 
 /// Build a SQL WHERE clause + params vector from optional filter fields.
 ///
-/// Returns `("1=1", [])` when no filters are supplied.
+/// Returns `("1=1", [])` when no filters are supplied. Placeholders are
+/// numbered Postgres-style starting at `${param_offset + 1}` so the caller can
+/// safely append additional binds (e.g. LIMIT/OFFSET) after this clause.
 pub(super) fn build_where(
     project_id: &Option<String>,
     status: &Option<String>,
@@ -710,49 +639,60 @@ pub(super) fn build_where(
     label: &Option<String>,
     text: &Option<String>,
     parent: &Option<String>,
+    param_offset: usize,
 ) -> (String, Vec<SqlParam>) {
     let mut clauses: Vec<String> = Vec::new();
     let mut params: Vec<SqlParam> = Vec::new();
 
     if let Some(p) = project_id {
-        clauses.push("project_id = ?".to_owned());
+        let ph = format!("${}", param_offset + params.len() + 1);
+        clauses.push(format!("project_id = {ph}"));
         params.push(SqlParam::Text(p.clone()));
     }
 
     if let Some(s) = status {
-        clauses.push("`status` = ?".to_owned());
+        let ph = format!("${}", param_offset + params.len() + 1);
+        clauses.push(format!("status = {ph}"));
         params.push(SqlParam::Text(s.clone()));
     }
 
     if let Some(it) = issue_type {
         if let Some(neg) = it.strip_prefix('!') {
-            clauses.push("issue_type != ?".to_owned());
+            let ph = format!("${}", param_offset + params.len() + 1);
+            clauses.push(format!("issue_type != {ph}"));
             params.push(SqlParam::Text(neg.to_owned()));
         } else {
-            clauses.push("issue_type = ?".to_owned());
+            let ph = format!("${}", param_offset + params.len() + 1);
+            clauses.push(format!("issue_type = {ph}"));
             params.push(SqlParam::Text(it.clone()));
         }
     }
 
     if let Some(p) = priority {
-        clauses.push("priority = ?".to_owned());
+        let ph = format!("${}", param_offset + params.len() + 1);
+        clauses.push(format!("priority = {ph}"));
         params.push(SqlParam::Integer(p));
     }
 
     if let Some(lbl) = label {
-        clauses.push("JSON_CONTAINS(CAST(labels AS JSON), JSON_QUOTE(?), '$')".to_owned());
+        let ph = format!("${}", param_offset + params.len() + 1);
+        // Postgres JSONB array membership; `labels` is JSONB on Postgres.
+        clauses.push(format!("labels @> jsonb_build_array({ph}::text)"));
         params.push(SqlParam::Text(lbl.clone()));
     }
 
     if let Some(t) = text {
-        clauses.push("(title LIKE ? OR description LIKE ?)".to_owned());
+        let ph_a = format!("${}", param_offset + params.len() + 1);
+        let ph_b = format!("${}", param_offset + params.len() + 2);
+        clauses.push(format!("(title LIKE {ph_a} OR description LIKE {ph_b})"));
         let pattern = format!("%{t}%");
         params.push(SqlParam::Text(pattern.clone()));
         params.push(SqlParam::Text(pattern));
     }
 
     if let Some(p) = parent {
-        clauses.push("epic_id = ?".to_owned());
+        let ph = format!("${}", param_offset + params.len() + 1);
+        clauses.push(format!("epic_id = {ph}"));
         params.push(SqlParam::Text(p.clone()));
     }
 
@@ -763,6 +703,61 @@ pub(super) fn build_where(
     };
 
     (where_sql, params)
+}
+
+/// Build the WHERE clause for `list_ready` / `claim`: the fixed
+/// `t.status = 'open' AND no-unresolved-blockers` predicate plus optional
+/// filters. Placeholders are numbered Postgres-style starting at
+/// `${param_offset + 1}`.
+pub(super) fn build_ready_where(
+    query: &ReadyQuery,
+    param_offset: usize,
+) -> (String, Vec<SqlParam>) {
+    let mut clauses: Vec<String> = vec![
+        "t.status = 'open'".to_owned(),
+        "NOT EXISTS (
+             SELECT 1 FROM blockers b2
+             JOIN tasks bt ON bt.id = b2.blocking_task_id
+             WHERE b2.task_id = t.id
+                AND bt.status != 'closed'
+         )"
+        .to_owned(),
+    ];
+    let mut params: Vec<SqlParam> = Vec::new();
+
+    if let Some(project_id) = &query.project_id {
+        let ph = format!("${}", param_offset + params.len() + 1);
+        clauses.push(format!("t.project_id = {ph}"));
+        params.push(SqlParam::Text(project_id.clone()));
+    }
+    if let Some(it) = &query.issue_type {
+        if let Some(neg) = it.strip_prefix('!') {
+            let ph = format!("${}", param_offset + params.len() + 1);
+            clauses.push(format!("t.issue_type != {ph}"));
+            params.push(SqlParam::Text(neg.to_owned()));
+        } else {
+            let ph = format!("${}", param_offset + params.len() + 1);
+            clauses.push(format!("t.issue_type = {ph}"));
+            params.push(SqlParam::Text(it.clone()));
+        }
+    }
+    if let Some(lbl) = &query.label {
+        let ph = format!("${}", param_offset + params.len() + 1);
+        clauses.push(format!("t.labels @> jsonb_build_array({ph}::text)"));
+        params.push(SqlParam::Text(lbl.clone()));
+    }
+    if let Some(owner) = &query.owner {
+        let ph = format!("${}", param_offset + params.len() + 1);
+        clauses.push(format!("t.owner = {ph}"));
+        params.push(SqlParam::Text(owner.clone()));
+    }
+    if let Some(pmax) = query.priority_max {
+        let ph = format!("${}", param_offset + params.len() + 1);
+        clauses.push(format!("t.priority <= {ph}"));
+        params.push(SqlParam::Integer(pmax));
+    }
+
+    (clauses.join(" AND "), params)
 }
 
 /// Convert a sort key to a SQL ORDER BY clause.

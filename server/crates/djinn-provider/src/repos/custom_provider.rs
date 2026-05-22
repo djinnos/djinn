@@ -16,7 +16,7 @@ impl CustomProviderRepository {
     pub async fn list(&self) -> Result<Vec<CustomProvider>> {
         ensure_db!(self.db);
         let rows = sqlx::query_as::<_, (String, String, String, String, String, String)>(
-            "SELECT id, name, base_url, env_var, seed_models, created_at
+            "SELECT id, name, base_url, env_var, seed_models::text, created_at
              FROM custom_providers
              ORDER BY created_at ASC",
         )
@@ -50,20 +50,22 @@ impl CustomProviderRepository {
             serde_json::to_string(&provider.seed_models).unwrap_or_else(|_| "[]".into());
 
         ensure_db!(self.db);
+        let seed_value: serde_json::Value = serde_json::from_str(&seed_json)
+            .unwrap_or_else(|_| serde_json::Value::Array(vec![]));
         sqlx::query(
-            "INSERT INTO custom_providers (id, `name`, base_url, env_var, seed_models)
-             VALUES (?, ?, ?, ?, ?)
-             ON DUPLICATE KEY UPDATE
-               `name`      = VALUES(`name`),
-               base_url    = VALUES(base_url),
-               env_var     = VALUES(env_var),
-               seed_models = VALUES(seed_models)",
+            "INSERT INTO custom_providers (id, name, base_url, env_var, seed_models)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (id) DO UPDATE SET
+               name        = EXCLUDED.name,
+               base_url    = EXCLUDED.base_url,
+               env_var     = EXCLUDED.env_var,
+               seed_models = EXCLUDED.seed_models",
         )
         .bind(&id)
         .bind(&name)
         .bind(&base_url)
         .bind(&env_var)
-        .bind(&seed_json)
+        .bind(sqlx::types::Json(&seed_value))
         .execute(self.db.pool())
         .await?;
         self.events
@@ -74,7 +76,7 @@ impl CustomProviderRepository {
     /// Delete a custom provider by ID. Returns true if a row was removed.
     pub async fn delete(&self, id: &str) -> Result<bool> {
         ensure_db!(self.db);
-        let result = sqlx::query("DELETE FROM custom_providers WHERE id = ?")
+        let result = sqlx::query("DELETE FROM custom_providers WHERE id = $1")
             .bind(id)
             .execute(self.db.pool())
             .await?;
@@ -90,8 +92,8 @@ impl CustomProviderRepository {
     pub async fn get(&self, id: &str) -> Result<Option<CustomProvider>> {
         ensure_db!(self.db);
         let row = sqlx::query_as::<_, (String, String, String, String, String, String)>(
-            "SELECT id, name, base_url, env_var, seed_models, created_at
-             FROM custom_providers WHERE id = ?",
+            "SELECT id, name, base_url, env_var, seed_models::text, created_at
+             FROM custom_providers WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(self.db.pool())

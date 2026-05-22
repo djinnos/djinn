@@ -632,7 +632,7 @@ async fn housekeeping_flag_orphan_notes_tags_stale_unlinked_notes_only() {
     // DATE_FORMAT expression against the sqlx offline cache.
     sqlx::query(
         r#"UPDATE notes
-         SET last_accessed = DATE_FORMAT(to_char((now() at time zone 'utc') - interval '31 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), '%Y-%m-%dT%H:%i:%s.%fZ'),
+         SET last_accessed = to_char((now() at time zone 'utc') - interval '31 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
              access_count = 0
          WHERE id IN ($1, $2)"#,
     )

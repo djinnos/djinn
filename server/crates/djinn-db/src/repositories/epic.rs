@@ -469,7 +469,8 @@ impl EpicRepository {
     /// List epics with optional filters, sorting, and pagination.
     pub async fn list_filtered(&self, query: EpicListQuery) -> Result<EpicListResult> {
         self.db.ensure_initialized().await?;
-        let (where_sql, params) = epic_build_where(&query.project_id, &query.status, &query.text);
+        let (where_sql, params) =
+            epic_build_where(&query.project_id, &query.status, &query.text, 0);
         let order_sql = epic_sort_to_sql(&query.sort);
 
         // NOTE: dynamic SQL (WHERE clause built from optional filters) — compile-time check not possible
@@ -481,12 +482,14 @@ impl EpicRepository {
         }
         let total = total_q.fetch_one(self.db.pool()).await?;
 
+        let limit_ph = format!("${}", params.len() + 1);
+        let offset_ph = format!("${}", params.len() + 2);
         // NOTE: dynamic SQL (WHERE + ORDER clauses built from optional filters; uses inlined EPIC_COLS projection) — compile-time check not possible
         let sql = format!(
             r#"SELECT id, project_id, short_id, title, description, emoji, color, status,
                     owner, created_at, updated_at, closed_at, memory_refs::text AS "memory_refs!",
                     auto_breakdown, originating_adr_id
-             FROM epics WHERE {where_sql} ORDER BY {order_sql} LIMIT $1 OFFSET $2"#
+             FROM epics WHERE {where_sql} ORDER BY {order_sql} LIMIT {limit_ph} OFFSET {offset_ph}"#
         );
         let mut epic_q = sqlx::query_as::<_, Epic>(&sql);
         for p in &params {
@@ -508,7 +511,8 @@ impl EpicRepository {
     /// Count epics with optional group_by.
     pub async fn count_grouped(&self, query: EpicCountQuery) -> Result<serde_json::Value> {
         self.db.ensure_initialized().await?;
-        let (where_sql, params) = epic_build_where(&query.project_id, &query.status, &None);
+        let (where_sql, params) =
+            epic_build_where(&query.project_id, &query.status, &None, 0);
 
         match query.group_by.as_deref() {
             Some("status") => {
@@ -615,21 +619,26 @@ fn epic_build_where(
     project_id: &Option<String>,
     status: &Option<String>,
     text: &Option<String>,
+    param_offset: usize,
 ) -> (String, Vec<SqlParam>) {
     let mut clauses: Vec<String> = Vec::new();
     let mut params: Vec<SqlParam> = Vec::new();
 
     if let Some(p) = project_id {
-        clauses.push("project_id = ?".to_owned());
+        let ph = format!("${}", param_offset + params.len() + 1);
+        clauses.push(format!("project_id = {ph}"));
         params.push(SqlParam::Text(p.clone()));
     }
 
     if let Some(s) = status {
-        clauses.push("status = ?".to_owned());
+        let ph = format!("${}", param_offset + params.len() + 1);
+        clauses.push(format!("status = {ph}"));
         params.push(SqlParam::Text(s.clone()));
     }
     if let Some(t) = text {
-        clauses.push("(title LIKE ? OR description LIKE ?)".to_owned());
+        let ph_a = format!("${}", param_offset + params.len() + 1);
+        let ph_b = format!("${}", param_offset + params.len() + 2);
+        clauses.push(format!("(title LIKE {ph_a} OR description LIKE {ph_b})"));
         let pattern = format!("%{t}%");
         params.push(SqlParam::Text(pattern.clone()));
         params.push(SqlParam::Text(pattern));

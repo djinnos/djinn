@@ -493,7 +493,7 @@ impl AgentRepository {
     pub async fn list_for_project(&self, query: AgentListQuery) -> Result<AgentListResult> {
         self.db.ensure_initialized().await?;
 
-        let (where_sql, params) = build_where(&query.project_id, &query.base_role);
+        let (where_sql, params) = build_where(&query.project_id, &query.base_role, 0);
 
         // NOTE: dynamic SQL (WHERE clause built from optional filters) — compile-time check not possible
         let total_sql = format!("SELECT COUNT(*) FROM agents WHERE {where_sql}");
@@ -503,6 +503,8 @@ impl AgentRepository {
         }
         let total = total_q.fetch_one(self.db.pool()).await?;
 
+        let limit_ph = format!("${}", params.len() + 1);
+        let offset_ph = format!("${}", params.len() + 2);
         // NOTE: dynamic SQL (WHERE clause built from optional filters; uses inlined AGENT_COLUMNS projection) — compile-time check not possible
         let sql = format!(
             r#"SELECT id, project_id, name, base_role, description,
@@ -516,7 +518,7 @@ impl AgentRepository {
                     created_at, updated_at
              FROM agents WHERE {where_sql}
              ORDER BY is_default DESC, base_role ASC, name ASC
-             LIMIT $1 OFFSET $2"#
+             LIMIT {limit_ph} OFFSET {offset_ph}"#
         );
         let mut role_q = sqlx::query_as::<_, Agent>(&sql);
         for p in &params {
@@ -869,12 +871,16 @@ impl AgentRepository {
     }
 }
 
-fn build_where(project_id: &str, base_role: &Option<String>) -> (String, Vec<String>) {
-    let mut clauses: Vec<String> = vec!["project_id = ?".to_owned()];
+fn build_where(
+    project_id: &str,
+    base_role: &Option<String>,
+    param_offset: usize,
+) -> (String, Vec<String>) {
     let mut params: Vec<String> = vec![project_id.to_owned()];
+    let mut clauses: Vec<String> = vec![format!("project_id = ${}", param_offset + 1)];
 
     if let Some(br) = base_role {
-        clauses.push("base_role = ?".to_owned());
+        clauses.push(format!("base_role = ${}", param_offset + params.len() + 1));
         params.push(br.clone());
     }
 
