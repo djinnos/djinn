@@ -9,7 +9,7 @@ spec:
   replicas: 1
   strategy:
     # Leader election is not wired up; stick to Recreate so we never have two
-    # controllers racing to dispatch Jobs or write to MySQL.
+    # controllers racing to dispatch Jobs or write to Postgres.
     type: Recreate
   selector:
     matchLabels:
@@ -29,9 +29,10 @@ spec:
       # Give the binary's shutdown path (HTTP drain → RPC drain → SQLx
       # pool close, capped at 30s internally) enough headroom to run
       # before SIGKILL. Without this, in-flight statements on the SQLx
-      # pool die mid-statement and InnoDB has to roll them back on the
-      # next pod's boot. 60s is the chart's contract with the binary
-      # — see `main.rs`'s `pool.close()` deadline.
+      # pool die mid-statement and Postgres has to abort them server-side
+      # (visible as "aborted_connection" in pg_stat_database). 60s is the
+      # chart's contract with the binary — see `main.rs`'s `pool.close()`
+      # deadline.
       terminationGracePeriodSeconds: 60
       {{- with .Values.nodeSelector }}
       nodeSelector:
@@ -88,6 +89,17 @@ spec:
             - configMapRef:
                 name: {{ include "djinn.fullname" . }}-server
           env:
+            {{- if .Values.database.existingSecret }}
+            # External DB URL pulled from a caller-owned Secret (typically
+            # provisioned out-of-band for RDS credentials). The configmap
+            # intentionally skips DJINN_DATABASE_URL when this is set, so
+            # the env name only lands here.
+            - name: DJINN_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret | quote }}
+                  key: url
+            {{- end }}
             # HTTP bind port — must match `service.apiPort`. The binary's
             # CLI default is 8372 (legacy local-dev), so we have to pin it
             # here or the readiness probe would never pass.

@@ -195,35 +195,43 @@ ingress:
     secretName: ""
 
 # -----------------------------------------------------------------------------
-# MySQL 8.4 (bundled SQL state, InnoDB)
+# Postgres 16 (bundled SQL state)
 # -----------------------------------------------------------------------------
-# Stock upstream `mysql:8.4` running as a single-replica StatefulSet. The
-# server binary speaks plain MySQL protocol — no Dolt-specific features are
-# in use anywhere in the application — and InnoDB's row-lock deadlock
-# detection makes the workload behave deterministically under concurrent
-# writes (see the Dolt→MySQL migration plan for context).
-mysql:
+# Stock upstream `postgres:16` running as a single-replica StatefulSet. The
+# server speaks plain Postgres protocol via sqlx; deadlock detection is
+# reliable (SQLSTATE 40P01) and JSONB columns avoid the LONGTEXT-string
+# round-trips MySQL forced on us.
+#
+# For staging / prod, set `postgres.enabled: false` and provide
+# `database.externalUrl` or `database.existingSecret` below — the
+# StatefulSet + Service won't render and the server dials your RDS
+# endpoint instead.
+postgres:
+  # Set to false to use an external Postgres (RDS, Cloud SQL, etc.).
+  # Mutually exclusive with database.externalUrl / database.existingSecret —
+  # the chart will render the bundled StatefulSet only when enabled is true.
   enabled: true
-  image: mysql:8.4
+  image: postgres:16
   auth:
-    # Kind/internal-only cluster: leaving this empty enables
-    # MYSQL_ALLOW_EMPTY_PASSWORD. Set a real password for environments
-    # where the StatefulSet is reachable outside the namespace.
-    rootPassword: ""
+    # Password for the bundled `djinn` Postgres user. Empty string falls
+    # back to a chart-default ("djinn-local-dev") suitable ONLY for
+    # kind / local-dev. Set a real password for any cluster reachable
+    # outside the namespace.
+    password: ""
   # Service name + port exposed inside the cluster. Consumed by djinn-server
-  # via the DJINN_MYSQL_URL env computed in configmap.yaml.
+  # via the DJINN_DATABASE_URL env computed in configmap.yaml.
   service:
-    port: 3306
+    port: 5432
   storage:
     size: 20Gi
     accessMode: ReadWriteOnce
     storageClassName: ""
-  # Surfaced as --innodb-buffer-pool-size / --max-connections in the
-  # StatefulSet args. 2G buffer pool matches Phase 4's target footprint;
-  # the server connection pool's max is 100, plus migrate-job (1), worker
-  # pool (≤16), and ad-hoc tooling — 200 leaves comfortable headroom.
+  # Surfaced as `-c key=value` args on the postgres process. shared_buffers
+  # at 2G matches the prior MySQL footprint; max_connections=200 leaves
+  # headroom over the server's pool (100) + migrate-job (1) + worker
+  # pool (<=16) + ad-hoc tooling.
   config:
-    innodbBufferPoolSize: 2G
+    sharedBuffers: 2GB
     maxConnections: 200
   resources:
     requests:
@@ -232,6 +240,28 @@ mysql:
     limits:
       cpu: "2"
       memory: "4Gi"
+
+# -----------------------------------------------------------------------------
+# Database connection (external override)
+# -----------------------------------------------------------------------------
+# When `postgres.enabled: false`, the server needs to know how to reach the
+# external Postgres. Two mutually-exclusive ways to specify it:
+#
+#   1. externalUrl: literal URL string (rendered into the chart ConfigMap).
+#      Convenient for staging but bakes the password into the rendered
+#      Helm release. Format:
+#        postgres://user:password@host:5432/dbname?sslmode=require
+#
+#   2. existingSecret: name of an existing Kubernetes Secret with a `url`
+#      key holding the full Postgres URL. The Deployment + migrate Job
+#      pull DJINN_DATABASE_URL via `valueFrom: secretKeyRef`, so the URL
+#      never lands in a ConfigMap or in `helm get values` output. Preferred
+#      for RDS credentials (typically provisioned out-of-band in a vault).
+#
+# Set exactly one. When `postgres.enabled: true`, both should be empty.
+database:
+  externalUrl: ""
+  existingSecret: ""
 
 # -----------------------------------------------------------------------------
 # Qdrant (bundled vector store)

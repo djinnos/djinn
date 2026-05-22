@@ -12,8 +12,15 @@ data:
   DJINN_HOME: "/var/lib/djinn"
   RUST_LOG: {{ .Values.env.rustLog | quote }}
   DJINN_VECTOR_BACKEND: "qdrant"
-  {{- if .Values.mysql.enabled }}
-  DJINN_MYSQL_URL: {{ printf "mysql://root@%s.%s.svc.cluster.local:%d/djinn" (include "djinn.serviceName.mysql" .) (include "djinn.namespace" .) (.Values.mysql.service.port | int) | quote }}
+  # DJINN_DATABASE_URL is only rendered into the ConfigMap when the URL is
+  # safe to expose there:
+  #   - postgres.enabled=true: in-cluster URL with chart-known credentials.
+  #   - database.externalUrl: caller already committed to plaintext-in-Helm.
+  # When database.existingSecret is set, the env is wired via
+  # valueFrom: secretKeyRef on the Deployment + migrate Job instead — see
+  # deployment-server.yaml + job-migrate.yaml.
+  {{- if not (include "djinn.databaseUrl.fromSecret" .) }}
+  DJINN_DATABASE_URL: {{ include "djinn.databaseUrl" . | quote }}
   {{- end }}
   {{- if .Values.qdrant.enabled }}
   QDRANT_URL: {{ printf "http://%s.%s.svc.cluster.local:%d" (include "djinn.serviceName.qdrant" .) (include "djinn.namespace" .) (.Values.qdrant.service.grpcPort | int) | quote }}

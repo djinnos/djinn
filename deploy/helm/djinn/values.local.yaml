@@ -72,12 +72,12 @@ resources:
       cpu: "1"
       memory: "2Gi"
 
-# Local-dev MySQL footprint — InnoDB buffer pool tuned down so the whole
-# stack still fits on a laptop. Defaults from the chart (2G / 200 conns,
-# 2Gi/4Gi) are sized for production; halve them here.
-mysql:
+# Local-dev Postgres footprint — shared_buffers + connections tuned down
+# so the whole stack still fits on a laptop. Defaults from the chart
+# (2GB / 200 conns, 2Gi/4Gi) are sized for production; halve them here.
+postgres:
   config:
-    innodbBufferPoolSize: 512M
+    sharedBuffers: 512MB
     maxConnections: 100
   resources:
     requests:

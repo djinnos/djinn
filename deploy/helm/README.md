@@ -5,7 +5,7 @@ Phase 2 installs Djinn on top of Kubernetes via two charts:
 - `djinn-crds/` — reserved for future CustomResourceDefinitions. Install
   first, upgrade independently. Empty in the current release.
 - `djinn/` — the workload: djinn-server controller Deployment, bundled
-  MySQL 8.4 + Qdrant StatefulSets, per-task-run RBAC, PVCs, and secrets.
+  Postgres 16 + Qdrant StatefulSets, per-task-run RBAC, PVCs, and secrets.
 
 ## Prerequisites
 
@@ -31,7 +31,7 @@ helm install djinn       deploy/helm/djinn \
 Use Tilt — the `Tiltfile` at the repo root bootstraps the kind cluster +
 localhost:5001 registry, builds both images, installs the Helm release with
 `values.local.yaml`, and port-forwards the API/UI (`:3000`), worker RPC
-(`:8443`), MySQL (`:3306`), and Qdrant (`:6333`/`:6334`) for you:
+(`:8443`), Postgres (`:5432`), and Qdrant (`:6333`/`:6334`) for you:
 
 ```bash
 tilt up         # full stack up, watched, port-forwards live in the Tilt UI
@@ -73,7 +73,7 @@ Multi-node:
 - Leave `.hostPath` empty so PVCs render.
 - Provide a `storageClassName` whose provisioner supports RWX (e.g. NFS,
   cephfs, longhorn configured for RWX, AWS EFS CSI).
-- Bundled MySQL and Qdrant StatefulSets use RWO for their own per-pod
+- Bundled Postgres and Qdrant StatefulSets use RWO for their own per-pod
   volumes — independent of the mirror PVC story.
 
 ## Secrets

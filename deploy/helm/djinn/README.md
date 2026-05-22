@@ -1,6 +1,6 @@
 # djinn Helm chart
 
-Installs djinn-server (controller), MySQL 8.4 (SQL state, InnoDB), qdrant
+Installs djinn-server (controller), Postgres 16 (SQL state, JSONB), qdrant
 (vector store), and the Phase 3 image pipeline (BuildKit + Zot + image
 controller).
 

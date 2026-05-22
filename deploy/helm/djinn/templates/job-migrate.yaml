@@ -19,7 +19,7 @@
     inside the Job rather than failing the whole helm rollout.
     `backoffLimit: 3` caps retries so a genuinely broken migration
     surfaces fast instead of churning the Job indefinitely.
-    InnoDB's deadlock detector kills cycle victims with SQLSTATE 40001
+    Postgres' deadlock detector kills cycle victims with SQLSTATE 40P01
     immediately, and `djinn_db::retry` covers the migrator's own retry
     needs at the application layer.
 
@@ -53,7 +53,7 @@ metadata:
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   # Bail after 10 minutes — far longer than any reasonable migration on
-  # a healthy MySQL, short enough that a wedged hook doesn't pin the
+  # a healthy Postgres, short enough that a wedged hook doesn't pin the
   # release indefinitely.
   activeDeadlineSeconds: 600
   backoffLimit: 3
@@ -84,17 +84,36 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["djinn-server"]
           args: ["--migrate-only"]
-          envFrom:
-            # Pulls DJINN_MYSQL_URL from the same ConfigMap the server
-            # Deployment uses, so the Job and the app pods always agree
-            # on which database to migrate.
-            - configMapRef:
-                name: {{ include "djinn.fullname" . }}-server
-          # Force-disable the UI bundle path entirely — migrate-only
-          # never spins up the HTTP listener, but the flag avoids any
-          # filesystem probe for the embedded assets if a future refactor
-          # moves UI init earlier in main.
+          # Env is rendered INLINE from `.Values` rather than imported from
+          # the chart's ConfigMap. This is intentional: the Job runs as a
+          # `pre-install,pre-upgrade` Helm hook (weight -5), which fires
+          # BEFORE the new release's ConfigMap is applied to the cluster.
+          # If we used `envFrom: configMapRef`, the Job would read the
+          # PRIOR release's ConfigMap — a foot-gun that wedged staging on
+          # v0.1.4→v0.1.7 when DJINN_DB_BACKEND was removed. Inline env
+          # tracks the release Helm is rolling, not the cluster's last
+          # committed state.
           env:
+            - name: DJINN_HOME
+              value: "/var/lib/djinn"
+            - name: RUST_LOG
+              value: {{ .Values.env.rustLog | quote }}
+            - name: DJINN_VECTOR_BACKEND
+              value: "qdrant"
+            {{- if include "djinn.databaseUrl.fromSecret" . }}
+            - name: DJINN_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret | quote }}
+                  key: url
+            {{- else }}
+            - name: DJINN_DATABASE_URL
+              value: {{ include "djinn.databaseUrl" . | quote }}
+            {{- end }}
+            # Force-disable the UI bundle path entirely — migrate-only
+            # never spins up the HTTP listener, but the flag avoids any
+            # filesystem probe for the embedded assets if a future refactor
+            # moves UI init earlier in main.
             - name: DJINN_UI_ENABLED
               value: "false"
           resources:

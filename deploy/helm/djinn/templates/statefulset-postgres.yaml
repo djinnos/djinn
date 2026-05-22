@@ -1,0 +1,110 @@
+{{- if .Values.postgres.enabled -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "djinn.serviceName.postgres" . }}
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.postgres.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "djinn.serviceName.postgres" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "djinn.postgres.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "djinn.postgres.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # postgres:16 reads server tuning from `-c key=value` args appended
+          # after the entrypoint. Surfacing them here keeps tuning visible
+          # (and chart-controlled) rather than baking a custom postgresql.conf
+          # ConfigMap. statement_timeout + lock_timeout are short by design:
+          # any query / lock-wait longer than this means a stuck client we'd
+          # rather see fail fast than pile up.
+          args:
+            - -c
+            - shared_buffers={{ .Values.postgres.config.sharedBuffers }}
+            - -c
+            - max_connections={{ .Values.postgres.config.maxConnections }}
+            - -c
+            - statement_timeout=30000
+            - -c
+            - lock_timeout=10000
+          env:
+            # POSTGRES_HOST_AUTH_METHOD (e.g. "trust") is intentionally NOT
+            # set — we always require a password. The bundled-dev path uses
+            # a chart-default below when postgres.auth.password is empty;
+            # operators MUST override this for any non-kind deployment.
+            - name: POSTGRES_USER
+              value: "djinn"
+            - name: POSTGRES_DB
+              value: "djinn"
+            - name: POSTGRES_PASSWORD
+              value: {{ default "djinn-local-dev" .Values.postgres.auth.password | quote }}
+            # postgres:16 stores its data under PGDATA (default
+            # /var/lib/postgresql/data). The volumeClaimTemplate below
+            # mounts a PVC at that path so data survives Pod restarts.
+            # We pin a subdirectory because the volume mountpoint can be
+            # `lost+found`-polluted on some CSI drivers, which trips
+            # `initdb`'s "directory not empty" check.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: {{ .Values.postgres.service.port }}
+              protocol: TCP
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          # `pg_isready` returns 0 when the server is accepting connections —
+          # the right "ready for traffic" signal for the pre-upgrade migrate
+          # Job and the server Deployment to dial.
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -h
+                - 127.0.0.1
+                - -U
+                - djinn
+                - -d
+                - djinn
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -h
+                - 127.0.0.1
+                - -U
+                - djinn
+                - -d
+                - djinn
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - {{ .Values.postgres.storage.accessMode }}
+        resources:
+          requests:
+            storage: {{ .Values.postgres.storage.size }}
+        {{- with .Values.postgres.storage.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+{{- end -}}
