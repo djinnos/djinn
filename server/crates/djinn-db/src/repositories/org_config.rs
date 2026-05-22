@@ -84,7 +84,7 @@ impl OrgConfigRepository {
         sqlx::query!(
             "INSERT INTO org_config
                 (id, github_org_id, github_org_login, app_id, installation_id)
-             VALUES (1, ?, ?, ?, ?)",
+             VALUES (1, $1, $2, $3, $4)",
             cfg.github_org_id,
             cfg.github_org_login,
             cfg.app_id,

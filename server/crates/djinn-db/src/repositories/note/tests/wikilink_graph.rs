@@ -245,9 +245,9 @@ async fn extracted_note_audit_groups_merge_strengthen_demote_and_archive_backlog
         );
         sqlx::query!(
             "UPDATE notes
-             SET `abstract` = ?,
-                 overview = ?
-             WHERE id = ?",
+             SET abstract = $1,
+                 overview = $2
+             WHERE id = $3",
             abstract_text,
             abstract_text,
             note.id

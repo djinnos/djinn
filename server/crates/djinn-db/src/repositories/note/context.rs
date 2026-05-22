@@ -135,9 +135,9 @@ impl NoteRepository {
     async fn get_direct_neighbors(&self, project_id: &str, seed_id: &str) -> Result<Vec<String>> {
         let rows = sqlx::query_scalar!(
             r#"SELECT target_id AS "target_id!: String" FROM note_links
-             WHERE source_id = ?
+             WHERE source_id = $1
                AND target_id IS NOT NULL
-               AND target_id IN (SELECT id FROM notes WHERE project_id = ?)"#,
+               AND target_id IN (SELECT id FROM notes WHERE project_id = $2)"#,
             seed_id,
             project_id
         )
@@ -212,7 +212,7 @@ impl NoteRepository {
 
         let sql = executable_lexical_search_sql(&plan);
         // NOTE: dynamic SQL — compile-time check not possible
-        let mut q = sqlx::query_as::<sqlx::MySql, (String, f64)>(&sql);
+        let mut q = sqlx::query_as::<sqlx::Postgres, (String, f64)>(&sql);
         if plan.needs_query_bind() {
             q = q.bind(&plan.query);
         }
@@ -233,7 +233,7 @@ impl NoteRepository {
         let rows = sqlx::query!(
             "SELECT id, access_count, created_at, updated_at
              FROM notes
-             WHERE project_id = ?",
+             WHERE project_id = $1",
             project_id
         )
         .fetch_all(self.db.pool())
@@ -349,7 +349,7 @@ impl NoteRepository {
             .join(", ");
 
         let sql = format!(
-            "SELECT id, permalink, title, note_type, COALESCE(`abstract`, substr(content, 1, 100)) as disclosure_text
+            "SELECT id, permalink, title, note_type, COALESCE(abstract, substr(content, 1, 100)) as disclosure_text
              FROM notes
              WHERE id IN ({})",
             placeholders

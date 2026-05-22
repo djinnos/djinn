@@ -42,7 +42,7 @@ impl TaskRepository {
         acceptance_criteria: Option<&str>,
     ) -> Result<Task> {
         self.db.ensure_initialized().await?;
-        let project_id = sqlx::query_scalar!("SELECT project_id FROM epics WHERE id = ?", epic_id)
+        let project_id = sqlx::query_scalar!("SELECT project_id FROM epics WHERE id = $1", epic_id)
             .fetch_optional(self.db.pool())
             .await?
             .ok_or_else(|| Error::Internal(format!("epic not found: {epic_id}")))?;
@@ -120,9 +120,9 @@ impl TaskRepository {
                     sqlx::query!(
                         "INSERT INTO tasks
                             (id, project_id, short_id, epic_id, title, description, design,
-                             issue_type, priority, owner, `status`, acceptance_criteria,
+                             issue_type, priority, owner, status, acceptance_criteria,
                              created_by_user_id)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'open'), ?, ?)",
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, 'open'), $12::jsonb, $13)",
                         id,
                         project_id,
                         short_id,
@@ -186,8 +186,8 @@ impl TaskRepository {
         sqlx::query!(
             "INSERT INTO tasks
                 (id, project_id, short_id, epic_id, title, description, design,
-                 issue_type, priority, owner, `status`, continuation_count, memory_refs)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '[]')",
+                 issue_type, priority, owner, status, continuation_count, memory_refs)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 0, '[]')",
             id,
             project_id,
             short_id,
@@ -242,12 +242,12 @@ impl TaskRepository {
                 let acceptance_criteria = ac_owned.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET
-                            title = ?, description = ?, design = ?,
-                            priority = ?, owner = ?, labels = ?,
-                            acceptance_criteria = ?,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                        r#"UPDATE tasks SET
+                            title = $1, description = $2, design = $3,
+                            priority = $4, owner = $5, labels = $6,
+                            acceptance_criteria = $7,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $8"#,
                         title,
                         description,
                         design,
@@ -282,7 +282,7 @@ impl TaskRepository {
             || {
                 let id = id_owned.clone();
                 async move {
-                    sqlx::query!("DELETE FROM tasks WHERE id = ?", id)
+                    sqlx::query!("DELETE FROM tasks WHERE id = $1", id)
                         .execute(self.db.pool())
                         .await?;
                     Ok::<_, crate::Error>(())
@@ -308,9 +308,9 @@ impl TaskRepository {
                 let sha = sha_owned.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET merge_commit_sha = ?,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                        r#"UPDATE tasks SET merge_commit_sha = $1,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $2"#,
                         sha,
                         id
                     )
@@ -345,9 +345,9 @@ impl TaskRepository {
                 let url = url_owned.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET pr_url = ?,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                        r#"UPDATE tasks SET pr_url = $1,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $2"#,
                         url,
                         id
                     )
@@ -386,9 +386,9 @@ impl TaskRepository {
                 let metadata = metadata_owned.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET merge_conflict_metadata = ?,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                        r#"UPDATE tasks SET merge_conflict_metadata = $1,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $2"#,
                         metadata,
                         id
                     )
@@ -418,9 +418,9 @@ impl TaskRepository {
                 let id = id_owned.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET continuation_count = continuation_count + 1,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                        r#"UPDATE tasks SET continuation_count = continuation_count + 1,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $1"#,
                         id
                     )
                     .execute(self.db.pool())
@@ -454,9 +454,9 @@ impl TaskRepository {
                 let agent_type = agent_type_owned.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET agent_type = ?,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                        r#"UPDATE tasks SET agent_type = $1,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $2"#,
                         agent_type,
                         id
                     )
@@ -493,9 +493,9 @@ impl TaskRepository {
                 let ac = ac_owned.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET acceptance_criteria = ?,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                        r#"UPDATE tasks SET acceptance_criteria = $1,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $2"#,
                         ac,
                         id
                     )
@@ -528,9 +528,9 @@ impl TaskRepository {
                 let id = id_owned.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET continuation_count = ?,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                        r#"UPDATE tasks SET continuation_count = $1,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $2"#,
                         count,
                         id
                     )
@@ -558,9 +558,9 @@ impl TaskRepository {
                 let id = id_owned.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET verification_failure_count = ?,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                        r#"UPDATE tasks SET verification_failure_count = $1,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $2"#,
                         count,
                         id
                     )
@@ -587,13 +587,13 @@ impl TaskRepository {
                 let id = id_owned.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET
+                        r#"UPDATE tasks SET
                             reopen_count = 0,
                             continuation_count = 0,
                             intervention_count = intervention_count + 1,
-                            last_intervention_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'),
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                            last_intervention_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $1"#,
                         id
                     )
                     .execute(self.db.pool())
@@ -624,9 +624,9 @@ impl TaskRepository {
                 let memory_refs_json = memory_refs_owned.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET memory_refs = ?,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                        r#"UPDATE tasks SET memory_refs = $1,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $2"#,
                         memory_refs_json,
                         id
                     )
@@ -663,7 +663,7 @@ impl TaskRepository {
                 let updated_at = updated_at_owned.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET updated_at = ? WHERE id = ?",
+                        "UPDATE tasks SET updated_at = $1 WHERE id = $2",
                         updated_at,
                         id
                     )
@@ -696,7 +696,7 @@ mod created_by_tests {
         let owner = "test";
         let repo_slug = format!("task-writes-{project_id}");
         sqlx::query!(
-            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES (?, ?, ?, ?)",
+            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
             project_id,
             "p",
             owner,
@@ -709,7 +709,7 @@ mod created_by_tests {
         let epic_id = uuid::Uuid::now_v7().to_string();
         sqlx::query!(
             "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
             epic_id,
             project_id,
             "ep01",
@@ -764,7 +764,7 @@ mod created_by_tests {
             .await;
 
         let stamped: Option<String> = sqlx::query_scalar!(
-            "SELECT created_by_user_id FROM tasks WHERE id = ?",
+            "SELECT created_by_user_id FROM tasks WHERE id = $1",
             created_id
         )
         .fetch_one(db.pool())
@@ -794,7 +794,7 @@ mod created_by_tests {
             .await
             .unwrap();
         let stamped: Option<String> = sqlx::query_scalar!(
-            "SELECT created_by_user_id FROM tasks WHERE id = ?",
+            "SELECT created_by_user_id FROM tasks WHERE id = $1",
             unattributed.id
         )
         .fetch_one(db.pool())

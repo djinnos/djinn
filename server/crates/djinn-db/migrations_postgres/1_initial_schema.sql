@@ -12,9 +12,12 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- ── settings & projects ──────────────────────────────────────────────────────
+-- `settings.value` stores arbitrary serialized blobs — sometimes a JSON
+-- object (org_config), sometimes a plain string (git:target_branch). We
+-- keep it TEXT so the repository layer can stay format-agnostic.
 CREATE TABLE IF NOT EXISTS settings (
     key        VARCHAR(191) NOT NULL PRIMARY KEY,
-    value      JSONB        NOT NULL,
+    value      TEXT         NOT NULL,
     updated_at VARCHAR(64)  NOT NULL DEFAULT ''
 );
 

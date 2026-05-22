@@ -44,7 +44,7 @@ async fn list_for_export_excludes_old_closed() {
 
     // Backdate closed_at to 2 hours ago.
     sqlx::query(
-        "UPDATE tasks SET closed_at = DATE_FORMAT(DATE_SUB(NOW(3), INTERVAL 2 HOUR), '%Y-%m-%dT%H:%i:%s.%fZ') WHERE id = ?",
+        r#"UPDATE tasks SET closed_at = DATE_FORMAT(to_char((now() at time zone 'utc') - interval '2 hour', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), '%Y-%m-%dT%H:%i:%s.%fZ') WHERE id = $1"#,
     )
         .bind(&task.id)
         .execute(db.pool())

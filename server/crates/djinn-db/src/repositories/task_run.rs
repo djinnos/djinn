@@ -29,8 +29,8 @@ impl TaskRunRepository {
         let status = params.status.unwrap_or("running");
         sqlx::query!(
             "INSERT INTO task_runs
-                (id, project_id, task_id, trigger_type, `status`, workspace_path, mirror_ref)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (id, project_id, task_id, trigger_type, status, workspace_path, mirror_ref)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
             params.id,
             params.project_id,
             params.task_id,
@@ -45,9 +45,9 @@ impl TaskRunRepository {
         let run = sqlx::query_as!(
             TaskRunRecord,
             r#"SELECT id, project_id, task_id, trigger_type,
-                `status` AS "status!", started_at, ended_at,
+                status AS "status!", started_at, ended_at,
                 workspace_path, mirror_ref
-             FROM task_runs WHERE id = ?"#,
+             FROM task_runs WHERE id = $1"#,
             params.id
         )
         .fetch_one(self.db.pool())
@@ -61,9 +61,9 @@ impl TaskRunRepository {
         Ok(sqlx::query_as!(
             TaskRunRecord,
             r#"SELECT id, project_id, task_id, trigger_type,
-                `status` AS "status!", started_at, ended_at,
+                status AS "status!", started_at, ended_at,
                 workspace_path, mirror_ref
-             FROM task_runs WHERE id = ?"#,
+             FROM task_runs WHERE id = $1"#,
             id
         )
         .fetch_optional(self.db.pool())
@@ -78,10 +78,10 @@ impl TaskRunRepository {
         let status_str = status.as_str();
         if status.is_terminal() {
             sqlx::query!(
-                "UPDATE task_runs
-                 SET `status` = ?,
-                     ended_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                 WHERE id = ?",
+                r#"UPDATE task_runs
+                 SET status = $1,
+                     ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                 WHERE id = $2"#,
                 status_str,
                 id
             )
@@ -90,9 +90,9 @@ impl TaskRunRepository {
         } else {
             sqlx::query!(
                 "UPDATE task_runs
-                 SET `status` = ?,
+                 SET status = $1,
                      ended_at = NULL
-                 WHERE id = ?",
+                 WHERE id = $2",
                 status_str,
                 id
             )
@@ -108,9 +108,9 @@ impl TaskRunRepository {
         Ok(sqlx::query_as!(
             TaskRunRecord,
             r#"SELECT id, project_id, task_id, trigger_type,
-                `status` AS "status!", started_at, ended_at,
+                status AS "status!", started_at, ended_at,
                 workspace_path, mirror_ref
-             FROM task_runs WHERE task_id = ? ORDER BY started_at DESC"#,
+             FROM task_runs WHERE task_id = $1 ORDER BY started_at DESC"#,
             task_id
         )
         .fetch_all(self.db.pool())
@@ -140,7 +140,7 @@ impl TaskRunRepository {
 
         let row: Option<String> = sqlx::query_scalar!(
             "SELECT id FROM task_runs
-             WHERE task_id = ? AND `status` = 'running' AND ended_at IS NULL
+             WHERE task_id = $1 AND status = 'running' AND ended_at IS NULL
              ORDER BY started_at DESC LIMIT 1",
             task_id
         )
@@ -171,9 +171,9 @@ impl TaskRunRepository {
 
         let ids: Vec<String> = sqlx::query_scalar!(
             "SELECT id FROM task_runs
-             WHERE `status` = 'running'
+             WHERE status = 'running'
                AND ended_at IS NULL
-               AND started_at < ?",
+               AND started_at < $1",
             stale_threshold_iso
         )
         .fetch_all(self.db.pool())
@@ -197,7 +197,7 @@ impl TaskRunRepository {
 
         let row: Option<Option<String>> = sqlx::query_scalar!(
             "SELECT workspace_path FROM task_runs
-             WHERE task_id = ? AND workspace_path IS NOT NULL
+             WHERE task_id = $1 AND workspace_path IS NOT NULL
              ORDER BY started_at DESC LIMIT 1",
             task_id
         )
@@ -232,8 +232,8 @@ mod tests {
         let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
         sqlx::query!(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                issue_type, priority, owner, `status`, continuation_count, labels, acceptance_criteria, memory_refs)
-             VALUES (?, ?, ?, ?, 'Task', '', '', 'task', 0, '', 'open', 0, '[]', '[]', '[]')",
+                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
+             VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
             task_id,
             epic.project_id,
             short_id,

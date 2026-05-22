@@ -195,7 +195,7 @@ async fn fts5_search_folder_filter() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "MySQL FULLTEXT applies equal weight across indexed columns; title-vs-content ranking was SQLite FTS5-specific (bm25 weights). See replacement_notes on MysqlFulltext plans."]
+#[ignore = "MySQL FULLTEXT applies equal weight across indexed columns; title-vs-content ranking was SQLite FTS5-specific (bm25 weights). See replacement_notes on PostgresTsvector plans."]
 async fn fts5_search_prefers_title_over_content() {
     let tmp = crate::database::test_tempdir().unwrap();
     let db = Database::open_in_memory().unwrap();
@@ -240,7 +240,7 @@ async fn fts5_search_prefers_title_over_content() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "MySQL FULLTEXT applies equal weight across indexed columns; tags-vs-content ranking was SQLite FTS5-specific (bm25 weights). See replacement_notes on MysqlFulltext plans."]
+#[ignore = "MySQL FULLTEXT applies equal weight across indexed columns; tags-vs-content ranking was SQLite FTS5-specific (bm25 weights). See replacement_notes on PostgresTsvector plans."]
 async fn fts5_search_prefers_tags_over_content() {
     let tmp = crate::database::test_tempdir().unwrap();
     let db = Database::open_in_memory().unwrap();
@@ -467,11 +467,11 @@ async fn search_rrf_prefers_higher_access_count_for_equivalent_matches() {
         .await
         .unwrap();
 
-    sqlx::query!("UPDATE notes SET access_count = 10 WHERE id = ?", high.id)
+    sqlx::query!("UPDATE notes SET access_count = 10 WHERE id = $1", high.id)
         .execute(db.pool())
         .await
         .unwrap();
-    sqlx::query!("UPDATE notes SET access_count = 0 WHERE id = ?", low.id)
+    sqlx::query!("UPDATE notes SET access_count = 0 WHERE id = $1", low.id)
         .execute(db.pool())
         .await
         .unwrap();
@@ -512,7 +512,7 @@ async fn update_confidence_reads_updates_and_persists() {
         .await
         .unwrap();
 
-    sqlx::query!("UPDATE notes SET confidence = 0.5 WHERE id = ?", note.id)
+    sqlx::query!("UPDATE notes SET confidence = 0.5 WHERE id = $1", note.id)
         .execute(db.pool())
         .await
         .unwrap();
@@ -523,7 +523,7 @@ async fn update_confidence_reads_updates_and_persists() {
         .unwrap();
     assert!(updated > 0.5);
 
-    let stored = sqlx::query_scalar!("SELECT confidence FROM notes WHERE id = ?", note.id)
+    let stored = sqlx::query_scalar!("SELECT confidence FROM notes WHERE id = $1", note.id)
         .fetch_one(db.pool())
         .await
         .unwrap();
@@ -560,14 +560,14 @@ async fn search_rrf_confidence_lowers_equivalent_match_ranking() {
         .unwrap();
 
     sqlx::query!(
-        "UPDATE notes SET access_count = 0, confidence = 1.0 WHERE id = ?",
+        "UPDATE notes SET access_count = 0, confidence = 1.0 WHERE id = $1",
         high.id
     )
     .execute(db.pool())
     .await
     .unwrap();
     sqlx::query!(
-        "UPDATE notes SET access_count = 0, confidence = 0.5 WHERE id = ?",
+        "UPDATE notes SET access_count = 0, confidence = 0.5 WHERE id = $1",
         low.id
     )
     .execute(db.pool())

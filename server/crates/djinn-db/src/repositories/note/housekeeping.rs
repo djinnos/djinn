@@ -30,7 +30,7 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
 
         let rows = sqlx::query!(
-            "SELECT id, content FROM notes WHERE project_id = ? AND content_hash IS NULL",
+            "SELECT id, content FROM notes WHERE project_id = $1 AND content_hash IS NULL",
             project_id
         )
         .fetch_all(self.db.pool())
@@ -40,7 +40,7 @@ impl NoteRepository {
         for row in &rows {
             let hash = note_content_hash(&row.content);
             sqlx::query!(
-                "UPDATE notes SET content_hash = ? WHERE id = ?",
+                "UPDATE notes SET content_hash = $1 WHERE id = $2",
                 hash,
                 row.id
             )
@@ -62,15 +62,15 @@ impl NoteRepository {
         let notes = sqlx::query_as!(
             Note,
             r#"SELECT id, project_id, permalink, title, file_path,
-                        storage, note_type, folder, tags, content,
+                        storage, note_type, folder, tags::text AS "tags!", content,
                         created_at, updated_at, last_accessed,
                         access_count, confidence,
-                        `abstract` AS abstract_, overview,
-                        scope_paths
+                        abstract AS abstract_, overview,
+                        scope_paths::text AS "scope_paths!"
              FROM notes n
-             WHERE n.project_id = ?
+             WHERE n.project_id = $1
                AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')
-               AND n.last_accessed < DATE_SUB(NOW(3), INTERVAL 30 DAY)
+               AND n.last_accessed < to_char((now() at time zone 'utc') - interval '30 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                AND n.access_count = 0
                AND NOT EXISTS (
                    SELECT 1 FROM note_links l WHERE l.target_id = n.id
@@ -109,7 +109,7 @@ impl NoteRepository {
                     l.target_raw AS target_raw
              FROM note_links l
              JOIN notes src ON src.id = l.source_id
-             WHERE src.project_id = ?
+             WHERE src.project_id = $1
                AND l.target_id IS NULL
              ORDER BY src.id, l.target_raw"#,
             project_id
@@ -154,7 +154,7 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
 
         sqlx::query!(
-            "UPDATE notes SET content_hash = NULL WHERE id = ?",
+            "UPDATE notes SET content_hash = NULL WHERE id = $1",
             note_id
         )
         .execute(self.db.pool())
@@ -168,7 +168,7 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
 
         let count: i64 = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM notes WHERE project_id = ?",
+            "SELECT COUNT(*) FROM notes WHERE project_id = $1",
             project_id
         )
         .fetch_one(self.db.pool())
@@ -185,7 +185,7 @@ impl NoteRepository {
         min_score: f64,
     ) -> Result<Option<String>> {
         let exact_title = sqlx::query_scalar!(
-            "SELECT title FROM notes WHERE project_id = ? AND title = ? LIMIT 1",
+            "SELECT title FROM notes WHERE project_id = $1 AND title = $2 LIMIT 1",
             project_id,
             target_raw
         )

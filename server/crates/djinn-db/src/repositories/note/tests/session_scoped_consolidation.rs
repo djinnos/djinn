@@ -227,7 +227,7 @@ async fn session_scoped_clusters_do_not_include_cross_session_notes() {
             note.title
         );
         sqlx::query!(
-            "UPDATE notes SET `abstract` = ?, overview = ? WHERE id = ?",
+            "UPDATE notes SET abstract = $1, overview = $2 WHERE id = $3",
             abstract_text,
             abstract_text,
             note.id

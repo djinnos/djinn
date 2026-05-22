@@ -92,7 +92,7 @@ impl CodeChunkRepository {
                       m.extension_state AS "meta_extension_state?"
                  FROM code_chunks c
             LEFT JOIN code_chunk_meta m ON m.id = c.id
-                WHERE c.project_id = ?"#,
+                WHERE c.project_id = $1"#,
             project_id
         )
         .fetch_all(self.db.pool())
@@ -148,7 +148,7 @@ mod tests {
             r#"INSERT INTO code_chunks
                 (id, project_id, file_path, symbol_key, kind,
                  start_line, end_line, content_hash, embedded_text)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
             "chunk-1",
             "proj-1",
             "src/lib.rs",
@@ -166,7 +166,7 @@ mod tests {
         sqlx::query!(
             r#"INSERT INTO code_chunk_meta
                 (id, project_id, content_hash, model_version, embedded_at, extension_state)
-               VALUES (?, ?, ?, ?, ?, ?)"#,
+               VALUES ($1, $2, $3, $4, $5, $6)"#,
             "chunk-1",
             "proj-1",
             "deadbeef",

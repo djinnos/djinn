@@ -197,7 +197,7 @@ fn double_close_returns_error() {
                 .expect_err("second Close must return an error");
             assert!(
                 matches!(err, Error::InvalidTransition(_)),
-                "expected InvalidTransition, got {err:?} (from {status_str})"
+                "expected InvalidTransition, got {err:$1} (from {status_str})"
             );
         }
     });

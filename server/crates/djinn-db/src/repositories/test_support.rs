@@ -29,7 +29,7 @@ pub async fn make_project(db: &Database, path: &Path) -> Project {
     let owner = "test";
     let repo_slug = format!("{path_slug}-{id}");
     sqlx::query!(
-        "INSERT INTO projects (id, name, github_owner, github_repo) VALUES (?, ?, ?, ?)",
+        "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
         id,
         project_name,
         owner,
@@ -47,7 +47,7 @@ pub async fn make_project(db: &Database, path: &Path) -> Project {
                   auto_merge AS "auto_merge!: bool",
                   sync_enabled AS "sync_enabled!: bool",
                   sync_remote
-           FROM projects WHERE id = ?"#,
+           FROM projects WHERE id = $1"#,
         id
     )
     .fetch_one(db.pool())
@@ -329,10 +329,10 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
         .unwrap();
 
     sqlx::query!(
-        "UPDATE note_associations
-         SET last_co_access = DATE_SUB(NOW(3), INTERVAL 100 DAY)
-         WHERE (note_a_id = ? AND note_b_id = ?)
-            OR (note_a_id = ? AND note_b_id = ?)",
+        r#"UPDATE note_associations
+         SET last_co_access = to_char((now() at time zone 'utc') - interval '100 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+         WHERE (note_a_id = $1 AND note_b_id = $2)
+            OR (note_a_id = $3 AND note_b_id = $4)"#,
         project_one_stale_a.id,
         project_one_stale_b.id,
         project_two_stale_a.id,
@@ -343,10 +343,10 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
     .unwrap();
 
     sqlx::query!(
-        "UPDATE note_associations
-         SET last_co_access = DATE_SUB(NOW(3), INTERVAL 1 DAY)
-         WHERE (note_a_id = ? AND note_b_id = ?)
-            OR (note_a_id = ? AND note_b_id = ?)",
+        r#"UPDATE note_associations
+         SET last_co_access = to_char((now() at time zone 'utc') - interval '1 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+         WHERE (note_a_id = $1 AND note_b_id = $2)
+            OR (note_a_id = $3 AND note_b_id = $4)"#,
         project_one_recent_a.id,
         project_one_recent_b.id,
         project_two_recent_a.id,
@@ -357,9 +357,9 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
     .unwrap();
 
     sqlx::query!(
-        "UPDATE notes
-         SET last_accessed = DATE_SUB(NOW(3), INTERVAL 31 DAY), access_count = 0
-         WHERE id IN (?, ?, ?, ?)",
+        r#"UPDATE notes
+         SET last_accessed = to_char((now() at time zone 'utc') - interval '31 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), access_count = 0
+         WHERE id IN ($1, $2, $3, $4)"#,
         project_one_orphan.id,
         project_one_linked_target.id,
         project_two_orphan.id,
@@ -370,7 +370,7 @@ pub async fn build_multi_project_housekeeping_fixture(db: &Database) -> Housekee
     .unwrap();
 
     sqlx::query!(
-        "UPDATE notes SET content_hash = NULL WHERE id IN (?, ?, ?, ?)",
+        "UPDATE notes SET content_hash = NULL WHERE id IN ($1, $2, $3, $4)",
         project_one_canonical_hash.id,
         project_one_legacy_hash.id,
         project_two_canonical_hash.id,

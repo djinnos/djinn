@@ -3,7 +3,7 @@ use crate::error::{DbError as Error, DbResult as Result};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LexicalSearchBackend {
     SqliteFts5,
-    MysqlFulltext,
+    PostgresTsvector,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,7 +29,7 @@ impl LexicalSearchPlan {
     /// Whether the caller must bind `query` as the first positional parameter
     /// when executing the SQL returned by [`executable_lexical_search_sql`].
     ///
-    /// For `MysqlFulltext` the query is inlined as a SQL literal (see the
+    /// For `PostgresTsvector` the query is inlined as a SQL literal (see the
     /// Dolt workaround comment in `executable_lexical_search_sql`), so callers
     /// must skip the first bind.
     pub fn needs_query_bind(&self) -> bool {
@@ -40,7 +40,7 @@ impl LexicalSearchPlan {
 pub fn executable_lexical_search_sql(plan: &LexicalSearchPlan) -> String {
     match plan.backend {
         LexicalSearchBackend::SqliteFts5 => plan.sql.clone(),
-        LexicalSearchBackend::MysqlFulltext => {
+        LexicalSearchBackend::PostgresTsvector => {
             // Dolt's MySQL wire protocol currently fails to bind a prepared
             // parameter inside MATCH(...) AGAINST (?), returning
             // "MySQLToType failed: unsupported type" for the column metadata.
@@ -49,7 +49,7 @@ pub fn executable_lexical_search_sql(plan: &LexicalSearchPlan) -> String {
             // other positional placeholders (`?2`, `?3`, ...). Callers bind
             // the remaining parameters in order but skip the query literal.
             //
-            // Safety: `plan.query` is produced by `sanitize_mysql_boolean_query`,
+            // Safety: `plan.query` is produced by `sanitize_postgres_tsquery`,
             // which only emits characters from the set [A-Za-z0-9_ +*] — none
             // of which require SQL-level escaping inside a double-quoted
             // string literal. We still escape `"` and `\` defensively.
@@ -108,15 +108,15 @@ pub fn lexical_search_threshold(
     let threshold = match (backend, mode) {
         (LexicalSearchBackend::SqliteFts5, LexicalSearchMode::Dedup) => Some(-3.0),
         (LexicalSearchBackend::SqliteFts5, LexicalSearchMode::Contradiction) => Some(5.0),
-        (LexicalSearchBackend::MysqlFulltext, LexicalSearchMode::Dedup) => Some(0.0),
-        (LexicalSearchBackend::MysqlFulltext, LexicalSearchMode::Contradiction) => Some(0.0),
+        (LexicalSearchBackend::PostgresTsvector, LexicalSearchMode::Dedup) => Some(0.0),
+        (LexicalSearchBackend::PostgresTsvector, LexicalSearchMode::Contradiction) => Some(0.0),
         _ => None,
     };
 
     if let Some(threshold) = threshold
-        && backend == LexicalSearchBackend::MysqlFulltext
+        && backend == LexicalSearchBackend::PostgresTsvector
     {
-        validate_mysql_fulltext_threshold(threshold)?;
+        validate_postgres_tsvector_threshold(threshold)?;
     }
 
     Ok(threshold)
@@ -142,7 +142,7 @@ pub fn sanitize_sqlite_fts5_query(raw: &str) -> Option<String> {
     )
 }
 
-pub fn sanitize_mysql_boolean_query(raw: &str) -> Option<String> {
+pub fn sanitize_postgres_tsquery(raw: &str) -> Option<String> {
     let tokens = raw
         .split(|c: char| !c.is_alphanumeric() && c != '_')
         .map(|term| term.trim_matches('_'))
@@ -179,7 +179,7 @@ pub fn build_lexical_search_plan(
 ) -> Result<Option<LexicalSearchPlan>> {
     let query = match backend {
         LexicalSearchBackend::SqliteFts5 => sanitize_sqlite_fts5_query(raw_query),
-        LexicalSearchBackend::MysqlFulltext => sanitize_mysql_boolean_query(raw_query),
+        LexicalSearchBackend::PostgresTsvector => sanitize_postgres_tsquery(raw_query),
     };
 
     let Some(query) = query else {
@@ -190,7 +190,7 @@ pub fn build_lexical_search_plan(
         (LexicalSearchBackend::SqliteFts5, LexicalSearchMode::Ranked) => LexicalSearchPlan {
             backend,
             mode,
-            sql: "SELECT n.id, bm25(notes_fts, 3.0, 1.0, 2.0) as bm25_score\nFROM notes_fts\nJOIN notes n ON notes_fts.rowid = n.rowid\nWHERE notes_fts MATCH ?1\n  AND n.project_id = ?2\n  AND (?3 = '' OR n.folder = ?3)\n  AND (?4 = '' OR n.note_type = ?4)\nORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)\nLIMIT ?5".to_owned(),
+            sql: "SELECT n.id, bm25(notes_fts, 3.0, 1.0, 2.0) as bm25_score\nFROM notes_fts\nJOIN notes n ON notes_fts.rowid = n.rowid\nWHERE notes_fts MATCH $11\n  AND n.project_id = $22\n  AND ($33 = '' OR n.folder = $43)\n  AND ($54 = '' OR n.note_type = $64)\nORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)\nLIMIT $75".to_owned(),
             query,
             score_alias: "bm25_score",
             score_descending: false,
@@ -202,7 +202,7 @@ pub fn build_lexical_search_plan(
         (LexicalSearchBackend::SqliteFts5, LexicalSearchMode::Dedup) => LexicalSearchPlan {
             backend,
             mode,
-            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.abstract, n.overview,\n       -bm25(notes_fts, 3.0, 1.0, 2.0) as score\nFROM notes_fts\nJOIN notes n ON notes_fts.rowid = n.rowid\nWHERE notes_fts MATCH ?1\n  AND n.project_id = ?2\n  AND n.folder = ?3\n  AND n.note_type = ?4\n  AND -bm25(notes_fts, 3.0, 1.0, 2.0) > ?5\nORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)\nLIMIT ?6".to_owned(),
+            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.abstract, n.overview,\n       -bm25(notes_fts, 3.0, 1.0, 2.0) as score\nFROM notes_fts\nJOIN notes n ON notes_fts.rowid = n.rowid\nWHERE notes_fts MATCH $11\n  AND n.project_id = $22\n  AND n.folder = $33\n  AND n.note_type = $44\n  AND -bm25(notes_fts, 3.0, 1.0, 2.0) > $55\nORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)\nLIMIT $66".to_owned(),
             query,
             score_alias: "score",
             score_descending: true,
@@ -214,7 +214,7 @@ pub fn build_lexical_search_plan(
         (LexicalSearchBackend::SqliteFts5, LexicalSearchMode::Contradiction) => LexicalSearchPlan {
             backend,
             mode,
-            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type,\n       -bm25(notes_fts, 3.0, 1.0, 2.0) as score\nFROM notes_fts\nJOIN notes n ON notes_fts.rowid = n.rowid\nWHERE notes_fts MATCH ?1\n  AND n.id != ?2\n  AND -bm25(notes_fts, 3.0, 1.0, 2.0) > 5.0\nORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)\nLIMIT 3".to_owned(),
+            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type,\n       -bm25(notes_fts, 3.0, 1.0, 2.0) as score\nFROM notes_fts\nJOIN notes n ON notes_fts.rowid = n.rowid\nWHERE notes_fts MATCH $11\n  AND n.id != $22\n  AND -bm25(notes_fts, 3.0, 1.0, 2.0) > 5.0\nORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)\nLIMIT 3".to_owned(),
             query,
             score_alias: "score",
             score_descending: true,
@@ -226,7 +226,7 @@ pub fn build_lexical_search_plan(
         (LexicalSearchBackend::SqliteFts5, LexicalSearchMode::Discovery) => LexicalSearchPlan {
             backend,
             mode,
-            sql: "SELECT n.id, bm25(notes_fts, 3.0, 1.0, 2.0) as bm25_score\nFROM notes_fts\nJOIN notes n ON notes_fts.rowid = n.rowid\nWHERE notes_fts MATCH ?1\n  AND n.project_id = ?2\nORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)\nLIMIT ?3".to_owned(),
+            sql: "SELECT n.id, bm25(notes_fts, 3.0, 1.0, 2.0) as bm25_score\nFROM notes_fts\nJOIN notes n ON notes_fts.rowid = n.rowid\nWHERE notes_fts MATCH $11\n  AND n.project_id = $22\nORDER BY bm25(notes_fts, 3.0, 1.0, 2.0)\nLIMIT $33".to_owned(),
             query,
             score_alias: "bm25_score",
             score_descending: false,
@@ -235,10 +235,10 @@ pub fn build_lexical_search_plan(
                 "MySQL FULLTEXT only needs stable lexical candidates, not bm25 parity.",
             ],
         },
-        (LexicalSearchBackend::MysqlFulltext, LexicalSearchMode::Ranked) => LexicalSearchPlan {
+        (LexicalSearchBackend::PostgresTsvector, LexicalSearchMode::Ranked) => LexicalSearchPlan {
             backend,
             mode,
-            sql: "SELECT n.id, CAST(MATCH(n.title, n.content, n.tags) AGAINST (?1) AS DOUBLE) AS fulltext_score\nFROM notes n\nWHERE n.project_id = ?2\n  AND (?3 = '' OR n.folder = ?3)\n  AND (?4 = '' OR n.note_type = ?4)\n  AND MATCH(n.title, n.content, n.tags) AGAINST (?1)\nORDER BY fulltext_score DESC, n.id ASC\nLIMIT ?5".to_owned(),
+            sql: "SELECT n.id, CAST(MATCH(n.title, n.content, n.tags) AGAINST ($11) AS DOUBLE) AS fulltext_score\nFROM notes n\nWHERE n.project_id = $22\n  AND ($33 = '' OR n.folder = $43)\n  AND ($54 = '' OR n.note_type = $64)\n  AND MATCH(n.title, n.content, n.tags) AGAINST ($71)\nORDER BY fulltext_score DESC, n.id ASC\nLIMIT $85".to_owned(),
             query,
             score_alias: "fulltext_score",
             score_descending: true,
@@ -248,10 +248,10 @@ pub fn build_lexical_search_plan(
                 "Uses natural language mode (Dolt does not yet support IN BOOLEAN MODE).",
             ],
         },
-        (LexicalSearchBackend::MysqlFulltext, LexicalSearchMode::Dedup) => LexicalSearchPlan {
+        (LexicalSearchBackend::PostgresTsvector, LexicalSearchMode::Dedup) => LexicalSearchPlan {
             backend,
             mode,
-            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.abstract, n.overview,\n       CAST(MATCH(n.title, n.content, n.tags) AGAINST (?1) AS DOUBLE) AS score\nFROM notes n\nWHERE n.project_id = ?2\n  AND n.folder = ?3\n  AND n.note_type = ?4\n  AND MATCH(n.title, n.content, n.tags) AGAINST (?1) > ?5\nORDER BY score DESC, n.id ASC\nLIMIT ?6".to_owned(),
+            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.abstract, n.overview,\n       CAST(MATCH(n.title, n.content, n.tags) AGAINST ($11) AS DOUBLE) AS score\nFROM notes n\nWHERE n.project_id = $22\n  AND n.folder = $33\n  AND n.note_type = $44\n  AND MATCH(n.title, n.content, n.tags) AGAINST ($51) > $65\nORDER BY score DESC, n.id ASC\nLIMIT $76".to_owned(),
             query,
             score_alias: "score",
             score_descending: true,
@@ -261,10 +261,10 @@ pub fn build_lexical_search_plan(
                 "Uses natural language mode (Dolt does not yet support IN BOOLEAN MODE).",
             ],
         },
-        (LexicalSearchBackend::MysqlFulltext, LexicalSearchMode::Contradiction) => LexicalSearchPlan {
+        (LexicalSearchBackend::PostgresTsvector, LexicalSearchMode::Contradiction) => LexicalSearchPlan {
             backend,
             mode,
-            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type,\n       CAST(MATCH(n.title, n.content, n.tags) AGAINST (?1) AS DOUBLE) AS score\nFROM notes n\nWHERE n.id != ?2\n  AND MATCH(n.title, n.content, n.tags) AGAINST (?1) > ?3\nORDER BY score DESC, n.id ASC\nLIMIT 3".to_owned(),
+            sql: "SELECT n.id, n.permalink, n.title, n.folder, n.note_type,\n       CAST(MATCH(n.title, n.content, n.tags) AGAINST ($11) AS DOUBLE) AS score\nFROM notes n\nWHERE n.id != $22\n  AND MATCH(n.title, n.content, n.tags) AGAINST ($31) > $43\nORDER BY score DESC, n.id ASC\nLIMIT 3".to_owned(),
             query,
             score_alias: "score",
             score_descending: true,
@@ -274,10 +274,10 @@ pub fn build_lexical_search_plan(
                 "Uses natural language mode (Dolt does not yet support IN BOOLEAN MODE).",
             ],
         },
-        (LexicalSearchBackend::MysqlFulltext, LexicalSearchMode::Discovery) => LexicalSearchPlan {
+        (LexicalSearchBackend::PostgresTsvector, LexicalSearchMode::Discovery) => LexicalSearchPlan {
             backend,
             mode,
-            sql: "SELECT n.id, CAST(MATCH(n.title, n.content, n.tags) AGAINST (?1) AS DOUBLE) AS fulltext_score\nFROM notes n\nWHERE n.project_id = ?2\n  AND MATCH(n.title, n.content, n.tags) AGAINST (?1)\nORDER BY fulltext_score DESC, n.id ASC\nLIMIT ?3".to_owned(),
+            sql: "SELECT n.id, CAST(MATCH(n.title, n.content, n.tags) AGAINST ($11) AS DOUBLE) AS fulltext_score\nFROM notes n\nWHERE n.project_id = $22\n  AND MATCH(n.title, n.content, n.tags) AGAINST ($31)\nORDER BY fulltext_score DESC, n.id ASC\nLIMIT $43".to_owned(),
             query,
             score_alias: "fulltext_score",
             score_descending: true,
@@ -290,7 +290,7 @@ pub fn build_lexical_search_plan(
     }))
 }
 
-pub fn validate_mysql_fulltext_threshold(threshold: f64) -> Result<()> {
+pub fn validate_postgres_tsvector_threshold(threshold: f64) -> Result<()> {
     if threshold.is_sign_negative() {
         return Err(Error::InvalidData(
             "MySQL FULLTEXT thresholds must be non-negative MATCH() scores".to_owned(),
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn mysql_query_sanitizer_requires_positive_terms() {
         assert_eq!(
-            sanitize_mysql_boolean_query("rust sqlite _ bm25"),
+            sanitize_postgres_tsquery("rust sqlite _ bm25"),
             Some("+rust* +sqlite* +bm25*".to_owned())
         );
     }
@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn mysql_plan_replaces_shadow_table_with_match_against() {
         let plan = build_lexical_search_plan(
-            LexicalSearchBackend::MysqlFulltext,
+            LexicalSearchBackend::PostgresTsvector,
             LexicalSearchMode::Ranked,
             "rust sqlite",
         )
@@ -360,14 +360,14 @@ mod tests {
 
     #[test]
     fn mysql_thresholds_must_be_non_negative() {
-        assert!(validate_mysql_fulltext_threshold(0.0).is_ok());
-        assert!(validate_mysql_fulltext_threshold(-0.1).is_err());
+        assert!(validate_postgres_tsvector_threshold(0.0).is_ok());
+        assert!(validate_postgres_tsvector_threshold(-0.1).is_err());
     }
 
     #[test]
     fn mysql_execution_sql_uses_mysql_placeholders() {
         let plan = build_lexical_search_plan(
-            LexicalSearchBackend::MysqlFulltext,
+            LexicalSearchBackend::PostgresTsvector,
             LexicalSearchMode::Ranked,
             "rust sqlite",
         )
@@ -394,7 +394,7 @@ mod tests {
         .unwrap()
         .unwrap();
         let mysql_plan = build_lexical_search_plan(
-            LexicalSearchBackend::MysqlFulltext,
+            LexicalSearchBackend::PostgresTsvector,
             LexicalSearchMode::Ranked,
             "rust sqlite",
         )
@@ -414,7 +414,7 @@ mod tests {
         );
         assert_eq!(
             lexical_search_threshold(
-                LexicalSearchBackend::MysqlFulltext,
+                LexicalSearchBackend::PostgresTsvector,
                 LexicalSearchMode::Contradiction,
             )
             .unwrap(),

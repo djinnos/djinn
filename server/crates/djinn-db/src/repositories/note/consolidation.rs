@@ -96,11 +96,11 @@ impl NoteConsolidationRepository {
 
         sqlx::query_as!(
             ConsolidationNote,
-            r#"SELECT id, project_id, permalink, title, note_type, folder, scope_paths, content,
-                    `abstract` AS abstract_, overview, confidence
+            r#"SELECT id, project_id, permalink, title, note_type, folder, scope_paths::text AS "scope_paths!", content,
+                    abstract AS abstract_, overview, confidence
              FROM notes
-             WHERE project_id = ?
-               AND note_type = ?
+             WHERE project_id = $1
+               AND note_type = $2
                AND storage = 'db'
              ORDER BY permalink ASC, id ASC"#,
             project_id,
@@ -134,13 +134,13 @@ impl NoteConsolidationRepository {
         sqlx::query_as!(
             ConsolidationNote,
             r#"SELECT n.id, n.project_id, n.permalink, n.title, n.note_type, n.folder, n.scope_paths, n.content,
-                    n.`abstract` AS abstract_, n.overview, n.confidence
+                    n.abstract AS abstract_, n.overview, n.confidence
              FROM notes n
              JOIN consolidated_note_provenance cnp ON cnp.note_id = n.id
-             WHERE n.project_id = ?
-               AND n.note_type = ?
+             WHERE n.project_id = $1
+               AND n.note_type = $2
                AND n.storage = 'db'
-               AND cnp.session_id = ?
+               AND cnp.session_id = $3
              ORDER BY n.permalink ASC, n.id ASC"#,
             project_id,
             note_type,
@@ -167,7 +167,7 @@ impl NoteConsolidationRepository {
              JOIN consolidated_note_provenance cnp ON cnp.note_id = n.id
              WHERE n.storage = 'db'
                AND n.note_type IN ('case', 'pattern', 'pitfall')
-               AND cnp.session_id = ?
+               AND cnp.session_id = $1
              GROUP BY n.project_id, n.note_type
              HAVING COUNT(*) >= 2
              ORDER BY n.project_id ASC, n.note_type ASC"#,
@@ -214,7 +214,7 @@ impl NoteConsolidationRepository {
 
         for session_id in source_session_ids {
             let exists: i64 = sqlx::query_scalar!(
-                "SELECT COUNT(*) FROM sessions WHERE id = ? AND project_id = ?",
+                "SELECT COUNT(*) FROM sessions WHERE id = $1 AND project_id = $2",
                 session_id,
                 project_id
             )
@@ -236,7 +236,7 @@ impl NoteConsolidationRepository {
         note_repo.set_confidence(&created.id, confidence).await?;
 
         sqlx::query!(
-            "UPDATE notes SET `abstract` = ?, overview = ? WHERE id = ?",
+            "UPDATE notes SET abstract = $1, overview = $2 WHERE id = $3",
             abstract_,
             overview,
             created.id
@@ -270,7 +270,7 @@ impl NoteConsolidationRepository {
         let placeholders = sql_placeholders(source_note_ids.len(), 2);
         // NOTE: dynamic SQL (IN list built at runtime) — compile-time check not possible
         let note_count_query =
-            format!("SELECT COUNT(*) FROM notes WHERE project_id = ? AND id IN ({placeholders})");
+            format!("SELECT COUNT(*) FROM notes WHERE project_id = $1 AND id IN ({placeholders})");
         let mut note_count = sqlx::query_scalar::<_, i64>(&note_count_query).bind(project_id);
         for note_id in source_note_ids {
             note_count = note_count.bind(note_id);
@@ -288,7 +288,7 @@ impl NoteConsolidationRepository {
             "SELECT DISTINCT cnp.session_id
              FROM consolidated_note_provenance cnp
              JOIN notes n ON n.id = cnp.note_id
-             WHERE n.project_id = ?
+             WHERE n.project_id = $1
                AND cnp.note_id IN ({placeholders})
              ORDER BY cnp.session_id ASC"
         );
@@ -430,25 +430,22 @@ impl NoteConsolidationRepository {
 
         sqlx::query_as!(
             NoteDedupCandidate,
-            r#"SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.`abstract` AS abstract_, n.overview,
-                    CAST(MATCH(n.title, n.content, n.tags) AGAINST (? IN NATURAL LANGUAGE MODE) AS DOUBLE) AS "score!: f64"
+            r#"SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.abstract AS abstract_, n.overview,
+                    ts_rank(n.search_vector, websearch_to_tsquery('english', $1))::float8 AS "score!: f64"
              FROM notes n
-             WHERE MATCH(n.title, n.content, n.tags) AGAINST (? IN NATURAL LANGUAGE MODE)
-               AND n.project_id = ?
-               AND n.folder = ?
-               AND n.note_type = ?
+             WHERE n.search_vector @@ websearch_to_tsquery('english', $1)
+               AND n.project_id = $2
+               AND n.folder = $3
+               AND n.note_type = $4
                AND n.storage = 'db'
-               AND MATCH(n.title, n.content, n.tags) AGAINST (? IN NATURAL LANGUAGE MODE) > ?
-             ORDER BY MATCH(n.title, n.content, n.tags) AGAINST (? IN NATURAL LANGUAGE MODE) DESC
-             LIMIT ?"#,
-            safe_query,
+               AND ts_rank(n.search_vector, websearch_to_tsquery('english', $1)) > $5
+             ORDER BY ts_rank(n.search_vector, websearch_to_tsquery('english', $1)) DESC
+             LIMIT $6"#,
             safe_query,
             project_id,
             folder,
             note_type,
-            safe_query,
             mysql_threshold,
-            safe_query,
             DEDUP_LIMIT
         )
         .fetch_all(self.db.pool())
@@ -465,7 +462,7 @@ impl NoteConsolidationRepository {
 
         sqlx::query!(
             "INSERT INTO consolidated_note_provenance (note_id, session_id)
-             VALUES (?, ?)",
+             VALUES ($1, $2)",
             note_id,
             session_id
         )
@@ -482,7 +479,7 @@ impl NoteConsolidationRepository {
             ConsolidatedNoteProvenance,
             "SELECT note_id, session_id, created_at
              FROM consolidated_note_provenance
-             WHERE note_id = ?
+             WHERE note_id = $1
              ORDER BY created_at ASC, session_id ASC",
             note_id
         )
@@ -505,11 +502,11 @@ impl NoteConsolidationRepository {
         let source_i32 = params.source_note_count as i32;
         sqlx::query!(
             "INSERT INTO consolidation_run_metrics (
-                id, project_id, `status`, note_type,
+                id, project_id, status, note_type,
                 scanned_note_count, candidate_cluster_count,
                 consolidated_cluster_count, consolidated_note_count,
                 source_note_count, started_at, completed_at, error_message
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
             id,
             params.project_id,
             params.status,
@@ -541,18 +538,18 @@ impl NoteConsolidationRepository {
 
         sqlx::query_as!(
             ConsolidationRunMetric,
-            r#"SELECT id, project_id, note_type, `status` AS "status!",
-                    CAST(scanned_note_count AS SIGNED) AS "scanned_note_count!: i64",
-                    CAST(candidate_cluster_count AS SIGNED) AS "candidate_cluster_count!: i64",
-                    CAST(consolidated_cluster_count AS SIGNED) AS "consolidated_cluster_count!: i64",
-                    CAST(consolidated_note_count AS SIGNED) AS "consolidated_note_count!: i64",
-                    CAST(source_note_count AS SIGNED) AS "source_note_count!: i64",
+            r#"SELECT id, project_id, note_type, status AS "status!",
+                    CAST(scanned_note_count AS BIGINT) AS "scanned_note_count!: i64",
+                    CAST(candidate_cluster_count AS BIGINT) AS "candidate_cluster_count!: i64",
+                    CAST(consolidated_cluster_count AS BIGINT) AS "consolidated_cluster_count!: i64",
+                    CAST(consolidated_note_count AS BIGINT) AS "consolidated_note_count!: i64",
+                    CAST(source_note_count AS BIGINT) AS "source_note_count!: i64",
                     started_at, completed_at, error_message
              FROM consolidation_run_metrics
-             WHERE project_id = ?
-               AND (? = '' OR note_type = ?)
+             WHERE project_id = $1
+               AND ($2 = '' OR note_type = $3)
              ORDER BY started_at DESC, id DESC
-             LIMIT ?"#,
+             LIMIT $4"#,
             project_id,
             note_type,
             note_type,
@@ -574,7 +571,7 @@ impl NoteConsolidationRepository {
             ConsolidatedNoteProvenance,
             "SELECT note_id, session_id, created_at
              FROM consolidated_note_provenance
-             WHERE note_id = ? AND session_id = ?",
+             WHERE note_id = $1 AND session_id = $2",
             note_id,
             session_id
         )
@@ -593,15 +590,15 @@ impl NoteConsolidationRepository {
 
         sqlx::query_as!(
             ConsolidationRunMetric,
-            r#"SELECT id, project_id, note_type, `status` AS "status!",
-                    CAST(scanned_note_count AS SIGNED) AS "scanned_note_count!: i64",
-                    CAST(candidate_cluster_count AS SIGNED) AS "candidate_cluster_count!: i64",
-                    CAST(consolidated_cluster_count AS SIGNED) AS "consolidated_cluster_count!: i64",
-                    CAST(consolidated_note_count AS SIGNED) AS "consolidated_note_count!: i64",
-                    CAST(source_note_count AS SIGNED) AS "source_note_count!: i64",
+            r#"SELECT id, project_id, note_type, status AS "status!",
+                    CAST(scanned_note_count AS BIGINT) AS "scanned_note_count!: i64",
+                    CAST(candidate_cluster_count AS BIGINT) AS "candidate_cluster_count!: i64",
+                    CAST(consolidated_cluster_count AS BIGINT) AS "consolidated_cluster_count!: i64",
+                    CAST(consolidated_note_count AS BIGINT) AS "consolidated_note_count!: i64",
+                    CAST(source_note_count AS BIGINT) AS "source_note_count!: i64",
                     started_at, completed_at, error_message
              FROM consolidation_run_metrics
-             WHERE id = ?"#,
+             WHERE id = $1"#,
             id
         )
         .fetch_one(self.db.pool())

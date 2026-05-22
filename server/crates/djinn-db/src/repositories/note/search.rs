@@ -21,7 +21,7 @@ impl NoteRepository {
     pub(crate) fn lexical_search_backend(&self) -> LexicalSearchBackend {
         match self.db.backend_capabilities().lexical_search {
             DatabaseNoteSearchBackend::SqliteFts5 => LexicalSearchBackend::SqliteFts5,
-            DatabaseNoteSearchBackend::MysqlFulltext => LexicalSearchBackend::MysqlFulltext,
+            DatabaseNoteSearchBackend::PostgresTsvector => LexicalSearchBackend::PostgresTsvector,
         }
     }
 
@@ -47,7 +47,7 @@ impl NoteRepository {
         // NOTE: dynamic SQL (backend-specific FTS query built from a runtime plan and dispatched across SQLite/MySQL pools) — compile-time check not possible
         let sql = executable_lexical_search_sql(&plan);
 
-        let mut q = sqlx::query_as::<sqlx::MySql, (String, f64)>(&sql);
+        let mut q = sqlx::query_as::<sqlx::Postgres, (String, f64)>(&sql);
         if plan.needs_query_bind() {
             q = q.bind(&plan.query);
         }
@@ -58,7 +58,7 @@ impl NoteRepository {
         // SQLite FTS5 reuses numbered placeholders natively, so bind once there.
         let repeat_filter_binds = matches!(
             plan.backend,
-            crate::repositories::note::LexicalSearchBackend::MysqlFulltext
+            crate::repositories::note::LexicalSearchBackend::PostgresTsvector
         );
         q = q.bind(project_id).bind(folder);
         if repeat_filter_binds {
@@ -93,7 +93,7 @@ impl NoteRepository {
         let sql = executable_lexical_search_sql(&plan);
 
         let mut q = sqlx::query_as::<
-            sqlx::MySql,
+            sqlx::Postgres,
             (
                 String,
                 String,
@@ -152,7 +152,7 @@ impl NoteRepository {
         let sql = executable_lexical_search_sql(&plan);
 
         let mut q =
-            sqlx::query_as::<sqlx::MySql, (String, String, String, String, String, f64)>(&sql);
+            sqlx::query_as::<sqlx::Postgres, (String, String, String, String, String, f64)>(&sql);
         if plan.needs_query_bind() {
             q = q.bind(&plan.query);
         }
@@ -286,7 +286,7 @@ impl NoteRepository {
             "SELECT id, permalink, title, folder, note_type,
                     COALESCE(abstract, substr(content, 1, 200)) as abstract_text
              FROM notes
-             WHERE project_id = ? AND id IN ({})",
+             WHERE project_id = $1 AND id IN ({})",
             placeholders
         );
         let mut q = sqlx::query_as::<_, (String, String, String, String, String, String)>(&sql)
@@ -360,9 +360,9 @@ impl NoteRepository {
         let sql = format!(
             "SELECT n.id FROM notes n
              JOIN note_embedding_meta m ON m.note_id = n.id
-             WHERE n.project_id = ?
-               AND (? = '' OR n.folder = ?)
-               AND (? = '' OR n.note_type = ?)
+             WHERE n.project_id = $1
+               AND ($2 = '' OR n.folder = $3)
+               AND ($4 = '' OR n.note_type = $5)
                AND {branch_filter_sql}
                AND n.id IN ({})",
             placeholders
@@ -405,7 +405,7 @@ impl NoteRepository {
         Ok(sqlx::query_scalar!(
             "SELECT short_id
                  FROM tasks
-                 WHERE project_id = ? AND (id = ? OR short_id = ?)
+                 WHERE project_id = $1 AND (id = $2 OR short_id = $3)
                  LIMIT 1",
             project_id,
             task_id,
@@ -423,7 +423,7 @@ impl NoteRepository {
 
         let rows = sqlx::query!(
             "SELECT folder, title, permalink, updated_at
-             FROM notes WHERE project_id = ?
+             FROM notes WHERE project_id = $1
              ORDER BY folder, title",
             project_id
         )
@@ -452,16 +452,16 @@ impl NoteRepository {
         // NOTE: dynamic SQL (hours interval inlined when > 0) — compile-time check not possible
         let sql = if hours > 0 {
             format!(
-                "SELECT id, permalink, title, note_type, folder, updated_at, scope_paths
+                r#"SELECT id, permalink, title, note_type, folder, updated_at, scope_paths::text AS "scope_paths!"
                  FROM notes
-                 WHERE project_id = ?
-                   AND updated_at >= DATE_SUB(NOW(3), INTERVAL {hours} HOUR)
-                 ORDER BY updated_at DESC LIMIT ?"
+                 WHERE project_id = $1
+                   AND updated_at >= to_char((now() at time zone 'utc') - (interval '1 hour' * {hours}), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                 ORDER BY updated_at DESC LIMIT $2"#
             )
         } else {
-            "SELECT id, permalink, title, note_type, folder, updated_at, scope_paths
-             FROM notes WHERE project_id = ?
-             ORDER BY updated_at DESC LIMIT ?"
+            r#"SELECT id, permalink, title, note_type, folder, updated_at, scope_paths::text AS "scope_paths!"
+             FROM notes WHERE project_id = $1
+             ORDER BY updated_at DESC LIMIT $2"#
                 .to_owned()
         };
 
@@ -485,8 +485,8 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
 
         // NOTE: dynamic SQL (folder/note_type clauses appended at runtime) — compile-time check not possible
-        let mut sql = "SELECT id, permalink, title, note_type, folder, updated_at, scope_paths
-             FROM notes WHERE project_id = ?"
+        let mut sql = r#"SELECT id, permalink, title, note_type, folder, updated_at, scope_paths::text AS "scope_paths!"
+             FROM notes WHERE project_id = $1"#
             .to_owned();
 
         let mut binds: Vec<String> = vec![project_id.to_string()];
@@ -558,9 +558,9 @@ impl NoteRepository {
                 bind_values.push(task_path.clone());
                 exists_parts.push(
                     "EXISTS (SELECT 1 FROM JSON_TABLE(n.scope_paths, '$[*]' COLUMNS (value VARCHAR(1024) PATH '$')) AS sp \
-                     WHERE ? LIKE CONCAT(sp.value, '/%') \
-                        OR sp.value LIKE CONCAT(?, '/%') \
-                        OR sp.value = ?)".to_string()
+                     WHERE $1 LIKE CONCAT(sp.value, '/%') \
+                        OR sp.value LIKE CONCAT($2, '/%') \
+                        OR sp.value = $3)".to_string()
                 );
             }
             let exists_or = exists_parts.join(" OR ");
@@ -575,9 +575,9 @@ impl NoteRepository {
                     n.access_count, n.confidence, n.abstract AS abstract_, n.overview,
                     n.scope_paths
              FROM notes n
-             WHERE n.project_id = ?
+             WHERE n.project_id = $1
                AND n.note_type IN ({types_in})
-               AND n.confidence >= ?
+               AND n.confidence >= $2
                AND {scope_clause}
              ORDER BY n.confidence DESC, n.updated_at DESC
              LIMIT {limit}"
@@ -619,9 +619,9 @@ impl NoteRepository {
             bind_values.push(changed_path.clone());
             overlap_parts.push(
                 "EXISTS (SELECT 1 FROM JSON_TABLE(CAST(n.scope_paths AS JSON), '$[*]' COLUMNS (value VARCHAR(1024) PATH '$')) AS sp \
-                 WHERE ? LIKE CONCAT(sp.value, '/%') \
-                    OR sp.value LIKE CONCAT(?, '/%') \
-                    OR sp.value = ?)".to_string()
+                 WHERE $1 LIKE CONCAT(sp.value, '/%') \
+                    OR sp.value LIKE CONCAT($2, '/%') \
+                    OR sp.value = $3)".to_string()
             );
         }
 
@@ -634,7 +634,7 @@ impl NoteRepository {
                     n.access_count, n.confidence, n.abstract AS abstract_, n.overview,
                     n.scope_paths
              FROM notes n
-             WHERE n.project_id = ?
+             WHERE n.project_id = $1
                AND JSON_LENGTH(CAST(n.scope_paths AS JSON)) > 0
                AND ({overlap_clause})
              ORDER BY n.updated_at DESC
@@ -655,13 +655,17 @@ impl NoteRepository {
     pub async fn task_refs(&self, permalink: &str) -> Result<Vec<serde_json::Value>> {
         self.db.ensure_initialized().await?;
 
-        let pattern = format!("%\"{permalink}\"%");
-
+        // `memory_refs` is a JSONB array of strings; use containment to match
+        // any task whose array contains the requested permalink. We pass the
+        // probe as a JSONB array literal so the index can drive the lookup.
+        let probe = serde_json::Value::Array(vec![serde_json::Value::String(
+            permalink.to_owned(),
+        )]);
         let rows = sqlx::query!(
-            r#"SELECT id, short_id, title, `status` AS "status!" FROM tasks
-             WHERE memory_refs LIKE ?
+            r#"SELECT id, short_id, title, status AS "status!" FROM tasks
+             WHERE memory_refs @> $1
              ORDER BY priority, created_at"#,
-            pattern
+            sqlx::types::Json(probe) as _
         )
         .fetch_all(self.db.pool())
         .await?;
@@ -694,7 +698,7 @@ mod contradiction_tests {
         let owner = "test";
         let repo_slug = format!("contradiction-{id}");
         sqlx::query!(
-            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES (?, ?, ?, ?)",
+            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
             id,
             "test",
             owner,
@@ -866,7 +870,7 @@ mod scope_overlap_decay_tests {
         let owner = "test";
         let repo_slug = format!("scope-overlap-{id}");
         sqlx::query!(
-            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES (?, ?, ?, ?)",
+            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
             id,
             "test",
             owner,

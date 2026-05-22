@@ -43,7 +43,7 @@ impl RepoGraphCacheRepository {
         Ok(sqlx::query(
             "SELECT project_id, commit_sha, graph_blob, built_at
              FROM repo_graph_cache
-             WHERE project_id = ? AND commit_sha = ?",
+             WHERE project_id = $1 AND commit_sha = $2",
         )
         .bind(project_id)
         .bind(commit_sha)
@@ -67,7 +67,7 @@ impl RepoGraphCacheRepository {
         Ok(sqlx::query(
             "SELECT project_id, commit_sha, graph_blob, built_at
              FROM repo_graph_cache
-             WHERE project_id = ?
+             WHERE project_id = $1
              ORDER BY built_at DESC
              LIMIT 1",
         )
@@ -87,12 +87,12 @@ impl RepoGraphCacheRepository {
         // `built_at` defaults to "" in the schema; stamp it explicitly so the
         // row carries a usable ISO-8601 timestamp on first insert.
         sqlx::query!(
-            "INSERT INTO repo_graph_cache
+            r#"INSERT INTO repo_graph_cache
              (project_id, commit_sha, graph_blob, built_at)
-             VALUES (?, ?, ?, DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))
-             ON DUPLICATE KEY UPDATE
-                graph_blob=VALUES(graph_blob),
-                built_at=VALUES(built_at)",
+             VALUES ($1, $2, $3, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+             ON CONFLICT (project_id, commit_sha) DO UPDATE SET
+                graph_blob = EXCLUDED.graph_blob,
+                built_at = EXCLUDED.built_at"#,
             entry.project_id,
             entry.commit_sha,
             entry.graph_blob,
@@ -106,9 +106,9 @@ impl RepoGraphCacheRepository {
         // `sqlx::query` form so builds work on databases that haven't yet
         // applied migration 9.
         if let Err(e) = sqlx::query(
-            "UPDATE projects
-               SET graph_warmed_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE id = ?",
+            r#"UPDATE projects
+               SET graph_warmed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $1"#,
         )
         .bind(entry.project_id)
         .execute(self.db.pool())

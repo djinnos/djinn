@@ -156,7 +156,7 @@ pub async fn chunk_and_embed_files(
             let existing = sqlx::query!(
                 r#"SELECT content_hash, model_version, extension_state
                      FROM code_chunk_meta
-                    WHERE id = ?"#,
+                    WHERE id = $1"#,
                 chunk.id
             )
             .fetch_optional(db.pool())
@@ -259,16 +259,16 @@ async fn upsert_chunk_row(db: &Database, chunk: &super::chunker::CodeChunk) -> R
         r#"INSERT INTO code_chunks
             (id, project_id, file_path, symbol_key, kind,
              start_line, end_line, content_hash, embedded_text)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON DUPLICATE KEY UPDATE
-             project_id = VALUES(project_id),
-             file_path = VALUES(file_path),
-             symbol_key = VALUES(symbol_key),
-             kind = VALUES(kind),
-             start_line = VALUES(start_line),
-             end_line = VALUES(end_line),
-             content_hash = VALUES(content_hash),
-             embedded_text = VALUES(embedded_text)"#,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           ON CONFLICT (id) DO UPDATE SET
+             project_id = EXCLUDED.project_id,
+             file_path = EXCLUDED.file_path,
+             symbol_key = EXCLUDED.symbol_key,
+             kind = EXCLUDED.kind,
+             start_line = EXCLUDED.start_line,
+             end_line = EXCLUDED.end_line,
+             content_hash = EXCLUDED.content_hash,
+             embedded_text = EXCLUDED.embedded_text"#,
         chunk.id,
         chunk.project_id,
         chunk.file_path,
@@ -302,13 +302,13 @@ async fn upsert_chunk_meta(
     sqlx::query!(
         r#"INSERT INTO code_chunk_meta
             (id, project_id, content_hash, model_version, embedded_at, extension_state)
-           VALUES (?, ?, ?, ?, DATE_FORMAT(UTC_TIMESTAMP(3), '%Y-%m-%dT%H:%i:%S.%fZ'), ?)
-           ON DUPLICATE KEY UPDATE
-             project_id = VALUES(project_id),
-             content_hash = VALUES(content_hash),
-             model_version = VALUES(model_version),
-             embedded_at = VALUES(embedded_at),
-             extension_state = VALUES(extension_state)"#,
+           VALUES ($1, $2, $3, $4, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), $5)
+           ON CONFLICT (id) DO UPDATE SET
+             project_id = EXCLUDED.project_id,
+             content_hash = EXCLUDED.content_hash,
+             model_version = EXCLUDED.model_version,
+             embedded_at = EXCLUDED.embedded_at,
+             extension_state = EXCLUDED.extension_state"#,
         chunk_id,
         project_id,
         content_hash,

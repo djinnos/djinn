@@ -29,7 +29,7 @@ impl SessionMessageRepository {
 
         sqlx::query!(
             "INSERT INTO session_messages (id, session_id, role, content_json, token_count)
-             VALUES (?, ?, ?, ?, ?)",
+             VALUES ($1, $2, $3, $4, $5)",
             id,
             session_id,
             role,
@@ -42,7 +42,7 @@ impl SessionMessageRepository {
         let msg = sqlx::query_as!(
             SessionMessage,
             "SELECT id, session_id, role, content_json, token_count, created_at
-             FROM session_messages WHERE id = ?",
+             FROM session_messages WHERE id = $1",
             id,
         )
         .fetch_one(self.db.pool())
@@ -85,7 +85,7 @@ impl SessionMessageRepository {
 
             sqlx::query!(
                 "INSERT INTO session_messages (id, session_id, role, content_json)
-                 VALUES (?, ?, ?, ?)",
+                 VALUES ($1, $2, $3, $4)",
                 id,
                 session_id,
                 role,
@@ -119,7 +119,7 @@ impl SessionMessageRepository {
             SessionMessage,
             "SELECT id, session_id, role, content_json, token_count, created_at
              FROM session_messages
-             WHERE session_id = ?
+             WHERE session_id = $1
              ORDER BY created_at ASC",
             session_id,
         )
@@ -177,7 +177,7 @@ impl SessionMessageRepository {
     pub async fn delete_conversation(&self, session_id: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;
         let result = sqlx::query!(
-            "DELETE FROM session_messages WHERE session_id = ?",
+            "DELETE FROM session_messages WHERE session_id = $1",
             session_id,
         )
         .execute(self.db.pool())
@@ -221,8 +221,8 @@ mod tests {
         let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
         sqlx::query!(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                issue_type, priority, owner, `status`, continuation_count, labels, acceptance_criteria, memory_refs)
-             VALUES (?, ?, ?, ?, 'Task', '', '', 'task', 0, '', 'open', 0, '[]', '[]', '[]')",
+                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
+             VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
             task_id,
             epic.project_id,
             short_id,
