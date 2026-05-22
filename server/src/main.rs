@@ -249,24 +249,46 @@ fn init_logging() -> (WorkerGuard, WorkerGuard) {
 
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,opentelemetry_sdk=warn"));
-    let format = tracing_subscriber::fmt::format()
-        .compact()
-        .with_target(true);
 
-    let file_layer = tracing_subscriber::fmt::layer()
-        .event_format(format.clone())
-        .with_ansi(false)
-        .with_writer(file_writer);
+    // Default to JSON for prod log aggregation; allow `compact` for local-dev.
+    // Honors `DJINN_LOG_FORMAT=json|compact` (anything else falls back to json).
+    let log_format = std::env::var("DJINN_LOG_FORMAT")
+        .ok()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "json".to_owned());
 
-    let stderr_layer = tracing_subscriber::fmt::layer()
-        .event_format(format)
-        .with_writer(stderr_writer);
+    let json_mode = log_format != "compact";
 
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(file_layer)
-        .with(stderr_layer)
-        .init();
+    if json_mode {
+        let file_layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_ansi(false)
+            .with_writer(file_writer);
+        let stderr_layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(stderr_writer);
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(file_layer)
+            .with(stderr_layer)
+            .init();
+    } else {
+        let format = tracing_subscriber::fmt::format()
+            .compact()
+            .with_target(true);
+        let file_layer = tracing_subscriber::fmt::layer()
+            .event_format(format.clone())
+            .with_ansi(false)
+            .with_writer(file_writer);
+        let stderr_layer = tracing_subscriber::fmt::layer()
+            .event_format(format)
+            .with_writer(stderr_writer);
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(file_layer)
+            .with(stderr_layer)
+            .init();
+    }
 
     (file_guard, stderr_guard)
 }
