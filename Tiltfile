@@ -311,7 +311,7 @@ k8s_resource(
     labels=['djinn'],
 )
 k8s_resource(
-    workload='djinn-dolt',
+    workload='djinn-mysql',
     port_forwards=[port_forward(3306, 3306, name='mysql')],
     labels=['infra'],
 )
