@@ -412,7 +412,7 @@ impl GitHubApiClient {
     ///
     /// Returns the fields the REST `pulls/{n}` endpoint doesn't surface:
     /// `mergeStateStatus`, the live `mergeQueueEntry`, the
-    /// `autoMergeRequest`, and the most recent `DequeuedEvent` (used to
+    /// `autoMergeRequest`, and the most recent `RemovedFromMergeQueueEvent` (used to
     /// surface failure diagnostics when the queue kicks a PR out).
     pub async fn get_pr_merge_queue_state(
         &self,
@@ -433,13 +433,13 @@ impl GitHubApiClient {
                             estimatedTimeToMerge
                             solo
                         }
-                        timelineItems(last: 20, itemTypes: [DEQUEUED_EVENT]) {
+                        timelineItems(last: 20, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) {
                             nodes {
                                 __typename
-                                ... on DequeuedEvent {
+                                ... on RemovedFromMergeQueueEvent {
                                     reason
                                     createdAt
-                                    enqueuer { __typename }
+                                    actor { login }
                                 }
                             }
                         }
@@ -543,7 +543,7 @@ impl GitHubApiClient {
                 nodes
                     .iter()
                     .rev()
-                    .find(|n| n["__typename"] == "DequeuedEvent")
+                    .find(|n| n["__typename"] == "RemovedFromMergeQueueEvent")
             })
             .map(|node| DequeueEvent {
                 reason: node["reason"].as_str().map(|s| s.to_string()),

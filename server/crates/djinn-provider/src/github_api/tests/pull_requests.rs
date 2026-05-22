@@ -554,7 +554,7 @@ async fn get_pr_merge_queue_state_returns_dequeue_event_when_kicked() {
                         "timelineItems": {
                             "nodes": [
                                 {
-                                    "__typename": "DequeuedEvent",
+                                    "__typename": "RemovedFromMergeQueueEvent",
                                     "reason": "CHECKS_FAILED",
                                     "createdAt": "2026-05-21T22:30:00Z"
                                 }
