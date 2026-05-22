@@ -16,7 +16,7 @@ pub mod test_support {
 
 pub use database::{
     Database, DatabaseBackendCapabilities, DatabaseBackendKind, DatabaseBootstrapInfo,
-    DatabaseConnectConfig, MysqlDatabaseConfig, NoteSearchBackend, NoteVectorBackend,
+    DatabaseConnectConfig, NoteSearchBackend, NoteVectorBackend, PostgresDatabaseConfig,
     SqliteVecStatus, default_db_path,
 };
 pub use error::{DbError as Error, DbResult as Result};

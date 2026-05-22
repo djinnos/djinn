@@ -5,10 +5,12 @@ use serde::Serialize;
 
 use djinn_db::{
     Database, DatabaseBackendKind, DatabaseBootstrapInfo, DatabaseConnectConfig,
-    MysqlDatabaseConfig,
+    PostgresDatabaseConfig,
 };
 
-use crate::db::mysql::{MysqlRuntimeError, ensure_mysql_runtime_for_connect_config};
+use crate::db::postgres::{
+    PostgresRuntimeError, ensure_postgres_runtime_for_connect_config,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DatabaseRuntimeConfig {
@@ -18,43 +20,26 @@ pub struct DatabaseRuntimeConfig {
 impl DatabaseRuntimeConfig {
     pub fn from_cli_and_env(
         _db_path: Option<PathBuf>,
-        backend: Option<String>,
-        mysql_url: Option<String>,
-        _mysql_flavor: Option<String>,
+        database_url: Option<String>,
     ) -> Result<Self, DatabaseRuntimeError> {
-        let backend = backend
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("mysql")
-            .to_ascii_lowercase();
+        // Postgres is a sibling service (compose or StatefulSet). The
+        // operator must supply a URL via DJINN_DATABASE_URL.
+        let url = database_url.ok_or(DatabaseRuntimeError::MissingDatabaseUrl)?;
 
-        match backend.as_str() {
-            "mysql" => {
-                // MySQL is a sibling service (compose or StatefulSet). The
-                // operator must supply a URL via DJINN_MYSQL_URL when not
-                // running against the host-exposed compose stack.
-                let url = mysql_url.ok_or_else(|| DatabaseRuntimeError::MissingMysqlUrl {
-                    backend: backend.clone(),
-                })?;
-
-                Ok(Self {
-                    connect: DatabaseConnectConfig::Mysql(MysqlDatabaseConfig { url }),
-                })
-            }
-            other => Err(DatabaseRuntimeError::UnknownBackend(other.to_owned())),
-        }
+        Ok(Self {
+            connect: DatabaseConnectConfig::Postgres(PostgresDatabaseConfig { url }),
+        })
     }
 
     pub fn backend_kind(&self) -> DatabaseBackendKind {
         self.connect.backend_kind()
     }
 
-    /// Build a `DatabaseRuntimeConfig` targeting MySQL at the given URL.
+    /// Build a `DatabaseRuntimeConfig` targeting Postgres at the given URL.
     /// Used by tests and CLI fallback paths.
-    pub fn mysql(url: String) -> Self {
+    pub fn postgres(url: String) -> Self {
         Self {
-            connect: DatabaseConnectConfig::Mysql(MysqlDatabaseConfig { url }),
+            connect: DatabaseConnectConfig::Postgres(PostgresDatabaseConfig { url }),
         }
     }
 }
@@ -79,20 +64,20 @@ impl DatabaseRuntimeManager {
         Database::open_with_config(self.config.connect.clone()).map_err(DatabaseRuntimeError::Open)
     }
 
-    /// Probe the mysql service over TCP. Under compose / Helm-managed deploy
-    /// the mysql container is a sibling service; if it isn't reachable we
+    /// Probe the postgres service over TCP. Under compose / Helm-managed deploy
+    /// the postgres container is a sibling service; if it isn't reachable we
     /// surface an actionable error.
     pub fn ensure_runtime_available(&self) -> Result<(), DatabaseRuntimeError> {
-        ensure_mysql_runtime_for_connect_config(&self.config.connect)?;
+        ensure_postgres_runtime_for_connect_config(&self.config.connect)?;
         Ok(())
     }
 
     pub fn startup_mode(&self) -> DatabaseRuntimeMode {
         match &self.config.connect {
-            DatabaseConnectConfig::Mysql(config) => DatabaseRuntimeMode {
-                backend_kind: DatabaseBackendKind::Mysql,
+            DatabaseConnectConfig::Postgres(config) => DatabaseRuntimeMode {
+                backend_kind: DatabaseBackendKind::Postgres,
                 backend_label: config.display_backend().to_owned(),
-                target: redact_mysql_target(&config.url),
+                target: redact_postgres_target(&config.url),
                 managed_process: false,
             },
         }
@@ -119,9 +104,8 @@ impl DatabaseRuntimeManager {
     pub fn planned_health_snapshot(&self) -> DatabaseRuntimeHealth {
         let mode = self.startup_mode();
         let detail = match mode.backend_kind {
-            DatabaseBackendKind::Mysql => {
-                "mysql backend selected; runtime will use the mysql-compatible sqlx pool"
-                    .to_owned()
+            DatabaseBackendKind::Postgres => {
+                "postgres backend selected; runtime will use the postgres sqlx pool".to_owned()
             }
         };
 
@@ -161,27 +145,25 @@ pub struct DatabaseRuntimeMode {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DatabaseRuntimeError {
-    #[error("unknown database backend `{0}`; expected mysql")]
-    UnknownBackend(String),
-    #[error("database backend `{backend}` requires DJINN_MYSQL_URL to be set")]
-    MissingMysqlUrl { backend: String },
-    #[error("mysql runtime bootstrap failed: {0}")]
-    MysqlRuntime(#[from] MysqlRuntimeError),
+    #[error("postgres backend requires DJINN_DATABASE_URL to be set")]
+    MissingDatabaseUrl,
+    #[error("postgres runtime bootstrap failed: {0}")]
+    PostgresRuntime(#[from] PostgresRuntimeError),
     #[error("database bootstrap failed: {0}")]
     Open(#[from] djinn_db::Error),
 }
 
-fn redact_mysql_target(url: &str) -> String {
+fn redact_postgres_target(url: &str) -> String {
     match url.rsplit('@').next() {
-        Some(host_part) if host_part != url => format!("mysql://<redacted>@{host_part}"),
-        _ => "mysql://<configured>".to_owned(),
+        Some(host_part) if host_part != url => format!("postgres://<redacted>@{host_part}"),
+        _ => "postgres://<configured>".to_owned(),
     }
 }
 
 fn runtime_detail_for_bootstrap(bootstrap: &DatabaseBootstrapInfo) -> String {
     match bootstrap.backend_kind {
-        DatabaseBackendKind::Mysql => format!(
-            "{} backend ready via mysql-compatible sqlx pool",
+        DatabaseBackendKind::Postgres => format!(
+            "{} backend ready via postgres sqlx pool",
             bootstrap.backend_label
         ),
     }
@@ -192,29 +174,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mysql_is_default_backend_selection() {
+    fn postgres_is_default_backend_selection() {
         let config = DatabaseRuntimeConfig::from_cli_and_env(
             None,
-            None,
-            Some("mysql://root@127.0.0.1:3308/djinn".to_owned()),
-            None,
+            Some("postgres://postgres@127.0.0.1:5433/djinn".to_owned()),
         )
         .unwrap();
-        assert_eq!(config.backend_kind(), DatabaseBackendKind::Mysql);
-        let DatabaseConnectConfig::Mysql(cfg) = &config.connect;
-        assert!(cfg.url.contains("127.0.0.1:3308"));
+        assert_eq!(config.backend_kind(), DatabaseBackendKind::Postgres);
+        let DatabaseConnectConfig::Postgres(cfg) = &config.connect;
+        assert!(cfg.url.contains("127.0.0.1:5433"));
     }
 
     #[test]
-    fn mysql_backend_requires_explicit_url() {
-        let error = DatabaseRuntimeConfig::from_cli_and_env(None, Some("mysql".to_owned()), None, None)
-            .expect_err("mysql without url should fail");
-        assert!(error.to_string().contains("DJINN_MYSQL_URL"));
+    fn postgres_backend_requires_explicit_url() {
+        let error = DatabaseRuntimeConfig::from_cli_and_env(None, None)
+            .expect_err("postgres without url should fail");
+        assert!(error.to_string().contains("DJINN_DATABASE_URL"));
     }
 
     #[test]
-    fn mysql_target_is_redacted_for_health_output() {
-        let target = redact_mysql_target("mysql://user:secret@127.0.0.1:3306/djinn");
-        assert_eq!(target, "mysql://<redacted>@127.0.0.1:3306/djinn");
+    fn postgres_target_is_redacted_for_health_output() {
+        let target = redact_postgres_target("postgres://user:secret@127.0.0.1:5432/djinn");
+        assert_eq!(target, "postgres://<redacted>@127.0.0.1:5432/djinn");
     }
 }
