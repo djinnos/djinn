@@ -86,7 +86,7 @@ mod tests {
         let epic_id = uuid::Uuid::now_v7().to_string();
         sqlx::query!(
             "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '[]'::jsonb)",
             epic_id,
             project_id,
             "ep01",
@@ -94,8 +94,7 @@ mod tests {
             "",
             "",
             "",
-            "",
-            "[]"
+            ""
         )
         .execute(db.pool())
         .await
@@ -730,8 +729,8 @@ pub(super) async fn maybe_reopen_epic(
     events: &EventBus,
     epic_id: &str,
 ) -> Result<()> {
-    let closed = sqlx::query_scalar!(
-        "SELECT COUNT(*) FROM epics WHERE id = $1 AND status = 'closed'",
+    let closed: i64 = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "count!: i64" FROM epics WHERE id = $1 AND status = 'closed'"#,
         epic_id
     )
     .fetch_one(db.pool())

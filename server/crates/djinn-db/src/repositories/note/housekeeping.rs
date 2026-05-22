@@ -105,7 +105,7 @@ impl NoteRepository {
         let broken = sqlx::query_as!(
             BrokenLinkCandidateRow,
             r#"SELECT src.id AS source_id, src.title AS source_title,
-                    src.tags AS source_tags, src.content AS source_content,
+                    src.tags::text AS "source_tags!", src.content AS source_content,
                     l.target_raw AS target_raw
              FROM note_links l
              JOIN notes src ON src.id = l.source_id
@@ -168,7 +168,7 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
 
         let count: i64 = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM notes WHERE project_id = $1",
+            r#"SELECT COUNT(*) AS "count!: i64" FROM notes WHERE project_id = $1"#,
             project_id
         )
         .fetch_one(self.db.pool())

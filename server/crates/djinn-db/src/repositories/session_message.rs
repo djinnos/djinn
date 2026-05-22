@@ -27,13 +27,15 @@ impl SessionMessageRepository {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
 
+        let content_value: serde_json::Value = serde_json::from_str(content_json)
+            .map_err(|e| crate::Error::InvalidData(format!("invalid json for session_messages.content_json: {e}")))?;
         sqlx::query!(
             "INSERT INTO session_messages (id, session_id, role, content_json, token_count)
              VALUES ($1, $2, $3, $4, $5)",
             id,
             session_id,
             role,
-            content_json,
+            content_value,
             token_count,
         )
         .execute(self.db.pool())
@@ -41,8 +43,8 @@ impl SessionMessageRepository {
 
         let msg = sqlx::query_as!(
             SessionMessage,
-            "SELECT id, session_id, role, content_json, token_count, created_at
-             FROM session_messages WHERE id = $1",
+            r#"SELECT id, session_id, role, content_json::text AS "content_json!", token_count, created_at
+             FROM session_messages WHERE id = $1"#,
             id,
         )
         .fetch_one(self.db.pool())
@@ -79,8 +81,8 @@ impl SessionMessageRepository {
                 Role::User => "user",
                 Role::Assistant => "assistant",
             };
-            let content_json =
-                serde_json::to_string(&msg.content).unwrap_or_else(|_| "[]".to_string());
+            let content_value = serde_json::to_value(&msg.content)
+                .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
             let id = uuid::Uuid::now_v7().to_string();
 
             sqlx::query!(
@@ -89,7 +91,7 @@ impl SessionMessageRepository {
                 id,
                 session_id,
                 role,
-                content_json,
+                content_value,
             )
             .execute(self.db.pool())
             .await?;
@@ -117,10 +119,10 @@ impl SessionMessageRepository {
 
         let rows = sqlx::query_as!(
             SessionMessage,
-            "SELECT id, session_id, role, content_json, token_count, created_at
+            r#"SELECT id, session_id, role, content_json::text AS "content_json!", token_count, created_at
              FROM session_messages
              WHERE session_id = $1
-             ORDER BY created_at ASC",
+             ORDER BY created_at ASC"#,
             session_id,
         )
         .fetch_all(self.db.pool())

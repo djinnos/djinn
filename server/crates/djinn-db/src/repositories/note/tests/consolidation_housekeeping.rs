@@ -648,11 +648,11 @@ async fn housekeeping_flag_orphan_notes_tags_stale_unlinked_notes_only() {
         .unwrap();
     assert_eq!(flagged, 1);
 
-    let orphan_tags = sqlx::query_scalar!("SELECT tags::text AS "tags!" FROM notes WHERE id = $1", orphan.id)
+    let orphan_tags = sqlx::query_scalar!(r#"SELECT tags::text AS "tags!" FROM notes WHERE id = $1"#, orphan.id)
         .fetch_one(db.pool())
         .await
         .unwrap();
-    let linked_tags = sqlx::query_scalar!("SELECT tags::text AS "tags!" FROM notes WHERE id = $1", linked.id)
+    let linked_tags = sqlx::query_scalar!(r#"SELECT tags::text AS "tags!" FROM notes WHERE id = $1"#, linked.id)
         .fetch_one(db.pool())
         .await
         .unwrap();

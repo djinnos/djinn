@@ -169,13 +169,15 @@ impl EpicRepository {
         let short_id = self.generate_short_id(&id).await?;
         let status = input.status.unwrap_or("drafting");
         let auto_breakdown = input.auto_breakdown.unwrap_or(true);
-        let memory_refs = input.memory_refs.unwrap_or("[]");
+        let memory_refs_str = input.memory_refs.unwrap_or("[]");
+        let memory_refs: serde_json::Value = serde_json::from_str(memory_refs_str)
+            .map_err(|e| Error::InvalidData(format!("invalid json for epics.memory_refs: {e}")))?;
         // Phase 3B: stamp `created_by_user_id` from the task-local set at
         // the MCP dispatch root. `None` when no user context is in scope.
         let created_by_user_id = djinn_core::auth_context::current_user_id();
         sqlx::query!(
             "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, status, owner, memory_refs, auto_breakdown, originating_adr_id, created_by_user_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
             id,
             project_id,
             short_id,
@@ -211,7 +213,9 @@ impl EpicRepository {
     pub async fn update(&self, id: &str, input: EpicUpdateInput<'_>) -> Result<Epic> {
         self.db.ensure_initialized().await?;
         let status = input.status.unwrap_or("drafting");
-        let memory_refs = input.memory_refs.unwrap_or("[]");
+        let memory_refs_str = input.memory_refs.unwrap_or("[]");
+        let memory_refs: serde_json::Value = serde_json::from_str(memory_refs_str)
+            .map_err(|e| Error::InvalidData(format!("invalid json for epics.memory_refs: {e}")))?;
         sqlx::query!(
             r#"UPDATE epics SET title = $1, description = $2, emoji = $3,
                     color = $4, status = $5, owner = $6, memory_refs = $7,
@@ -286,11 +290,13 @@ impl EpicRepository {
     /// Replace the `memory_refs` JSON array on an epic.
     pub async fn update_memory_refs(&self, id: &str, memory_refs_json: &str) -> Result<Epic> {
         self.db.ensure_initialized().await?;
+        let memory_refs: serde_json::Value = serde_json::from_str(memory_refs_json)
+            .map_err(|e| Error::InvalidData(format!("invalid json for epics.memory_refs: {e}")))?;
         sqlx::query!(
             r#"UPDATE epics SET memory_refs = $1,
                 updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
              WHERE id = $2"#,
-            memory_refs_json,
+            memory_refs,
             id
         )
         .execute(self.db.pool())
@@ -453,7 +459,7 @@ impl EpicRepository {
     /// Count child tasks then CASCADE-delete the epic. Returns the child task count.
     pub async fn delete_with_count(&self, id: &str) -> Result<i64> {
         self.db.ensure_initialized().await?;
-        let count: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM tasks WHERE epic_id = $1", id)
+        let count: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "count!: i64" FROM tasks WHERE epic_id = $1"#, id)
             .fetch_one(self.db.pool())
             .await?;
         self.delete(id).await?;
@@ -872,8 +878,8 @@ mod tests {
             let id = uuid::Uuid::now_v7().to_string();
             sqlx::query!(
                 "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                    issue_type, priority, owner, status, continuation_count, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!", memory_refs)
-                 VALUES ($1, $2, $3, $4, 'T', '', '', 'task', 0, '', 'open', 0, '[]', '[]', '[]')",
+                                    issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
+                 VALUES ($1, $2, $3, $4, 'T', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
                 id,
                 epic.project_id,
                 short,
@@ -886,8 +892,8 @@ mod tests {
         let t3_id = uuid::Uuid::now_v7().to_string();
         sqlx::query!(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                issue_type, priority, owner, status, continuation_count, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!", memory_refs)
-             VALUES ($1, $2, 't003', $3, 'T3', '', '', 'task', 0, '', 'open', 0, '[]', '[]', '[]')",
+                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
+             VALUES ($1, $2, 't003', $3, 'T3', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
             t3_id,
             epic.project_id,
             epic.id
@@ -918,8 +924,8 @@ mod tests {
             let id = uuid::Uuid::now_v7().to_string();
             sqlx::query!(
                 "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                    issue_type, priority, owner, status, continuation_count, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!", memory_refs)
-                 VALUES ($1, $2, $3, $4, 'T', '', '', 'task', 0, '', 'open', 0, '[]', '[]', '[]')",
+                                    issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
+                 VALUES ($1, $2, $3, $4, 'T', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
                 id,
                 epic.project_id,
                 short,

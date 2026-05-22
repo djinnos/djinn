@@ -78,7 +78,11 @@ impl TaskRepository {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
         let short_id = self.generate_short_id(&id).await?;
-        let ac = acceptance_criteria.unwrap_or("[]").to_owned();
+        let ac_str = acceptance_criteria.unwrap_or("[]");
+        let ac: serde_json::Value = serde_json::from_str(ac_str)
+            .map_err(|e| crate::Error::InvalidData(format!("invalid json for tasks.acceptance_criteria: {e}")))?;
+        let priority: i32 = priority.try_into()
+            .map_err(|_| crate::Error::InvalidData("priority exceeds i32 range".into()))?;
         // Phase 3B: stamp `created_by_user_id` from the task-local set at
         // the MCP dispatch root (`SESSION_USER_ID`). `None` for
         // agent/background callers with no user context — schema allows
@@ -122,7 +126,7 @@ impl TaskRepository {
                             (id, project_id, short_id, epic_id, title, description, design,
                              issue_type, priority, owner, status, acceptance_criteria,
                              created_by_user_id)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, 'open'), $12::jsonb, $13)",
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, 'open'), $12, $13)",
                         id,
                         project_id,
                         short_id,
@@ -182,12 +186,12 @@ impl TaskRepository {
         let empty = "";
         let epic_id_none: Option<&str> = None;
         let issue_type = "task";
-        let priority = 1_i64;
+        let priority = 1_i32;
         sqlx::query!(
             "INSERT INTO tasks
                 (id, project_id, short_id, epic_id, title, description, design,
                  issue_type, priority, owner, status, continuation_count, memory_refs)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 0, '[]')",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 0, '[]'::jsonb)",
             id,
             project_id,
             short_id,
@@ -222,13 +226,17 @@ impl TaskRepository {
         acceptance_criteria: &str,
     ) -> Result<Task> {
         self.db.ensure_initialized().await?;
+        let priority: i32 = priority.try_into()
+            .map_err(|_| crate::Error::InvalidData("priority exceeds i32 range".into()))?;
+        let labels_value: serde_json::Value = serde_json::from_str(labels)
+            .map_err(|e| crate::Error::InvalidData(format!("invalid json for tasks.labels: {e}")))?;
+        let ac_value: serde_json::Value = serde_json::from_str(acceptance_criteria)
+            .map_err(|e| crate::Error::InvalidData(format!("invalid json for tasks.acceptance_criteria: {e}")))?;
         let id_owned = id.to_owned();
         let title_owned = title.to_owned();
         let description_owned = description.to_owned();
         let design_owned = design.to_owned();
         let owner_owned = owner.to_owned();
-        let labels_owned = labels.to_owned();
-        let ac_owned = acceptance_criteria.to_owned();
 
         let task: Task = crate::retry::retry_on_serialization_failure(
             crate::retry::DEFAULT_MAX_TX_RETRIES,
@@ -238,8 +246,8 @@ impl TaskRepository {
                 let description = description_owned.clone();
                 let design = design_owned.clone();
                 let owner = owner_owned.clone();
-                let labels = labels_owned.clone();
-                let acceptance_criteria = ac_owned.clone();
+                let labels = labels_value.clone();
+                let acceptance_criteria = ac_value.clone();
                 async move {
                     sqlx::query!(
                         r#"UPDATE tasks SET
@@ -484,13 +492,14 @@ impl TaskRepository {
     pub async fn set_acceptance_criteria(&self, id: &str, ac_json: &str) -> Result<Task> {
         self.db.ensure_initialized().await?;
         let id_owned = id.to_owned();
-        let ac_owned = ac_json.to_owned();
+        let ac_value: serde_json::Value = serde_json::from_str(ac_json)
+            .map_err(|e| crate::Error::InvalidData(format!("invalid json for tasks.acceptance_criteria: {e}")))?;
 
         let task: Task = crate::retry::retry_on_serialization_failure(
             crate::retry::DEFAULT_MAX_TX_RETRIES,
             || {
                 let id = id_owned.clone();
-                let ac = ac_owned.clone();
+                let ac = ac_value.clone();
                 async move {
                     sqlx::query!(
                         r#"UPDATE tasks SET acceptance_criteria = $1,
@@ -520,6 +529,8 @@ impl TaskRepository {
     /// production code mutates this through [`Self::increment_continuation_count`].
     pub async fn set_continuation_count(&self, id: &str, count: i64) -> Result<()> {
         self.db.ensure_initialized().await?;
+        let count: i32 = count.try_into()
+            .map_err(|_| crate::Error::InvalidData("count exceeds i32 range".into()))?;
         let id_owned = id.to_owned();
 
         crate::retry::retry_on_serialization_failure(
@@ -550,6 +561,8 @@ impl TaskRepository {
     /// production code increments this through the transition path.
     pub async fn set_verification_failure_count(&self, id: &str, count: i64) -> Result<()> {
         self.db.ensure_initialized().await?;
+        let count: i32 = count.try_into()
+            .map_err(|_| crate::Error::InvalidData("count exceeds i32 range".into()))?;
         let id_owned = id.to_owned();
 
         crate::retry::retry_on_serialization_failure(
@@ -615,13 +628,14 @@ impl TaskRepository {
     pub async fn update_memory_refs(&self, id: &str, memory_refs_json: &str) -> Result<Task> {
         self.db.ensure_initialized().await?;
         let id_owned = id.to_owned();
-        let memory_refs_owned = memory_refs_json.to_owned();
+        let memory_refs_value: serde_json::Value = serde_json::from_str(memory_refs_json)
+            .map_err(|e| crate::Error::InvalidData(format!("invalid json for tasks.memory_refs: {e}")))?;
 
         let task: Task = crate::retry::retry_on_serialization_failure(
             crate::retry::DEFAULT_MAX_TX_RETRIES,
             || {
                 let id = id_owned.clone();
-                let memory_refs_json = memory_refs_owned.clone();
+                let memory_refs_json = memory_refs_value.clone();
                 async move {
                     sqlx::query!(
                         r#"UPDATE tasks SET memory_refs = $1,
@@ -709,7 +723,7 @@ mod created_by_tests {
         let epic_id = uuid::Uuid::now_v7().to_string();
         sqlx::query!(
             "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '[]'::jsonb)",
             epic_id,
             project_id,
             "ep01",
@@ -717,8 +731,7 @@ mod created_by_tests {
             "",
             "",
             "",
-            "",
-            "[]"
+            ""
         )
         .execute(db.pool())
         .await

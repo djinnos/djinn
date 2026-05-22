@@ -29,7 +29,7 @@ pub struct NoteEmbeddingRecord {
     pub note_id: String,
     pub content_hash: String,
     pub model_version: String,
-    pub embedding_dim: i64,
+    pub embedding_dim: i32,
     pub embedded_at: String,
     pub updated_at: String,
     pub extension_state: String,
@@ -287,8 +287,8 @@ async fn upsert_embedding_metadata(
     input: UpsertNoteEmbedding<'_>,
     extension_state: &str,
 ) -> Result<NoteEmbeddingRecord> {
-    let embedding_dim = i64::try_from(input.embedding.len())
-        .map_err(|_| Error::InvalidData("embedding dimension exceeds i64".to_owned()))?;
+    let embedding_dim = i32::try_from(input.embedding.len())
+        .map_err(|_| Error::InvalidData("embedding dimension exceeds i32".to_owned()))?;
     let embedding_blob = embedding_to_blob(input.embedding);
 
     let mut tx = repo.db.pool().begin().await?;
@@ -940,7 +940,7 @@ impl NoteRepository {
     ) -> Result<Vec<NoteRepairEmbeddingRow>> {
         self.db.ensure_initialized().await?;
         let rows = sqlx::query!(
-            r#"SELECT n.id, n.title, n.note_type, n.tags, n.content,
+            r#"SELECT n.id, n.title, n.note_type, n.tags::text AS "tags!", n.content,
                       m.content_hash AS "content_hash?",
                       m.model_version AS "model_version?",
                       m.extension_state AS "extension_state?"

@@ -69,7 +69,7 @@ impl VerificationCacheRepository {
         self.db.ensure_initialized().await?;
         sqlx::query!(
             r#"DELETE FROM verification_cache WHERE created_at < to_char((now() at time zone 'utc') - (interval '1 day' * $1), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#,
-            days,
+            days as f64,
         )
         .execute(self.db.pool())
         .await?;

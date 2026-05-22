@@ -340,7 +340,7 @@ impl SessionRepository {
     pub async fn count_for_task(&self, task_id: &str) -> Result<i64> {
         self.db.ensure_initialized().await?;
         Ok(
-            sqlx::query_scalar!("SELECT COUNT(*) FROM sessions WHERE task_id = $1", task_id)
+            sqlx::query_scalar!(r#"SELECT COUNT(*) AS "count!: i64" FROM sessions WHERE task_id = $1"#, task_id)
                 .fetch_one(self.db.pool())
                 .await?,
         )
@@ -419,9 +419,11 @@ impl SessionRepository {
     pub async fn set_event_taxonomy(&self, id: &str, taxonomy_json: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
 
+        let taxonomy: serde_json::Value = serde_json::from_str(taxonomy_json)
+            .map_err(|e| crate::Error::InvalidData(format!("invalid json for sessions.event_taxonomy: {e}")))?;
         sqlx::query!(
             "UPDATE sessions SET event_taxonomy = $1 WHERE id = $2",
-            taxonomy_json,
+            taxonomy,
             id
         )
         .execute(self.db.pool())
@@ -439,7 +441,7 @@ impl SessionRepository {
     pub async fn get_event_taxonomy_json(&self, id: &str) -> Result<Option<String>> {
         self.db.ensure_initialized().await?;
         let row: Option<Option<String>> =
-            sqlx::query_scalar!(r#"SELECT event_taxonomy::text AS "event_taxonomy!" FROM sessions WHERE id = $1"#, id)
+            sqlx::query_scalar!(r#"SELECT event_taxonomy::text AS "event_taxonomy?" FROM sessions WHERE id = $1"#, id)
                 .fetch_optional(self.db.pool())
                 .await?;
         Ok(row.flatten())
@@ -450,7 +452,7 @@ impl SessionRepository {
         self.db.ensure_initialized().await?;
 
         let row: Option<Option<String>> = sqlx::query_scalar!(
-            r#"SELECT event_taxonomy::text AS "event_taxonomy!" FROM sessions
+            r#"SELECT event_taxonomy::text AS "event_taxonomy?" FROM sessions
              WHERE task_id = $1 AND event_taxonomy IS NOT NULL
              ORDER BY started_at DESC LIMIT 1"#,
             task_id
@@ -460,7 +462,7 @@ impl SessionRepository {
 
         Ok(row
             .flatten()
-            .and_then(|json| serde_json::from_str::<Value>(&json).ok()))
+            .and_then(|json| serde_json::from_str::<Value>(json.as_str()).ok()))
     }
 
     /// Find the most recent paused session for a task that matches the given
@@ -664,8 +666,8 @@ mod tests {
         let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
         sqlx::query!(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                issue_type, priority, owner, status, continuation_count, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!", memory_refs)
-             VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]', '[]', '[]')",
+                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
+             VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
             task_id,
             epic.project_id,
             short_id,
@@ -876,8 +878,8 @@ mod tests {
         let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
         sqlx::query!(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                issue_type, priority, owner, status, continuation_count, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!", memory_refs)
-             VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]', '[]', '[]')",
+                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
+             VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
             task_id,
             project_id,
             short_id,

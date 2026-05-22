@@ -362,6 +362,12 @@ impl AgentRepository {
 
     pub async fn update(&self, id: &str, input: AgentUpdateInput<'_>) -> Result<Agent> {
         self.db.ensure_initialized().await?;
+        let system_prompt_value: serde_json::Value = serde_json::from_str(input.system_prompt_extensions)
+            .map_err(|e| Error::InvalidData(format!("invalid json for agents.system_prompt_extensions: {e}")))?;
+        let mcp_servers_value: serde_json::Value = serde_json::from_str(input.mcp_servers)
+            .map_err(|e| Error::InvalidData(format!("invalid json for agents.mcp_servers: {e}")))?;
+        let skills_value: serde_json::Value = serde_json::from_str(input.skills)
+            .map_err(|e| Error::InvalidData(format!("invalid json for agents.skills: {e}")))?;
         sqlx::query!(
             r#"UPDATE agents
              SET name = $1, description = $2, system_prompt_extensions = $3,
@@ -371,11 +377,11 @@ impl AgentRepository {
              WHERE id = $9"#,
             input.name,
             input.description,
-            input.system_prompt_extensions,
+            system_prompt_value,
             input.model_preference,
             input.verification_command,
-            input.mcp_servers,
-            input.skills,
+            mcp_servers_value,
+            skills_value,
             input.learned_prompt,
             id
         )
@@ -468,11 +474,13 @@ impl AgentRepository {
         extensions: &str,
     ) -> Result<u64> {
         self.db.ensure_initialized().await?;
+        let extensions_value: serde_json::Value = serde_json::from_str(extensions)
+            .map_err(|e| Error::InvalidData(format!("invalid json for agents.system_prompt_extensions: {e}")))?;
         let result = sqlx::query!(
             r#"UPDATE agents SET system_prompt_extensions = $1,
                     updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
              WHERE project_id = $2 AND base_role = $3 AND is_default = TRUE"#,
-            extensions,
+            extensions_value,
             project_id,
             base_role
         )
@@ -585,7 +593,7 @@ impl AgentRepository {
                AND s.started_at >= to_char((now() at time zone 'utc') - (interval '1 day' * $3), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#,
             project_id,
             agent_type,
-            window_days
+            window_days as f64
         )
         .fetch_one(self.db.pool())
         .await
@@ -636,13 +644,13 @@ impl AgentRepository {
     ) -> Result<Vec<PendingAmendmentEvaluation>> {
         self.db.ensure_initialized().await?;
         let rows = sqlx::query!(
-            "SELECT h.id, h.agent_id, h.created_at, h.proposed_text, h.metrics_before
+            r#"SELECT h.id, h.agent_id, h.created_at, h.proposed_text, h.metrics_before::text AS "metrics_before"
              FROM learned_prompt_history h
              JOIN agents r ON r.id = h.agent_id
              WHERE r.project_id = $1
                AND h.action = 'keep'
                AND h.metrics_after IS NULL
-             ORDER BY h.created_at ASC",
+             ORDER BY h.created_at ASC"#,
             project_id
         )
         .fetch_all(self.db.pool())
@@ -774,12 +782,14 @@ impl AgentRepository {
         metrics_after: &str,
     ) -> Result<()> {
         self.db.ensure_initialized().await?;
+        let metrics_after_value: serde_json::Value = serde_json::from_str(metrics_after)
+            .map_err(|e| Error::InvalidData(format!("invalid json for learned_prompt_history.metrics_after: {e}")))?;
         sqlx::query!(
             "UPDATE learned_prompt_history
              SET action = $1, metrics_after = $2
              WHERE id = $3",
             action,
-            metrics_after,
+            metrics_after_value,
             history_id
         )
         .execute(self.db.pool())
@@ -824,6 +834,12 @@ impl AgentRepository {
         // The derived AGENT_COLUMNS query will pick it up automatically.
         let history_id = uuid::Uuid::now_v7().to_string();
         let amendment_trimmed = amendment.trim();
+        let metrics_snapshot_value: Option<serde_json::Value> = match metrics_snapshot {
+            Some(s) => Some(serde_json::from_str(s).map_err(|e| {
+                Error::InvalidData(format!("invalid json for learned_prompt_history.metrics_before: {e}"))
+            })?),
+            None => None,
+        };
         sqlx::query!(
             "INSERT INTO learned_prompt_history
                 (id, agent_id, proposed_text, action, metrics_before)
@@ -831,7 +847,7 @@ impl AgentRepository {
             history_id,
             role_id,
             amendment_trimmed,
-            metrics_snapshot
+            metrics_snapshot_value
         )
         .execute(self.db.pool())
         .await?;

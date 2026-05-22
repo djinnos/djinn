@@ -481,8 +481,8 @@ mod tests {
         repo.delete(&note1).await.unwrap();
 
         // Association should be gone
-        let after = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM note_associations WHERE note_a_id = $1 OR note_b_id = $2",
+        let after: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count!: i64" FROM note_associations WHERE note_a_id = $1 OR note_b_id = $2"#,
             note1,
             note1
         )
@@ -577,7 +577,7 @@ mod tests {
 
         // Verify all three associations exist
         let before_count: i64 = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM note_associations WHERE note_a_id IN ($1, $2, $3) OR note_b_id IN ($4, $5, $6)",
+            r#"SELECT COUNT(*) AS "count!: i64" FROM note_associations WHERE note_a_id IN ($1, $2, $3) OR note_b_id IN ($4, $5, $6)"#,
             note1,
             note3,
             note5,
@@ -725,7 +725,7 @@ mod tests {
 
         // Verify project2 association still exists
         let p2_count: i64 = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM note_associations WHERE note_a_id = $1 OR note_b_id = $2",
+            r#"SELECT COUNT(*) AS "count!: i64" FROM note_associations WHERE note_a_id = $1 OR note_b_id = $2"#,
             p2_note1.id,
             p2_note1.id
         )
@@ -736,7 +736,7 @@ mod tests {
 
         // Verify project1 association is gone
         let p1_count: i64 = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM note_associations WHERE note_a_id = $1 OR note_b_id = $2",
+            r#"SELECT COUNT(*) AS "count!: i64" FROM note_associations WHERE note_a_id = $1 OR note_b_id = $2"#,
             p1_note1,
             p1_note1
         )

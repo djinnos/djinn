@@ -11,17 +11,19 @@ impl TaskRepository {
     ) -> Result<ActivityEntry> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
+        let payload_value: serde_json::Value = serde_json::from_str(payload)
+            .map_err(|e| crate::Error::InvalidData(format!("invalid json for activity_log.payload: {e}")))?;
         let mut tx = self.db.pool().begin().await?;
         sqlx::query!(
             "INSERT INTO activity_log
                 (id, task_id, actor_id, actor_role, event_type, payload)
-             VALUES ($1, $2, $3, $4, $5, $6::jsonb)",
+             VALUES ($1, $2, $3, $4, $5, $6)",
             id,
             task_id,
             actor_id,
             actor_role,
             event_type,
-            payload,
+            payload_value,
         )
         .execute(&mut *tx)
         .await?;
@@ -34,8 +36,6 @@ impl TaskRepository {
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
-        let payload_value: serde_json::Value =
-            serde_json::from_str(payload).unwrap_or(serde_json::Value::String(payload.to_owned()));
         self.events.send(DjinnEventEnvelope::activity_logged(
             task_id,
             event_type,

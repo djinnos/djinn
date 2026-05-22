@@ -308,8 +308,7 @@ impl TaskRepository {
         let payload = serde_json::json!({
             "from_status": "open",
             "to_status":   "in_progress",
-        })
-        .to_string();
+        });
         sqlx::query!(
             "INSERT INTO activity_log
                 (id, task_id, actor_id, actor_role, event_type, payload)
@@ -663,8 +662,7 @@ impl TaskRepository {
                         "from":   "in_progress",
                         "to":     "open",
                         "reason": "reconcile_stale",
-                    })
-                    .to_string();
+                    });
                     sqlx::query!(
                         "INSERT INTO activity_log
                             (id, task_id, actor_id, actor_role, event_type, payload)

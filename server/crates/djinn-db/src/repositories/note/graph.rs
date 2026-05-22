@@ -137,28 +137,28 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
 
         let total_notes: i64 = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM notes WHERE project_id = $1",
+            r#"SELECT COUNT(*) AS "count!: i64" FROM notes WHERE project_id = $1"#,
             project_id
         )
         .fetch_one(self.db.pool())
         .await?;
 
         let broken_link_count: i64 = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM note_links l
+            r#"SELECT COUNT(*) AS "count!: i64" FROM note_links l
              JOIN notes src ON src.id = l.source_id AND src.project_id = $1
-             WHERE l.target_id IS NULL",
+             WHERE l.target_id IS NULL"#,
             project_id
         )
         .fetch_one(self.db.pool())
         .await?;
 
         let orphan_note_count: i64 = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM notes n
+            r#"SELECT COUNT(*) AS "count!: i64" FROM notes n
              WHERE n.project_id = $1
                AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')
                AND NOT EXISTS (
                    SELECT 1 FROM note_links l WHERE l.target_id = n.id
-               )",
+               )"#,
             project_id
         )
         .fetch_one(self.db.pool())
@@ -187,9 +187,9 @@ impl NoteRepository {
             .sum();
 
         let low_confidence_note_count: i64 = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM notes
+            r#"SELECT COUNT(*) AS "count!: i64" FROM notes
              WHERE project_id = $1
-               AND confidence < $2",
+               AND confidence < $2"#,
             project_id,
             STALE_CITATION
         )

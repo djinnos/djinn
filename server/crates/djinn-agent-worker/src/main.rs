@@ -73,7 +73,7 @@ use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_core::events::EventBus;
-use djinn_db::{Database, DatabaseConnectConfig, MysqlDatabaseConfig};
+use djinn_db::{Database, DatabaseConnectConfig, PostgresDatabaseConfig};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_runtime::{ResolvedCredentials, RoleKind, TaskRunSpec, WorkerEvent};
 use djinn_supervisor::{RpcServices, SupervisorServices, TaskRunSupervisor};
@@ -600,12 +600,12 @@ async fn run_warm_graph(project_id: &str) -> Result<()> {
 /// warm Pod shares the same env-var contract as djinn-server so operators
 /// only manage one configuration surface:
 ///
-/// * `DJINN_MYSQL_URL` — full DSN (required).
+/// * `DJINN_DATABASE_URL` — full DSN (required).
 fn bootstrap_warm_database() -> Result<Database> {
-    let url = std::env::var("DJINN_MYSQL_URL")
-        .map_err(|_| anyhow::anyhow!("DJINN_MYSQL_URL must be set for the warm worker pod"))?;
+    let url = std::env::var("DJINN_DATABASE_URL")
+        .map_err(|_| anyhow::anyhow!("DJINN_DATABASE_URL must be set for the warm worker pod"))?;
 
-    let connect = DatabaseConnectConfig::Mysql(MysqlDatabaseConfig { url });
+    let connect = DatabaseConnectConfig::Postgres(PostgresDatabaseConfig { url });
     Database::open_with_config(connect).context("open warm worker database")
 }
 

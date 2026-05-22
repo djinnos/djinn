@@ -620,9 +620,11 @@ impl ProjectRepository {
         if matches!(&current, Some(existing) if existing == stack_json) {
             return Ok(false);
         }
+        let stack: serde_json::Value = serde_json::from_str(stack_json)
+            .map_err(|e| crate::Error::InvalidData(format!("invalid json for projects.stack: {e}")))?;
         sqlx::query!(
-            "UPDATE projects SET stack = $1::jsonb WHERE id = $2",
-            stack_json,
+            "UPDATE projects SET stack = $1 WHERE id = $2",
+            stack,
             project_id
         )
         .execute(self.db.pool())
@@ -1089,7 +1091,7 @@ mod tests {
         repo.create("proj-a", "acme", "proj-a").await.unwrap();
         repo.create("proj-b", "acme", "proj-b").await.unwrap();
 
-        let total: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM agents WHERE is_default = TRUE")
+        let total: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "count!: i64" FROM agents WHERE is_default = TRUE"#)
             .fetch_one(db.pool())
             .await
             .unwrap();

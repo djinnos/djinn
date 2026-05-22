@@ -38,7 +38,7 @@ async fn make_epic(db: &Database, project_id: &str) -> String {
     let short_id = format!("ep-{}", &epic_id[epic_id.len() - 12..]);
     sqlx::query!(
         "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '[]'::jsonb)",
         epic_id,
         project_id,
         short_id,
@@ -47,7 +47,6 @@ async fn make_epic(db: &Database, project_id: &str) -> String {
         "",
         "",
         "",
-        "[]",
     )
     .execute(db.pool())
     .await

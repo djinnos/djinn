@@ -133,7 +133,7 @@ impl NoteConsolidationRepository {
 
         sqlx::query_as!(
             ConsolidationNote,
-            r#"SELECT n.id, n.project_id, n.permalink, n.title, n.note_type, n.folder, n.scope_paths, n.content,
+            r#"SELECT n.id, n.project_id, n.permalink, n.title, n.note_type, n.folder, n.scope_paths::text AS "scope_paths!", n.content,
                     n.abstract AS abstract_, n.overview, n.confidence
              FROM notes n
              JOIN consolidated_note_provenance cnp ON cnp.note_id = n.id
@@ -214,7 +214,7 @@ impl NoteConsolidationRepository {
 
         for session_id in source_session_ids {
             let exists: i64 = sqlx::query_scalar!(
-                "SELECT COUNT(*) FROM sessions WHERE id = $1 AND project_id = $2",
+                r#"SELECT COUNT(*) AS "count!: i64" FROM sessions WHERE id = $1 AND project_id = $2"#,
                 session_id,
                 project_id
             )
@@ -424,8 +424,8 @@ impl NoteConsolidationRepository {
             return Ok(Vec::new());
         };
 
-        // Threshold retuned: MySQL MATCH() scores are positive; use 0.0 floor.
-        let mysql_threshold: f64 = 0.0;
+        // Postgres ts_rank() returns float4 (f32). Use 0.0 floor.
+        let mysql_threshold: f32 = 0.0;
         let _ = DEDUP_SCORE_THRESHOLD;
 
         sqlx::query_as!(
