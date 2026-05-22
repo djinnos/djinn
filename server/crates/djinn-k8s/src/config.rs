@@ -283,10 +283,8 @@ mod tests {
             std::env::set_var("DJINN_K8S_TTL_SECONDS", "600");
             std::env::set_var(
                 "DJINN_MYSQL_URL",
-                "mysql://root@djinn-dolt:3306/djinn",
+                "mysql://root@djinn-mysql:3306/djinn",
             );
-            std::env::set_var("DJINN_DB_BACKEND", "dolt");
-            std::env::set_var("DJINN_MYSQL_FLAVOR", "dolt");
         }
         let cfg = KubernetesConfig::from_env();
         assert_eq!(cfg.namespace, "test-ns");
@@ -295,13 +293,11 @@ mod tests {
         assert_eq!(cfg.ttl_seconds_after_finished, 600);
         // Unset vars fall back to `for_testing` defaults.
         assert_eq!(cfg.service_account, "djinn-taskrun");
-        // DB vars forwarded as-is for warm Pod env projection.
+        // DB URL forwarded as-is for warm Pod env projection.
         assert_eq!(
             cfg.database_url.as_deref(),
-            Some("mysql://root@djinn-dolt:3306/djinn")
+            Some("mysql://root@djinn-mysql:3306/djinn")
         );
-        assert_eq!(cfg.database_backend.as_deref(), Some("dolt"));
-        assert_eq!(cfg.database_flavor.as_deref(), Some("dolt"));
 
         // Reset so we don't leak into other tests that might touch
         // overlapping env keys via `from_env()`.

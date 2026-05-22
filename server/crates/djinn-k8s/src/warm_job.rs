@@ -121,12 +121,6 @@ exec {bin} warm-graph "{project_id}"
     if let Some(url) = config.database_url.as_deref() {
         env.push(env_var("DJINN_MYSQL_URL", url));
     }
-    if let Some(backend) = config.database_backend.as_deref() {
-        env.push(env_var("DJINN_DB_BACKEND", backend));
-    }
-    if let Some(flavor) = config.database_flavor.as_deref() {
-        env.push(env_var("DJINN_MYSQL_FLAVOR", flavor));
-    }
 
     let container = Container {
         name: "warmer".to_string(),
@@ -274,9 +268,7 @@ mod tests {
     #[test]
     fn builds_warm_job_manifest_with_expected_shape() {
         let mut cfg = KubernetesConfig::for_testing();
-        cfg.database_url = Some("mysql://root@djinn-dolt:3306/djinn".into());
-        cfg.database_backend = Some("dolt".into());
-        cfg.database_flavor = Some("dolt".into());
+        cfg.database_url = Some("mysql://root@djinn-mysql:3306/djinn".into());
         let job = build_warm_job(&cfg, "proj-xyz", "reg.example:5000/djinn-project-p:abc123");
 
         let meta = &job.metadata;
@@ -335,14 +327,12 @@ mod tests {
             Some(format!("{WORKSPACE_MOUNT_DIR}/proj-xyz").as_str()),
         );
         // DB env forwarded from KubernetesConfig so the warm Pod shares
-        // the server's Dolt/MySQL target instead of falling back to the
-        // warm binary's 127.0.0.1:3306 default.
+        // the server's MySQL target instead of falling back to the warm
+        // binary's 127.0.0.1:3306 default.
         assert_eq!(
             envs.get("DJINN_MYSQL_URL").copied(),
-            Some("mysql://root@djinn-dolt:3306/djinn"),
+            Some("mysql://root@djinn-mysql:3306/djinn"),
         );
-        assert_eq!(envs.get("DJINN_DB_BACKEND").copied(), Some("dolt"));
-        assert_eq!(envs.get("DJINN_MYSQL_FLAVOR").copied(), Some("dolt"));
 
         let mounts = container.volume_mounts.as_ref().expect("mounts");
         assert_eq!(mounts.len(), 3, "mirror + workspace + env-config");

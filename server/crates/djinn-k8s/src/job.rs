@@ -340,12 +340,6 @@ fn build_task_run_env(config: &KubernetesConfig, task_run_id_str: &str) -> Vec<E
     if let Some(url) = config.database_url.as_deref() {
         env.push(env_var("DJINN_MYSQL_URL", url));
     }
-    if let Some(backend) = config.database_backend.as_deref() {
-        env.push(env_var("DJINN_DB_BACKEND", backend));
-    }
-    if let Some(flavor) = config.database_flavor.as_deref() {
-        env.push(env_var("DJINN_MYSQL_FLAVOR", flavor));
-    }
     // Force git to trust the cross-UID-owned /mirror PVC. The per-project
     // image runs as root by default (USER reset by language-toolchain
     // layers), so the worker process sees the /mirror dir as
@@ -522,14 +516,6 @@ mod tests {
             !envs.contains_key("DJINN_MYSQL_URL"),
             "DJINN_MYSQL_URL must be absent when database_url is None"
         );
-        assert!(
-            !envs.contains_key("DJINN_DB_BACKEND"),
-            "DJINN_DB_BACKEND must be absent when database_backend is None"
-        );
-        assert!(
-            !envs.contains_key("DJINN_MYSQL_FLAVOR"),
-            "DJINN_MYSQL_FLAVOR must be absent when database_flavor is None"
-        );
 
         // Volume mounts: 5 from the pre-env-config layout + the
         // environment-config mount added in P4.
@@ -659,9 +645,7 @@ mod tests {
     #[test]
     fn forwards_db_env_vars_when_configured() {
         let mut cfg = KubernetesConfig::for_testing();
-        cfg.database_url = Some("mysql://djinn@dolt.djinn.svc:3306/djinn".into());
-        cfg.database_backend = Some("dolt".into());
-        cfg.database_flavor = Some("dolt".into());
+        cfg.database_url = Some("mysql://djinn@djinn-mysql.djinn.svc:3306/djinn".into());
 
         let job = build_task_run_job(
             &cfg,
@@ -687,9 +671,7 @@ mod tests {
 
         assert_eq!(
             envs.get("DJINN_MYSQL_URL").copied(),
-            Some("mysql://djinn@dolt.djinn.svc:3306/djinn")
+            Some("mysql://djinn@djinn-mysql.djinn.svc:3306/djinn")
         );
-        assert_eq!(envs.get("DJINN_DB_BACKEND").copied(), Some("dolt"));
-        assert_eq!(envs.get("DJINN_MYSQL_FLAVOR").copied(), Some("dolt"));
     }
 }
