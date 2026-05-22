@@ -1,0 +1,12 @@
+{
+  "db_name": "MySQL",
+  "query": "INSERT INTO user_auth_sessions\n                (token, github_login, github_name, github_avatar_url,\n                 github_access_token, github_access_token_expires_at,\n                 github_refresh_token, github_refresh_token_expires_at,\n                 expires_at, user_fk)\n             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 10
+    },
+    "nullable": []
+  },
+  "hash": "e11961db5b639d616d4d2e8f31d62555ad9f91efc117093420068adf7a655e0f"
+}

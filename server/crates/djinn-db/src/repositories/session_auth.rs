@@ -12,6 +12,12 @@ use crate::database::Database;
 use crate::repositories::user::User;
 
 /// Row materialised from `user_auth_sessions` plus the GitHub access token.
+///
+/// `expires_at` is the **browser session** deadline (cookie TTL). The
+/// GitHub access token has its own, much shorter deadline carried by
+/// `github_access_token_expires_at`; when it elapses the transport's
+/// 401-on-refresh path uses `github_refresh_token` to mint a fresh
+/// access token without the user having to sign in again.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct UserAuthSessionRecord {
     pub token: String,
@@ -21,6 +27,17 @@ pub struct UserAuthSessionRecord {
     pub github_name: Option<String>,
     pub github_avatar_url: Option<String>,
     pub github_access_token: String,
+    /// RFC3339 deadline of `github_access_token`. NULL when the App is
+    /// configured with non-expiring user tokens (no `expires_in` in the
+    /// OAuth response).
+    pub github_access_token_expires_at: Option<String>,
+    /// Refresh credential paired with `github_access_token`. NULL when
+    /// the App is configured with non-expiring user tokens.
+    pub github_refresh_token: Option<String>,
+    /// RFC3339 deadline of `github_refresh_token`. NULL with non-expiring
+    /// tokens. After this passes the refresh attempt returns 400 and the
+    /// session is hard-evicted by the transport.
+    pub github_refresh_token_expires_at: Option<String>,
     pub created_at: String,
     pub expires_at: String,
 }
@@ -35,8 +52,26 @@ pub struct CreateUserAuthSession<'a> {
     pub github_name: Option<&'a str>,
     pub github_avatar_url: Option<&'a str>,
     pub github_access_token: &'a str,
-    /// RFC3339 timestamp string (the caller computes TTL — typically +30d).
+    /// RFC3339 deadline of the access token. Pass `None` when the App is
+    /// configured with non-expiring user tokens.
+    pub github_access_token_expires_at: Option<&'a str>,
+    /// Refresh credential. Pass `None` when the App is configured with
+    /// non-expiring user tokens.
+    pub github_refresh_token: Option<&'a str>,
+    /// RFC3339 deadline of the refresh credential. Pass `None` with
+    /// non-expiring tokens.
+    pub github_refresh_token_expires_at: Option<&'a str>,
+    /// RFC3339 timestamp string for the browser session cookie deadline
+    /// (the caller computes TTL — typically +30d).
     pub expires_at: &'a str,
+}
+
+/// Update params for [`SessionAuthRepository::update_github_tokens`].
+pub struct UpdateGithubTokens<'a> {
+    pub github_access_token: &'a str,
+    pub github_access_token_expires_at: Option<&'a str>,
+    pub github_refresh_token: Option<&'a str>,
+    pub github_refresh_token_expires_at: Option<&'a str>,
 }
 
 #[derive(Clone)]
@@ -55,13 +90,18 @@ impl SessionAuthRepository {
         sqlx::query!(
             "INSERT INTO user_auth_sessions
                 (token, github_login, github_name, github_avatar_url,
-                 github_access_token, expires_at, user_fk)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 github_access_token, github_access_token_expires_at,
+                 github_refresh_token, github_refresh_token_expires_at,
+                 expires_at, user_fk)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params.token,
             params.github_login,
             params.github_name,
             params.github_avatar_url,
             params.github_access_token,
+            params.github_access_token_expires_at,
+            params.github_refresh_token,
+            params.github_refresh_token_expires_at,
             params.expires_at,
             params.user_fk,
         )
@@ -71,7 +111,9 @@ impl SessionAuthRepository {
         let row = sqlx::query_as!(
             UserAuthSessionRecord,
             "SELECT token, github_login, github_name, github_avatar_url, \
-                    github_access_token, created_at, expires_at, user_fk \
+                    github_access_token, github_access_token_expires_at, \
+                    github_refresh_token, github_refresh_token_expires_at, \
+                    created_at, expires_at, user_fk \
              FROM user_auth_sessions WHERE token = ?",
             params.token,
         )
@@ -86,12 +128,44 @@ impl SessionAuthRepository {
         Ok(sqlx::query_as!(
             UserAuthSessionRecord,
             "SELECT token, github_login, github_name, github_avatar_url, \
-                    github_access_token, created_at, expires_at, user_fk \
+                    github_access_token, github_access_token_expires_at, \
+                    github_refresh_token, github_refresh_token_expires_at, \
+                    created_at, expires_at, user_fk \
              FROM user_auth_sessions WHERE token = ?",
             token,
         )
         .fetch_optional(self.db.pool())
         .await?)
+    }
+
+    /// Overwrite the GitHub-side token fields after a successful refresh.
+    ///
+    /// Identified by the browser session token (`user_auth_sessions.token`)
+    /// — the row that the cookie points at. Leaves `expires_at` and the
+    /// identity columns untouched: the browser session is independent of
+    /// the GitHub-side token rotation.
+    pub async fn update_github_tokens(
+        &self,
+        session_token: &str,
+        params: UpdateGithubTokens<'_>,
+    ) -> Result<u64> {
+        self.db.ensure_initialized().await?;
+        let res = sqlx::query!(
+            "UPDATE user_auth_sessions
+                SET github_access_token = ?,
+                    github_access_token_expires_at = ?,
+                    github_refresh_token = ?,
+                    github_refresh_token_expires_at = ?
+              WHERE token = ?",
+            params.github_access_token,
+            params.github_access_token_expires_at,
+            params.github_refresh_token,
+            params.github_refresh_token_expires_at,
+            session_token,
+        )
+        .execute(self.db.pool())
+        .await?;
+        Ok(res.rows_affected())
     }
 
     /// Return the most recently issued, non-expired session for `user_fk`,
@@ -110,7 +184,9 @@ impl SessionAuthRepository {
         Ok(sqlx::query_as!(
             UserAuthSessionRecord,
             "SELECT token, github_login, github_name, github_avatar_url, \
-                    github_access_token, created_at, expires_at, user_fk \
+                    github_access_token, github_access_token_expires_at, \
+                    github_refresh_token, github_refresh_token_expires_at, \
+                    created_at, expires_at, user_fk \
              FROM user_auth_sessions \
              WHERE user_fk = ? \
                AND expires_at > DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ') \
@@ -136,22 +212,25 @@ impl SessionAuthRepository {
 
         let row = sqlx::query!(
             r#"SELECT
-                 s.token               AS s_token,
-                 s.github_login        AS s_github_login,
-                 s.github_name         AS s_github_name,
-                 s.github_avatar_url   AS s_github_avatar_url,
-                 s.github_access_token AS s_github_access_token,
-                 s.created_at          AS s_created_at,
-                 s.expires_at          AS s_expires_at,
-                 s.user_fk             AS s_user_fk,
-                 u.id                  AS u_id,
-                 u.github_id           AS u_github_id,
-                 u.github_login        AS u_github_login,
-                 u.github_name         AS u_github_name,
-                 u.github_avatar_url   AS u_github_avatar_url,
-                 u.is_member_of_org    AS `u_is_member_of_org!: bool`,
-                 u.last_seen_at        AS u_last_seen_at,
-                 u.created_at          AS u_created_at
+                 s.token                            AS s_token,
+                 s.github_login                     AS s_github_login,
+                 s.github_name                      AS s_github_name,
+                 s.github_avatar_url                AS s_github_avatar_url,
+                 s.github_access_token              AS s_github_access_token,
+                 s.github_access_token_expires_at   AS s_github_access_token_expires_at,
+                 s.github_refresh_token             AS s_github_refresh_token,
+                 s.github_refresh_token_expires_at  AS s_github_refresh_token_expires_at,
+                 s.created_at                       AS s_created_at,
+                 s.expires_at                       AS s_expires_at,
+                 s.user_fk                          AS s_user_fk,
+                 u.id                               AS u_id,
+                 u.github_id                        AS u_github_id,
+                 u.github_login                     AS u_github_login,
+                 u.github_name                      AS u_github_name,
+                 u.github_avatar_url                AS u_github_avatar_url,
+                 u.is_member_of_org                 AS `u_is_member_of_org!: bool`,
+                 u.last_seen_at                     AS u_last_seen_at,
+                 u.created_at                       AS u_created_at
                FROM user_auth_sessions s
                INNER JOIN users u ON u.id = s.user_fk
                WHERE s.token = ?"#,
@@ -167,6 +246,9 @@ impl SessionAuthRepository {
                 github_name: r.s_github_name,
                 github_avatar_url: r.s_github_avatar_url,
                 github_access_token: r.s_github_access_token,
+                github_access_token_expires_at: r.s_github_access_token_expires_at,
+                github_refresh_token: r.s_github_refresh_token,
+                github_refresh_token_expires_at: r.s_github_refresh_token_expires_at,
                 created_at: r.s_created_at,
                 expires_at: r.s_expires_at,
                 user_fk: r.s_user_fk,
@@ -250,12 +332,16 @@ mod tests {
                 github_name: Some("Octo Cat"),
                 github_avatar_url: Some("https://example/a.png"),
                 github_access_token: "gho_x",
+                github_access_token_expires_at: Some("2099-01-01T08:00:00.000Z"),
+                github_refresh_token: Some("ghr_x"),
+                github_refresh_token_expires_at: Some("2099-07-01T00:00:00.000Z"),
                 expires_at: "2099-01-01T00:00:00.000Z",
             })
             .await
             .unwrap();
         assert_eq!(created.github_login, "octocat");
         assert_eq!(created.user_fk, user_fk);
+        assert_eq!(created.github_refresh_token.as_deref(), Some("ghr_x"));
 
         let fetched = repo.get_by_token("tok-abc").await.unwrap().unwrap();
         assert_eq!(fetched.user_fk, user_fk);
@@ -284,6 +370,9 @@ mod tests {
             github_name: None,
             github_avatar_url: None,
             github_access_token: "t1",
+            github_access_token_expires_at: None,
+            github_refresh_token: None,
+            github_refresh_token_expires_at: None,
             expires_at: "2000-01-01T00:00:00.000Z",
         })
         .await
@@ -295,6 +384,9 @@ mod tests {
             github_name: None,
             github_avatar_url: None,
             github_access_token: "t2",
+            github_access_token_expires_at: None,
+            github_refresh_token: None,
+            github_refresh_token_expires_at: None,
             expires_at: "2099-01-01T00:00:00.000Z",
         })
         .await
@@ -324,6 +416,9 @@ mod tests {
                 github_name: Some("Joined"),
                 github_avatar_url: None,
                 github_access_token: "gho_linked",
+                github_access_token_expires_at: None,
+                github_refresh_token: None,
+                github_refresh_token_expires_at: None,
                 expires_at: "2099-01-01T00:00:00.000Z",
             })
             .await
@@ -366,6 +461,9 @@ mod tests {
                 github_name: None,
                 github_avatar_url: None,
                 github_access_token: "gho_old",
+                github_access_token_expires_at: None,
+                github_refresh_token: None,
+                github_refresh_token_expires_at: None,
                 expires_at: "2000-01-01T00:00:00.000Z",
             })
             .await
@@ -388,6 +486,9 @@ mod tests {
                 github_name: None,
                 github_avatar_url: None,
                 github_access_token: "gho_fresh",
+                github_access_token_expires_at: None,
+                github_refresh_token: None,
+                github_refresh_token_expires_at: None,
                 expires_at: "2099-01-01T00:00:00.000Z",
             })
             .await
@@ -413,6 +514,55 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_github_tokens_rewrites_only_the_github_columns() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let user_fk = seed_user(&db, 5151, "rotator").await;
+        let sessions = SessionAuthRepository::new(db);
+
+        sessions
+            .create(CreateUserAuthSession {
+                token: "rot-tok",
+                user_fk: &user_fk,
+                github_login: "rotator",
+                github_name: None,
+                github_avatar_url: None,
+                github_access_token: "gho_v1",
+                github_access_token_expires_at: Some("2099-01-01T08:00:00.000Z"),
+                github_refresh_token: Some("ghr_v1"),
+                github_refresh_token_expires_at: Some("2099-07-01T00:00:00.000Z"),
+                expires_at: "2099-06-01T00:00:00.000Z",
+            })
+            .await
+            .unwrap();
+
+        let rows = sessions
+            .update_github_tokens(
+                "rot-tok",
+                UpdateGithubTokens {
+                    github_access_token: "gho_v2",
+                    github_access_token_expires_at: Some("2099-01-01T16:00:00.000Z"),
+                    github_refresh_token: Some("ghr_v2"),
+                    github_refresh_token_expires_at: Some("2099-07-02T00:00:00.000Z"),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows, 1);
+
+        let rotated = sessions.get_by_token("rot-tok").await.unwrap().unwrap();
+        assert_eq!(rotated.github_access_token, "gho_v2");
+        assert_eq!(
+            rotated.github_access_token_expires_at.as_deref(),
+            Some("2099-01-01T16:00:00.000Z")
+        );
+        assert_eq!(rotated.github_refresh_token.as_deref(), Some("ghr_v2"));
+        // Browser session deadline stays put — refresh must not extend the
+        // cookie TTL, only the underlying GitHub credentials.
+        assert_eq!(rotated.expires_at, "2099-06-01T00:00:00.000Z");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn deleting_user_cascades_session() {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
@@ -427,6 +577,9 @@ mod tests {
                 github_name: None,
                 github_avatar_url: None,
                 github_access_token: "gho_casc",
+                github_access_token_expires_at: None,
+                github_refresh_token: None,
+                github_refresh_token_expires_at: None,
                 expires_at: "2099-01-01T00:00:00.000Z",
             })
             .await

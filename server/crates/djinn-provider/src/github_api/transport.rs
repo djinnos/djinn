@@ -37,7 +37,7 @@ impl GitHubApiClient {
                     })?;
                 Ok(tok.token)
             }
-            AuthMode::UserToken(token) => Ok(token.clone()),
+            AuthMode::UserToken { current, .. } => Ok(current.read().await.clone()),
         }
     }
 
@@ -53,7 +53,8 @@ impl GitHubApiClient {
 
     /// Execute a request using the configured auth mode. Retries once with
     /// a refreshed token on 401 for installation-scoped clients; for user
-    /// tokens a 401 surfaces a re-auth error immediately.
+    /// tokens, consults the attached
+    /// [`crate::github_api::UserTokenRefresh`] before giving up.
     pub(super) async fn send_with_retry<F, Fut>(&self, build_request: F) -> Result<Response>
     where
         F: Fn(String) -> Fut,
@@ -79,7 +80,25 @@ impl GitHubApiClient {
                 let token = self.bearer_token().await?;
                 build_request(token).await
             }
-            AuthMode::UserToken(_) => Err(anyhow::Error::new(UserTokenExpired)),
+            AuthMode::UserToken { current, refresher } => {
+                tracing::warn!("github-api: 401 on user token — attempting refresh");
+                match refresher.refresh().await {
+                    Ok(new_token) => {
+                        // Overwrite the cell so subsequent calls on this
+                        // client (and any clones sharing the Arc) pick up
+                        // the rotated token without another DB round-trip.
+                        *current.write().await = new_token.clone();
+                        build_request(new_token).await
+                    }
+                    Err(e) => {
+                        tracing::info!(
+                            error = %e,
+                            "github-api: user-token refresh failed → surfacing UserTokenExpired"
+                        );
+                        Err(anyhow::Error::new(UserTokenExpired))
+                    }
+                }
+            }
         }
     }
 }

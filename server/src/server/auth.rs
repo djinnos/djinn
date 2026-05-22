@@ -50,6 +50,7 @@ use djinn_db::{
     CreateUserAuthSession, NewOrgConfig, OrgConfigRepository, SessionAuthRepository, UserRepository,
 };
 use djinn_provider::github_app::jwt::mint_app_jwt_anyhow;
+use djinn_provider::oauth::github_app_user::{self, GithubUserTokens};
 
 const SESSION_COOKIE: &str = "djinn_session";
 const OAUTH_STATE_COOKIE: &str = "djinn_oauth_state";
@@ -385,15 +386,23 @@ async fn github_callback(
             .into_response();
     }
 
-    // 1. Exchange code for access token.
+    // 1. Exchange code for access token + (optional) refresh token.
     let callback_url = format!("{}/auth/github/callback", public_url());
-    let access_token = match exchange_code(&client_id, &client_secret, &code, &callback_url).await {
+    let tokens = match github_app_user::exchange_code(
+        &client_id,
+        &client_secret,
+        &code,
+        &callback_url,
+    )
+    .await
+    {
         Ok(t) => t,
         Err(e) => {
             tracing::error!(error = %e, "auth callback: token exchange failed");
             return (StatusCode::BAD_GATEWAY, "token exchange failed").into_response();
         }
     };
+    let access_token = tokens.access_token.clone();
 
     // 2. Fetch /user to build the identity.
     let user = match fetch_github_user(&access_token).await {
@@ -500,8 +509,24 @@ async fn github_callback(
     };
 
     // 6. Persist a new session row, linked to the users table via `user_fk`.
+    //
+    //    Two independent deadlines on the row:
+    //    * `expires_at` — browser session cookie TTL (30d). The user stays
+    //      signed in this long regardless of GitHub-side rotations.
+    //    * `github_access_token_expires_at` + `github_refresh_token_*` —
+    //      GitHub's deadlines, taken straight from `expires_in` /
+    //      `refresh_token_expires_in` in the OAuth response. NULL when the
+    //      App is configured with non-expiring user tokens.
     let token = random_token_b64();
     let expires_at = rfc3339_in(SESSION_TTL_SECS);
+    let GithubUserTokens {
+        access_token: _,
+        expires_in,
+        refresh_token,
+        refresh_token_expires_in,
+    } = tokens;
+    let access_expires_at = expires_in.map(rfc3339_in);
+    let refresh_expires_at = refresh_token_expires_in.map(rfc3339_in);
     let repo = SessionAuthRepository::new(state.db().clone());
     if let Err(e) = repo
         .create(CreateUserAuthSession {
@@ -511,6 +536,9 @@ async fn github_callback(
             github_name: user.name.as_deref(),
             github_avatar_url: user.avatar_url.as_deref(),
             github_access_token: &access_token,
+            github_access_token_expires_at: access_expires_at.as_deref(),
+            github_refresh_token: refresh_token.as_deref(),
+            github_refresh_token_expires_at: refresh_expires_at.as_deref(),
             expires_at: &expires_at,
         })
         .await
@@ -557,15 +585,45 @@ async fn github_callback(
 }
 
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Some(token) = extract_cookie(&headers, SESSION_COOKIE) {
-        let repo = SessionAuthRepository::new(state.db().clone());
-        if let Err(e) = repo.delete_by_token(&token).await {
+    // Resolve the cookie up front so we can also nuke any sibling sessions
+    // for the same user (rotating workstations, leftover dev tabs, etc.).
+    let cookie_token = extract_cookie(&headers, SESSION_COOKIE);
+    let repo = SessionAuthRepository::new(state.db().clone());
+
+    if let Some(token) = &cookie_token {
+        // Best-effort look up the user behind this cookie so we can drop
+        // every session for them, not just this one. Falls back to a
+        // single-row delete if the lookup fails.
+        let user_fk = match repo.get_by_token(token).await {
+            Ok(Some(row)) => Some(row.user_fk),
+            _ => None,
+        };
+        if let Some(user_fk) = user_fk {
+            if let Err(e) = repo.delete_by_user_fk(&user_fk).await {
+                tracing::warn!(
+                    error = %e,
+                    user_fk = %user_fk,
+                    "auth /logout: failed to delete sessions by user_fk",
+                );
+            }
+        } else if let Err(e) = repo.delete_by_token(token).await {
             tracing::warn!(error = %e, "auth /logout: failed to delete session row");
         }
     }
+    tracing::info!(
+        had_cookie = cookie_token.is_some(),
+        "auth /logout: clearing browser session"
+    );
+
     let mut resp_headers = HeaderMap::new();
     clear_cookie(&mut resp_headers, SESSION_COOKIE);
-    (StatusCode::NO_CONTENT, resp_headers).into_response()
+    // 200 + JSON body — some browsers and proxies treat 204 conservatively
+    // and `fetch().json()` on the client expects a parseable body.
+    resp_headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    (StatusCode::OK, resp_headers, "{\"ok\":true}").into_response()
 }
 
 // ─── GitHub API helpers ───────────────────────────────────────────────────────
@@ -578,56 +636,6 @@ struct GhUser {
     name: Option<String>,
     #[serde(default)]
     avatar_url: Option<String>,
-}
-
-async fn exchange_code(
-    client_id: &str,
-    client_secret: &str,
-    code: &str,
-    redirect_uri: &str,
-) -> Result<String, String> {
-    #[derive(Serialize)]
-    struct Req<'a> {
-        client_id: &'a str,
-        client_secret: &'a str,
-        code: &'a str,
-        redirect_uri: &'a str,
-    }
-    #[derive(Deserialize)]
-    struct Resp {
-        #[serde(default)]
-        access_token: Option<String>,
-        #[serde(default)]
-        error: Option<String>,
-        #[serde(default)]
-        error_description: Option<String>,
-    }
-
-    let client = Client::new();
-    let resp: Resp = client
-        .post("https://github.com/login/oauth/access_token")
-        .header("Accept", "application/json")
-        .json(&Req {
-            client_id,
-            client_secret,
-            code,
-            redirect_uri,
-        })
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if let Some(err) = resp.error {
-        return Err(format!(
-            "{err}: {}",
-            resp.error_description.unwrap_or_default()
-        ));
-    }
-    resp.access_token
-        .ok_or_else(|| "missing access_token in response".to_string())
 }
 
 async fn fetch_github_user(access_token: &str) -> Result<GhUser, String> {
@@ -734,7 +742,14 @@ fn set_cookie(headers: &mut HeaderMap, name: &str, value: &str, max_age: i64) {
 
 fn clear_cookie(headers: &mut HeaderMap, name: &str) {
     let secure = if cookie_secure() { "; Secure" } else { "" };
-    let cookie = format!("{name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}");
+    // Belt-and-braces: pair `Max-Age=0` with a far-past `Expires`. Some
+    // (older) Safari builds silently ignore `Max-Age` on responses they
+    // treat as third-party — `Expires` is the original RFC 2109
+    // mechanism every browser honours.
+    let cookie = format!(
+        "{name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; \
+         Expires=Thu, 01 Jan 1970 00:00:00 GMT{secure}",
+    );
     if let Ok(hv) = HeaderValue::from_str(&cookie) {
         headers.append(header::SET_COOKIE, hv);
     }

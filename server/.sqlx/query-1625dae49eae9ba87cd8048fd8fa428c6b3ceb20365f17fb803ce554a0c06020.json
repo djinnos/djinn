@@ -1,6 +1,6 @@
 {
   "db_name": "MySQL",
-  "query": "SELECT token, github_login, github_name, github_avatar_url, github_access_token, created_at, expires_at, user_fk FROM user_auth_sessions WHERE token = ?",
+  "query": "SELECT token, github_login, github_name, github_avatar_url, github_access_token, github_access_token_expires_at, github_refresh_token, github_refresh_token_expires_at, created_at, expires_at, user_fk FROM user_auth_sessions WHERE user_fk = ? AND expires_at > DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ') ORDER BY created_at DESC LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -50,6 +50,33 @@
       },
       {
         "ordinal": 5,
+        "name": "github_access_token_expires_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "github_refresh_token",
+        "type_info": {
+          "type": "Blob",
+          "flags": "",
+          "max_size": 262140
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "github_refresh_token_expires_at",
+        "type_info": {
+          "type": "VarString",
+          "flags": "",
+          "max_size": 256
+        }
+      },
+      {
+        "ordinal": 8,
         "name": "created_at",
         "type_info": {
           "type": "VarString",
@@ -58,7 +85,7 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 9,
         "name": "expires_at",
         "type_info": {
           "type": "VarString",
@@ -67,7 +94,7 @@
         }
       },
       {
-        "ordinal": 7,
+        "ordinal": 10,
         "name": "user_fk",
         "type_info": {
           "type": "VarString",
@@ -85,10 +112,13 @@
       true,
       true,
       false,
+      true,
+      true,
+      true,
       false,
       false,
       false
     ]
   },
-  "hash": "e4a4906203612c729c80fbd8519357142394e02da43a878b6e49e02ebdcdaaf9"
+  "hash": "1625dae49eae9ba87cd8048fd8fa428c6b3ceb20365f17fb803ce554a0c06020"
 }

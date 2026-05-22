@@ -1,8 +1,10 @@
 use djinn_core::models::TransitionAction;
 use djinn_db::{ActivityQuery, SessionAuthRepository, UserSettingsRepository};
 use djinn_provider::github_api::{
-    CheckRun, GitHubApiClient, MergeMethod, PrReviewFeedback, PrState, UserTokenExpired,
+    CheckRun, DbBackedRefresher, GitHubApiClient, MergeMethod, PrReviewFeedback, PrState,
+    UserTokenExpired,
 };
+use djinn_provider::oauth::github_app_user;
 
 use super::*;
 
@@ -666,8 +668,33 @@ impl CoordinatorActor {
                         }
                     };
                     if let Some(session) = live_session {
-                        let user_client =
-                            GitHubApiClient::for_user_token(session.github_access_token);
+                        // Build a refreshable client when App OAuth creds
+                        // are visible to this process — that lets the
+                        // transport rotate the access/refresh pair
+                        // transparently on 401 instead of asking the user
+                        // to re-sign in every 8 hours. If creds aren't
+                        // available we degrade to the legacy non-refreshable
+                        // client; a 401 will then hard-evict the session
+                        // row and the next UI hit bounces to login.
+                        let user_client = match github_app_user::client_credentials_from_env() {
+                            Some((cid, secret)) => GitHubApiClient::for_user_session(
+                                session.github_access_token.clone(),
+                                DbBackedRefresher::new(
+                                    self.db.clone(),
+                                    session.token.clone(),
+                                    cid,
+                                    secret,
+                                )
+                                .into_arc(),
+                            ),
+                            None => {
+                                tracing::debug!(
+                                    "PR poller: GITHUB_APP_CLIENT_ID/SECRET unset; \
+                                     constructing non-refreshable user client"
+                                );
+                                GitHubApiClient::for_user_token(session.github_access_token.clone())
+                            }
+                        };
                         match user_client
                             .approve_pull_request(&owner, &repo, pull_number, &current_sha)
                             .await

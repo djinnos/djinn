@@ -29,6 +29,7 @@
 mod checks;
 mod contents;
 mod pull_requests;
+pub mod refresh;
 mod reviews;
 pub mod search;
 #[cfg(test)]
@@ -36,8 +37,12 @@ mod tests;
 mod transport;
 mod types;
 
-use reqwest::Client;
+use std::sync::Arc;
 
+use reqwest::Client;
+use tokio::sync::RwLock;
+
+pub use refresh::{DbBackedRefresher, NoRefresh, UserTokenRefresh};
 pub use transport::UserTokenExpired;
 pub use types::{
     ActionsJob, ActionsJobStep, AutoMergeRequest, CheckAnnotation, CheckRun, CheckRunsResponse,
@@ -66,14 +71,24 @@ pub(super) enum AuthMode {
     SessionUser,
     /// Mint a GitHub App installation token for each call.
     Installation { installation_id: u64 },
-    /// Use a specific user GitHub access token supplied at client construction.
+    /// Use a specific user GitHub access token supplied at client
+    /// construction. For background coordinator paths (pr_poller,
+    /// schedulers) that act on behalf of a user but run outside any
+    /// HTTP `SESSION_USER_TOKEN` scope.
     ///
-    /// For background coordinator paths (pr_poller, schedulers) that act on
-    /// behalf of a user but run outside any HTTP `SESSION_USER_TOKEN` scope.
-    /// On 401 the call returns an error tagged as user-token-expired rather
-    /// than retrying — caller decides whether to skip the action or surface
-    /// it to the user.
-    UserToken(String),
+    /// On 401 the transport consults `refresher`:
+    /// * If it returns a new access token, the call retries once with
+    ///   the rotated token and `current` is overwritten in place so
+    ///   subsequent calls pick up the fresh credential without a DB
+    ///   round-trip.
+    /// * Otherwise the call surfaces [`UserTokenExpired`] and the
+    ///   caller decides whether to skip or bounce the user to login.
+    UserToken {
+        /// Lock so a refresh on one in-flight request also benefits
+        /// the next. Cheap: critical sections only clone the string.
+        current: Arc<RwLock<String>>,
+        refresher: Arc<dyn UserTokenRefresh>,
+    },
 }
 
 #[derive(Clone)]
@@ -115,13 +130,60 @@ impl GitHubApiClient {
     /// token. For background paths (pr_poller, scheduled jobs) that need to
     /// act as a specific user but cannot read `SESSION_USER_TOKEN` because
     /// they run outside an HTTP request.
+    ///
+    /// **No refresh on 401** — the token is treated as opaque/static.
+    /// Production paths should prefer [`Self::for_user_session`], which
+    /// rotates via the paired refresh token instead of bouncing the
+    /// user back to `/auth/github/start` on every 8-hour cycle.
     pub fn for_user_token(token: String) -> Self {
-        Self::build(AuthMode::UserToken(token), GITHUB_API_BASE.to_string())
+        Self::build(
+            AuthMode::UserToken {
+                current: Arc::new(RwLock::new(token)),
+                refresher: Arc::new(NoRefresh),
+            },
+            GITHUB_API_BASE.to_string(),
+        )
     }
 
     /// User-token constructor with a custom base URL (useful for tests).
     pub fn for_user_token_with_base_url(token: String, base_url: String) -> Self {
-        Self::build(AuthMode::UserToken(token), base_url)
+        Self::build(
+            AuthMode::UserToken {
+                current: Arc::new(RwLock::new(token)),
+                refresher: Arc::new(NoRefresh),
+            },
+            base_url,
+        )
+    }
+
+    /// Create a client backed by a refreshable user session. On `401`
+    /// the transport rotates the access/refresh pair via
+    /// [`crate::oauth::github_app_user::refresh_user_token`] and retries
+    /// once before giving up.
+    pub fn for_user_session(token: String, refresher: Arc<dyn UserTokenRefresh>) -> Self {
+        Self::build(
+            AuthMode::UserToken {
+                current: Arc::new(RwLock::new(token)),
+                refresher,
+            },
+            GITHUB_API_BASE.to_string(),
+        )
+    }
+
+    /// Refreshable-session constructor with a custom base URL (used in
+    /// transport tests that mock the GitHub endpoint).
+    pub fn for_user_session_with_base_url(
+        token: String,
+        refresher: Arc<dyn UserTokenRefresh>,
+        base_url: String,
+    ) -> Self {
+        Self::build(
+            AuthMode::UserToken {
+                current: Arc::new(RwLock::new(token)),
+                refresher,
+            },
+            base_url,
+        )
     }
 
     fn build(auth: AuthMode, base_url: String) -> Self {

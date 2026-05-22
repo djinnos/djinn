@@ -7,6 +7,7 @@
  * session cookie flows both ways.
  */
 import { getBaseUrl } from "@/api/serverUrl";
+import { queryClient } from "@/lib/queryClient";
 
 export interface User {
   id: string;
@@ -240,7 +241,18 @@ export async function selectInstallation(
 }
 
 /**
- * Log out and reload so every query refetches under the new (unauth) session.
+ * Log out and bounce to the app root under a fresh (unauth) state.
+ *
+ * Three layers, because cookie-clearing is surprisingly fragile:
+ *  1. POST /auth/logout — server-side row delete + `Set-Cookie` with
+ *     `Max-Age=0` and a far-past `Expires`.
+ *  2. queryClient.clear() — drops every in-memory query, including the
+ *     cached `["auth", "me"]` user that AuthGate keys off. Without this
+ *     a soft reload paths sometimes pick up the cached user before the
+ *     refetch lands.
+ *  3. window.location.assign("/") — full navigation, not a reload, so
+ *     the React tree is freshly mounted with no stale in-memory state
+ *     (zustand stores, route history, etc.).
  */
 export async function logout(): Promise<void> {
   try {
@@ -248,9 +260,16 @@ export async function logout(): Promise<void> {
       method: "POST",
       credentials: "include",
     });
+  } catch (err) {
+    console.warn("logout: request failed; continuing to clear local state", err);
   } finally {
+    try {
+      queryClient.clear();
+    } catch (err) {
+      console.warn("logout: queryClient.clear failed", err);
+    }
     if (typeof window !== "undefined") {
-      window.location.reload();
+      window.location.assign("/");
     }
   }
 }

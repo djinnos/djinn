@@ -1,7 +1,12 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use anyhow::{Result, anyhow};
+use async_trait::async_trait;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use crate::github_api::{GitHubApiClient, UserTokenExpired};
+use crate::github_api::{GitHubApiClient, UserTokenExpired, UserTokenRefresh};
 
 use super::seed_installation_token;
 
@@ -52,6 +57,119 @@ async fn user_token_client_sends_literal_bearer() {
         .await
         .expect("get_ref");
     assert_eq!(sha.as_deref(), Some("abc123"));
+}
+
+/// Test-only refresher that hands out a fixed access token and counts
+/// how many times the transport asked for a refresh.
+#[derive(Clone, Default)]
+struct CannedRefresher {
+    new_token: String,
+    calls: Arc<AtomicUsize>,
+    fail: bool,
+}
+
+#[async_trait]
+impl UserTokenRefresh for CannedRefresher {
+    async fn refresh(&self) -> Result<String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail {
+            Err(anyhow!("refresh upstream said no"))
+        } else {
+            Ok(self.new_token.clone())
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn user_token_401_then_refresh_success_retries_with_new_token() {
+    let server = MockServer::start().await;
+    // First call with the original token: 401. The transport invokes
+    // the refresher, gets `ghu_after_refresh`, and retries — that
+    // second request hits the 200 branch below.
+    Mock::given(method("GET"))
+        .and(path("/repos/djinnos/server/git/ref/heads/main"))
+        .and(header("authorization", "Bearer ghu_before"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/djinnos/server/git/ref/heads/main"))
+        .and(header("authorization", "Bearer ghu_after_refresh"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "ref": "refs/heads/main",
+            "object": {"sha": "rotated-sha"}
+        })))
+        .mount(&server)
+        .await;
+
+    let refresher = CannedRefresher {
+        new_token: "ghu_after_refresh".to_string(),
+        calls: Arc::new(AtomicUsize::new(0)),
+        fail: false,
+    };
+    let call_counter = refresher.calls.clone();
+
+    let client = GitHubApiClient::for_user_session_with_base_url(
+        "ghu_before".to_string(),
+        Arc::new(refresher),
+        server.uri(),
+    );
+    let sha = client
+        .get_ref("djinnos", "server", "heads/main")
+        .await
+        .expect("get_ref should succeed after refresh");
+    assert_eq!(sha.as_deref(), Some("rotated-sha"));
+    assert_eq!(
+        call_counter.load(Ordering::SeqCst),
+        1,
+        "refresher should be invoked exactly once on the 401",
+    );
+
+    // Subsequent calls reuse the rotated token in the shared cell, so
+    // they hit the 200 branch directly — no extra refresh.
+    let again = client
+        .get_ref("djinnos", "server", "heads/main")
+        .await
+        .expect("second call should succeed without another refresh");
+    assert_eq!(again.as_deref(), Some("rotated-sha"));
+    assert_eq!(
+        call_counter.load(Ordering::SeqCst),
+        1,
+        "refresher must not be re-invoked once the new token is stored",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn user_token_401_refresh_failure_surfaces_expired() {
+    // Refresher refuses → transport must surface UserTokenExpired so
+    // the caller can route the user back to /auth/github/start.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/djinnos/server/git/ref/heads/main"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+
+    let refresher = CannedRefresher {
+        new_token: String::new(),
+        calls: Arc::new(AtomicUsize::new(0)),
+        fail: true,
+    };
+
+    let client = GitHubApiClient::for_user_session_with_base_url(
+        "ghu_dead".to_string(),
+        Arc::new(refresher.clone()),
+        server.uri(),
+    );
+    let err = client
+        .get_ref("djinnos", "server", "heads/main")
+        .await
+        .expect_err("expected refresh failure to bubble UserTokenExpired");
+    assert!(
+        err.downcast_ref::<UserTokenExpired>().is_some(),
+        "expected UserTokenExpired downcast, got: {err:?}"
+    );
+    assert_eq!(refresher.calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

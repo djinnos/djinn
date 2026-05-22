@@ -588,6 +588,9 @@ mod tests {
                 github_name: None,
                 github_avatar_url: None,
                 github_access_token: "gho_a",
+                github_access_token_expires_at: None,
+                github_refresh_token: None,
+                github_refresh_token_expires_at: None,
                 expires_at: "2099-01-01T00:00:00.000Z",
             })
             .await
@@ -600,6 +603,9 @@ mod tests {
                 github_name: None,
                 github_avatar_url: None,
                 github_access_token: "gho_b",
+                github_access_token_expires_at: None,
+                github_refresh_token: None,
+                github_refresh_token_expires_at: None,
                 expires_at: "2099-01-01T00:00:00.000Z",
             })
             .await
@@ -612,6 +618,9 @@ mod tests {
                 github_name: None,
                 github_avatar_url: None,
                 github_access_token: "gho_b2",
+                github_access_token_expires_at: None,
+                github_refresh_token: None,
+                github_refresh_token_expires_at: None,
                 expires_at: "2099-01-01T00:00:00.000Z",
             })
             .await
