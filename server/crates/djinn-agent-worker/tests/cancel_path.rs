@@ -10,9 +10,9 @@
 //! ## Dolt dependency
 //!
 //! Same constraint as `in_pod_drive.rs`: the worker bootstraps an in-Pod
-//! `Database` via `bootstrap_warm_database()`, so a live Dolt at
-//! `127.0.0.1:3307` (or `DJINN_TEST_MYSQL_URL`) is required — matches the
-//! `make test` convention shared with `djinn-agent`'s
+//! `Database` via `bootstrap_warm_database()`, so a live Postgres at
+//! `127.0.0.1:5433` (or `DJINN_TEST_DATABASE_URL`) is required — matches
+//! the `make test` convention shared with `djinn-agent`'s
 //! `phase1_supervisor` integration test.
 
 use std::collections::HashMap;
@@ -447,8 +447,8 @@ async fn worker_observes_host_initiated_cancel() {
 
     // 4. Spawn worker.
     let exe = env!("CARGO_BIN_EXE_djinn-agent-worker");
-    let test_db_url = std::env::var("DJINN_TEST_MYSQL_URL")
-        .unwrap_or_else(|_| "mysql://root@127.0.0.1:3307".into());
+    let test_db_url = std::env::var("DJINN_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1:5433/postgres".into());
     let mut child = Command::new(exe)
         .arg("task-run")
         .env("DJINN_SERVER_ADDR", addr.to_string())
@@ -458,9 +458,7 @@ async fn worker_observes_host_initiated_cancel() {
         .env("DJINN_TASK_RUN_ID", task_run_id)
         .env("DJINN_WORKSPACE_PATH", workspace_dir.path())
         .env("DJINN_MIRROR_ROOT", mirrors_root.path())
-        .env("DJINN_MYSQL_URL", format!("{}/djinn_test", test_db_url))
-        .env("DJINN_DB_BACKEND", "dolt")
-        .env("DJINN_MYSQL_FLAVOR", "dolt")
+        .env("DJINN_DATABASE_URL", test_db_url)
         .env("RUST_LOG", "info,djinn_agent=warn,sqlx=warn")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

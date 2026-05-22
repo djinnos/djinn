@@ -135,7 +135,7 @@ impl KubernetesConfig {
     /// | `DJINN_K8S_SERVER_ADDR` | `server_addr` | `djinn.djinn.svc.cluster.local:8443` |
     /// | `DJINN_K8S_WARM_JOB_TTL_SECONDS` | `warm_job_ttl_seconds` | `300` (parsed as `i32`) |
     /// | `DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS` | `warm_job_timeout_seconds` | `1800` (parsed as `i64`) |
-    /// | `DJINN_MYSQL_URL` | `database_url` | _(unset → warm Pod uses default `mysql://root@127.0.0.1:3306/djinn`)_ |
+    /// | `DJINN_DATABASE_URL` | `database_url` | _(unset → warm Pod has no fallback; helm chart projects this via the `djinn-server` ConfigMap)_ |
     /// | `DJINN_K8S_TASK_RUN_ACTIVE_DEADLINE_SECONDS` | `task_run_active_deadline_seconds` | `3600` (parsed as `u64`) |
     /// | `DJINN_K8S_TASK_RUN_TERMINATION_GRACE_PERIOD_SECONDS` | `task_run_termination_grace_period_seconds` | `60` (parsed as `i64`) |
     /// | `DJINN_K8S_WARM_CPU_REQUEST` | `warm_cpu_request` | `1` |
@@ -143,14 +143,13 @@ impl KubernetesConfig {
     /// | `DJINN_K8S_WARM_MEMORY_REQUEST` | `warm_memory_request` | `2Gi` |
     /// | `DJINN_K8S_WARM_MEMORY_LIMIT` | `warm_memory_limit` | `4Gi` |
     ///
-    /// `DJINN_MYSQL_URL` is read from djinn-server's own environment (the
+    /// `DJINN_DATABASE_URL` is read from djinn-server's own environment (the
     /// Helm chart projects it via `envFrom: configMap djinn-config`) and
     /// is forwarded onto both the warm Pod container (so `warm-graph`
     /// talks to the same backing store) and the task-run Pod container
-    /// (so the worker's `bootstrap_warm_database()` opens the same MySQL
-    /// instance and helpers like `resolve_role_overrides` /
-    /// `build_prompt_context` succeed mid-run instead of falling back to
-    /// the single-node `mysql://root@127.0.0.1:3306/djinn` default).
+    /// (so the worker's `bootstrap_warm_database()` opens the same
+    /// Postgres instance and helpers like `resolve_role_overrides` /
+    /// `build_prompt_context` succeed mid-run).
     ///
     /// A malformed `DJINN_K8S_TTL_SECONDS` is logged at `warn` and falls
     /// back to the default — the runtime still boots.
@@ -219,7 +218,7 @@ impl KubernetesConfig {
                 ),
             }
         }
-        cfg.database_url = std::env::var("DJINN_MYSQL_URL")
+        cfg.database_url = std::env::var("DJINN_DATABASE_URL")
             .ok()
             .filter(|v| !v.is_empty());
         if let Ok(v) = std::env::var("DJINN_K8S_TASK_RUN_ACTIVE_DEADLINE_SECONDS") {
@@ -282,8 +281,8 @@ mod tests {
             std::env::set_var("DJINN_K8S_SERVER_ADDR", "djinn:9000");
             std::env::set_var("DJINN_K8S_TTL_SECONDS", "600");
             std::env::set_var(
-                "DJINN_MYSQL_URL",
-                "mysql://root@djinn-mysql:3306/djinn",
+                "DJINN_DATABASE_URL",
+                "postgres://djinn:djinn@djinn-postgres:5432/djinn",
             );
         }
         let cfg = KubernetesConfig::from_env();
@@ -296,7 +295,7 @@ mod tests {
         // DB URL forwarded as-is for warm Pod env projection.
         assert_eq!(
             cfg.database_url.as_deref(),
-            Some("mysql://root@djinn-mysql:3306/djinn")
+            Some("postgres://djinn:djinn@djinn-postgres:5432/djinn")
         );
 
         // Reset so we don't leak into other tests that might touch
@@ -306,9 +305,7 @@ mod tests {
             std::env::remove_var("DJINN_K8S_IMAGE");
             std::env::remove_var("DJINN_K8S_SERVER_ADDR");
             std::env::remove_var("DJINN_K8S_TTL_SECONDS");
-            std::env::remove_var("DJINN_MYSQL_URL");
-            std::env::remove_var("DJINN_DB_BACKEND");
-            std::env::remove_var("DJINN_MYSQL_FLAVOR");
+            std::env::remove_var("DJINN_DATABASE_URL");
         }
     }
 

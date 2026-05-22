@@ -6,24 +6,32 @@ SERVER_DIR := $(CURDIR)/server
 # (via scripts/tilt/build-binaries.sh), builds the agent-runtime base +
 # thin images, installs the Helm release, and wires port-forwards. Nothing
 # in this Makefile manages the dev stack anymore — only the isolated test
-# MySQL (docker-compose.yml → `mysql-test` service at :3308) plus the test
-# harness targets that depend on it.
+# Postgres (docker-compose.yml → `postgres-test` service at :5433) plus the
+# test harness targets that depend on it.
 
-.PHONY: help dev test-db-migrate test-db-mysql-template test-vault test-db-reset sqlx-prepare sqlx-check test test-all
+.PHONY: help dev test-db-migrate test-db-postgres-template test-vault test-db-reset sqlx-prepare sqlx-check test test-all
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
-test-db-migrate: ## Ensure schema is applied to the test MySQL (:3308)
-	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features mysql,rustls"; exit 1; }
-	@until docker exec djinn-mysql-test mysql -uroot -e "SELECT 1" >/dev/null 2>&1; do sleep 1; done
-	@cd $(SERVER_DIR)/crates/djinn-db && DATABASE_URL=mysql://root@127.0.0.1:3308/djinn sqlx migrate run --source migrations_mysql >/dev/null
+test-db-migrate: ## Ensure schema is applied to the test Postgres (:5433)
+	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features postgres,rustls"; exit 1; }
+	@until docker exec djinn-postgres-test pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done
+	@cd $(SERVER_DIR)/crates/djinn-db && DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn sqlx migrate run --source migrations_postgres >/dev/null
 
-test-db-mysql-template: ## Build the djinn_test_template DB MySQL clones from
-	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features mysql,rustls"; exit 1; }
-	@until docker exec djinn-mysql-test mysql -uroot -e "SELECT 1" >/dev/null 2>&1; do echo "waiting for mysql-test..."; sleep 1; done
-	@docker exec djinn-mysql-test mysql -uroot -e "DROP DATABASE IF EXISTS djinn_test_template; CREATE DATABASE djinn_test_template"
-	@cd $(SERVER_DIR)/crates/djinn-db && DATABASE_URL=mysql://root@127.0.0.1:3308/djinn_test_template sqlx migrate run --source migrations_mysql >/dev/null
+test-db-postgres-template: ## Build the djinn_test_template DB Postgres clones from
+	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features postgres,rustls"; exit 1; }
+	@until docker exec djinn-postgres-test pg_isready -U postgres >/dev/null 2>&1; do echo "waiting for postgres-test..."; sleep 1; done
+	@# Evict any sessions still attached to the template before dropping; Postgres
+	@# refuses DROP DATABASE while connections remain.
+	@docker exec djinn-postgres-test psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='djinn_test_template' AND pid <> pg_backend_pid()" >/dev/null
+	@docker exec djinn-postgres-test psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS djinn_test_template" >/dev/null
+	@docker exec djinn-postgres-test psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE djinn_test_template" >/dev/null
+	@cd $(SERVER_DIR)/crates/djinn-db && DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn_test_template sqlx migrate run --source migrations_postgres >/dev/null
+	@# Mark the template as a TEMPLATE so it can be used as a fast clone source
+	@# (CREATE DATABASE x TEMPLATE djinn_test_template). Required for the test-
+	@# harness clone path in Database::open_in_memory().
+	@docker exec djinn-postgres-test psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'" >/dev/null
 	@echo "djinn_test_template ready"
 
 test-vault: ## Create the test-only vault key at $DJINN_VAULT_KEY_PATH (idempotent)
@@ -37,8 +45,8 @@ test-vault: ## Create the test-only vault key at $DJINN_VAULT_KEY_PATH (idempote
 dev: ## Start the Vite web client standalone (Tilt also runs it — this is for UI-only sessions)
 	cd $(UI_DIR) && pnpm dev
 
-sqlx-prepare: ## Regenerate server/.sqlx/ offline cache (uses test MySQL on :3308 via .cargo/config.toml)
-	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features mysql,rustls"; exit 1; }
+sqlx-prepare: ## Regenerate server/.sqlx/ offline cache (uses test Postgres on :5433 via .cargo/config.toml)
+	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features postgres,rustls"; exit 1; }
 	@$(MAKE) --no-print-directory test-db-migrate
 	@# Use `cargo check --all-targets --all-features` instead of `cargo sqlx prepare --workspace`:
 	@# the latter (as of sqlx-cli 0.8.6) skips test targets, so queries inside
@@ -62,22 +70,22 @@ sqlx-prepare: ## Regenerate server/.sqlx/ offline cache (uses test MySQL on :330
 	@echo "server/.sqlx/ regenerated ($$(ls $(SERVER_DIR)/.sqlx/query-*.json | wc -l) entries) — run 'git add server/.sqlx' and commit."
 
 sqlx-check: ## Fail if server/.sqlx/ is stale vs. current queries (CI)
-	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features mysql,rustls"; exit 1; }
+	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features postgres,rustls"; exit 1; }
 	@$(MAKE) --no-print-directory test-db-migrate
 	cd $(SERVER_DIR) && cargo sqlx prepare --check --workspace
 
-test-db-reset: ## Wipe and restart the test MySQL — cleans out djinn_test_* DBs
-	docker compose stop mysql-test
-	docker compose rm -sf mysql-test
-	docker compose up -d mysql-test
+test-db-reset: ## Wipe and restart the test Postgres — cleans out djinn_test_* DBs
+	docker compose stop postgres-test
+	docker compose rm -sf postgres-test
+	docker compose up -d postgres-test
 	@$(MAKE) --no-print-directory test-db-migrate
-	@$(MAKE) --no-print-directory test-db-mysql-template
+	@$(MAKE) --no-print-directory test-db-postgres-template
 
-test: ## Run djinn-db tests (env routes to :3308 via .cargo/config.toml)
-	@$(MAKE) --no-print-directory test-db-migrate test-db-mysql-template test-vault
+test: ## Run djinn-db tests (env routes to :5433 via .cargo/config.toml)
+	@$(MAKE) --no-print-directory test-db-migrate test-db-postgres-template test-vault
 	cd $(SERVER_DIR) && cargo test -p djinn-db
 
-# InnoDB + tmpfs handles the full workspace concurrently without the
+# Postgres + tmpfs handles the full workspace concurrently without the
 # OOM cascade that Dolt's caching exhibited, so we can run the workspace
 # in one shot via nextest.
 test-all: ## Run every workspace crate's tests in one nextest invocation

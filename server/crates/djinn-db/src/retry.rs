@@ -1,39 +1,43 @@
-//! Serialization-failure retry helper for Dolt transactions.
+//! Serialization-failure / deadlock retry helper for Postgres transactions.
 //!
-//! Dolt's MVCC engine surfaces MySQL error 1213 (40001) whenever two
-//! transactions touch overlapping keys and one of them commits first —
-//! the loser gets "serialization failure: this transaction conflicts with
-//! a committed transaction from another client, try restarting transaction."
-//! This is a normal, benign outcome under concurrent writes; the correct
-//! response is to re-run the transaction.
+//! Postgres raises SQLSTATE `40001` (`serialization_failure`) under
+//! SERIALIZABLE isolation when two concurrent transactions touch
+//! overlapping keys and the engine cannot serialize them; and SQLSTATE
+//! `40P01` (`deadlock_detected`) when the deadlock detector breaks a
+//! lock cycle. Both are benign outcomes — the loser should re-run the
+//! transaction.
 //!
-//! Call sites that `BEGIN ... COMMIT` on hot tables (notes, tasks, links,
-//! agents) wrap the transaction body in [`retry_on_serialization_failure`]
-//! so the retry is transparent. Every retry opens a fresh `sqlx` transaction
-//! — we do not try to resume one that already failed.
+//! Historical note: pre–postgres-cutover this helper was wired to Dolt's
+//! MySQL error 1213. Dolt routinely emitted 1213 under benign
+//! concurrency (the docs describe it as the default MVCC behaviour);
+//! Postgres surfaces 40001 / 40P01 only on real contention. The retry
+//! is kept because the tx bodies that wrap it (notes, tasks, links,
+//! agents) are still hot under concurrent test runs.
+//!
+//! Call sites that `BEGIN ... COMMIT` on hot tables wrap the transaction
+//! body in [`retry_on_serialization_failure`] so the retry is
+//! transparent. Every retry opens a fresh `sqlx` transaction — we do not
+//! try to resume one that already failed.
 
 use std::time::Duration;
 
 use crate::error::DbError;
 
-/// Default retry cap. Three attempts is enough in practice: Dolt commits
-/// are serialized on the server, so by attempt 3 the contending writer
-/// has almost always finished.
+/// Default retry cap. Three attempts is enough in practice for both
+/// 40001 (`serialization_failure`) and 40P01 (`deadlock_detected`) on
+/// Postgres — by attempt 3 the contending writer has almost always
+/// finished.
 pub const DEFAULT_MAX_TX_RETRIES: usize = 3;
 
-/// Returns `true` iff `err` is MySQL/Dolt error 1213 (serialization failure
-/// / deadlock). Both SQLSTATE `40001` and the numeric code are checked
-/// because `sqlx` and Dolt have historically shifted which field they
-/// populate across versions.
+/// Returns `true` iff `err` is a Postgres SQLSTATE that warrants a
+/// transaction retry: `40001` (`serialization_failure`) or `40P01`
+/// (`deadlock_detected`). Both encode a benign "loser of a concurrent
+/// access contest" outcome; rerunning the tx is the canonical fix.
 pub fn is_serialization_failure(err: &DbError) -> bool {
     let DbError::Sqlx(sqlx::Error::Database(db_err)) = err else {
         return false;
     };
-    let msg = db_err.message();
-    db_err.code().as_deref() == Some("40001")
-        || msg.contains("1213")
-        || msg.contains("serialization failure")
-        || msg.contains("Deadlock found")
+    matches!(db_err.code().as_deref(), Some("40001") | Some("40P01"))
 }
 
 /// Run `op` and retry up to `max_attempts` times when it returns a Dolt
