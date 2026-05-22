@@ -73,7 +73,7 @@ use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_core::events::EventBus;
-use djinn_db::{Database, DatabaseConnectConfig, MysqlBackendFlavor, MysqlDatabaseConfig};
+use djinn_db::{Database, DatabaseConnectConfig, MysqlDatabaseConfig};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_runtime::{ResolvedCredentials, RoleKind, TaskRunSpec, WorkerEvent};
 use djinn_supervisor::{RpcServices, SupervisorServices, TaskRunSupervisor};
@@ -600,42 +600,12 @@ async fn run_warm_graph(project_id: &str) -> Result<()> {
 /// warm Pod shares the same env-var contract as djinn-server so operators
 /// only manage one configuration surface:
 ///
-/// * `DJINN_DB_BACKEND` — `mysql` | `dolt` (defaults to `dolt`).
-/// * `DJINN_MYSQL_URL` — full DSN (defaults to
-///   `mysql://root@127.0.0.1:3306/djinn` under `dolt`).
-/// * `DJINN_MYSQL_FLAVOR` — `mysql` | `dolt` (defaults to the backend).
+/// * `DJINN_MYSQL_URL` — full DSN (required).
 fn bootstrap_warm_database() -> Result<Database> {
-    let backend = std::env::var("DJINN_DB_BACKEND").ok();
-    let backend = backend
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("dolt")
-        .to_ascii_lowercase();
-
-    let flavor_raw = std::env::var("DJINN_MYSQL_FLAVOR").ok();
-    let flavor = match flavor_raw
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(backend.as_str())
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "mysql" => MysqlBackendFlavor::Mysql,
-        "dolt" => MysqlBackendFlavor::Dolt,
-        other => anyhow::bail!("unknown DJINN_MYSQL_FLAVOR `{other}`; expected `mysql` or `dolt`"),
-    };
-
     let url = std::env::var("DJINN_MYSQL_URL")
-        .ok()
-        .or_else(|| match flavor {
-            MysqlBackendFlavor::Dolt => Some("mysql://root@127.0.0.1:3306/djinn".to_owned()),
-            MysqlBackendFlavor::Mysql => None,
-        })
-        .ok_or_else(|| anyhow::anyhow!("DJINN_MYSQL_URL must be set when DJINN_MYSQL_FLAVOR=mysql"))?;
+        .map_err(|_| anyhow::anyhow!("DJINN_MYSQL_URL must be set for the warm worker pod"))?;
 
-    let connect = DatabaseConnectConfig::Mysql(MysqlDatabaseConfig { url, flavor });
+    let connect = DatabaseConnectConfig::Mysql(MysqlDatabaseConfig { url });
     Database::open_with_config(connect).context("open warm worker database")
 }
 

@@ -8,7 +8,7 @@
         "name": "last_at?: String",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "",
           "max_size": 256
         }
       }
@@ -17,7 +17,7 @@
       "Right": 1
     },
     "nullable": [
-      false
+      true
     ]
   },
   "hash": "201398f074c0403dfc0257d01eda8d4b76a08faf97635f782d52f74c2823ffb5"

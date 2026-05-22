@@ -1,2 +1,2 @@
-pub mod dolt;
+pub mod mysql;
 pub mod runtime;

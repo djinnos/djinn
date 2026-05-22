@@ -136,16 +136,18 @@ impl AgentRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             Agent,
-            r#"SELECT id, project_id, `name`, base_role, description,
-                system_prompt_extensions, model_preference, verification_command,
-                mcp_servers, skills,
+            r#"SELECT id AS "id!", project_id AS "project_id!",
+                `name` AS "name!", base_role AS "base_role!",
+                description AS "description!", system_prompt_extensions AS "system_prompt_extensions!",
+                model_preference, verification_command,
+                mcp_servers AS "mcp_servers!", skills AS "skills!",
                 is_default AS "is_default!: bool",
                 (SELECT GROUP_CONCAT(h.proposed_text ORDER BY h.created_at ASC SEPARATOR '\n\n---\n\n')
                  FROM learned_prompt_history h
                  WHERE h.agent_id = agents.id
                    AND h.action IN ('keep','confirmed')
                 ) AS learned_prompt,
-                created_at, updated_at
+                created_at AS "created_at!", updated_at AS "updated_at!"
              FROM agents
              ORDER BY project_id ASC, is_default DESC, base_role ASC, name ASC"#
         )
@@ -204,16 +206,18 @@ impl AgentRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             Agent,
-            r#"SELECT id, project_id, `name`, base_role, description,
-                system_prompt_extensions, model_preference, verification_command,
-                mcp_servers, skills,
+            r#"SELECT id AS "id!", project_id AS "project_id!",
+                `name` AS "name!", base_role AS "base_role!",
+                description AS "description!", system_prompt_extensions AS "system_prompt_extensions!",
+                model_preference, verification_command,
+                mcp_servers AS "mcp_servers!", skills AS "skills!",
                 is_default AS "is_default!: bool",
                 (SELECT GROUP_CONCAT(h.proposed_text ORDER BY h.created_at ASC SEPARATOR '\n\n---\n\n')
                  FROM learned_prompt_history h
                  WHERE h.agent_id = agents.id
                    AND h.action IN ('keep','confirmed')
                 ) AS learned_prompt,
-                created_at, updated_at
+                created_at AS "created_at!", updated_at AS "updated_at!"
              FROM agents WHERE id = ?"#,
             id
         )
@@ -231,16 +235,18 @@ impl AgentRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             Agent,
-            r#"SELECT id, project_id, `name`, base_role, description,
-                system_prompt_extensions, model_preference, verification_command,
-                mcp_servers, skills,
+            r#"SELECT id AS "id!", project_id AS "project_id!",
+                `name` AS "name!", base_role AS "base_role!",
+                description AS "description!", system_prompt_extensions AS "system_prompt_extensions!",
+                model_preference, verification_command,
+                mcp_servers AS "mcp_servers!", skills AS "skills!",
                 is_default AS "is_default!: bool",
                 (SELECT GROUP_CONCAT(h.proposed_text ORDER BY h.created_at ASC SEPARATOR '\n\n---\n\n')
                  FROM learned_prompt_history h
                  WHERE h.agent_id = agents.id
                    AND h.action IN ('keep','confirmed')
                 ) AS learned_prompt,
-                created_at, updated_at
+                created_at AS "created_at!", updated_at AS "updated_at!"
              FROM agents
              WHERE project_id = ? AND base_role = ? AND is_default = 1 LIMIT 1"#,
             project_id,
@@ -262,16 +268,18 @@ impl AgentRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             Agent,
-            r#"SELECT id, project_id, `name`, base_role, description,
-                system_prompt_extensions, model_preference, verification_command,
-                mcp_servers, skills,
+            r#"SELECT id AS "id!", project_id AS "project_id!",
+                `name` AS "name!", base_role AS "base_role!",
+                description AS "description!", system_prompt_extensions AS "system_prompt_extensions!",
+                model_preference, verification_command,
+                mcp_servers AS "mcp_servers!", skills AS "skills!",
                 is_default AS "is_default!: bool",
                 (SELECT GROUP_CONCAT(h.proposed_text ORDER BY h.created_at ASC SEPARATOR '\n\n---\n\n')
                  FROM learned_prompt_history h
                  WHERE h.agent_id = agents.id
                    AND h.action IN ('keep','confirmed')
                 ) AS learned_prompt,
-                created_at, updated_at
+                created_at AS "created_at!", updated_at AS "updated_at!"
              FROM agents WHERE project_id = ? AND `name` = ?"#,
             project_id,
             name
@@ -286,16 +294,18 @@ impl AgentRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             Agent,
-            r#"SELECT id, project_id, `name`, base_role, description,
-                system_prompt_extensions, model_preference, verification_command,
-                mcp_servers, skills,
+            r#"SELECT id AS "id!", project_id AS "project_id!",
+                `name` AS "name!", base_role AS "base_role!",
+                description AS "description!", system_prompt_extensions AS "system_prompt_extensions!",
+                model_preference, verification_command,
+                mcp_servers AS "mcp_servers!", skills AS "skills!",
                 is_default AS "is_default!: bool",
                 (SELECT GROUP_CONCAT(h.proposed_text ORDER BY h.created_at ASC SEPARATOR '\n\n---\n\n')
                  FROM learned_prompt_history h
                  WHERE h.agent_id = agents.id
                    AND h.action IN ('keep','confirmed')
                 ) AS learned_prompt,
-                created_at, updated_at
+                created_at AS "created_at!", updated_at AS "updated_at!"
              FROM agents
              WHERE project_id = ? ORDER BY is_default DESC, base_role ASC, `name` ASC"#,
             project_id

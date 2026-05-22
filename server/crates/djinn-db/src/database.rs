@@ -23,22 +23,6 @@ impl DatabaseBackendKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MysqlBackendFlavor {
-    Mysql,
-    Dolt,
-}
-
-impl MysqlBackendFlavor {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Mysql => "mysql",
-            Self::Dolt => "dolt",
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "backend", rename_all = "snake_case")]
 pub enum DatabaseConnectConfig {
@@ -56,13 +40,11 @@ impl DatabaseConnectConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MysqlDatabaseConfig {
     pub url: String,
-    #[serde(default = "default_mysql_flavor")]
-    pub flavor: MysqlBackendFlavor,
 }
 
 impl MysqlDatabaseConfig {
     pub fn display_backend(&self) -> &'static str {
-        self.flavor.as_str()
+        "mysql"
     }
 }
 
@@ -94,12 +76,7 @@ pub struct DatabaseBackendCapabilities {
     pub note_vector_backend: NoteVectorBackend,
     pub supports_sqlite_pragmas: bool,
     pub supports_sqlite_vec: bool,
-    pub supports_branching_metadata: bool,
     pub supports_readonly_connection_mode: bool,
-}
-
-fn default_mysql_flavor() -> MysqlBackendFlavor {
-    MysqlBackendFlavor::Mysql
 }
 
 #[derive(Clone, Debug)]
@@ -109,98 +86,35 @@ pub struct Database {
     bootstrap: DatabaseBootstrapInfo,
     capabilities: DatabaseBackendCapabilities,
     initialized: Arc<OnceCell<()>>,
-    test_branch: Option<TestBranchInit>,
+    test_branch: Option<TestDbInit>,
 }
 
+/// MySQL template-clone test isolation: per-test `djinn_test_<uuid>`
+/// schema cloned from `djinn_test_template`.
 #[derive(Clone, Debug)]
-enum TestBranchInit {
-    /// Legacy Dolt branching: a single shared `djinn_test` database with a
-    /// branch per test. Slated for deletion in Phase 2.
-    Dolt {
-        server_prefix: String,
-        shared_db: String,
-        branch: String,
-    },
-    /// MySQL template-clone isolation: per-test `djinn_test_<uuid>`
-    /// schema cloned from `djinn_test_template`.
-    Mysql {
-        server_prefix: String,
-        test_db: String,
-    },
+struct TestDbInit {
+    server_prefix: String,
+    test_db: String,
 }
-
-/// Process-wide guard: the shared `djinn_test` database is created and
-/// migrated exactly once per test process, regardless of how many
-/// `open_in_memory()` callers fan out. Branch creation is per-instance.
-static SHARED_TEST_DB_INIT: OnceCell<()> = OnceCell::const_new();
 
 impl Database {
     /// Open a database using an explicit backend selection seam.
     pub fn open_with_config(config: DatabaseConnectConfig) -> DbResult<Self> {
         match config {
-            // Dolt COMMITs can take 30–90s under write contention (merge-based
-            // commit path is O(working-set)), so a connection is held ~10×
-            // longer per write than a plain MySQL one. A pool of 8 starves
-            // almost immediately when mirror-fetcher + KB watcher + MCP tools
-            // all have a write in flight. 32 gives reads + concurrent writers
-            // headroom without blowing past Dolt's own connection cap.
+            // 32 max connections gives reads + concurrent writers headroom
+            // for the workspace's expected concurrency (coordinator,
+            // mirror-fetcher, KB watcher, MCP tools, PR poller).
             DatabaseConnectConfig::Mysql(mysql) => Self::open_mysql(&mysql, 32),
         }
     }
 
     /// Open an isolated test database.
     ///
-    /// Phase 1 of the Dolt → MySQL cutover supports two backends behind one
-    /// API:
-    ///
-    /// * **MySQL** (when `DJINN_TEST_MYSQL_URL` is set, default in Phase 2):
-    ///   create a fresh `djinn_test_<uuid>` schema on `:3308` and clone the
-    ///   table definitions from the `djinn_test_template` schema, which was
-    ///   pre-built by `make test-db-mysql-template`. Cloning is sub-second
-    ///   because the mysql-test container is tmpfs-backed.
-    /// * **Dolt** (legacy fallback, kept until Phase 2 deletes it): create a
-    ///   fresh branch on the shared `djinn_test` database. Each new pool
-    ///   connection runs `USE djinn_test/<branch>` in `after_connect`.
-    ///
-    /// Each test gets a UUIDv7-named container (database or branch) — no
-    /// collisions under `cargo nextest` parallelism.
-    pub fn open_in_memory() -> DbResult<Self> {
-        if let Ok(base) = std::env::var("DJINN_TEST_MYSQL_URL") {
-            return Self::open_in_memory_mysql(&base);
-        }
-        Self::open_in_memory_dolt()
-    }
-
-    /// Legacy Dolt-branch test isolation. See `open_in_memory` for context.
-    /// Slated for deletion in Phase 2 of the MySQL cutover.
-    fn open_in_memory_dolt() -> DbResult<Self> {
-        let server_prefix = "mysql://root@127.0.0.1:3307".to_owned();
-        let shared_db = "djinn_test".to_owned();
-        let branch = format!("t_{}", uuid::Uuid::now_v7().simple());
-        // Pool connects to the shared DB; after_connect pins each conn to
-        // the branch via `USE djinn_test/<branch>`.
-        let url = format!("{server_prefix}/{shared_db}");
-
-        Self::open_mysql_inner(
-            &MysqlDatabaseConfig {
-                url,
-                flavor: MysqlBackendFlavor::Dolt,
-            },
-            4,
-            Some(TestBranchInit::Dolt {
-                server_prefix,
-                shared_db,
-                branch,
-            }),
-        )
-    }
-
-    /// MySQL template-clone test isolation.
-    ///
-    /// Takes the base URL (e.g. `mysql://root@127.0.0.1:3308`), strips any
-    /// trailing `/<db>` segment, then constructs an admin connection
-    /// against `<base>/mysql`, creates a fresh `djinn_test_<uuid>` schema,
-    /// and clones every table from `djinn_test_template` into it
+    /// Uses the MySQL template-clone approach: take the base URL from
+    /// `DJINN_TEST_MYSQL_URL` (default `mysql://root@127.0.0.1:3308`), strip
+    /// any trailing `/<db>` segment, then construct an admin connection
+    /// against `<base>/mysql`, create a fresh `djinn_test_<uuid>` schema,
+    /// and clone every table from `djinn_test_template` into it
     /// (DDL + rows; the only seeded rows are in `_sqlx_migrations`).
     ///
     /// FK constraints are recreated by replaying each table's
@@ -208,18 +122,20 @@ impl Database {
     /// duration of the clone — `CREATE TABLE ... LIKE` would silently drop
     /// the FK constraints, breaking ON DELETE CASCADE assumptions in many
     /// repositories.
-    fn open_in_memory_mysql(base: &str) -> DbResult<Self> {
-        let server_prefix = strip_server_prefix(base);
+    ///
+    /// Each test gets a UUIDv7-named database — no collisions under
+    /// `cargo nextest` parallelism.
+    pub fn open_in_memory() -> DbResult<Self> {
+        let base = std::env::var("DJINN_TEST_MYSQL_URL")
+            .unwrap_or_else(|_| "mysql://root@127.0.0.1:3308".to_owned());
+        let server_prefix = strip_server_prefix(&base);
         let test_db = format!("djinn_test_{}", uuid::Uuid::now_v7().simple());
         let url = format!("{server_prefix}/{test_db}");
 
         Self::open_mysql_inner(
-            &MysqlDatabaseConfig {
-                url,
-                flavor: MysqlBackendFlavor::Mysql,
-            },
+            &MysqlDatabaseConfig { url },
             4,
-            Some(TestBranchInit::Mysql {
+            Some(TestDbInit {
                 server_prefix,
                 test_db,
             }),
@@ -253,7 +169,7 @@ impl Database {
     fn open_mysql_inner(
         config: &MysqlDatabaseConfig,
         max_connections: u32,
-        test_branch: Option<TestBranchInit>,
+        test_branch: Option<TestDbInit>,
     ) -> DbResult<Self> {
         let mut opts = MySqlConnectOptions::from_str(&config.url)?;
         // For the MySQL test path, disable sqlx's prepared-statement cache.
@@ -264,51 +180,35 @@ impl Database {
         // cached statement is reused against a freshly-created twin schema.
         // Disabling client-side caching forces a fresh PREPARE on each
         // query, which is a small per-test overhead and eliminates the race.
-        // Production / Dolt paths keep caching on.
-        if matches!(test_branch, Some(TestBranchInit::Mysql { .. })) {
+        // Production paths keep caching on.
+        if test_branch.is_some() {
             opts = opts.statement_cache_capacity(0);
         }
-        // Precompute the `USE db/branch` statement so the after_connect
-        // closure can be shared (no per-connection allocation). Only the
-        // Dolt branch variant needs it — the MySQL template-clone path
-        // points the connection URL directly at `djinn_test_<uuid>`.
-        let use_branch_stmt = test_branch.as_ref().and_then(|init| match init {
-            TestBranchInit::Dolt {
-                shared_db, branch, ..
-            } => Some(format!("USE {shared_db}/{branch}")),
-            TestBranchInit::Mysql { .. } => None,
-        });
         let pool = MySqlPoolOptions::new()
             .max_connections(max_connections)
-            // Dolt COMMITs can run 30–90s under write contention; the sqlx
-            // default acquire_timeout of 30s causes every UI/MCP request
-            // queued behind a slow write to hard-fail with "pool timed out"
-            // even though the DB is healthy. Raise the ceiling so queued
-            // requests wait it out instead of cascading into retry storms.
-            .acquire_timeout(std::time::Duration::from_secs(120))
+            // InnoDB resolves lock cycles in single-digit milliseconds (vs
+            // Dolt's multi-minute hangs that prompted the migration), so a
+            // 15s acquire ceiling surfaces real pool exhaustion as a hard
+            // signal rather than masking it behind a 120s wait.
+            .acquire_timeout(std::time::Duration::from_secs(15))
             .after_connect(move |conn, _meta| {
-                let use_branch_stmt = use_branch_stmt.clone();
                 Box::pin(async move {
                     sqlx::query("SET SESSION sql_mode = CONCAT(@@sql_mode, ',STRICT_ALL_TABLES')")
                         .execute(&mut *conn)
                         .await?;
-                    // Bound how long any single statement / lock wait can
-                    // hang. Dolt's enforcement of these is best-effort
-                    // (varies by version) — the dolt_watchdog spawned at
-                    // server startup is the authoritative safety net. Both
-                    // SETs are wrapped in best-effort blocks so a Dolt
-                    // build that rejects them with a parse error doesn't
-                    // break new connections; older Dolt accepts MySQL
-                    // syntax but ignores the value.
-                    let _ = sqlx::query("SET SESSION MAX_EXECUTION_TIME = 60000")
+                    // Bound how long any single statement can run before
+                    // the server kills it.
+                    sqlx::query("SET SESSION MAX_EXECUTION_TIME = 30000")
                         .execute(&mut *conn)
-                        .await;
-                    let _ = sqlx::query("SET SESSION lock_wait_timeout = 60")
+                        .await?;
+                    // Bound how long any row-lock acquisition can wait on
+                    // InnoDB. NOTE: this is `innodb_lock_wait_timeout`,
+                    // NOT `lock_wait_timeout` (which targets metadata
+                    // locks). The legacy Dolt code set the wrong variable;
+                    // this is the actual InnoDB knob.
+                    sqlx::query("SET SESSION innodb_lock_wait_timeout = 10")
                         .execute(&mut *conn)
-                        .await;
-                    if let Some(stmt) = use_branch_stmt {
-                        sqlx::query(&stmt).execute(&mut *conn).await?;
-                    }
+                        .await?;
                     Ok(())
                 })
             })
@@ -331,7 +231,6 @@ impl Database {
                 note_vector_backend: NoteVectorBackend::External,
                 supports_sqlite_pragmas: false,
                 supports_sqlite_vec: false,
-                supports_branching_metadata: matches!(config.flavor, MysqlBackendFlavor::Dolt),
                 supports_readonly_connection_mode: false,
             },
             initialized: Arc::new(OnceCell::new()),
@@ -341,7 +240,7 @@ impl Database {
 
     /// Legacy stub retained so sqlite-vec-era embedding tests still compile.
     ///
-    /// MySQL/Dolt has no sqlite-vec equivalent — vector search is handled by
+    /// MySQL has no sqlite-vec equivalent — vector search is handled by
     /// Qdrant. This always returns "unavailable" so tests that gate on the
     /// extension status take their fallback path.
     /// Return `true` if a table with the given name exists in the current
@@ -366,7 +265,7 @@ impl Database {
         Ok(SqliteVecStatus {
             available: false,
             version: None,
-            detail: Some("sqlite-vec retired with the MySQL/Dolt migration".to_owned()),
+            detail: Some("sqlite-vec retired with the MySQL migration".to_owned()),
         })
     }
 
@@ -461,26 +360,7 @@ impl Database {
         self.initialized
             .get_or_try_init(|| async move {
                 match test_branch {
-                    Some(TestBranchInit::Dolt {
-                        server_prefix,
-                        shared_db,
-                        branch,
-                    }) => {
-                        // Shared djinn_test DB + migrations on `main` —
-                        // once per process, regardless of test fan-out.
-                        SHARED_TEST_DB_INIT
-                            .get_or_try_init(|| {
-                                init_shared_test_db(
-                                    server_prefix.clone(),
-                                    shared_db.clone(),
-                                )
-                            })
-                            .await?;
-                        // Per-instance: create the branch this test will
-                        // write against. UUIDv7 names don't collide.
-                        create_test_branch(&server_prefix, &shared_db, &branch).await?;
-                    }
-                    Some(TestBranchInit::Mysql {
+                    Some(TestDbInit {
                         server_prefix,
                         test_db,
                     }) => {
@@ -518,58 +398,6 @@ fn strip_server_prefix(base_url: &str) -> String {
         },
         None => trimmed.to_owned(),
     }
-}
-
-async fn init_shared_test_db(server_prefix: String, shared_db: String) -> DbResult<()> {
-    let url = format!("{server_prefix}/{shared_db}");
-    migrations::ensure_mysql_database_exists(&url).await?;
-    let pool = MySqlPool::connect(&url)
-        .await
-        .map_err(DbError::from)?;
-    let result = async {
-        sqlx::migrate!("./migrations_mysql")
-            .run(&pool)
-            .await
-            .map_err(|e: sqlx::migrate::MigrateError| DbError::InvalidData(e.to_string()))?;
-        // Dolt branches fork from the latest *commit*, not the working
-        // root. Without this commit, `CALL DOLT_BRANCH('t_x', 'main')`
-        // would produce a branch with an empty schema because the
-        // migrations live in main's unstaged working root.
-        let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dolt_status")
-            .fetch_one(&pool)
-            .await
-            .map_err(DbError::from)?;
-        if pending > 0 {
-            sqlx::query("CALL DOLT_ADD('-A')")
-                .execute(&pool)
-                .await
-                .map_err(DbError::from)?;
-            sqlx::query("CALL DOLT_COMMIT('-m', 'apply test migrations on main')")
-                .execute(&pool)
-                .await
-                .map_err(DbError::from)?;
-        }
-        Ok::<(), DbError>(())
-    }
-    .await;
-    pool.close().await;
-    result
-}
-
-async fn create_test_branch(
-    server_prefix: &str,
-    shared_db: &str,
-    branch: &str,
-) -> DbResult<()> {
-    use sqlx::{ConnectOptions, Connection, Executor};
-    let url = format!("{server_prefix}/{shared_db}");
-    let opts = MySqlConnectOptions::from_str(&url)
-        .map_err(|e| DbError::InvalidData(format!("invalid mysql url: {e}")))?;
-    let mut conn = opts.connect().await.map_err(DbError::from)?;
-    let stmt = format!("CALL DOLT_BRANCH('{branch}', 'main')");
-    conn.execute(stmt.as_str()).await.map_err(DbError::from)?;
-    conn.close().await.map_err(DbError::from)?;
-    Ok(())
 }
 
 /// Clone `djinn_test_template` into a freshly-created per-test database.
@@ -810,20 +638,18 @@ mod tests {
     use super::*;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn mysql_backend_selection_metadata_is_dolt_shaped() {
+    async fn mysql_backend_selection_metadata_is_shaped_as_expected() {
         let db = Database::open_with_config(DatabaseConnectConfig::Mysql(MysqlDatabaseConfig {
-            url: "mysql://root@127.0.0.1:3306/djinn".to_owned(),
-            flavor: MysqlBackendFlavor::Dolt,
+            url: "mysql://root@127.0.0.1:3308/djinn".to_owned(),
         }))
-        .expect("mysql/dolt backend should construct a concrete runtime path");
+        .expect("mysql backend should construct a concrete runtime path");
 
         assert_eq!(db.backend_kind(), DatabaseBackendKind::Mysql);
-        assert_eq!(db.bootstrap_info().backend_label, "dolt");
+        assert_eq!(db.bootstrap_info().backend_label, "mysql");
         assert_eq!(
             db.backend_capabilities().lexical_search,
             NoteSearchBackend::MysqlFulltext
         );
-        assert!(db.backend_capabilities().supports_branching_metadata);
         assert!(!db.backend_capabilities().supports_sqlite_vec);
     }
 
@@ -878,10 +704,9 @@ mod tests {
     async fn open_in_memory_generates_unique_isolation_containers() {
         let a = Database::open_in_memory().unwrap();
         let b = Database::open_in_memory().unwrap();
-        // The Dolt variant gives each test a distinct branch; the MySQL
-        // variant gives each test a distinct database. Either way, two
-        // back-to-back `open_in_memory` calls produce different isolation
-        // identifiers.
+        // Each `open_in_memory` call gives the test a distinct
+        // `djinn_test_<uuid>` database. Two back-to-back calls must
+        // produce different isolation identifiers.
         let a_init = a
             .test_branch
             .as_ref()
@@ -890,58 +715,8 @@ mod tests {
             .test_branch
             .as_ref()
             .expect("open_in_memory sets test_branch");
-        match (a_init, b_init) {
-            (
-                TestBranchInit::Dolt {
-                    shared_db: a_db,
-                    branch: a_br,
-                    ..
-                },
-                TestBranchInit::Dolt {
-                    branch: b_br, ..
-                },
-            ) => {
-                assert_ne!(a_br, b_br);
-                assert!(a_br.starts_with("t_"));
-                assert_eq!(a_db, "djinn_test");
-                assert_eq!(a.bootstrap_info().target, b.bootstrap_info().target);
-            }
-            (
-                TestBranchInit::Mysql { test_db: a_db, .. },
-                TestBranchInit::Mysql { test_db: b_db, .. },
-            ) => {
-                assert_ne!(a_db, b_db);
-                assert!(a_db.starts_with("djinn_test_"));
-                assert_ne!(a.bootstrap_info().target, b.bootstrap_info().target);
-            }
-            (left, right) => panic!(
-                "open_in_memory should pick one flavor per process, got {left:?} vs {right:?}"
-            ),
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn mysql_and_dolt_capabilities_differ_only_by_branch_metadata() {
-        let mysql = Database::open_with_config(DatabaseConnectConfig::Mysql(MysqlDatabaseConfig {
-            url: "mysql://root@127.0.0.1:3306/djinn".to_owned(),
-            flavor: MysqlBackendFlavor::Mysql,
-        }))
-        .unwrap();
-        let dolt = Database::open_with_config(DatabaseConnectConfig::Mysql(MysqlDatabaseConfig {
-            url: "mysql://root@127.0.0.1:3307/djinn".to_owned(),
-            flavor: MysqlBackendFlavor::Dolt,
-        }))
-        .unwrap();
-
-        assert_eq!(
-            mysql.backend_capabilities().lexical_search,
-            dolt.backend_capabilities().lexical_search
-        );
-        assert_eq!(
-            mysql.backend_capabilities().note_vector_backend,
-            dolt.backend_capabilities().note_vector_backend
-        );
-        assert!(!mysql.backend_capabilities().supports_branching_metadata);
-        assert!(dolt.backend_capabilities().supports_branching_metadata);
+        assert_ne!(a_init.test_db, b_init.test_db);
+        assert!(a_init.test_db.starts_with("djinn_test_"));
+        assert_ne!(a.bootstrap_info().target, b.bootstrap_info().target);
     }
 }

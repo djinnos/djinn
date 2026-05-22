@@ -14,7 +14,9 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
 
         let node_rows = sqlx::query!(
-            r#"SELECT n.id, n.permalink, n.title, n.note_type, n.folder,
+            r#"SELECT n.id AS "id!", n.permalink AS "permalink!",
+                    n.title AS "title!", n.note_type AS "note_type!",
+                    n.folder AS "folder!",
                     (SELECT COUNT(*) FROM note_links WHERE source_id = n.id
                        AND target_id IS NOT NULL)
                     + (SELECT COUNT(*) FROM note_links WHERE target_id = n.id)

@@ -8,7 +8,7 @@
         "name": "id",
         "type_info": {
           "type": "Long",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | PRIMARY_KEY | NO_DEFAULT_VALUE",
           "max_size": 11
         }
       },
@@ -17,7 +17,7 @@
         "name": "github_org_id",
         "type_info": {
           "type": "LongLong",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
           "max_size": 20
         }
       },
@@ -26,7 +26,7 @@
         "name": "github_org_login",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
           "max_size": 1020
         }
       },
@@ -35,7 +35,7 @@
         "name": "app_id",
         "type_info": {
           "type": "LongLong",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
           "max_size": 20
         }
       },
@@ -44,7 +44,7 @@
         "name": "installation_id",
         "type_info": {
           "type": "LongLong",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
           "max_size": 20
         }
       },

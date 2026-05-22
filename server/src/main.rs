@@ -161,7 +161,6 @@ async fn async_main() {
         state.event_bus(),
         state.cancel().clone(),
     );
-    djinn_db::background::dolt_watchdog::spawn(state.db().clone(), state.cancel().clone());
     djinn_server::mirror_fetcher::spawn(state.clone());
 
     // OTLP telemetry is configured at deploy time via env (set by the Helm

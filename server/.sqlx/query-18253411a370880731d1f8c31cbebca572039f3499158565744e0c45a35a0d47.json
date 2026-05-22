@@ -35,7 +35,7 @@
         "name": "image_last_error",
         "type_info": {
           "type": "Blob",
-          "flags": "",
+          "flags": "BLOB",
           "max_size": 4294967295
         }
       }

@@ -20,14 +20,14 @@ rustc-wrapper = "sccache"
 
 [env]
 TMPDIR = "/var/tmp"
-# Default every cargo invocation in this workspace to the isolated test Dolt
-# on :3307 — NOT the dev Dolt on :3306 which holds real user data. Both
-# sqlx-macros (compile-time schema validation via DATABASE_URL) and the
-# test harness (runtime DB creation via DJINN_TEST_MYSQL_URL) honor these.
-# To deliberately point at the dev Dolt instead (e.g. sqlx-prepare against
-# a stable schema), override at the command line.
-DATABASE_URL = "mysql://root@127.0.0.1:3307/djinn"
-DJINN_TEST_MYSQL_URL = "mysql://root@127.0.0.1:3307"
+# Default every cargo invocation in this workspace to the isolated test
+# MySQL on :3308. Both sqlx-macros (compile-time schema validation via
+# DATABASE_URL) and the test harness (runtime DB creation via
+# DJINN_TEST_MYSQL_URL) honor these. To deliberately point at a different
+# instance (e.g. sqlx-prepare against a stable schema), override at the
+# command line.
+DATABASE_URL = "mysql://root@127.0.0.1:3308/djinn"
+DJINN_TEST_MYSQL_URL = "mysql://root@127.0.0.1:3308"
 # Default tests to a disk-backed vault key under /var/tmp — NOT the
 # production vault at ~/.djinn/vault.key which is owned by root (the
 # djinn-server container writes it). crypto::vault_key_path() honors

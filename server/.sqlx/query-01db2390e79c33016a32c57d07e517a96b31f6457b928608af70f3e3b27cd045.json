@@ -8,7 +8,7 @@
         "name": "content_hash",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
           "max_size": 256
         }
       },
@@ -17,7 +17,7 @@
         "name": "model_version",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
           "max_size": 256
         }
       },

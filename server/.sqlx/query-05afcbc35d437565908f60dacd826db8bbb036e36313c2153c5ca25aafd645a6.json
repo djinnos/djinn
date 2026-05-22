@@ -8,7 +8,7 @@
         "name": "id",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | PRIMARY_KEY | NO_DEFAULT_VALUE",
           "max_size": 144
         }
       },

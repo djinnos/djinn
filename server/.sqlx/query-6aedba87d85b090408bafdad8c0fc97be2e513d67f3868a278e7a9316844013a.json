@@ -8,7 +8,7 @@
         "name": "value",
         "type_info": {
           "type": "Blob",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | BLOB | NO_DEFAULT_VALUE",
           "max_size": 4294967295
         }
       }

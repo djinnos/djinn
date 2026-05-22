@@ -8,7 +8,7 @@
         "name": "branch",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | MULTIPLE_KEY",
           "max_size": 1020
         }
       },
@@ -17,8 +17,8 @@
         "name": "count!: i64",
         "type_info": {
           "type": "LongLong",
-          "flags": "NOT_NULL",
-          "max_size": 20
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 21
         }
       }
     ],

@@ -7,18 +7,18 @@
         "ordinal": 0,
         "name": "completed!: i64",
         "type_info": {
-          "type": "Double",
-          "flags": "NOT_NULL",
-          "max_size": 22
+          "type": "NewDecimal",
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 24
         }
       },
       {
         "ordinal": 1,
         "name": "failed!: i64",
         "type_info": {
-          "type": "Double",
-          "flags": "NOT_NULL",
-          "max_size": 22
+          "type": "NewDecimal",
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 24
         }
       },
       {
@@ -26,8 +26,8 @@
         "name": "avg_tokens!: f64",
         "type_info": {
           "type": "Double",
-          "flags": "",
-          "max_size": 22
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 23
         }
       }
     ],
@@ -37,7 +37,7 @@
     "nullable": [
       false,
       false,
-      true
+      false
     ]
   },
   "hash": "42fe751e069c5be08665a4d236c455a9a62ad02ed2d7dad07016f703d6f63a60"

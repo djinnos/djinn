@@ -61,9 +61,9 @@ jobs:
         working-directory: server
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
-      # No Dolt service in this job. Force sqlx to read from the committed
-      # `.sqlx/` offline cache instead of trying to connect to the
-      # DATABASE_URL baked into `.cargo/config.toml`.
+      # No MySQL service in this job. Force sqlx to read from the
+      # committed `.sqlx/` offline cache instead of trying to connect to
+      # the DATABASE_URL baked into `.cargo/config.toml`.
       SQLX_OFFLINE: "true"
     steps:
       - uses: actions/checkout@v4
@@ -103,7 +103,7 @@ jobs:
         working-directory: server
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
-      # No Dolt service in this job (it only compiles, --no-run).
+      # No MySQL service in this job (it only compiles, --no-run).
       # Force sqlx to read from the committed `.sqlx/` offline cache.
       SQLX_OFFLINE: "true"
     steps:
@@ -192,20 +192,23 @@ jobs:
         working-directory: server
     env:
       RUSTFLAGS: "-D warnings -C link-arg=-fuse-ld=mold"
-    # Ephemeral Dolt for djinn-db integration tests. The workspace
+      DJINN_TEST_MYSQL_URL: "mysql://root@127.0.0.1:3308"
+    # Ephemeral MySQL for djinn-db integration tests. The workspace
     # `.cargo/config.toml` points DATABASE_URL and DJINN_TEST_MYSQL_URL
-    # at :3307, matching the `dolt-test` service in docker-compose.yml —
+    # at :3308, matching the `mysql-test` service in docker-compose.yml —
     # CI inherits those values automatically, so we just need the port
     # forwarded here.
     services:
-      dolt:
-        image: dolthub/dolt-sql-server:latest
+      mysql:
+        image: mysql:8.4
         env:
-          DOLT_ROOT_PASSWORD: ""
-          DOLT_ROOT_HOST: "%"
-          DOLT_DATABASE: djinn
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+          MYSQL_DATABASE: djinn
         ports:
-          - 3307:3306
+          - 3308:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=5s --health-timeout=3s --health-retries=20
     steps:
       - uses: actions/checkout@v4
 
@@ -229,30 +232,17 @@ jobs:
         with:
           tool: sqlx-cli
 
-      - name: Wait for Dolt
-        run: |
-          # Dolt ships no health check, so poll. Check both: port open
-          # (tcp) AND query-ready (SELECT 1). The latter covers the gap
-          # between bind and accept — on cold start Dolt binds fast but
-          # takes a few seconds to serve queries.
-          for i in $(seq 1 60); do
-            if (echo > /dev/tcp/127.0.0.1/3307) >/dev/null 2>&1 \
-               && mysql -h 127.0.0.1 -P 3307 -u root -e "SELECT 1" >/dev/null 2>&1; then
-              echo "Dolt is ready after ${i}s"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "::error::Dolt did not become ready within 60s"
-          docker ps -a
-          docker logs "$(docker ps -aqf 'ancestor=dolthub/dolt-sql-server:latest')" || true
-          exit 1
-
       - name: Apply djinn-db migrations
         working-directory: server/crates/djinn-db
         env:
-          DATABASE_URL: mysql://root@127.0.0.1:3307/djinn
+          DATABASE_URL: mysql://root@127.0.0.1:3308/djinn
         run: sqlx migrate run --source migrations_mysql
+
+      - name: Build MySQL test template
+        run: |
+          until mysql -h 127.0.0.1 -P 3308 -uroot -e "SELECT 1" >/dev/null 2>&1; do sleep 1; done
+          mysql -h 127.0.0.1 -P 3308 -uroot -e "DROP DATABASE IF EXISTS djinn_test_template; CREATE DATABASE djinn_test_template"
+          cd server/crates/djinn-db && DATABASE_URL=mysql://root@127.0.0.1:3308/djinn_test_template sqlx migrate run --source migrations_mysql
 
       - name: Configure git identity for tests
         run: |

@@ -8,8 +8,8 @@
         "name": "avg_tokens!: f64",
         "type_info": {
           "type": "Double",
-          "flags": "",
-          "max_size": 22
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 23
         }
       },
       {
@@ -17,8 +17,8 @@
         "name": "avg_tokens_in!: f64",
         "type_info": {
           "type": "Double",
-          "flags": "",
-          "max_size": 22
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 23
         }
       },
       {
@@ -26,8 +26,8 @@
         "name": "avg_tokens_out!: f64",
         "type_info": {
           "type": "Double",
-          "flags": "",
-          "max_size": 22
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 23
         }
       },
       {
@@ -35,71 +35,71 @@
         "name": "avg_time_seconds!: f64",
         "type_info": {
           "type": "Double",
-          "flags": "",
-          "max_size": 22
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 23
         }
       },
       {
         "ordinal": 4,
         "name": "extracted!: i64",
         "type_info": {
-          "type": "Double",
-          "flags": "NOT_NULL",
-          "max_size": 22
+          "type": "NewDecimal",
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 43
         }
       },
       {
         "ordinal": 5,
         "name": "dedup_skipped!: i64",
         "type_info": {
-          "type": "Double",
-          "flags": "NOT_NULL",
-          "max_size": 22
+          "type": "NewDecimal",
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 43
         }
       },
       {
         "ordinal": 6,
         "name": "novelty_skipped!: i64",
         "type_info": {
-          "type": "Double",
-          "flags": "NOT_NULL",
-          "max_size": 22
+          "type": "NewDecimal",
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 43
         }
       },
       {
         "ordinal": 7,
         "name": "written!: i64",
         "type_info": {
-          "type": "Double",
-          "flags": "NOT_NULL",
-          "max_size": 22
+          "type": "NewDecimal",
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 43
         }
       },
       {
         "ordinal": 8,
         "name": "merged!: i64",
         "type_info": {
-          "type": "Double",
-          "flags": "NOT_NULL",
-          "max_size": 22
+          "type": "NewDecimal",
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 43
         }
       },
       {
         "ordinal": 9,
         "name": "downgraded!: i64",
         "type_info": {
-          "type": "Double",
-          "flags": "NOT_NULL",
-          "max_size": 22
+          "type": "NewDecimal",
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 43
         }
       },
       {
         "ordinal": 10,
         "name": "discarded!: i64",
         "type_info": {
-          "type": "Double",
-          "flags": "NOT_NULL",
-          "max_size": 22
+          "type": "NewDecimal",
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 43
         }
       }
     ],
@@ -107,10 +107,10 @@
       "Right": 3
     },
     "nullable": [
-      true,
-      true,
-      true,
-      true,
+      false,
+      false,
+      false,
+      false,
       false,
       false,
       false,

@@ -6,7 +6,7 @@ SERVER_DIR := $(CURDIR)/server
 # (via scripts/tilt/build-binaries.sh), builds the agent-runtime base +
 # thin images, installs the Helm release, and wires port-forwards. Nothing
 # in this Makefile manages the dev stack anymore — only the isolated test
-# Dolt (docker-compose.yml → `dolt-test` service at :3307) plus the test
+# MySQL (docker-compose.yml → `mysql-test` service at :3308) plus the test
 # harness targets that depend on it.
 
 .PHONY: help dev test-db-migrate test-db-mysql-template test-vault test-db-reset sqlx-prepare sqlx-check test test-all
@@ -14,12 +14,12 @@ SERVER_DIR := $(CURDIR)/server
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
-test-db-migrate: ## Ensure schema is applied to the test Dolt (:3307)
+test-db-migrate: ## Ensure schema is applied to the test MySQL (:3308)
 	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features mysql,rustls"; exit 1; }
-	@until docker exec djinn-dolt-test dolt sql -q "SELECT 1" >/dev/null 2>&1; do sleep 1; done
-	@cd $(SERVER_DIR)/crates/djinn-db && DATABASE_URL=mysql://root@127.0.0.1:3307/djinn sqlx migrate run --source migrations_mysql >/dev/null
+	@until docker exec djinn-mysql-test mysql -uroot -e "SELECT 1" >/dev/null 2>&1; do sleep 1; done
+	@cd $(SERVER_DIR)/crates/djinn-db && DATABASE_URL=mysql://root@127.0.0.1:3308/djinn sqlx migrate run --source migrations_mysql >/dev/null
 
-test-db-mysql-template: ## Build the djinn_test_template DB MySQL clones from (Phase 1 cut-over scaffolding)
+test-db-mysql-template: ## Build the djinn_test_template DB MySQL clones from
 	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features mysql,rustls"; exit 1; }
 	@until docker exec djinn-mysql-test mysql -uroot -e "SELECT 1" >/dev/null 2>&1; do echo "waiting for mysql-test..."; sleep 1; done
 	@docker exec djinn-mysql-test mysql -uroot -e "DROP DATABASE IF EXISTS djinn_test_template; CREATE DATABASE djinn_test_template"
@@ -37,7 +37,7 @@ test-vault: ## Create the test-only vault key at $DJINN_VAULT_KEY_PATH (idempote
 dev: ## Start the Vite web client standalone (Tilt also runs it — this is for UI-only sessions)
 	cd $(UI_DIR) && pnpm dev
 
-sqlx-prepare: ## Regenerate server/.sqlx/ offline cache (uses test Dolt on :3307 via .cargo/config.toml)
+sqlx-prepare: ## Regenerate server/.sqlx/ offline cache (uses test MySQL on :3308 via .cargo/config.toml)
 	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features mysql,rustls"; exit 1; }
 	@$(MAKE) --no-print-directory test-db-migrate
 	@# Use `cargo check --all-targets --all-features` instead of `cargo sqlx prepare --workspace`:
@@ -66,32 +66,21 @@ sqlx-check: ## Fail if server/.sqlx/ is stale vs. current queries (CI)
 	@$(MAKE) --no-print-directory test-db-migrate
 	cd $(SERVER_DIR) && cargo sqlx prepare --check --workspace
 
-test-db-reset: ## Wipe and restart the test Dolt — cleans out djinn_test_* DBs
-	docker compose stop dolt-test
-	docker compose rm -sf dolt-test
-	docker compose up -d dolt-test
+test-db-reset: ## Wipe and restart the test MySQL — cleans out djinn_test_* DBs
+	docker compose stop mysql-test
+	docker compose rm -sf mysql-test
+	docker compose up -d mysql-test
 	@$(MAKE) --no-print-directory test-db-migrate
+	@$(MAKE) --no-print-directory test-db-mysql-template
 
-test: ## Run djinn-db tests (env routes to :3307 via .cargo/config.toml)
-	@$(MAKE) --no-print-directory test-db-migrate test-vault
+test: ## Run djinn-db tests (env routes to :3308 via .cargo/config.toml)
+	@$(MAKE) --no-print-directory test-db-migrate test-db-mysql-template test-vault
 	cd $(SERVER_DIR) && cargo test -p djinn-db
 
-# Each crate's test suite spins up 100–250 fresh djinn_test_* databases and
-# Dolt caches them all, so running the workspace concurrently saturates the
-# 8 GiB test-Dolt and cascades into `UnexpectedEof` failures. This target
-# runs each crate sequentially with a `test-db-reset` between them so the
-# cache is drained before the next crate starts.
-test-all: ## Run every workspace crate's tests sequentially (avoids test-Dolt OOM)
+# InnoDB + tmpfs handles the full workspace concurrently without the
+# OOM cascade that Dolt's caching exhibited, so we can run the workspace
+# in one shot via nextest.
+test-all: ## Run every workspace crate's tests in one nextest invocation
 	@$(MAKE) --no-print-directory test-vault
 	@$(MAKE) --no-print-directory test-db-reset
-	cd $(SERVER_DIR) && cargo test -p djinn-db
-	@$(MAKE) --no-print-directory test-db-reset
-	cd $(SERVER_DIR) && cargo test -p djinn-core
-	@$(MAKE) --no-print-directory test-db-reset
-	cd $(SERVER_DIR) && cargo test -p djinn-provider
-	@$(MAKE) --no-print-directory test-db-reset
-	cd $(SERVER_DIR) && cargo test -p djinn-mcp
-	@$(MAKE) --no-print-directory test-db-reset
-	cd $(SERVER_DIR) && cargo test -p djinn-agent
-	@$(MAKE) --no-print-directory test-db-reset
-	cd $(SERVER_DIR) && cargo test -p djinn-server
+	cd $(SERVER_DIR) && cargo nextest run --workspace

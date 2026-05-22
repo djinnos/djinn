@@ -8,7 +8,7 @@
         "name": "id",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | PRIMARY_KEY",
           "max_size": 144
         }
       },
@@ -17,7 +17,7 @@
         "name": "project_id",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | MULTIPLE_KEY | NO_DEFAULT_VALUE",
           "max_size": 144
         }
       },
@@ -26,7 +26,7 @@
         "name": "task_id",
         "type_info": {
           "type": "VarString",
-          "flags": "",
+          "flags": "MULTIPLE_KEY",
           "max_size": 144
         }
       },
@@ -35,7 +35,7 @@
         "name": "run_id",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | MULTIPLE_KEY | NO_DEFAULT_VALUE",
           "max_size": 144
         }
       },
@@ -44,7 +44,7 @@
         "name": "phase",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
           "max_size": 128
         }
       },
@@ -53,7 +53,7 @@
         "name": "step_index",
         "type_info": {
           "type": "Long",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
           "max_size": 11
         }
       },
@@ -62,7 +62,7 @@
         "name": "name",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
           "max_size": 1020
         }
       },
@@ -71,7 +71,7 @@
         "name": "command",
         "type_info": {
           "type": "Blob",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | BLOB | NO_DEFAULT_VALUE",
           "max_size": 4294967295
         }
       },
@@ -80,7 +80,7 @@
         "name": "exit_code",
         "type_info": {
           "type": "Long",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
           "max_size": 11
         }
       },
@@ -89,7 +89,7 @@
         "name": "stdout",
         "type_info": {
           "type": "Blob",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | BLOB | NO_DEFAULT_VALUE",
           "max_size": 4294967295
         }
       },
@@ -98,7 +98,7 @@
         "name": "stderr",
         "type_info": {
           "type": "Blob",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | BLOB | NO_DEFAULT_VALUE",
           "max_size": 4294967295
         }
       },

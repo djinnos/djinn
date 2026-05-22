@@ -2,34 +2,33 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::str::FromStr;
 use std::time::Duration;
 
-use djinn_db::{DatabaseConnectConfig, MysqlBackendFlavor};
+use djinn_db::DatabaseConnectConfig;
 
 #[cfg(test)]
 use djinn_db::MysqlDatabaseConfig;
 
-const DEFAULT_DOLT_HOST: &str = "127.0.0.1";
-const DEFAULT_DOLT_PORT: u16 = 3306;
+const DEFAULT_MYSQL_HOST: &str = "127.0.0.1";
+const DEFAULT_MYSQL_PORT: u16 = 3306;
 const DEFAULT_HEALTHCHECK_TIMEOUT: Duration = Duration::from_millis(250);
 
-/// Outcome of probing the dolt endpoint.
+/// Outcome of probing the mysql endpoint.
 ///
-/// The `Spawned` variant is retained purely so callers (e.g. runtime
-/// health snapshots) can include it in their enums, but under
-/// compose-managed deploy we only ever return `AlreadyHealthy` — the
-/// server does not spawn dolt itself.
+/// Under compose / Helm-managed deploy MySQL is a sibling container or
+/// StatefulSet — the server does not spawn it itself. We only return
+/// `AlreadyHealthy` when the TCP probe succeeds.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DoltSqlServerAvailability {
+pub enum MysqlSqlServerAvailability {
     AlreadyHealthy { endpoint: String },
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum DoltRuntimeError {
-    #[error("invalid dolt sql-server configuration: {0}")]
+pub enum MysqlRuntimeError {
+    #[error("invalid mysql sql-server configuration: {0}")]
     InvalidConfig(String),
-    #[error("failed to parse mysql endpoint for dolt runtime: {0}")]
+    #[error("failed to parse mysql endpoint for runtime probe: {0}")]
     InvalidMysqlUrl(String),
     #[error(
-        "dolt service unreachable at {endpoint}; check that the dolt container is running (docker compose up -d dolt)"
+        "mysql service unreachable at {endpoint}; check that the mysql container is running (docker compose up -d mysql-test) or that the StatefulSet is Ready"
     )]
     Unreachable { endpoint: String },
 }
@@ -40,44 +39,44 @@ struct MysqlEndpoint {
     port: u16,
 }
 
-fn mysql_endpoint_from_url(url: &str) -> Result<MysqlEndpoint, DoltRuntimeError> {
+fn mysql_endpoint_from_url(url: &str) -> Result<MysqlEndpoint, MysqlRuntimeError> {
     let trimmed = url.trim();
     let without_scheme = trimmed
         .strip_prefix("mysql://")
-        .ok_or_else(|| DoltRuntimeError::InvalidMysqlUrl(trimmed.to_owned()))?;
+        .ok_or_else(|| MysqlRuntimeError::InvalidMysqlUrl(trimmed.to_owned()))?;
     let host_and_path = without_scheme.rsplit('@').next().unwrap_or(without_scheme);
     let host_port = host_and_path
         .split(['/', '?'])
         .next()
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| DoltRuntimeError::InvalidMysqlUrl(trimmed.to_owned()))?;
+        .ok_or_else(|| MysqlRuntimeError::InvalidMysqlUrl(trimmed.to_owned()))?;
 
     let socket_addr = if host_port.starts_with('[') {
         let end = host_port
             .find(']')
-            .ok_or_else(|| DoltRuntimeError::InvalidMysqlUrl(trimmed.to_owned()))?;
+            .ok_or_else(|| MysqlRuntimeError::InvalidMysqlUrl(trimmed.to_owned()))?;
         let host = &host_port[1..end];
         let port = host_port[end + 1..]
             .strip_prefix(':')
             .filter(|value| !value.is_empty())
             .map(parse_port)
             .transpose()?
-            .unwrap_or(DEFAULT_DOLT_PORT);
+            .unwrap_or(DEFAULT_MYSQL_PORT);
         MysqlEndpoint {
             host: host.to_owned(),
             port,
         }
     } else {
         let mut segments = host_port.splitn(2, ':');
-        let host = segments.next().unwrap_or(DEFAULT_DOLT_HOST).trim();
+        let host = segments.next().unwrap_or(DEFAULT_MYSQL_HOST).trim();
         let port = segments
             .next()
             .map(parse_port)
             .transpose()?
-            .unwrap_or(DEFAULT_DOLT_PORT);
+            .unwrap_or(DEFAULT_MYSQL_PORT);
         MysqlEndpoint {
             host: if host.is_empty() {
-                DEFAULT_DOLT_HOST.to_owned()
+                DEFAULT_MYSQL_HOST.to_owned()
             } else {
                 host.to_owned()
             },
@@ -88,33 +87,30 @@ fn mysql_endpoint_from_url(url: &str) -> Result<MysqlEndpoint, DoltRuntimeError>
     Ok(socket_addr)
 }
 
-fn parse_port(value: &str) -> Result<u16, DoltRuntimeError> {
+fn parse_port(value: &str) -> Result<u16, MysqlRuntimeError> {
     u16::from_str(value)
-        .map_err(|_| DoltRuntimeError::InvalidMysqlUrl(format!("invalid port `{value}`")))
+        .map_err(|_| MysqlRuntimeError::InvalidMysqlUrl(format!("invalid port `{value}`")))
 }
 
-/// Probe the dolt service over TCP.
+/// Probe the mysql service over TCP.
 ///
-/// Under compose-managed deploy dolt is a sibling container; the server does
-/// not spawn or supervise it. If the probe fails, we return an error that tells
-/// the operator to check compose state.
-pub fn ensure_dolt_runtime_for_connect_config(
+/// Under compose / Helm-managed deploy MySQL is a sibling container or
+/// StatefulSet; the server does not spawn or supervise it. If the probe
+/// fails, we return an error that tells the operator to check the runtime.
+pub fn ensure_mysql_runtime_for_connect_config(
     connect: &DatabaseConnectConfig,
-) -> Result<Option<DoltSqlServerAvailability>, DoltRuntimeError> {
+) -> Result<Option<MysqlSqlServerAvailability>, MysqlRuntimeError> {
     let DatabaseConnectConfig::Mysql(mysql) = connect;
-    if mysql.flavor != MysqlBackendFlavor::Dolt {
-        return Ok(None);
-    }
 
     let endpoint = mysql_endpoint_from_url(&mysql.url)?;
     let endpoint_label = format!("{}:{}", endpoint.host, endpoint.port);
     if probe_tcp_endpoint(&endpoint.host, endpoint.port, DEFAULT_HEALTHCHECK_TIMEOUT) {
-        return Ok(Some(DoltSqlServerAvailability::AlreadyHealthy {
+        return Ok(Some(MysqlSqlServerAvailability::AlreadyHealthy {
             endpoint: endpoint_label,
         }));
     }
 
-    Err(DoltRuntimeError::Unreachable {
+    Err(MysqlRuntimeError::Unreachable {
         endpoint: endpoint_label,
     })
 }
@@ -141,8 +137,8 @@ mod tests {
 
     #[test]
     fn mysql_endpoint_parser_accepts_service_host() {
-        let endpoint = mysql_endpoint_from_url("mysql://root@dolt:3306/djinn").unwrap();
-        assert_eq!(endpoint.host, "dolt");
+        let endpoint = mysql_endpoint_from_url("mysql://root@djinn-mysql:3306/djinn").unwrap();
+        assert_eq!(endpoint.host, "djinn-mysql");
         assert_eq!(endpoint.port, 3306);
     }
 
@@ -153,15 +149,14 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
-        let result = ensure_dolt_runtime_for_connect_config(&DatabaseConnectConfig::Mysql(
+        let result = ensure_mysql_runtime_for_connect_config(&DatabaseConnectConfig::Mysql(
             MysqlDatabaseConfig {
                 url: format!("mysql://root@127.0.0.1:{port}/djinn"),
-                flavor: MysqlBackendFlavor::Dolt,
             },
         ))
-        .expect_err("unreachable dolt should fail");
+        .expect_err("unreachable mysql should fail");
 
-        assert!(matches!(result, DoltRuntimeError::Unreachable { .. }));
+        assert!(matches!(result, MysqlRuntimeError::Unreachable { .. }));
         assert!(result.to_string().contains("docker compose"));
     }
 }

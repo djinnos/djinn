@@ -8,7 +8,7 @@
         "name": "key",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | PRIMARY_KEY | NO_DEFAULT_VALUE",
           "max_size": 764
         }
       },
@@ -17,7 +17,7 @@
         "name": "value",
         "type_info": {
           "type": "Blob",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | BLOB | NO_DEFAULT_VALUE",
           "max_size": 4294967295
         }
       },

@@ -6,5 +6,4 @@
 //! (`Database`, `EventBus`, `CancellationToken`, etc.) — server code wires
 //! them up at startup instead of handing over an `AppState`.
 
-pub mod dolt_watchdog;
 pub mod housekeeping;

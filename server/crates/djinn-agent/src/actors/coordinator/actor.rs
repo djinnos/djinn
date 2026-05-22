@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant as StdInstant;
 
-use ::time::OffsetDateTime;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::{self, Interval};
 use tokio_util::sync::CancellationToken;
@@ -20,10 +19,7 @@ use djinn_core::models::parse_json_array;
 use djinn_db::Database;
 use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
-use djinn_db::{
-    ActivityQuery, DoltHistoryMaintenanceAction, DoltHistoryMaintenanceExecution,
-    DoltHistoryMaintenancePolicy, DoltHistoryMaintenanceService, ReadyQuery, TaskRepository,
-};
+use djinn_db::{ActivityQuery, ReadyQuery, TaskRepository};
 use djinn_provider::catalog::CatalogService;
 use djinn_provider::catalog::health::HealthTracker;
 use djinn_provider::rate_limit::suppression_remaining;
@@ -332,7 +328,6 @@ impl CoordinatorActor {
                     self.prune_tick_counter += 1;
                     if self.prune_tick_counter >= 120 {
                         self.prune_tick_counter = 0;
-                        self.run_dolt_history_maintenance_tick().await;
                         self.prune_note_associations().await;
                         if !self.should_skip_background_llm_work("hourly_note_consolidation") {
                             super::consolidation::run_note_consolidation(&self.db, &self.consolidation_runner).await;
@@ -395,55 +390,6 @@ impl CoordinatorActor {
             return true;
         }
         false
-    }
-
-    async fn run_dolt_history_maintenance_tick(&self) {
-        let service = DoltHistoryMaintenanceService::new(&self.db);
-        if !service.is_dolt_backend() {
-            tracing::debug!(
-                backend = %self.db.backend_capabilities().backend_label,
-                "CoordinatorActor: skipping ADR-055 Dolt history maintenance tick on non-Dolt backend"
-            );
-            return;
-        }
-
-        let current_hour_utc = OffsetDateTime::now_utc().hour();
-        let policy = DoltHistoryMaintenancePolicy::default();
-        match service.scheduled_report(&policy, current_hour_utc).await {
-            Ok(report) => {
-                let action = match report.plan.action {
-                    DoltHistoryMaintenanceAction::None => "none",
-                    DoltHistoryMaintenanceAction::Compact => "compact",
-                    DoltHistoryMaintenanceAction::Flatten => "flatten",
-                };
-                let execution = match report.execution {
-                    DoltHistoryMaintenanceExecution::UnsupportedBackend => "unsupported_backend",
-                    DoltHistoryMaintenanceExecution::NoActionRequired => "no_action_required",
-                    DoltHistoryMaintenanceExecution::BlockedBySafetyChecks => {
-                        "blocked_by_safety_checks"
-                    }
-                    DoltHistoryMaintenanceExecution::PlannedOnly => "planned_only",
-                };
-                tracing::info!(
-                    action,
-                    execution,
-                    commit_count = report.plan.commit_count,
-                    current_hour_utc = report.plan.current_hour_utc,
-                    non_main_branch_count = report.plan.non_main_branches.len(),
-                    verification_required = report.plan.verification_required,
-                    safety_warnings = ?report.plan.safety_warnings,
-                    baseline_row_counts = ?report.plan.baseline_row_counts,
-                    reason = %report.plan.reason,
-                    "CoordinatorActor: ADR-055 Dolt history maintenance plan evaluated"
-                );
-            }
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "CoordinatorActor: ADR-055 Dolt history maintenance planning failed"
-                );
-            }
-        }
     }
 
     async fn handle_message(&mut self, msg: CoordinatorMessage) {

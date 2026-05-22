@@ -8,7 +8,7 @@
         "name": "id",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | PRIMARY_KEY | NO_DEFAULT_VALUE",
           "max_size": 144
         }
       },
@@ -17,7 +17,7 @@
         "name": "project_id",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | MULTIPLE_KEY | NO_DEFAULT_VALUE",
           "max_size": 144
         }
       },
@@ -26,7 +26,7 @@
         "name": "short_id",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
           "max_size": 128
         }
       },
@@ -35,7 +35,7 @@
         "name": "title",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
           "max_size": 2048
         }
       },
@@ -44,7 +44,7 @@
         "name": "description",
         "type_info": {
           "type": "Blob",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | BLOB | NO_DEFAULT_VALUE",
           "max_size": 4294967295
         }
       },
@@ -116,7 +116,7 @@
         "name": "memory_refs",
         "type_info": {
           "type": "Blob",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | BLOB",
           "max_size": 4294967295
         }
       },
@@ -126,7 +126,7 @@
         "type_info": {
           "type": "Tiny",
           "flags": "NOT_NULL",
-          "max_size": 4
+          "max_size": 1
         }
       },
       {

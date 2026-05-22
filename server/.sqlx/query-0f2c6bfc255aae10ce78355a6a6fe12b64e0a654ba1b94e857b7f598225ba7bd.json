@@ -8,7 +8,7 @@
         "name": "id",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | PRIMARY_KEY | NO_DEFAULT_VALUE",
           "max_size": 144
         }
       },
@@ -17,7 +17,7 @@
         "name": "project_id",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | MULTIPLE_KEY | NO_DEFAULT_VALUE",
           "max_size": 144
         }
       },
@@ -26,7 +26,7 @@
         "name": "short_id",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
           "max_size": 128
         }
       },
@@ -35,7 +35,7 @@
         "name": "epic_id",
         "type_info": {
           "type": "VarString",
-          "flags": "",
+          "flags": "MULTIPLE_KEY",
           "max_size": 144
         }
       },
@@ -44,7 +44,7 @@
         "name": "title",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
           "max_size": 2048
         }
       },
@@ -53,7 +53,7 @@
         "name": "description",
         "type_info": {
           "type": "Blob",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | BLOB | NO_DEFAULT_VALUE",
           "max_size": 4294967295
         }
       },
@@ -62,7 +62,7 @@
         "name": "design",
         "type_info": {
           "type": "Blob",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | BLOB | NO_DEFAULT_VALUE",
           "max_size": 4294967295
         }
       },
@@ -80,7 +80,7 @@
         "name": "status!",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | MULTIPLE_KEY",
           "max_size": 256
         }
       },
@@ -89,7 +89,7 @@
         "name": "priority",
         "type_info": {
           "type": "Long",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | MULTIPLE_KEY",
           "max_size": 11
         }
       },
@@ -107,7 +107,7 @@
         "name": "labels",
         "type_info": {
           "type": "Blob",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | BLOB",
           "max_size": 4294967295
         }
       },
@@ -116,7 +116,7 @@
         "name": "acceptance_criteria",
         "type_info": {
           "type": "Blob",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | BLOB",
           "max_size": 4294967295
         }
       },
@@ -215,7 +215,7 @@
         "name": "close_reason",
         "type_info": {
           "type": "Blob",
-          "flags": "",
+          "flags": "BLOB",
           "max_size": 4294967295
         }
       },
@@ -242,7 +242,7 @@
         "name": "merge_conflict_metadata",
         "type_info": {
           "type": "Blob",
-          "flags": "",
+          "flags": "BLOB",
           "max_size": 4294967295
         }
       },
@@ -251,7 +251,7 @@
         "name": "memory_refs",
         "type_info": {
           "type": "Blob",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | BLOB",
           "max_size": 4294967295
         }
       },
@@ -269,8 +269,8 @@
         "name": "unresolved_blocker_count!: i64",
         "type_info": {
           "type": "LongLong",
-          "flags": "NOT_NULL",
-          "max_size": 20
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 21
         }
       }
     ],

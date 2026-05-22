@@ -8,7 +8,7 @@
         "name": "id",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | PRIMARY_KEY | NO_DEFAULT_VALUE",
           "max_size": 144
         }
       },
@@ -17,7 +17,7 @@
         "name": "title",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | MULTIPLE_KEY | NO_DEFAULT_VALUE",
           "max_size": 2048
         }
       },
@@ -26,7 +26,7 @@
         "name": "note_type",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | MULTIPLE_KEY",
           "max_size": 256
         }
       },
@@ -35,7 +35,7 @@
         "name": "tags",
         "type_info": {
           "type": "Blob",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | BLOB",
           "max_size": 4294967295
         }
       },
@@ -44,7 +44,7 @@
         "name": "content",
         "type_info": {
           "type": "Blob",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | BLOB",
           "max_size": 4294967295
         }
       },
@@ -53,7 +53,7 @@
         "name": "content_hash?",
         "type_info": {
           "type": "String",
-          "flags": "NOT_NULL",
+          "flags": "NO_DEFAULT_VALUE",
           "max_size": 256
         }
       },
@@ -62,7 +62,7 @@
         "name": "model_version?",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "MULTIPLE_KEY | NO_DEFAULT_VALUE",
           "max_size": 1020
         }
       },
@@ -71,7 +71,7 @@
         "name": "extension_state?",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "",
           "max_size": 256
         }
       }
@@ -85,9 +85,9 @@
       false,
       false,
       false,
-      false,
-      false,
-      false
+      true,
+      true,
+      true
     ]
   },
   "hash": "e630c8c4c7a4f6a4fe0bbee8eb23cf116f38b058b16a09d55b60112d1f009dc4"

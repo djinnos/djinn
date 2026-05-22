@@ -8,7 +8,7 @@
         "name": "id",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | PRIMARY_KEY | NO_DEFAULT_VALUE",
           "max_size": 144
         }
       },
@@ -17,7 +17,7 @@
         "name": "project_id",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | MULTIPLE_KEY | NO_DEFAULT_VALUE",
           "max_size": 144
         }
       },
@@ -26,7 +26,7 @@
         "name": "note_type",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
           "max_size": 256
         }
       },
@@ -35,7 +35,7 @@
         "name": "status!",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
           "max_size": 256
         }
       },
@@ -44,8 +44,8 @@
         "name": "scanned_note_count!: i64",
         "type_info": {
           "type": "LongLong",
-          "flags": "NOT_NULL",
-          "max_size": 20
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 21
         }
       },
       {
@@ -53,8 +53,8 @@
         "name": "candidate_cluster_count!: i64",
         "type_info": {
           "type": "LongLong",
-          "flags": "NOT_NULL",
-          "max_size": 20
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 21
         }
       },
       {
@@ -62,8 +62,8 @@
         "name": "consolidated_cluster_count!: i64",
         "type_info": {
           "type": "LongLong",
-          "flags": "NOT_NULL",
-          "max_size": 20
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 21
         }
       },
       {
@@ -71,8 +71,8 @@
         "name": "consolidated_note_count!: i64",
         "type_info": {
           "type": "LongLong",
-          "flags": "NOT_NULL",
-          "max_size": 20
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 21
         }
       },
       {
@@ -80,8 +80,8 @@
         "name": "source_note_count!: i64",
         "type_info": {
           "type": "LongLong",
-          "flags": "NOT_NULL",
-          "max_size": 20
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 21
         }
       },
       {
@@ -89,7 +89,7 @@
         "name": "started_at",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
           "max_size": 256
         }
       },
@@ -107,7 +107,7 @@
         "name": "error_message",
         "type_info": {
           "type": "Blob",
-          "flags": "",
+          "flags": "BLOB",
           "max_size": 4294967295
         }
       }

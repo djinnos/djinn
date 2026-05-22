@@ -16,8 +16,8 @@ pub mod test_support {
 
 pub use database::{
     Database, DatabaseBackendCapabilities, DatabaseBackendKind, DatabaseBootstrapInfo,
-    DatabaseConnectConfig, MysqlBackendFlavor, MysqlDatabaseConfig, NoteSearchBackend,
-    NoteVectorBackend, SqliteVecStatus, default_db_path,
+    DatabaseConnectConfig, MysqlDatabaseConfig, NoteSearchBackend, NoteVectorBackend,
+    SqliteVecStatus, default_db_path,
 };
 pub use error::{DbError as Error, DbResult as Result};
 pub use repositories::{
@@ -38,16 +38,6 @@ pub use repositories::{
         CommitFileChange, CommitFileChangeRepository, CoupledFile, CoupledPair, CouplingHub,
         CouplingPairEvent, FileChurn, MAX_FILES_PER_COMMIT_FOR_PAIRS, coupling_event_key,
         derive_pair_events, derive_pair_events_into,
-    },
-    dolt_branch::{
-        DoltBranchError, DoltBranchLifecycle, DoltBranchLifecycleAction, DoltBranchLifecycleResult,
-        DoltBranchSqlHelper,
-    },
-    dolt_history_maintenance::{
-        DoltHistoryMaintenanceAction, DoltHistoryMaintenanceError, DoltHistoryMaintenanceExecution,
-        DoltHistoryMaintenancePlan, DoltHistoryMaintenancePolicy, DoltHistoryMaintenanceReport,
-        DoltHistoryMaintenanceService, DoltHistoryMaintenanceSnapshot, DoltHistoryTableCount,
-        plan_dolt_history_maintenance, verify_row_counts,
     },
     epic::{
         EpicCountQuery, EpicCreateInput, EpicListQuery, EpicListResult, EpicRepository,

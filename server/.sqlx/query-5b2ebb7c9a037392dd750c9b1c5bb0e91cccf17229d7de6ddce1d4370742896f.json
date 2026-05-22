@@ -8,7 +8,7 @@
         "name": "id",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | PRIMARY_KEY | NO_DEFAULT_VALUE",
           "max_size": 144
         }
       },
@@ -17,7 +17,7 @@
         "name": "task_id",
         "type_info": {
           "type": "VarString",
-          "flags": "",
+          "flags": "MULTIPLE_KEY",
           "max_size": 144
         }
       },
@@ -44,7 +44,7 @@
         "name": "event_type",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
           "max_size": 512
         }
       },
@@ -53,7 +53,7 @@
         "name": "payload",
         "type_info": {
           "type": "Blob",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | BLOB | NO_DEFAULT_VALUE",
           "max_size": 4294967295
         }
       },
@@ -62,7 +62,7 @@
         "name": "created_at",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | MULTIPLE_KEY",
           "max_size": 256
         }
       }

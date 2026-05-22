@@ -8,7 +8,7 @@
         "name": "project_id",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | MULTIPLE_KEY | NO_DEFAULT_VALUE",
           "max_size": 144
         }
       },
@@ -17,7 +17,7 @@
         "name": "note_type",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | MULTIPLE_KEY",
           "max_size": 256
         }
       },
@@ -26,8 +26,8 @@
         "name": "note_count!: i64",
         "type_info": {
           "type": "LongLong",
-          "flags": "NOT_NULL",
-          "max_size": 20
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 21
         }
       }
     ],

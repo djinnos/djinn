@@ -8,7 +8,7 @@
         "name": "event_taxonomy",
         "type_info": {
           "type": "Blob",
-          "flags": "",
+          "flags": "BLOB",
           "max_size": 4294967295
         }
       }

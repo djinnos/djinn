@@ -8,7 +8,7 @@
         "name": "s_token",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | PRIMARY_KEY | NO_DEFAULT_VALUE",
           "max_size": 256
         }
       },
@@ -17,7 +17,7 @@
         "name": "s_github_login",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
           "max_size": 1020
         }
       },
@@ -35,7 +35,7 @@
         "name": "s_github_avatar_url",
         "type_info": {
           "type": "Blob",
-          "flags": "",
+          "flags": "BLOB",
           "max_size": 262140
         }
       },
@@ -44,7 +44,7 @@
         "name": "s_github_access_token",
         "type_info": {
           "type": "Blob",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | BLOB | NO_DEFAULT_VALUE",
           "max_size": 262140
         }
       },
@@ -62,7 +62,7 @@
         "name": "s_github_refresh_token",
         "type_info": {
           "type": "Blob",
-          "flags": "",
+          "flags": "BLOB",
           "max_size": 262140
         }
       },
@@ -89,7 +89,7 @@
         "name": "s_expires_at",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | MULTIPLE_KEY | NO_DEFAULT_VALUE",
           "max_size": 256
         }
       },
@@ -98,7 +98,7 @@
         "name": "s_user_fk",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | MULTIPLE_KEY | NO_DEFAULT_VALUE",
           "max_size": 144
         }
       },
@@ -107,7 +107,7 @@
         "name": "u_id",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | PRIMARY_KEY | NO_DEFAULT_VALUE",
           "max_size": 144
         }
       },
@@ -116,7 +116,7 @@
         "name": "u_github_id",
         "type_info": {
           "type": "LongLong",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | UNIQUE_KEY | NO_DEFAULT_VALUE",
           "max_size": 20
         }
       },
@@ -125,7 +125,7 @@
         "name": "u_github_login",
         "type_info": {
           "type": "VarString",
-          "flags": "NOT_NULL",
+          "flags": "NOT_NULL | MULTIPLE_KEY | NO_DEFAULT_VALUE",
           "max_size": 1020
         }
       },
@@ -143,7 +143,7 @@
         "name": "u_github_avatar_url",
         "type_info": {
           "type": "Blob",
-          "flags": "",
+          "flags": "BLOB",
           "max_size": 262140
         }
       },
@@ -153,7 +153,7 @@
         "type_info": {
           "type": "Tiny",
           "flags": "NOT_NULL",
-          "max_size": 4
+          "max_size": 1
         }
       },
       {

@@ -8,8 +8,8 @@
         "name": "task_count!: i64",
         "type_info": {
           "type": "LongLong",
-          "flags": "NOT_NULL",
-          "max_size": 20
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 21
         }
       },
       {
@@ -17,8 +17,8 @@
         "name": "open_count!: i64",
         "type_info": {
           "type": "LongLong",
-          "flags": "NOT_NULL",
-          "max_size": 20
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 21
         }
       },
       {
@@ -26,8 +26,8 @@
         "name": "in_progress_count!: i64",
         "type_info": {
           "type": "LongLong",
-          "flags": "NOT_NULL",
-          "max_size": 20
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 21
         }
       },
       {
@@ -35,8 +35,8 @@
         "name": "closed_count!: i64",
         "type_info": {
           "type": "LongLong",
-          "flags": "NOT_NULL",
-          "max_size": 20
+          "flags": "NOT_NULL | BINARY",
+          "max_size": 21
         }
       }
     ],

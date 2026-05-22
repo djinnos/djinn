@@ -230,7 +230,7 @@ struct Inner {
 
 impl AppState {
     pub fn new(db: Database, cancel: CancellationToken) -> Self {
-        let runtime = DatabaseRuntimeManager::new(crate::db::runtime::DatabaseRuntimeConfig::dolt(
+        let runtime = DatabaseRuntimeManager::new(crate::db::runtime::DatabaseRuntimeConfig::mysql(
             db.bootstrap_info().target.clone(),
         ));
         Self::new_with_runtime(db, runtime, cancel)
