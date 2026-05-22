@@ -1,8 +1,7 @@
 use super::AgentType;
 use crate::context::AgentContext;
-use crate::output_parser::ParsedAgentOutput;
 use crate::prompts::TaskContext;
-use djinn_core::models::{Task, TransitionAction};
+use djinn_core::models::Task;
 use futures::future::BoxFuture;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -26,7 +25,6 @@ pub(crate) struct RoleConfig {
     pub(crate) display_name: &'static str,
     pub(crate) dispatch_role: &'static str,
     pub(crate) tool_schemas: fn() -> Vec<serde_json::Value>,
-    pub(crate) release_action: fn() -> TransitionAction,
     pub(crate) initial_message: &'static str,
     /// Tool names the agent can call to signal completion for this role.
     /// The first entry is the primary finalize tool; additional entries are
@@ -50,12 +48,6 @@ pub(crate) fn config_for(agent_type: AgentType) -> &'static RoleConfig {
 pub(crate) trait AgentRole: Send + Sync + 'static {
     fn config(&self) -> &RoleConfig;
     fn render_prompt(&self, task: &Task, ctx: &TaskContext) -> String;
-    fn on_complete<'a>(
-        &'a self,
-        task_id: &'a str,
-        output: &'a ParsedAgentOutput,
-        app_state: &'a AgentContext,
-    ) -> BoxFuture<'a, Option<(TransitionAction, Option<String>)>>;
     /// The primary MCP tool name this role uses to signal session completion.
     fn finalize_tool_name(&self) -> &'static str {
         self.config()

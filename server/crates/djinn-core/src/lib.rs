@@ -3,6 +3,7 @@ pub mod commands;
 pub mod error;
 pub mod events;
 pub mod index_tree;
+pub mod liveness;
 pub mod message;
 pub mod models;
 pub mod paths;

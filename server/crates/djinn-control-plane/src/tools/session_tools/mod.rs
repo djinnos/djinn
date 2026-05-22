@@ -314,11 +314,38 @@ impl DjinnMcpServer {
             Ok(sessions) => {
                 let mut runtime_sessions = Vec::new();
                 let mut stale_sessions = Vec::new();
+                let now = time::OffsetDateTime::now_utc();
+                let config = djinn_core::liveness::LivenessConfig::OBSERVATION;
 
                 for session in sessions {
                     if let Some(task_id) = session.task_id.as_deref() {
                         match pool.has_session(task_id).await {
-                            Ok(true) => runtime_sessions.push(session),
+                            Ok(true) => {
+                                // Slot is alive — but it might be wedged on
+                                // a never-returning model call. Classify
+                                // using the latest session_messages
+                                // timestamp + token counts.
+                                let last_msg = repo
+                                    .last_message_at(&session.id)
+                                    .await
+                                    .unwrap_or(None);
+                                let verdict = djinn_core::liveness::classify_session_progress(
+                                    &session.started_at,
+                                    last_msg.as_deref(),
+                                    session.tokens_in,
+                                    session.tokens_out,
+                                    now,
+                                    &config,
+                                );
+                                match verdict {
+                                    djinn_core::liveness::ProgressVerdict::Live => {
+                                        runtime_sessions.push(session);
+                                    }
+                                    djinn_core::liveness::ProgressVerdict::Wedged { .. } => {
+                                        stale_sessions.push(session);
+                                    }
+                                }
+                            }
                             Ok(false) => stale_sessions.push(session),
                             Err(e) => {
                                 return Json(SessionActiveResponse {

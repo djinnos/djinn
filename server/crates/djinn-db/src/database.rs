@@ -303,6 +303,86 @@ impl Database {
         })
     }
 
+    /// Read-only sanity check: confirm every migration baked into this
+    /// binary has already been applied successfully on the live DB.
+    ///
+    /// **Does not** call `sqlx::migrate!(...).run(...)` — that path takes
+    /// the migrator's advisory lock (`GET_LOCK(_sqlx_migrator_lock, -1)`).
+    /// If the previous pod's connection died holding a partition lock on
+    /// some table being ALTERed, that advisory lock can survive the
+    /// connection drop and wedge the new pod indefinitely.
+    ///
+    /// Cut-over: migrations now live in the Helm `pre-upgrade` Job
+    /// (`djinn-server --migrate-only`). App pods just verify the schema
+    /// is current and refuse to start otherwise — a much faster, lock-free
+    /// boot path that no longer fights Dolt over the migrator lock.
+    ///
+    /// Returns `Err` when:
+    ///   * The DB doesn't have a `_sqlx_migrations` table at all (fresh
+    ///     DB — the Job must run first).
+    ///   * Any migration version known to the binary is missing from the
+    ///     DB or is recorded as `success = 0` (Job didn't finish).
+    pub async fn verify_schema_is_current(&self) -> DbResult<()> {
+        if self.readonly {
+            return Ok(());
+        }
+
+        let migrator = sqlx::migrate!("./migrations_mysql");
+        let expected_versions: Vec<i64> = migrator.migrations.iter().map(|m| m.version).collect();
+        if expected_versions.is_empty() {
+            return Ok(());
+        }
+
+        // Detect the "no migrations table at all" case up front so we can
+        // give the operator a clear error message instead of a generic
+        // "_sqlx_migrations not found" SQL exception.
+        let migrations_table_exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) \
+             FROM information_schema.tables \
+             WHERE table_schema = DATABASE() \
+               AND table_name   = '_sqlx_migrations'",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+        if migrations_table_exists == 0 {
+            return Err(DbError::InvalidData(
+                "_sqlx_migrations table missing — the migration Job has not run yet. \
+                 Run `djinn-server --migrate-only` against this database before booting \
+                 the app pod (the Helm `pre-upgrade` hook normally handles this)."
+                    .to_owned(),
+            ));
+        }
+
+        let applied: Vec<(i64, bool)> =
+            sqlx::query_as("SELECT version, success FROM _sqlx_migrations")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(DbError::from)?;
+        let mut applied_ok = std::collections::HashSet::new();
+        for (version, success) in &applied {
+            if *success {
+                applied_ok.insert(*version);
+            }
+        }
+
+        let mut missing: Vec<i64> = expected_versions
+            .iter()
+            .copied()
+            .filter(|v| !applied_ok.contains(v))
+            .collect();
+        missing.sort_unstable();
+        if !missing.is_empty() {
+            return Err(DbError::InvalidData(format!(
+                "schema is behind the binary — missing migrations: {missing:?}. \
+                 The Helm `pre-upgrade` Job should have applied these via \
+                 `djinn-server --migrate-only` before this pod started.",
+            )));
+        }
+
+        Ok(())
+    }
+
     pub async fn ensure_initialized(&self) -> DbResult<()> {
         if self.readonly {
             return Ok(());
@@ -511,6 +591,69 @@ mod tests {
         );
         assert!(db.backend_capabilities().supports_branching_metadata);
         assert!(!db.backend_capabilities().supports_sqlite_vec);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verify_schema_is_current_passes_on_a_freshly_migrated_db() {
+        // `open_in_memory` runs the migrator as part of `ensure_initialized`,
+        // so once it succeeds we should be at HEAD.
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        db.verify_schema_is_current()
+            .await
+            .expect("verify_schema_is_current should pass on a freshly migrated DB");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verify_schema_is_current_fails_when_migrator_has_not_run() {
+        // Build a Dolt branch but skip the migrate step — emulates a pod
+        // booting against a DB the pre-upgrade Job hasn't touched yet.
+        // Without a `_sqlx_migrations` table, verify must hard-fail
+        // rather than degrading to "schema is empty so we're fine".
+        let db = Database::open_in_memory().unwrap();
+        // Force the branch to materialise without running migrations.
+        sqlx::query("SELECT 1")
+            .execute(db.pool())
+            .await
+            .expect("branch reachable");
+
+        let err = db
+            .verify_schema_is_current()
+            .await
+            .expect_err("verify should refuse a DB with no _sqlx_migrations table");
+        let message = err.to_string();
+        assert!(
+            message.contains("_sqlx_migrations"),
+            "expected error to call out missing migrations table, got: {message}",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verify_schema_is_current_fails_when_a_migration_is_missing() {
+        // Migrate to HEAD, then delete the most recent row to fake a
+        // binary that ships one migration the DB has not received yet.
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+
+        // Drop the newest applied version. The binary's compile-time
+        // migrator still expects it, so verify must flag the gap.
+        sqlx::query(
+            "DELETE FROM _sqlx_migrations \
+             WHERE version = (SELECT * FROM (SELECT MAX(version) FROM _sqlx_migrations) AS m)",
+        )
+        .execute(db.pool())
+        .await
+        .expect("drop newest migration row");
+
+        let err = db
+            .verify_schema_is_current()
+            .await
+            .expect_err("verify should refuse when binary-known migrations are missing");
+        let message = err.to_string();
+        assert!(
+            message.contains("missing migrations"),
+            "expected error to call out the missing version list, got: {message}",
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

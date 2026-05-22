@@ -1,0 +1,24 @@
+{
+  "db_name": "MySQL",
+  "query": "SELECT MAX(created_at) AS \"last_at?: String\"\n               FROM session_messages\n               WHERE session_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "last_at?: String",
+        "type_info": {
+          "type": "VarString",
+          "flags": "NOT_NULL",
+          "max_size": 256
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "201398f074c0403dfc0257d01eda8d4b76a08faf97635f782d52f74c2823ffb5"
+}

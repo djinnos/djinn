@@ -135,7 +135,6 @@ pub(crate) mod test_helpers;
 mod tests {
     use super::AgentType;
     use crate::roles;
-    use djinn_core::models::TransitionAction;
 
     fn assert_equivalent_to_role_config(agent_type: AgentType) {
         let cfg = roles::config_for(agent_type);
@@ -189,27 +188,4 @@ mod tests {
         assert_eq!(AgentType::Architect.dispatch_role(), "architect");
     }
 
-    #[test]
-    fn release_action_via_role_config() {
-        assert_eq!(
-            (AgentType::Worker.role_config().release_action)(),
-            TransitionAction::Release
-        );
-        assert_eq!(
-            (AgentType::Reviewer.role_config().release_action)(),
-            TransitionAction::ReleaseTaskReview
-        );
-        assert_eq!(
-            (AgentType::Lead.role_config().release_action)(),
-            TransitionAction::LeadInterventionRelease
-        );
-        assert_eq!(
-            (AgentType::Planner.role_config().release_action)(),
-            TransitionAction::Release
-        );
-        assert_eq!(
-            (AgentType::Architect.role_config().release_action)(),
-            TransitionAction::Release
-        );
-    }
 }

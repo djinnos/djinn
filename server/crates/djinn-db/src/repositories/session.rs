@@ -593,6 +593,27 @@ impl SessionRepository {
         Ok(())
     }
 
+    /// Return the ISO-8601 `created_at` of the most recent
+    /// `session_messages` row for this session, or `None` when the session
+    /// has no messages yet (e.g. the planner has not produced its first
+    /// turn).
+    ///
+    /// Used by liveness classification: a `running` session whose latest
+    /// message timestamp (falling back to `started_at`) is older than the
+    /// configured threshold is wedged.
+    pub async fn last_message_at(&self, session_id: &str) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        let row: Option<String> = sqlx::query_scalar!(
+            r#"SELECT MAX(created_at) AS "last_at?: String"
+               FROM session_messages
+               WHERE session_id = ?"#,
+            session_id
+        )
+        .fetch_one(self.db.pool())
+        .await?;
+        Ok(row.filter(|s: &String| !s.is_empty()))
+    }
+
     /// Delete a chat session row.  `session_messages` rows are cascade-deleted
     /// by the `fk_session_messages_session ON DELETE CASCADE` FK in migration 1.
     pub async fn delete_chat_session(&self, session_id: &str) -> Result<u64> {
@@ -963,5 +984,69 @@ mod tests {
         let repo = SessionRepository::new(db, bus);
         let matches = repo.active_planner_for_epic(&epic.id).await.unwrap();
         assert!(matches.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn last_message_at_returns_none_when_no_messages() {
+        let db = test_db();
+        let bus = EventBus::noop();
+        let (project_id, task_id) = create_task(&db, bus.clone()).await;
+        let repo = SessionRepository::new(db.clone(), bus);
+
+        let session = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "planner",
+                metadata_json: None,
+                task_run_id: None,
+            })
+            .await
+            .unwrap();
+
+        let last = repo.last_message_at(&session.id).await.unwrap();
+        assert!(last.is_none(), "fresh session has no messages");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn last_message_at_returns_latest_created_at() {
+        let db = test_db();
+        let bus = EventBus::noop();
+        let (project_id, task_id) = create_task(&db, bus.clone()).await;
+        let repo = SessionRepository::new(db.clone(), bus);
+
+        let session = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "planner",
+                metadata_json: None,
+                task_run_id: None,
+            })
+            .await
+            .unwrap();
+
+        // Explicit, distinct timestamps so the test doesn't depend on
+        // clock resolution between consecutive inserts.
+        for (id, ts) in [
+            ("msg-1", "2026-05-22T10:00:00.000Z"),
+            ("msg-2", "2026-05-22T10:05:00.000Z"),
+        ] {
+            sqlx::query!(
+                "INSERT INTO session_messages (id, session_id, role, content_json, created_at)
+                 VALUES (?, ?, 'assistant', '{}', ?)",
+                id,
+                session.id,
+                ts,
+            )
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+
+        let last = repo.last_message_at(&session.id).await.unwrap();
+        assert_eq!(last.as_deref(), Some("2026-05-22T10:05:00.000Z"));
     }
 }

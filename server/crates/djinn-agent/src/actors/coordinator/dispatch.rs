@@ -1,6 +1,5 @@
 use super::*;
 use crate::roles::DispatchContext;
-use crate::task_merge::{self, MergeActions};
 use djinn_core::models::task::{IssueType, PRIORITY_CRITICAL};
 use djinn_core::models::{TaskStatus, TransitionAction};
 #[cfg(not(test))]
@@ -583,6 +582,13 @@ impl CoordinatorActor {
             active.iter().filter_map(|s| s.task_id.clone()).collect();
         self.stall_killed.retain(|id| active_task_ids.contains(id));
 
+        /// Zero-token short-circuit: a session that has not produced or
+        /// consumed a single token after this many seconds has its very
+        /// first LLM call hung — no plausible legitimate work is in
+        /// flight. Applied to every role, ahead of the general
+        /// idle-based threshold which protects long worker turns.
+        const ZERO_TOKEN_STALL_SECS: u64 = 180;
+
         for session in active {
             let Some(task_id) = session.task_id.as_deref() else {
                 continue;
@@ -622,7 +628,17 @@ impl CoordinatorActor {
                 }
             };
 
-            if idle <= stall_threshold {
+            // Pick the threshold that fires first. A session at 0/0 tokens
+            // is wedged-on-first-call at 3 min regardless of role; one
+            // that has produced tokens falls under the role's idle budget.
+            let zero_tokens = session.tokens_in == 0 && session.tokens_out == 0;
+            let applied_threshold = if zero_tokens {
+                stall_threshold.min(ZERO_TOKEN_STALL_SECS)
+            } else {
+                stall_threshold
+            };
+
+            if idle <= applied_threshold {
                 continue;
             }
 
@@ -634,11 +650,16 @@ impl CoordinatorActor {
             // Mark as killed so we don't re-kill and re-log on subsequent ticks.
             self.stall_killed.insert(task_id.to_owned());
 
+            let reason = if zero_tokens {
+                "zero-token (first LLM call hung)"
+            } else {
+                "idle"
+            };
             let task_repo = self.task_repo();
             let payload = serde_json::json!({
                 "message": format!(
-                    "Coordinator stall timeout: {} session idle for {}s (threshold {}s). Session was cancelled for redispatch.",
-                    session.agent_type, idle, stall_threshold
+                    "Coordinator stall timeout: {} session {} for {}s (threshold {}s, {}). Session was cancelled for redispatch.",
+                    session.agent_type, if zero_tokens { "stuck" } else { "idle" }, idle, applied_threshold, reason
                 )
             })
             .to_string();
@@ -651,6 +672,8 @@ impl CoordinatorActor {
                 session_id = %session.id,
                 agent_type = %session.agent_type,
                 idle_seconds = idle,
+                threshold_secs = applied_threshold,
+                zero_tokens,
                 "CoordinatorActor: killed stalled session"
             );
         }
@@ -1376,27 +1399,6 @@ impl CoordinatorActor {
             mirror: self.mirror.clone(),
             rpc_registry: None,
             default_project_id: None,
-        };
-
-        // Use Reopen as a sentinel for "leave in approved / retry next tick".
-        // The approved → reopen transition is not valid in the state machine, so
-        // we intercept it before calling `repo.transition` and simply skip.
-        const SKIP_SENTINEL: TransitionAction = TransitionAction::Reopen;
-
-        /// Transition actions for the coordinator-driven approved → PR path.
-        const APPROVED_MERGE_ACTIONS: MergeActions = MergeActions {
-            // Direct-merge success (no GitHub App): close the task.
-            approve: TransitionAction::Close,
-            // Merge conflict: reopen so the worker can rebase.
-            conflict: TransitionAction::PrConflict,
-            // Transient / infra failure: leave in approved (retry next tick).
-            release: SKIP_SENTINEL,
-            // No verification gate on this path.
-            verification_fail: None,
-            // PR creation auth/infra failure: leave in approved (retry next tick).
-            pr_creation_fail: Some(SKIP_SENTINEL),
-            // PR created successfully: transition approved → pr_draft.
-            pr_created: Some(TransitionAction::PrCreated),
         };
 
         for task in tasks {

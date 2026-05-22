@@ -39,6 +39,17 @@ struct Cli {
     /// Disable for headless API-only deployments.
     #[arg(long, env = "DJINN_UI_ENABLED", default_value_t = true, action = clap::ArgAction::Set)]
     ui_enabled: bool,
+
+    /// One-shot mode: apply every pending SQL migration, then exit.
+    ///
+    /// Used by the Helm `pre-upgrade` migrate Job so app pods can skip
+    /// the migrator lock entirely on boot — they just verify the schema
+    /// matches what their binary expects. The Job has exclusive DB
+    /// access (no traffic, no concurrent pods racing on the same
+    /// `GET_LOCK`), so it can take the full ALTER duration without
+    /// blocking anyone.
+    #[arg(long, env = "DJINN_MIGRATE_ONLY", default_value_t = false)]
+    migrate_only: bool,
 }
 
 fn main() {
@@ -104,19 +115,43 @@ async fn async_main() {
         std::process::exit(1);
     });
 
-    // Apply schema migrations eagerly. sqlx's Database::ensure_initialized
-    // is lazy — without this, migration mismatches (e.g. the binary was
-    // compiled before a migration the live DB has already applied) surface
-    // as scattered warnings from every background task that hits the DB,
-    // and the server limps along in a half-broken state until something
-    // downstream finally crashes. Fail fast with a clear message.
-    if let Err(e) = db.ensure_initialized().await {
+    // ── Migrate-only short-circuit ────────────────────────────────────
+    // The Helm `pre-upgrade` Job invokes us with this flag: apply every
+    // pending migration, then exit. No HTTP listener, no actors, no
+    // background tasks — the Job owns the DB exclusively for the
+    // duration, which is the only safe place to run long ALTERs without
+    // racing the app pod's connections.
+    if cli.migrate_only {
+        tracing::info!("migrate-only mode: applying pending migrations");
+        if let Err(e) = db.ensure_initialized().await {
+            tracing::error!(
+                error = %e,
+                "migrate-only: schema migration failed",
+            );
+            // Drain the pool even on failure so Dolt releases its locks
+            // before the Job retries — otherwise the next retry hits the
+            // same wedge we're trying to prevent.
+            db.pool().close().await;
+            std::process::exit(1);
+        }
+        tracing::info!("migrate-only mode: all migrations applied, shutting down");
+        db.pool().close().await;
+        return;
+    }
+
+    // App-pod boot path: schema must already be current (the pre-upgrade
+    // Job applied it). We only verify — no `GET_LOCK`, no writes — so
+    // even if a previous pod left a ghost lock on the migrator, this
+    // path doesn't care.
+    if let Err(e) = db.verify_schema_is_current().await {
         tracing::error!(
             error = %e,
-            "schema migration failed — binary is likely out of date \
-             (or a committed migration file was mutated). Refusing to \
-             start in a half-migrated state."
+            "schema verification failed — refusing to boot. Either the \
+             pre-upgrade migrate Job has not run yet, or this binary \
+             ships migrations the live DB has not received. Run \
+             `djinn-server --migrate-only` to catch up before retrying."
         );
+        db.pool().close().await;
         std::process::exit(1);
     }
 
@@ -159,6 +194,23 @@ async fn async_main() {
     // in-flight worker RPCs drain cleanly.  Matches the HTTP server's
     // `with_graceful_shutdown` semantics.
     state_for_shutdown.shutdown_rpc_listener().await;
+
+    // Drain the SQLx pool BEFORE the process exits. Without this, the
+    // OS reaps our DB sockets via TCP RST and Dolt may not release row
+    // / partition locks (especially mid-ALTER) until its idle-timeout
+    // GC catches up, which can wedge the next pod's migrator GET_LOCK
+    // for minutes. `pool.close()` waits for in-flight queries to
+    // finish and shuts each connection down via the MySQL protocol —
+    // Dolt sees the close and releases locks immediately. Capped at
+    // 30s so we never overrun `terminationGracePeriodSeconds` and
+    // get SIGKILLed mid-drain.
+    let pool = state_for_shutdown.db().pool().clone();
+    match tokio::time::timeout(std::time::Duration::from_secs(30), pool.close()).await {
+        Ok(()) => tracing::info!("DB pool drained cleanly"),
+        Err(_) => tracing::warn!(
+            "DB pool drain timed out after 30s — Dolt may hold locks until idle GC catches up"
+        ),
+    }
 
     // Flush any pending OTel spans before exit.
     djinn_provider::provider::telemetry::shutdown();

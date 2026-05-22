@@ -1,0 +1,93 @@
+{{- /*
+  Apply pending SQL migrations before the server Deployment rolls.
+
+  Why this exists:
+    Previously every app pod ran `sqlx::migrate!(...).run(&pool)` on
+    boot, which takes the migrator's `GET_LOCK(_sqlx_migrator_lock, -1)`
+    advisory lock. When the old pod's Dolt connection was killed mid-
+    ALTER (e.g. terminationGracePeriodSeconds elapsed), Dolt sometimes
+    kept the migration's partition + advisory locks live past the
+    connection drop. The new pod's `GET_LOCK` then blocked forever and
+    the rollout stalled with the cluster's CI / mirror plane wedged.
+
+  How this fixes it:
+    Migrations now run in this dedicated Job, never on the app pod.
+    Hook order — pre-install + pre-upgrade with weight -5 — runs us
+    BEFORE the Deployment touches anything, with no concurrent traffic
+    and no other djinn-server pod racing on the same advisory lock.
+    `restartPolicy: OnFailure` means a transient Dolt error retries
+    inside the Job rather than restarting the whole helm rollout.
+
+  Cleanup:
+    `hook-delete-policy: before-hook-creation,hook-succeeded` keeps
+    successful runs out of the way (no Job clutter in `kubectl get
+    jobs`) while leaving failed runs around for `kubectl logs`-based
+    triage. The companion `--migrate-only` flag is also useful as a
+    standalone debugging tool: `kubectl run --rm -it djinn-migrate \
+    --image=... --command -- djinn-server --migrate-only`.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # Suffix with the release revision so successive helm upgrades create
+  # distinct Job names — the `before-hook-creation` cleanup policy still
+  # nukes prior failures, but the unique name keeps `kubectl get jobs`
+  # output legible during a rolling release.
+  name: {{ include "djinn.fullname" . }}-migrate-{{ .Release.Revision }}
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.server.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  # Bail after 10 minutes — far longer than any reasonable migration on
+  # a healthy Dolt, short enough that a wedged hook doesn't pin the
+  # release indefinitely.
+  activeDeadlineSeconds: 600
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        {{- include "djinn.server.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ include "djinn.serviceAccountName.controller" . }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: djinn-migrate
+          image: {{ .Values.image.server | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["djinn-server"]
+          args: ["--migrate-only"]
+          envFrom:
+            # Pulls DJINN_MYSQL_URL, DJINN_DB_BACKEND, DJINN_MYSQL_FLAVOR
+            # from the same ConfigMap the server Deployment uses, so the
+            # Job and the app pods always agree on which database to
+            # migrate.
+            - configMapRef:
+                name: {{ include "djinn.fullname" . }}-server
+          # Force-disable the UI bundle path entirely — migrate-only
+          # never spins up the HTTP listener, but the flag avoids any
+          # filesystem probe for the embedded assets if a future refactor
+          # moves UI init earlier in main.
+          env:
+            - name: DJINN_UI_ENABLED
+              value: "false"
+          resources:
+            {{- toYaml .Values.resources.server | nindent 12 }}

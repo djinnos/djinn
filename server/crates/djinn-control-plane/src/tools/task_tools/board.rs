@@ -94,18 +94,73 @@ pub(super) async fn board_reconcile_impl(
             };
 
             let mut finalized_stale_session_ids = Vec::new();
+            let now = time::OffsetDateTime::now_utc();
+            let liveness_config = djinn_core::liveness::LivenessConfig::OBSERVATION;
             for session in &running_sessions {
-                let has_runtime_session = if let Some(task_id) = session.task_id.as_deref() {
-                    match pool.has_session(task_id).await {
-                        Ok(v) => v,
-                        Err(e) => {
-                            return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
+                let Some(task_id) = session.task_id.as_deref() else {
+                    // Detached sessions (no task) aren't subject to slot
+                    // liveness — leave them alone.
+                    continue;
+                };
+
+                let slot_alive = match pool.has_session(task_id).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
+                    }
+                };
+
+                // Stale-slot path: slot already gone, just mark the row.
+                // Wedged-slot path: slot alive but no LLM progress past
+                // the observation threshold — kill the slot first, then
+                // mark interrupted.
+                let should_finalize = if slot_alive {
+                    let last_msg = session_repo
+                        .last_message_at(&session.id)
+                        .await
+                        .unwrap_or(None);
+                    let verdict = djinn_core::liveness::classify_session_progress(
+                        &session.started_at,
+                        last_msg.as_deref(),
+                        session.tokens_in,
+                        session.tokens_out,
+                        now,
+                        &liveness_config,
+                    );
+                    match verdict {
+                        djinn_core::liveness::ProgressVerdict::Live => false,
+                        djinn_core::liveness::ProgressVerdict::Wedged {
+                            idle_secs,
+                            zero_tokens,
+                        } => {
+                            if let Err(e) = pool.kill_session(task_id).await {
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    session_id = %session.id,
+                                    error = %e,
+                                    "board_reconcile: failed to kill wedged session"
+                                );
+                                // Don't finalize a row whose slot we
+                                // couldn't kill — the next sweep will
+                                // see it again with fresher state.
+                                false
+                            } else {
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    session_id = %session.id,
+                                    idle_seconds = idle_secs,
+                                    zero_tokens,
+                                    "board_reconcile: killed wedged session"
+                                );
+                                true
+                            }
                         }
                     }
                 } else {
                     true
                 };
-                if has_runtime_session {
+
+                if !should_finalize {
                     continue;
                 }
                 if session_repo

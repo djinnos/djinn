@@ -83,7 +83,6 @@ pub(crate) mod reply_loop;
 mod reply_loop_tests;
 pub(crate) mod session_extraction;
 mod supervisor_runner;
-pub(crate) mod task_review;
 pub(crate) mod verification;
 
 pub use actor::*;
