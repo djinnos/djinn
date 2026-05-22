@@ -34,13 +34,8 @@ async function pingServer(): Promise<{ version: string | null }> {
 export function useServerHealth(): ServerHealthState {
   const [status, setStatus] = useState<ConnectionStatus>("loading");
   const [port] = useState<number | null>(() => {
-    // `getServerBaseUrl()` returns "" when the UI is served same-origin —
-    // good for `fetch` (resolves to window.location.origin) but the URL
-    // constructor rejects empty strings. Fall back to the page origin so
-    // we can still extract a port.
-    const base = getServerBaseUrl() || window.location.origin;
     try {
-      const url = new URL(base);
+      const url = new URL(getServerBaseUrl());
       return Number(url.port) || null;
     } catch {
       return null;

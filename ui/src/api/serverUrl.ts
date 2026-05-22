@@ -22,6 +22,14 @@ export function getServerBaseUrl(): string {
   if (envUrl && envUrl.length > 0) {
     return stripTrailingSlash(envUrl);
   }
+  // Same-origin: resolve against the current page so callers get an
+  // absolute URL. Returning "" worked for `fetch`/EventSource (which
+  // resolve relative paths) but broke `new URL(...)` and downstream
+  // SDKs (MCP transport, useServerHealth's port parse) that require
+  // an absolute URL.
+  if (typeof window !== "undefined" && window.location) {
+    return stripTrailingSlash(window.location.origin);
+  }
   return "";
 }
 
