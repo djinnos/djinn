@@ -835,6 +835,7 @@ impl CoordinatorActor {
     ///   `DequeuedEvent`) → fetch dequeue diagnostics, attach as PR review
     ///   feedback, transition the task with `PrCiFailed`.
     /// - State fetch failed → log warn, retry next tick.
+    #[allow(clippy::too_many_arguments)]
     async fn observe_auto_merge_state(
         &mut self,
         gh_client: &GitHubApiClient,
@@ -909,19 +910,19 @@ impl CoordinatorActor {
         // surface it. Otherwise fall through silently — next tick will
         // re-enable auto-merge via the undraft path on a fresh push, or
         // a human will intervene.
-        if let Some(dequeue) = &state.last_dequeue {
-            if dequeue_reason_is_failure(dequeue.reason.as_deref()) {
-                self.handle_queue_failure(
-                    task_id,
-                    task_short_id,
-                    pull_number,
-                    pr_url,
-                    Some(dequeue),
-                    "merge_queue_dequeued",
-                )
-                .await;
-                return;
-            }
+        if let Some(dequeue) = &state.last_dequeue
+            && dequeue_reason_is_failure(dequeue.reason.as_deref())
+        {
+            self.handle_queue_failure(
+                task_id,
+                task_short_id,
+                pull_number,
+                pr_url,
+                Some(dequeue),
+                "merge_queue_dequeued",
+            )
+            .await;
+            return;
         }
 
         tracing::debug!(
@@ -1703,6 +1704,7 @@ fn dequeue_reason_is_failure(reason: Option<&str>) -> bool {
 /// - "Pull request Auto merge is not allowed on this repository" — repo
 ///   settings have auto-merge disabled.
 /// - Branch protection misconfigured.
+///
 /// In those cases the legacy REST merge path in `poll_pr_review_tasks`
 /// takes over.
 async fn enable_auto_merge_best_effort(
