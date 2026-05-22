@@ -4,7 +4,6 @@
 -- server after the first assistant reply lands).  Non-chat (worker,
 -- planner, reviewer, …) sessions are indexed by task/short_id in the
 -- UI and never consult `title`, so we leave the column NULLABLE with
--- no default.  Pre-existing chat rows (agent_type='chat') stay NULL
--- and will be populated on their next completions turn.
+-- no default.
 
 ALTER TABLE sessions ADD COLUMN title VARCHAR(255) NULL;

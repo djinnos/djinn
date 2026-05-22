@@ -1,37 +1,33 @@
--- MySQL/Dolt initial schema (flattened). Single source of truth for fresh installs.
+-- Postgres initial schema (flattened). Single source of truth for fresh installs.
 -- Managed by sqlx::migrate!. DO NOT MODIFY after commit — add a new V{N}__{slug}.sql instead.
+--
+-- This is the Postgres port of what was previously the MySQL/Dolt schema.
+-- JSON columns are stored as JSONB. Timestamps remain VARCHAR(64) RFC3339
+-- for consistency with the rest of the schema (the repository layer reads
+-- them as String).
 
--- ADR-055 Dolt/MySQL schema snapshot for djinn-db.
---
--- This snapshot is the full-port of the SQLite refinery migration chain into
--- MySQL 8.0 / Dolt dialect. It omits SQLite-only constructs (FTS5 shadow
--- tables + triggers, sqlite-vec virtual tables) in favour of native MySQL
--- equivalents (FULLTEXT index, Qdrant for vector search).
---
--- Ground truth: crates/djinn-db/migrations/*.sql (the rebuilt shapes used at
--- runtime by the Rust repository layer). The legacy top-level schema.sql
--- file is partially stale and is NOT the source used here.
---
--- Every table uses CREATE TABLE IF NOT EXISTS so that partial-apply recovery
--- is possible when the schema version marker is bumped.
+-- `gen_random_uuid()` lives in pgcrypto on Postgres 12; from 13+ it is
+-- also exposed in the default catalog, but enabling pgcrypto here is the
+-- portable form and RDS supports it.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- ── settings & projects ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS settings (
-    `key`      VARCHAR(191) NOT NULL PRIMARY KEY,
-    `value`    LONGTEXT NOT NULL,
-    updated_at VARCHAR(64) NOT NULL DEFAULT ""
+    key        VARCHAR(191) NOT NULL PRIMARY KEY,
+    value      JSONB        NOT NULL,
+    updated_at VARCHAR(64)  NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS projects (
     id                  VARCHAR(36)  NOT NULL PRIMARY KEY,
     name                VARCHAR(255) NOT NULL,
     path                VARCHAR(512) NOT NULL,
-    created_at          VARCHAR(64)  NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')),
+    created_at          VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
     target_branch       VARCHAR(255) NOT NULL DEFAULT 'main',
     auto_merge          BOOLEAN      NOT NULL DEFAULT TRUE,
     sync_enabled        BOOLEAN      NOT NULL DEFAULT FALSE,
     sync_remote         VARCHAR(512) NULL,
-    verification_rules  LONGTEXT     NOT NULL,
+    verification_rules  JSONB        NOT NULL,
     -- Migration 2: GitHub-origin projects. For server-cloned repos these
     -- columns carry the source-of-truth metadata; `path` mirrors
     -- `clone_path`. The legacy host-path flow leaves them NULL.
@@ -43,9 +39,9 @@ CREATE TABLE IF NOT EXISTS projects (
     -- mint installation tokens without discovering the installation via a
     -- user token on every push.
     installation_id     BIGINT       NULL,
-    UNIQUE KEY uq_projects_name (name),
-    UNIQUE KEY uq_projects_path (path),
-    UNIQUE KEY uq_projects_github_owner_repo (github_owner, github_repo)
+    CONSTRAINT uq_projects_name UNIQUE (name),
+    CONSTRAINT uq_projects_path UNIQUE (path),
+    CONSTRAINT uq_projects_github_owner_repo UNIQUE (github_owner, github_repo)
 );
 
 -- ── epics ────────────────────────────────────────────────────────────────────
@@ -54,18 +50,18 @@ CREATE TABLE IF NOT EXISTS epics (
     project_id          VARCHAR(36)  NOT NULL,
     short_id            VARCHAR(32)  NOT NULL,
     title               VARCHAR(512) NOT NULL,
-    description         LONGTEXT     NOT NULL,
+    description         TEXT         NOT NULL,
     emoji               VARCHAR(32)  NOT NULL DEFAULT '',
     color               VARCHAR(32)  NOT NULL DEFAULT '',
-    `status`            VARCHAR(64)  NOT NULL DEFAULT 'drafting',
+    status              VARCHAR(64)  NOT NULL DEFAULT 'drafting',
     owner               VARCHAR(255) NOT NULL DEFAULT '',
-    created_at          VARCHAR(64)  NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')),
-    updated_at          VARCHAR(64)  NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')),
+    created_at          VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    updated_at          VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
     closed_at           VARCHAR(64)  NULL,
-    memory_refs         LONGTEXT     NOT NULL,
+    memory_refs         JSONB        NOT NULL,
     auto_breakdown      BOOLEAN      NOT NULL DEFAULT TRUE,
     originating_adr_id  VARCHAR(191) NULL,
-    UNIQUE KEY uq_epics_project_short_id (project_id, short_id),
+    CONSTRAINT uq_epics_project_short_id UNIQUE (project_id, short_id),
     CONSTRAINT fk_epics_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
@@ -78,14 +74,14 @@ CREATE TABLE IF NOT EXISTS tasks (
     short_id                           VARCHAR(32)  NOT NULL,
     epic_id                            VARCHAR(36)  NULL,
     title                              VARCHAR(512) NOT NULL,
-    description                        LONGTEXT     NOT NULL,
-    design                             LONGTEXT     NOT NULL,
+    description                        TEXT         NOT NULL,
+    design                             TEXT         NOT NULL,
     issue_type                         VARCHAR(64)  NOT NULL DEFAULT 'task',
-    `status`                           VARCHAR(64)  NOT NULL DEFAULT 'open',
+    status                             VARCHAR(64)  NOT NULL DEFAULT 'open',
     priority                           INT          NOT NULL DEFAULT 0,
     owner                              VARCHAR(255) NOT NULL DEFAULT '',
-    labels                             LONGTEXT     NOT NULL,
-    acceptance_criteria                LONGTEXT     NOT NULL,
+    labels                             JSONB        NOT NULL,
+    acceptance_criteria                JSONB        NOT NULL,
     reopen_count                       INT          NOT NULL DEFAULT 0,
     continuation_count                 INT          NOT NULL DEFAULT 0,
     verification_failure_count         INT          NOT NULL DEFAULT 0,
@@ -93,23 +89,23 @@ CREATE TABLE IF NOT EXISTS tasks (
     total_verification_failure_count   INT          NOT NULL DEFAULT 0,
     intervention_count                 INT          NOT NULL DEFAULT 0,
     last_intervention_at               VARCHAR(64)  NULL,
-    created_at                         VARCHAR(64)  NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')),
-    updated_at                         VARCHAR(64)  NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')),
+    created_at                         VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    updated_at                         VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
     closed_at                          VARCHAR(64)  NULL,
-    close_reason                       LONGTEXT     NULL,
+    close_reason                       TEXT         NULL,
     merge_commit_sha                   VARCHAR(64)  NULL,
-    memory_refs                        LONGTEXT     NOT NULL,
-    merge_conflict_metadata            LONGTEXT     NULL,
+    memory_refs                        JSONB        NOT NULL,
+    merge_conflict_metadata            TEXT         NULL,
     agent_type                         VARCHAR(64)  NULL,
     pr_url                             VARCHAR(1024) NULL,
-    UNIQUE KEY uq_tasks_project_short_id (project_id, short_id),
+    CONSTRAINT uq_tasks_project_short_id UNIQUE (project_id, short_id),
     CONSTRAINT fk_tasks_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
     CONSTRAINT fk_tasks_epic    FOREIGN KEY (epic_id)    REFERENCES epics(id)    ON DELETE SET NULL
 );
 
 CREATE INDEX tasks_project_id ON tasks(project_id);
 CREATE INDEX tasks_epic_id    ON tasks(epic_id);
-CREATE INDEX tasks_status     ON tasks(`status`);
+CREATE INDEX tasks_status     ON tasks(status);
 CREATE INDEX tasks_priority   ON tasks(priority, created_at);
 
 -- ── blockers ────────────────────────────────────────────────────────────────
@@ -132,9 +128,9 @@ CREATE TABLE IF NOT EXISTS activity_log (
     actor_id    VARCHAR(255) NOT NULL DEFAULT '',
     actor_role  VARCHAR(64)  NOT NULL DEFAULT '',
     event_type  VARCHAR(128) NOT NULL,
-    payload     LONGTEXT     NOT NULL,
+    payload     JSONB        NOT NULL,
     archived    BOOLEAN      NOT NULL DEFAULT FALSE,
-    created_at  VARCHAR(64)  NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))
+    created_at  VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
 );
 
 CREATE INDEX activity_log_task_id     ON activity_log(task_id);
@@ -151,18 +147,18 @@ CREATE TABLE IF NOT EXISTS notes (
     storage       VARCHAR(32)   NOT NULL DEFAULT 'file',
     note_type     VARCHAR(64)   NOT NULL DEFAULT '',
     folder        VARCHAR(255)  NOT NULL DEFAULT '',
-    tags          LONGTEXT      NOT NULL,
-    content       LONGTEXT      NOT NULL,
-    created_at    VARCHAR(64)   NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')),
-    updated_at    VARCHAR(64)   NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')),
-    last_accessed VARCHAR(64)   NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')),
+    tags          JSONB         NOT NULL,
+    content       TEXT          NOT NULL,
+    created_at    VARCHAR(64)   NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    updated_at    VARCHAR(64)   NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    last_accessed VARCHAR(64)   NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
     access_count  BIGINT        NOT NULL DEFAULT 0,
-    confidence    DOUBLE        NOT NULL DEFAULT 1.0,
-    abstract      LONGTEXT      NULL,
-    overview      LONGTEXT      NULL,
-    scope_paths   LONGTEXT      NOT NULL,
+    confidence    DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    abstract      TEXT          NULL,
+    overview      TEXT          NULL,
+    scope_paths   JSONB         NOT NULL,
     content_hash  CHAR(64)      NULL,
-    UNIQUE KEY uq_notes_project_permalink (project_id, permalink),
+    CONSTRAINT uq_notes_project_permalink UNIQUE (project_id, permalink),
     CONSTRAINT fk_notes_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
@@ -172,22 +168,27 @@ CREATE INDEX notes_type                  ON notes(note_type);
 CREATE INDEX notes_updated_at            ON notes(updated_at);
 CREATE INDEX notes_project_last_accessed ON notes(project_id, last_accessed);
 CREATE INDEX notes_project_content_hash  ON notes(project_id, content_hash);
--- Title is VARCHAR(512); under utf8mb4 the composite index hits InnoDB's
--- 3072-byte key limit. Cap title to its first 191 chars in the index —
--- the prefix is unique enough for the lookup patterns this index serves
--- (project-scoped folder/title prefix filtering). Dolt silently accepted
--- the unprefixed version; real MySQL 8 rejects it.
-CREATE INDEX notes_project_folder_title  ON notes(project_id, folder, title(191));
+CREATE INDEX notes_project_folder_title  ON notes(project_id, folder, title);
 
--- MySQL/Dolt replacement for the SQLite FTS5 shadow table + triggers.
-ALTER TABLE notes ADD FULLTEXT KEY notes_ft (title, content, tags);
+-- Postgres FTS: generated tsvector + GIN index. Replaces the MySQL
+-- FULLTEXT index. The `tags` column is JSONB, so we feed its text
+-- representation into the tsvector (this matches the MySQL behavior of
+-- treating tags as a searchable string blob).
+ALTER TABLE notes ADD COLUMN search_vector tsvector
+    GENERATED ALWAYS AS (
+        setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
+        setweight(to_tsvector('english', coalesce(content, '')), 'B') ||
+        setweight(to_tsvector('english', coalesce(tags::text, '')), 'C')
+    ) STORED;
+
+CREATE INDEX notes_search_vector_idx ON notes USING GIN(search_vector);
 
 -- ── note_embeddings + meta (vector bytes; Qdrant holds the ANN index) ───────
 CREATE TABLE IF NOT EXISTS note_embeddings (
     note_id        VARCHAR(36) NOT NULL PRIMARY KEY,
-    embedding      LONGBLOB    NOT NULL,
+    embedding      BYTEA       NOT NULL,
     embedding_dim  INT         NOT NULL,
-    updated_at     VARCHAR(64) NOT NULL DEFAULT "",
+    updated_at     VARCHAR(64) NOT NULL DEFAULT '',
     CONSTRAINT fk_note_embeddings_note FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE
 );
 
@@ -213,7 +214,7 @@ CREATE TABLE IF NOT EXISTS note_links (
     target_id    VARCHAR(36)  NULL,
     target_raw   VARCHAR(512) NOT NULL,
     display_text VARCHAR(512) NULL,
-    UNIQUE KEY uq_note_links_source_target_raw (source_id, target_raw),
+    CONSTRAINT uq_note_links_source_target_raw UNIQUE (source_id, target_raw),
     CONSTRAINT fk_note_links_source FOREIGN KEY (source_id) REFERENCES notes(id) ON DELETE CASCADE,
     CONSTRAINT fk_note_links_target FOREIGN KEY (target_id) REFERENCES notes(id) ON DELETE SET NULL
 );
@@ -225,7 +226,7 @@ CREATE INDEX note_links_target ON note_links(target_id);
 CREATE TABLE IF NOT EXISTS note_associations (
     note_a_id       VARCHAR(36) NOT NULL,
     note_b_id       VARCHAR(36) NOT NULL,
-    weight          DOUBLE      NOT NULL DEFAULT 0.01,
+    weight          DOUBLE PRECISION NOT NULL DEFAULT 0.01,
     co_access_count BIGINT      NOT NULL DEFAULT 1,
     last_co_access  VARCHAR(64) NOT NULL,
     PRIMARY KEY (note_a_id, note_b_id),
@@ -243,7 +244,7 @@ CREATE TABLE IF NOT EXISTS consolidation_run_metrics (
     id                          VARCHAR(36) NOT NULL PRIMARY KEY,
     project_id                  VARCHAR(36) NOT NULL,
     note_type                   VARCHAR(64) NOT NULL,
-    `status`                    VARCHAR(64) NOT NULL,
+    status                      VARCHAR(64) NOT NULL,
     scanned_note_count          INT         NOT NULL,
     candidate_cluster_count     INT         NOT NULL,
     consolidated_cluster_count  INT         NOT NULL,
@@ -251,7 +252,7 @@ CREATE TABLE IF NOT EXISTS consolidation_run_metrics (
     source_note_count           INT         NOT NULL,
     started_at                  VARCHAR(64) NOT NULL,
     completed_at                VARCHAR(64) NULL,
-    error_message               LONGTEXT    NULL,
+    error_message               TEXT        NULL,
     CONSTRAINT fk_consolidation_metrics_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
@@ -263,7 +264,7 @@ CREATE TABLE IF NOT EXISTS task_memory_refs (
     task_id     VARCHAR(36) NOT NULL,
     note_id     VARCHAR(36) NOT NULL,
     relation    VARCHAR(64) NOT NULL DEFAULT 'context',
-    created_at  VARCHAR(64) NOT NULL DEFAULT "",
+    created_at  VARCHAR(64) NOT NULL DEFAULT '',
     PRIMARY KEY (task_id, note_id),
     CONSTRAINT fk_task_memory_refs_task FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
     CONSTRAINT fk_task_memory_refs_note FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE
@@ -275,7 +276,7 @@ CREATE TABLE IF NOT EXISTS epic_memory_refs (
     epic_id     VARCHAR(36) NOT NULL,
     note_id     VARCHAR(36) NOT NULL,
     relation    VARCHAR(64) NOT NULL DEFAULT 'context',
-    created_at  VARCHAR(64) NOT NULL DEFAULT "",
+    created_at  VARCHAR(64) NOT NULL DEFAULT '',
     PRIMARY KEY (epic_id, note_id),
     CONSTRAINT fk_epic_memory_refs_epic FOREIGN KEY (epic_id) REFERENCES epics(id) ON DELETE CASCADE,
     CONSTRAINT fk_epic_memory_refs_note FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE
@@ -290,20 +291,20 @@ CREATE TABLE IF NOT EXISTS sessions (
     task_id         VARCHAR(36)  NULL,
     model_id        VARCHAR(255) NOT NULL,
     agent_type      VARCHAR(64)  NOT NULL,
-    started_at      VARCHAR(64)  NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')),
+    started_at      VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
     ended_at        VARCHAR(64)  NULL,
-    `status`        VARCHAR(64)  NOT NULL,
+    status          VARCHAR(64)  NOT NULL,
     tokens_in       BIGINT       NOT NULL DEFAULT 0,
     tokens_out      BIGINT       NOT NULL DEFAULT 0,
     worktree_path   VARCHAR(1024) NULL,
-    event_taxonomy  LONGTEXT     NULL,
+    event_taxonomy  JSONB        NULL,
     CONSTRAINT fk_sessions_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
     CONSTRAINT fk_sessions_task    FOREIGN KEY (task_id)    REFERENCES tasks(id)    ON DELETE SET NULL
 );
 
 CREATE INDEX idx_sessions_project_id ON sessions(project_id);
 CREATE INDEX idx_sessions_task_id    ON sessions(task_id);
-CREATE INDEX idx_sessions_status     ON sessions(`status`);
+CREATE INDEX idx_sessions_status     ON sessions(status);
 CREATE INDEX idx_sessions_started_at ON sessions(started_at);
 
 -- ── session_messages ────────────────────────────────────────────────────────
@@ -311,9 +312,9 @@ CREATE TABLE IF NOT EXISTS session_messages (
     id            VARCHAR(36) NOT NULL PRIMARY KEY,
     session_id    VARCHAR(36) NOT NULL,
     role          VARCHAR(64) NOT NULL,
-    content_json  LONGTEXT    NOT NULL,
+    content_json  JSONB       NOT NULL,
     token_count   BIGINT      NULL,
-    created_at    VARCHAR(64) NOT NULL DEFAULT "",
+    created_at    VARCHAR(64) NOT NULL DEFAULT '',
     CONSTRAINT fk_session_messages_session FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
@@ -323,7 +324,7 @@ CREATE INDEX idx_session_messages_session_id_created_at ON session_messages(sess
 CREATE TABLE IF NOT EXISTS consolidated_note_provenance (
     note_id    VARCHAR(36) NOT NULL,
     session_id VARCHAR(36) NOT NULL,
-    created_at VARCHAR(64) NOT NULL DEFAULT "",
+    created_at VARCHAR(64) NOT NULL DEFAULT '',
     PRIMARY KEY (note_id, session_id),
     CONSTRAINT fk_cnp_note    FOREIGN KEY (note_id)    REFERENCES notes(id)    ON DELETE CASCADE,
     CONSTRAINT fk_cnp_session FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
@@ -336,10 +337,10 @@ CREATE TABLE IF NOT EXISTS credentials (
     id              VARCHAR(36)  NOT NULL PRIMARY KEY,
     provider_id     VARCHAR(191) NOT NULL,
     key_name        VARCHAR(191) NOT NULL,
-    encrypted_value LONGBLOB     NOT NULL,
-    created_at      VARCHAR(64)  NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')),
-    updated_at      VARCHAR(64)  NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')),
-    UNIQUE KEY uq_credentials_key_name (key_name)
+    encrypted_value BYTEA        NOT NULL,
+    created_at      VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    updated_at      VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    CONSTRAINT uq_credentials_key_name UNIQUE (key_name)
 );
 
 CREATE INDEX credentials_provider_id ON credentials(provider_id);
@@ -350,21 +351,21 @@ CREATE TABLE IF NOT EXISTS custom_providers (
     name        VARCHAR(255) NOT NULL,
     base_url    VARCHAR(1024) NOT NULL,
     env_var     VARCHAR(128) NOT NULL,
-    seed_models LONGTEXT     NOT NULL,
-    created_at  VARCHAR(64)  NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))
+    seed_models JSONB        NOT NULL,
+    created_at  VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
 );
 
 -- ── model_health (provider/model reachability rollup) ──────────────────────
 CREATE TABLE IF NOT EXISTS model_health (
     provider       VARCHAR(128) NOT NULL,
     model          VARCHAR(191) NOT NULL,
-    `status`       VARCHAR(64)  NOT NULL,
+    status         VARCHAR(64)  NOT NULL,
     latency_ms     BIGINT       NULL,
-    success_rate   DOUBLE       NULL,
+    success_rate   DOUBLE PRECISION NULL,
     sample_size    BIGINT       NULL,
-    error_message  LONGTEXT     NULL,
-    details        LONGTEXT     NULL,
-    checked_at     VARCHAR(64)  NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')),
+    error_message  TEXT         NULL,
+    details        JSONB        NULL,
+    checked_at     VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
     PRIMARY KEY (provider, model)
 );
 
@@ -372,9 +373,9 @@ CREATE TABLE IF NOT EXISTS model_health (
 CREATE TABLE IF NOT EXISTS verification_cache (
     project_id   VARCHAR(36)  NOT NULL,
     commit_sha   VARCHAR(64)  NOT NULL,
-    output       LONGTEXT     NOT NULL,
+    output       TEXT         NOT NULL,
     duration_ms  BIGINT       NULL,
-    created_at   VARCHAR(64)  NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')),
+    created_at   VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
     PRIMARY KEY (project_id, commit_sha),
     CONSTRAINT fk_verification_cache_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
@@ -382,22 +383,24 @@ CREATE TABLE IF NOT EXISTS verification_cache (
 CREATE INDEX idx_verification_cache_created_at ON verification_cache(created_at);
 
 -- ── verification_results (durable per-step results for task verify runs) ───
--- NOTE: `id` uses UUID() expression default so inserts that omit `id`
--- (see verification_result.rs) still populate a primary-key value.
+-- NOTE: `id` uses gen_random_uuid() default so inserts that omit `id`
+-- (see verification_result.rs) still populate a primary-key value. The
+-- column type stays VARCHAR(36) for cross-table consistency; Postgres
+-- happily casts the uuid to text for the default.
 CREATE TABLE IF NOT EXISTS verification_results (
-    id          VARCHAR(36)  NOT NULL PRIMARY KEY DEFAULT (UUID()),
+    id          VARCHAR(36)  NOT NULL PRIMARY KEY DEFAULT gen_random_uuid()::text,
     project_id  VARCHAR(36)  NOT NULL,
     task_id     VARCHAR(36)  NULL,
     run_id      VARCHAR(36)  NOT NULL,
     phase       VARCHAR(32)  NOT NULL,
     step_index  INT          NOT NULL,
     name        VARCHAR(255) NOT NULL,
-    command     LONGTEXT     NOT NULL,
+    command     TEXT         NOT NULL,
     exit_code   INT          NOT NULL,
-    stdout      LONGTEXT     NOT NULL,
-    stderr      LONGTEXT     NOT NULL,
+    stdout      TEXT         NOT NULL,
+    stderr      TEXT         NOT NULL,
     duration_ms BIGINT       NOT NULL DEFAULT 0,
-    created_at  VARCHAR(64)  NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))
+    created_at  VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
 );
 
 CREATE INDEX idx_verification_results_task    ON verification_results(task_id, created_at);
@@ -406,21 +409,19 @@ CREATE INDEX idx_verification_results_run     ON verification_results(run_id);
 
 -- ── repo_map_cache (per-worktree rendered repo map) ────────────────────────
 -- The composite identity is (project_id, project_path, worktree_path,
--- commit_sha). Under utf8mb4 the raw VARCHAR widths sum past InnoDB's
--- 3072-byte key limit, so identity is normalized into a SHA-256 hex
--- digest column the application populates on insert and ON DUPLICATE
--- KEY UPDATE against. Hash collisions on SHA-256 are not a concern.
+-- commit_sha). Identity is normalized into a SHA-256 hex digest column
+-- the application populates on insert and ON CONFLICT UPDATE against.
 CREATE TABLE IF NOT EXISTS repo_map_cache (
     cache_key         CHAR(64)     NOT NULL PRIMARY KEY,
     project_id        VARCHAR(36)  NOT NULL,
     project_path      VARCHAR(512) NOT NULL,
     worktree_path     VARCHAR(512) NOT NULL DEFAULT '',
     commit_sha        VARCHAR(64)  NOT NULL,
-    rendered_map      LONGTEXT     NOT NULL,
+    rendered_map      TEXT         NOT NULL,
     token_estimate    BIGINT       NOT NULL,
     included_entries  BIGINT       NOT NULL,
-    graph_artifact    LONGTEXT     NULL,
-    created_at        VARCHAR(64)  NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))
+    graph_artifact    JSONB        NULL,
+    created_at        VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
 );
 
 CREATE INDEX repo_map_cache_project_commit ON repo_map_cache(project_id, commit_sha);
@@ -429,8 +430,8 @@ CREATE INDEX repo_map_cache_project_commit ON repo_map_cache(project_id, commit_
 CREATE TABLE IF NOT EXISTS repo_graph_cache (
     project_id VARCHAR(36) NOT NULL,
     commit_sha VARCHAR(64) NOT NULL,
-    graph_blob LONGBLOB    NOT NULL,
-    built_at   VARCHAR(64) NOT NULL DEFAULT "",
+    graph_blob BYTEA       NOT NULL,
+    built_at   VARCHAR(64) NOT NULL DEFAULT '',
     PRIMARY KEY (project_id, commit_sha)
 );
 
@@ -440,17 +441,17 @@ CREATE TABLE IF NOT EXISTS agents (
     project_id               VARCHAR(36)  NOT NULL,
     name                     VARCHAR(255) NOT NULL,
     base_role                VARCHAR(64)  NOT NULL,
-    description              LONGTEXT     NOT NULL,
-    system_prompt_extensions LONGTEXT     NOT NULL,
+    description              TEXT         NOT NULL,
+    system_prompt_extensions JSONB        NOT NULL,
     model_preference         VARCHAR(255) NULL,
-    verification_command     LONGTEXT     NULL,
-    mcp_servers              LONGTEXT     NOT NULL,
-    skills                   LONGTEXT     NOT NULL,
+    verification_command     TEXT         NULL,
+    mcp_servers              JSONB        NOT NULL,
+    skills                   JSONB        NOT NULL,
     is_default               BOOLEAN      NOT NULL DEFAULT FALSE,
-    learned_prompt           LONGTEXT     NULL,
-    created_at               VARCHAR(64)  NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')),
-    updated_at               VARCHAR(64)  NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')),
-    UNIQUE KEY uq_agents_project_name (project_id, name),
+    learned_prompt           TEXT         NULL,
+    created_at               VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    updated_at               VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    CONSTRAINT uq_agents_project_name UNIQUE (project_id, name),
     CONSTRAINT fk_agents_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
@@ -458,40 +459,36 @@ CREATE INDEX agents_project_id          ON agents(project_id);
 CREATE INDEX agents_base_role           ON agents(project_id, base_role);
 CREATE INDEX agents_is_default          ON agents(project_id, is_default);
 
--- Partial-unique emulation: MySQL does not support WHERE in CREATE INDEX, but
--- Dolt does via INDEX with WHERE. We use a generated column to approximate the
--- SQLite partial unique (project_id, base_role) WHERE is_default = 1.
-ALTER TABLE agents
-    ADD COLUMN default_key VARCHAR(128) GENERATED ALWAYS AS
-        (CASE WHEN is_default = TRUE
-              THEN CONCAT(project_id, ':', base_role)
-              ELSE NULL END) VIRTUAL;
-
-CREATE UNIQUE INDEX uq_agents_one_default_per_base_role ON agents(default_key);
+-- Partial-unique: at most one default agent per (project_id, base_role).
+-- Postgres supports partial indexes natively, no generated column needed.
+CREATE UNIQUE INDEX uq_agents_one_default_per_base_role
+    ON agents(project_id, base_role) WHERE is_default = TRUE;
 
 -- ── learned_prompt_history (architect improvement-loop audit trail) ────────
 CREATE TABLE IF NOT EXISTS learned_prompt_history (
     id              VARCHAR(36)  NOT NULL PRIMARY KEY,
     agent_id        VARCHAR(36)  NOT NULL,
-    proposed_text   LONGTEXT     NOT NULL,
+    proposed_text   TEXT         NOT NULL,
     action          VARCHAR(32)  NOT NULL,
-    metrics_before  LONGTEXT     NULL,
-    metrics_after   LONGTEXT     NULL,
-    created_at      VARCHAR(64)  NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')),
+    metrics_before  JSONB        NULL,
+    metrics_after   JSONB        NULL,
+    created_at      VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
     CONSTRAINT fk_learned_prompt_history_agent FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
 );
 
 CREATE INDEX learned_prompt_history_agent_id ON learned_prompt_history(agent_id);
 
 CREATE TABLE IF NOT EXISTS user_auth_sessions (
-    token               VARCHAR(64) NOT NULL PRIMARY KEY,
-    user_id             VARCHAR(64) NOT NULL,
-    github_login        VARCHAR(255) NOT NULL,
-    github_name         VARCHAR(255) NULL,
-    github_avatar_url   TEXT NULL,
-    github_access_token TEXT NOT NULL,
-    created_at          DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-    expires_at          DATETIME(3) NOT NULL
+    token               VARCHAR(64)   NOT NULL PRIMARY KEY,
+    user_id             VARCHAR(64)   NOT NULL,
+    github_login        VARCHAR(255)  NOT NULL,
+    github_name         VARCHAR(255)  NULL,
+    github_avatar_url   TEXT          NULL,
+    github_access_token TEXT          NOT NULL,
+    -- Migration 2 rewrites these to VARCHAR(64) RFC3339 for consistency
+    -- with the rest of the schema, which reads timestamps as String.
+    created_at          TIMESTAMP(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    expires_at          TIMESTAMP(3)  NOT NULL
 );
 
 CREATE INDEX idx_user_auth_sessions_user_id    ON user_auth_sessions(user_id);

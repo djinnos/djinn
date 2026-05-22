@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS org_config (
     github_org_login  VARCHAR(255) NOT NULL,
     app_id            BIGINT       NOT NULL,
     installation_id   BIGINT       NOT NULL,
-    created_at        VARCHAR(64)  NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')),
+    created_at        VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
     CONSTRAINT chk_org_config_singleton CHECK (id = 1)
 );
 
@@ -30,8 +30,8 @@ CREATE TABLE IF NOT EXISTS users (
     github_avatar_url  TEXT         NULL,
     is_member_of_org   BOOLEAN      NOT NULL DEFAULT TRUE,
     last_seen_at       VARCHAR(64)  NULL,
-    created_at         VARCHAR(64)  NOT NULL DEFAULT (DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')),
-    UNIQUE KEY uq_users_github_id (github_id)
+    created_at         VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+    CONSTRAINT uq_users_github_id UNIQUE (github_id)
 );
 
 CREATE INDEX idx_users_github_login ON users(github_login);
