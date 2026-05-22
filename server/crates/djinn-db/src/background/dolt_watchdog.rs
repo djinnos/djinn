@@ -144,7 +144,12 @@ async fn run_tick(pool: &MySqlPool, kill_after_secs: u32) -> sqlx::Result<()> {
 #[derive(sqlx::FromRow)]
 struct StuckRow {
     id: u64,
-    time: u32,
+    // Dolt's `information_schema.processlist.time` is a **signed** `INT`
+    // (not `INT UNSIGNED`), unlike older MySQL builds. sqlx is strict about
+    // the type match, so an `i64` here keeps decoding working against both
+    // signed and unsigned flavors. Negative values are never expected; we
+    // clamp at the comparison site below by casting to u32.
+    time: i64,
     info: Option<String>,
 }
 
