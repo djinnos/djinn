@@ -36,7 +36,11 @@ metadata:
   name: {{ include "djinn.fullname" . }}-migrate-{{ .Release.Revision }}
   namespace: {{ include "djinn.namespace" . }}
   labels:
-    {{- include "djinn.server.labels" . | nindent 4 }}
+    # Use the chart-wide labels here rather than `djinn.server.labels`
+    # so we don't collide on `app.kubernetes.io/component` — this Job
+    # is a sibling component to the server Deployment, not a copy of
+    # it.
+    {{- include "djinn.labels" . | nindent 4 }}
     app.kubernetes.io/component: migrate
   annotations:
     "helm.sh/hook": pre-install,pre-upgrade
@@ -52,7 +56,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "djinn.server.selectorLabels" . | nindent 8 }}
+        {{- include "djinn.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: migrate
     spec:
       restartPolicy: OnFailure

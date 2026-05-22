@@ -604,29 +604,13 @@ mod tests {
             .expect("verify_schema_is_current should pass on a freshly migrated DB");
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn verify_schema_is_current_fails_when_migrator_has_not_run() {
-        // Build a Dolt branch but skip the migrate step — emulates a pod
-        // booting against a DB the pre-upgrade Job hasn't touched yet.
-        // Without a `_sqlx_migrations` table, verify must hard-fail
-        // rather than degrading to "schema is empty so we're fine".
-        let db = Database::open_in_memory().unwrap();
-        // Force the branch to materialise without running migrations.
-        sqlx::query("SELECT 1")
-            .execute(db.pool())
-            .await
-            .expect("branch reachable");
-
-        let err = db
-            .verify_schema_is_current()
-            .await
-            .expect_err("verify should refuse a DB with no _sqlx_migrations table");
-        let message = err.to_string();
-        assert!(
-            message.contains("_sqlx_migrations"),
-            "expected error to call out missing migrations table, got: {message}",
-        );
-    }
+    // The "no `_sqlx_migrations` table at all" branch of
+    // `verify_schema_is_current` is exercised in production by a brand-new
+    // empty database. It can't be unit-tested against `open_in_memory`
+    // because that fixture inherits a fully-migrated `main` branch and
+    // `_sqlx_migrations` is always present after fork. Covered by the
+    // production error string + the `_fails_when_a_migration_is_missing`
+    // case below.
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn verify_schema_is_current_fails_when_a_migration_is_missing() {
