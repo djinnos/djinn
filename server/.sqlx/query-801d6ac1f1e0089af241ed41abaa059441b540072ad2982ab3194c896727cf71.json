@@ -1,20 +1,16 @@
 {
-  "db_name": "MySQL",
+  "db_name": "PostgreSQL",
   "query": "SELECT id FROM projects ORDER BY created_at LIMIT 1",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
         "name": "id",
-        "type_info": {
-          "type": "VarString",
-          "flags": "NOT_NULL | PRIMARY_KEY | NO_DEFAULT_VALUE",
-          "max_size": 144
-        }
+        "type_info": "Varchar"
       }
     ],
     "parameters": {
-      "Right": 0
+      "Left": []
     },
     "nullable": [
       false

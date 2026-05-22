@@ -316,7 +316,7 @@ async fn db_create_and_delete_persists_state() {
     repo.delete(&created.id).await.unwrap();
     assert!(repo.get(&created.id).await.unwrap().is_none());
     assert_eq!(
-        sqlx::query_scalar!("SELECT COUNT(*) FROM notes WHERE id = ?", created.id)
+        sqlx::query_scalar!(r#"SELECT COUNT(*) AS "count!: i64" FROM notes WHERE id = $1"#, created.id)
             .fetch_one(db.pool())
             .await
             .unwrap(),

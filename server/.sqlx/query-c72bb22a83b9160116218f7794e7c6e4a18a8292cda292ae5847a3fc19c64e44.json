@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO code_chunks\n            (id, project_id, file_path, symbol_key, kind,\n             start_line, end_line, content_hash, embedded_text)\n           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)\n           ON CONFLICT (id) DO UPDATE SET\n             project_id = EXCLUDED.project_id,\n             file_path = EXCLUDED.file_path,\n             symbol_key = EXCLUDED.symbol_key,\n             kind = EXCLUDED.kind,\n             start_line = EXCLUDED.start_line,\n             end_line = EXCLUDED.end_line,\n             content_hash = EXCLUDED.content_hash,\n             embedded_text = EXCLUDED.embedded_text",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Text",
+        "Text",
+        "Varchar",
+        "Int4",
+        "Int4",
+        "Varchar",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c72bb22a83b9160116218f7794e7c6e4a18a8292cda292ae5847a3fc19c64e44"
+}

@@ -32,7 +32,7 @@ impl GitSettingsRepository {
         self.db.ensure_initialized().await?;
 
         if let Some(branch) =
-            sqlx::query_scalar!("SELECT `value` FROM settings WHERE `key` = ?", project_key)
+            sqlx::query_scalar!("SELECT value FROM settings WHERE key = $1", project_key)
                 .fetch_optional(self.db.pool())
                 .await?
         {
@@ -42,7 +42,7 @@ impl GitSettingsRepository {
         }
 
         if let Some(branch) =
-            sqlx::query_scalar!("SELECT `value` FROM settings WHERE `key` = ?", global_key)
+            sqlx::query_scalar!("SELECT value FROM settings WHERE key = $1", global_key)
                 .fetch_optional(self.db.pool())
                 .await?
         {
@@ -59,11 +59,11 @@ impl GitSettingsRepository {
         self.db.ensure_initialized().await?;
         let key = format!("git:{project_id}:target_branch");
         sqlx::query!(
-            "INSERT INTO settings (`key`, `value`, updated_at)
-             VALUES (?, ?, DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))
-             ON DUPLICATE KEY UPDATE
-               `value` = VALUES(`value`),
-               updated_at = VALUES(updated_at)",
+            r#"INSERT INTO settings (key, value, updated_at)
+             VALUES ($1, $2, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+             ON CONFLICT (key) DO UPDATE SET
+               value = EXCLUDED.value,
+               updated_at = EXCLUDED.updated_at"#,
             key,
             branch,
         )
@@ -82,11 +82,11 @@ impl GitSettingsRepository {
     pub async fn set_global_target_branch(&self, branch: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query!(
-            "INSERT INTO settings (`key`, `value`, updated_at)
-             VALUES ('git:global:target_branch', ?, DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))
-             ON DUPLICATE KEY UPDATE
-               `value` = VALUES(`value`),
-               updated_at = VALUES(updated_at)",
+            r#"INSERT INTO settings (key, value, updated_at)
+             VALUES ('git:global:target_branch', $1, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+             ON CONFLICT (key) DO UPDATE SET
+               value = EXCLUDED.value,
+               updated_at = EXCLUDED.updated_at"#,
             branch,
         )
         .execute(self.db.pool())

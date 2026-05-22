@@ -22,7 +22,7 @@ impl NoteRepository {
                     + (SELECT COUNT(*) FROM note_links WHERE target_id = n.id)
                       AS "connection_count!: i64"
              FROM notes n
-             WHERE n.project_id = ?
+             WHERE n.project_id = $1
              ORDER BY n.folder, n.title"#,
             project_id
         )
@@ -32,7 +32,7 @@ impl NoteRepository {
         let edge_rows = sqlx::query!(
             r#"SELECT l.source_id, l.target_id AS "target_id!", l.target_raw
              FROM note_links l
-             JOIN notes src ON src.id = l.source_id AND src.project_id = ?
+             JOIN notes src ON src.id = l.source_id AND src.project_id = $1
              WHERE l.target_id IS NOT NULL"#,
             project_id
         )
@@ -75,13 +75,12 @@ impl NoteRepository {
         let rows = sqlx::query!(
             r#"SELECT src.id, src.permalink, src.title, l.target_raw
              FROM note_links l
-             JOIN notes src ON src.id = l.source_id AND src.project_id = ?
+             JOIN notes src ON src.id = l.source_id AND src.project_id = $1
              WHERE l.target_id IS NULL
-               AND (? IS NULL OR src.folder = ?)
+               AND ($2::text IS NULL OR src.folder = $2)
              ORDER BY src.permalink, l.target_raw"#,
             project_id,
             folder,
-            folder
         )
         .fetch_all(self.db.pool())
         .await?;
@@ -106,16 +105,15 @@ impl NoteRepository {
         let rows = sqlx::query!(
             r#"SELECT n.id, n.permalink, n.title, n.note_type, n.folder
              FROM notes n
-             WHERE n.project_id = ?
+             WHERE n.project_id = $1
                AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')
-               AND (? IS NULL OR n.folder = ?)
+               AND ($2::text IS NULL OR n.folder = $2)
                AND NOT EXISTS (
                    SELECT 1 FROM note_links l WHERE l.target_id = n.id
                )
              ORDER BY n.folder, n.title"#,
             project_id,
             folder,
-            folder
         )
         .fetch_all(self.db.pool())
         .await?;
@@ -139,28 +137,28 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
 
         let total_notes: i64 = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM notes WHERE project_id = ?",
+            r#"SELECT COUNT(*) AS "count!: i64" FROM notes WHERE project_id = $1"#,
             project_id
         )
         .fetch_one(self.db.pool())
         .await?;
 
         let broken_link_count: i64 = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM note_links l
-             JOIN notes src ON src.id = l.source_id AND src.project_id = ?
-             WHERE l.target_id IS NULL",
+            r#"SELECT COUNT(*) AS "count!: i64" FROM note_links l
+             JOIN notes src ON src.id = l.source_id AND src.project_id = $1
+             WHERE l.target_id IS NULL"#,
             project_id
         )
         .fetch_one(self.db.pool())
         .await?;
 
         let orphan_note_count: i64 = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM notes n
-             WHERE n.project_id = ?
+            r#"SELECT COUNT(*) AS "count!: i64" FROM notes n
+             WHERE n.project_id = $1
                AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')
                AND NOT EXISTS (
                    SELECT 1 FROM note_links l WHERE l.target_id = n.id
-               )",
+               )"#,
             project_id
         )
         .fetch_one(self.db.pool())
@@ -168,8 +166,8 @@ impl NoteRepository {
 
         let stale_rows = sqlx::query!(
             r#"SELECT folder, COUNT(*) AS "count!: i64" FROM notes
-             WHERE project_id = ?
-               AND updated_at < DATE_SUB(NOW(3), INTERVAL 30 DAY)
+             WHERE project_id = $1
+               AND updated_at < to_char((now() at time zone 'utc') - interval '30 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
              GROUP BY folder ORDER BY folder"#,
             project_id
         )
@@ -189,9 +187,9 @@ impl NoteRepository {
             .sum();
 
         let low_confidence_note_count: i64 = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM notes
-             WHERE project_id = ?
-               AND confidence < ?",
+            r#"SELECT COUNT(*) AS "count!: i64" FROM notes
+             WHERE project_id = $1
+               AND confidence < $2"#,
             project_id,
             STALE_CITATION
         )
@@ -229,12 +227,12 @@ impl NoteRepository {
         let notes = sqlx::query_as!(
             Note,
             r#"SELECT id, project_id, permalink, title, file_path,
-                    storage, note_type, folder, tags, content,
+                    storage, note_type, folder, tags::text AS "tags!", content,
                     created_at, updated_at, last_accessed,
-                    access_count, confidence, `abstract` AS abstract_, overview,
-                    scope_paths
+                    access_count, confidence, abstract AS abstract_, overview,
+                    scope_paths::text AS "scope_paths!"
              FROM notes
-             WHERE project_id = ?
+             WHERE project_id = $1
                AND note_type IN ('case', 'pattern', 'pitfall')
              ORDER BY note_type, permalink"#,
             project_id
@@ -303,7 +301,7 @@ impl NoteRepository {
                 && missing_sections.len() == required_sections.len();
             let looks_task_local = looks_task_local(&note.title, &note.content);
             let is_orphan = !sqlx::query_scalar!(
-                r#"SELECT EXISTS(SELECT 1 FROM note_links WHERE target_id = ?) AS "exists!: i64""#,
+                r#"SELECT EXISTS(SELECT 1 FROM note_links WHERE target_id = $1) AS "exists!: i64""#,
                 note.id
             )
             .fetch_one(self.db.pool())
@@ -426,7 +424,7 @@ impl NoteRepository {
         permalink: &str,
     ) -> Result<Option<String>> {
         Ok(sqlx::query_scalar!(
-            "SELECT id FROM notes WHERE project_id = ? AND permalink = ? LIMIT 1",
+            "SELECT id FROM notes WHERE project_id = $1 AND permalink = $2 LIMIT 1",
             project_id,
             permalink
         )
@@ -459,7 +457,7 @@ impl NoteRepository {
 
         for (id, score) in candidate_scores {
             let note_type = sqlx::query_scalar!(
-                "SELECT note_type FROM notes WHERE id = ? AND project_id = ? LIMIT 1",
+                "SELECT note_type FROM notes WHERE id = $1 AND project_id = $2 LIMIT 1",
                 id,
                 project_id
             )
@@ -495,7 +493,7 @@ impl NoteRepository {
         let mut scores: HashMap<String, f64> = HashMap::new();
 
         let task_refs: Option<String> = sqlx::query_scalar!(
-            "SELECT memory_refs FROM tasks WHERE id = ? AND project_id = ?",
+            r#"SELECT memory_refs::text AS "memory_refs!" FROM tasks WHERE id = $1 AND project_id = $2"#,
             task_id,
             project_id
         )
@@ -533,10 +531,10 @@ impl NoteRepository {
         }
 
         let epic_refs: Option<String> = sqlx::query_scalar!(
-            r#"SELECT e.memory_refs AS "memory_refs!"
+            r#"SELECT e.memory_refs::text AS "memory_refs!"
              FROM tasks t
              JOIN epics e ON e.id = t.epic_id
-             WHERE t.id = ? AND t.project_id = ?"#,
+             WHERE t.id = $1 AND t.project_id = $2"#,
             task_id,
             project_id
         )
@@ -555,10 +553,10 @@ impl NoteRepository {
         }
 
         let blocker_refs = sqlx::query!(
-            r#"SELECT bt.memory_refs AS "memory_refs!"
+            r#"SELECT bt.memory_refs::text AS "memory_refs!"
              FROM blockers b
              JOIN tasks bt ON bt.id = b.blocking_task_id
-             WHERE b.task_id = ? AND bt.project_id = ?"#,
+             WHERE b.task_id = $1 AND bt.project_id = $2"#,
             task_id,
             project_id
         )

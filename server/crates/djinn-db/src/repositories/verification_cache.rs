@@ -25,7 +25,7 @@ impl VerificationCacheRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             CachedVerification,
-            r#"SELECT output, duration_ms AS "duration_ms!: i64", created_at FROM verification_cache WHERE project_id = ? AND commit_sha = ?"#,
+            r#"SELECT output, duration_ms AS "duration_ms!: i64", created_at FROM verification_cache WHERE project_id = $1 AND commit_sha = $2"#,
             project_id,
             commit_sha,
         )
@@ -42,8 +42,8 @@ impl VerificationCacheRepository {
     ) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query!(
-            "INSERT INTO verification_cache (project_id, commit_sha, output, duration_ms) VALUES (?, ?, ?, ?) \
-             ON DUPLICATE KEY UPDATE output=VALUES(output), duration_ms=VALUES(duration_ms)",
+            "INSERT INTO verification_cache (project_id, commit_sha, output, duration_ms) VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (project_id, commit_sha) DO UPDATE SET output=EXCLUDED.output, duration_ms=EXCLUDED.duration_ms",
             project_id,
             commit_sha,
             output_json,
@@ -57,7 +57,7 @@ impl VerificationCacheRepository {
     pub async fn invalidate_project(&self, project_id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query!(
-            "DELETE FROM verification_cache WHERE project_id = ?",
+            "DELETE FROM verification_cache WHERE project_id = $1",
             project_id
         )
         .execute(self.db.pool())
@@ -68,8 +68,8 @@ impl VerificationCacheRepository {
     pub async fn prune_older_than(&self, days: i64) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query!(
-            "DELETE FROM verification_cache WHERE created_at < DATE_SUB(NOW(3), INTERVAL ? DAY)",
-            days,
+            r#"DELETE FROM verification_cache WHERE created_at < to_char((now() at time zone 'utc') - (interval '1 day' * $1), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#,
+            days as f64,
         )
         .execute(self.db.pool())
         .await?;
@@ -97,7 +97,7 @@ mod tests {
             let owner = "test";
             let repo_slug = format!("verif-cache-{id}");
             sqlx::query!(
-                "INSERT INTO projects (id, name, github_owner, github_repo) VALUES (?, ?, ?, ?)",
+                "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
                 id,
                 id,
                 owner,
@@ -152,7 +152,7 @@ mod tests {
 
         repo.insert("p1", "old", "[]", 1).await.expect("insert old");
         sqlx::query!(
-            "UPDATE verification_cache SET created_at = DATE_SUB(NOW(3), INTERVAL 10 DAY) WHERE project_id = ? AND commit_sha = ?",
+            r#"UPDATE verification_cache SET created_at = to_char((now() at time zone 'utc') - interval '10 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE project_id = $1 AND commit_sha = $2"#,
             "p1",
             "old",
         )

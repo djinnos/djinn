@@ -26,10 +26,10 @@
 //! directly (`resolve_role_overrides`, `build_prompt_context`,
 //! `spawn_post_session_work`, `task_merge::resolve_project_path_for_id`).
 //! The worker bootstraps an in-Pod `Database` against
-//! `DJINN_MYSQL_URL` so those calls have a live connection; the test
-//! needs Dolt at `127.0.0.1:3307` (or a `DJINN_TEST_MYSQL_URL` override) —
-//! same convention as `djinn-agent`'s `phase1_supervisor` integration
-//! test (`make test` brings up the test Dolt instance).
+//! `DJINN_DATABASE_URL` so those calls have a live connection; the test
+//! needs Postgres at `127.0.0.1:5433` (or a `DJINN_TEST_DATABASE_URL`
+//! override) — same convention as `djinn-agent`'s `phase1_supervisor`
+//! integration test (`make test` brings up the test Postgres instance).
 //!
 //! The test exercises a Planner stage with an OAuth-style credential
 //! whose `base_url` points at an unreachable port (`http://127.0.0.1:1`),
@@ -474,12 +474,12 @@ async fn worker_drives_real_supervisor_in_pod() {
     )
     .await;
 
-    // 4. Spawn the worker binary. Inherits DJINN_TEST_MYSQL_URL so the
-    //    in-Pod `bootstrap_warm_database()` lands on the same isolated Dolt
-    //    branch this crate's other DB-touching tests use.
+    // 4. Spawn the worker binary. Inherits DJINN_TEST_DATABASE_URL so the
+    //    in-Pod `bootstrap_warm_database()` lands on the same isolated
+    //    Postgres database this crate's other DB-touching tests use.
     let exe = env!("CARGO_BIN_EXE_djinn-agent-worker");
-    let test_db_url = std::env::var("DJINN_TEST_MYSQL_URL")
-        .unwrap_or_else(|_| "mysql://root@127.0.0.1:3307".into());
+    let test_db_url = std::env::var("DJINN_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1:5433/postgres".into());
     let mut child = Command::new(exe)
         .arg("task-run")
         .env("DJINN_SERVER_ADDR", addr.to_string())
@@ -489,10 +489,8 @@ async fn worker_drives_real_supervisor_in_pod() {
         .env("DJINN_TASK_RUN_ID", task_run_id)
         .env("DJINN_WORKSPACE_PATH", workspace_dir.path())
         .env("DJINN_MIRROR_ROOT", mirrors_root.path())
-        // Point the in-Pod Database at the test Dolt branch.
-        .env("DJINN_MYSQL_URL", format!("{}/djinn_test", test_db_url))
-        .env("DJINN_DB_BACKEND", "dolt")
-        .env("DJINN_MYSQL_FLAVOR", "dolt")
+        // Point the in-Pod Database at the test Postgres database.
+        .env("DJINN_DATABASE_URL", test_db_url)
         .env("RUST_LOG", "info,djinn_agent=warn,sqlx=warn")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

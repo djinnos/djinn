@@ -1,7 +1,7 @@
 //! Schema migrations for djinn-db.
 //!
 //! The project uses [`sqlx::migrate!`] as the single source of truth for
-//! the MySQL/Dolt backend. Migrations live under `migrations_mysql/` at
+//! the Postgres backend. Migrations live under `migrations_postgres/` at
 //! the crate root and are embedded into the binary at compile time.
 //!
 //! Adding a migration: create the next `{N}_{slug}.sql` under that
@@ -10,39 +10,53 @@
 //! diverges. Tests enforce this (`tests/migrations_immutable.rs`).
 use std::str::FromStr;
 
-use sqlx::mysql::MySqlConnectOptions;
+use sqlx::postgres::PgConnectOptions;
 use sqlx::{ConnectOptions, Connection, Executor};
 
 use crate::error::{DbError, DbResult};
 
-/// Ensure a MySQL/Dolt database named in `db_url` exists on the server,
-/// creating it via a side connection without a default schema if necessary.
+/// Ensure a Postgres database named in `db_url` exists on the server,
+/// creating it via a side connection to the `postgres` maintenance database
+/// if necessary.
 ///
 /// sqlx will not `CREATE DATABASE` for us — the pool connects with the
 /// database selected, so this has to run first.
-pub async fn ensure_mysql_database_exists(db_url: &str) -> DbResult<()> {
-    let Some(database) = extract_mysql_database_name(db_url) else {
+pub async fn ensure_postgres_database_exists(db_url: &str) -> DbResult<()> {
+    let Some(database) = extract_postgres_database_name(db_url) else {
         return Ok(());
     };
     if !is_safe_database_identifier(&database) {
         return Err(DbError::InvalidData(format!(
-            "unsafe mysql database name `{database}`; only [A-Za-z0-9_] allowed"
+            "unsafe postgres database name `{database}`; only [A-Za-z0-9_] allowed"
         )));
     }
 
-    let opts = MySqlConnectOptions::from_str(db_url)
-        .map_err(|e| DbError::InvalidData(format!("invalid mysql url: {e}")))?
-        .database("");
+    // Side connection against the `postgres` maintenance database. Postgres
+    // does not support `CREATE DATABASE IF NOT EXISTS` so we probe first
+    // and only issue the CREATE when missing.
+    let opts = PgConnectOptions::from_str(db_url)
+        .map_err(|e| DbError::InvalidData(format!("invalid postgres url: {e}")))?
+        .database("postgres");
     let mut conn = opts.connect().await.map_err(DbError::from)?;
-    let stmt = format!("CREATE DATABASE IF NOT EXISTS `{database}`");
-    conn.execute(stmt.as_str()).await.map_err(DbError::from)?;
+    let exists: Option<i32> =
+        sqlx::query_scalar("SELECT 1 FROM pg_database WHERE datname = $1")
+            .bind(&database)
+            .fetch_optional(&mut conn)
+            .await
+            .map_err(DbError::from)?;
+    if exists.is_none() {
+        let stmt = format!(r#"CREATE DATABASE "{database}""#);
+        conn.execute(stmt.as_str()).await.map_err(DbError::from)?;
+    }
     conn.close().await.map_err(DbError::from)?;
     Ok(())
 }
 
-fn extract_mysql_database_name(db_url: &str) -> Option<String> {
+fn extract_postgres_database_name(db_url: &str) -> Option<String> {
     let trimmed = db_url.trim();
-    let without_scheme = trimmed.strip_prefix("mysql://")?;
+    let without_scheme = trimmed
+        .strip_prefix("postgres://")
+        .or_else(|| trimmed.strip_prefix("postgresql://"))?;
     let after_host = without_scheme.rsplit('@').next().unwrap_or(without_scheme);
     let (_host, path) = after_host.split_once('/')?;
     let name = path.split('?').next()?.trim();

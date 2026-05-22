@@ -37,13 +37,13 @@ impl NoteRepository {
         let growth_factor = (0..n_co_accesses).fold(1.0_f64, |acc, _| acc * 1.01);
         let new_co_accesses = i64::from(n_co_accesses);
         sqlx::query!(
-            "INSERT INTO note_associations
+            r#"INSERT INTO note_associations
              (note_a_id, note_b_id, weight, co_access_count, last_co_access)
-             VALUES (?, ?, 0.01, ?, DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))
-             ON DUPLICATE KEY UPDATE
-                 weight = LEAST(1.0, weight * ?),
-                 co_access_count = co_access_count + VALUES(co_access_count),
-                 last_co_access = VALUES(last_co_access)",
+             VALUES ($1, $2, 0.01, $3, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+             ON CONFLICT (note_a_id, note_b_id) DO UPDATE SET
+                 weight = LEAST(1.0, note_associations.weight * $4),
+                 co_access_count = note_associations.co_access_count + EXCLUDED.co_access_count,
+                 last_co_access = EXCLUDED.last_co_access"#,
             a_id,
             b_id,
             new_co_accesses,
@@ -57,7 +57,7 @@ impl NoteRepository {
                 NoteAssociation,
                 "SELECT note_a_id, note_b_id, weight, co_access_count, last_co_access
                  FROM note_associations
-                 WHERE note_a_id = ? AND note_b_id = ?",
+                 WHERE note_a_id = $1 AND note_b_id = $2",
                 a_id,
                 b_id
             )
@@ -85,13 +85,13 @@ impl NoteRepository {
         let min_weight = min_weight.clamp(0.0, 1.0);
 
         sqlx::query!(
-            "INSERT INTO note_associations
+            r#"INSERT INTO note_associations
              (note_a_id, note_b_id, weight, co_access_count, last_co_access)
-             VALUES (?, ?, ?, 1, DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))
-             ON DUPLICATE KEY UPDATE
-                 weight = GREATEST(weight, VALUES(weight)),
-                 co_access_count = co_access_count + 1,
-                 last_co_access = VALUES(last_co_access)",
+             VALUES ($1, $2, $3, 1, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+             ON CONFLICT (note_a_id, note_b_id) DO UPDATE SET
+                 weight = GREATEST(note_associations.weight, EXCLUDED.weight),
+                 co_access_count = note_associations.co_access_count + 1,
+                 last_co_access = EXCLUDED.last_co_access"#,
             a_id,
             b_id,
             min_weight
@@ -104,7 +104,7 @@ impl NoteRepository {
                 NoteAssociation,
                 "SELECT note_a_id, note_b_id, weight, co_access_count, last_co_access
                  FROM note_associations
-                 WHERE note_a_id = ? AND note_b_id = ?",
+                 WHERE note_a_id = $1 AND note_b_id = $2",
                 a_id,
                 b_id
             )
@@ -124,7 +124,7 @@ impl NoteRepository {
             NoteAssociation,
             "SELECT note_a_id, note_b_id, weight, co_access_count, last_co_access
              FROM note_associations
-             WHERE note_a_id = ? OR note_b_id = ?
+             WHERE note_a_id = $1 OR note_b_id = $2
              ORDER BY weight DESC",
             note_id,
             note_id
@@ -153,18 +153,18 @@ impl NoteRepository {
         let entries: Vec<NoteAssociationEntry> = sqlx::query_as!(
             NoteAssociationEntry,
             r#"SELECT
-                 CASE WHEN na.note_a_id = ? THEN nb.permalink ELSE na_.permalink END AS "note_permalink!: String",
-                 CASE WHEN na.note_a_id = ? THEN nb.title    ELSE na_.title    END AS "note_title!: String",
+                 CASE WHEN na.note_a_id = $1 THEN nb.permalink ELSE na_.permalink END AS "note_permalink!: String",
+                 CASE WHEN na.note_a_id = $2 THEN nb.title    ELSE na_.title    END AS "note_title!: String",
                  na.weight,
                  na.co_access_count,
                  na.last_co_access
              FROM note_associations na
              JOIN notes na_ ON na_.id = na.note_a_id
              JOIN notes nb  ON nb.id  = na.note_b_id
-             WHERE (na.note_a_id = ? OR na.note_b_id = ?)
-               AND na.weight >= ?
+             WHERE (na.note_a_id = $3 OR na.note_b_id = $4)
+               AND na.weight >= $5
              ORDER BY na.weight DESC
-             LIMIT ?"#,
+             LIMIT $6"#,
             note_id,
             note_id,
             note_id,
@@ -191,7 +191,7 @@ impl NoteRepository {
             NoteAssociation,
             "SELECT note_a_id, note_b_id, weight, co_access_count, last_co_access
              FROM note_associations
-             WHERE weight >= ?
+             WHERE weight >= $1
              ORDER BY weight DESC",
             threshold
         )
@@ -210,7 +210,7 @@ impl NoteRepository {
 
         let result = sqlx::query!(
             "DELETE FROM note_associations
-             WHERE weight < ?",
+             WHERE weight < $1",
             threshold
         )
         .execute(self.db.pool())
@@ -231,7 +231,7 @@ impl NoteRepository {
 
         let result = sqlx::query!(
             "DELETE FROM note_associations
-             WHERE last_co_access < ? AND weight <= ?",
+             WHERE last_co_access < $1 AND weight <= $2",
             before_timestamp,
             max_weight
         )
@@ -253,10 +253,10 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
 
         let result = sqlx::query!(
-            "DELETE FROM note_associations
+            r#"DELETE FROM note_associations
              WHERE weight < 0.05
-               AND last_co_access < DATE_SUB(NOW(3), INTERVAL 90 DAY)
-               AND note_a_id IN (SELECT id FROM notes WHERE project_id = ?)",
+               AND last_co_access < to_char((now() at time zone 'utc') - interval '90 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+               AND note_a_id IN (SELECT id FROM notes WHERE project_id = $1)"#,
             project_id
         )
         .execute(self.db.pool())
@@ -481,8 +481,8 @@ mod tests {
         repo.delete(&note1).await.unwrap();
 
         // Association should be gone
-        let after = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM note_associations WHERE note_a_id = ? OR note_b_id = ?",
+        let after: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count!: i64" FROM note_associations WHERE note_a_id = $1 OR note_b_id = $2"#,
             note1,
             note1
         )
@@ -505,7 +505,7 @@ mod tests {
 
         // Insert via raw SQL to bypass canonicalization - should fail
         let _result = sqlx::query!(
-            "INSERT INTO note_associations (note_a_id, note_b_id) VALUES (?, ?)",
+            "INSERT INTO note_associations (note_a_id, note_b_id) VALUES ($1, $2)",
             note2, // note2 > note1
             note1
         )
@@ -543,7 +543,7 @@ mod tests {
         // Pair 1: weight=0.01, last_co_access 100 days ago (should be pruned)
         repo.upsert_association(&note1, &note2, 1).await.unwrap();
         sqlx::query!(
-            "UPDATE note_associations SET last_co_access = DATE_SUB(NOW(3), INTERVAL 100 DAY) WHERE note_a_id = ? AND note_b_id = ?",
+            r#"UPDATE note_associations SET last_co_access = to_char((now() at time zone 'utc') - interval '100 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE note_a_id = $1 AND note_b_id = $2"#,
             note1,
             note2
         )
@@ -554,7 +554,7 @@ mod tests {
         // Pair 2: weight=0.01, last_co_access yesterday (should survive - recent)
         repo.upsert_association(&note3, &note4, 1).await.unwrap();
         sqlx::query!(
-            "UPDATE note_associations SET last_co_access = DATE_SUB(NOW(3), INTERVAL 1 DAY) WHERE note_a_id = ? AND note_b_id = ?",
+            r#"UPDATE note_associations SET last_co_access = to_char((now() at time zone 'utc') - interval '1 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE note_a_id = $1 AND note_b_id = $2"#,
             note3,
             note4
         )
@@ -567,7 +567,7 @@ mod tests {
             repo.upsert_association(&note5, &note6, 1).await.unwrap();
         }
         sqlx::query!(
-            "UPDATE note_associations SET last_co_access = DATE_SUB(NOW(3), INTERVAL 100 DAY) WHERE note_a_id = ? AND note_b_id = ?",
+            r#"UPDATE note_associations SET last_co_access = to_char((now() at time zone 'utc') - interval '100 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE note_a_id = $1 AND note_b_id = $2"#,
             note5,
             note6
         )
@@ -577,7 +577,7 @@ mod tests {
 
         // Verify all three associations exist
         let before_count: i64 = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM note_associations WHERE note_a_id IN (?, ?, ?) OR note_b_id IN (?, ?, ?)",
+            r#"SELECT COUNT(*) AS "count!: i64" FROM note_associations WHERE note_a_id IN ($1, $2, $3) OR note_b_id IN ($4, $5, $6)"#,
             note1,
             note3,
             note5,
@@ -596,7 +596,7 @@ mod tests {
 
         // Verify only the first pair was deleted
         let remaining_rows = sqlx::query!(
-            "SELECT note_a_id, note_b_id FROM note_associations WHERE note_a_id IN (?, ?, ?) OR note_b_id IN (?, ?, ?) ORDER BY note_a_id",
+            "SELECT note_a_id, note_b_id FROM note_associations WHERE note_a_id IN ($1, $2, $3) OR note_b_id IN ($4, $5, $6) ORDER BY note_a_id",
             note1,
             note3,
             note5,
@@ -642,7 +642,7 @@ mod tests {
             let id = uuid::Uuid::now_v7().to_string();
             let _ = project2_path; // path is now derived at runtime
             sqlx::query!(
-                "INSERT INTO projects (id, name, github_owner, github_repo) VALUES (?, ?, ?, ?)",
+                "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
                 id,
                 "test-project-2",
                 "test",
@@ -660,7 +660,7 @@ mod tests {
                           auto_merge AS "auto_merge!: bool",
                           sync_enabled AS "sync_enabled!: bool",
                           sync_remote
-                 FROM projects WHERE id = ?"#,
+                 FROM projects WHERE id = $1"#,
                 id
             )
             .fetch_one(db.pool())
@@ -699,7 +699,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::query!(
-            "UPDATE note_associations SET last_co_access = DATE_SUB(NOW(3), INTERVAL 100 DAY) WHERE note_a_id = ? AND note_b_id = ?",
+            r#"UPDATE note_associations SET last_co_access = to_char((now() at time zone 'utc') - interval '100 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE note_a_id = $1 AND note_b_id = $2"#,
             p1_note1,
             p1_note2
         )
@@ -711,7 +711,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::query!(
-            "UPDATE note_associations SET last_co_access = DATE_SUB(NOW(3), INTERVAL 100 DAY) WHERE note_a_id = ? AND note_b_id = ?",
+            r#"UPDATE note_associations SET last_co_access = to_char((now() at time zone 'utc') - interval '100 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE note_a_id = $1 AND note_b_id = $2"#,
             p2_note1.id,
             p2_note2.id
         )
@@ -725,7 +725,7 @@ mod tests {
 
         // Verify project2 association still exists
         let p2_count: i64 = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM note_associations WHERE note_a_id = ? OR note_b_id = ?",
+            r#"SELECT COUNT(*) AS "count!: i64" FROM note_associations WHERE note_a_id = $1 OR note_b_id = $2"#,
             p2_note1.id,
             p2_note1.id
         )
@@ -736,7 +736,7 @@ mod tests {
 
         // Verify project1 association is gone
         let p1_count: i64 = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM note_associations WHERE note_a_id = ? OR note_b_id = ?",
+            r#"SELECT COUNT(*) AS "count!: i64" FROM note_associations WHERE note_a_id = $1 OR note_b_id = $2"#,
             p1_note1,
             p1_note1
         )

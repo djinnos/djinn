@@ -18,9 +18,9 @@ impl UserSettingsRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             UserSettings,
-            "SELECT user_id, CAST(auto_approve_prs AS UNSIGNED) AS `auto_approve_prs!: bool`,
+            r#"SELECT user_id, auto_approve_prs AS "auto_approve_prs!: bool",
                     created_at, updated_at
-               FROM user_settings WHERE user_id = ?",
+               FROM user_settings WHERE user_id = $1"#,
             user_id,
         )
         .fetch_optional(self.db.pool())
@@ -64,13 +64,13 @@ impl UserSettingsRepository {
     ) -> Result<UserSettings> {
         self.db.ensure_initialized().await?;
         sqlx::query!(
-            "INSERT INTO user_settings (user_id, auto_approve_prs, created_at, updated_at)
-             VALUES (?, ?,
-                     DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'),
-                     DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))
-             ON DUPLICATE KEY UPDATE
-                 auto_approve_prs = VALUES(auto_approve_prs),
-                 updated_at = VALUES(updated_at)",
+            r#"INSERT INTO user_settings (user_id, auto_approve_prs, created_at, updated_at)
+             VALUES ($1, $2,
+                     to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                     to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+             ON CONFLICT (user_id) DO UPDATE SET
+                 auto_approve_prs = EXCLUDED.auto_approve_prs,
+                 updated_at = EXCLUDED.updated_at"#,
             user_id,
             value,
         )
@@ -93,7 +93,7 @@ mod tests {
         let github_id: i64 = suffix.bytes().map(i64::from).sum::<i64>() + 1_000_000;
         let login = format!("user-{suffix}");
         sqlx::query!(
-            "INSERT INTO users (id, github_id, github_login) VALUES (?, ?, ?)",
+            "INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)",
             id,
             github_id,
             login,
@@ -168,7 +168,7 @@ mod tests {
         let repo = UserSettingsRepository::new(db.clone());
         repo.upsert_auto_approve_prs(&user_id, true).await.unwrap();
 
-        sqlx::query("DELETE FROM users WHERE id = ?")
+        sqlx::query("DELETE FROM users WHERE id = $1")
             .bind(&user_id)
             .execute(db.pool())
             .await

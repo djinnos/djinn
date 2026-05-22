@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH RECURSIVE reach(id) AS (\n                                 SELECT task_id FROM blockers WHERE blocking_task_id = $1\n                                 UNION\n                                 SELECT b.task_id FROM blockers b JOIN reach r ON b.blocking_task_id = r.id\n                             )\n                             SELECT EXISTS(SELECT 1 FROM reach WHERE id = $2) AS \"exists!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!: i64",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "3e451ff899b97948387471d31c34c0111aafbe2568100eccbbb6a8694ff5c0f6"
+}

@@ -95,7 +95,7 @@ impl ProjectRepository {
                       auto_merge as "auto_merge: bool",
                       sync_enabled as "sync_enabled: bool",
                       sync_remote
-               FROM projects WHERE id = ?"#,
+               FROM projects WHERE id = $1"#,
             id,
         )
         .fetch_optional(self.db.pool())
@@ -114,7 +114,7 @@ impl ProjectRepository {
         // UUID path: if the ref parses as a UUID and maps to a row, use it.
         if uuid::Uuid::parse_str(trimmed).is_ok()
             && let Some(id) =
-                sqlx::query_scalar!("SELECT id FROM projects WHERE id = ?", trimmed)
+                sqlx::query_scalar!("SELECT id FROM projects WHERE id = $1", trimmed)
                     .fetch_optional(self.db.pool())
                     .await?
         {
@@ -124,7 +124,7 @@ impl ProjectRepository {
         // Slug path: `owner/repo`.
         if let Some((owner, repo)) = trimmed.split_once('/') {
             let id = sqlx::query_scalar!(
-                "SELECT id FROM projects WHERE github_owner = ? AND github_repo = ?",
+                "SELECT id FROM projects WHERE github_owner = $1 AND github_repo = $2",
                 owner,
                 repo,
             )
@@ -166,7 +166,7 @@ impl ProjectRepository {
                 async move {
                     let mut tx = self.db.pool().begin().await?;
                     sqlx::query!(
-                        "INSERT INTO projects (id, name, github_owner, github_repo) VALUES (?, ?, ?, ?)",
+                        "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
                         id,
                         name,
                         owner,
@@ -183,7 +183,7 @@ impl ProjectRepository {
                                 auto_merge AS "auto_merge!: bool",
                                 sync_enabled AS "sync_enabled!: bool",
                                 sync_remote
-                         FROM projects WHERE id = ?"#,
+                         FROM projects WHERE id = $1"#,
                         id
                     )
                     .fetch_one(&mut *tx)
@@ -227,7 +227,7 @@ impl ProjectRepository {
                 async move {
                     let mut tx = self.db.pool().begin().await?;
                     sqlx::query!(
-                        "INSERT INTO projects (id, name, github_owner, github_repo) VALUES (?, ?, ?, ?)",
+                        "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
                         id,
                         name,
                         owner,
@@ -244,7 +244,7 @@ impl ProjectRepository {
                                 auto_merge AS "auto_merge!: bool",
                                 sync_enabled AS "sync_enabled!: bool",
                                 sync_remote
-                         FROM projects WHERE id = ?"#,
+                         FROM projects WHERE id = $1"#,
                         id
                     )
                     .fetch_one(&mut *tx)
@@ -272,7 +272,7 @@ impl ProjectRepository {
             r#"SELECT
                  github_owner AS "github_owner!: String",
                  github_repo  AS "github_repo!: String"
-               FROM projects WHERE id = ?"#,
+               FROM projects WHERE id = $1"#,
             project_id
         )
         .fetch_optional(self.db.pool())
@@ -290,7 +290,7 @@ impl ProjectRepository {
     pub async fn get_installation_id(&self, project_id: &str) -> Result<Option<u64>> {
         self.db.ensure_initialized().await?;
         let row: Option<Option<i64>> = sqlx::query_scalar!(
-            "SELECT installation_id FROM projects WHERE id = ?",
+            "SELECT installation_id FROM projects WHERE id = $1",
             project_id
         )
         .fetch_optional(self.db.pool())
@@ -306,7 +306,7 @@ impl ProjectRepository {
     pub async fn get_default_branch(&self, project_id: &str) -> Result<Option<String>> {
         self.db.ensure_initialized().await?;
         let row: Option<Option<String>> = sqlx::query_scalar!(
-            "SELECT default_branch FROM projects WHERE id = ?",
+            "SELECT default_branch FROM projects WHERE id = $1",
             project_id
         )
         .fetch_optional(self.db.pool())
@@ -327,7 +327,7 @@ impl ProjectRepository {
                     sync_enabled AS "sync_enabled!: bool",
                     sync_remote
              FROM projects
-             WHERE github_owner = ? AND github_repo = ?"#,
+             WHERE github_owner = $1 AND github_repo = $2"#,
             owner,
             repo
         )
@@ -357,7 +357,7 @@ impl ProjectRepository {
         sqlx::query!(
             "INSERT INTO projects
                 (id, name, github_owner, github_repo, default_branch, target_branch, installation_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
             id,
             name,
             owner,
@@ -378,7 +378,7 @@ impl ProjectRepository {
                     auto_merge AS "auto_merge!: bool",
                     sync_enabled AS "sync_enabled!: bool",
                     sync_remote
-             FROM projects WHERE id = ?"#,
+             FROM projects WHERE id = $1"#,
             id
         )
         .fetch_one(self.db.pool())
@@ -419,9 +419,10 @@ impl ProjectRepository {
         for (base_role, description) in DEFAULT_ROLES {
             let role_id = uuid::Uuid::now_v7().to_string();
             sqlx::query!(
-                "INSERT IGNORE INTO agents
-                    (id, project_id, `name`, base_role, description, is_default)
-                 VALUES (?, ?, ?, ?, ?, 1)",
+                "INSERT INTO agents
+                    (id, project_id, name, base_role, description, is_default)
+                 VALUES ($1, $2, $3, $4, $5, TRUE)
+                 ON CONFLICT (project_id, name) DO NOTHING",
                 role_id,
                 project_id,
                 base_role, // name = base_role for defaults
@@ -436,7 +437,7 @@ impl ProjectRepository {
 
     pub async fn update(&self, id: &str, name: &str) -> Result<Project> {
         self.db.ensure_initialized().await?;
-        sqlx::query!("UPDATE projects SET name = ? WHERE id = ?", name, id)
+        sqlx::query!("UPDATE projects SET name = $1 WHERE id = $2", name, id)
             .execute(self.db.pool())
             .await?;
         let project = sqlx::query_as!(
@@ -448,7 +449,7 @@ impl ProjectRepository {
                     auto_merge AS "auto_merge!: bool",
                     sync_enabled AS "sync_enabled!: bool",
                     sync_remote
-             FROM projects WHERE id = ?"#,
+             FROM projects WHERE id = $1"#,
             id
         )
         .fetch_one(self.db.pool())
@@ -468,9 +469,9 @@ impl ProjectRepository {
         // the cache baseline.
         use sqlx::Row;
         let row = sqlx::query(
-            "SELECT target_branch, auto_merge, sync_enabled, sync_remote,
-                    graph_excluded_paths, graph_orphan_ignore
-               FROM projects WHERE id = ?",
+            r#"SELECT target_branch, auto_merge, sync_enabled, sync_remote,
+                    graph_excluded_paths::text AS "graph_excluded_paths!", graph_orphan_ignore::text AS "graph_orphan_ignore!"
+               FROM projects WHERE id = $1"#,
         )
         .bind(id)
         .fetch_optional(self.db.pool())
@@ -502,7 +503,7 @@ impl ProjectRepository {
         match key {
             "target_branch" => {
                 sqlx::query!(
-                    "UPDATE projects SET target_branch = ? WHERE id = ?",
+                    "UPDATE projects SET target_branch = $1 WHERE id = $2",
                     value,
                     id
                 )
@@ -511,19 +512,19 @@ impl ProjectRepository {
             }
             "auto_merge" => {
                 let v = matches!(value, "true" | "1");
-                sqlx::query!("UPDATE projects SET auto_merge = ? WHERE id = ?", v, id)
+                sqlx::query!("UPDATE projects SET auto_merge = $1 WHERE id = $2", v, id)
                     .execute(self.db.pool())
                     .await?;
             }
             "sync_enabled" => {
                 let v = matches!(value, "true" | "1");
-                sqlx::query!("UPDATE projects SET sync_enabled = ? WHERE id = ?", v, id)
+                sqlx::query!("UPDATE projects SET sync_enabled = $1 WHERE id = $2", v, id)
                     .execute(self.db.pool())
                     .await?;
             }
             "sync_remote" => {
                 let val = if value.is_empty() { None } else { Some(value) };
-                sqlx::query!("UPDATE projects SET sync_remote = ? WHERE id = ?", val, id)
+                sqlx::query!("UPDATE projects SET sync_remote = $1 WHERE id = $2", val, id)
                     .execute(self.db.pool())
                     .await?;
             }
@@ -535,7 +536,7 @@ impl ProjectRepository {
                 // Non-macro UPDATE because the column post-dates the
                 // sqlx offline cache baseline (migration 12).
                 sqlx::query(
-                    "UPDATE projects SET graph_excluded_paths = ? WHERE id = ?",
+                    "UPDATE projects SET graph_excluded_paths = $1 WHERE id = $2",
                 )
                 .bind(&canonical)
                 .bind(id)
@@ -548,7 +549,7 @@ impl ProjectRepository {
                         "graph_orphan_ignore: {e}"
                     )))?;
                 sqlx::query(
-                    "UPDATE projects SET graph_orphan_ignore = ? WHERE id = ?",
+                    "UPDATE projects SET graph_orphan_ignore = $1 WHERE id = $2",
                 )
                 .bind(&canonical)
                 .bind(id)
@@ -578,7 +579,7 @@ impl ProjectRepository {
                       auto_merge AS "auto_merge!: bool",
                       sync_enabled AS "sync_enabled!: bool",
                       sync_remote
-               FROM projects WHERE sync_enabled = 1 ORDER BY name"#,
+               FROM projects WHERE sync_enabled = TRUE ORDER BY name"#,
         )
         .fetch_all(self.db.pool())
         .await?)
@@ -586,7 +587,7 @@ impl ProjectRepository {
 
     pub async fn delete(&self, id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query!("DELETE FROM projects WHERE id = ?", id)
+        sqlx::query!("DELETE FROM projects WHERE id = $1", id)
             .execute(self.db.pool())
             .await?;
 
@@ -611,7 +612,7 @@ impl ProjectRepository {
     pub async fn set_stack(&self, project_id: &str, stack_json: &str) -> Result<bool> {
         self.db.ensure_initialized().await?;
         let current: Option<String> = sqlx::query_scalar!(
-            "SELECT stack FROM projects WHERE id = ?",
+            r#"SELECT stack::text AS "stack!" FROM projects WHERE id = $1"#,
             project_id
         )
         .fetch_optional(self.db.pool())
@@ -619,9 +620,11 @@ impl ProjectRepository {
         if matches!(&current, Some(existing) if existing == stack_json) {
             return Ok(false);
         }
+        let stack: serde_json::Value = serde_json::from_str(stack_json)
+            .map_err(|e| crate::Error::InvalidData(format!("invalid json for projects.stack: {e}")))?;
         sqlx::query!(
-            "UPDATE projects SET stack = ? WHERE id = ?",
-            stack_json,
+            "UPDATE projects SET stack = $1 WHERE id = $2",
+            stack,
             project_id
         )
         .execute(self.db.pool())
@@ -638,7 +641,7 @@ impl ProjectRepository {
     pub async fn get_stack(&self, project_id: &str) -> Result<Option<String>> {
         self.db.ensure_initialized().await?;
         Ok(
-            sqlx::query_scalar!("SELECT stack FROM projects WHERE id = ?", project_id)
+            sqlx::query_scalar!(r#"SELECT stack::text AS "stack!" FROM projects WHERE id = $1"#, project_id)
                 .fetch_optional(self.db.pool())
                 .await?,
         )
@@ -660,7 +663,7 @@ impl ProjectRepository {
     pub async fn get_environment_config(&self, project_id: &str) -> Result<Option<String>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_scalar::<_, String>(
-            "SELECT environment_config FROM projects WHERE id = ?",
+            r#"SELECT environment_config::text AS "environment_config!" FROM projects WHERE id = $1"#,
         )
         .bind(project_id)
         .fetch_optional(self.db.pool())
@@ -688,9 +691,9 @@ impl ProjectRepository {
         self.db.ensure_initialized().await?;
         sqlx::query(
             "UPDATE projects
-                SET environment_config = ?,
+                SET environment_config = $1,
                     image_hash = NULL
-              WHERE id = ?",
+              WHERE id = $2",
         )
         .bind(environment_config_json)
         .bind(project_id)
@@ -709,7 +712,7 @@ impl ProjectRepository {
     pub async fn list_for_reseed(&self) -> Result<Vec<ProjectReseedRow>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, ProjectReseedRow>(
-            "SELECT id, stack, environment_config FROM projects",
+            r#"SELECT id, stack::text AS "stack!", environment_config::text AS "environment_config!" FROM projects"#,
         )
         .fetch_all(self.db.pool())
         .await?)
@@ -726,7 +729,7 @@ impl ProjectRepository {
         self.db.ensure_initialized().await?;
         let row = sqlx::query!(
             "SELECT image_tag, image_hash, image_status, image_last_error
-               FROM projects WHERE id = ?",
+               FROM projects WHERE id = $1",
             project_id
         )
         .fetch_optional(self.db.pool())
@@ -754,11 +757,11 @@ impl ProjectRepository {
         self.db.ensure_initialized().await?;
         sqlx::query!(
             "UPDATE projects
-                SET image_tag = ?,
-                    image_hash = ?,
-                    image_status = ?,
-                    image_last_error = ?
-              WHERE id = ?",
+                SET image_tag = $1,
+                    image_hash = $2,
+                    image_status = $3,
+                    image_last_error = $4
+              WHERE id = $5",
             image.tag,
             image.hash,
             image.status,
@@ -790,7 +793,7 @@ impl ProjectRepository {
         // schema-wide timestamp convention (see migration 2). An empty
         // string means "never warmed".
         let row = sqlx::query(
-            "SELECT image_status, graph_warmed_at FROM projects WHERE id = ?",
+            "SELECT image_status, graph_warmed_at FROM projects WHERE id = $1",
         )
         .bind(project_id)
         .fetch_optional(self.db.pool())
@@ -812,7 +815,7 @@ impl ProjectRepository {
     pub async fn set_image_status(&self, project_id: &str, status: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query!(
-            "UPDATE projects SET image_status = ? WHERE id = ?",
+            "UPDATE projects SET image_status = $1 WHERE id = $2",
             status,
             project_id
         )
@@ -1054,13 +1057,13 @@ mod tests {
         let project = repo.create("seeded", "acme", "seeded").await.unwrap();
 
         let rows_raw = sqlx::query!(
-            r#"SELECT `name`, base_role, is_default AS "is_default!: i64" FROM agents WHERE project_id = ? ORDER BY base_role"#,
+            r#"SELECT name, base_role, is_default AS "is_default!: bool" FROM agents WHERE project_id = $1 ORDER BY base_role"#,
             project.id
         )
         .fetch_all(db.pool())
         .await
         .unwrap();
-        let rows: Vec<(String, String, i64)> = rows_raw
+        let rows: Vec<(String, String, bool)> = rows_raw
             .into_iter()
             .map(|r| (r.name, r.base_role, r.is_default))
             .collect();
@@ -1077,7 +1080,7 @@ mod tests {
         {
             assert_eq!(base_role, expected);
             assert_eq!(name, expected, "default role name should equal base_role");
-            assert_eq!(*is_default, 1, "role {base_role} should be is_default=1");
+            assert!(*is_default, "role {base_role} should be is_default=true");
         }
     }
 
@@ -1088,7 +1091,7 @@ mod tests {
         repo.create("proj-a", "acme", "proj-a").await.unwrap();
         repo.create("proj-b", "acme", "proj-b").await.unwrap();
 
-        let total: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM agents WHERE is_default = 1")
+        let total: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "count!: i64" FROM agents WHERE is_default = TRUE"#)
             .fetch_one(db.pool())
             .await
             .unwrap();

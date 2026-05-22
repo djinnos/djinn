@@ -332,13 +332,13 @@ fn build_task_run_env(config: &KubernetesConfig, task_run_id_str: &str) -> Vec<E
         env_var("DJINN_MIRROR_ROOT", MIRROR_MOUNT_DIR),
     ];
     // Forward the server's DB configuration so the worker's
-    // `bootstrap_warm_database()` opens the same Dolt/MySQL instance the
-    // server uses. Without these the worker falls back to
-    // `mysql://root@127.0.0.1:3306/djinn` (single-node dev default) and
-    // helpers like `resolve_role_overrides` / `build_prompt_context`
-    // start failing with cryptic errors mid-run. Mirrors warm_job.rs.
+    // `bootstrap_warm_database()` opens the same Postgres instance the
+    // server uses. Without this the worker's
+    // `bootstrap_warm_database()` errors out at startup (no env-var
+    // fallback any more); helpers like `resolve_role_overrides` /
+    // `build_prompt_context` need a live DB to function. Mirrors warm_job.rs.
     if let Some(url) = config.database_url.as_deref() {
-        env.push(env_var("DJINN_MYSQL_URL", url));
+        env.push(env_var("DJINN_DATABASE_URL", url));
     }
     // Force git to trust the cross-UID-owned /mirror PVC. The per-project
     // image runs as root by default (USER reset by language-toolchain
@@ -513,8 +513,8 @@ mod tests {
         // absent here — see `forwards_db_env_vars_when_configured` for
         // the populated-config case.
         assert!(
-            !envs.contains_key("DJINN_MYSQL_URL"),
-            "DJINN_MYSQL_URL must be absent when database_url is None"
+            !envs.contains_key("DJINN_DATABASE_URL"),
+            "DJINN_DATABASE_URL must be absent when database_url is None"
         );
 
         // Volume mounts: 5 from the pre-env-config layout + the
@@ -640,12 +640,12 @@ mod tests {
 
     /// When the server's `KubernetesConfig` has the DB connection vars
     /// populated, the task-run Pod must forward them so the worker's
-    /// `bootstrap_warm_database()` connects to the same Dolt instance
+    /// `bootstrap_warm_database()` connects to the same Postgres instance
     /// as the launcher — mirroring the warm-Pod behaviour.
     #[test]
     fn forwards_db_env_vars_when_configured() {
         let mut cfg = KubernetesConfig::for_testing();
-        cfg.database_url = Some("mysql://djinn@djinn-mysql.djinn.svc:3306/djinn".into());
+        cfg.database_url = Some("postgres://djinn@djinn-postgres.djinn.svc:5432/djinn".into());
 
         let job = build_task_run_job(
             &cfg,
@@ -670,8 +670,8 @@ mod tests {
             .collect();
 
         assert_eq!(
-            envs.get("DJINN_MYSQL_URL").copied(),
-            Some("mysql://djinn@djinn-mysql.djinn.svc:3306/djinn")
+            envs.get("DJINN_DATABASE_URL").copied(),
+            Some("postgres://djinn@djinn-postgres.djinn.svc:5432/djinn")
         );
     }
 }

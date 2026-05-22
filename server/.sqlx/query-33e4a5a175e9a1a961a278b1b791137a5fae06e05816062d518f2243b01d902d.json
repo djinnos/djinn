@@ -1,65 +1,41 @@
 {
-  "db_name": "MySQL",
+  "db_name": "PostgreSQL",
   "query": "SELECT id, github_org_id, github_org_login, app_id, installation_id, created_at\n             FROM org_config WHERE id = 1",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
         "name": "id",
-        "type_info": {
-          "type": "Long",
-          "flags": "NOT_NULL | PRIMARY_KEY | NO_DEFAULT_VALUE",
-          "max_size": 11
-        }
+        "type_info": "Int4"
       },
       {
         "ordinal": 1,
         "name": "github_org_id",
-        "type_info": {
-          "type": "LongLong",
-          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
-          "max_size": 20
-        }
+        "type_info": "Int8"
       },
       {
         "ordinal": 2,
         "name": "github_org_login",
-        "type_info": {
-          "type": "VarString",
-          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
-          "max_size": 1020
-        }
+        "type_info": "Varchar"
       },
       {
         "ordinal": 3,
         "name": "app_id",
-        "type_info": {
-          "type": "LongLong",
-          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
-          "max_size": 20
-        }
+        "type_info": "Int8"
       },
       {
         "ordinal": 4,
         "name": "installation_id",
-        "type_info": {
-          "type": "LongLong",
-          "flags": "NOT_NULL | NO_DEFAULT_VALUE",
-          "max_size": 20
-        }
+        "type_info": "Int8"
       },
       {
         "ordinal": 5,
         "name": "created_at",
-        "type_info": {
-          "type": "VarString",
-          "flags": "NOT_NULL",
-          "max_size": 256
-        }
+        "type_info": "Varchar"
       }
     ],
     "parameters": {
-      "Right": 0
+      "Left": []
     },
     "nullable": [
       false,

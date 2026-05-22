@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM note_associations\n             WHERE last_co_access < $1 AND weight <= $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "94339205f689ce956a6dc36e86b2033173a1e44eefb594ec6320eefababda73f"
+}

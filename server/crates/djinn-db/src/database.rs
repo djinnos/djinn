@@ -2,8 +2,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use sqlx::MySqlPool;
-use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+use sqlx::PgPool;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio::sync::OnceCell;
 
 use crate::error::{DbError, DbResult};
@@ -12,13 +12,13 @@ use crate::migrations;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DatabaseBackendKind {
-    Mysql,
+    Postgres,
 }
 
 impl DatabaseBackendKind {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Mysql => "mysql",
+            Self::Postgres => "postgres",
         }
     }
 }
@@ -26,25 +26,25 @@ impl DatabaseBackendKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "backend", rename_all = "snake_case")]
 pub enum DatabaseConnectConfig {
-    Mysql(MysqlDatabaseConfig),
+    Postgres(PostgresDatabaseConfig),
 }
 
 impl DatabaseConnectConfig {
     pub fn backend_kind(&self) -> DatabaseBackendKind {
         match self {
-            Self::Mysql(_) => DatabaseBackendKind::Mysql,
+            Self::Postgres(_) => DatabaseBackendKind::Postgres,
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MysqlDatabaseConfig {
+pub struct PostgresDatabaseConfig {
     pub url: String,
 }
 
-impl MysqlDatabaseConfig {
+impl PostgresDatabaseConfig {
     pub fn display_backend(&self) -> &'static str {
-        "mysql"
+        "postgres"
     }
 }
 
@@ -59,7 +59,7 @@ pub struct DatabaseBootstrapInfo {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NoteSearchBackend {
     SqliteFts5,
-    MysqlFulltext,
+    PostgresTsvector,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,7 +81,7 @@ pub struct DatabaseBackendCapabilities {
 
 #[derive(Clone, Debug)]
 pub struct Database {
-    pool: MySqlPool,
+    pool: PgPool,
     readonly: bool,
     bootstrap: DatabaseBootstrapInfo,
     capabilities: DatabaseBackendCapabilities,
@@ -89,8 +89,8 @@ pub struct Database {
     test_branch: Option<TestDbInit>,
 }
 
-/// MySQL template-clone test isolation: per-test `djinn_test_<uuid>`
-/// schema cloned from `djinn_test_template`.
+/// Postgres template-clone test isolation: per-test `djinn_test_<uuid>`
+/// database cloned from `djinn_test_template` via `CREATE DATABASE … TEMPLATE`.
 #[derive(Clone, Debug)]
 struct TestDbInit {
     server_prefix: String,
@@ -104,36 +104,34 @@ impl Database {
             // 32 max connections gives reads + concurrent writers headroom
             // for the workspace's expected concurrency (coordinator,
             // mirror-fetcher, KB watcher, MCP tools, PR poller).
-            DatabaseConnectConfig::Mysql(mysql) => Self::open_mysql(&mysql, 32),
+            DatabaseConnectConfig::Postgres(pg) => Self::open_postgres(&pg, 32),
         }
     }
 
     /// Open an isolated test database.
     ///
-    /// Uses the MySQL template-clone approach: take the base URL from
-    /// `DJINN_TEST_MYSQL_URL` (default `mysql://root@127.0.0.1:3308`), strip
-    /// any trailing `/<db>` segment, then construct an admin connection
-    /// against `<base>/mysql`, create a fresh `djinn_test_<uuid>` schema,
-    /// and clone every table from `djinn_test_template` into it
-    /// (DDL + rows; the only seeded rows are in `_sqlx_migrations`).
+    /// Uses the Postgres template-clone approach: take the base URL from
+    /// `DJINN_TEST_DATABASE_URL` (default
+    /// `postgres://postgres:postgres@127.0.0.1:5433/postgres`), strip any
+    /// trailing `/<db>` segment, then construct an admin connection against
+    /// `<base>/postgres`, `CREATE DATABASE djinn_test_<uuid> TEMPLATE
+    /// djinn_test_template`, and connect the per-test pool to it.
     ///
-    /// FK constraints are recreated by replaying each table's
-    /// `SHOW CREATE TABLE` output with `FOREIGN_KEY_CHECKS=0` for the
-    /// duration of the clone — `CREATE TABLE ... LIKE` would silently drop
-    /// the FK constraints, breaking ON DELETE CASCADE assumptions in many
-    /// repositories.
+    /// Postgres copies indexes, FK constraints, generated columns, and
+    /// defaults cleanly via `CREATE DATABASE … TEMPLATE`, so no
+    /// `SHOW CREATE TABLE` replay is needed.
     ///
     /// Each test gets a UUIDv7-named database — no collisions under
     /// `cargo nextest` parallelism.
     pub fn open_in_memory() -> DbResult<Self> {
-        let base = std::env::var("DJINN_TEST_MYSQL_URL")
-            .unwrap_or_else(|_| "mysql://root@127.0.0.1:3308".to_owned());
+        let base = std::env::var("DJINN_TEST_DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1:5433/postgres".to_owned());
         let server_prefix = strip_server_prefix(&base);
         let test_db = format!("djinn_test_{}", uuid::Uuid::now_v7().simple());
         let url = format!("{server_prefix}/{test_db}");
 
-        Self::open_mysql_inner(
-            &MysqlDatabaseConfig { url },
+        Self::open_postgres_inner(
+            &PostgresDatabaseConfig { url },
             4,
             Some(TestDbInit {
                 server_prefix,
@@ -142,11 +140,11 @@ impl Database {
         )
     }
 
-    pub fn pool(&self) -> &MySqlPool {
+    pub fn pool(&self) -> &PgPool {
         &self.pool
     }
 
-    pub fn mysql_pool(&self) -> Option<&MySqlPool> {
+    pub fn postgres_pool(&self) -> Option<&PgPool> {
         Some(&self.pool)
     }
 
@@ -162,51 +160,44 @@ impl Database {
         self.bootstrap.backend_kind
     }
 
-    fn open_mysql(config: &MysqlDatabaseConfig, max_connections: u32) -> DbResult<Self> {
-        Self::open_mysql_inner(config, max_connections, None)
+    fn open_postgres(config: &PostgresDatabaseConfig, max_connections: u32) -> DbResult<Self> {
+        Self::open_postgres_inner(config, max_connections, None)
     }
 
-    fn open_mysql_inner(
-        config: &MysqlDatabaseConfig,
+    fn open_postgres_inner(
+        config: &PostgresDatabaseConfig,
         max_connections: u32,
         test_branch: Option<TestDbInit>,
     ) -> DbResult<Self> {
-        let mut opts = MySqlConnectOptions::from_str(&config.url)?;
-        // For the MySQL test path, disable sqlx's prepared-statement cache.
+        let mut opts = PgConnectOptions::from_str(&config.url)?;
+        // For the Postgres test path, disable sqlx's prepared-statement cache.
         // Parallel tests rapidly CREATE / DROP databases with the same table
-        // names (`djinn_test_<uuid>` instances cloned from the same
-        // template); MySQL's server-side statement cache then surfaces
-        // error 1615 ("Prepared statement needs to be re-prepared") when a
-        // cached statement is reused against a freshly-created twin schema.
-        // Disabling client-side caching forces a fresh PREPARE on each
-        // query, which is a small per-test overhead and eliminates the race.
-        // Production paths keep caching on.
+        // names (`djinn_test_<uuid>` instances cloned from the same template);
+        // we want each per-test pool to fresh-prepare so prior cached plan
+        // metadata can't cross-contaminate.
         if test_branch.is_some() {
             opts = opts.statement_cache_capacity(0);
         }
-        let pool = MySqlPoolOptions::new()
+        let pool = PgPoolOptions::new()
             .max_connections(max_connections)
-            // InnoDB resolves lock cycles in single-digit milliseconds (vs
-            // Dolt's multi-minute hangs that prompted the migration), so a
-            // 15s acquire ceiling surfaces real pool exhaustion as a hard
+            // Postgres lock acquisition is single-digit-ms in normal operation;
+            // a 15s acquire ceiling surfaces real pool exhaustion as a hard
             // signal rather than masking it behind a 120s wait.
             .acquire_timeout(std::time::Duration::from_secs(15))
             .after_connect(move |conn, _meta| {
                 Box::pin(async move {
-                    sqlx::query("SET SESSION sql_mode = CONCAT(@@sql_mode, ',STRICT_ALL_TABLES')")
+                    // Bound how long any single statement can run before the
+                    // server kills it.
+                    sqlx::query("SET statement_timeout = '30s'")
                         .execute(&mut *conn)
                         .await?;
-                    // Bound how long any single statement can run before
-                    // the server kills it.
-                    sqlx::query("SET SESSION MAX_EXECUTION_TIME = 30000")
+                    // Bound how long any explicit lock acquisition can wait.
+                    sqlx::query("SET lock_timeout = '10s'")
                         .execute(&mut *conn)
                         .await?;
-                    // Bound how long any row-lock acquisition can wait on
-                    // InnoDB. NOTE: this is `innodb_lock_wait_timeout`,
-                    // NOT `lock_wait_timeout` (which targets metadata
-                    // locks). The legacy Dolt code set the wrong variable;
-                    // this is the actual InnoDB knob.
-                    sqlx::query("SET SESSION innodb_lock_wait_timeout = 10")
+                    // Reap connections that started a transaction and walked
+                    // away; matches MySQL's wait_timeout role.
+                    sqlx::query("SET idle_in_transaction_session_timeout = '60s'")
                         .execute(&mut *conn)
                         .await?;
                     Ok(())
@@ -219,15 +210,15 @@ impl Database {
             pool,
             readonly: false,
             bootstrap: DatabaseBootstrapInfo {
-                backend_kind: DatabaseBackendKind::Mysql,
+                backend_kind: DatabaseBackendKind::Postgres,
                 backend_label: backend_label.clone(),
                 target: config.url.clone(),
                 readonly: false,
             },
             capabilities: DatabaseBackendCapabilities {
-                backend_kind: DatabaseBackendKind::Mysql,
+                backend_kind: DatabaseBackendKind::Postgres,
                 backend_label,
-                lexical_search: NoteSearchBackend::MysqlFulltext,
+                lexical_search: NoteSearchBackend::PostgresTsvector,
                 note_vector_backend: NoteVectorBackend::External,
                 supports_sqlite_pragmas: false,
                 supports_sqlite_vec: false,
@@ -238,11 +229,6 @@ impl Database {
         })
     }
 
-    /// Legacy stub retained so sqlite-vec-era embedding tests still compile.
-    ///
-    /// MySQL has no sqlite-vec equivalent — vector search is handled by
-    /// Qdrant. This always returns "unavailable" so tests that gate on the
-    /// extension status take their fallback path.
     /// Return `true` if a table with the given name exists in the current
     /// database schema.
     ///
@@ -253,7 +239,7 @@ impl Database {
         self.ensure_initialized().await?;
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM information_schema.tables \
-             WHERE table_schema = DATABASE() AND table_name = ?",
+             WHERE table_schema = current_schema() AND table_name = $1",
         )
         .bind(table_name)
         .fetch_one(&self.pool)
@@ -265,7 +251,7 @@ impl Database {
         Ok(SqliteVecStatus {
             available: false,
             version: None,
-            detail: Some("sqlite-vec retired with the MySQL migration".to_owned()),
+            detail: Some("sqlite-vec retired with the Postgres migration".to_owned()),
         })
     }
 
@@ -273,27 +259,22 @@ impl Database {
     /// binary has already been applied successfully on the live DB.
     ///
     /// **Does not** call `sqlx::migrate!(...).run(...)` — that path takes
-    /// the migrator's advisory lock (`GET_LOCK(_sqlx_migrator_lock, -1)`).
-    /// If the previous pod's connection died holding a partition lock on
-    /// some table being ALTERed, that advisory lock can survive the
-    /// connection drop and wedge the new pod indefinitely.
-    ///
-    /// Cut-over: migrations now live in the Helm `pre-upgrade` Job
-    /// (`djinn-server --migrate-only`). App pods just verify the schema
-    /// is current and refuse to start otherwise — a much faster, lock-free
-    /// boot path that no longer fights Dolt over the migrator lock.
+    /// the migrator's advisory lock. Migrations now live in the Helm
+    /// `pre-upgrade` Job (`djinn-server --migrate-only`). App pods just
+    /// verify the schema is current and refuse to start otherwise — a
+    /// much faster, lock-free boot path.
     ///
     /// Returns `Err` when:
     ///   * The DB doesn't have a `_sqlx_migrations` table at all (fresh
     ///     DB — the Job must run first).
     ///   * Any migration version known to the binary is missing from the
-    ///     DB or is recorded as `success = 0` (Job didn't finish).
+    ///     DB or is recorded as `success = false` (Job didn't finish).
     pub async fn verify_schema_is_current(&self) -> DbResult<()> {
         if self.readonly {
             return Ok(());
         }
 
-        let migrator = sqlx::migrate!("./migrations_mysql");
+        let migrator = sqlx::migrate!("./migrations_postgres");
         let expected_versions: Vec<i64> = migrator.migrations.iter().map(|m| m.version).collect();
         if expected_versions.is_empty() {
             return Ok(());
@@ -305,7 +286,7 @@ impl Database {
         let migrations_table_exists: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) \
              FROM information_schema.tables \
-             WHERE table_schema = DATABASE() \
+             WHERE table_schema = current_schema() \
                AND table_name   = '_sqlx_migrations'",
         )
         .fetch_one(&self.pool)
@@ -364,17 +345,17 @@ impl Database {
                         server_prefix,
                         test_db,
                     }) => {
-                        // Clone the pre-built `djinn_test_template` schema
+                        // Clone the pre-built `djinn_test_template` database
                         // into the per-test database. The template Job
-                        // (`make test-db-mysql-template`) must have run
+                        // (`make test-db-postgres-template`) must have run
                         // already — if it hasn't, the clone fails with a
-                        // clear "Unknown database" error and the operator
-                        // knows what to do.
-                        clone_mysql_test_template(&server_prefix, &test_db).await?;
+                        // clear "template database does not exist" error
+                        // and the operator knows what to do.
+                        clone_postgres_test_template(&server_prefix, &test_db).await?;
                     }
                     None => {
-                        migrations::ensure_mysql_database_exists(&url).await?;
-                        sqlx::migrate!("./migrations_mysql")
+                        migrations::ensure_postgres_database_exists(&url).await?;
+                        sqlx::migrate!("./migrations_postgres")
                             .run(&pool)
                             .await
                             .map_err(|e: sqlx::migrate::MigrateError| {
@@ -391,165 +372,63 @@ impl Database {
 
 fn strip_server_prefix(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
-    match trimmed.strip_prefix("mysql://") {
+    match trimmed.strip_prefix("postgres://") {
         Some(after_scheme) => match after_scheme.find('/') {
-            Some(slash) => format!("mysql://{}", &after_scheme[..slash]),
-            None => format!("mysql://{after_scheme}"),
+            Some(slash) => format!("postgres://{}", &after_scheme[..slash]),
+            None => format!("postgres://{after_scheme}"),
         },
-        None => trimmed.to_owned(),
+        None => match trimmed.strip_prefix("postgresql://") {
+            Some(after_scheme) => match after_scheme.find('/') {
+                Some(slash) => format!("postgresql://{}", &after_scheme[..slash]),
+                None => format!("postgresql://{after_scheme}"),
+            },
+            None => trimmed.to_owned(),
+        },
     }
 }
 
-/// Clone `djinn_test_template` into a freshly-created per-test database.
+/// Clone `djinn_test_template` into a freshly-created per-test database via
+/// `CREATE DATABASE … TEMPLATE`.
 ///
-/// `CREATE TABLE ... LIKE` would be simpler, but it does not copy FK
-/// constraints — and several repositories rely on `ON DELETE CASCADE`
-/// (tasks→projects, blockers→tasks, notes→projects, embeddings→notes,
-/// task_runs→tasks, etc.). Replaying each table's `SHOW CREATE TABLE`
-/// preserves indexes, FK constraints, FULLTEXT keys, defaults, and
-/// engine/charset settings exactly. `FOREIGN_KEY_CHECKS=0` is set on the
-/// admin connection for the duration so table order does not matter.
-async fn clone_mysql_test_template(server_prefix: &str, test_db: &str) -> DbResult<()> {
+/// Postgres copies indexes, FK constraints, generated columns, defaults, and
+/// any rows in the template — no `SHOW CREATE TABLE` replay needed. The
+/// template must have no concurrent client connections at clone time, so we
+/// terminate any other backends connected to it first.
+async fn clone_postgres_test_template(server_prefix: &str, test_db: &str) -> DbResult<()> {
     if !is_safe_database_identifier(test_db) {
         return Err(DbError::InvalidData(format!(
-            "unsafe mysql database name `{test_db}`; only [A-Za-z0-9_] allowed",
+            "unsafe postgres database name `{test_db}`; only [A-Za-z0-9_] allowed",
         )));
     }
 
-    // Connect to the system `mysql` schema with a SINGLE connection,
-    // not a pool. We need `SET SESSION FOREIGN_KEY_CHECKS=0` to apply
-    // to every subsequent statement in this clone, and a pool would
-    // round-robin across connections that don't carry the SET. Using
-    // `MySqlConnection` (single conn) makes the session state stable.
     use sqlx::ConnectOptions;
-    let admin_url = format!("{server_prefix}/mysql");
-    let opts = sqlx::mysql::MySqlConnectOptions::from_str(&admin_url)
-        .map_err(DbError::from)?;
+    // Connect to the maintenance `postgres` database (admin connection
+    // cannot be open against the template DB at clone time).
+    let admin_url = format!("{server_prefix}/postgres");
+    let opts = sqlx::postgres::PgConnectOptions::from_str(&admin_url).map_err(DbError::from)?;
     let mut conn = opts.connect().await.map_err(DbError::from)?;
 
-    let result: DbResult<()> = async {
-        // Disable FK checks so CREATE TABLE statements can reference
-        // tables that don't exist yet (the natural ordering of
-        // SHOW CREATE TABLE output is by name, not by FK dependency
-        // graph). FK enforcement is restored implicitly when this
-        // connection drops — the per-test pool reconnects with the
-        // server default (FOREIGN_KEY_CHECKS=1) so production code
-        // paths see fully-enforced FKs.
-        sqlx::query("SET SESSION FOREIGN_KEY_CHECKS=0")
-            .execute(&mut conn)
-            .await
-            .map_err(DbError::from)?;
+    // Boot any stragglers off the template. Without this, parallel tests
+    // racing on the template see `ERROR: source database "djinn_test_template"
+    // is being accessed by other users`.
+    sqlx::query(
+        "SELECT pg_terminate_backend(pid) \
+           FROM pg_stat_activity \
+          WHERE datname = 'djinn_test_template' \
+            AND pid <> pg_backend_pid()",
+    )
+    .execute(&mut conn)
+    .await
+    .map_err(DbError::from)?;
 
-        sqlx::query(format!("CREATE DATABASE `{test_db}`").as_str())
-            .execute(&mut conn)
-            .await
-            .map_err(DbError::from)?;
-
-        // Enumerate template tables (and views, though we expect none).
-        // MySQL 8 returns information_schema string columns as VARBINARY
-        // under utf8mb4_0900_ai_ci collation; sqlx will not decode that
-        // into `String`. CAST to CHAR makes the wire type unambiguous and
-        // is a no-op on the round-trip.
-        let tables: Vec<String> = sqlx::query_scalar(
-            "SELECT CAST(TABLE_NAME AS CHAR) \
-               FROM information_schema.tables \
-              WHERE TABLE_SCHEMA = 'djinn_test_template' \
-                AND TABLE_TYPE   = 'BASE TABLE'",
-        )
-        .fetch_all(&mut conn)
+    let stmt = format!(r#"CREATE DATABASE "{test_db}" TEMPLATE djinn_test_template"#);
+    sqlx::query(stmt.as_str())
+        .execute(&mut conn)
         .await
         .map_err(DbError::from)?;
 
-        for t in &tables {
-            // SHOW CREATE TABLE returns (Name, Create Table) on row 0.
-            // MySQL 8 returns the second column as VARBINARY (not VARCHAR)
-            // under the default utf8mb4_0900_ai_ci collation — sqlx is
-            // strict about that, so decode as `Vec<u8>` then parse UTF-8.
-            // The DDL string is always valid UTF-8.
-            let row: (String, Vec<u8>) = sqlx::query_as(&format!(
-                "SHOW CREATE TABLE `djinn_test_template`.`{t}`"
-            ))
-            .fetch_one(&mut conn)
-            .await
-            .map_err(DbError::from)?;
-            let mut ddl = String::from_utf8(row.1).map_err(|e| {
-                DbError::InvalidData(format!(
-                    "SHOW CREATE TABLE returned non-UTF8 bytes for `{t}`: {e}"
-                ))
-            })?;
-            // Rewrite `CREATE TABLE \`t\` (...)` to target the per-test
-            // schema. `SHOW CREATE TABLE` does not include the schema
-            // qualifier so a plain prefix substitution is safe.
-            let needle = format!("CREATE TABLE `{t}`");
-            let replacement = format!("CREATE TABLE `{test_db}`.`{t}`");
-            ddl = ddl.replacen(&needle, &replacement, 1);
-            sqlx::query(ddl.as_str())
-                .execute(&mut conn)
-                .await
-                .map_err(DbError::from)?;
-
-            // Copy data. Only `_sqlx_migrations` has rows in the
-            // template (the migrator records its own runs there); the
-            // other tables ship empty. We can't use `SELECT *` because
-            // some tables have GENERATED columns (e.g. `agents.default_key`
-            // which is VIRTUAL) — MySQL rejects any attempt to bind a value
-            // for those, even via SELECT *. Enumerate real columns from
-            // `information_schema.columns`, skipping anything with `extra`
-            // containing 'GENERATED'.
-            let real_cols: Vec<String> = sqlx::query_scalar(
-                "SELECT CAST(COLUMN_NAME AS CHAR) \
-                   FROM information_schema.columns \
-                  WHERE TABLE_SCHEMA = 'djinn_test_template' \
-                    AND TABLE_NAME   = ? \
-                    AND extra NOT LIKE '%GENERATED%' \
-                  ORDER BY ORDINAL_POSITION",
-            )
-            .bind(t)
-            .fetch_all(&mut conn)
-            .await
-            .map_err(DbError::from)?;
-            let col_list = real_cols
-                .iter()
-                .map(|c| format!("`{c}`"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let insert = format!(
-                "INSERT INTO `{test_db}`.`{t}` ({col_list}) \
-                 SELECT {col_list} FROM `djinn_test_template`.`{t}`"
-            );
-            sqlx::query(insert.as_str())
-                .execute(&mut conn)
-                .await
-                .map_err(DbError::from)?;
-        }
-        // Force MySQL to invalidate any cached table-metadata that may
-        // reference the prior-test version of `djinn_test_<uuid>` tables.
-        // Without this, subsequent FK-cascade DELETEs on the per-test pool
-        // hit error 1615 ("Prepared statement needs to be re-prepared")
-        // because the server-side dictionary still points at indexes from
-        // a DROPped sibling test's tables of the same name.
-        //
-        // NOTE: `FLUSH TABLES FROM <db>` is *not* valid MySQL 8 syntax —
-        // it has to be `FLUSH TABLES <db>.<t1>, <db>.<t2>, ...`. We have
-        // the table list in hand from the loop above so build the
-        // qualified form.
-        if !tables.is_empty() {
-            let flush_list = tables
-                .iter()
-                .map(|t| format!("`{test_db}`.`{t}`"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            sqlx::query(&format!("FLUSH TABLES {flush_list}"))
-                .execute(&mut conn)
-                .await
-                .map_err(DbError::from)?;
-        }
-        Ok(())
-    }
-    .await;
-
     drop(conn);
-    result
+    Ok(())
 }
 
 fn is_safe_database_identifier(name: &str) -> bool {
@@ -638,17 +517,19 @@ mod tests {
     use super::*;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn mysql_backend_selection_metadata_is_shaped_as_expected() {
-        let db = Database::open_with_config(DatabaseConnectConfig::Mysql(MysqlDatabaseConfig {
-            url: "mysql://root@127.0.0.1:3308/djinn".to_owned(),
-        }))
-        .expect("mysql backend should construct a concrete runtime path");
+    async fn postgres_backend_selection_metadata_is_shaped_as_expected() {
+        let db = Database::open_with_config(DatabaseConnectConfig::Postgres(
+            PostgresDatabaseConfig {
+                url: "postgres://postgres:postgres@127.0.0.1:5433/djinn".to_owned(),
+            },
+        ))
+        .expect("postgres backend should construct a concrete runtime path");
 
-        assert_eq!(db.backend_kind(), DatabaseBackendKind::Mysql);
-        assert_eq!(db.bootstrap_info().backend_label, "mysql");
+        assert_eq!(db.backend_kind(), DatabaseBackendKind::Postgres);
+        assert_eq!(db.bootstrap_info().backend_label, "postgres");
         assert_eq!(
             db.backend_capabilities().lexical_search,
-            NoteSearchBackend::MysqlFulltext
+            NoteSearchBackend::PostgresTsvector
         );
         assert!(!db.backend_capabilities().supports_sqlite_vec);
     }
@@ -664,14 +545,6 @@ mod tests {
             .expect("verify_schema_is_current should pass on a freshly migrated DB");
     }
 
-    // The "no `_sqlx_migrations` table at all" branch of
-    // `verify_schema_is_current` is exercised in production by a brand-new
-    // empty database. It can't be unit-tested against `open_in_memory`
-    // because that fixture inherits a fully-migrated `main` branch and
-    // `_sqlx_migrations` is always present after fork. Covered by the
-    // production error string + the `_fails_when_a_migration_is_missing`
-    // case below.
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn verify_schema_is_current_fails_when_a_migration_is_missing() {
         // Migrate to HEAD, then delete the most recent row to fake a
@@ -679,11 +552,9 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
 
-        // Drop the newest applied version. The binary's compile-time
-        // migrator still expects it, so verify must flag the gap.
         sqlx::query(
             "DELETE FROM _sqlx_migrations \
-             WHERE version = (SELECT * FROM (SELECT MAX(version) FROM _sqlx_migrations) AS m)",
+             WHERE version = (SELECT MAX(version) FROM _sqlx_migrations)",
         )
         .execute(db.pool())
         .await
@@ -704,9 +575,6 @@ mod tests {
     async fn open_in_memory_generates_unique_isolation_containers() {
         let a = Database::open_in_memory().unwrap();
         let b = Database::open_in_memory().unwrap();
-        // Each `open_in_memory` call gives the test a distinct
-        // `djinn_test_<uuid>` database. Two back-to-back calls must
-        // produce different isolation identifiers.
         let a_init = a
             .test_branch
             .as_ref()

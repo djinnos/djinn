@@ -1,20 +1,16 @@
 {
-  "db_name": "MySQL",
+  "db_name": "PostgreSQL",
   "query": "SELECT DISTINCT session_id\n             FROM consolidated_note_provenance\n             ORDER BY session_id ASC",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
         "name": "session_id",
-        "type_info": {
-          "type": "VarString",
-          "flags": "NOT_NULL | PRIMARY_KEY | MULTIPLE_KEY | NO_DEFAULT_VALUE",
-          "max_size": 144
-        }
+        "type_info": "Varchar"
       }
     ],
     "parameters": {
-      "Right": 0
+      "Left": []
     },
     "nullable": [
       false

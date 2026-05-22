@@ -50,7 +50,7 @@ pub use embeddings::{
 pub use lexical_search::{
     LexicalSearchBackend, LexicalSearchMode, LexicalSearchPlan, build_lexical_search_plan,
     executable_lexical_search_sql, lexical_search_threshold, normalize_lexical_score,
-    sanitize_mysql_boolean_query, sanitize_sqlite_fts5_query, validate_mysql_fulltext_threshold,
+    sanitize_postgres_tsquery, sanitize_sqlite_fts5_query, validate_postgres_tsvector_threshold,
 };
 pub use rrf::rrf_fuse;
 pub use scoring::{
@@ -92,11 +92,11 @@ macro_rules! note_select_where_id {
         ::sqlx::query_as!(
             ::djinn_memory::Note,
             r#"SELECT id, project_id, permalink, title, file_path,
-                storage, note_type, folder, tags, content,
+                storage, note_type, folder, tags::text AS "tags!", content,
                 created_at, updated_at, last_accessed,
-                access_count, confidence, `abstract` as abstract_, overview,
-                scope_paths
-             FROM notes WHERE id = ?"#,
+                access_count, confidence, abstract as abstract_, overview,
+                scope_paths::text AS "scope_paths!"
+             FROM notes WHERE id = $1"#,
             $id
         )
     };

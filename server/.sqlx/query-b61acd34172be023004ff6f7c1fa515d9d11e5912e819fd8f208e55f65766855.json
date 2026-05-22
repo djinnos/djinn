@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM verification_results WHERE created_at < to_char((now() at time zone 'utc') - (interval '1 day' * $1), 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b61acd34172be023004ff6f7c1fa515d9d11e5912e819fd8f208e55f65766855"
+}

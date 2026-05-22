@@ -1,0 +1,82 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT token, github_login, github_name, github_avatar_url,\n                    github_access_token, github_access_token_expires_at,\n                    github_refresh_token, github_refresh_token_expires_at,\n                    created_at, expires_at, user_fk\n             FROM user_auth_sessions\n             WHERE user_fk = $1\n               AND expires_at > to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')\n             ORDER BY created_at DESC\n             LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "token",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "github_login",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "github_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "github_avatar_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "github_access_token",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "github_access_token_expires_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "github_refresh_token",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "github_refresh_token_expires_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "expires_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 10,
+        "name": "user_fk",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4d52aa4e0207011ca271feb13b023df2fa044f9d200ae0589dfea1563b076c0c"
+}

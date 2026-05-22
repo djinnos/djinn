@@ -230,7 +230,7 @@ struct Inner {
 
 impl AppState {
     pub fn new(db: Database, cancel: CancellationToken) -> Self {
-        let runtime = DatabaseRuntimeManager::new(crate::db::runtime::DatabaseRuntimeConfig::mysql(
+        let runtime = DatabaseRuntimeManager::new(crate::db::runtime::DatabaseRuntimeConfig::postgres(
             db.bootstrap_info().target.clone(),
         ));
         Self::new_with_runtime(db, runtime, cancel)
@@ -501,7 +501,7 @@ impl AppState {
     pub async fn minimal_for_warm_only() -> anyhow::Result<Self> {
         let cancel = CancellationToken::new();
         let db_runtime = DatabaseRuntimeManager::new(
-            crate::db::runtime::DatabaseRuntimeConfig::from_cli_and_env(None, None, None, None)
+            crate::db::runtime::DatabaseRuntimeConfig::from_cli_and_env(None, None)
                 .map_err(|e| anyhow::anyhow!("invalid database runtime configuration: {e}"))?,
         );
         db_runtime

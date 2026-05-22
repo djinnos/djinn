@@ -27,13 +27,15 @@ impl SessionMessageRepository {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
 
+        let content_value: serde_json::Value = serde_json::from_str(content_json)
+            .map_err(|e| crate::Error::InvalidData(format!("invalid json for session_messages.content_json: {e}")))?;
         sqlx::query!(
             "INSERT INTO session_messages (id, session_id, role, content_json, token_count)
-             VALUES (?, ?, ?, ?, ?)",
+             VALUES ($1, $2, $3, $4, $5)",
             id,
             session_id,
             role,
-            content_json,
+            content_value,
             token_count,
         )
         .execute(self.db.pool())
@@ -41,8 +43,8 @@ impl SessionMessageRepository {
 
         let msg = sqlx::query_as!(
             SessionMessage,
-            "SELECT id, session_id, role, content_json, token_count, created_at
-             FROM session_messages WHERE id = ?",
+            r#"SELECT id, session_id, role, content_json::text AS "content_json!", token_count, created_at
+             FROM session_messages WHERE id = $1"#,
             id,
         )
         .fetch_one(self.db.pool())
@@ -79,17 +81,17 @@ impl SessionMessageRepository {
                 Role::User => "user",
                 Role::Assistant => "assistant",
             };
-            let content_json =
-                serde_json::to_string(&msg.content).unwrap_or_else(|_| "[]".to_string());
+            let content_value = serde_json::to_value(&msg.content)
+                .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
             let id = uuid::Uuid::now_v7().to_string();
 
             sqlx::query!(
                 "INSERT INTO session_messages (id, session_id, role, content_json)
-                 VALUES (?, ?, ?, ?)",
+                 VALUES ($1, $2, $3, $4)",
                 id,
                 session_id,
                 role,
-                content_json,
+                content_value,
             )
             .execute(self.db.pool())
             .await?;
@@ -117,10 +119,10 @@ impl SessionMessageRepository {
 
         let rows = sqlx::query_as!(
             SessionMessage,
-            "SELECT id, session_id, role, content_json, token_count, created_at
+            r#"SELECT id, session_id, role, content_json::text AS "content_json!", token_count, created_at
              FROM session_messages
-             WHERE session_id = ?
-             ORDER BY created_at ASC",
+             WHERE session_id = $1
+             ORDER BY created_at ASC"#,
             session_id,
         )
         .fetch_all(self.db.pool())
@@ -177,7 +179,7 @@ impl SessionMessageRepository {
     pub async fn delete_conversation(&self, session_id: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;
         let result = sqlx::query!(
-            "DELETE FROM session_messages WHERE session_id = ?",
+            "DELETE FROM session_messages WHERE session_id = $1",
             session_id,
         )
         .execute(self.db.pool())
@@ -221,8 +223,8 @@ mod tests {
         let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
         sqlx::query!(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                issue_type, priority, owner, `status`, continuation_count, labels, acceptance_criteria, memory_refs)
-             VALUES (?, ?, ?, ?, 'Task', '', '', 'task', 0, '', 'open', 0, '[]', '[]', '[]')",
+                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
+             VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
             task_id,
             epic.project_id,
             short_id,

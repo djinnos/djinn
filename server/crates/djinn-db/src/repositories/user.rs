@@ -63,16 +63,16 @@ impl UserRepository {
         // VALUES(...) clause feeds new login/name/avatar into the update;
         // last_seen_at is refreshed unconditionally.
         sqlx::query!(
-            "INSERT INTO users
+            r#"INSERT INTO users
                 (id, github_id, github_login, github_name, github_avatar_url,
                  is_member_of_org, last_seen_at)
-             VALUES (?, ?, ?, ?, ?, TRUE,
-                     DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))
-             ON DUPLICATE KEY UPDATE
-                 github_login      = VALUES(github_login),
-                 github_name       = VALUES(github_name),
-                 github_avatar_url = VALUES(github_avatar_url),
-                 last_seen_at      = VALUES(last_seen_at)",
+             VALUES ($1, $2, $3, $4, $5, TRUE,
+                     to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+             ON CONFLICT (github_id) DO UPDATE SET
+                 github_login      = EXCLUDED.github_login,
+                 github_name       = EXCLUDED.github_name,
+                 github_avatar_url = EXCLUDED.github_avatar_url,
+                 last_seen_at      = EXCLUDED.last_seen_at"#,
             new_id,
             github_id,
             github_login,
@@ -87,7 +87,7 @@ impl UserRepository {
             r#"SELECT id, github_id, github_login, github_name, github_avatar_url,
                       is_member_of_org AS "is_member_of_org!: bool",
                       last_seen_at, created_at
-               FROM users WHERE github_id = ?"#,
+               FROM users WHERE github_id = $1"#,
             github_id,
         )
         .fetch_one(self.db.pool())
@@ -103,7 +103,7 @@ impl UserRepository {
             r#"SELECT id, github_id, github_login, github_name, github_avatar_url,
                       is_member_of_org AS "is_member_of_org!: bool",
                       last_seen_at, created_at
-               FROM users WHERE id = ?"#,
+               FROM users WHERE id = $1"#,
             id,
         )
         .fetch_optional(self.db.pool())
@@ -117,7 +117,7 @@ impl UserRepository {
             r#"SELECT id, github_id, github_login, github_name, github_avatar_url,
                       is_member_of_org AS "is_member_of_org!: bool",
                       last_seen_at, created_at
-               FROM users WHERE github_id = ?"#,
+               FROM users WHERE github_id = $1"#,
             github_id,
         )
         .fetch_optional(self.db.pool())
@@ -130,7 +130,7 @@ impl UserRepository {
     pub async fn set_member_status(&self, id: &str, is_member: bool) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query!(
-            "UPDATE users SET is_member_of_org = ? WHERE id = ?",
+            "UPDATE users SET is_member_of_org = $1 WHERE id = $2",
             is_member,
             id,
         )
@@ -145,9 +145,9 @@ impl UserRepository {
     pub async fn touch_last_seen(&self, id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query!(
-            "UPDATE users
-               SET last_seen_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE id = ?",
+            r#"UPDATE users
+               SET last_seen_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $1"#,
             id,
         )
         .execute(self.db.pool())

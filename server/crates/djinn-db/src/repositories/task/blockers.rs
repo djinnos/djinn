@@ -29,11 +29,11 @@ impl TaskRepository {
                     // If so, adding "blocking_id blocks task_id" would form a cycle.
                     let would_cycle = sqlx::query_scalar!(
                         r#"WITH RECURSIVE reach(id) AS (
-                             SELECT task_id FROM blockers WHERE blocking_task_id = ?
+                             SELECT task_id FROM blockers WHERE blocking_task_id = $1
                              UNION
                              SELECT b.task_id FROM blockers b JOIN reach r ON b.blocking_task_id = r.id
                          )
-                         SELECT EXISTS(SELECT 1 FROM reach WHERE id = ?) AS "exists!: i64""#,
+                         SELECT EXISTS(SELECT 1 FROM reach WHERE id = $2) AS "exists!: i64""#,
                         task_id,
                         blocking_id
                     )
@@ -45,7 +45,7 @@ impl TaskRepository {
                         ));
                     }
                     let result = sqlx::query!(
-                        "INSERT INTO blockers (task_id, blocking_task_id) VALUES (?, ?)",
+                        "INSERT INTO blockers (task_id, blocking_task_id) VALUES ($1, $2)",
                         task_id,
                         blocking_id
                     )
@@ -97,7 +97,7 @@ impl TaskRepository {
                 let blocking_id = blocking_id_owned.clone();
                 async move {
                     sqlx::query!(
-                        "DELETE FROM blockers WHERE task_id = ? AND blocking_task_id = ?",
+                        "DELETE FROM blockers WHERE task_id = $1 AND blocking_task_id = $2",
                         task_id,
                         blocking_id
                     )
@@ -147,7 +147,7 @@ impl TaskRepository {
                     // Removals first (so adds can reference the freed edges if needed).
                     for blocking_id in remove {
                         sqlx::query!(
-                            "DELETE FROM blockers WHERE task_id = ? AND blocking_task_id = ?",
+                            "DELETE FROM blockers WHERE task_id = $1 AND blocking_task_id = $2",
                             task_id,
                             blocking_id
                         )
@@ -162,11 +162,11 @@ impl TaskRepository {
                         }
                         let would_cycle = sqlx::query_scalar!(
                             r#"WITH RECURSIVE reach(id) AS (
-                                 SELECT task_id FROM blockers WHERE blocking_task_id = ?
+                                 SELECT task_id FROM blockers WHERE blocking_task_id = $1
                                  UNION
                                  SELECT b.task_id FROM blockers b JOIN reach r ON b.blocking_task_id = r.id
                              )
-                             SELECT EXISTS(SELECT 1 FROM reach WHERE id = ?) AS "exists!: i64""#,
+                             SELECT EXISTS(SELECT 1 FROM reach WHERE id = $2) AS "exists!: i64""#,
                             task_id,
                             blocking_id
                         )
@@ -178,7 +178,7 @@ impl TaskRepository {
                             ));
                         }
                         let result = sqlx::query!(
-                            "INSERT INTO blockers (task_id, blocking_task_id) VALUES (?, ?)",
+                            "INSERT INTO blockers (task_id, blocking_task_id) VALUES ($1, $2)",
                             task_id,
                             blocking_id
                         )
@@ -227,10 +227,10 @@ impl TaskRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             BlockerRef,
-            r#"SELECT t.id AS task_id, t.short_id, t.title, t.`status`
+            r#"SELECT t.id AS task_id, t.short_id, t.title, t.status
              FROM blockers b
              JOIN tasks t ON t.id = b.blocking_task_id
-             WHERE b.task_id = ?
+             WHERE b.task_id = $1
              ORDER BY t.created_at"#,
             task_id
         )
@@ -243,10 +243,10 @@ impl TaskRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             BlockerRef,
-            r#"SELECT t.id AS task_id, t.short_id, t.title, t.`status`
+            r#"SELECT t.id AS task_id, t.short_id, t.title, t.status
              FROM blockers b
              JOIN tasks t ON t.id = b.task_id
-             WHERE b.blocking_task_id = ?
+             WHERE b.blocking_task_id = $1
              ORDER BY t.created_at"#,
             blocking_task_id
         )
@@ -261,7 +261,7 @@ impl TaskRepository {
         // NOTE: Task has #[sqlx(default)] fields that a macro-typed query cannot satisfy without repeating the SELECT with NULLs; keep runtime.
         let unblocked = sqlx::query_as::<_, Task>(
             "SELECT t.id, t.project_id, t.short_id, t.epic_id, t.title, t.description, t.design,
-                    t.issue_type, t.`status`, t.priority, t.owner, t.labels,
+                    t.issue_type, t.status, t.priority, t.owner, t.labels,
                     t.acceptance_criteria, t.reopen_count, t.continuation_count,
                     t.verification_failure_count,
                     t.total_reopen_count, t.total_verification_failure_count,
@@ -270,13 +270,13 @@ impl TaskRepository {
                     t.close_reason, t.merge_commit_sha, t.pr_url, t.merge_conflict_metadata, t.memory_refs
              FROM blockers b
              JOIN tasks t ON t.id = b.task_id
-             WHERE b.blocking_task_id = ?
-               AND t.`status` = 'open'
+             WHERE b.blocking_task_id = $1
+               AND t.status = 'open'
                AND NOT EXISTS (
                    SELECT 1 FROM blockers b2
                    JOIN tasks bt ON bt.id = b2.blocking_task_id
                     WHERE b2.task_id = t.id
-                       AND bt.`status` != 'closed'
+                       AND bt.status != 'closed'
                 )",
         )
         .bind(completed_task_id)

@@ -16,7 +16,7 @@ pub mod test_support {
 
 pub use database::{
     Database, DatabaseBackendCapabilities, DatabaseBackendKind, DatabaseBootstrapInfo,
-    DatabaseConnectConfig, MysqlDatabaseConfig, NoteSearchBackend, NoteVectorBackend,
+    DatabaseConnectConfig, NoteSearchBackend, NoteVectorBackend, PostgresDatabaseConfig,
     SqliteVecStatus, default_db_path,
 };
 pub use error::{DbError as Error, DbResult as Result};
@@ -61,9 +61,9 @@ pub use repositories::{
         infer_embedding_branch_from_worktree, infer_note_type, is_singleton,
         lexical_search_threshold, normalize_lexical_score, normalize_virtual_note_path,
         permalink_for, permalink_for_with_status, permalink_from_virtual_note_path,
-        render_note_markdown, rrf_fuse, sanitize_mysql_boolean_query,
+        render_note_markdown, rrf_fuse, sanitize_postgres_tsquery,
         sanitize_sqlite_fts5_query, slugify, task_branch_name, title_from_permalink,
-        validate_mysql_fulltext_threshold, virtual_note_path_for_permalink,
+        validate_postgres_tsvector_threshold, virtual_note_path_for_permalink,
     },
     org_config::{NewOrgConfig, OrgConfig, OrgConfigRepository},
     project::{

@@ -112,11 +112,11 @@ pub async fn lexical_search_chunks(
     let rows = sqlx::query!(
         r#"SELECT id, file_path, symbol_key, kind, start_line, end_line, embedded_text
              FROM code_chunks
-            WHERE project_id = ?
-              AND (LOWER(symbol_key) LIKE ?
-                   OR LOWER(file_path) LIKE ?
-                   OR LOWER(embedded_text) LIKE ?)
-            LIMIT ?"#,
+            WHERE project_id = $1
+              AND (LOWER(symbol_key) LIKE $2
+                   OR LOWER(file_path) LIKE $3
+                   OR LOWER(embedded_text) LIKE $4)
+            LIMIT $5"#,
         project_id,
         pattern,
         pattern,
@@ -208,13 +208,13 @@ pub async fn hydrate_chunk_ids(
     let sql = format!(
         "SELECT id, file_path, symbol_key, kind, start_line, end_line
            FROM code_chunks
-          WHERE project_id = ?
+          WHERE project_id = $1
             AND id IN ({})",
         placeholders
     );
 
     let mut q = sqlx::query_as::<
-        sqlx::MySql,
+        sqlx::Postgres,
         (String, String, Option<String>, String, i32, i32),
     >(&sql)
     .bind(project_id);
@@ -361,7 +361,7 @@ mod tests {
                 r#"INSERT INTO code_chunks
                     (id, project_id, file_path, symbol_key, kind,
                      start_line, end_line, content_hash, embedded_text)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
                 id,
                 "proj-1",
                 file,
@@ -398,7 +398,7 @@ mod tests {
                 r#"INSERT INTO code_chunks
                     (id, project_id, file_path, symbol_key, kind,
                      start_line, end_line, content_hash, embedded_text)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
                 id,
                 project,
                 "src/foo.rs",
@@ -431,7 +431,7 @@ mod tests {
                 r#"INSERT INTO code_chunks
                     (id, project_id, file_path, symbol_key, kind,
                      start_line, end_line, content_hash, embedded_text)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
                 id,
                 "proj-1",
                 "src/foo.rs",

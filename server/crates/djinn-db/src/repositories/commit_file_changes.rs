@@ -175,13 +175,13 @@ impl CommitFileChangeRepository {
             sql.push_str("(?, ?, ?, ?, ?, ?, ?, ?, ?)");
         }
         sql.push_str(
-            " ON DUPLICATE KEY UPDATE \
-               change_kind = VALUES(change_kind), \
-               committed_at = VALUES(committed_at), \
-               author_email = VALUES(author_email), \
-               insertions = VALUES(insertions), \
-               deletions = VALUES(deletions), \
-               old_path = VALUES(old_path)",
+            " ON CONFLICT (project_id, commit_sha, file_path) DO UPDATE SET \
+               change_kind = EXCLUDED.change_kind, \
+               committed_at = EXCLUDED.committed_at, \
+               author_email = EXCLUDED.author_email, \
+               insertions = EXCLUDED.insertions, \
+               deletions = EXCLUDED.deletions, \
+               old_path = EXCLUDED.old_path",
         );
 
         let mut query = sqlx::query(&sql);
@@ -233,7 +233,7 @@ impl CommitFileChangeRepository {
         // non-PK column with the same value so the UPSERT contract is
         // satisfied without changing semantics on duplicate keys.
         sql.push_str(
-            " ON DUPLICATE KEY UPDATE committed_at = VALUES(committed_at)",
+            " ON CONFLICT (event_key) DO UPDATE SET committed_at = EXCLUDED.committed_at",
         );
 
         let mut query = sqlx::query(&sql);
@@ -260,7 +260,7 @@ impl CommitFileChangeRepository {
         use sqlx::Row;
         let row = sqlx::query(
             "SELECT COUNT(*) AS row_count \
-             FROM coupling_pair_events WHERE project_id = ?",
+             FROM coupling_pair_events WHERE project_id = $1",
         )
         .bind(project_id)
         .fetch_one(self.db.pool())
@@ -287,7 +287,7 @@ impl CommitFileChangeRepository {
         let rows = sqlx::query(
             "SELECT commit_sha, file_path, committed_at \
              FROM commit_file_changes \
-             WHERE project_id = ? \
+             WHERE project_id = $1 \
              ORDER BY commit_sha ASC, file_path ASC",
         )
         .bind(project_id)
@@ -342,7 +342,7 @@ impl CommitFileChangeRepository {
         self.db.ensure_initialized().await?;
         use sqlx::Row;
         Ok(sqlx::query(
-            "SELECT last_indexed_sha FROM coupling_cursor WHERE project_id = ?",
+            "SELECT last_indexed_sha FROM coupling_cursor WHERE project_id = $1",
         )
         .bind(project_id)
         .fetch_optional(self.db.pool())
@@ -354,11 +354,11 @@ impl CommitFileChangeRepository {
     pub async fn set_cursor(&self, project_id: &str, sha: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query(
-            "INSERT INTO coupling_cursor (project_id, last_indexed_sha, last_updated_at) \
-             VALUES (?, ?, DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')) \
-             ON DUPLICATE KEY UPDATE \
-               last_indexed_sha = VALUES(last_indexed_sha), \
-               last_updated_at = VALUES(last_updated_at)",
+            r#"INSERT INTO coupling_cursor (project_id, last_indexed_sha, last_updated_at) \
+             VALUES ($1, $2, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')) \
+             ON CONFLICT (event_key) DO UPDATE SET \
+               last_indexed_sha = EXCLUDED.last_indexed_sha, \
+               last_updated_at = EXCLUDED.last_updated_at"#,
         )
         .bind(project_id)
         .bind(sha)
@@ -388,21 +388,21 @@ impl CommitFileChangeRepository {
         let rows: Vec<CoupledFile> = sqlx::query_as(
             "SELECT \
                 file_path, \
-                CAST(COUNT(DISTINCT commit_sha) AS SIGNED) AS co_edit_count, \
+                CAST(COUNT(DISTINCT commit_sha) AS BIGINT) AS co_edit_count, \
                 MAX(committed_at) AS last_co_edit, \
-                GROUP_CONCAT(DISTINCT commit_sha ORDER BY committed_at DESC SEPARATOR ',') AS supporting_commit_samples \
+                string_agg(DISTINCT commit_sha, ',' ORDER BY committed_at DESC) AS supporting_commit_samples \
              FROM ( \
                  SELECT file_b AS file_path, commit_sha, committed_at \
                    FROM coupling_pair_events \
-                  WHERE project_id = ? AND file_a = ? \
+                  WHERE project_id = $1 AND file_a = $2 \
                  UNION ALL \
                  SELECT file_a AS file_path, commit_sha, committed_at \
                    FROM coupling_pair_events \
-                  WHERE project_id = ? AND file_b = ? \
+                  WHERE project_id = $3 AND file_b = $4 \
              ) AS peers \
              GROUP BY file_path \
              ORDER BY co_edit_count DESC, last_co_edit DESC, file_path ASC \
-             LIMIT ?",
+             LIMIT $5",
         )
         .bind(project_id)
         .bind(file_path)
@@ -429,15 +429,15 @@ impl CommitFileChangeRepository {
             Some(ts) => sqlx::query_as(
                 "SELECT \
                     file_path, \
-                    CAST(COUNT(DISTINCT commit_sha) AS SIGNED) AS commit_count, \
-                    CAST(COALESCE(SUM(insertions), 0) AS SIGNED) AS insertions, \
-                    CAST(COALESCE(SUM(deletions), 0) AS SIGNED) AS deletions, \
+                    CAST(COUNT(DISTINCT commit_sha) AS BIGINT) AS commit_count, \
+                    CAST(COALESCE(SUM(insertions), 0) AS BIGINT) AS insertions, \
+                    CAST(COALESCE(SUM(deletions), 0) AS BIGINT) AS deletions, \
                     MAX(committed_at) AS last_commit_at \
                  FROM commit_file_changes \
-                 WHERE project_id = ? AND committed_at >= ? \
+                 WHERE project_id = $1 AND committed_at >= $2 \
                  GROUP BY file_path \
                  ORDER BY commit_count DESC, last_commit_at DESC, file_path ASC \
-                 LIMIT ?",
+                 LIMIT $3",
             )
             .bind(project_id)
             .bind(ts)
@@ -447,15 +447,15 @@ impl CommitFileChangeRepository {
             None => sqlx::query_as(
                 "SELECT \
                     file_path, \
-                    CAST(COUNT(DISTINCT commit_sha) AS SIGNED) AS commit_count, \
-                    CAST(COALESCE(SUM(insertions), 0) AS SIGNED) AS insertions, \
-                    CAST(COALESCE(SUM(deletions), 0) AS SIGNED) AS deletions, \
+                    CAST(COUNT(DISTINCT commit_sha) AS BIGINT) AS commit_count, \
+                    CAST(COALESCE(SUM(insertions), 0) AS BIGINT) AS insertions, \
+                    CAST(COALESCE(SUM(deletions), 0) AS BIGINT) AS deletions, \
                     MAX(committed_at) AS last_commit_at \
                  FROM commit_file_changes \
-                 WHERE project_id = ? \
+                 WHERE project_id = $1 \
                  GROUP BY file_path \
                  ORDER BY commit_count DESC, last_commit_at DESC, file_path ASC \
-                 LIMIT ?",
+                 LIMIT $2",
             )
             .bind(project_id)
             .bind(limit)
@@ -504,13 +504,13 @@ impl CommitFileChangeRepository {
                 "SELECT \
                     file_a, \
                     file_b, \
-                    CAST(COUNT(*) AS SIGNED) AS co_edits, \
+                    CAST(COUNT(*) AS BIGINT) AS co_edits, \
                     MAX(committed_at) AS last_co_edit \
                  FROM coupling_pair_events \
-                 WHERE project_id = ? AND committed_at >= ? \
+                 WHERE project_id = $1 AND committed_at >= $2 \
                  GROUP BY file_a, file_b \
                  ORDER BY co_edits DESC, last_co_edit DESC, file_a ASC, file_b ASC \
-                 LIMIT ?",
+                 LIMIT $3",
             )
             .bind(project_id)
             .bind(ts)
@@ -521,13 +521,13 @@ impl CommitFileChangeRepository {
                 "SELECT \
                     file_a, \
                     file_b, \
-                    CAST(COUNT(*) AS SIGNED) AS co_edits, \
+                    CAST(COUNT(*) AS BIGINT) AS co_edits, \
                     MAX(committed_at) AS last_co_edit \
                  FROM coupling_pair_events \
-                 WHERE project_id = ? \
+                 WHERE project_id = $1 \
                  GROUP BY file_a, file_b \
                  ORDER BY co_edits DESC, last_co_edit DESC, file_a ASC, file_b ASC \
-                 LIMIT ?",
+                 LIMIT $2",
             )
             .bind(project_id)
             .bind(limit)
@@ -554,9 +554,9 @@ impl CommitFileChangeRepository {
             Some(ts) => sqlx::query_as(
                 "SELECT project_id, file_a, file_b, commit_sha, committed_at \
                  FROM coupling_pair_events \
-                 WHERE project_id = ? AND committed_at >= ? \
+                 WHERE project_id = $1 AND committed_at >= $2 \
                  ORDER BY committed_at DESC \
-                 LIMIT ?",
+                 LIMIT $3",
             )
             .bind(project_id)
             .bind(ts)
@@ -566,9 +566,9 @@ impl CommitFileChangeRepository {
             None => sqlx::query_as(
                 "SELECT project_id, file_a, file_b, commit_sha, committed_at \
                  FROM coupling_pair_events \
-                 WHERE project_id = ? \
+                 WHERE project_id = $1 \
                  ORDER BY committed_at DESC \
-                 LIMIT ?",
+                 LIMIT $2",
             )
             .bind(project_id)
             .bind(limit)

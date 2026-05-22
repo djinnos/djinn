@@ -42,7 +42,7 @@ impl TaskRepository {
         acceptance_criteria: Option<&str>,
     ) -> Result<Task> {
         self.db.ensure_initialized().await?;
-        let project_id = sqlx::query_scalar!("SELECT project_id FROM epics WHERE id = ?", epic_id)
+        let project_id = sqlx::query_scalar!("SELECT project_id FROM epics WHERE id = $1", epic_id)
             .fetch_optional(self.db.pool())
             .await?
             .ok_or_else(|| Error::Internal(format!("epic not found: {epic_id}")))?;
@@ -78,7 +78,11 @@ impl TaskRepository {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
         let short_id = self.generate_short_id(&id).await?;
-        let ac = acceptance_criteria.unwrap_or("[]").to_owned();
+        let ac_str = acceptance_criteria.unwrap_or("[]");
+        let ac: serde_json::Value = serde_json::from_str(ac_str)
+            .map_err(|e| crate::Error::InvalidData(format!("invalid json for tasks.acceptance_criteria: {e}")))?;
+        let priority: i32 = priority.try_into()
+            .map_err(|_| crate::Error::InvalidData("priority exceeds i32 range".into()))?;
         // Phase 3B: stamp `created_by_user_id` from the task-local set at
         // the MCP dispatch root (`SESSION_USER_ID`). `None` for
         // agent/background callers with no user context — schema allows
@@ -120,9 +124,9 @@ impl TaskRepository {
                     sqlx::query!(
                         "INSERT INTO tasks
                             (id, project_id, short_id, epic_id, title, description, design,
-                             issue_type, priority, owner, `status`, acceptance_criteria,
+                             issue_type, priority, owner, status, acceptance_criteria,
                              created_by_user_id)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'open'), ?, ?)",
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, 'open'), $12, $13)",
                         id,
                         project_id,
                         short_id,
@@ -182,12 +186,12 @@ impl TaskRepository {
         let empty = "";
         let epic_id_none: Option<&str> = None;
         let issue_type = "task";
-        let priority = 1_i64;
+        let priority = 1_i32;
         sqlx::query!(
             "INSERT INTO tasks
                 (id, project_id, short_id, epic_id, title, description, design,
-                 issue_type, priority, owner, `status`, continuation_count, memory_refs)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '[]')",
+                 issue_type, priority, owner, status, continuation_count, memory_refs)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 0, '[]'::jsonb)",
             id,
             project_id,
             short_id,
@@ -222,13 +226,17 @@ impl TaskRepository {
         acceptance_criteria: &str,
     ) -> Result<Task> {
         self.db.ensure_initialized().await?;
+        let priority: i32 = priority.try_into()
+            .map_err(|_| crate::Error::InvalidData("priority exceeds i32 range".into()))?;
+        let labels_value: serde_json::Value = serde_json::from_str(labels)
+            .map_err(|e| crate::Error::InvalidData(format!("invalid json for tasks.labels: {e}")))?;
+        let ac_value: serde_json::Value = serde_json::from_str(acceptance_criteria)
+            .map_err(|e| crate::Error::InvalidData(format!("invalid json for tasks.acceptance_criteria: {e}")))?;
         let id_owned = id.to_owned();
         let title_owned = title.to_owned();
         let description_owned = description.to_owned();
         let design_owned = design.to_owned();
         let owner_owned = owner.to_owned();
-        let labels_owned = labels.to_owned();
-        let ac_owned = acceptance_criteria.to_owned();
 
         let task: Task = crate::retry::retry_on_serialization_failure(
             crate::retry::DEFAULT_MAX_TX_RETRIES,
@@ -238,16 +246,16 @@ impl TaskRepository {
                 let description = description_owned.clone();
                 let design = design_owned.clone();
                 let owner = owner_owned.clone();
-                let labels = labels_owned.clone();
-                let acceptance_criteria = ac_owned.clone();
+                let labels = labels_value.clone();
+                let acceptance_criteria = ac_value.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET
-                            title = ?, description = ?, design = ?,
-                            priority = ?, owner = ?, labels = ?,
-                            acceptance_criteria = ?,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                        r#"UPDATE tasks SET
+                            title = $1, description = $2, design = $3,
+                            priority = $4, owner = $5, labels = $6,
+                            acceptance_criteria = $7,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $8"#,
                         title,
                         description,
                         design,
@@ -282,7 +290,7 @@ impl TaskRepository {
             || {
                 let id = id_owned.clone();
                 async move {
-                    sqlx::query!("DELETE FROM tasks WHERE id = ?", id)
+                    sqlx::query!("DELETE FROM tasks WHERE id = $1", id)
                         .execute(self.db.pool())
                         .await?;
                     Ok::<_, crate::Error>(())
@@ -308,9 +316,9 @@ impl TaskRepository {
                 let sha = sha_owned.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET merge_commit_sha = ?,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                        r#"UPDATE tasks SET merge_commit_sha = $1,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $2"#,
                         sha,
                         id
                     )
@@ -345,9 +353,9 @@ impl TaskRepository {
                 let url = url_owned.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET pr_url = ?,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                        r#"UPDATE tasks SET pr_url = $1,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $2"#,
                         url,
                         id
                     )
@@ -386,9 +394,9 @@ impl TaskRepository {
                 let metadata = metadata_owned.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET merge_conflict_metadata = ?,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                        r#"UPDATE tasks SET merge_conflict_metadata = $1,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $2"#,
                         metadata,
                         id
                     )
@@ -418,9 +426,9 @@ impl TaskRepository {
                 let id = id_owned.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET continuation_count = continuation_count + 1,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                        r#"UPDATE tasks SET continuation_count = continuation_count + 1,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $1"#,
                         id
                     )
                     .execute(self.db.pool())
@@ -454,9 +462,9 @@ impl TaskRepository {
                 let agent_type = agent_type_owned.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET agent_type = ?,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                        r#"UPDATE tasks SET agent_type = $1,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $2"#,
                         agent_type,
                         id
                     )
@@ -484,18 +492,19 @@ impl TaskRepository {
     pub async fn set_acceptance_criteria(&self, id: &str, ac_json: &str) -> Result<Task> {
         self.db.ensure_initialized().await?;
         let id_owned = id.to_owned();
-        let ac_owned = ac_json.to_owned();
+        let ac_value: serde_json::Value = serde_json::from_str(ac_json)
+            .map_err(|e| crate::Error::InvalidData(format!("invalid json for tasks.acceptance_criteria: {e}")))?;
 
         let task: Task = crate::retry::retry_on_serialization_failure(
             crate::retry::DEFAULT_MAX_TX_RETRIES,
             || {
                 let id = id_owned.clone();
-                let ac = ac_owned.clone();
+                let ac = ac_value.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET acceptance_criteria = ?,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                        r#"UPDATE tasks SET acceptance_criteria = $1,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $2"#,
                         ac,
                         id
                     )
@@ -520,6 +529,8 @@ impl TaskRepository {
     /// production code mutates this through [`Self::increment_continuation_count`].
     pub async fn set_continuation_count(&self, id: &str, count: i64) -> Result<()> {
         self.db.ensure_initialized().await?;
+        let count: i32 = count.try_into()
+            .map_err(|_| crate::Error::InvalidData("count exceeds i32 range".into()))?;
         let id_owned = id.to_owned();
 
         crate::retry::retry_on_serialization_failure(
@@ -528,9 +539,9 @@ impl TaskRepository {
                 let id = id_owned.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET continuation_count = ?,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                        r#"UPDATE tasks SET continuation_count = $1,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $2"#,
                         count,
                         id
                     )
@@ -550,6 +561,8 @@ impl TaskRepository {
     /// production code increments this through the transition path.
     pub async fn set_verification_failure_count(&self, id: &str, count: i64) -> Result<()> {
         self.db.ensure_initialized().await?;
+        let count: i32 = count.try_into()
+            .map_err(|_| crate::Error::InvalidData("count exceeds i32 range".into()))?;
         let id_owned = id.to_owned();
 
         crate::retry::retry_on_serialization_failure(
@@ -558,9 +571,9 @@ impl TaskRepository {
                 let id = id_owned.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET verification_failure_count = ?,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                        r#"UPDATE tasks SET verification_failure_count = $1,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $2"#,
                         count,
                         id
                     )
@@ -587,13 +600,13 @@ impl TaskRepository {
                 let id = id_owned.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET
+                        r#"UPDATE tasks SET
                             reopen_count = 0,
                             continuation_count = 0,
                             intervention_count = intervention_count + 1,
-                            last_intervention_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'),
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                            last_intervention_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $1"#,
                         id
                     )
                     .execute(self.db.pool())
@@ -615,18 +628,19 @@ impl TaskRepository {
     pub async fn update_memory_refs(&self, id: &str, memory_refs_json: &str) -> Result<Task> {
         self.db.ensure_initialized().await?;
         let id_owned = id.to_owned();
-        let memory_refs_owned = memory_refs_json.to_owned();
+        let memory_refs_value: serde_json::Value = serde_json::from_str(memory_refs_json)
+            .map_err(|e| crate::Error::InvalidData(format!("invalid json for tasks.memory_refs: {e}")))?;
 
         let task: Task = crate::retry::retry_on_serialization_failure(
             crate::retry::DEFAULT_MAX_TX_RETRIES,
             || {
                 let id = id_owned.clone();
-                let memory_refs_json = memory_refs_owned.clone();
+                let memory_refs_json = memory_refs_value.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET memory_refs = ?,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                        r#"UPDATE tasks SET memory_refs = $1,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $2"#,
                         memory_refs_json,
                         id
                     )
@@ -663,7 +677,7 @@ impl TaskRepository {
                 let updated_at = updated_at_owned.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET updated_at = ? WHERE id = ?",
+                        "UPDATE tasks SET updated_at = $1 WHERE id = $2",
                         updated_at,
                         id
                     )
@@ -696,7 +710,7 @@ mod created_by_tests {
         let owner = "test";
         let repo_slug = format!("task-writes-{project_id}");
         sqlx::query!(
-            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES (?, ?, ?, ?)",
+            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
             project_id,
             "p",
             owner,
@@ -709,7 +723,7 @@ mod created_by_tests {
         let epic_id = uuid::Uuid::now_v7().to_string();
         sqlx::query!(
             "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '[]'::jsonb)",
             epic_id,
             project_id,
             "ep01",
@@ -717,8 +731,7 @@ mod created_by_tests {
             "",
             "",
             "",
-            "",
-            "[]"
+            ""
         )
         .execute(db.pool())
         .await
@@ -764,7 +777,7 @@ mod created_by_tests {
             .await;
 
         let stamped: Option<String> = sqlx::query_scalar!(
-            "SELECT created_by_user_id FROM tasks WHERE id = ?",
+            "SELECT created_by_user_id FROM tasks WHERE id = $1",
             created_id
         )
         .fetch_one(db.pool())
@@ -794,7 +807,7 @@ mod created_by_tests {
             .await
             .unwrap();
         let stamped: Option<String> = sqlx::query_scalar!(
-            "SELECT created_by_user_id FROM tasks WHERE id = ?",
+            "SELECT created_by_user_id FROM tasks WHERE id = $1",
             unattributed.id
         )
         .fetch_one(db.pool())

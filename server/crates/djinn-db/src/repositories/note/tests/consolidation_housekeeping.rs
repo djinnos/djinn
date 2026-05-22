@@ -70,9 +70,9 @@ async fn consolidation_lists_db_note_groups_and_clusters_deterministically() {
         );
         sqlx::query!(
             "UPDATE notes
-             SET `abstract` = ?,
-                 overview = ?
-             WHERE id = ?",
+             SET abstract = $1,
+                 overview = $2
+             WHERE id = $3",
             abstract_text,
             abstract_text,
             note.id
@@ -131,7 +131,7 @@ async fn consolidation_lists_db_note_groups_and_clusters_deterministically() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "Below-threshold filter was tuned to negated SQLite bm25 scores; MySQL FULLTEXT in natural-language mode returns all term-bearing rows with positive scores, so the dedup threshold semantics don't port. Needs a new empirical threshold when MysqlFulltext dedup is retuned (see replacement_notes on the plan)."]
+#[ignore = "Below-threshold filter was tuned to negated SQLite bm25 scores; MySQL FULLTEXT in natural-language mode returns all term-bearing rows with positive scores, so the dedup threshold semantics don't port. Needs a new empirical threshold when PostgresTsvector dedup is retuned (see replacement_notes on the plan)."]
 async fn consolidation_clusters_ignore_below_threshold_inputs() {
     let tmp = crate::database::test_tempdir().unwrap();
     let db = Database::open_in_memory().unwrap();
@@ -513,7 +513,7 @@ async fn housekeeping_rebuild_missing_content_hashes_repairs_legacy_null_hashes_
         .unwrap();
 
     sqlx::query!(
-        "UPDATE notes SET content_hash = NULL WHERE id IN (?, ?)",
+        "UPDATE notes SET content_hash = NULL WHERE id IN ($1, $2)",
         canonical.id,
         legacy_duplicate.id
     )
@@ -522,7 +522,7 @@ async fn housekeeping_rebuild_missing_content_hashes_repairs_legacy_null_hashes_
     .unwrap();
 
     let note_count_before = sqlx::query_scalar!(
-        "SELECT COUNT(*) FROM notes WHERE project_id = ?",
+        "SELECT COUNT(*) FROM notes WHERE project_id = $1",
         project.id
     )
     .fetch_one(db.pool())
@@ -536,7 +536,7 @@ async fn housekeeping_rebuild_missing_content_hashes_repairs_legacy_null_hashes_
     assert_eq!(rebuilt, 2);
 
     let note_count_after = sqlx::query_scalar!(
-        "SELECT COUNT(*) FROM notes WHERE project_id = ?",
+        "SELECT COUNT(*) FROM notes WHERE project_id = $1",
         project.id
     )
     .fetch_one(db.pool())
@@ -545,7 +545,7 @@ async fn housekeeping_rebuild_missing_content_hashes_repairs_legacy_null_hashes_
     assert_eq!(note_count_after, note_count_before);
 
     let rebuilt_hashes: Vec<(String, Option<String>)> = sqlx::query!(
-        "SELECT id, content_hash FROM notes WHERE id IN (?, ?) ORDER BY id",
+        "SELECT id, content_hash FROM notes WHERE id IN ($1, $2) ORDER BY id",
         canonical.id,
         legacy_duplicate.id
     )
@@ -562,7 +562,7 @@ async fn housekeeping_rebuild_missing_content_hashes_repairs_legacy_null_hashes_
     }
 
     let unaffected_hash =
-        sqlx::query_scalar!("SELECT content_hash FROM notes WHERE id = ?", unaffected.id)
+        sqlx::query_scalar!("SELECT content_hash FROM notes WHERE id = $1", unaffected.id)
             .fetch_one(db.pool())
             .await
             .unwrap();
@@ -631,10 +631,10 @@ async fn housekeeping_flag_orphan_notes_tags_stale_unlinked_notes_only() {
     // NOTE: raw `sqlx::query` because `query!` can't check the dynamic
     // DATE_FORMAT expression against the sqlx offline cache.
     sqlx::query(
-        "UPDATE notes
-         SET last_accessed = DATE_FORMAT(DATE_SUB(NOW(3), INTERVAL 31 DAY), '%Y-%m-%dT%H:%i:%s.%fZ'),
+        r#"UPDATE notes
+         SET last_accessed = DATE_FORMAT(to_char((now() at time zone 'utc') - interval '31 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), '%Y-%m-%dT%H:%i:%s.%fZ'),
              access_count = 0
-         WHERE id IN (?, ?)",
+         WHERE id IN ($1, $2)"#,
     )
     .bind(&orphan.id)
     .bind(&linked.id)
@@ -648,11 +648,11 @@ async fn housekeeping_flag_orphan_notes_tags_stale_unlinked_notes_only() {
         .unwrap();
     assert_eq!(flagged, 1);
 
-    let orphan_tags = sqlx::query_scalar!("SELECT tags FROM notes WHERE id = ?", orphan.id)
+    let orphan_tags = sqlx::query_scalar!(r#"SELECT tags::text AS "tags!" FROM notes WHERE id = $1"#, orphan.id)
         .fetch_one(db.pool())
         .await
         .unwrap();
-    let linked_tags = sqlx::query_scalar!("SELECT tags FROM notes WHERE id = ?", linked.id)
+    let linked_tags = sqlx::query_scalar!(r#"SELECT tags::text AS "tags!" FROM notes WHERE id = $1"#, linked.id)
         .fetch_one(db.pool())
         .await
         .unwrap();
@@ -702,7 +702,7 @@ async fn housekeeping_repair_broken_wikilinks_does_not_force_low_confidence_matc
 
     let target_raw = "Rust Ownership Guide";
     let resolved_target = sqlx::query_scalar!(
-        "SELECT target_id FROM note_links WHERE source_id = ? AND target_raw = ?",
+        "SELECT target_id FROM note_links WHERE source_id = $1 AND target_raw = $2",
         source.id,
         target_raw
     )

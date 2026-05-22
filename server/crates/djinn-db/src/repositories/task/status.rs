@@ -114,11 +114,11 @@ impl TaskRepository {
                     if apply.set_closed_at && !work_landed {
                         let downstream = sqlx::query_as!(
                             BlockerRef,
-                            r#"SELECT t.id AS task_id, t.short_id, t.title, t.`status` AS "status!"
+                            r#"SELECT t.id AS task_id, t.short_id, t.title, t.status AS "status!"
                              FROM blockers b
                              JOIN tasks t ON t.id = b.task_id
-                             WHERE b.blocking_task_id = ?
-                               AND t.`status` != 'closed'"#,
+                             WHERE b.blocking_task_id = $1
+                               AND t.status != 'closed'"#,
                             id
                         )
                         .fetch_all(&mut *tx)
@@ -151,10 +151,10 @@ impl TaskRepository {
                             }
                         }
                         let count: i64 = sqlx::query_scalar!(
-                            "SELECT COUNT(*) FROM blockers b
+                            r#"SELECT COUNT(*) AS "count!: i64" FROM blockers b
                              JOIN tasks bt ON b.blocking_task_id = bt.id
-                             WHERE b.task_id = ?
-                               AND bt.`status` != 'closed'",
+                             WHERE b.task_id = $1
+                               AND bt.status != 'closed'"#,
                             id
                         )
                         .fetch_one(&mut *tx)
@@ -188,34 +188,34 @@ impl TaskRepository {
                     let conflict_meta_ref = effective_conflict_metadata.as_deref();
 
                     // Apply all side effects atomically.
-                    let reopen_inc_val: i64 = if apply.increment_reopen { 1 } else { 0 };
+                    let reopen_inc_val: i32 = if apply.increment_reopen { 1 } else { 0 };
                     sqlx::query!(
-                        "UPDATE tasks SET
-                            `status` = ?,
-                            reopen_count = reopen_count + ?,
-                            total_reopen_count = total_reopen_count + ?,
-                            continuation_count = CASE WHEN ? THEN 0 WHEN ? THEN continuation_count + 1 ELSE continuation_count END,
-                            verification_failure_count = CASE WHEN ? THEN 0 WHEN ? THEN verification_failure_count + 1 ELSE verification_failure_count END,
-                            total_verification_failure_count = total_verification_failure_count + CASE WHEN ? THEN 1 ELSE 0 END,
-                            intervention_count = CASE WHEN ? THEN intervention_count + 1 ELSE intervention_count END,
-                            last_intervention_at = CASE WHEN ? THEN DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ') ELSE last_intervention_at END,
+                        r#"UPDATE tasks SET
+                            status = $1,
+                            reopen_count = reopen_count + $2,
+                            total_reopen_count = total_reopen_count + $3,
+                            continuation_count = CASE WHEN $4 THEN 0 WHEN $5 THEN continuation_count + 1 ELSE continuation_count END,
+                            verification_failure_count = CASE WHEN $6 THEN 0 WHEN $7 THEN verification_failure_count + 1 ELSE verification_failure_count END,
+                            total_verification_failure_count = total_verification_failure_count + CASE WHEN $8 THEN 1 ELSE 0 END,
+                            intervention_count = CASE WHEN $9 THEN intervention_count + 1 ELSE intervention_count END,
+                            last_intervention_at = CASE WHEN $10 THEN to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE last_intervention_at END,
                             closed_at = CASE
-                                WHEN ? THEN DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                                WHEN ? THEN NULL
+                                WHEN $11 THEN to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                                WHEN $12 THEN NULL
                                 ELSE closed_at
                             END,
                             close_reason = CASE
-                                WHEN ? IS NOT NULL THEN ?
-                                WHEN ? THEN NULL
+                                WHEN $13::text IS NOT NULL THEN $14
+                                WHEN $15 THEN NULL
                                 ELSE close_reason
                             END,
                             merge_conflict_metadata = CASE
-                                WHEN ? THEN NULL
-                                WHEN ? THEN ?
+                                WHEN $16 THEN NULL
+                                WHEN $17 THEN $18
                                 ELSE merge_conflict_metadata
                             END,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $19"#,
                         to_str,
                         reopen_inc_val,
                         reopen_inc_val,
@@ -251,12 +251,12 @@ impl TaskRepository {
                             serde_json::from_str(ac).unwrap_or(serde_json::json!([]));
                         payload_obj["ac_snapshot"] = ac_value;
                     }
-                    let payload = payload_obj.to_string();
+                    let payload = payload_obj;
 
                     sqlx::query!(
                         "INSERT INTO activity_log
                             (id, task_id, actor_id, actor_role, event_type, payload)
-                         VALUES (?, ?, ?, ?, ?, ?)",
+                         VALUES ($1, $2, $3, $4, $5, $6)",
                         activity_id,
                         id,
                         actor_id,
@@ -309,18 +309,18 @@ impl TaskRepository {
                         ""
                     };
                     // Only increment reopen_count on actual reopen transitions (not open->open)
-                    let reopen_inc: i64 = if status == "open" && from_task.status != "open" {
+                    let reopen_inc: i32 = if status == "open" && from_task.status != "open" {
                         1
                     } else {
                         0
                     };
                     // NOTE: dynamic SQL (closed_at fragment) — compile-time check not possible
                     sqlx::query(&format!(
-                        "UPDATE tasks SET `status` = ?, {closed_at_sql}
-                            reopen_count = reopen_count + ?,
-                            total_reopen_count = total_reopen_count + ?,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?"
+                        r#"UPDATE tasks SET status = $1, {closed_at_sql}
+                            reopen_count = reopen_count + $2,
+                            total_reopen_count = total_reopen_count + $3,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $4"#
                     ))
                     .bind(&status)
                     .bind(reopen_inc)
@@ -384,27 +384,27 @@ impl TaskRepository {
                         task_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
                     // Only increment reopen_count on actual reopen transitions (not open->open)
-                    let reopen_inc: i64 = if status == "open" && from_task.status != "open" {
+                    let reopen_inc: i32 = if status == "open" && from_task.status != "open" {
                         1
                     } else {
                         0
                     };
                     sqlx::query!(
-                        "UPDATE tasks SET
-                            `status` = ?,
+                        r#"UPDATE tasks SET
+                            status = $1,
                             closed_at = CASE
-                                WHEN ? = 'closed' THEN DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                                WHEN `status` = 'closed' THEN NULL
+                                WHEN $2 = 'closed' THEN to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                                WHEN status = 'closed' THEN NULL
                                 ELSE closed_at
                             END,
-                            reopen_count = reopen_count + ?,
-                            total_reopen_count = total_reopen_count + ?,
+                            reopen_count = reopen_count + $3,
+                            total_reopen_count = total_reopen_count + $4,
                             close_reason = CASE
-                                WHEN ? = 'closed' THEN ?
+                                WHEN $5 = 'closed' THEN $6
                                 ELSE NULL
                             END,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $7"#,
                         status,
                         status,
                         reopen_inc,
@@ -459,9 +459,9 @@ impl TaskRepository {
                 let new_epic_id = new_epic_id_owned.clone();
                 async move {
                     sqlx::query!(
-                        "UPDATE tasks SET epic_id = ?,
-                            updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                        r#"UPDATE tasks SET epic_id = $1,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $2"#,
                         new_epic_id,
                         id
                     )

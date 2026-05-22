@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT note_a_id, note_b_id, weight, co_access_count, last_co_access\n                 FROM note_associations\n                 WHERE note_a_id = $1 AND note_b_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "note_a_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "note_b_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "weight",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 3,
+        "name": "co_access_count",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "last_co_access",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "c158d7034f69d710d62121753ef1260cbeb23dd931bc882aeea30e16d14103f9"
+}

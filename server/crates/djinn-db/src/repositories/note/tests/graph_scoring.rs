@@ -57,7 +57,7 @@ async fn task_affinity_scores_task_epic_blocker_and_max() {
     let epic_id = uuid::Uuid::now_v7().to_string();
     sqlx::query(
         "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(&epic_id)
     .bind(&project.id)
@@ -76,7 +76,7 @@ async fn task_affinity_scores_task_epic_blocker_and_max() {
     sqlx::query(
         "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
                             issue_type, priority, owner, status, continuation_count, memory_refs)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
     )
     .bind(&task_id)
     .bind(&project.id)
@@ -99,7 +99,7 @@ async fn task_affinity_scores_task_epic_blocker_and_max() {
     sqlx::query(
         "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
                             issue_type, priority, owner, status, continuation_count, memory_refs)
-         VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(&blocker_id)
     .bind(&project.id)
@@ -124,7 +124,7 @@ async fn task_affinity_scores_task_epic_blocker_and_max() {
     .await
     .unwrap();
 
-    sqlx::query("INSERT INTO blockers (task_id, blocking_task_id) VALUES (?, ?)")
+    sqlx::query("INSERT INTO blockers (task_id, blocking_task_id) VALUES ($1, $2)")
         .bind(&task_id)
         .bind(&blocker_id)
         .execute(db.pool())
@@ -180,7 +180,7 @@ async fn task_affinity_scores_include_repo_map_neighbors_for_task_memory_refs() 
     sqlx::query(
         "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
                             issue_type, priority, owner, status, continuation_count, memory_refs)
-         VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(&task_id)
     .bind(&project.id)
@@ -398,8 +398,8 @@ async fn graph_proximity_association_applies_weighted_decay() {
     };
 
     sqlx::query(
-        "INSERT INTO note_associations (note_a_id, note_b_id, weight, co_access_count, last_co_access)
-         VALUES (?, ?, ?, 1, DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))",
+        r#"INSERT INTO note_associations (note_a_id, note_b_id, weight, co_access_count, last_co_access)
+         VALUES ($1, $2, $3, 1, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))"#,
     )
     .bind(&note_a_id)
     .bind(&note_b_id)
@@ -440,8 +440,8 @@ async fn graph_proximity_ignores_low_weight_association_noise() {
     };
 
     sqlx::query(
-        "INSERT INTO note_associations (note_a_id, note_b_id, weight, co_access_count, last_co_access)
-         VALUES (?, ?, ?, 1, DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'))",
+        r#"INSERT INTO note_associations (note_a_id, note_b_id, weight, co_access_count, last_co_access)
+         VALUES ($1, $2, $3, 1, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))"#,
     )
     .bind(&note_a_id)
     .bind(&note_b_id)
@@ -496,10 +496,10 @@ async fn temporal_scores_higher_access_count_wins_same_age() {
         .unwrap();
 
     sqlx::query(
-        "UPDATE notes
-         SET created_at = DATE_FORMAT(DATE_SUB(NOW(3), INTERVAL 1 DAY), '%Y-%m-%dT%H:%i:%s.%fZ'),
-             updated_at = DATE_FORMAT(DATE_SUB(NOW(3), INTERVAL 1 DAY), '%Y-%m-%dT%H:%i:%s.%fZ')
-         WHERE id IN (?, ?)",
+        r#"UPDATE notes
+         SET created_at = DATE_FORMAT(to_char((now() at time zone 'utc') - interval '1 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), '%Y-%m-%dT%H:%i:%s.%fZ'),
+             updated_at = DATE_FORMAT(to_char((now() at time zone 'utc') - interval '1 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), '%Y-%m-%dT%H:%i:%s.%fZ')
+         WHERE id IN ($1, $2)"#,
     )
     .bind(&high.id)
     .bind(&low.id)
@@ -507,13 +507,13 @@ async fn temporal_scores_higher_access_count_wins_same_age() {
     .await
     .unwrap();
 
-    sqlx::query("UPDATE notes SET access_count = 10 WHERE id = ?")
+    sqlx::query("UPDATE notes SET access_count = 10 WHERE id = $1")
         .bind(&high.id)
         .execute(db.pool())
         .await
         .unwrap();
 
-    sqlx::query("UPDATE notes SET access_count = 0 WHERE id = ?")
+    sqlx::query("UPDATE notes SET access_count = 0 WHERE id = $1")
         .bind(&low.id)
         .execute(db.pool())
         .await
@@ -544,14 +544,14 @@ async fn temporal_scores_recent_update_wins_same_access_count() {
         .await
         .unwrap();
 
-    sqlx::query("UPDATE notes SET access_count = 3 WHERE id IN (?, ?)")
+    sqlx::query("UPDATE notes SET access_count = 3 WHERE id IN ($1, $2)")
         .bind(&recent.id)
         .bind(&stale.id)
         .execute(db.pool())
         .await
         .unwrap();
 
-    sqlx::query("UPDATE notes SET created_at = DATE_FORMAT(DATE_SUB(NOW(3), INTERVAL 30 DAY), '%Y-%m-%dT%H:%i:%s.%fZ') WHERE id IN (?, ?)")
+    sqlx::query(r#"UPDATE notes SET created_at = DATE_FORMAT(to_char((now() at time zone 'utc') - interval '30 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), '%Y-%m-%dT%H:%i:%s.%fZ') WHERE id IN ($1, $2)"#)
         .bind(&recent.id)
         .bind(&stale.id)
         .execute(db.pool())
@@ -559,14 +559,14 @@ async fn temporal_scores_recent_update_wins_same_access_count() {
         .unwrap();
 
     sqlx::query(
-        "UPDATE notes SET updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ') WHERE id = ?",
+        r#"UPDATE notes SET updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE id = $1"#,
     )
     .bind(&recent.id)
     .execute(db.pool())
     .await
     .unwrap();
 
-    sqlx::query("UPDATE notes SET updated_at = DATE_FORMAT(DATE_SUB(NOW(3), INTERVAL 30 DAY), '%Y-%m-%dT%H:%i:%s.%fZ') WHERE id = ?")
+    sqlx::query(r#"UPDATE notes SET updated_at = DATE_FORMAT(to_char((now() at time zone 'utc') - interval '30 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), '%Y-%m-%dT%H:%i:%s.%fZ') WHERE id = $1"#)
         .bind(&stale.id)
         .execute(db.pool())
         .await
@@ -604,11 +604,11 @@ async fn temporal_scores_edge_cases_are_finite() {
         .unwrap();
 
     sqlx::query(
-        "UPDATE notes
+        r#"UPDATE notes
          SET access_count = 0,
-             created_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'),
-             updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-         WHERE id = ?",
+             created_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+             updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+         WHERE id = $1"#,
     )
     .bind(&zero_age.id)
     .execute(db.pool())
@@ -616,11 +616,11 @@ async fn temporal_scores_edge_cases_are_finite() {
     .unwrap();
 
     sqlx::query(
-        "UPDATE notes
+        r#"UPDATE notes
          SET access_count = 0,
-             created_at = DATE_FORMAT(DATE_SUB(NOW(3), INTERVAL 365 DAY), '%Y-%m-%dT%H:%i:%s.%fZ'),
-             updated_at = DATE_FORMAT(DATE_SUB(NOW(3), INTERVAL 365 DAY), '%Y-%m-%dT%H:%i:%s.%fZ')
-         WHERE id = ?",
+             created_at = DATE_FORMAT(to_char((now() at time zone 'utc') - interval '365 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), '%Y-%m-%dT%H:%i:%s.%fZ'),
+             updated_at = DATE_FORMAT(to_char((now() at time zone 'utc') - interval '365 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), '%Y-%m-%dT%H:%i:%s.%fZ')
+         WHERE id = $1"#,
     )
     .bind(&old.id)
     .execute(db.pool())

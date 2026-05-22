@@ -137,12 +137,12 @@ impl AgentRepository {
         Ok(sqlx::query_as!(
             Agent,
             r#"SELECT id AS "id!", project_id AS "project_id!",
-                `name` AS "name!", base_role AS "base_role!",
-                description AS "description!", system_prompt_extensions AS "system_prompt_extensions!",
+                name AS "name!", base_role AS "base_role!",
+                description AS "description!", system_prompt_extensions::text AS "system_prompt_extensions!",
                 model_preference, verification_command,
-                mcp_servers AS "mcp_servers!", skills AS "skills!",
+                mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
-                (SELECT GROUP_CONCAT(h.proposed_text ORDER BY h.created_at ASC SEPARATOR '\n\n---\n\n')
+                (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
                  FROM learned_prompt_history h
                  WHERE h.agent_id = agents.id
                    AND h.action IN ('keep','confirmed')
@@ -159,9 +159,9 @@ impl AgentRepository {
     pub async fn get_history(&self, role_id: &str) -> Result<Vec<LearnedPromptHistoryEntry>> {
         self.db.ensure_initialized().await?;
         let rows = sqlx::query!(
-            r#"SELECT id, proposed_text, action AS "action!", metrics_before, metrics_after, created_at
+            r#"SELECT id, proposed_text, action AS "action!", metrics_before::text AS "metrics_before?", metrics_after::text AS "metrics_after?", created_at
                  FROM learned_prompt_history
-                 WHERE agent_id = ?
+                 WHERE agent_id = $1
                  ORDER BY created_at DESC"#,
             role_id
         )
@@ -185,10 +185,10 @@ impl AgentRepository {
     pub async fn clear_learned_prompt(&self, role_id: &str) -> Result<Agent> {
         self.db.ensure_initialized().await?;
         sqlx::query!(
-            "UPDATE agents
+            r#"UPDATE agents
              SET learned_prompt = NULL,
-                 updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE id = ?",
+                 updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $1"#,
             role_id
         )
         .execute(self.db.pool())
@@ -207,18 +207,18 @@ impl AgentRepository {
         Ok(sqlx::query_as!(
             Agent,
             r#"SELECT id AS "id!", project_id AS "project_id!",
-                `name` AS "name!", base_role AS "base_role!",
-                description AS "description!", system_prompt_extensions AS "system_prompt_extensions!",
+                name AS "name!", base_role AS "base_role!",
+                description AS "description!", system_prompt_extensions::text AS "system_prompt_extensions!",
                 model_preference, verification_command,
-                mcp_servers AS "mcp_servers!", skills AS "skills!",
+                mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
-                (SELECT GROUP_CONCAT(h.proposed_text ORDER BY h.created_at ASC SEPARATOR '\n\n---\n\n')
+                (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
                  FROM learned_prompt_history h
                  WHERE h.agent_id = agents.id
                    AND h.action IN ('keep','confirmed')
                 ) AS learned_prompt,
                 created_at AS "created_at!", updated_at AS "updated_at!"
-             FROM agents WHERE id = ?"#,
+             FROM agents WHERE id = $1"#,
             id
         )
         .fetch_optional(self.db.pool())
@@ -236,19 +236,19 @@ impl AgentRepository {
         Ok(sqlx::query_as!(
             Agent,
             r#"SELECT id AS "id!", project_id AS "project_id!",
-                `name` AS "name!", base_role AS "base_role!",
-                description AS "description!", system_prompt_extensions AS "system_prompt_extensions!",
+                name AS "name!", base_role AS "base_role!",
+                description AS "description!", system_prompt_extensions::text AS "system_prompt_extensions!",
                 model_preference, verification_command,
-                mcp_servers AS "mcp_servers!", skills AS "skills!",
+                mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
-                (SELECT GROUP_CONCAT(h.proposed_text ORDER BY h.created_at ASC SEPARATOR '\n\n---\n\n')
+                (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
                  FROM learned_prompt_history h
                  WHERE h.agent_id = agents.id
                    AND h.action IN ('keep','confirmed')
                 ) AS learned_prompt,
                 created_at AS "created_at!", updated_at AS "updated_at!"
              FROM agents
-             WHERE project_id = ? AND base_role = ? AND is_default = 1 LIMIT 1"#,
+             WHERE project_id = $1 AND base_role = $2 AND is_default = TRUE LIMIT 1"#,
             project_id,
             base_role
         )
@@ -269,18 +269,18 @@ impl AgentRepository {
         Ok(sqlx::query_as!(
             Agent,
             r#"SELECT id AS "id!", project_id AS "project_id!",
-                `name` AS "name!", base_role AS "base_role!",
-                description AS "description!", system_prompt_extensions AS "system_prompt_extensions!",
+                name AS "name!", base_role AS "base_role!",
+                description AS "description!", system_prompt_extensions::text AS "system_prompt_extensions!",
                 model_preference, verification_command,
-                mcp_servers AS "mcp_servers!", skills AS "skills!",
+                mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
-                (SELECT GROUP_CONCAT(h.proposed_text ORDER BY h.created_at ASC SEPARATOR '\n\n---\n\n')
+                (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
                  FROM learned_prompt_history h
                  WHERE h.agent_id = agents.id
                    AND h.action IN ('keep','confirmed')
                 ) AS learned_prompt,
                 created_at AS "created_at!", updated_at AS "updated_at!"
-             FROM agents WHERE project_id = ? AND `name` = ?"#,
+             FROM agents WHERE project_id = $1 AND name = $2"#,
             project_id,
             name
         )
@@ -295,19 +295,19 @@ impl AgentRepository {
         Ok(sqlx::query_as!(
             Agent,
             r#"SELECT id AS "id!", project_id AS "project_id!",
-                `name` AS "name!", base_role AS "base_role!",
-                description AS "description!", system_prompt_extensions AS "system_prompt_extensions!",
+                name AS "name!", base_role AS "base_role!",
+                description AS "description!", system_prompt_extensions::text AS "system_prompt_extensions!",
                 model_preference, verification_command,
-                mcp_servers AS "mcp_servers!", skills AS "skills!",
+                mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
-                (SELECT GROUP_CONCAT(h.proposed_text ORDER BY h.created_at ASC SEPARATOR '\n\n---\n\n')
+                (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
                  FROM learned_prompt_history h
                  WHERE h.agent_id = agents.id
                    AND h.action IN ('keep','confirmed')
                 ) AS learned_prompt,
                 created_at AS "created_at!", updated_at AS "updated_at!"
              FROM agents
-             WHERE project_id = ? ORDER BY is_default DESC, base_role ASC, `name` ASC"#,
+             WHERE project_id = $1 ORDER BY is_default DESC, base_role ASC, name ASC"#,
             project_id
         )
         .fetch_all(self.db.pool())
@@ -323,24 +323,31 @@ impl AgentRepository {
         let id = uuid::Uuid::now_v7().to_string();
         let mcp_servers = input.mcp_servers.unwrap_or("[]");
         let skills = input.skills.unwrap_or("[]");
-        let is_default_int = input.is_default as i64;
+        let is_default_bool = input.is_default;
+        // JSONB columns require Value/Json. Parse the caller's string blobs once.
+        let system_prompt_value: serde_json::Value =
+            serde_json::from_str(input.system_prompt_extensions).unwrap_or_else(|_| serde_json::json!({}));
+        let mcp_servers_value: serde_json::Value =
+            serde_json::from_str(mcp_servers).unwrap_or_else(|_| serde_json::json!([]));
+        let skills_value: serde_json::Value =
+            serde_json::from_str(skills).unwrap_or_else(|_| serde_json::json!([]));
         sqlx::query!(
             "INSERT INTO agents (
-                id, project_id, `name`, base_role, description,
+                id, project_id, name, base_role, description,
                 system_prompt_extensions, model_preference, verification_command,
                 mcp_servers, skills, is_default
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             id,
             project_id,
             input.name,
             input.base_role,
             input.description,
-            input.system_prompt_extensions,
+            system_prompt_value,
             input.model_preference,
             input.verification_command,
-            mcp_servers,
-            skills,
-            is_default_int
+            mcp_servers_value,
+            skills_value,
+            is_default_bool
         )
         .execute(self.db.pool())
         .await?;
@@ -355,20 +362,26 @@ impl AgentRepository {
 
     pub async fn update(&self, id: &str, input: AgentUpdateInput<'_>) -> Result<Agent> {
         self.db.ensure_initialized().await?;
+        let system_prompt_value: serde_json::Value = serde_json::from_str(input.system_prompt_extensions)
+            .map_err(|e| Error::InvalidData(format!("invalid json for agents.system_prompt_extensions: {e}")))?;
+        let mcp_servers_value: serde_json::Value = serde_json::from_str(input.mcp_servers)
+            .map_err(|e| Error::InvalidData(format!("invalid json for agents.mcp_servers: {e}")))?;
+        let skills_value: serde_json::Value = serde_json::from_str(input.skills)
+            .map_err(|e| Error::InvalidData(format!("invalid json for agents.skills: {e}")))?;
         sqlx::query!(
-            "UPDATE agents
-             SET `name` = ?, description = ?, system_prompt_extensions = ?,
-                 model_preference = ?, verification_command = ?,
-                 mcp_servers = ?, skills = ?, learned_prompt = ?,
-                 updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE id = ?",
+            r#"UPDATE agents
+             SET name = $1, description = $2, system_prompt_extensions = $3,
+                 model_preference = $4, verification_command = $5,
+                 mcp_servers = $6, skills = $7, learned_prompt = $8,
+                 updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $9"#,
             input.name,
             input.description,
-            input.system_prompt_extensions,
+            system_prompt_value,
             input.model_preference,
             input.verification_command,
-            input.mcp_servers,
-            input.skills,
+            mcp_servers_value,
+            skills_value,
             input.learned_prompt,
             id
         )
@@ -397,8 +410,8 @@ impl AgentRepository {
 
         // Clear any existing default for this (project_id, base_role).
         sqlx::query!(
-            "UPDATE agents SET is_default = 0
-             WHERE project_id = ? AND base_role = ? AND is_default = 1",
+            "UPDATE agents SET is_default = FALSE
+             WHERE project_id = $1 AND base_role = $2 AND is_default = TRUE",
             role.project_id,
             role.base_role
         )
@@ -407,9 +420,9 @@ impl AgentRepository {
 
         // Set this role as default.
         sqlx::query!(
-            "UPDATE agents SET is_default = 1,
-                     updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE id = ?",
+            r#"UPDATE agents SET is_default = TRUE,
+                     updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $1"#,
             id
         )
         .execute(self.db.pool())
@@ -425,7 +438,7 @@ impl AgentRepository {
 
     pub async fn delete(&self, id: &str, project_id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query!("DELETE FROM agents WHERE id = ?", id)
+        sqlx::query!("DELETE FROM agents WHERE id = $1", id)
             .execute(self.db.pool())
             .await?;
         self.events
@@ -441,7 +454,7 @@ impl AgentRepository {
     pub async fn delete_for_base_role(&self, project_id: &str, base_role: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;
         let result = sqlx::query!(
-            "DELETE FROM agents WHERE project_id = ? AND base_role = ?",
+            "DELETE FROM agents WHERE project_id = $1 AND base_role = $2",
             project_id,
             base_role
         )
@@ -461,11 +474,13 @@ impl AgentRepository {
         extensions: &str,
     ) -> Result<u64> {
         self.db.ensure_initialized().await?;
+        let extensions_value: serde_json::Value = serde_json::from_str(extensions)
+            .map_err(|e| Error::InvalidData(format!("invalid json for agents.system_prompt_extensions: {e}")))?;
         let result = sqlx::query!(
-            "UPDATE agents SET system_prompt_extensions = ?,
-                    updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE project_id = ? AND base_role = ? AND is_default = 1",
-            extensions,
+            r#"UPDATE agents SET system_prompt_extensions = $1,
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE project_id = $2 AND base_role = $3 AND is_default = TRUE"#,
+            extensions_value,
             project_id,
             base_role
         )
@@ -490,18 +505,18 @@ impl AgentRepository {
 
         // NOTE: dynamic SQL (WHERE clause built from optional filters; uses inlined AGENT_COLUMNS projection) — compile-time check not possible
         let sql = format!(
-            "SELECT id, project_id, `name`, base_role, description, \
-                    system_prompt_extensions, model_preference, verification_command, \
-                    mcp_servers, skills, is_default, \
-                    (SELECT GROUP_CONCAT(h.proposed_text ORDER BY h.created_at ASC SEPARATOR '\n\n---\n\n') \
-                     FROM learned_prompt_history h \
-                     WHERE h.agent_id = agents.id \
-                       AND h.action IN ('keep','confirmed') \
-                    ) AS learned_prompt, \
-                    created_at, updated_at \
-             FROM agents WHERE {where_sql} \
-             ORDER BY is_default DESC, base_role ASC, name ASC \
-             LIMIT ? OFFSET ?"
+            r#"SELECT id, project_id, name, base_role, description,
+                    system_prompt_extensions::text AS "system_prompt_extensions!", model_preference, verification_command,
+                    mcp_servers::text AS "mcp_servers!", skills::text AS "skills!", is_default,
+                    (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
+                     FROM learned_prompt_history h
+                     WHERE h.agent_id = agents.id
+                       AND h.action IN ('keep','confirmed')
+                    ) AS learned_prompt,
+                    created_at, updated_at
+             FROM agents WHERE {where_sql}
+             ORDER BY is_default DESC, base_role ASC, name ASC
+             LIMIT $1 OFFSET $2"#
         );
         let mut role_q = sqlx::query_as::<_, Agent>(&sql);
         for p in &params {
@@ -532,18 +547,18 @@ impl AgentRepository {
         // Task-level metrics: closed tasks that had at least one session of this agent_type.
         let task_row = sqlx::query!(
             r#"SELECT
-                CAST(SUM(CASE WHEN t.close_reason = 'completed' THEN 1 ELSE 0 END) AS DOUBLE)
-                    / CAST(GREATEST(1, COUNT(DISTINCT t.id)) AS DOUBLE) AS "success_rate: f64",
-                COALESCE(AVG(CAST(t.total_reopen_count AS DOUBLE)), 0.0) AS "avg_reopens!: f64",
-                CAST(SUM(CASE WHEN t.total_verification_failure_count = 0 THEN 1 ELSE 0 END) AS DOUBLE)
-                    / CAST(GREATEST(1, COUNT(DISTINCT t.id)) AS DOUBLE) AS "verification_pass_rate: f64",
+                CAST(SUM(CASE WHEN t.close_reason = 'completed' THEN 1 ELSE 0 END) AS DOUBLE PRECISION)
+                    / CAST(GREATEST(1, COUNT(DISTINCT t.id)) AS DOUBLE PRECISION) AS "success_rate: f64",
+                COALESCE(AVG(CAST(t.total_reopen_count AS DOUBLE PRECISION)), 0.0) AS "avg_reopens!: f64",
+                CAST(SUM(CASE WHEN t.total_verification_failure_count = 0 THEN 1 ELSE 0 END) AS DOUBLE PRECISION)
+                    / CAST(GREATEST(1, COUNT(DISTINCT t.id)) AS DOUBLE PRECISION) AS "verification_pass_rate: f64",
                 COUNT(DISTINCT t.id) AS "completed_task_count!: i64"
              FROM tasks t
-             WHERE t.project_id = ?
-               AND t.`status` = 'closed'
+             WHERE t.project_id = $1
+               AND t.status = 'closed'
                AND EXISTS (
                    SELECT 1 FROM sessions s
-                   WHERE s.task_id = t.id AND s.agent_type = ?
+                   WHERE s.task_id = t.id AND s.agent_type = $2
                )"#,
             project_id,
             agent_type
@@ -555,30 +570,30 @@ impl AgentRepository {
         // Session-level metrics: completed sessions within the lookback window.
         let session_row = sqlx::query!(
             r#"SELECT
-                COALESCE(AVG(CAST(s.tokens_in + s.tokens_out AS DOUBLE)), 0.0) AS "avg_tokens!: f64",
-                COALESCE(AVG(CAST(s.tokens_in AS DOUBLE)), 0.0) AS "avg_tokens_in!: f64",
-                COALESCE(AVG(CAST(s.tokens_out AS DOUBLE)), 0.0) AS "avg_tokens_out!: f64",
+                COALESCE(AVG(CAST(s.tokens_in + s.tokens_out AS DOUBLE PRECISION)), 0.0) AS "avg_tokens!: f64",
+                COALESCE(AVG(CAST(s.tokens_in AS DOUBLE PRECISION)), 0.0) AS "avg_tokens_in!: f64",
+                COALESCE(AVG(CAST(s.tokens_out AS DOUBLE PRECISION)), 0.0) AS "avg_tokens_out!: f64",
                 COALESCE(AVG(
                     CASE WHEN s.ended_at IS NOT NULL
-                        THEN CAST(TIMESTAMPDIFF(MICROSECOND, s.started_at, s.ended_at) / 1000000.0 AS DOUBLE)
+                        THEN EXTRACT(EPOCH FROM (s.ended_at::timestamp - s.started_at::timestamp))
                         ELSE NULL END
                 ), 0.0) AS "avg_time_seconds!: f64",
-                COALESCE(SUM(CAST(JSON_EXTRACT(CAST(s.event_taxonomy AS JSON), '$.extraction_quality.extracted') AS SIGNED)), 0) AS "extracted!: i64",
-                COALESCE(SUM(CAST(JSON_EXTRACT(CAST(s.event_taxonomy AS JSON), '$.extraction_quality.dedup_skipped') AS SIGNED)), 0) AS "dedup_skipped!: i64",
-                COALESCE(SUM(CAST(JSON_EXTRACT(CAST(s.event_taxonomy AS JSON), '$.extraction_quality.novelty_skipped') AS SIGNED)), 0) AS "novelty_skipped!: i64",
-                COALESCE(SUM(CAST(JSON_EXTRACT(CAST(s.event_taxonomy AS JSON), '$.extraction_quality.written') AS SIGNED)), 0) AS "written!: i64",
-                COALESCE(SUM(CAST(JSON_EXTRACT(CAST(s.event_taxonomy AS JSON), '$.extraction_quality.merged') AS SIGNED)), 0) AS "merged!: i64",
-                COALESCE(SUM(CAST(JSON_EXTRACT(CAST(s.event_taxonomy AS JSON), '$.extraction_quality.downgraded') AS SIGNED)), 0) AS "downgraded!: i64",
-                COALESCE(SUM(CAST(JSON_EXTRACT(CAST(s.event_taxonomy AS JSON), '$.extraction_quality.discarded') AS SIGNED)), 0) AS "discarded!: i64"
+                COALESCE(SUM((s.event_taxonomy -> 'extraction_quality' ->> 'extracted')::bigint), 0) AS "extracted!: i64",
+                COALESCE(SUM((s.event_taxonomy -> 'extraction_quality' ->> 'dedup_skipped')::bigint), 0) AS "dedup_skipped!: i64",
+                COALESCE(SUM((s.event_taxonomy -> 'extraction_quality' ->> 'novelty_skipped')::bigint), 0) AS "novelty_skipped!: i64",
+                COALESCE(SUM((s.event_taxonomy -> 'extraction_quality' ->> 'written')::bigint), 0) AS "written!: i64",
+                COALESCE(SUM((s.event_taxonomy -> 'extraction_quality' ->> 'merged')::bigint), 0) AS "merged!: i64",
+                COALESCE(SUM((s.event_taxonomy -> 'extraction_quality' ->> 'downgraded')::bigint), 0) AS "downgraded!: i64",
+                COALESCE(SUM((s.event_taxonomy -> 'extraction_quality' ->> 'discarded')::bigint), 0) AS "discarded!: i64"
              FROM sessions s
              JOIN tasks t ON t.id = s.task_id
-             WHERE t.project_id = ?
-               AND s.agent_type = ?
-               AND s.`status` = 'completed'
-               AND s.started_at >= DATE_SUB(NOW(3), INTERVAL ? DAY)"#,
+             WHERE t.project_id = $1
+               AND s.agent_type = $2
+               AND s.status = 'completed'
+               AND s.started_at >= to_char((now() at time zone 'utc') - (interval '1 day' * $3), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#,
             project_id,
             agent_type,
-            window_days
+            window_days as f64
         )
         .fetch_one(self.db.pool())
         .await
@@ -629,13 +644,13 @@ impl AgentRepository {
     ) -> Result<Vec<PendingAmendmentEvaluation>> {
         self.db.ensure_initialized().await?;
         let rows = sqlx::query!(
-            "SELECT h.id, h.agent_id, h.created_at, h.proposed_text, h.metrics_before
+            r#"SELECT h.id, h.agent_id, h.created_at, h.proposed_text, h.metrics_before::text AS "metrics_before"
              FROM learned_prompt_history h
              JOIN agents r ON r.id = h.agent_id
-             WHERE r.project_id = ?
+             WHERE r.project_id = $1
                AND h.action = 'keep'
                AND h.metrics_after IS NULL
-             ORDER BY h.created_at ASC",
+             ORDER BY h.created_at ASC"#,
             project_id
         )
         .fetch_all(self.db.pool())
@@ -670,12 +685,12 @@ impl AgentRepository {
                 COALESCE(SUM(CASE WHEN t.close_reason = 'completed' THEN 1 ELSE 0 END), 0) AS "completed!: i64",
                 COALESCE(SUM(CASE WHEN t.close_reason != 'completed' OR t.close_reason IS NULL THEN 1 ELSE 0 END), 0) AS "failed!: i64"
              FROM tasks t
-             WHERE t.project_id = ?
-               AND t.`status` = 'closed'
-               AND t.closed_at > ?
+             WHERE t.project_id = $1
+               AND t.status = 'closed'
+               AND t.closed_at > $2
                AND EXISTS (
                    SELECT 1 FROM sessions s
-                   WHERE s.task_id = t.id AND s.agent_type = ?
+                   WHERE s.task_id = t.id AND s.agent_type = $3
                )"#,
             project_id,
             since_timestamp,
@@ -711,21 +726,21 @@ impl AgentRepository {
                 COALESCE(AVG(
                     CASE WHEN t.close_reason = 'completed'
                         THEN (
-                            SELECT COALESCE(AVG(CAST(s.tokens_in + s.tokens_out AS DOUBLE)), 0.0)
+                            SELECT COALESCE(AVG(CAST(s.tokens_in + s.tokens_out AS DOUBLE PRECISION)), 0.0)
                             FROM sessions s
-                            WHERE s.task_id = t.id AND s.agent_type = ?
+                            WHERE s.task_id = t.id AND s.agent_type = $1
                         )
                         ELSE NULL
                     END
                 ), 0.0) AS "avg_tokens!: f64"
              FROM tasks t
-             WHERE t.project_id = ?
-               AND t.`status` = 'closed'
-               AND t.closed_at > ?
-               AND t.closed_at <= ?
+             WHERE t.project_id = $2
+               AND t.status = 'closed'
+               AND t.closed_at > $3
+               AND t.closed_at <= $4
                AND EXISTS (
                    SELECT 1 FROM sessions s
-                   WHERE s.task_id = t.id AND s.agent_type = ?
+                   WHERE s.task_id = t.id AND s.agent_type = $5
                )"#,
             agent_type,
             project_id,
@@ -767,12 +782,14 @@ impl AgentRepository {
         metrics_after: &str,
     ) -> Result<()> {
         self.db.ensure_initialized().await?;
+        let metrics_after_value: serde_json::Value = serde_json::from_str(metrics_after)
+            .map_err(|e| Error::InvalidData(format!("invalid json for learned_prompt_history.metrics_after: {e}")))?;
         sqlx::query!(
             "UPDATE learned_prompt_history
-             SET action = ?, metrics_after = ?
-             WHERE id = ?",
+             SET action = $1, metrics_after = $2
+             WHERE id = $3",
             action,
-            metrics_after,
+            metrics_after_value,
             history_id
         )
         .execute(self.db.pool())
@@ -787,7 +804,7 @@ impl AgentRepository {
         sqlx::query!(
             "UPDATE learned_prompt_history
              SET action = 'discard'
-             WHERE agent_id = ? AND action IN ('keep','confirmed')",
+             WHERE agent_id = $1 AND action IN ('keep','confirmed')",
             agent_id
         )
         .execute(self.db.pool())
@@ -817,21 +834,27 @@ impl AgentRepository {
         // The derived AGENT_COLUMNS query will pick it up automatically.
         let history_id = uuid::Uuid::now_v7().to_string();
         let amendment_trimmed = amendment.trim();
+        let metrics_snapshot_value: Option<serde_json::Value> = match metrics_snapshot {
+            Some(s) => Some(serde_json::from_str(s).map_err(|e| {
+                Error::InvalidData(format!("invalid json for learned_prompt_history.metrics_before: {e}"))
+            })?),
+            None => None,
+        };
         sqlx::query!(
             "INSERT INTO learned_prompt_history
                 (id, agent_id, proposed_text, action, metrics_before)
-             VALUES (?, ?, ?, 'keep', ?)",
+             VALUES ($1, $2, $3, 'keep', $4)",
             history_id,
             role_id,
             amendment_trimmed,
-            metrics_snapshot
+            metrics_snapshot_value
         )
         .execute(self.db.pool())
         .await?;
 
         // Touch updated_at so consumers see the change.
         sqlx::query!(
-            "UPDATE agents SET updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ') WHERE id = ?",
+            r#"UPDATE agents SET updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE id = $1"#,
             role_id
         )
         .execute(self.db.pool())
@@ -875,7 +898,7 @@ mod tests {
         let owner = "test";
         let repo_slug = format!("agent-{id}");
         sqlx::query!(
-            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES (?, ?, ?, ?)",
+            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
             id,
             "test",
             owner,
@@ -1167,7 +1190,7 @@ mod tests {
         );
 
         let defaults_rows = sqlx::query!(
-            r#"SELECT `name`, is_default AS "is_default!: i64" FROM agents WHERE project_id = ? AND base_role = 'worker' ORDER BY `name`"#,
+            r#"SELECT name, is_default AS "is_default!: i64" FROM agents WHERE project_id = $1 AND base_role = 'worker' ORDER BY name"#,
             project_id
         )
         .fetch_all(repo.db.pool())

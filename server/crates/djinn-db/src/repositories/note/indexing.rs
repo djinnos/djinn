@@ -40,12 +40,12 @@ pub(super) fn extract_wikilinks(content: &str) -> Vec<(String, Option<String>)> 
 /// Deletes existing link rows for the note then re-inserts them, resolving
 /// each target by title or permalink within the same project.
 pub(super) async fn index_links_for_note(
-    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     source_id: &str,
     project_id: &str,
     content: &str,
 ) -> Result<()> {
-    sqlx::query!("DELETE FROM note_links WHERE source_id = ?", source_id)
+    sqlx::query!("DELETE FROM note_links WHERE source_id = $1", source_id)
         .execute(&mut **tx)
         .await?;
 
@@ -57,12 +57,13 @@ pub(super) async fn index_links_for_note(
     for (target_raw, display_text) in links {
         let id = uuid::Uuid::now_v7().to_string();
         sqlx::query!(
-            "INSERT IGNORE INTO note_links (id, source_id, target_id, target_raw, display_text)
-             VALUES (?, ?,
+            "INSERT INTO note_links (id, source_id, target_id, target_raw, display_text)
+             VALUES ($1, $2,
                      (SELECT id FROM notes
-                      WHERE project_id = ? AND (title = ? OR permalink = ?)
+                      WHERE project_id = $3 AND (title = $4 OR permalink = $5)
                       LIMIT 1),
-                     ?, ?)",
+                     $6, $7)
+             ON CONFLICT (source_id, target_raw) DO NOTHING",
             id,
             source_id,
             project_id,
@@ -80,7 +81,7 @@ pub(super) async fn index_links_for_note(
 /// After a note is created or its title/permalink changes, resolve any
 /// previously-broken links in the project that now match this note.
 pub(super) async fn resolve_links_for_note(
-    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     note_id: &str,
     title: &str,
     permalink: &str,
@@ -88,10 +89,10 @@ pub(super) async fn resolve_links_for_note(
 ) -> Result<()> {
     sqlx::query!(
         "UPDATE note_links
-         SET target_id = ?
+         SET target_id = $1
          WHERE target_id IS NULL
-           AND (target_raw = ? OR target_raw = ?)
-           AND source_id IN (SELECT id FROM notes WHERE project_id = ?)",
+           AND (target_raw = $2 OR target_raw = $3)
+           AND source_id IN (SELECT id FROM notes WHERE project_id = $4)",
         note_id,
         title,
         permalink,

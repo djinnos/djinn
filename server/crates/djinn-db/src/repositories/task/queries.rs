@@ -144,7 +144,7 @@ impl TaskRepository {
                  SELECT 1 FROM blockers b2
                  JOIN tasks bt ON bt.id = b2.blocking_task_id
                  WHERE b2.task_id = t.id
-                    AND bt.`status` != 'closed'
+                    AND bt.status != 'closed'
              )"
             .to_owned(),
         ];
@@ -181,7 +181,7 @@ impl TaskRepository {
         // NOTE: dynamic SQL (WHERE clause built from optional filters) — compile-time check not possible
         let sql = format!(
             "SELECT t.id, t.project_id, t.short_id, t.epic_id, t.title, t.description, t.design,
-                    t.issue_type, t.`status`, t.priority, t.owner, t.labels,
+                    t.issue_type, t.status, t.priority, t.owner, t.labels,
                     t.acceptance_criteria, t.reopen_count, t.continuation_count,
                     t.verification_failure_count,
                     t.total_reopen_count, t.total_verification_failure_count,
@@ -191,7 +191,7 @@ impl TaskRepository {
              FROM tasks t
              WHERE {where_sql}
              ORDER BY t.priority ASC, t.created_at ASC
-             LIMIT ?"
+             LIMIT $1"
         );
         let mut q = sqlx::query_as::<_, Task>(&sql);
         for p in params {
@@ -227,7 +227,7 @@ impl TaskRepository {
                  SELECT 1 FROM blockers b2
                  JOIN tasks bt ON bt.id = b2.blocking_task_id
                  WHERE b2.task_id = t.id
-                    AND bt.`status` != 'closed'
+                    AND bt.status != 'closed'
              )"
             .to_owned(),
         ];
@@ -264,7 +264,7 @@ impl TaskRepository {
         // NOTE: dynamic SQL (WHERE clause built from optional filters) — compile-time check not possible
         let sql = format!(
             "SELECT t.id, t.project_id, t.short_id, t.epic_id, t.title, t.description, t.design,
-                    t.issue_type, t.`status`, t.priority, t.owner, t.labels,
+                    t.issue_type, t.status, t.priority, t.owner, t.labels,
                     t.acceptance_criteria, t.reopen_count, t.continuation_count,
                     t.verification_failure_count,
                     t.total_reopen_count, t.total_verification_failure_count,
@@ -296,9 +296,9 @@ impl TaskRepository {
 
         // Apply Start transition: open → in_progress.
         sqlx::query!(
-            "UPDATE tasks SET `status` = 'in_progress',
-                 updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE id = ?",
+            r#"UPDATE tasks SET status = 'in_progress',
+                 updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $1"#,
             task.id
         )
         .execute(&mut *tx)
@@ -308,12 +308,11 @@ impl TaskRepository {
         let payload = serde_json::json!({
             "from_status": "open",
             "to_status":   "in_progress",
-        })
-        .to_string();
+        });
         sqlx::query!(
             "INSERT INTO activity_log
                 (id, task_id, actor_id, actor_role, event_type, payload)
-             VALUES (?, ?, ?, ?, 'status_changed', ?)",
+             VALUES ($1, $2, $3, $4, 'status_changed', $5)",
             activity_id,
             task.id,
             actor_id,
@@ -360,17 +359,17 @@ impl TaskRepository {
 
         // NOTE: dynamic SQL (WHERE + ORDER clauses built from request) — compile-time check not possible
         let sql = format!(
-            "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    status, priority, owner, labels, acceptance_criteria,
+            r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
+                    status, priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
                     reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs,
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",
                     (SELECT COUNT(*) FROM blockers b
                      JOIN tasks bt ON b.blocking_task_id = bt.id
-                     WHERE b.task_id = tasks.id AND bt.`status` != 'closed') AS unresolved_blocker_count
-             FROM tasks WHERE {where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?"
+                     WHERE b.task_id = tasks.id AND bt.status != 'closed') AS unresolved_blocker_count
+             FROM tasks WHERE {where_sql} ORDER BY {order_sql} LIMIT $1 OFFSET $2"#
         );
         let mut task_q = sqlx::query_as::<_, Task>(&sql);
         for p in &params {
@@ -460,14 +459,14 @@ impl TaskRepository {
         let epic_rows = sqlx::query(
             "SELECT e.id, e.short_id, e.title,
                     COUNT(t.id) AS total,
-                    CAST(SUM(CASE WHEN t.`status` = 'closed' THEN 1 ELSE 0 END) AS SIGNED) AS closed,
-                    CAST(SUM(CASE WHEN t.`status` IN (
+                    CAST(SUM(CASE WHEN t.status = 'closed' THEN 1 ELSE 0 END) AS BIGINT) AS closed,
+                    CAST(SUM(CASE WHEN t.status IN (
                         'needs_task_review','in_task_review','closed'
-                    ) THEN 1 ELSE 0 END) AS SIGNED) AS in_review,
-                    MIN(CASE WHEN t.`status` IN (
+                    ) THEN 1 ELSE 0 END) AS BIGINT) AS in_review,
+                    MIN(CASE WHEN t.status IN (
                         'needs_task_review','in_task_review','closed'
                     ) THEN t.updated_at ELSE NULL END) AS oldest_review_at,
-                    CAST(SUM(CASE WHEN t.`status` IN ('approved','pr_draft','pr_review') THEN 1 ELSE 0 END) AS SIGNED) AS pr_ready
+                    CAST(SUM(CASE WHEN t.status IN ('approved','pr_draft','pr_review') THEN 1 ELSE 0 END) AS BIGINT) AS pr_ready
              FROM epics e
              LEFT JOIN tasks t ON t.epic_id = e.id
              GROUP BY e.id
@@ -506,13 +505,13 @@ impl TaskRepository {
         // Stale tasks: in_progress longer than the threshold.
         // NOTE: dynamic SQL (stale_hours inlined) — compile-time check not possible
         let stale_sql = format!(
-            "SELECT t.id, t.short_id, t.title, t.`status`, t.updated_at, t.owner,
+            r#"SELECT t.id, t.short_id, t.title, t.status, t.updated_at, t.owner,
                     e.short_id AS epic_short_id
              FROM tasks t
              JOIN epics e ON t.epic_id = e.id
-             WHERE t.`status` = 'in_progress'
-               AND t.updated_at < DATE_SUB(NOW(3), INTERVAL {stale_hours} HOUR)
-             ORDER BY t.updated_at ASC"
+             WHERE t.status = 'in_progress'
+               AND t.updated_at < to_char((now() at time zone 'utc') - (interval '1 hour' * {stale_hours}), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             ORDER BY t.updated_at ASC"#
         );
         let stale_rows = sqlx::query(&stale_sql).fetch_all(self.db.pool()).await?;
         let stale_tasks: Vec<serde_json::Value> = stale_rows
@@ -534,11 +533,11 @@ impl TaskRepository {
         // Review queue: tasks waiting in any review status.
         // NOTE: dynamic row extraction via sqlx::Row::get — macro conversion would require a full refactor to typed rows
         let review_rows = sqlx::query(
-            "SELECT t.id, t.short_id, t.title, t.`status`, t.updated_at,
+            "SELECT t.id, t.short_id, t.title, t.status, t.updated_at,
                     e.short_id AS epic_short_id
              FROM tasks t
              JOIN epics e ON t.epic_id = e.id
-             WHERE t.`status` IN ('needs_task_review','in_task_review','approved','pr_draft','pr_review','closed')
+             WHERE t.status IN ('needs_task_review','in_task_review','approved','pr_draft','pr_review','closed')
              ORDER BY t.updated_at ASC",
         )
         .fetch_all(self.db.pool())
@@ -578,7 +577,7 @@ impl TaskRepository {
 
             let session_count = session_repo.count_for_task(&task.id).await.unwrap_or(0);
             let epic_short_id = if let Some(epic_id) = &task.epic_id {
-                sqlx::query_scalar!("SELECT short_id FROM epics WHERE id = ?", epic_id)
+                sqlx::query_scalar!("SELECT short_id FROM epics WHERE id = $1", epic_id)
                     .fetch_optional(self.db.pool())
                     .await?
                     .unwrap_or_default()
@@ -633,26 +632,26 @@ impl TaskRepository {
                 let mut tx = self.db.pool().begin().await?;
                 // NOTE: dynamic SQL (stale_hours inlined) — compile-time check not possible
                 let sql = format!(
-                    "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                            `status`, priority, owner, labels, acceptance_criteria,
+                    r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
+                            status, priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
                             reopen_count, continuation_count, verification_failure_count,
                             total_reopen_count, total_verification_failure_count,
                             intervention_count, last_intervention_at,
                             created_at, updated_at, closed_at,
-                            close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
+                            close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!"
                      FROM tasks
-                     WHERE `status` = 'in_progress'
-                       AND updated_at < DATE_SUB(NOW(3), INTERVAL {stale_hours} HOUR)"
+                     WHERE status = 'in_progress'
+                       AND updated_at < to_char((now() at time zone 'utc') - (interval '1 hour' * {stale_hours}), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#
                 );
                 let stale: Vec<Task> = sqlx::query_as(&sql).fetch_all(&mut *tx).await?;
 
                 let mut healed: Vec<Task> = Vec::new();
                 for task in stale {
                     sqlx::query!(
-                        "UPDATE tasks
-                         SET `status` = 'open',
-                             updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                         WHERE id = ?",
+                        r#"UPDATE tasks
+                         SET status = 'open',
+                             updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $1"#,
                         task.id
                     )
                     .execute(&mut *tx)
@@ -663,12 +662,11 @@ impl TaskRepository {
                         "from":   "in_progress",
                         "to":     "open",
                         "reason": "reconcile_stale",
-                    })
-                    .to_string();
+                    });
                     sqlx::query!(
                         "INSERT INTO activity_log
                             (id, task_id, actor_id, actor_role, event_type, payload)
-                         VALUES (?, ?, 'system', 'system', 'status_changed', ?)",
+                         VALUES ($1, $2, 'system', 'system', 'status_changed', $3)",
                         activity_id,
                         task.id,
                         payload

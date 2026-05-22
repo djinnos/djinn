@@ -3,5 +3,5 @@
 //! migrations directory at compile time; cargo has no way to know that
 //! without an explicit `rerun-if-changed` hint.
 fn main() {
-    println!("cargo:rerun-if-changed=migrations_mysql");
+    println!("cargo:rerun-if-changed=migrations_postgres");
 }

@@ -1,20 +1,16 @@
 {
-  "db_name": "MySQL",
+  "db_name": "PostgreSQL",
   "query": "SELECT user_id FROM user_settings WHERE auto_approve_prs = TRUE ORDER BY updated_at DESC",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
         "name": "user_id",
-        "type_info": {
-          "type": "VarString",
-          "flags": "NOT_NULL | PRIMARY_KEY | NO_DEFAULT_VALUE",
-          "max_size": 144
-        }
+        "type_info": "Varchar"
       }
     ],
     "parameters": {
-      "Right": 0
+      "Left": []
     },
     "nullable": [
       false

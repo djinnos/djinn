@@ -43,9 +43,9 @@ impl SessionRepository {
         let created_by_user_id = djinn_core::auth_context::current_user_id();
         sqlx::query!(
             "INSERT INTO sessions
-                (id, project_id, task_id, model_id, agent_type, `status`,
+                (id, project_id, task_id, model_id, agent_type, status,
                  created_by_user_id, task_run_id)
-             VALUES (?, ?, ?, ?, ?, 'running', ?, ?)",
+             VALUES ($1, $2, $3, $4, $5, 'running', $6, $7)",
             id,
             params.project_id,
             params.task_id,
@@ -60,8 +60,8 @@ impl SessionRepository {
         let session = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
-             FROM sessions WHERE id = ?"#,
+                status AS "status!", tokens_in, tokens_out, task_run_id, title
+             FROM sessions WHERE id = $1"#,
             id
         )
         .fetch_one(self.db.pool())
@@ -89,8 +89,8 @@ impl SessionRepository {
         let session = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
-             FROM sessions WHERE id = ?"#,
+                status AS "status!", tokens_in, tokens_out, task_run_id, title
+             FROM sessions WHERE id = $1"#,
             id
         )
         .fetch_one(self.db.pool())
@@ -124,12 +124,12 @@ impl SessionRepository {
 
         let status_str = status.as_str();
         sqlx::query!(
-            "UPDATE sessions
-             SET `status` = ?,
-                 tokens_in = ?,
-                 tokens_out = ?,
-                 ended_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE id = ?",
+            r#"UPDATE sessions
+             SET status = $1,
+                 tokens_in = $2,
+                 tokens_out = $3,
+                 ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $4"#,
             status_str,
             tokens_in,
             tokens_out,
@@ -149,8 +149,8 @@ impl SessionRepository {
         let running_sessions = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
-             FROM sessions WHERE `status` = 'running'"#
+                status AS "status!", tokens_in, tokens_out, task_run_id, title
+             FROM sessions WHERE status = 'running'"#
         )
         .fetch_all(self.db.pool())
         .await?;
@@ -160,10 +160,10 @@ impl SessionRepository {
         }
 
         let result = sqlx::query!(
-            "UPDATE sessions
-             SET `status` = 'interrupted',
-                 ended_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE `status` = 'running'"
+            r#"UPDATE sessions
+             SET status = 'interrupted',
+                 ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE status = 'running'"#
         )
         .execute(self.db.pool())
         .await?;
@@ -183,8 +183,8 @@ impl SessionRepository {
         let orphans = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
-             FROM sessions WHERE task_id = ? AND `status` = 'running'"#,
+                status AS "status!", tokens_in, tokens_out, task_run_id, title
+             FROM sessions WHERE task_id = $1 AND status = 'running'"#,
             task_id
         )
         .fetch_all(self.db.pool())
@@ -195,10 +195,10 @@ impl SessionRepository {
         }
 
         let result = sqlx::query!(
-            "UPDATE sessions
-             SET `status` = 'interrupted',
-                 ended_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE task_id = ? AND `status` = 'running'",
+            r#"UPDATE sessions
+             SET status = 'interrupted',
+                 ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE task_id = $1 AND status = 'running'"#,
             task_id
         )
         .execute(self.db.pool())
@@ -216,8 +216,8 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
-             FROM sessions WHERE id = ?"#,
+                status AS "status!", tokens_in, tokens_out, task_run_id, title
+             FROM sessions WHERE id = $1"#,
             id
         )
         .fetch_optional(self.db.pool())
@@ -233,8 +233,8 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
-             FROM sessions WHERE project_id = ? AND id = ?"#,
+                status AS "status!", tokens_in, tokens_out, task_run_id, title
+             FROM sessions WHERE project_id = $1 AND id = $2"#,
             project_id,
             id
         )
@@ -247,8 +247,8 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
-             FROM sessions WHERE task_id = ? ORDER BY started_at DESC"#,
+                status AS "status!", tokens_in, tokens_out, task_run_id, title
+             FROM sessions WHERE task_id = $1 ORDER BY started_at DESC"#,
             task_id
         )
         .fetch_all(self.db.pool())
@@ -264,9 +264,9 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
+                status AS "status!", tokens_in, tokens_out, task_run_id, title
              FROM sessions
-             WHERE project_id = ? AND task_id = ? ORDER BY started_at DESC"#,
+             WHERE project_id = $1 AND task_id = $2 ORDER BY started_at DESC"#,
             project_id,
             task_id
         )
@@ -279,9 +279,9 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
+                status AS "status!", tokens_in, tokens_out, task_run_id, title
              FROM sessions
-             WHERE `status` = 'running' ORDER BY started_at DESC"#
+             WHERE status = 'running' ORDER BY started_at DESC"#
         )
         .fetch_all(self.db.pool())
         .await?)
@@ -292,9 +292,9 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
+                status AS "status!", tokens_in, tokens_out, task_run_id, title
              FROM sessions
-             WHERE project_id = ? AND `status` = 'running' ORDER BY started_at DESC"#,
+             WHERE project_id = $1 AND status = 'running' ORDER BY started_at DESC"#,
             project_id
         )
         .fetch_all(self.db.pool())
@@ -311,11 +311,11 @@ impl SessionRepository {
             SessionRecord,
             r#"SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,
                     s.started_at, s.ended_at,
-                    s.`status` AS "status!", s.tokens_in, s.tokens_out,
+                    s.status AS "status!", s.tokens_in, s.tokens_out,
                     s.task_run_id, s.title
              FROM sessions s
              INNER JOIN tasks t ON t.id = s.task_id
-             WHERE s.`status` = 'running' AND s.agent_type = 'planner' AND t.epic_id = ?
+             WHERE s.status = 'running' AND s.agent_type = 'planner' AND t.epic_id = $1
              ORDER BY s.started_at DESC"#,
             epic_id
         )
@@ -328,9 +328,9 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
+                status AS "status!", tokens_in, tokens_out, task_run_id, title
              FROM sessions
-             WHERE task_id = ? AND `status` = 'running' ORDER BY started_at DESC LIMIT 1"#,
+             WHERE task_id = $1 AND status = 'running' ORDER BY started_at DESC LIMIT 1"#,
             task_id
         )
         .fetch_optional(self.db.pool())
@@ -340,7 +340,7 @@ impl SessionRepository {
     pub async fn count_for_task(&self, task_id: &str) -> Result<i64> {
         self.db.ensure_initialized().await?;
         Ok(
-            sqlx::query_scalar!("SELECT COUNT(*) FROM sessions WHERE task_id = ?", task_id)
+            sqlx::query_scalar!(r#"SELECT COUNT(*) AS "count!: i64" FROM sessions WHERE task_id = $1"#, task_id)
                 .fetch_one(self.db.pool())
                 .await?,
         )
@@ -375,7 +375,7 @@ impl SessionRepository {
         self.db.ensure_initialized().await?;
 
         sqlx::query!(
-            "UPDATE sessions SET `status` = 'paused', tokens_in = ?, tokens_out = ? WHERE id = ?",
+            "UPDATE sessions SET status = 'paused', tokens_in = $1, tokens_out = $2 WHERE id = $3",
             tokens_in,
             tokens_out,
             id
@@ -390,7 +390,7 @@ impl SessionRepository {
     pub async fn set_running(&self, id: &str) -> Result<SessionRecord> {
         self.db.ensure_initialized().await?;
 
-        sqlx::query!("UPDATE sessions SET `status` = 'running' WHERE id = ?", id)
+        sqlx::query!("UPDATE sessions SET status = 'running' WHERE id = $1", id)
             .execute(self.db.pool())
             .await?;
 
@@ -403,9 +403,9 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
+                status AS "status!", tokens_in, tokens_out, task_run_id, title
              FROM sessions
-             WHERE task_id = ? AND `status` = 'paused' ORDER BY started_at DESC LIMIT 1"#,
+             WHERE task_id = $1 AND status = 'paused' ORDER BY started_at DESC LIMIT 1"#,
             task_id
         )
         .fetch_optional(self.db.pool())
@@ -419,9 +419,11 @@ impl SessionRepository {
     pub async fn set_event_taxonomy(&self, id: &str, taxonomy_json: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
 
+        let taxonomy: serde_json::Value = serde_json::from_str(taxonomy_json)
+            .map_err(|e| crate::Error::InvalidData(format!("invalid json for sessions.event_taxonomy: {e}")))?;
         sqlx::query!(
-            "UPDATE sessions SET event_taxonomy = ? WHERE id = ?",
-            taxonomy_json,
+            "UPDATE sessions SET event_taxonomy = $1 WHERE id = $2",
+            taxonomy,
             id
         )
         .execute(self.db.pool())
@@ -439,7 +441,7 @@ impl SessionRepository {
     pub async fn get_event_taxonomy_json(&self, id: &str) -> Result<Option<String>> {
         self.db.ensure_initialized().await?;
         let row: Option<Option<String>> =
-            sqlx::query_scalar!("SELECT event_taxonomy FROM sessions WHERE id = ?", id)
+            sqlx::query_scalar!(r#"SELECT event_taxonomy::text AS "event_taxonomy?" FROM sessions WHERE id = $1"#, id)
                 .fetch_optional(self.db.pool())
                 .await?;
         Ok(row.flatten())
@@ -450,9 +452,9 @@ impl SessionRepository {
         self.db.ensure_initialized().await?;
 
         let row: Option<Option<String>> = sqlx::query_scalar!(
-            "SELECT event_taxonomy FROM sessions
-             WHERE task_id = ? AND event_taxonomy IS NOT NULL
-             ORDER BY started_at DESC LIMIT 1",
+            r#"SELECT event_taxonomy::text AS "event_taxonomy?" FROM sessions
+             WHERE task_id = $1 AND event_taxonomy IS NOT NULL
+             ORDER BY started_at DESC LIMIT 1"#,
             task_id
         )
         .fetch_optional(self.db.pool())
@@ -460,7 +462,7 @@ impl SessionRepository {
 
         Ok(row
             .flatten()
-            .and_then(|json| serde_json::from_str::<Value>(&json).ok()))
+            .and_then(|json| serde_json::from_str::<Value>(json.as_str()).ok()))
     }
 
     /// Find the most recent paused session for a task that matches the given
@@ -475,9 +477,9 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
+                status AS "status!", tokens_in, tokens_out, task_run_id, title
              FROM sessions
-             WHERE task_id = ? AND `status` = 'paused' AND agent_type = ?
+             WHERE task_id = $1 AND status = 'paused' AND agent_type = $2
              ORDER BY started_at DESC LIMIT 1"#,
             task_id,
             agent_type
@@ -512,13 +514,14 @@ impl SessionRepository {
         let created_by_user_id = djinn_core::auth_context::current_user_id();
         let initial_title = "New Chat";
 
-        // INSERT IGNORE is the closest equivalent to "create if missing, no-op
-        // otherwise" that Dolt/MySQL exposes without an extra round-trip.
+        // ON CONFLICT DO NOTHING gives us idempotent create-if-missing without
+        // the extra round-trip a SELECT-then-INSERT would cost.
         sqlx::query!(
-            "INSERT IGNORE INTO sessions
-                (id, project_id, task_id, model_id, agent_type, `status`,
+            "INSERT INTO sessions
+                (id, project_id, task_id, model_id, agent_type, status,
                  created_by_user_id, task_run_id, title)
-             VALUES (?, NULL, NULL, ?, 'chat', 'running', ?, NULL, ?)",
+             VALUES ($1, NULL, NULL, $2, 'chat', 'running', $3, NULL, $4)
+             ON CONFLICT (id) DO NOTHING",
             session_id,
             model_id,
             created_by_user_id,
@@ -530,8 +533,8 @@ impl SessionRepository {
         let session = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
-             FROM sessions WHERE id = ? AND agent_type = 'chat'"#,
+                status AS "status!", tokens_in, tokens_out, task_run_id, title
+             FROM sessions WHERE id = $1 AND agent_type = 'chat'"#,
             session_id
         )
         .fetch_one(self.db.pool())
@@ -546,8 +549,8 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                `status` AS "status!", tokens_in, tokens_out, task_run_id, title
-             FROM sessions WHERE id = ? AND agent_type = 'chat'"#,
+                status AS "status!", tokens_in, tokens_out, task_run_id, title
+             FROM sessions WHERE id = $1 AND agent_type = 'chat'"#,
             session_id
         )
         .fetch_optional(self.db.pool())
@@ -565,7 +568,7 @@ impl SessionRepository {
             SessionRecord,
             r#"SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,
                     s.started_at, s.ended_at,
-                    s.`status` AS "status!", s.tokens_in, s.tokens_out,
+                    s.status AS "status!", s.tokens_in, s.tokens_out,
                     s.task_run_id, s.title
              FROM sessions s
              LEFT JOIN (
@@ -584,7 +587,7 @@ impl SessionRepository {
     pub async fn update_chat_title(&self, session_id: &str, title: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query!(
-            "UPDATE sessions SET title = ? WHERE id = ? AND agent_type = 'chat'",
+            "UPDATE sessions SET title = $1 WHERE id = $2 AND agent_type = 'chat'",
             title,
             session_id,
         )
@@ -606,7 +609,7 @@ impl SessionRepository {
         let row: Option<String> = sqlx::query_scalar!(
             r#"SELECT MAX(created_at) AS "last_at?: String"
                FROM session_messages
-               WHERE session_id = ?"#,
+               WHERE session_id = $1"#,
             session_id
         )
         .fetch_one(self.db.pool())
@@ -619,7 +622,7 @@ impl SessionRepository {
     pub async fn delete_chat_session(&self, session_id: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;
         let result = sqlx::query!(
-            "DELETE FROM sessions WHERE id = ? AND agent_type = 'chat'",
+            "DELETE FROM sessions WHERE id = $1 AND agent_type = 'chat'",
             session_id,
         )
         .execute(self.db.pool())
@@ -663,8 +666,8 @@ mod tests {
         let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
         sqlx::query!(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                issue_type, priority, owner, `status`, continuation_count, labels, acceptance_criteria, memory_refs)
-             VALUES (?, ?, ?, ?, 'Task', '', '', 'task', 0, '', 'open', 0, '[]', '[]', '[]')",
+                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
+             VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
             task_id,
             epic.project_id,
             short_id,
@@ -875,8 +878,8 @@ mod tests {
         let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
         sqlx::query!(
             "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
-                                issue_type, priority, owner, `status`, continuation_count, labels, acceptance_criteria, memory_refs)
-             VALUES (?, ?, ?, ?, 'Task', '', '', 'task', 0, '', 'open', 0, '[]', '[]', '[]')",
+                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
+             VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
             task_id,
             project_id,
             short_id,
@@ -1036,7 +1039,7 @@ mod tests {
         ] {
             sqlx::query!(
                 "INSERT INTO session_messages (id, session_id, role, content_json, created_at)
-                 VALUES (?, ?, 'assistant', '{}', ?)",
+                 VALUES ($1, $2, 'assistant', '{}', $3)",
                 id,
                 session.id,
                 ts,

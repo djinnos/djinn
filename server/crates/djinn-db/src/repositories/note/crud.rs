@@ -73,13 +73,14 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
 
         let id = id.to_owned();
-        let scope_paths = scope_paths.to_owned();
+        let scope_paths: serde_json::Value = serde_json::from_str(scope_paths)
+            .map_err(|e| Error::InvalidData(format!("invalid json for notes.scope_paths: {e}")))?;
 
         sqlx::query!(
-            "UPDATE notes SET
-                scope_paths = ?,
-                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE id = ?",
+            r#"UPDATE notes SET
+                scope_paths = $1,
+                updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $2"#,
             scope_paths,
             id
         )
@@ -96,13 +97,14 @@ impl NoteRepository {
         self.db.ensure_initialized().await?;
 
         let id = id.to_owned();
-        let tags = tags.to_owned();
+        let tags: serde_json::Value = serde_json::from_str(tags)
+            .map_err(|e| Error::InvalidData(format!("invalid json for notes.tags: {e}")))?;
 
         sqlx::query!(
-            "UPDATE notes SET
-                tags = ?,
-                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE id = ?",
+            r#"UPDATE notes SET
+                tags = $1,
+                updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $2"#,
             tags,
             id
         )
@@ -136,7 +138,9 @@ impl NoteRepository {
         let tags = tags.to_owned();
 
         let content_hash = note_content_hash(&content);
-        let empty_scope = "[]".to_string();
+        let tags_json: serde_json::Value = serde_json::from_str(&tags)
+            .map_err(|e| Error::InvalidData(format!("invalid json for notes.tags: {e}")))?;
+        let empty_scope: serde_json::Value = serde_json::json!([]);
 
         // Retry on Dolt 1213 — same rationale as `create_internal`.
         let note: Note = crate::retry::retry_on_serialization_failure(
@@ -151,14 +155,14 @@ impl NoteRepository {
                     "INSERT INTO notes
                         (id, project_id, permalink, title, file_path,
                          storage, note_type, folder, tags, content, content_hash, scope_paths)
-                     VALUES (?, ?, ?, ?, '', 'db', ?, ?, ?, ?, ?, ?)",
+                     VALUES ($1, $2, $3, $4, '', 'db', $5, $6, $7, $8, $9, $10)",
                     id,
                     project_id,
                     permalink,
                     title,
                     note_type,
                     folder,
-                    tags,
+                    tags_json,
                     content,
                     content_hash,
                     empty_scope
@@ -274,8 +278,10 @@ impl NoteRepository {
         let content = content.to_owned();
         let note_type = note_type.to_owned();
         let folder = folder_for_type_with_status(&note_type, status).to_owned();
-        let tags = tags.to_owned();
-        let scope_paths = scope_paths.to_owned();
+        let tags_json: serde_json::Value = serde_json::from_str(tags)
+            .map_err(|e| Error::InvalidData(format!("invalid json for notes.tags: {e}")))?;
+        let scope_paths_json: serde_json::Value = serde_json::from_str(scope_paths)
+            .map_err(|e| Error::InvalidData(format!("invalid json for notes.scope_paths: {e}")))?;
 
         let content_hash = note_content_hash(&content);
 
@@ -297,17 +303,17 @@ impl NoteRepository {
                     "INSERT INTO notes
                         (id, project_id, permalink, title, file_path,
                          storage, note_type, folder, tags, content, content_hash, scope_paths)
-                     VALUES (?, ?, ?, ?, '', 'db', ?, ?, ?, ?, ?, ?)",
+                     VALUES ($1, $2, $3, $4, '', 'db', $5, $6, $7, $8, $9, $10)",
                     id,
                     project_id,
                     permalink,
                     title,
                     note_type,
                     folder,
-                    tags,
+                    tags_json,
                     content,
                     content_hash,
-                    scope_paths
+                    scope_paths_json
                 )
                 .execute(&mut *tx)
                 .await?;
@@ -333,13 +339,11 @@ impl NoteRepository {
         Ok(sqlx::query_as!(
             Note,
             r#"SELECT id, project_id, permalink, title, file_path,
-                      storage, note_type, folder, tags, content,
-                      CAST(created_at AS CHAR) as "created_at!: String",
-                      CAST(updated_at AS CHAR) as "updated_at!: String",
-                      CAST(last_accessed AS CHAR) as "last_accessed!: String",
+                      storage, note_type, folder, tags::text AS "tags!", content,
+                      created_at, updated_at, last_accessed,
                       access_count, confidence, abstract as abstract_, overview,
-                      scope_paths
-               FROM notes WHERE id = ?"#,
+                      scope_paths::text AS "scope_paths!"
+               FROM notes WHERE id = $1"#,
             id,
         )
         .fetch_optional(self.db.pool())
@@ -355,13 +359,11 @@ impl NoteRepository {
         Ok(sqlx::query_as!(
             Note,
             r#"SELECT id, project_id, permalink, title, file_path,
-                      storage, note_type, folder, tags, content,
-                      CAST(created_at AS CHAR) as "created_at!: String",
-                      CAST(updated_at AS CHAR) as "updated_at!: String",
-                      CAST(last_accessed AS CHAR) as "last_accessed!: String",
+                      storage, note_type, folder, tags::text AS "tags!", content,
+                      created_at, updated_at, last_accessed,
                       access_count, confidence, abstract as abstract_, overview,
-                      scope_paths
-               FROM notes WHERE project_id = ? AND permalink = ?"#,
+                      scope_paths::text AS "scope_paths!"
+               FROM notes WHERE project_id = $1 AND permalink = $2"#,
             project_id,
             permalink,
         )
@@ -378,14 +380,12 @@ impl NoteRepository {
         Ok(sqlx::query_as!(
             Note,
             r#"SELECT id, project_id, permalink, title, file_path,
-                      storage, note_type, folder, tags, content,
-                      CAST(created_at AS CHAR) as "created_at!: String",
-                      CAST(updated_at AS CHAR) as "updated_at!: String",
-                      CAST(last_accessed AS CHAR) as "last_accessed!: String",
+                      storage, note_type, folder, tags::text AS "tags!", content,
+                      created_at, updated_at, last_accessed,
                       access_count, confidence, abstract as abstract_, overview,
-                      scope_paths
+                      scope_paths::text AS "scope_paths!"
                FROM notes
-               WHERE project_id = ? AND content_hash = ?
+               WHERE project_id = $1 AND content_hash = $2
                ORDER BY created_at ASC
                LIMIT 1"#,
             project_id,
@@ -400,13 +400,11 @@ impl NoteRepository {
         Ok(sqlx::query_as!(
             Note,
             r#"SELECT id, project_id, permalink, title, file_path,
-                      storage, note_type, folder, tags, content,
-                      CAST(created_at AS CHAR) as "created_at!: String",
-                      CAST(updated_at AS CHAR) as "updated_at!: String",
-                      CAST(last_accessed AS CHAR) as "last_accessed!: String",
+                      storage, note_type, folder, tags::text AS "tags!", content,
+                      created_at, updated_at, last_accessed,
                       access_count, confidence, abstract as abstract_, overview,
-                      scope_paths
-               FROM notes WHERE id = ?"#,
+                      scope_paths::text AS "scope_paths!"
+               FROM notes WHERE id = $1"#,
             id,
         )
         .fetch_optional(self.db.pool())
@@ -458,13 +456,11 @@ impl NoteRepository {
             Ok(sqlx::query_as!(
                 Note,
                 r#"SELECT id, project_id, permalink, title, file_path,
-                          storage, note_type, folder, tags, content,
-                          CAST(created_at AS CHAR) as "created_at!: String",
-                          CAST(updated_at AS CHAR) as "updated_at!: String",
-                          CAST(last_accessed AS CHAR) as "last_accessed!: String",
+                          storage, note_type, folder, tags::text AS "tags!", content,
+                          created_at, updated_at, last_accessed,
                           access_count, confidence, abstract as abstract_, overview,
-                          scope_paths
-                   FROM notes WHERE project_id = ? AND folder = ?
+                          scope_paths::text AS "scope_paths!"
+                   FROM notes WHERE project_id = $1 AND folder = $2
                    ORDER BY folder, title"#,
                 project_id,
                 folder,
@@ -475,13 +471,11 @@ impl NoteRepository {
             Ok(sqlx::query_as!(
                 Note,
                 r#"SELECT id, project_id, permalink, title, file_path,
-                          storage, note_type, folder, tags, content,
-                          CAST(created_at AS CHAR) as "created_at!: String",
-                          CAST(updated_at AS CHAR) as "updated_at!: String",
-                          CAST(last_accessed AS CHAR) as "last_accessed!: String",
+                          storage, note_type, folder, tags::text AS "tags!", content,
+                          created_at, updated_at, last_accessed,
                           access_count, confidence, abstract as abstract_, overview,
-                          scope_paths
-                   FROM notes WHERE project_id = ?
+                          scope_paths::text AS "scope_paths!"
+                   FROM notes WHERE project_id = $1
                    ORDER BY folder, title"#,
                 project_id,
             )
@@ -501,7 +495,8 @@ impl NoteRepository {
         let id = id.to_owned();
         let title = title.to_owned();
         let content = content.to_owned();
-        let tags = tags.to_owned();
+        let tags: serde_json::Value = serde_json::from_str(tags)
+            .map_err(|e| Error::InvalidData(format!("invalid json for notes.tags: {e}")))?;
         let permalink = current.permalink.clone();
 
         // See `move_note` for the retry rationale: Dolt surfaces 1213
@@ -515,13 +510,13 @@ impl NoteRepository {
 
             let stage = async {
                 sqlx::query!(
-                    "UPDATE notes SET
-                        title   = ?,
-                        content = ?,
-                        tags    = ?,
-                        content_hash = ?,
-                        updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                     WHERE id = ?",
+                    r#"UPDATE notes SET
+                        title   = $1,
+                        content = $2,
+                        tags    = $3,
+                        content_hash = $4,
+                        updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                     WHERE id = $5"#,
                     title,
                     content,
                     tags,
@@ -570,11 +565,11 @@ impl NoteRepository {
         let mut tx = self.db.pool().begin().await?;
 
         sqlx::query!(
-            "UPDATE notes SET
-                `abstract` = ?,
-                overview = ?,
-                updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-             WHERE id = ?",
+            r#"UPDATE notes SET
+                abstract = $1,
+                overview = $2,
+                updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $3"#,
             abstract_summary,
             overview,
             id
@@ -611,7 +606,7 @@ impl NoteRepository {
             || {
                 let id_owned = id_owned.clone();
                 async move {
-                    sqlx::query!("DELETE FROM notes WHERE id = ?", id_owned)
+                    sqlx::query!("DELETE FROM notes WHERE id = $1", id_owned)
                         .execute(self.db.pool())
                         .await?;
                     Ok::<_, crate::Error>(())
@@ -637,10 +632,10 @@ impl NoteRepository {
             .ok_or_else(|| Error::InvalidData(format!("note not found: {id}")))?;
 
         sqlx::query!(
-            "UPDATE notes SET
-                last_accessed = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'),
+            r#"UPDATE notes SET
+                last_accessed = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
                 access_count = access_count + 1
-             WHERE id = ?",
+             WHERE id = $1"#,
             id
         )
         .execute(self.db.pool())
@@ -684,14 +679,14 @@ impl NoteRepository {
             let stage = async {
                 // file_path stays empty (no on-disk mirror anymore).
                 sqlx::query!(
-                    "UPDATE notes SET
-                        title      = ?,
+                    r#"UPDATE notes SET
+                        title      = $1,
                         file_path  = '',
-                        note_type  = ?,
-                        folder     = ?,
-                        permalink  = ?,
-                        updated_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ')
-                     WHERE id = ?",
+                        note_type  = $2,
+                        folder     = $3,
+                        permalink  = $4,
+                        updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                     WHERE id = $5"#,
                     new_title,
                     new_note_type,
                     new_folder,

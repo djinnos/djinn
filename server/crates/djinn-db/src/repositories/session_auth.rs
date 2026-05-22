@@ -93,7 +93,7 @@ impl SessionAuthRepository {
                  github_access_token, github_access_token_expires_at,
                  github_refresh_token, github_refresh_token_expires_at,
                  expires_at, user_fk)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             params.token,
             params.github_login,
             params.github_name,
@@ -114,7 +114,7 @@ impl SessionAuthRepository {
                     github_access_token, github_access_token_expires_at, \
                     github_refresh_token, github_refresh_token_expires_at, \
                     created_at, expires_at, user_fk \
-             FROM user_auth_sessions WHERE token = ?",
+             FROM user_auth_sessions WHERE token = $1",
             params.token,
         )
         .fetch_one(self.db.pool())
@@ -131,7 +131,7 @@ impl SessionAuthRepository {
                     github_access_token, github_access_token_expires_at, \
                     github_refresh_token, github_refresh_token_expires_at, \
                     created_at, expires_at, user_fk \
-             FROM user_auth_sessions WHERE token = ?",
+             FROM user_auth_sessions WHERE token = $1",
             token,
         )
         .fetch_optional(self.db.pool())
@@ -152,11 +152,11 @@ impl SessionAuthRepository {
         self.db.ensure_initialized().await?;
         let res = sqlx::query!(
             "UPDATE user_auth_sessions
-                SET github_access_token = ?,
-                    github_access_token_expires_at = ?,
-                    github_refresh_token = ?,
-                    github_refresh_token_expires_at = ?
-              WHERE token = ?",
+                SET github_access_token = $1,
+                    github_access_token_expires_at = $2,
+                    github_refresh_token = $3,
+                    github_refresh_token_expires_at = $4
+              WHERE token = $5",
             params.github_access_token,
             params.github_access_token_expires_at,
             params.github_refresh_token,
@@ -183,15 +183,15 @@ impl SessionAuthRepository {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             UserAuthSessionRecord,
-            "SELECT token, github_login, github_name, github_avatar_url, \
-                    github_access_token, github_access_token_expires_at, \
-                    github_refresh_token, github_refresh_token_expires_at, \
-                    created_at, expires_at, user_fk \
-             FROM user_auth_sessions \
-             WHERE user_fk = ? \
-               AND expires_at > DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ') \
-             ORDER BY created_at DESC \
-             LIMIT 1",
+            r#"SELECT token, github_login, github_name, github_avatar_url,
+                    github_access_token, github_access_token_expires_at,
+                    github_refresh_token, github_refresh_token_expires_at,
+                    created_at, expires_at, user_fk
+             FROM user_auth_sessions
+             WHERE user_fk = $1
+               AND expires_at > to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             ORDER BY created_at DESC
+             LIMIT 1"#,
             user_fk,
         )
         .fetch_optional(self.db.pool())
@@ -228,12 +228,12 @@ impl SessionAuthRepository {
                  u.github_login                     AS u_github_login,
                  u.github_name                      AS u_github_name,
                  u.github_avatar_url                AS u_github_avatar_url,
-                 u.is_member_of_org                 AS `u_is_member_of_org!: bool`,
+                 u.is_member_of_org                 AS "u_is_member_of_org!: bool",
                  u.last_seen_at                     AS u_last_seen_at,
                  u.created_at                       AS u_created_at
                FROM user_auth_sessions s
                INNER JOIN users u ON u.id = s.user_fk
-               WHERE s.token = ?"#,
+               WHERE s.token = $1"#,
             token,
         )
         .fetch_optional(self.db.pool())
@@ -269,7 +269,7 @@ impl SessionAuthRepository {
 
     pub async fn delete_by_token(&self, token: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;
-        let res = sqlx::query!("DELETE FROM user_auth_sessions WHERE token = ?", token)
+        let res = sqlx::query!("DELETE FROM user_auth_sessions WHERE token = $1", token)
             .execute(self.db.pool())
             .await?;
         Ok(res.rows_affected())
@@ -279,7 +279,7 @@ impl SessionAuthRepository {
     pub async fn delete_expired(&self, now_rfc3339: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;
         let res = sqlx::query!(
-            "DELETE FROM user_auth_sessions WHERE expires_at <= ?",
+            "DELETE FROM user_auth_sessions WHERE expires_at <= $1",
             now_rfc3339,
         )
         .execute(self.db.pool())
@@ -297,7 +297,7 @@ impl SessionAuthRepository {
     /// sessions).
     pub async fn delete_by_user_fk(&self, user_fk: &str) -> Result<u64> {
         self.db.ensure_initialized().await?;
-        let res = sqlx::query!("DELETE FROM user_auth_sessions WHERE user_fk = ?", user_fk,)
+        let res = sqlx::query!("DELETE FROM user_auth_sessions WHERE user_fk = $1", user_fk,)
             .execute(self.db.pool())
             .await?;
         Ok(res.rows_affected())
@@ -586,7 +586,7 @@ mod tests {
             .unwrap();
         assert!(sessions.get_by_token("casc-tok").await.unwrap().is_some());
 
-        sqlx::query("DELETE FROM users WHERE id = ?")
+        sqlx::query("DELETE FROM users WHERE id = $1")
             .bind(&user_fk)
             .execute(db.pool())
             .await

@@ -19,21 +19,14 @@ struct Cli {
     #[arg(short, long, default_value_t = 3000, env = "DJINN_PORT")]
     port: u16,
 
-    /// Database path (default: ~/.djinn/djinn.db)
+    /// Legacy on-disk DB path. Retained as a CLI shim for backward
+    /// compatibility; the active runtime is a sibling Postgres service.
     #[arg(long, env = "DJINN_DB_PATH")]
     db_path: Option<PathBuf>,
 
-    /// Database backend selector: `mysql` or `dolt` (default: `dolt`).
-    #[arg(long, env = "DJINN_DB_BACKEND")]
-    db_backend: Option<String>,
-
-    /// MySQL-compatible DSN for the Dolt/MySQL runtime.
-    #[arg(long, env = "DJINN_MYSQL_URL")]
-    mysql_url: Option<String>,
-
-    /// Flavor of the MySQL-compatible backend: mysql or dolt.
-    #[arg(long, env = "DJINN_MYSQL_FLAVOR")]
-    mysql_flavor: Option<String>,
+    /// Postgres DSN, e.g. `postgres://user:pass@host:5432/dbname`.
+    #[arg(long, env = "DJINN_DATABASE_URL")]
+    database_url: Option<String>,
 
     /// Serve the embedded Vite-built React UI as the HTTP fallback.
     /// Disable for headless API-only deployments.
@@ -82,16 +75,11 @@ async fn async_main() {
     });
 
     let db_runtime = DatabaseRuntimeManager::new(
-        DatabaseRuntimeConfig::from_cli_and_env(
-            cli.db_path.clone(),
-            cli.db_backend.clone(),
-            cli.mysql_url.clone(),
-            cli.mysql_flavor.clone(),
-        )
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "invalid database runtime configuration");
-            std::process::exit(1);
-        }),
+        DatabaseRuntimeConfig::from_cli_and_env(cli.db_path.clone(), cli.database_url.clone())
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, "invalid database runtime configuration");
+                std::process::exit(1);
+            }),
     );
     let startup_mode = db_runtime.startup_mode();
     tracing::info!(
@@ -101,11 +89,12 @@ async fn async_main() {
         "opening database runtime"
     );
 
-    // Under compose, dolt resolves to a service name like `dolt:3306`. Wait
-    // for the DB port to accept connections before the pool makes its first
-    // attempt — this keeps bootstrap straightforward even when Dolt is
-    // slower to start than the server container.
-    wait_for_dolt_reachable(&startup_mode.target);
+    // Under compose / Helm, postgres resolves to a service name like
+    // `djinn-postgres:5432`. Wait for the DB port to accept connections
+    // before the pool makes its first attempt — this keeps bootstrap
+    // straightforward even when Postgres is slower to start than the
+    // server container.
+    wait_for_database_reachable(&startup_mode.target);
     db_runtime.ensure_runtime_available().unwrap_or_else(|e| {
         tracing::error!(error = %e, "failed to ensure database runtime availability");
         std::process::exit(1);
@@ -128,9 +117,9 @@ async fn async_main() {
                 error = %e,
                 "migrate-only: schema migration failed",
             );
-            // Drain the pool even on failure so Dolt releases its locks
-            // before the Job retries — otherwise the next retry hits the
-            // same wedge we're trying to prevent.
+            // Drain the pool even on failure so the server releases its
+            // locks before the Job retries — otherwise the next retry hits
+            // the same wedge we're trying to prevent.
             db.pool().close().await;
             std::process::exit(1);
         }
@@ -195,20 +184,16 @@ async fn async_main() {
     // `with_graceful_shutdown` semantics.
     state_for_shutdown.shutdown_rpc_listener().await;
 
-    // Drain the SQLx pool BEFORE the process exits. Without this, the
-    // OS reaps our DB sockets via TCP RST and Dolt may not release row
-    // / partition locks (especially mid-ALTER) until its idle-timeout
-    // GC catches up, which can wedge the next pod's migrator GET_LOCK
-    // for minutes. `pool.close()` waits for in-flight queries to
-    // finish and shuts each connection down via the MySQL protocol —
-    // Dolt sees the close and releases locks immediately. Capped at
-    // 30s so we never overrun `terminationGracePeriodSeconds` and
-    // get SIGKILLed mid-drain.
+    // Drain the SQLx pool BEFORE the process exits. `pool.close()` waits
+    // for in-flight queries to finish and shuts each connection down via
+    // the Postgres protocol — the server sees the close and releases
+    // locks immediately. Capped at 30s so we never overrun
+    // `terminationGracePeriodSeconds` and get SIGKILLed mid-drain.
     let pool = state_for_shutdown.db().pool().clone();
     match tokio::time::timeout(std::time::Duration::from_secs(30), pool.close()).await {
         Ok(()) => tracing::info!("DB pool drained cleanly"),
         Err(_) => tracing::warn!(
-            "DB pool drain timed out after 30s — Dolt may hold locks until idle GC catches up"
+            "DB pool drain timed out after 30s — postgres may hold locks until idle GC catches up"
         ),
     }
 
@@ -216,15 +201,24 @@ async fn async_main() {
     djinn_provider::provider::telemetry::shutdown();
 }
 
-/// Parse a mysql URL of the form `mysql://<user>[:<pw>]@<host>:<port>/<db>` and
-/// block until a TCP connection to host:port succeeds (up to ~60s).
-fn wait_for_dolt_reachable(target: &str) {
+/// Parse a postgres URL of the form `postgres://<user>[:<pw>]@<host>:<port>/<db>`
+/// and block until a TCP connection to host:port succeeds (up to ~60s).
+fn wait_for_database_reachable(target: &str) {
     let host_port = target
-        .strip_prefix("mysql://")
+        .strip_prefix("postgres://")
+        .or_else(|| target.strip_prefix("postgresql://"))
         .and_then(|rest| rest.rsplit('@').next())
         .and_then(|after_at| after_at.split('/').next())
-        .unwrap_or("dolt:3306");
-    let addr = host_port.to_owned();
+        .map(|s| {
+            // If no port was specified after the host, append the default.
+            if s.contains(':') {
+                s.to_owned()
+            } else {
+                format!("{s}:5432")
+            }
+        })
+        .unwrap_or_else(|| "postgres:5432".to_owned());
+    let addr = host_port;
     tracing::info!(endpoint = %addr, "waiting for external database to accept TCP connections");
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);

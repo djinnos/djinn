@@ -10,15 +10,15 @@ impl TaskRepository {
         Ok(sqlx::query_as!(
             Task,
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    `status` AS "status!", priority, owner, labels, acceptance_criteria,
+                    status AS "status!", priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
                     reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs,
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",
                     agent_type,
-                    CAST(0 AS SIGNED) AS "unresolved_blocker_count!: i64"
-             FROM tasks WHERE project_id = ? ORDER BY priority, created_at"#,
+                    CAST(0 AS BIGINT) AS "unresolved_blocker_count!: i64"
+             FROM tasks WHERE project_id = $1 ORDER BY priority, created_at"#,
             project_id
         )
         .fetch_all(self.db.pool())
@@ -30,15 +30,15 @@ impl TaskRepository {
         Ok(sqlx::query_as!(
             Task,
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    `status` AS "status!", priority, owner, labels, acceptance_criteria,
+                    status AS "status!", priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
                     reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs,
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",
                     agent_type,
-                    CAST(0 AS SIGNED) AS "unresolved_blocker_count!: i64"
-             FROM tasks WHERE epic_id = ? ORDER BY priority, created_at"#,
+                    CAST(0 AS BIGINT) AS "unresolved_blocker_count!: i64"
+             FROM tasks WHERE epic_id = $1 ORDER BY priority, created_at"#,
             epic_id
         )
         .fetch_all(self.db.pool())
@@ -58,20 +58,20 @@ impl TaskRepository {
     ) -> Result<Vec<Task>> {
         self.db.ensure_initialized().await?;
         let blocker_filter = if exclude_blocked {
-            "AND NOT EXISTS (SELECT 1 FROM blockers b JOIN tasks bt ON b.blocking_task_id = bt.id WHERE b.task_id = tasks.id AND bt.`status` != 'closed')"
+            "AND NOT EXISTS (SELECT 1 FROM blockers b JOIN tasks bt ON b.blocking_task_id = bt.id WHERE b.task_id = tasks.id AND bt.status != 'closed')"
         } else {
             ""
         };
         // NOTE: dynamic SQL (optional blocker_filter fragment) — compile-time check not possible
         let sql = format!(
-            "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    `status`, priority, owner, labels, acceptance_criteria,
+            r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
+                    status, priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
                     reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
-             FROM tasks WHERE `status` = ? {blocker_filter} ORDER BY priority, created_at"
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!"
+             FROM tasks WHERE status = $1 {blocker_filter} ORDER BY priority, created_at"#
         );
         Ok(sqlx::query_as::<_, Task>(&sql)
             .bind(status)
@@ -91,15 +91,15 @@ impl TaskRepository {
         Ok(sqlx::query_as!(
             Task,
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    `status` AS "status!", priority, owner, labels, acceptance_criteria,
+                    status AS "status!", priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
                     reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs,
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",
                     agent_type,
-                    CAST(0 AS SIGNED) AS "unresolved_blocker_count!: i64"
-             FROM tasks WHERE short_id = ?"#,
+                    CAST(0 AS BIGINT) AS "unresolved_blocker_count!: i64"
+             FROM tasks WHERE short_id = $1"#,
             short_id
         )
         .fetch_optional(self.db.pool())
@@ -112,15 +112,15 @@ impl TaskRepository {
         Ok(sqlx::query_as!(
             Task,
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    `status` AS "status!", priority, owner, labels, acceptance_criteria,
+                    status AS "status!", priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
                     reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs,
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",
                     agent_type,
-                    CAST(0 AS SIGNED) AS "unresolved_blocker_count!: i64"
-             FROM tasks WHERE id = ? OR short_id = ?"#,
+                    CAST(0 AS BIGINT) AS "unresolved_blocker_count!: i64"
+             FROM tasks WHERE id = $1 OR short_id = $2"#,
             id_or_short,
             id_or_short
         )
@@ -137,15 +137,15 @@ impl TaskRepository {
         Ok(sqlx::query_as!(
             Task,
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    `status` AS "status!", priority, owner, labels, acceptance_criteria,
+                    status AS "status!", priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
                     reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs,
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",
                     agent_type,
-                    CAST(0 AS SIGNED) AS "unresolved_blocker_count!: i64"
-             FROM tasks WHERE project_id = ? AND (id = ? OR short_id = ?)"#,
+                    CAST(0 AS BIGINT) AS "unresolved_blocker_count!: i64"
+             FROM tasks WHERE project_id = $1 AND (id = $2 OR short_id = $3)"#,
             project_id,
             id_or_short,
             id_or_short
@@ -154,27 +154,29 @@ impl TaskRepository {
         .await?)
     }
 
-    /// Find tasks whose `memory_refs` JSON array contains the given permalink.
+    /// Find tasks whose `memory_refs` JSONB array contains the given permalink.
     ///
-    /// Uses a LIKE query on the JSON text — fast enough for the expected table
-    /// sizes and avoids requiring a json_each virtual table scan.
+    /// Uses the JSONB containment operator (`@>`) so the lookup can be
+    /// driven by a GIN index if/when we add one.
     pub async fn list_by_memory_ref(&self, permalink: &str) -> Result<Vec<Task>> {
-        let pattern = format!("%\"{permalink}\"%");
+        let probe = serde_json::Value::Array(vec![serde_json::Value::String(
+            permalink.to_owned(),
+        )]);
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             Task,
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    `status` AS "status!", priority, owner, labels, acceptance_criteria,
+                    status AS "status!", priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
                     reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs,
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",
                     agent_type,
-                    CAST(0 AS SIGNED) AS "unresolved_blocker_count!: i64"
-             FROM tasks WHERE memory_refs LIKE ?
+                    CAST(0 AS BIGINT) AS "unresolved_blocker_count!: i64"
+             FROM tasks WHERE memory_refs @> $1
              ORDER BY priority, created_at"#,
-            pattern
+            sqlx::types::Json(probe) as _,
         )
         .fetch_all(self.db.pool())
         .await?)
@@ -189,28 +191,28 @@ impl TaskRepository {
         self.db.ensure_initialized().await?;
         // NOTE: dynamic SQL (SELECT variant depends on project filter) — compile-time check not possible
         let sql = if project_id.is_some() {
-            "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    `status`, priority, owner, labels, acceptance_criteria,
+            r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
+                    status, priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
                     reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!"
              FROM tasks
-             WHERE project_id = ?
-               AND (`status` != 'closed' OR closed_at > DATE_SUB(NOW(3), INTERVAL 1 HOUR))
-             ORDER BY priority, created_at"
+             WHERE project_id = $1
+               AND (status != 'closed' OR closed_at > to_char((now() at time zone 'utc') - interval '1 hour', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+             ORDER BY priority, created_at"#
         } else {
-            "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    `status`, priority, owner, labels, acceptance_criteria,
+            r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
+                    status, priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
                     reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!"
              FROM tasks
-             WHERE (`status` != 'closed' OR closed_at > DATE_SUB(NOW(3), INTERVAL 1 HOUR))
-             ORDER BY priority, created_at"
+             WHERE (status != 'closed' OR closed_at > to_char((now() at time zone 'utc') - interval '1 hour', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+             ORDER BY priority, created_at"#
         };
 
         if let Some(pid) = project_id {
@@ -238,8 +240,8 @@ impl TaskRepository {
         let mut tx = self.db.pool().begin().await?;
         // Verify epic exists before INSERT when task references one.
         if let Some(epic_id) = &task.epic_id {
-            let epic_exists =
-                sqlx::query_scalar!("SELECT COUNT(*) FROM epics WHERE id = ?", epic_id)
+            let epic_exists: i64 =
+                sqlx::query_scalar!(r#"SELECT COUNT(*) AS "count!: i64" FROM epics WHERE id = $1"#, epic_id)
                     .fetch_one(&mut *tx)
                     .await?;
             if epic_exists == 0 {
@@ -255,7 +257,7 @@ impl TaskRepository {
         // no-op, including the LWW "this peer is older" and the terminal
         // "local closed, peer wants to regress" paths.
         let existing: Option<(String, String)> =
-            sqlx::query_as("SELECT updated_at, `status` FROM tasks WHERE id = ?")
+            sqlx::query_as("SELECT updated_at, status FROM tasks WHERE id = $1")
                 .bind(&task.id)
                 .fetch_optional(&mut *tx)
                 .await?;
@@ -280,44 +282,46 @@ impl TaskRepository {
         const MAX_RETRIES: usize = 3;
 
         let changed = loop {
+            // Helper macro: CASE WHEN newer-and-not-undoing-closed THEN excluded ELSE existing.
+            // Inlined per-column to keep the SQL readable.
             let result = sqlx::query(
-                "INSERT INTO tasks (
+                r#"INSERT INTO tasks (
                     id, project_id, short_id, epic_id, title, description, design,
-                    issue_type, `status`, priority, owner, labels,
+                    issue_type, status, priority, owner, labels,
                     acceptance_criteria, reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
                  ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
+                    $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28::jsonb
                  )
-                 ON DUPLICATE KEY UPDATE
-                    project_id          = VALUES(project_id),
-                    title               = VALUES(title),
-                    description         = VALUES(description),
-                    design              = VALUES(design),
-                    issue_type          = VALUES(issue_type),
-                    `status`            = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(`status`), tasks.`status`),
-                    priority            = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(priority), tasks.priority),
-                    owner               = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(owner), tasks.owner),
-                    labels              = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(labels), tasks.labels),
-                    acceptance_criteria = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(acceptance_criteria), tasks.acceptance_criteria),
-                    reopen_count        = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(reopen_count), tasks.reopen_count),
-                    continuation_count  = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(continuation_count), tasks.continuation_count),
-                    verification_failure_count = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(verification_failure_count), tasks.verification_failure_count),
-                    total_reopen_count  = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(total_reopen_count), tasks.total_reopen_count),
-                    total_verification_failure_count = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(total_verification_failure_count), tasks.total_verification_failure_count),
-                    intervention_count  = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(intervention_count), tasks.intervention_count),
-                    last_intervention_at = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(last_intervention_at), tasks.last_intervention_at),
-                    closed_at           = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(closed_at), tasks.closed_at),
-                    close_reason        = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(close_reason), tasks.close_reason),
-                    merge_commit_sha    = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(merge_commit_sha), tasks.merge_commit_sha),
-                    pr_url              = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(pr_url), tasks.pr_url),
-                    merge_conflict_metadata = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(merge_conflict_metadata), tasks.merge_conflict_metadata),
-                    memory_refs         = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(memory_refs), tasks.memory_refs),
-                    updated_at          = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(updated_at), tasks.updated_at)",
+                 ON CONFLICT (id) DO UPDATE SET
+                    project_id          = EXCLUDED.project_id,
+                    title               = EXCLUDED.title,
+                    description         = EXCLUDED.description,
+                    design              = EXCLUDED.design,
+                    issue_type          = EXCLUDED.issue_type,
+                    status              = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.status ELSE tasks.status END,
+                    priority            = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.priority ELSE tasks.priority END,
+                    owner               = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.owner ELSE tasks.owner END,
+                    labels              = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.labels ELSE tasks.labels END,
+                    acceptance_criteria = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.acceptance_criteria ELSE tasks.acceptance_criteria END,
+                    reopen_count        = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.reopen_count ELSE tasks.reopen_count END,
+                    continuation_count  = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.continuation_count ELSE tasks.continuation_count END,
+                    verification_failure_count = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.verification_failure_count ELSE tasks.verification_failure_count END,
+                    total_reopen_count  = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.total_reopen_count ELSE tasks.total_reopen_count END,
+                    total_verification_failure_count = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.total_verification_failure_count ELSE tasks.total_verification_failure_count END,
+                    intervention_count  = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.intervention_count ELSE tasks.intervention_count END,
+                    last_intervention_at = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.last_intervention_at ELSE tasks.last_intervention_at END,
+                    closed_at           = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.closed_at ELSE tasks.closed_at END,
+                    close_reason        = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.close_reason ELSE tasks.close_reason END,
+                    merge_commit_sha    = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.merge_commit_sha ELSE tasks.merge_commit_sha END,
+                    pr_url              = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.pr_url ELSE tasks.pr_url END,
+                    merge_conflict_metadata = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.merge_conflict_metadata ELSE tasks.merge_conflict_metadata END,
+                    memory_refs         = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.memory_refs ELSE tasks.memory_refs END,
+                    updated_at          = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.updated_at ELSE tasks.updated_at END"#,
             )
             .bind(&task.id)
             .bind(&task.project_id)
@@ -424,13 +428,13 @@ impl TaskRepository {
     /// On UNIQUE(short_id) constraint violation, the incoming short_id is
     /// extended by one character from the task UUID hex and retried (SYNC-15).
     pub async fn upsert_peer_in_tx(
-        tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         task: &Task,
     ) -> Result<bool> {
         // Verify epic exists before INSERT when task references one.
         if let Some(epic_id) = &task.epic_id {
             let epic_exists: i64 =
-                sqlx::query_scalar!("SELECT COUNT(*) FROM epics WHERE id = ?", epic_id)
+                sqlx::query_scalar!(r#"SELECT COUNT(*) AS "count!: i64" FROM epics WHERE id = $1"#, epic_id)
                     .fetch_one(&mut **tx)
                     .await?;
             if epic_exists == 0 {
@@ -441,7 +445,7 @@ impl TaskRepository {
         // Pre-check existing row; see `upsert_peer` for the CLIENT_FOUND_ROWS
         // rationale and the terminal-state-protection behaviour.
         let existing: Option<(String, String)> =
-            sqlx::query_as("SELECT updated_at, `status` FROM tasks WHERE id = ?")
+            sqlx::query_as("SELECT updated_at, status FROM tasks WHERE id = $1")
                 .bind(&task.id)
                 .fetch_optional(&mut **tx)
                 .await?;
@@ -461,43 +465,43 @@ impl TaskRepository {
 
         loop {
             let result = sqlx::query(
-                "INSERT INTO tasks (
+                r#"INSERT INTO tasks (
                     id, project_id, short_id, epic_id, title, description, design,
-                    issue_type, `status`, priority, owner, labels,
+                    issue_type, status, priority, owner, labels,
                     acceptance_criteria, reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs
                  ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb,
+                    $13::jsonb, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28::jsonb
                  )
-                 ON DUPLICATE KEY UPDATE
-                    project_id          = VALUES(project_id),
-                    title               = VALUES(title),
-                    description         = VALUES(description),
-                    design              = VALUES(design),
-                    issue_type          = VALUES(issue_type),
-                    `status`            = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(`status`), tasks.`status`),
-                    priority            = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(priority), tasks.priority),
-                    owner               = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(owner), tasks.owner),
-                    labels              = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(labels), tasks.labels),
-                    acceptance_criteria = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(acceptance_criteria), tasks.acceptance_criteria),
-                    reopen_count        = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(reopen_count), tasks.reopen_count),
-                    continuation_count  = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(continuation_count), tasks.continuation_count),
-                    verification_failure_count = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(verification_failure_count), tasks.verification_failure_count),
-                    total_reopen_count  = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(total_reopen_count), tasks.total_reopen_count),
-                    total_verification_failure_count = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(total_verification_failure_count), tasks.total_verification_failure_count),
-                    intervention_count  = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(intervention_count), tasks.intervention_count),
-                    last_intervention_at = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(last_intervention_at), tasks.last_intervention_at),
-                    closed_at           = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(closed_at), tasks.closed_at),
-                    close_reason        = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(close_reason), tasks.close_reason),
-                    merge_commit_sha    = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(merge_commit_sha), tasks.merge_commit_sha),
-                    pr_url              = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(pr_url), tasks.pr_url),
-                    merge_conflict_metadata = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(merge_conflict_metadata), tasks.merge_conflict_metadata),
-                    memory_refs         = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(memory_refs), tasks.memory_refs),
-                    updated_at          = IF(VALUES(updated_at) > tasks.updated_at AND NOT (tasks.`status` = 'closed' AND VALUES(`status`) != 'closed'), VALUES(updated_at), tasks.updated_at)",
+                 ON CONFLICT (id) DO UPDATE SET
+                    project_id          = EXCLUDED.project_id,
+                    title               = EXCLUDED.title,
+                    description         = EXCLUDED.description,
+                    design              = EXCLUDED.design,
+                    issue_type          = EXCLUDED.issue_type,
+                    status              = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.status ELSE tasks.status END,
+                    priority            = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.priority ELSE tasks.priority END,
+                    owner               = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.owner ELSE tasks.owner END,
+                    labels              = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.labels ELSE tasks.labels END,
+                    acceptance_criteria = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.acceptance_criteria ELSE tasks.acceptance_criteria END,
+                    reopen_count        = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.reopen_count ELSE tasks.reopen_count END,
+                    continuation_count  = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.continuation_count ELSE tasks.continuation_count END,
+                    verification_failure_count = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.verification_failure_count ELSE tasks.verification_failure_count END,
+                    total_reopen_count  = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.total_reopen_count ELSE tasks.total_reopen_count END,
+                    total_verification_failure_count = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.total_verification_failure_count ELSE tasks.total_verification_failure_count END,
+                    intervention_count  = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.intervention_count ELSE tasks.intervention_count END,
+                    last_intervention_at = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.last_intervention_at ELSE tasks.last_intervention_at END,
+                    closed_at           = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.closed_at ELSE tasks.closed_at END,
+                    close_reason        = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.close_reason ELSE tasks.close_reason END,
+                    merge_commit_sha    = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.merge_commit_sha ELSE tasks.merge_commit_sha END,
+                    pr_url              = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.pr_url ELSE tasks.pr_url END,
+                    merge_conflict_metadata = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.merge_conflict_metadata ELSE tasks.merge_conflict_metadata END,
+                    memory_refs         = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.memory_refs ELSE tasks.memory_refs END,
+                    updated_at          = CASE WHEN EXCLUDED.updated_at > tasks.updated_at AND NOT (tasks.status = 'closed' AND EXCLUDED.status != 'closed') THEN EXCLUDED.updated_at ELSE tasks.updated_at END"#,
             )
             .bind(&task.id)
             .bind(&task.project_id)
@@ -594,7 +598,7 @@ impl TaskRepository {
     ///
     /// Returns the count of tasks that were reconciled (closed).
     pub async fn reconcile_peer_in_tx(
-        tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         peer_user_id: &str,
         peer_task_ids: &[String],
     ) -> Result<usize> {
@@ -612,7 +616,7 @@ impl TaskRepository {
 
         // Find tasks owned by peer that are not in their export and not already closed
         let sql_select = format!(
-            "SELECT id FROM tasks WHERE owner = ? AND `status` != 'closed' AND id NOT IN ({})",
+            "SELECT id FROM tasks WHERE owner = $1 AND status != 'closed' AND id NOT IN ({})",
             placeholders
         );
 
@@ -635,8 +639,8 @@ impl TaskRepository {
             .join(",");
 
         let sql_update = format!(
-            "UPDATE tasks SET `status` = 'closed', close_reason = 'peer_reconciled',
-             closed_at = DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ') WHERE id IN ({})",
+            r#"UPDATE tasks SET status = 'closed', close_reason = 'peer_reconciled',
+             closed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') WHERE id IN ({})"#,
             placeholders
         );
 

@@ -53,7 +53,7 @@ impl VerificationResultRepository {
 
         // Delete previous results for this task.
         sqlx::query!(
-            "DELETE FROM verification_results WHERE task_id = ?",
+            "DELETE FROM verification_results WHERE task_id = $1",
             task_id
         )
         .execute(pool)
@@ -63,7 +63,7 @@ impl VerificationResultRepository {
             sqlx::query!(
                 "INSERT INTO verification_results \
                  (project_id, task_id, run_id, phase, step_index, name, command, exit_code, stdout, stderr, duration_ms) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
                 step.project_id,
                 step.task_id,
                 step.run_id,
@@ -90,7 +90,7 @@ impl VerificationResultRepository {
             VerificationStepRow,
             "SELECT id, project_id, task_id, run_id, phase, step_index, name, command, \
              exit_code, stdout, stderr, duration_ms, created_at \
-             FROM verification_results WHERE task_id = ? ORDER BY step_index ASC",
+             FROM verification_results WHERE task_id = $1 ORDER BY step_index ASC",
             task_id,
         )
         .fetch_all(self.db.pool())
@@ -101,7 +101,7 @@ impl VerificationResultRepository {
     pub async fn delete_for_task(&self, task_id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query!(
-            "DELETE FROM verification_results WHERE task_id = ?",
+            "DELETE FROM verification_results WHERE task_id = $1",
             task_id
         )
         .execute(self.db.pool())
@@ -113,8 +113,8 @@ impl VerificationResultRepository {
     pub async fn prune_older_than(&self, days: i64) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query!(
-            "DELETE FROM verification_results WHERE created_at < DATE_SUB(NOW(3), INTERVAL ? DAY)",
-            days,
+            r#"DELETE FROM verification_results WHERE created_at < to_char((now() at time zone 'utc') - (interval '1 day' * $1), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#,
+            days as f64,
         )
         .execute(self.db.pool())
         .await?;

@@ -1,6 +1,6 @@
-# Test-only MySQL instance for `cargo test` and sqlx macro compilation.
+# Test-only Postgres instance for `cargo test` and sqlx macro compilation.
 #
-# The full dev stack (djinn-server, dev MySQL, Qdrant) runs inside the kind
+# The full dev stack (djinn-server, dev Postgres, Qdrant) runs inside the kind
 # cluster managed by `tilt up` — see the Tiltfile at the repo root. The
 # one thing Tilt does NOT run is this isolated test DB, because
 # `cargo test` spins up ~250 ephemeral `djinn_test_*` DBs per crate and
@@ -8,20 +8,28 @@
 #
 # Consumed by Makefile targets: `test-db-migrate`, `test-db-reset`,
 # `test`, `test-all`, `sqlx-prepare`, `sqlx-check`. The workspace
-# `.cargo/config.toml` defaults DATABASE_URL to `:3308` so every cargo
+# `.cargo/config.toml` defaults DATABASE_URL to `:5433` so every cargo
 # invocation in the repo hits this instance by default.
 
 services:
-  mysql-test:
-    image: mysql:8.4
-    container_name: djinn-mysql-test
+  postgres-test:
+    image: postgres:16
+    container_name: djinn-postgres-test
     command:
-      - --innodb-flush-log-at-trx-commit=2
-      - --innodb-buffer-pool-size=512M
-      - --skip-log-bin
-      - --max-connections=500
+      - postgres
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - max_connections=500
+      - -c
+      - fsync=off
+      - -c
+      - synchronous_commit=off
+      - -c
+      - full_page_writes=off
     environment:
-      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
-      MYSQL_DATABASE: djinn
-    ports: ["127.0.0.1:3308:3306"]
-    tmpfs: ["/var/lib/mysql"]
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: djinn
+    ports: ["127.0.0.1:5433:5432"]
+    tmpfs: ["/var/lib/postgresql/data"]

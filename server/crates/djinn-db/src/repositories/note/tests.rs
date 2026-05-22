@@ -38,7 +38,7 @@ async fn make_epic(db: &Database, project_id: &str) -> String {
     let short_id = format!("ep-{}", &epic_id[epic_id.len() - 12..]);
     sqlx::query!(
         "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '[]'::jsonb)",
         epic_id,
         project_id,
         short_id,
@@ -47,7 +47,6 @@ async fn make_epic(db: &Database, project_id: &str) -> String {
         "",
         "",
         "",
-        "[]",
     )
     .execute(db.pool())
     .await
@@ -89,7 +88,7 @@ async fn make_session(
     // caller-supplied `_branch` is accepted for legacy signature
     // compatibility but ignored here.
     sqlx::query!(
-        "INSERT INTO sessions (
+        r#"INSERT INTO sessions (
             id,
             project_id,
             task_id,
@@ -101,16 +100,16 @@ async fn make_session(
             tokens_out
         )
         VALUES (
-            ?,
-            ?,
-            ?,
+            $1,
+            $2,
+            $3,
             'test-model',
             'worker',
-            DATE_FORMAT(NOW(3), '%Y-%m-%dT%H:%i:%s.%fZ'),
+            to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
             'completed',
             0,
             0
-        )",
+        )"#,
         id,
         project_id,
         task_id,
