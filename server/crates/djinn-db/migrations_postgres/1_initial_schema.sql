@@ -6,10 +6,13 @@
 -- for consistency with the rest of the schema (the repository layer reads
 -- them as String).
 
--- `gen_random_uuid()` lives in pgcrypto on Postgres 12; from 13+ it is
--- also exposed in the default catalog, but enabling pgcrypto here is the
--- portable form and RDS supports it.
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+-- `gen_random_uuid()` is built-in to PostgreSQL 13+ (pg_catalog) — no
+-- extension required. We deliberately do NOT `CREATE EXTENSION pgcrypto`:
+-- AWS RDS denies non-superuser roles permission to create extensions, and
+-- since `gen_random_uuid()` is the only pgcrypto-derived function we
+-- consume, leaning on the built-in keeps fresh installs portable across
+-- managed Postgres providers (RDS, Cloud SQL, Supabase) without a manual
+-- bootstrap step as the master/superuser.
 
 -- ── settings & projects ──────────────────────────────────────────────────────
 -- `settings.value` stores arbitrary serialized blobs — sometimes a JSON
