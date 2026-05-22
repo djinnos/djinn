@@ -239,6 +239,20 @@ impl Database {
                     sqlx::query("SET SESSION sql_mode = CONCAT(@@sql_mode, ',STRICT_ALL_TABLES')")
                         .execute(&mut *conn)
                         .await?;
+                    // Bound how long any single statement / lock wait can
+                    // hang. Dolt's enforcement of these is best-effort
+                    // (varies by version) — the dolt_watchdog spawned at
+                    // server startup is the authoritative safety net. Both
+                    // SETs are wrapped in best-effort blocks so a Dolt
+                    // build that rejects them with a parse error doesn't
+                    // break new connections; older Dolt accepts MySQL
+                    // syntax but ignores the value.
+                    let _ = sqlx::query("SET SESSION MAX_EXECUTION_TIME = 60000")
+                        .execute(&mut *conn)
+                        .await;
+                    let _ = sqlx::query("SET SESSION lock_wait_timeout = 60")
+                        .execute(&mut *conn)
+                        .await;
                     if let Some(stmt) = use_branch_stmt {
                         sqlx::query(&stmt).execute(&mut *conn).await?;
                     }
