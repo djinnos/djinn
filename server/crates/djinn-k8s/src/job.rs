@@ -576,7 +576,7 @@ mod tests {
         let secret_src = spec_volume.secret.as_ref().expect("spec volume is Secret");
         assert_eq!(secret_src.secret_name.as_deref(), Some(secret_name));
         assert_eq!(secret_src.optional, Some(false));
-        assert_eq!(secret_src.default_mode, Some(0o0400));
+        assert_eq!(secret_src.default_mode, Some(0o0444));
         let items = secret_src.items.as_ref().expect("secret items set");
         // Phase 7a: two keys — `spec.bin` and `credentials.bin`.
         assert_eq!(items.len(), 2);

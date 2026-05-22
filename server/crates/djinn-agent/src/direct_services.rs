@@ -508,10 +508,13 @@ mod tests {
         assert_eq!(env.entity_type, "session");
         assert_eq!(env.action, "message");
         assert_eq!(env.payload["role"], "assistant");
-        // Static strs from string literals collide with the constructor's
-        // pinned addresses — pointer-equality is the strongest assertion
-        // that we routed through the known arm.
-        assert!(std::ptr::eq(env.entity_type.as_ptr(), "session".as_ptr()));
+        // `entity_type` / `action` are `&'static str` from the match arms
+        // by type (see `DjinnEventEnvelope`), so the conversion away from
+        // owned `String` is enforced by the type system — no runtime
+        // pointer-eq check needed. (We used to assert
+        // `std::ptr::eq(env.entity_type.as_ptr(), "session".as_ptr())` here
+        // but cross-crate string-literal deduplication isn't a language
+        // guarantee, only an LTO heuristic.)
     }
 
     #[test]

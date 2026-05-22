@@ -1069,9 +1069,10 @@ impl SupervisorServices for UnimplementedRpcServices {
     }
 
     async fn touch_activity(&self, _task_id: String) -> Result<(), String> {
-        unimplemented!(
-            "UnimplementedRpcServices::touch_activity — construct RpcServices for real RPC"
-        )
+        // No-op rather than panic: `touch_activity` is fire-and-forget on
+        // the production reply_loop side (errors are swallowed), so panicking
+        // here only breaks unrelated tests without catching any real bug.
+        Ok(())
     }
 
     async fn transition_task(
