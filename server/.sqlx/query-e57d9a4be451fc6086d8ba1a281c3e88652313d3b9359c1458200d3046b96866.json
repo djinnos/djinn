@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n                COUNT(*) AS \"task_count!: i64\",\n                CAST(COALESCE(SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END), 0) AS BIGINT) AS \"open_count!: i64\",\n                CAST(COALESCE(SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END), 0) AS BIGINT) AS \"in_progress_count!: i64\",\n                CAST(COALESCE(SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END), 0) AS BIGINT) AS \"closed_count!: i64\"\n             FROM tasks WHERE epic_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "task_count!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "open_count!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "in_progress_count!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "closed_count!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "e57d9a4be451fc6086d8ba1a281c3e88652313d3b9359c1458200d3046b96866"
+}

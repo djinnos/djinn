@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT image_tag, image_hash, image_status, image_last_error\n               FROM projects WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "image_tag",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "image_hash",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "image_status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "image_last_error",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "f706e4f2ec943dd4939a65874624f03548e2a8bf3535a46075f7d7c16d9a2bef"
+}

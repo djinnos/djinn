@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id FROM task_runs\n             WHERE status = 'running'\n               AND ended_at IS NULL\n               AND started_at < $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7b84f6687319bafb6a1b232b27afd8738e395321af0290cc526fb9f2f205281f"
+}

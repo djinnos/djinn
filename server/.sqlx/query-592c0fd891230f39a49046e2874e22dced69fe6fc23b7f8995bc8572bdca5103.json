@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE sessions SET status = 'paused', tokens_in = $1, tokens_out = $2 WHERE id = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "592c0fd891230f39a49046e2874e22dced69fe6fc23b7f8995bc8572bdca5103"
+}

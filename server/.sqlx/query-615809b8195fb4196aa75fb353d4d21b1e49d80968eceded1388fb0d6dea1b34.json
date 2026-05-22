@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO org_config\n                (id, github_org_id, github_org_login, app_id, installation_id)\n             VALUES (1, $1, $2, $3, $4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Varchar",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "615809b8195fb4196aa75fb353d4d21b1e49d80968eceded1388fb0d6dea1b34"
+}

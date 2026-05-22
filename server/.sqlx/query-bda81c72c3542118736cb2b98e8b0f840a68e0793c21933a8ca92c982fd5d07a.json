@@ -1,0 +1,62 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, file_path, symbol_key, kind, start_line, end_line, embedded_text\n             FROM code_chunks\n            WHERE project_id = $1\n              AND (LOWER(symbol_key) LIKE $2\n                   OR LOWER(file_path) LIKE $3\n                   OR LOWER(embedded_text) LIKE $4)\n            LIMIT $5",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "file_path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "symbol_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "kind",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "start_line",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "end_line",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "embedded_text",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "bda81c72c3542118736cb2b98e8b0f840a68e0793c21933a8ca92c982fd5d07a"
+}

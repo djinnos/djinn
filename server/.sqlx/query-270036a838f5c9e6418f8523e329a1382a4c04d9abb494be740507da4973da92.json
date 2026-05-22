@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM agents WHERE project_id = $1 AND base_role = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "270036a838f5c9e6418f8523e329a1382a4c04d9abb494be740507da4973da92"
+}
