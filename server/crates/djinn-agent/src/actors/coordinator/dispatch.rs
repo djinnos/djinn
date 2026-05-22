@@ -1505,15 +1505,36 @@ impl CoordinatorActor {
                     );
                 }
                 djinn_runtime::TaskRunOutcome::Failed { stage, reason } => {
-                    self.pr_errors
-                        .insert(task.project_id.clone(), reason.clone());
-                    self.publish_status();
-                    tracing::warn!(
-                        task_id = %task.short_id,
-                        stage = %stage,
-                        error = %reason,
-                        "CoordinatorActor: supervisor_pr_open failed (will retry next tick)"
-                    );
+                    // Race-tolerant pr_errors gate. The coordinator's tick
+                    // path and the supervisor body's own open_pr can fire
+                    // concurrently for the same task. When the race-loser
+                    // surfaces a transient push/transition error AFTER the
+                    // winner has already opened the PR (`task.pr_url` set)
+                    // we don't want a stale banner. Two cases:
+                    //   1. Pre-existing pr_url → PR is open; the error
+                    //      reflects a tick that lost the race. Log and
+                    //      move on; next successful tick (or another
+                    //      task's PrOpened) clears the project's slot.
+                    //   2. No pr_url yet → genuine first-open failure
+                    //      (auth, permissions, bad ref, etc.) — surface.
+                    if task.pr_url.is_some() {
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            stage = %stage,
+                            error = %reason,
+                            "CoordinatorActor: supervisor_pr_open failed but PR already open — treating as transient race"
+                        );
+                    } else {
+                        self.pr_errors
+                            .insert(task.project_id.clone(), reason.clone());
+                        self.publish_status();
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            stage = %stage,
+                            error = %reason,
+                            "CoordinatorActor: supervisor_pr_open failed (will retry next tick)"
+                        );
+                    }
                 }
                 other => {
                     tracing::warn!(
