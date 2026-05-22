@@ -47,19 +47,12 @@ pub struct KubernetesConfig {
     /// terminates it (`activeDeadlineSeconds`). Keeps a wedged indexer
     /// subprocess from pinning a Pod indefinitely.
     pub warm_job_timeout_seconds: i64,
-    /// Database DSN forwarded to the warm Pod so `djinn-agent-worker
-    /// warm-graph` can reuse the server's backing Dolt/MySQL instance.
+    /// MySQL DSN forwarded to the warm Pod so `djinn-agent-worker
+    /// warm-graph` can reuse the server's backing MySQL instance.
     /// `None` leaves the warm binary to fall back to its built-in default
     /// (`mysql://root@127.0.0.1:3306/djinn`), which only works in single-
     /// process local test setups.
     pub database_url: Option<String>,
-    /// Matches `DJINN_DB_BACKEND` on djinn-server (`mysql` | `dolt`).
-    /// Forwarded so the warm Pod bootstraps an identical `Database` pool.
-    pub database_backend: Option<String>,
-    /// Matches `DJINN_MYSQL_FLAVOR` on djinn-server. Usually equal to
-    /// `database_backend`; kept distinct because the warm binary accepts
-    /// independent values (e.g. talking MySQL protocol to a Dolt server).
-    pub database_flavor: Option<String>,
     /// Maximum wall-clock seconds a task-run Pod may live before the
     /// kubelet terminates it (`activeDeadlineSeconds` on the Job). Without
     /// this, a stuck RPC connection or runaway LLM stream can keep the Pod
@@ -109,8 +102,6 @@ impl KubernetesConfig {
             warm_job_ttl_seconds: 300,
             warm_job_timeout_seconds: 1800,
             database_url: None,
-            database_backend: None,
-            database_flavor: None,
             task_run_active_deadline_seconds: 3600,
             task_run_termination_grace_period_seconds: 60,
             warm_cpu_request: "1".into(),
@@ -145,8 +136,6 @@ impl KubernetesConfig {
     /// | `DJINN_K8S_WARM_JOB_TTL_SECONDS` | `warm_job_ttl_seconds` | `300` (parsed as `i32`) |
     /// | `DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS` | `warm_job_timeout_seconds` | `1800` (parsed as `i64`) |
     /// | `DJINN_MYSQL_URL` | `database_url` | _(unset → warm Pod uses default `mysql://root@127.0.0.1:3306/djinn`)_ |
-    /// | `DJINN_DB_BACKEND` | `database_backend` | _(unset)_ |
-    /// | `DJINN_MYSQL_FLAVOR` | `database_flavor` | _(unset)_ |
     /// | `DJINN_K8S_TASK_RUN_ACTIVE_DEADLINE_SECONDS` | `task_run_active_deadline_seconds` | `3600` (parsed as `u64`) |
     /// | `DJINN_K8S_TASK_RUN_TERMINATION_GRACE_PERIOD_SECONDS` | `task_run_termination_grace_period_seconds` | `60` (parsed as `i64`) |
     /// | `DJINN_K8S_WARM_CPU_REQUEST` | `warm_cpu_request` | `1` |
@@ -154,11 +143,11 @@ impl KubernetesConfig {
     /// | `DJINN_K8S_WARM_MEMORY_REQUEST` | `warm_memory_request` | `2Gi` |
     /// | `DJINN_K8S_WARM_MEMORY_LIMIT` | `warm_memory_limit` | `4Gi` |
     ///
-    /// The three DB vars are read from djinn-server's own environment (the
-    /// Helm chart projects them via `envFrom: configMap djinn-config`) and
-    /// are forwarded onto both the warm Pod container (so `warm-graph`
+    /// `DJINN_MYSQL_URL` is read from djinn-server's own environment (the
+    /// Helm chart projects it via `envFrom: configMap djinn-config`) and
+    /// is forwarded onto both the warm Pod container (so `warm-graph`
     /// talks to the same backing store) and the task-run Pod container
-    /// (so the worker's `bootstrap_warm_database()` opens the same Dolt
+    /// (so the worker's `bootstrap_warm_database()` opens the same MySQL
     /// instance and helpers like `resolve_role_overrides` /
     /// `build_prompt_context` succeed mid-run instead of falling back to
     /// the single-node `mysql://root@127.0.0.1:3306/djinn` default).
@@ -231,12 +220,6 @@ impl KubernetesConfig {
             }
         }
         cfg.database_url = std::env::var("DJINN_MYSQL_URL")
-            .ok()
-            .filter(|v| !v.is_empty());
-        cfg.database_backend = std::env::var("DJINN_DB_BACKEND")
-            .ok()
-            .filter(|v| !v.is_empty());
-        cfg.database_flavor = std::env::var("DJINN_MYSQL_FLAVOR")
             .ok()
             .filter(|v| !v.is_empty());
         if let Ok(v) = std::env::var("DJINN_K8S_TASK_RUN_ACTIVE_DEADLINE_SECONDS") {

@@ -9,7 +9,7 @@ spec:
   replicas: 1
   strategy:
     # Leader election is not wired up; stick to Recreate so we never have two
-    # controllers racing to dispatch Jobs or write to Dolt.
+    # controllers racing to dispatch Jobs or write to MySQL.
     type: Recreate
   selector:
     matchLabels:
@@ -28,11 +28,10 @@ spec:
       serviceAccountName: {{ include "djinn.serviceAccountName.controller" . }}
       # Give the binary's shutdown path (HTTP drain → RPC drain → SQLx
       # pool close, capped at 30s internally) enough headroom to run
-      # before SIGKILL. Without this, ALTERs in-flight on the SQLx pool
-      # die mid-statement and Dolt may keep their partition locks live
-      # past the connection drop, wedging the next pod's migrator. 60s
-      # is the chart's contract with the binary — see `main.rs`'s
-      # `pool.close()` deadline.
+      # before SIGKILL. Without this, in-flight statements on the SQLx
+      # pool die mid-statement and InnoDB has to roll them back on the
+      # next pod's boot. 60s is the chart's contract with the binary
+      # — see `main.rs`'s `pool.close()` deadline.
       terminationGracePeriodSeconds: 60
       {{- with .Values.nodeSelector }}
       nodeSelector:

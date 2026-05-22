@@ -69,16 +69,16 @@ app.kubernetes.io/component: server
 {{- end -}}
 
 {{/*
-Dolt component labels.
+MySQL component labels.
 */}}
-{{- define "djinn.dolt.labels" -}}
+{{- define "djinn.mysql.labels" -}}
 {{ include "djinn.labels" . }}
-app.kubernetes.io/component: dolt
+app.kubernetes.io/component: mysql
 {{- end -}}
 
-{{- define "djinn.dolt.selectorLabels" -}}
+{{- define "djinn.mysql.selectorLabels" -}}
 {{ include "djinn.selectorLabels" . }}
-app.kubernetes.io/component: dolt
+app.kubernetes.io/component: mysql
 {{- end -}}
 
 {{/*
@@ -200,8 +200,8 @@ Service names (used inside DJINN_MYSQL_URL / QDRANT_URL env in configmap).
 {{- printf "%s-server" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "djinn.serviceName.dolt" -}}
-{{- printf "%s-dolt" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- define "djinn.serviceName.mysql" -}}
+{{- printf "%s-mysql" (include "djinn.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{- define "djinn.serviceName.qdrant" -}}

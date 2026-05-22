@@ -2,8 +2,8 @@ apiVersion: v2
 name: djinn
 description: |
   Djinn — multi-user agent control plane. Installs djinn-server (controller),
-  dolt (SQL state), qdrant (vector store), per-task-run RBAC, and the
-  secrets/PVCs the controller needs to dispatch task-run Jobs.
+  MySQL 8.4 (SQL state, InnoDB), qdrant (vector store), per-task-run RBAC,
+  and the secrets/PVCs the controller needs to dispatch task-run Jobs.
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

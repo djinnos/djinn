@@ -54,7 +54,7 @@ ingress:
 
 # Tighter resource defaults so the whole stack fits on a laptop.
 # Server limit accounts for the in-process nomic-embed model (~1GB FP32)
-# + Dolt pool + OTEL + actors. 4Gi was OOMing during the embedding
+# + SQLx pool + OTEL + actors. 4Gi was OOMing during the embedding
 # repair loop on projects with large notes; 6Gi gives headroom.
 resources:
   server:
@@ -72,16 +72,20 @@ resources:
       cpu: "1"
       memory: "2Gi"
 
-# Dolt's chunk store memory-maps aggressively and runs inline GC on COMMIT.
-# 2Gi caused 60-130s COMMIT stalls under ordinary stack-update traffic.
-dolt:
+# Local-dev MySQL footprint — InnoDB buffer pool tuned down so the whole
+# stack still fits on a laptop. Defaults from the chart (2G / 200 conns,
+# 2Gi/4Gi) are sized for production; halve them here.
+mysql:
+  config:
+    innodbBufferPoolSize: 512M
+    maxConnections: 100
   resources:
     requests:
       cpu: "250m"
-      memory: "1Gi"
+      memory: "512Mi"
     limits:
       cpu: "2"
-      memory: "6Gi"
+      memory: "2Gi"
   storage:
     size: 5Gi
     accessMode: ReadWriteOnce

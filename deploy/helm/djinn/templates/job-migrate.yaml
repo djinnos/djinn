@@ -2,21 +2,26 @@
   Apply pending SQL migrations before the server Deployment rolls.
 
   Why this exists:
-    Previously every app pod ran `sqlx::migrate!(...).run(&pool)` on
-    boot, which takes the migrator's `GET_LOCK(_sqlx_migrator_lock, -1)`
-    advisory lock. When the old pod's Dolt connection was killed mid-
-    ALTER (e.g. terminationGracePeriodSeconds elapsed), Dolt sometimes
-    kept the migration's partition + advisory locks live past the
-    connection drop. The new pod's `GET_LOCK` then blocked forever and
-    the rollout stalled with the cluster's CI / mirror plane wedged.
+    Migrations run in a dedicated Job rather than on the app pod's boot
+    path. The pre-install + pre-upgrade hook with weight -5 fires
+    BEFORE the Deployment touches anything, so the migrator has
+    exclusive access to the database: no concurrent traffic, no other
+    djinn-server pod racing on the same `_sqlx_migrations` advisory
+    lock, and no risk of two pods seeing a half-applied schema during
+    a rolling upgrade.
 
-  How this fixes it:
-    Migrations now run in this dedicated Job, never on the app pod.
-    Hook order — pre-install + pre-upgrade with weight -5 — runs us
-    BEFORE the Deployment touches anything, with no concurrent traffic
-    and no other djinn-server pod racing on the same advisory lock.
-    `restartPolicy: OnFailure` means a transient Dolt error retries
-    inside the Job rather than restarting the whole helm rollout.
+    Pulling migrations off the boot path also keeps app-pod startup
+    short and predictable, which matters for readinessProbe budgets
+    and for the worker pool's reconnect logic.
+
+  How this fixes failure modes:
+    `restartPolicy: OnFailure` retries transient connection errors
+    inside the Job rather than failing the whole helm rollout.
+    `backoffLimit: 3` caps retries so a genuinely broken migration
+    surfaces fast instead of churning the Job indefinitely.
+    InnoDB's deadlock detector kills cycle victims with SQLSTATE 40001
+    immediately, and `djinn_db::retry` covers the migrator's own retry
+    needs at the application layer.
 
   Cleanup:
     `hook-delete-policy: before-hook-creation,hook-succeeded` keeps
@@ -48,7 +53,7 @@ metadata:
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   # Bail after 10 minutes — far longer than any reasonable migration on
-  # a healthy Dolt, short enough that a wedged hook doesn't pin the
+  # a healthy MySQL, short enough that a wedged hook doesn't pin the
   # release indefinitely.
   activeDeadlineSeconds: 600
   backoffLimit: 3
@@ -80,10 +85,9 @@ spec:
           command: ["djinn-server"]
           args: ["--migrate-only"]
           envFrom:
-            # Pulls DJINN_MYSQL_URL, DJINN_DB_BACKEND, DJINN_MYSQL_FLAVOR
-            # from the same ConfigMap the server Deployment uses, so the
-            # Job and the app pods always agree on which database to
-            # migrate.
+            # Pulls DJINN_MYSQL_URL from the same ConfigMap the server
+            # Deployment uses, so the Job and the app pods always agree
+            # on which database to migrate.
             - configMapRef:
                 name: {{ include "djinn.fullname" . }}-server
           # Force-disable the UI bundle path entirely — migrate-only

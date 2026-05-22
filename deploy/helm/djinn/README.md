@@ -1,7 +1,8 @@
 # djinn Helm chart
 
-Installs djinn-server (controller), dolt (SQL state), qdrant (vector store),
-and the Phase 3 image pipeline (BuildKit + Zot + image controller).
+Installs djinn-server (controller), MySQL 8.4 (SQL state, InnoDB), qdrant
+(vector store), and the Phase 3 image pipeline (BuildKit + Zot + image
+controller).
 
 ## Node prerequisites
 

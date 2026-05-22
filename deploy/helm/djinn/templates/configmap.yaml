@@ -11,11 +11,9 @@ data:
   # caches), /var/run/secrets/djinn holds the mounted AES + GitHub App keys.
   DJINN_HOME: "/var/lib/djinn"
   RUST_LOG: {{ .Values.env.rustLog | quote }}
-  DJINN_DB_BACKEND: "dolt"
-  DJINN_MYSQL_FLAVOR: "dolt"
   DJINN_VECTOR_BACKEND: "qdrant"
-  {{- if .Values.dolt.enabled }}
-  DJINN_MYSQL_URL: {{ printf "mysql://root@%s.%s.svc.cluster.local:%d/djinn" (include "djinn.serviceName.dolt" .) (include "djinn.namespace" .) (.Values.dolt.service.port | int) | quote }}
+  {{- if .Values.mysql.enabled }}
+  DJINN_MYSQL_URL: {{ printf "mysql://root@%s.%s.svc.cluster.local:%d/djinn" (include "djinn.serviceName.mysql" .) (include "djinn.namespace" .) (.Values.mysql.service.port | int) | quote }}
   {{- end }}
   {{- if .Values.qdrant.enabled }}
   QDRANT_URL: {{ printf "http://%s.%s.svc.cluster.local:%d" (include "djinn.serviceName.qdrant" .) (include "djinn.namespace" .) (.Values.qdrant.service.grpcPort | int) | quote }}

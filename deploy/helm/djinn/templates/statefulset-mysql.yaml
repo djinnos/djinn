@@ -1,0 +1,99 @@
+{{- if .Values.mysql.enabled -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "djinn.serviceName.mysql" . }}
+  namespace: {{ include "djinn.namespace" . }}
+  labels:
+    {{- include "djinn.mysql.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "djinn.serviceName.mysql" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "djinn.mysql.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "djinn.mysql.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: mysql
+          image: {{ .Values.mysql.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # mysql:8.4 reads server args from CMD when they're passed through
+          # the entrypoint. Surfacing them here keeps tuning visible (and
+          # chart-controlled) rather than baking them into a custom my.cnf
+          # ConfigMap.
+          args:
+            - --innodb-buffer-pool-size={{ .Values.mysql.config.innodbBufferPoolSize }}
+            - --max-connections={{ .Values.mysql.config.maxConnections }}
+            - --default-time-zone=+00:00
+            - --character-set-server=utf8mb4
+            - --collation-server=utf8mb4_0900_ai_ci
+            - --skip-name-resolve
+            # Durability over throughput — InnoDB fsyncs the redo log on
+            # every commit. Switch to `2` for staging only if we ever
+            # benchmark a workload that's bottlenecked on fsync latency.
+            - --innodb-flush-log-at-trx-commit=1
+          env:
+            # Kind/internal-only cluster: empty root password matches the
+            # bundled-Dolt UX. Override `mysql.auth.rootPassword` in values
+            # to set MYSQL_ROOT_PASSWORD instead.
+            {{- if .Values.mysql.auth.rootPassword }}
+            - name: MYSQL_ROOT_PASSWORD
+              value: {{ .Values.mysql.auth.rootPassword | quote }}
+            {{- else }}
+            - name: MYSQL_ALLOW_EMPTY_PASSWORD
+              value: "yes"
+            {{- end }}
+            - name: MYSQL_DATABASE
+              value: "djinn"
+          ports:
+            - name: mysql
+              containerPort: {{ .Values.mysql.service.port }}
+              protocol: TCP
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+          # `mysqladmin ping` over TCP returns OK as soon as InnoDB has
+          # finished startup and is accepting connections — the right
+          # "ready for traffic" signal for the pre-upgrade migrate Job
+          # and the server Deployment to dial.
+          readinessProbe:
+            exec:
+              command:
+                - mysqladmin
+                - ping
+                - -h
+                - 127.0.0.1
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - mysqladmin
+                - ping
+                - -h
+                - 127.0.0.1
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.mysql.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - {{ .Values.mysql.storage.accessMode }}
+        resources:
+          requests:
+            storage: {{ .Values.mysql.storage.size }}
+        {{- with .Values.mysql.storage.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+{{- end -}}
