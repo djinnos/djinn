@@ -91,6 +91,53 @@ async fn enable_auto_merge_success() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enqueue_pull_request_success() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(header("Authorization", "Bearer ghs_test_install"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "enqueuePullRequest": {
+                    "mergeQueueEntry": { "id": "MQE_test", "state": "QUEUED" }
+                }
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    client
+        .enqueue_pull_request("PR_node789", "abc123def456")
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enqueue_pull_request_propagates_graphql_error() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "errors": [{ "message": "Pull request is not in a mergeable state" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let err = client
+        .enqueue_pull_request("PR_node789", "abc123def456")
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("GraphQL error"), "got: {err}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mark_pr_ready_for_review_uses_graphql_mutation() {
     let server = MockServer::start().await;
     let install_id = seed_installation_token();

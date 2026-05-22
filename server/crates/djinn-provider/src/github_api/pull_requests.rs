@@ -289,6 +289,73 @@ impl GitHubApiClient {
         Ok(())
     }
 
+    /// Enqueue a pull request into the repository merge queue.
+    ///
+    /// Unlike [`Self::enable_auto_merge`] this mutation does not require
+    /// the repo's "Allow auto-merge" setting to be on — it works on any
+    /// repo whose protected branch enforces a merge queue. Used as the
+    /// fallback when `PUT /pulls/{n}/merge` returns 405 because the
+    /// branch protection routes everything through the queue.
+    ///
+    /// `expected_head_oid` pins the enqueue to the SHA we observed:
+    /// if a new commit landed in the meantime, GitHub rejects the
+    /// mutation instead of queuing a stale ref.
+    pub async fn enqueue_pull_request(
+        &self,
+        pull_request_node_id: &str,
+        expected_head_oid: &str,
+    ) -> Result<()> {
+        let query = r#"
+            mutation EnqueuePullRequest($pullRequestId: ID!, $expectedHeadOid: GitObjectID) {
+                enqueuePullRequest(input: {
+                    pullRequestId: $pullRequestId,
+                    expectedHeadOid: $expectedHeadOid
+                }) {
+                    mergeQueueEntry { id state }
+                }
+            }
+        "#;
+
+        let body = serde_json::json!({
+            "query": query,
+            "variables": {
+                "pullRequestId": pull_request_node_id,
+                "expectedHeadOid": expected_head_oid,
+            }
+        });
+
+        let base_url = self.base_url.clone();
+        let resp = self
+            .send_with_retry(|token| {
+                let body = body.clone();
+                let http = self.http.clone();
+                let base_url = base_url.clone();
+                async move {
+                    let graphql_url = format!("{}/graphql", base_url);
+                    let resp = http
+                        .post(&graphql_url)
+                        .bearer_auth(&token)
+                        .json(&body)
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("enqueue_pull_request failed ({}): {}", status, body));
+        }
+
+        let json: serde_json::Value = resp.json().await?;
+        if let Some(errors) = json.get("errors") {
+            return Err(anyhow!("enqueue_pull_request GraphQL error: {}", errors));
+        }
+        Ok(())
+    }
+
     /// Remove a pull request from the repository merge queue.
     ///
     /// `merge_queue_entry_id` is [`MergeQueueEntry::id`] from a prior

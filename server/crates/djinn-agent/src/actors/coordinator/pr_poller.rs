@@ -387,6 +387,7 @@ impl CoordinatorActor {
                     .await;
                 self.pr_status_cache.remove(&task.id);
                 self.merge_fail_count.remove(&task.id);
+                self.delegated_to_github.remove(&task.id);
                 continue;
             }
 
@@ -405,6 +406,7 @@ impl CoordinatorActor {
                 .await;
                 self.pr_status_cache.remove(&task.id);
                 self.merge_fail_count.remove(&task.id);
+                self.delegated_to_github.remove(&task.id);
                 continue;
             }
 
@@ -468,6 +470,7 @@ impl CoordinatorActor {
                 .await;
                 self.pr_status_cache.remove(&task.id);
                 self.merge_fail_count.remove(&task.id);
+                self.delegated_to_github.remove(&task.id);
                 continue;
             }
 
@@ -523,6 +526,7 @@ impl CoordinatorActor {
                     .await;
                     self.pr_status_cache.remove(&task.id);
                     self.merge_fail_count.remove(&task.id);
+                    self.delegated_to_github.remove(&task.id);
                     continue;
                 }
 
@@ -555,6 +559,7 @@ impl CoordinatorActor {
                 .await;
                 self.pr_status_cache.remove(&task.id);
                 self.merge_fail_count.remove(&task.id);
+                self.delegated_to_github.remove(&task.id);
                 continue;
             }
 
@@ -602,9 +607,13 @@ impl CoordinatorActor {
                         // Head SHA will change; invalidate the CI cache so
                         // next tick re-checks against the new commit, and
                         // reset merge_fail_count since we're not actually
-                        // attempting a merge this tick.
+                        // attempting a merge this tick. Clear the
+                        // delegated-to-GitHub marker too — the queue
+                        // entry was pinned to the prior SHA and is now
+                        // invalidated by update-branch.
                         self.pr_status_cache.remove(&task.id);
                         self.merge_fail_count.remove(&task.id);
+                        self.delegated_to_github.remove(&task.id);
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -618,19 +627,25 @@ impl CoordinatorActor {
                 continue;
             }
 
-            // ── Auto-approve (per-user opt-in) ────────────────────────────────
-            // When the task's creator has `auto_approve_prs=true` and we have
-            // their live GitHub session token, POST an APPROVE review using
-            // their identity. Branch protection's "1 approval required" gate
-            // is what's left between us and the merge; the next poller tick
-            // sees the new approval state and falls through to the merge call
-            // naturally. Pinning `commit_id = current_sha` means a fresh push
-            // automatically invalidates the approval.
+            // ── Auto-approve (per-user opt-in, with fallback approver) ────────
+            // When some user has `auto_approve_prs=true` and we have their
+            // live GitHub session token, POST an APPROVE review using their
+            // identity. Branch protection's "1 approval required" gate is
+            // what's left between us and the merge; the next poller tick
+            // sees the new approval state and falls through to the merge
+            // call naturally. Pinning `commit_id = current_sha` means a
+            // fresh push automatically invalidates the approval.
+            //
+            // Approver selection (see `find_auto_approver_session`):
+            //   1. The task's `created_by_user_id` if that user has the
+            //      toggle on and a live session.
+            //   2. Otherwise, any user with the toggle on and a live
+            //      session — needed for tasks spawned by background
+            //      agents (Planner/Architect/auto-breakdown) whose
+            //      `created_by_user_id IS NULL`.
             //
             // Skipped silently when:
-            //  - the task is background-agent-created (`created_by_user_id IS NULL`)
-            //  - the user has the toggle off (or `user_settings` row missing)
-            //  - the user's session is expired or absent (we don't store refresh tokens)
+            //  - no user has the toggle on, or none has a live session
             //  - an approve attempt was already made on this exact SHA
             //  - we already have an approval (re-approving is a no-op anyway)
             if !has_approved
@@ -638,129 +653,106 @@ impl CoordinatorActor {
                     .auto_approve_attempted
                     .get(&task.id)
                     .is_none_or(|sha| sha != &current_sha)
-                && let Some(user_id) = self.task_created_by_user_id(&task.id).await
+                && let Some((user_id, session)) =
+                    self.find_auto_approver_session(&task.id, &task.short_id).await
             {
-                let us_repo = UserSettingsRepository::new(self.db.clone());
-                let toggle = match us_repo.get_or_default(&user_id).await {
-                    Ok(s) => s.auto_approve_prs,
-                    Err(e) => {
-                        tracing::warn!(
-                            task_id = %task.short_id,
-                            user_id = %user_id,
-                            error = %e,
-                            "PR poller: user_settings read failed; skipping auto-approve"
+                // Build a refreshable client when App OAuth creds are
+                // visible to this process — that lets the transport
+                // rotate the access/refresh pair transparently on 401
+                // instead of asking the user to re-sign in every 8 hours.
+                // If creds aren't available we degrade to the legacy
+                // non-refreshable client; a 401 will then hard-evict the
+                // session row and the next UI hit bounces to login.
+                let user_client = match github_app_user::client_credentials_from_env() {
+                    Some((cid, secret)) => GitHubApiClient::for_user_session(
+                        session.github_access_token.clone(),
+                        DbBackedRefresher::new(
+                            self.db.clone(),
+                            session.token.clone(),
+                            cid,
+                            secret,
+                        )
+                        .into_arc(),
+                    ),
+                    None => {
+                        tracing::debug!(
+                            "PR poller: GITHUB_APP_CLIENT_ID/SECRET unset; \
+                             constructing non-refreshable user client"
                         );
-                        false
+                        GitHubApiClient::for_user_token(session.github_access_token.clone())
                     }
                 };
-                if toggle {
-                    let sa_repo = SessionAuthRepository::new(self.db.clone());
-                    let live_session = match sa_repo.latest_token_for_user(&user_id).await {
-                        Ok(s) => s,
-                        Err(e) => {
+                match user_client
+                    .approve_pull_request(&owner, &repo, pull_number, &current_sha)
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            user_id = %user_id,
+                            pr = pull_number,
+                            sha = %current_sha,
+                            "PR poller: auto-approved PR on user's behalf"
+                        );
+                        self.auto_approve_attempted
+                            .insert(task.id.clone(), current_sha.clone());
+                        self.pr_status_cache.remove(&task.id);
+                        continue;
+                    }
+                    Err(e) => {
+                        // Suppress regardless of failure mode — same SHA
+                        // shouldn't be retried until a fresh push lands.
+                        self.auto_approve_attempted
+                            .insert(task.id.clone(), current_sha.clone());
+                        if e.downcast_ref::<UserTokenExpired>().is_some() {
+                            tracing::info!(
+                                task_id = %task.short_id,
+                                user_id = %user_id,
+                                pr = pull_number,
+                                "PR poller: auto-approve skipped — user token expired (sign in to re-arm)"
+                            );
+                        } else {
                             tracing::warn!(
                                 task_id = %task.short_id,
                                 user_id = %user_id,
+                                pr = pull_number,
                                 error = %e,
-                                "PR poller: session lookup failed; skipping auto-approve"
+                                "PR poller: auto-approve failed; falling through to wait for human approval"
                             );
-                            None
                         }
-                    };
-                    if let Some(session) = live_session {
-                        // Build a refreshable client when App OAuth creds
-                        // are visible to this process — that lets the
-                        // transport rotate the access/refresh pair
-                        // transparently on 401 instead of asking the user
-                        // to re-sign in every 8 hours. If creds aren't
-                        // available we degrade to the legacy non-refreshable
-                        // client; a 401 will then hard-evict the session
-                        // row and the next UI hit bounces to login.
-                        let user_client = match github_app_user::client_credentials_from_env() {
-                            Some((cid, secret)) => GitHubApiClient::for_user_session(
-                                session.github_access_token.clone(),
-                                DbBackedRefresher::new(
-                                    self.db.clone(),
-                                    session.token.clone(),
-                                    cid,
-                                    secret,
-                                )
-                                .into_arc(),
-                            ),
-                            None => {
-                                tracing::debug!(
-                                    "PR poller: GITHUB_APP_CLIENT_ID/SECRET unset; \
-                                     constructing non-refreshable user client"
-                                );
-                                GitHubApiClient::for_user_token(session.github_access_token.clone())
-                            }
-                        };
-                        match user_client
-                            .approve_pull_request(&owner, &repo, pull_number, &current_sha)
-                            .await
-                        {
-                            Ok(()) => {
-                                tracing::info!(
-                                    task_id = %task.short_id,
-                                    user_id = %user_id,
-                                    pr = pull_number,
-                                    sha = %current_sha,
-                                    "PR poller: auto-approved PR on user's behalf"
-                                );
-                                self.auto_approve_attempted
-                                    .insert(task.id.clone(), current_sha.clone());
-                                self.pr_status_cache.remove(&task.id);
-                                continue;
-                            }
-                            Err(e) => {
-                                // Suppress regardless of failure mode — same
-                                // SHA shouldn't be retried until the user
-                                // pushes a new commit.
-                                self.auto_approve_attempted
-                                    .insert(task.id.clone(), current_sha.clone());
-                                if e.downcast_ref::<UserTokenExpired>().is_some() {
-                                    tracing::info!(
-                                        task_id = %task.short_id,
-                                        user_id = %user_id,
-                                        pr = pull_number,
-                                        "PR poller: auto-approve skipped — user token expired (sign in to re-arm)"
-                                    );
-                                } else {
-                                    tracing::warn!(
-                                        task_id = %task.short_id,
-                                        user_id = %user_id,
-                                        pr = pull_number,
-                                        error = %e,
-                                        "PR poller: auto-approve failed; falling through to wait for human approval"
-                                    );
-                                }
-                                // Fall through to the merge attempt below —
-                                // GitHub will reject if branch protection
-                                // requires an approval, which surfaces as a
-                                // normal merge failure in the existing path.
-                            }
-                        }
-                    } else {
-                        tracing::debug!(
-                            task_id = %task.short_id,
-                            user_id = %user_id,
-                            "PR poller: auto-approve skipped — no live session token for user"
-                        );
+                        // Fall through to the merge attempt below —
+                        // GitHub will reject if branch protection requires
+                        // an approval, which surfaces as a normal merge
+                        // failure in the existing path.
                     }
                 }
             }
 
-            // ── Merge path: auto-merge (queue-aware) or legacy direct ─────────
-            // When GitHub's native auto-merge is enabled on the PR, GitHub
-            // handles the timing: it waits for approvals + checks, then
-            // either merges directly or enqueues into the repository merge
-            // queue. We just observe; on `UNMERGEABLE` or a failure-flavored
-            // dequeue event we surface it as `PrCiFailed`.
+            // ── Merge path: delegated-to-GitHub vs legacy direct merge ────────
+            // Three modes, picked in order:
             //
-            // When auto-merge isn't enabled (older PR, repo doesn't support
-            // it, mutation failed at undraft time), we fall back to the
-            // legacy REST merge call.
-            if pr.auto_merge.is_some() {
+            //   (a) GitHub already owns the PR's merge timing — either
+            //       `enablePullRequestAutoMerge` succeeded earlier (`pr.auto_merge`
+            //       is set) OR we explicitly enqueued the PR into the merge
+            //       queue on a previous tick (tracked in `delegated_to_github`
+            //       keyed by SHA so a new push re-enters this branch). Just
+            //       observe; on `UNMERGEABLE` or a failure-flavored dequeue
+            //       event the observer surfaces `PrCiFailed`.
+            //
+            //   (b) REST `PUT /pulls/{n}/merge` succeeds — repos without
+            //       merge-queue branch protection. Close the task.
+            //
+            //   (c) REST returns the merge-queue 405 — repo enforces a
+            //       merge queue. We call `enqueuePullRequest` directly
+            //       (works regardless of the repo's "Allow auto-merge"
+            //       setting; `enable_auto_merge_best_effort` from undraft
+            //       time often hits `UNPROCESSABLE` and is unreliable).
+            //       Then mark delegated and observe next tick.
+            let delegated_for_current_sha = self
+                .delegated_to_github
+                .get(&task.id)
+                .is_some_and(|sha| sha == &current_sha);
+            if pr.auto_merge.is_some() || delegated_for_current_sha {
                 self.observe_auto_merge_state(
                     gh_client,
                     &task.id,
@@ -772,6 +764,11 @@ impl CoordinatorActor {
                 )
                 .await;
                 continue;
+            }
+            // SHA moved since we last delegated — drop the stale entry so a
+            // fresh enqueue attempt fires below.
+            if self.delegated_to_github.contains_key(&task.id) {
+                self.delegated_to_github.remove(&task.id);
             }
 
             // Either approved or no reviews — attempt squash merge.
@@ -796,31 +793,60 @@ impl CoordinatorActor {
                         .await;
                     self.pr_status_cache.remove(&task.id);
                     self.merge_fail_count.remove(&task.id);
+                    self.delegated_to_github.remove(&task.id);
                 }
                 Err(e) => {
-                    // Merge-queue 405: the repo has a merge queue configured
-                    // and either someone else enqueued the PR or branch
-                    // protection routed our REST call through the queue.
-                    // Treat as "GitHub is handling it" — don't count as a
-                    // failure and try auto-merge enablement on the next tick.
+                    // Merge-queue 405: the repo's branch protection routes
+                    // everything through a merge queue. The REST merge
+                    // endpoint is not allowed here — directly enqueue the
+                    // PR via GraphQL `enqueuePullRequest`, which works
+                    // regardless of the repo's "Allow auto-merge" setting.
                     if is_merge_queue_405(&e) {
-                        tracing::info!(
-                            task_id = %task.short_id,
-                            pr = pull_number,
-                            "PR poller: PR is already in merge queue — switching to observe mode"
-                        );
-                        // Best-effort: enable auto-merge so future ticks
-                        // hit the auto-merge observer path and stop trying
-                        // the REST merge endpoint.
-                        enable_auto_merge_best_effort(
-                            gh_client,
-                            &task.short_id,
-                            pull_number,
-                            &pr.node_id,
-                            &pr.title,
-                        )
-                        .await;
-                        self.merge_fail_count.remove(&task.id);
+                        match gh_client
+                            .enqueue_pull_request(&pr.node_id, &current_sha)
+                            .await
+                        {
+                            Ok(()) => {
+                                tracing::info!(
+                                    task_id = %task.short_id,
+                                    pr = pull_number,
+                                    sha = %current_sha,
+                                    "PR poller: enqueued PR into merge queue — switching to observe mode"
+                                );
+                                self.delegated_to_github
+                                    .insert(task.id.clone(), current_sha.clone());
+                                self.merge_fail_count.remove(&task.id);
+                            }
+                            Err(enqueue_err) => {
+                                // Enqueue failed (PR not ready: missing
+                                // approval, failing checks, etc.). Don't
+                                // mark delegated — next tick re-checks
+                                // upstream gates and tries again. Bump
+                                // merge_fail_count so the cache-invalidate
+                                // threshold still kicks in on persistent
+                                // failure.
+                                let count =
+                                    self.merge_fail_count.entry(task.id.clone()).or_insert(0);
+                                *count += 1;
+                                tracing::warn!(
+                                    task_id = %task.short_id,
+                                    pr = pull_number,
+                                    attempt = *count,
+                                    error = %enqueue_err,
+                                    "PR poller: enqueue_pull_request failed (will retry next tick)"
+                                );
+                                if *count >= MERGE_RETRY_RECHECK_THRESHOLD {
+                                    tracing::info!(
+                                        task_id = %task.short_id,
+                                        pr = pull_number,
+                                        "PR poller: {} consecutive enqueue failures, invalidating CI cache for re-check",
+                                        *count
+                                    );
+                                    self.pr_status_cache.remove(&task.id);
+                                    *count = 0;
+                                }
+                            }
+                        }
                         continue;
                     }
 
@@ -1025,6 +1051,7 @@ impl CoordinatorActor {
         .await;
         self.pr_status_cache.remove(task_id);
         self.merge_fail_count.remove(task_id);
+        self.delegated_to_github.remove(task_id);
     }
 
     /// Attach PR review feedback to the task activity log, increment the
@@ -1641,6 +1668,105 @@ impl CoordinatorActor {
                 "PR poller: failed to log CI failure comment"
             );
         }
+    }
+
+    /// Resolve a user identity + live GitHub session that can act as an
+    /// auto-approver for the given task's PR.
+    ///
+    /// Tried in order:
+    ///   1. The task's `created_by_user_id` (when set) — the most natural
+    ///      "approve as the person who asked for this work" path.
+    ///   2. Any user with `auto_approve_prs = true` and a non-expired
+    ///      session, most-recently-updated first. Needed for background-
+    ///      agent-spawned tasks (Planner / Architect / auto-breakdown
+    ///      output) whose `created_by_user_id` is NULL — without this
+    ///      fallback those PRs would sit in `pr_review` forever.
+    ///
+    /// Returns `None` when nobody opted in, or when every opted-in user's
+    /// session has expired. Logs the outcome at debug for visibility.
+    async fn find_auto_approver_session(
+        &self,
+        task_id: &str,
+        task_short_id: &str,
+    ) -> Option<(String, djinn_db::UserAuthSessionRecord)> {
+        let us_repo = UserSettingsRepository::new(self.db.clone());
+        let sa_repo = SessionAuthRepository::new(self.db.clone());
+
+        // Try the task's creator first.
+        if let Some(user_id) = self.task_created_by_user_id(task_id).await {
+            let toggle = match us_repo.get_or_default(&user_id).await {
+                Ok(s) => s.auto_approve_prs,
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task_short_id,
+                        user_id = %user_id,
+                        error = %e,
+                        "PR poller: user_settings read failed; will try fallback approver"
+                    );
+                    false
+                }
+            };
+            if toggle {
+                match sa_repo.latest_token_for_user(&user_id).await {
+                    Ok(Some(session)) => return Some((user_id, session)),
+                    Ok(None) => {
+                        tracing::debug!(
+                            task_id = %task_short_id,
+                            user_id = %user_id,
+                            "PR poller: task creator has no live session; trying fallback approver"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            task_id = %task_short_id,
+                            user_id = %user_id,
+                            error = %e,
+                            "PR poller: session lookup failed for task creator; trying fallback approver"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Fallback: any opted-in user with a live session.
+        let candidates = match us_repo.list_users_with_auto_approve().await {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_short_id,
+                    error = %e,
+                    "PR poller: list_users_with_auto_approve failed; skipping fallback approver"
+                );
+                return None;
+            }
+        };
+        for uid in candidates {
+            match sa_repo.latest_token_for_user(&uid).await {
+                Ok(Some(session)) => {
+                    tracing::debug!(
+                        task_id = %task_short_id,
+                        user_id = %uid,
+                        "PR poller: selected fallback auto-approver"
+                    );
+                    return Some((uid, session));
+                }
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task_short_id,
+                        user_id = %uid,
+                        error = %e,
+                        "PR poller: session lookup failed for fallback approver candidate"
+                    );
+                }
+            }
+        }
+
+        tracing::debug!(
+            task_id = %task_short_id,
+            "PR poller: no eligible auto-approver (nobody opted in with a live session)"
+        );
+        None
     }
 
     /// Side-query for the task's `created_by_user_id` column. The `Task`

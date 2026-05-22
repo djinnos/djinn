@@ -37,6 +37,25 @@ impl UserSettingsRepository {
             .unwrap_or_else(|| UserSettings::defaults_for(user_id)))
     }
 
+    /// Return user IDs of every user with `auto_approve_prs = true`, most
+    /// recently updated first.
+    ///
+    /// Used by the PR poller's fallback approver path: when a task has no
+    /// `created_by_user_id` (background-agent-spawned) we still want to
+    /// auto-approve on behalf of an opted-in human. Phase 0 deployments
+    /// typically have a single human user so this list has length 0 or 1.
+    pub async fn list_users_with_auto_approve(&self) -> Result<Vec<String>> {
+        self.db.ensure_initialized().await?;
+        let rows = sqlx::query!(
+            "SELECT user_id FROM user_settings \
+             WHERE auto_approve_prs = TRUE \
+             ORDER BY updated_at DESC",
+        )
+        .fetch_all(self.db.pool())
+        .await?;
+        Ok(rows.into_iter().map(|r| r.user_id).collect())
+    }
+
     /// Upsert the `auto_approve_prs` toggle. Returns the resulting row.
     pub async fn upsert_auto_approve_prs(
         &self,
@@ -121,6 +140,25 @@ mod tests {
             .unwrap();
         assert!(!updated.auto_approve_prs);
         assert_eq!(updated.user_id, user_id);
+    }
+
+    #[tokio::test]
+    async fn list_users_with_auto_approve_returns_only_opted_in_users() {
+        let db = Database::open_in_memory().expect("in-memory db");
+        let user_off = seed_user(&db, "off").await;
+        let user_on_a = seed_user(&db, "on-a").await;
+        let user_on_b = seed_user(&db, "on-b").await;
+        let repo = UserSettingsRepository::new(db);
+
+        repo.upsert_auto_approve_prs(&user_off, false).await.unwrap();
+        repo.upsert_auto_approve_prs(&user_on_a, true).await.unwrap();
+        repo.upsert_auto_approve_prs(&user_on_b, true).await.unwrap();
+
+        let ids = repo.list_users_with_auto_approve().await.unwrap();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&user_on_a));
+        assert!(ids.contains(&user_on_b));
+        assert!(!ids.contains(&user_off));
     }
 
     #[tokio::test]

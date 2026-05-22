@@ -462,6 +462,7 @@ mod tests {
             pr_draft_first_seen: std::collections::HashMap::new(),
             merge_fail_count: std::collections::HashMap::new(),
             auto_approve_attempted: std::collections::HashMap::new(),
+            delegated_to_github: std::collections::HashMap::new(),
             stall_killed: std::collections::HashSet::new(),
             last_idle_consolidation: None,
             idle_consolidation_cancel: None,

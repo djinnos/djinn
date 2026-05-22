@@ -117,6 +117,14 @@ pub(super) struct CoordinatorActor {
     /// it yet. Stale entries are harmless: a new push bumps the SHA and we
     /// retry once on the new commit.
     pub(super) auto_approve_attempted: HashMap<String, String>,
+    /// task_id → head SHA at the time we handed the PR off to GitHub
+    /// (either via auto-merge enablement or direct merge-queue enqueue).
+    /// While this entry is present the poller stays in observe-mode and
+    /// does not re-attempt the REST merge call. Cleared on:
+    ///   * PR merge / close (success)
+    ///   * SHA change (a new push invalidated GitHub's queue entry)
+    ///   * Merge-queue rejection (`PrCiFailed` reopens the task)
+    pub(super) delegated_to_github: HashMap<String, String>,
     /// Task IDs for which a stall-kill has already been issued.  Prevents
     /// repeated kill + activity-log spam while the async lifecycle cleanup
     /// is still in progress (the DB session record stays `running` until
@@ -198,6 +206,7 @@ impl CoordinatorActor {
             pr_draft_first_seen: HashMap::new(),
             merge_fail_count: HashMap::new(),
             auto_approve_attempted: HashMap::new(),
+            delegated_to_github: HashMap::new(),
             stall_killed: HashSet::new(),
             last_idle_consolidation: None,
             idle_consolidation_cancel: None,
