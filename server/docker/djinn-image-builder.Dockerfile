@@ -19,6 +19,24 @@
 
 FROM moby/buildkit:v0.15.2 AS buildkit
 
+# Cloud registry credential helpers. The build pod's `buildctl` reads
+# `~/.docker/config.json` (sourced from the chart-rendered registry-auth
+# Secret) which carries a `credHelpers` entry like
+# `"<account>.dkr.ecr.<region>.amazonaws.com": "ecr-login"`. buildctl
+# invokes the helper binary locally (not on buildkitd) to resolve a token
+# per push, so the helper has to be in this image's PATH or every ECR
+# push fails with `exec: "docker-credential-ecr-login": executable file
+# not found in $PATH`. djinn-buildkitd bakes in the same helper for
+# parity with the few buildkit code paths that auth server-side.
+FROM alpine:3.20 AS helpers
+
+ARG ECR_CRED_HELPER_VERSION=0.9.0
+
+RUN apk add --no-cache curl ca-certificates \
+    && curl -fsSL -o /docker-credential-ecr-login \
+       "https://amazon-ecr-credential-helper-releases.s3.amazonaws.com/${ECR_CRED_HELPER_VERSION}/linux-amd64/docker-credential-ecr-login" \
+    && chmod 0755 /docker-credential-ecr-login
+
 FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -31,3 +49,4 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=buildkit /usr/bin/buildctl /usr/local/bin/buildctl
+COPY --from=helpers  /docker-credential-ecr-login /usr/local/bin/docker-credential-ecr-login
