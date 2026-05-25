@@ -20,6 +20,12 @@ const DEFAULT_NAMESPACE: &str = "djinn";
 const DEFAULT_REGISTRY_AUTH_SECRET: &str = "djinn-zot-auth";
 /// Default PVC claim name holding the per-project bare mirrors.
 const DEFAULT_MIRROR_PVC: &str = "djinn-mirrors";
+/// Default ServiceAccount the build Pod runs under. The build Pod has to
+/// authenticate to a managed registry (ECR/GCR/ACR) via the cluster's
+/// IRSA-style annotations on this SA — see
+/// `deploy/helm/djinn/templates/serviceaccount-controller.yaml`. If left
+/// unset, K8s falls back to `default` (no IRSA → 401 Unauthorized on push).
+const DEFAULT_BUILD_SERVICE_ACCOUNT: &str = "djinn-controller";
 /// Default concurrency cap — matches the Helm values default.
 const DEFAULT_MAX_CONCURRENT: usize = 3;
 
@@ -33,6 +39,7 @@ pub mod env {
     pub const NAMESPACE: &str = "DJINN_IMAGE_NAMESPACE";
     pub const REGISTRY_AUTH_SECRET: &str = "DJINN_IMAGE_REGISTRY_AUTH_SECRET";
     pub const MIRROR_PVC: &str = "DJINN_IMAGE_MIRROR_PVC";
+    pub const BUILD_SERVICE_ACCOUNT: &str = "DJINN_IMAGE_BUILD_SERVICE_ACCOUNT";
 }
 
 /// Runtime configuration for [`crate::ImageController`].
@@ -67,6 +74,12 @@ pub struct ImageControllerConfig {
     /// Enforced via a tokio [`tokio::sync::Semaphore`] — in-flight guards
     /// prevent duplicate enqueues for the same project.
     pub max_concurrent: usize,
+    /// ServiceAccount the build Pod runs under. Has to carry the cluster's
+    /// IRSA / Workload-Identity annotation so the docker credential helper
+    /// in the build Pod can authenticate to the managed registry. Defaults
+    /// to `djinn-controller` so behavior matches the rest of the chart's
+    /// controller-dispatched Jobs.
+    pub build_service_account: String,
 }
 
 impl ImageControllerConfig {
@@ -81,6 +94,7 @@ impl ImageControllerConfig {
             registry_auth_secret: DEFAULT_REGISTRY_AUTH_SECRET.into(),
             mirror_pvc: DEFAULT_MIRROR_PVC.into(),
             max_concurrent: DEFAULT_MAX_CONCURRENT,
+            build_service_account: DEFAULT_BUILD_SERVICE_ACCOUNT.into(),
         }
     }
 
@@ -111,6 +125,9 @@ impl ImageControllerConfig {
         }
         if let Ok(v) = std::env::var(env::MIRROR_PVC) {
             cfg.mirror_pvc = v;
+        }
+        if let Ok(v) = std::env::var(env::BUILD_SERVICE_ACCOUNT) {
+            cfg.build_service_account = v;
         }
         if let Ok(v) = std::env::var(env::MAX_CONCURRENT) {
             match v.parse::<usize>().and_then(validate_positive) {

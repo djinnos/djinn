@@ -264,8 +264,15 @@ exec buildctl \
         },
     ];
 
+    // The build Pod has to authenticate to a managed registry (ECR/GCR/
+    // ACR) via the docker credential helper baked into djinn-image-builder.
+    // Helpers walk the AWS/GCP/Azure SDK env that's injected by IRSA /
+    // Workload-Identity webhooks based on the Pod's ServiceAccount. With
+    // no SA set, K8s falls back to `default` (no annotation, no token) and
+    // every push ends in `401 Unauthorized`.
     let pod_spec = PodSpec {
         restart_policy: Some("Never".to_string()),
+        service_account_name: Some(config.build_service_account.clone()),
         containers: vec![container],
         volumes: Some(volumes),
         ..PodSpec::default()
@@ -449,6 +456,26 @@ mod tests {
                 "missing script item path: {path}"
             );
         }
+    }
+
+    #[test]
+    fn builds_job_uses_configured_service_account() {
+        // Default SA carries no IRSA annotation, so without an explicit
+        // serviceAccountName the build Pod can't authenticate to managed
+        // registries (ECR/GCR/ACR) and every push 401s.
+        let mut cfg = test_cfg();
+        cfg.build_service_account = "custom-build-sa".into();
+        let ctx = test_build_context();
+        let job = build_image_build_job(&cfg, "p", "abc123", "reg/p:abc123", &ctx);
+        let pod = job
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap();
+        assert_eq!(pod.service_account_name.as_deref(), Some("custom-build-sa"));
     }
 
     #[test]

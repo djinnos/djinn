@@ -134,6 +134,14 @@ spec:
               value: {{ include "djinn.imagePipeline.buildkitdHost" . | quote }}
             - name: DJINN_IMAGE_NAMESPACE
               value: {{ include "djinn.namespace" . | quote }}
+            # SA the build Pod runs under. Must carry the cluster's IRSA /
+            # Workload-Identity annotation so the docker credential helper
+            # baked into djinn-image-builder can authenticate to the managed
+            # registry (ECR/GCR/ACR). Reusing djinn-controller (the SA the
+            # server itself runs as) keeps the build Pod inside the same
+            # trust boundary as its dispatcher.
+            - name: DJINN_IMAGE_BUILD_SERVICE_ACCOUNT
+              value: {{ include "djinn.serviceAccountName.controller" . | quote }}
             - name: DJINN_IMAGE_REGISTRY_AUTH_SECRET
               value: {{ include "djinn.imagePipeline.registryAuthSecretName" . | quote }}
             - name: DJINN_IMAGE_MIRROR_PVC
