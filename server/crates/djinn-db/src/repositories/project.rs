@@ -541,8 +541,10 @@ impl ProjectRepository {
                     )))?;
                 // Non-macro UPDATE because the column post-dates the
                 // sqlx offline cache baseline (migration 12).
+                // `$1::jsonb` cast required: bind is `&str`, column is JSONB.
+                // sqlx::query (non-macro) doesn't auto-cast like the macro form.
                 sqlx::query(
-                    "UPDATE projects SET graph_excluded_paths = $1 WHERE id = $2",
+                    "UPDATE projects SET graph_excluded_paths = $1::jsonb WHERE id = $2",
                 )
                 .bind(&canonical)
                 .bind(id)
@@ -555,7 +557,7 @@ impl ProjectRepository {
                         "graph_orphan_ignore: {e}"
                     )))?;
                 sqlx::query(
-                    "UPDATE projects SET graph_orphan_ignore = $1 WHERE id = $2",
+                    "UPDATE projects SET graph_orphan_ignore = $1::jsonb WHERE id = $2",
                 )
                 .bind(&canonical)
                 .bind(id)
@@ -696,9 +698,10 @@ impl ProjectRepository {
         environment_config_json: &str,
     ) -> Result<()> {
         self.db.ensure_initialized().await?;
+        // `$1::jsonb` cast required: bind is `&str`, column is JSONB.
         sqlx::query(
             "UPDATE projects
-                SET environment_config = $1,
+                SET environment_config = $1::jsonb,
                     image_hash = NULL
               WHERE id = $2",
         )
