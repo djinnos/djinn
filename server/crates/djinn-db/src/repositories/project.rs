@@ -468,9 +468,15 @@ impl ProjectRepository {
         // `environment_config` / `graph_warmed_at` which also post-date
         // the cache baseline.
         use sqlx::Row;
+        // NOTE: column aliases are bare names (no `!`). The `"col!"`
+        // non-null-override syntax is a `sqlx::query!`-MACRO feature only —
+        // outside the macro it becomes part of the literal column name and
+        // breaks `row.try_get("col")` lookups (previously silently fell
+        // back to `unwrap_or_default()`, losing real data).
         let row = sqlx::query(
             r#"SELECT target_branch, auto_merge, sync_enabled, sync_remote,
-                    graph_excluded_paths::text AS "graph_excluded_paths!", graph_orphan_ignore::text AS "graph_orphan_ignore!"
+                    graph_excluded_paths::text AS graph_excluded_paths,
+                    graph_orphan_ignore::text AS graph_orphan_ignore
                FROM projects WHERE id = $1"#,
         )
         .bind(id)
@@ -662,8 +668,9 @@ impl ProjectRepository {
     /// been applied, which is what the caller wants.
     pub async fn get_environment_config(&self, project_id: &str) -> Result<Option<String>> {
         self.db.ensure_initialized().await?;
+        // Bare alias — `"col!"` is macro-only syntax (see get_config note).
         Ok(sqlx::query_scalar::<_, String>(
-            r#"SELECT environment_config::text AS "environment_config!" FROM projects WHERE id = $1"#,
+            r#"SELECT environment_config::text AS environment_config FROM projects WHERE id = $1"#,
         )
         .bind(project_id)
         .fetch_optional(self.db.pool())
@@ -711,8 +718,9 @@ impl ProjectRepository {
     /// the reason.
     pub async fn list_for_reseed(&self) -> Result<Vec<ProjectReseedRow>> {
         self.db.ensure_initialized().await?;
+        // Bare aliases — `"col!"` is macro-only syntax (see get_config note).
         Ok(sqlx::query_as::<_, ProjectReseedRow>(
-            r#"SELECT id, stack::text AS "stack!", environment_config::text AS "environment_config!" FROM projects"#,
+            r#"SELECT id, stack::text AS stack, environment_config::text AS environment_config FROM projects"#,
         )
         .fetch_all(self.db.pool())
         .await?)
