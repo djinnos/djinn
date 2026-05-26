@@ -194,18 +194,16 @@ impl PlannedIndexerCommand {
         // empirically sufficient to keep `rust-analyzer scip` warm
         // without melting the box.
         command.env("CARGO_BUILD_JOBS", "4");
-        // For Rust: rust-analyzer is a rustup shim that honors the
-        // repo's `rust-toolchain.toml`. If the pin points at a version
-        // whose `rust-analyzer` component we didn't install in the
-        // image, rustup errors with "Unknown binary 'rust-analyzer'".
-        // Force rustup to use the image's default toolchain (where we
-        // did install rust-analyzer) regardless of the repo's pin.
-        // The SCIP output is toolchain-independent for our purposes —
-        // we want symbol resolution, not edition-sensitive type
-        // inference — so this is safe.
-        if self.indexer == SupportedIndexer::RustAnalyzer {
-            command.env("RUSTUP_TOOLCHAIN", "stable");
-        }
+        // NOTE: do NOT force `RUSTUP_TOOLCHAIN=stable` here. The image's
+        // install-rust.sh installs the `rust-analyzer` component into the
+        // project's *pinned* toolchain (derived from rust-toolchain.toml
+        // at build time, e.g. 1.94.1) and runs `rustup default <that>`.
+        // `stable` is never installed, so forcing it made rustup try to
+        // download a fresh `stable` (which lacks rust-analyzer under the
+        // minimal profile) → "Unknown binary 'rust-analyzer' in toolchain
+        // 'stable'", failing every Rust index. Leaving RUSTUP_TOOLCHAIN
+        // unset lets the rust-analyzer shim resolve the repo pin / image
+        // default — exactly the toolchain that has the component.
         command
     }
 }
