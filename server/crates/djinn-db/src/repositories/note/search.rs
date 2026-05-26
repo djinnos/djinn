@@ -44,18 +44,17 @@ impl NoteRepository {
         let Some(plan) = self.lexical_search_plan(LexicalSearchMode::Ranked, query)? else {
             return Ok(vec![]);
         };
-        // NOTE: dynamic SQL (backend-specific FTS query built from a runtime plan and dispatched across SQLite/MySQL pools) — compile-time check not possible
+        // NOTE: dynamic SQL (backend-specific FTS query built from a runtime plan) — compile-time check not possible
         let sql = executable_lexical_search_sql(&plan);
 
         let mut q = sqlx::query_as::<sqlx::Postgres, (String, f64)>(&sql);
         if plan.needs_query_bind() {
             q = q.bind(&plan.query);
         }
-        // The Ranked MySQL plan uses `?3` for folder and `?4` for note_type
-        // twice each (once for the `?='' OR ...` guard, once for the equality
-        // check). MySQL positional binding expands each occurrence into its own
-        // placeholder, so we must bind folder/note_type twice on that backend.
-        // SQLite FTS5 reuses numbered placeholders natively, so bind once there.
+        // The Postgres Ranked plan uses two distinct placeholders for folder
+        // ($3 guard, $4 equality) and note_type ($5 guard, $6 equality), so
+        // those values must be bound twice. SQLite FTS5 reuses numbered
+        // placeholders natively, so bind once there.
         let repeat_filter_binds = matches!(
             plan.backend,
             crate::repositories::note::LexicalSearchBackend::PostgresTsvector
@@ -451,17 +450,21 @@ impl NoteRepository {
     ) -> Result<Vec<NoteCompact>> {
         self.db.ensure_initialized().await?;
 
-        // NOTE: dynamic SQL (hours interval inlined when > 0) — compile-time check not possible
+        // NOTE: dynamic SQL (hours interval inlined when > 0) — compile-time check not possible.
+        // Non-macro `query_as`: the JSONB→text cast must use a *plain* column
+        // alias (`AS scope_paths`). The `AS "scope_paths!"` non-null assertion
+        // is macro-only — in non-macro it yields a result column literally
+        // named `scope_paths!`, which `FromRow` can't map to `NoteCompact`.
         let sql = if hours > 0 {
             format!(
-                r#"SELECT id, permalink, title, note_type, folder, updated_at, scope_paths::text AS "scope_paths!"
+                r#"SELECT id, permalink, title, note_type, folder, updated_at, scope_paths::text AS scope_paths
                  FROM notes
                  WHERE project_id = $1
                    AND updated_at >= to_char((now() at time zone 'utc') - (interval '1 hour' * {hours}), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                  ORDER BY updated_at DESC LIMIT $2"#
             )
         } else {
-            r#"SELECT id, permalink, title, note_type, folder, updated_at, scope_paths::text AS "scope_paths!"
+            r#"SELECT id, permalink, title, note_type, folder, updated_at, scope_paths::text AS scope_paths
              FROM notes WHERE project_id = $1
              ORDER BY updated_at DESC LIMIT $2"#
                 .to_owned()
@@ -486,26 +489,37 @@ impl NoteRepository {
     ) -> Result<Vec<NoteCompact>> {
         self.db.ensure_initialized().await?;
 
-        // NOTE: dynamic SQL (folder/note_type clauses appended at runtime) — compile-time check not possible
-        let mut sql = r#"SELECT id, permalink, title, note_type, folder, updated_at, scope_paths::text AS "scope_paths!"
+        // NOTE: dynamic SQL (folder/note_type clauses appended at runtime) — compile-time check not possible.
+        // Postgres positional binds: project_id is $1; appended clauses number
+        // their placeholders from $2 onward. Plain `AS scope_paths` alias (the
+        // `!` non-null assertion is macro-only — see `recent`).
+        let mut sql = r#"SELECT id, permalink, title, note_type, folder, updated_at, scope_paths::text AS scope_paths
              FROM notes WHERE project_id = $1"#
             .to_owned();
 
         let mut binds: Vec<String> = vec![project_id.to_string()];
+        // Next free placeholder index ($1 is project_id).
+        let mut next = 2;
 
         if let Some(f) = folder {
             if depth == 1 {
-                sql.push_str(" AND folder = ?");
+                sql.push_str(&format!(" AND folder = ${next}"));
+                next += 1;
                 binds.push(f.to_string());
             } else {
-                sql.push_str(" AND (folder = ? OR folder LIKE CONCAT(?, '/%'))");
+                let p_eq = next;
+                let p_like = next + 1;
+                sql.push_str(&format!(
+                    " AND (folder = ${p_eq} OR folder LIKE ${p_like} || '/%')"
+                ));
+                next += 2;
                 binds.push(f.to_string());
                 binds.push(f.to_string());
             }
         }
 
         if let Some(t) = note_type {
-            sql.push_str(" AND note_type = ?");
+            sql.push_str(&format!(" AND note_type = ${next}"));
             binds.push(t.to_string());
         }
 
@@ -541,41 +555,48 @@ impl NoteRepository {
             .collect::<Vec<_>>()
             .join(", ");
 
-        let mut bind_values: Vec<String> = Vec::new();
-
-        bind_values.push(project_id.to_string());
+        // Postgres positional binds. Fixed params: $1 = project_id,
+        // $2 = min_confidence. Per-task-path EXISTS binds start at $3 and each
+        // path consumes three placeholders (LIKE/LIKE/=).
+        let mut path_binds: Vec<String> = Vec::new();
+        let mut next = 3;
 
         let scope_clause = if task_paths.is_empty() {
-            // Only global notes
-            "JSON_LENGTH(n.scope_paths) = 0".to_string()
+            // Only global notes (empty JSONB array → length 0).
+            "jsonb_array_length(n.scope_paths) = 0".to_string()
         } else {
             // Global notes OR bidirectional scope overlap:
             // - task path is under note scope (note is more general — parent match)
             // - note scope is under task path (note is more specific — child match)
             let mut exists_parts = Vec::new();
             for task_path in task_paths {
-                // Each iteration binds the task_path 3 times for LIKE/LIKE/=
-                bind_values.push(task_path.clone());
-                bind_values.push(task_path.clone());
-                bind_values.push(task_path.clone());
-                exists_parts.push(
-                    "EXISTS (SELECT 1 FROM JSON_TABLE(n.scope_paths, '$[*]' COLUMNS (value VARCHAR(1024) PATH '$')) AS sp \
-                     WHERE $1 LIKE CONCAT(sp.value, '/%') \
-                        OR sp.value LIKE CONCAT($2, '/%') \
-                        OR sp.value = $3)".to_string()
-                );
+                let p_like_task = next;
+                let p_like_scope = next + 1;
+                let p_eq = next + 2;
+                next += 3;
+                path_binds.push(task_path.clone());
+                path_binds.push(task_path.clone());
+                path_binds.push(task_path.clone());
+                exists_parts.push(format!(
+                    "EXISTS (SELECT 1 FROM jsonb_array_elements_text(n.scope_paths) AS sp(value) \
+                     WHERE ${p_like_task} LIKE sp.value || '/%' \
+                        OR sp.value LIKE ${p_like_scope} || '/%' \
+                        OR sp.value = ${p_eq})"
+                ));
             }
             let exists_or = exists_parts.join(" OR ");
-            format!("(JSON_LENGTH(n.scope_paths) = 0 OR {exists_or})")
+            format!("(jsonb_array_length(n.scope_paths) = 0 OR {exists_or})")
         };
 
-        // NOTE: dynamic SQL (note_type IN list and per-task-path EXISTS clauses built at runtime) — compile-time check not possible
+        // NOTE: dynamic SQL (note_type IN list and per-task-path EXISTS clauses built at runtime) — compile-time check not possible.
+        // Non-macro `query_as::<_, Note>`: JSONB columns must be cast to text
+        // with plain aliases so `FromRow` maps them onto the `String` fields.
         let sql = format!(
             "SELECT n.id, n.project_id, n.permalink, n.title, n.file_path,
-                    n.storage, n.note_type, n.folder, n.tags, n.content,
+                    n.storage, n.note_type, n.folder, n.tags::text AS tags, n.content,
                     n.created_at, n.updated_at, n.last_accessed,
                     n.access_count, n.confidence, n.abstract AS abstract_, n.overview,
-                    n.scope_paths
+                    n.scope_paths::text AS scope_paths
              FROM notes n
              WHERE n.project_id = $1
                AND n.note_type IN ({types_in})
@@ -586,9 +607,9 @@ impl NoteRepository {
         );
 
         let mut query = sqlx::query_as::<_, Note>(&sql);
-        query = query.bind(&bind_values[0]); // project_id
-        query = query.bind(min_confidence);
-        for val in &bind_values[1..] {
+        query = query.bind(project_id); // $1
+        query = query.bind(min_confidence); // $2
+        for val in &path_binds {
             query = query.bind(val);
         }
 
@@ -612,32 +633,41 @@ impl NoteRepository {
             return Ok(Vec::new());
         }
 
+        // Postgres positional binds. $1 = project_id; per-changed-path EXISTS
+        // binds start at $2, three placeholders per path (LIKE/LIKE/=).
         let mut bind_values: Vec<String> = vec![project_id.to_string()];
         let mut overlap_parts = Vec::new();
+        let mut next = 2;
 
         for changed_path in changed_paths {
+            let p_like_changed = next;
+            let p_like_scope = next + 1;
+            let p_eq = next + 2;
+            next += 3;
             bind_values.push(changed_path.clone());
             bind_values.push(changed_path.clone());
             bind_values.push(changed_path.clone());
-            overlap_parts.push(
-                "EXISTS (SELECT 1 FROM JSON_TABLE(CAST(n.scope_paths AS JSON), '$[*]' COLUMNS (value VARCHAR(1024) PATH '$')) AS sp \
-                 WHERE $1 LIKE CONCAT(sp.value, '/%') \
-                    OR sp.value LIKE CONCAT($2, '/%') \
-                    OR sp.value = $3)".to_string()
-            );
+            overlap_parts.push(format!(
+                "EXISTS (SELECT 1 FROM jsonb_array_elements_text(n.scope_paths) AS sp(value) \
+                 WHERE ${p_like_changed} LIKE sp.value || '/%' \
+                    OR sp.value LIKE ${p_like_scope} || '/%' \
+                    OR sp.value = ${p_eq})"
+            ));
         }
 
         let overlap_clause = overlap_parts.join(" OR ");
-        // NOTE: dynamic SQL (per-changed-path EXISTS clauses built at runtime) — compile-time check not possible
+        // NOTE: dynamic SQL (per-changed-path EXISTS clauses built at runtime) — compile-time check not possible.
+        // Non-macro `query_as::<_, Note>`: JSONB columns cast to text with
+        // plain aliases for `FromRow`.
         let sql = format!(
             "SELECT n.id, n.project_id, n.permalink, n.title, n.file_path,
-                    n.storage, n.note_type, n.folder, n.tags, n.content,
+                    n.storage, n.note_type, n.folder, n.tags::text AS tags, n.content,
                     n.created_at, n.updated_at, n.last_accessed,
                     n.access_count, n.confidence, n.abstract AS abstract_, n.overview,
-                    n.scope_paths
+                    n.scope_paths::text AS scope_paths
              FROM notes n
              WHERE n.project_id = $1
-               AND JSON_LENGTH(CAST(n.scope_paths AS JSON)) > 0
+               AND jsonb_array_length(n.scope_paths) > 0
                AND ({overlap_clause})
              ORDER BY n.updated_at DESC
              LIMIT {limit}"
