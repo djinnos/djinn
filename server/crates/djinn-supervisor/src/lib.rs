@@ -340,6 +340,14 @@ impl TaskRunSupervisor {
                 let pre_stage_action: Option<&'static str> = match role_kind {
                     RoleKind::Worker => Some("start"),
                     RoleKind::Reviewer => Some("task_review_start"),
+                    // Planner grooms open planning/review tasks. Move them
+                    // open → in_progress so (a) the host coordinator stops
+                    // seeing them as ready and re-dispatching concurrently
+                    // during the 60-90s run (the source of the Interrupted
+                    // churn — multiple runs for one task fighting over the
+                    // single slot), and (b) the post-planner `close`
+                    // transition below is valid (close from in_progress).
+                    RoleKind::Planner => Some("start"),
                     _ => None,
                 };
                 if let Some(action) = pre_stage_action
@@ -529,14 +537,20 @@ impl TaskRunSupervisor {
                         // (observed on patrol planning task k4my: 10 sessions
                         // in 8 minutes).
                         //
-                        // Mirrors the planner role's on_complete:
-                        //   planning|decomposition → submit_for_merge (→ approved)
-                        //   review                 → close (patrol artifact)
-                        //   other                  → no transition
+                        // Planner tasks use the SIMPLE lifecycle
+                        // (open → in_progress → closed); their terminal state
+                        // is `closed`, not `approved`. The earlier intent of
+                        // `submit_for_merge` (→ approved) was wrong: it routes
+                        // the task into process_approved_tasks' PR pipeline,
+                        // which a plan/groom task has no durable artifacts for
+                        // — a fresh re-dispatch loop. The pre-stage `start`
+                        // above moved the task to in_progress, so `close` is a
+                        // valid transition here.
+                        //   planning|decomposition|review → close
+                        //   other                         → no transition
                         if role_kind == RoleKind::Planner {
                             let action = match task.issue_type.as_str() {
-                                "planning" | "decomposition" => Some("submit_for_merge"),
-                                "review" => Some("close"),
+                                "planning" | "decomposition" | "review" => Some("close"),
                                 _ => None,
                             };
                             if let Some(action) = action
