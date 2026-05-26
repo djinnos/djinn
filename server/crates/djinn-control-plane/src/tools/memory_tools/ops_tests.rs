@@ -53,6 +53,7 @@ mod tests {
         ) -> Result<(), String> {
             Ok(())
         }
+        async fn trigger_mirror_refresh(&self, _: &str) {}
     }
 
     #[async_trait::async_trait]
@@ -80,6 +81,7 @@ mod tests {
         ) -> Result<(), String> {
             Ok(())
         }
+        async fn trigger_mirror_refresh(&self, _: &str) {}
     }
 
     fn event_bus_for(tx: &broadcast::Sender<DjinnEventEnvelope>) -> EventBus {
