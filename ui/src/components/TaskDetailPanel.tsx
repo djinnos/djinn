@@ -1,9 +1,12 @@
 import type { Epic, Task, AcceptanceCriterion } from "@/api/types";
 import { StepLog } from "@/components/StepLog";
 import { useStore } from "zustand";
+import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useEffect, useState } from "react";
+import { usersQueryOptions } from "@/api/queryOptions";
+import { userDisplayName } from "@/api/users";
 import { useTaskActions } from "@/hooks/useTaskActions";
 import { useExecutionControl } from "@/hooks/useExecutionControl";
 import { useSelectedProject } from "@/stores/useProjectStore";
@@ -150,6 +153,13 @@ export function TaskDetailPanel({ task, epic, open, onClose }: TaskDetailPanelPr
   if (!open || !task) return null;
 
   const criteria = (task.acceptance_criteria ?? []).map(parseCriterion);
+  const { data: users = [] } = useQuery(usersQueryOptions());
+  const creator = task.created_by_user_id
+    ? users.find((u) => u.id === task.created_by_user_id)
+    : undefined;
+  const createdByLabel = task.created_by_user_id
+    ? (creator ? userDisplayName(creator) : task.created_by_user_id)
+    : "Agent / unassigned";
   const setupVerification = useStore(verificationStore, (state) => {
     const next = buildSetupVerificationView(task.id, state);
     const storeState = state as ReturnType<typeof verificationStore.getState> & {
@@ -222,7 +232,7 @@ export function TaskDetailPanel({ task, epic, open, onClose }: TaskDetailPanelPr
               <div><span className="font-medium">Priority:</span> {PRIORITY_LABELS[task.priority] ?? `P${task.priority}`}</div>
               {task.issue_type && <div><span className="font-medium">Type:</span> {task.issue_type}</div>}
               <div><span className="font-medium">Epic:</span> {epic?.title ?? "No Epic"}</div>
-              <div><span className="font-medium">Owner:</span> {task.owner ?? "Unassigned"}</div>
+              <div><span className="font-medium">Created by:</span> {createdByLabel}</div>
               <div><span className="font-medium">Created:</span> {formatRelative(task.created_at)}</div>
               <div><span className="font-medium">Updated:</span> {formatRelative(task.updated_at)}</div>
             </div>

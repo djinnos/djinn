@@ -355,6 +355,10 @@ pub struct TaskResponse {
     /// Specialist role name assigned to this task, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
+    /// Stable `users.id` of whoever this task belongs to (session creator, or
+    /// the parent epic's creator for Planner-spawned tasks). `None` for tasks
+    /// with no human owner. Resolve to a display name via the org user list.
+    pub created_by_user_id: Option<String>,
     /// Set when force_close unblocks downstream tasks that may need replacement blockers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
@@ -644,6 +648,10 @@ pub struct TaskListItem {
     /// Specialist role name assigned to this task, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
+    /// Stable `users.id` of whoever this task belongs to (session creator, or
+    /// the parent epic's creator for Planner-spawned tasks). `None` for tasks
+    /// with no human owner. Resolve to a display name via the org user list.
+    pub created_by_user_id: Option<String>,
     /// Active running session for this task, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_session: Option<ActiveSessionSummary>,
@@ -708,6 +716,7 @@ pub fn task_to_response(t: &Task) -> TaskResponse {
             .and_then(|s| serde_json::from_str(s).ok())
             .map(AnyJson),
         agent_type: t.agent_type.clone(),
+        created_by_user_id: t.created_by_user_id.clone(),
         warning: None,
     }
 }
@@ -747,6 +756,7 @@ pub fn task_to_list_item(
         merge_conflict_metadata: base.merge_conflict_metadata,
         unresolved_blocker_count: t.unresolved_blocker_count,
         agent_type: t.agent_type.clone(),
+        created_by_user_id: base.created_by_user_id,
         active_session,
         session_count,
     }

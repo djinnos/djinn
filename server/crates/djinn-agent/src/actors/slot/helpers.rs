@@ -1983,6 +1983,7 @@ mod tests {
             merge_conflict_metadata: None,
             memory_refs: "[]".to_string(),
             agent_type: None,
+            created_by_user_id: None,
             unresolved_blocker_count: 0,
         }
     }
@@ -2166,6 +2167,7 @@ mod tests {
             merge_conflict_metadata: None,
             memory_refs: "[]".to_string(),
             agent_type: None,
+            created_by_user_id: None,
             unresolved_blocker_count: 0,
         }
     }

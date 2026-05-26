@@ -135,6 +135,13 @@ pub struct Task {
     /// When set, the slot lifecycle loads this Agent instead of the project default.
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub agent_type: Option<String>,
+    /// Stable `users.id` of whoever created this task. Stamped from the
+    /// session user at the MCP dispatch root; for background/agent callers
+    /// with no session it falls back to the parent epic's creator (so
+    /// Planner-spawned tasks inherit the human who owns the epic). `None`
+    /// only for tasks with neither a session user nor an owned epic.
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub created_by_user_id: Option<String>,
     /// Number of unresolved blocker tasks (blocking tasks not yet closed).
     /// Populated by list queries via subquery; defaults to 0 elsewhere.
     #[cfg_attr(feature = "sqlx", sqlx(default))]

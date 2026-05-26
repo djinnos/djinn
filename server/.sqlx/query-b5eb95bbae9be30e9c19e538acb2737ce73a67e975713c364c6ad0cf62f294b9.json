@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,\n                    status AS \"status!\", priority, owner, labels::text AS \"labels!\", acceptance_criteria::text AS \"acceptance_criteria!\",\n                    reopen_count, continuation_count, verification_failure_count,\n                    total_reopen_count, total_verification_failure_count,\n                    intervention_count, last_intervention_at,\n                    created_at, updated_at, closed_at,\n                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS \"memory_refs!\",\n                    agent_type,\n                    CAST(0 AS BIGINT) AS \"unresolved_blocker_count!: i64\"\n             FROM tasks WHERE epic_id = $1 ORDER BY priority, created_at",
+  "query": "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,\n                status AS \"status!\", priority, owner, labels::text AS \"labels!\", acceptance_criteria::text AS \"acceptance_criteria!\",\n                reopen_count, continuation_count, verification_failure_count,\n                total_reopen_count, total_verification_failure_count,\n                intervention_count, last_intervention_at,\n                created_at, updated_at, closed_at,\n                close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS \"memory_refs!\",\n                agent_type, created_by_user_id,\n                CAST(0 AS BIGINT) AS \"unresolved_blocker_count!: i64\"\n             FROM tasks WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -150,6 +150,11 @@
       },
       {
         "ordinal": 29,
+        "name": "created_by_user_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 30,
         "name": "unresolved_blocker_count!: i64",
         "type_info": "Int8"
       }
@@ -189,8 +194,9 @@
       true,
       null,
       true,
+      true,
       null
     ]
   },
-  "hash": "dc0e57adeed37b488813eb7a0bd8cd519c8d2ccf3a0ec9ea7f60389bf28f2dd3"
+  "hash": "b5eb95bbae9be30e9c19e538acb2737ce73a67e975713c364c6ad0cf62f294b9"
 }

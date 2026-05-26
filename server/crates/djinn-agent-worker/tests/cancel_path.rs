@@ -69,6 +69,7 @@ fn fixture_task(task_id: &str, project_id: &str) -> Task {
         merge_conflict_metadata: None,
         memory_refs: "[]".into(),
         agent_type: None,
+        created_by_user_id: None,
         unresolved_blocker_count: 0,
     }
 }

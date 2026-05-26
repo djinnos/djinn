@@ -7734,6 +7734,11 @@ expression: signatures
             "created_at": {
               "type": "string"
             },
+            "created_by_user_id": {
+              "description": "Stable `users.id` of whoever this task belongs to (session creator, or\nthe parent epic's creator for Planner-spawned tasks). `None` for tasks\nwith no human owner. Resolve to a display name via the org user list.",
+              "nullable": true,
+              "type": "string"
+            },
             "description": {
               "type": "string"
             },

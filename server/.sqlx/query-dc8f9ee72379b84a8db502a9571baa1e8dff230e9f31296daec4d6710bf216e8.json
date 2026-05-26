@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,\n                    status AS \"status!\", priority, owner, labels::text AS \"labels!\", acceptance_criteria::text AS \"acceptance_criteria!\",\n                    reopen_count, continuation_count, verification_failure_count,\n                    total_reopen_count, total_verification_failure_count,\n                    intervention_count, last_intervention_at,\n                    created_at, updated_at, closed_at,\n                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS \"memory_refs!\",\n                    agent_type,\n                    CAST(0 AS BIGINT) AS \"unresolved_blocker_count!: i64\"\n             FROM tasks WHERE short_id = $1",
+  "query": "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,\n                    status AS \"status!\", priority, owner, labels::text AS \"labels!\", acceptance_criteria::text AS \"acceptance_criteria!\",\n                    reopen_count, continuation_count, verification_failure_count,\n                    total_reopen_count, total_verification_failure_count,\n                    intervention_count, last_intervention_at,\n                    created_at, updated_at, closed_at,\n                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS \"memory_refs!\",\n                    agent_type, created_by_user_id,\n                    CAST(0 AS BIGINT) AS \"unresolved_blocker_count!: i64\"\n             FROM tasks WHERE id = $1 OR short_id = $2",
   "describe": {
     "columns": [
       {
@@ -150,12 +150,18 @@
       },
       {
         "ordinal": 29,
+        "name": "created_by_user_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 30,
         "name": "unresolved_blocker_count!: i64",
         "type_info": "Int8"
       }
     ],
     "parameters": {
       "Left": [
+        "Text",
         "Text"
       ]
     },
@@ -189,8 +195,9 @@
       true,
       null,
       true,
+      true,
       null
     ]
   },
-  "hash": "c9f092a50dbfdab5b240c9f5879491a80cff23119ee87d722cda208f21be81de"
+  "hash": "dc8f9ee72379b84a8db502a9571baa1e8dff230e9f31296daec4d6710bf216e8"
 }

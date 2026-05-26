@@ -624,6 +624,14 @@ export namespace CredentialSetInputSchema {
    */
   key_name: string
   /**
+   * Admin path: when `true`, store this as the ORG-SHARED fallback
+   * credential (`owner_user_id = NULL`) that any user without a personal
+   * credential for the same key_name will resolve. When `false`/absent, the
+   * credential is stamped private to the acting user (the connect-flow
+   * default). Defaults to `false`.
+   */
+  org_shared?: boolean
+  /**
    * Provider ID this key belongs to (e.g. 'anthropic', 'openai').
    */
   provider_id: string
@@ -3957,6 +3965,12 @@ export namespace TaskListOutputSchema {
   closed_at?: string
   continuation_count: number
   created_at: string
+  /**
+   * Stable `users.id` of whoever this task belongs to (session creator, or
+   * the parent epic's creator for Planner-spawned tasks). `None` for tasks
+   * with no human owner. Resolve to a display name via the org user list.
+   */
+  created_by_user_id?: string
   description: string
   design: string
   epic_id?: string

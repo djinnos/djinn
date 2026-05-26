@@ -100,11 +100,25 @@ impl TaskRepository {
             "acceptance_criteria",
             acceptance_criteria.unwrap_or("[]"),
         )?;
-        // Phase 3B: stamp `created_by_user_id` from the task-local set at
-        // the MCP dispatch root (`SESSION_USER_ID`). `None` for
-        // agent/background callers with no user context — schema allows
-        // NULL and Phase 4 will tighten where appropriate.
-        let created_by_user_id = djinn_core::auth_context::current_user_id();
+        // Stamp `created_by_user_id` from the task-local set at the MCP
+        // dispatch root (`SESSION_USER_ID`). For agent/background callers
+        // with no session (e.g. the Planner breaking down an epic), fall
+        // back to the parent epic's creator so spawned tasks belong to the
+        // human who owns the epic rather than appearing as system/unowned.
+        // `None` only when there is neither a session user nor an owned epic.
+        let created_by_user_id = match djinn_core::auth_context::current_user_id() {
+            Some(uid) => Some(uid),
+            None => match epic_id {
+                Some(eid) => sqlx::query_scalar!(
+                    "SELECT created_by_user_id FROM epics WHERE id = $1",
+                    eid
+                )
+                .fetch_optional(self.db.pool())
+                .await?
+                .flatten(),
+                None => None,
+            },
+        };
 
         let project_id_owned = project_id.to_owned();
         let epic_id_owned = epic_id.map(|s| s.to_owned());
@@ -822,7 +836,90 @@ mod created_by_tests {
         .unwrap();
         assert!(
             stamped.is_none(),
-            "task created outside SESSION_USER_ID scope must leave created_by_user_id NULL"
+            "task created outside SESSION_USER_ID scope under an unowned epic must leave created_by_user_id NULL"
+        );
+    }
+
+    /// A background/agent caller (no SESSION_USER_ID) creating a task under an
+    /// epic that *does* have a creator must inherit the epic's creator, so
+    /// Planner-spawned tasks belong to the human who owns the epic rather than
+    /// appearing as unowned/system. A session user, when present, still wins.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_in_project_inherits_created_by_from_epic_when_no_session() {
+        let db = Database::open_in_memory().unwrap();
+        let (project_id, _) = seed_project_and_epic(&db).await;
+
+        let users = UserRepository::new(db.clone());
+        let epic_owner = users
+            .upsert_from_github(515151, "epic-owner", Some("Epic Owner"), None)
+            .await
+            .unwrap();
+        let session_user = users
+            .upsert_from_github(626262, "session-user", Some("Session User"), None)
+            .await
+            .unwrap();
+
+        // An epic owned by `epic_owner`.
+        let owned_epic_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query!(
+            "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs, created_by_user_id)
+             VALUES ($1, $2, $3, '', '', '', '', '', '[]'::jsonb, $4)",
+            owned_epic_id,
+            project_id,
+            "ep02",
+            epic_owner.id,
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let repo = TaskRepository::new(db.clone(), EventBus::noop());
+
+        // No session in scope → inherit the epic's creator.
+        let inherited = repo
+            .create_in_project(
+                &project_id,
+                Some(&owned_epic_id),
+                "Inherited",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            inherited.created_by_user_id.as_deref(),
+            Some(epic_owner.id.as_str()),
+            "background task under an owned epic must inherit the epic's creator"
+        );
+
+        // Session user present → it wins over the epic's creator.
+        let session_owned = SESSION_USER_ID
+            .scope(Some(session_user.id.clone()), async {
+                repo.create_in_project(
+                    &project_id,
+                    Some(&owned_epic_id),
+                    "SessionOwned",
+                    "",
+                    "",
+                    "task",
+                    0,
+                    "",
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+            })
+            .await;
+        assert_eq!(
+            session_owned.created_by_user_id.as_deref(),
+            Some(session_user.id.as_str()),
+            "an in-scope SESSION_USER_ID must take precedence over the epic's creator"
         );
     }
 }

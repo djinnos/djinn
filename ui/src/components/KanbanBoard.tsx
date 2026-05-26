@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { usersQueryOptions } from "@/api/queryOptions";
+import { userDisplayName } from "@/api/users";
 import { useTaskStore } from "@/stores/useTaskStore";
 import { useEpicStore } from "@/stores/useEpicStore";
 import { useProjects } from "@/stores/useProjectStore";
@@ -52,6 +55,10 @@ import { epicStore } from "@/stores/epicStore";
 import { projectStore } from "@/stores/projectStore";
 
 type ColumnKey = "open" | "in_progress" | "pr_ready" | "done";
+
+/** Owner-filter sentinel for tasks with no human creator (background agents). */
+const UNASSIGNED_OWNER = "__none__";
+const UNASSIGNED_OWNER_LABEL = "Agent / unassigned";
 
 const ISSUE_TYPES = [
   { value: "task", label: "Task" },
@@ -332,6 +339,22 @@ export function KanbanBoard({
   const storeEpics = useEpicStore((state) => state.epics);
   const projects = useProjects();
 
+  // Org roster, used to resolve a task's `created_by_user_id` to a name for
+  // the owner filter. Empty until loaded; ids fall back to themselves.
+  const { data: users = [] } = useQuery(usersQueryOptions());
+  const userLabelById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const user of users) map.set(user.id, userDisplayName(user));
+    return map;
+  }, [users]);
+  const ownerLabel = useCallback(
+    (ownerId: string) =>
+      ownerId === UNASSIGNED_OWNER
+        ? UNASSIGNED_OWNER_LABEL
+        : (userLabelById.get(ownerId) ?? ownerId),
+    [userLabelById],
+  );
+
   const tasks = tasksProp ?? storeTasks;
   const epics = epicsProp ?? storeEpics;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -489,10 +512,12 @@ export function KanbanBoard({
   const ownerOptions = useMemo(() => {
     const owners = new Set<string>();
     for (const task of tasks) {
-      if (task.owner) owners.add(task.owner);
+      owners.add(task.created_by_user_id ?? UNASSIGNED_OWNER);
     }
-    return Array.from(owners).sort((a, b) => a.localeCompare(b));
-  }, [tasks]);
+    return Array.from(owners).sort((a, b) =>
+      ownerLabel(a).localeCompare(ownerLabel(b)),
+    );
+  }, [tasks, ownerLabel]);
 
   const filteredTasks = useMemo(() => {
     const q = textFilter.trim().toLowerCase();
@@ -505,7 +530,10 @@ export function KanbanBoard({
         return false;
       if (epicFilters.length > 0 && !epicFilters.includes(task.epic_id ?? ""))
         return false;
-      if (ownerFilters.length > 0 && !ownerFilters.includes(task.owner ?? ""))
+      if (
+        ownerFilters.length > 0 &&
+        !ownerFilters.includes(task.created_by_user_id ?? UNASSIGNED_OWNER)
+      )
         return false;
       if (
         issueTypeFilters.length > 0 &&
@@ -627,6 +655,7 @@ export function KanbanBoard({
           multiple
           value={ownerFilters}
           onValueChange={(v) => setOwnerFilters(v ?? [])}
+          itemToStringLabel={ownerLabel}
         >
           <ComboboxInput
             placeholder={
@@ -641,7 +670,7 @@ export function KanbanBoard({
               <ComboboxEmpty>No owners found</ComboboxEmpty>
               {ownerOptions.map((owner) => (
                 <ComboboxItem key={owner} value={owner}>
-                  {owner}
+                  {ownerLabel(owner)}
                 </ComboboxItem>
               ))}
             </ComboboxList>

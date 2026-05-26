@@ -104,6 +104,7 @@ pub(crate) fn make_peer_task(
         merge_conflict_metadata: None,
         memory_refs: "[]".to_string(),
         agent_type: None,
+        created_by_user_id: None,
         unresolved_blocker_count: 0,
         total_reopen_count: 0,
         total_verification_failure_count: 0,

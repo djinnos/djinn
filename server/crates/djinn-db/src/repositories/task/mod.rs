@@ -668,7 +668,7 @@ macro_rules! task_select_where_id {
                 intervention_count, last_intervention_at,
                 created_at, updated_at, closed_at,
                 close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",
-                agent_type,
+                agent_type, created_by_user_id,
                 CAST(0 AS BIGINT) AS "unresolved_blocker_count!: i64"
              FROM tasks WHERE id = $1"#,
             $id

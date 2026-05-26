@@ -29,6 +29,7 @@ expression: task_show
   "closed_at": null,
   "close_reason": null,
   "merge_commit_sha": null,
+  "created_by_user_id": null,
   "session_count": 0,
   "active_session": null
 }

@@ -18,6 +18,7 @@ mod org_sync;
 mod project_tools;
 mod state;
 mod static_ui;
+mod users;
 pub use auth::{AuthenticatedUser, authenticate};
 pub use org_sync::{SyncReport, start_org_member_sync, sync_once};
 pub use state::AppState;
@@ -42,7 +43,8 @@ pub fn router(state: AppState, serve_ui: bool) -> Router {
         .merge(github_install::router())
         .merge(crate::mirror_fetcher::router())
         .merge(org_sync::router())
-        .merge(project_tools::router());
+        .merge(project_tools::router())
+        .merge(users::router());
     if serve_ui {
         router = router.fallback(static_ui::serve_static);
     }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,\n                    status AS \"status!\", priority, owner, labels::text AS \"labels!\", acceptance_criteria::text AS \"acceptance_criteria!\",\n                    reopen_count, continuation_count, verification_failure_count,\n                    total_reopen_count, total_verification_failure_count,\n                    intervention_count, last_intervention_at,\n                    created_at, updated_at, closed_at,\n                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS \"memory_refs!\",\n                    agent_type,\n                    CAST(0 AS BIGINT) AS \"unresolved_blocker_count!: i64\"\n             FROM tasks WHERE project_id = $1 ORDER BY priority, created_at",
+  "query": "SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,\n                    status AS \"status!\", priority, owner, labels::text AS \"labels!\", acceptance_criteria::text AS \"acceptance_criteria!\",\n                    reopen_count, continuation_count, verification_failure_count,\n                    total_reopen_count, total_verification_failure_count,\n                    intervention_count, last_intervention_at,\n                    created_at, updated_at, closed_at,\n                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS \"memory_refs!\",\n                    agent_type, created_by_user_id,\n                    CAST(0 AS BIGINT) AS \"unresolved_blocker_count!: i64\"\n             FROM tasks WHERE epic_id = $1 ORDER BY priority, created_at",
   "describe": {
     "columns": [
       {
@@ -150,6 +150,11 @@
       },
       {
         "ordinal": 29,
+        "name": "created_by_user_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 30,
         "name": "unresolved_blocker_count!: i64",
         "type_info": "Int8"
       }
@@ -189,8 +194,9 @@
       true,
       null,
       true,
+      true,
       null
     ]
   },
-  "hash": "6332a1bf4156998c2aa7e53e629cd44483d089ce6e5f8b9717597d42088af41a"
+  "hash": "8ea9cf70307331f4e6ece0c53c1bf1ca87cf23984cb7684b83bf2550871d5788"
 }
