@@ -875,7 +875,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(updated_note.tags, "[\"fs\",\"updated\"]");
+        // Postgres JSONB `::text` canonicalizes the array with a space after
+        // the comma (single-element `["fs"]` above has no comma, so it round-
+        // trips unchanged).
+        assert_eq!(updated_note.tags, "[\"fs\", \"updated\"]");
         assert_eq!(repo.graph(&project_id).await.unwrap().edges.len(), 0);
         assert_eq!(repo.broken_links(&project_id, None).await.unwrap().len(), 1);
 
@@ -940,7 +943,9 @@ mod tests {
             .unwrap();
         assert_eq!(note.title, "Frontmatter Title");
         assert_eq!(note.note_type, "design");
-        assert_eq!(note.tags, "[\"meta\",\"frontmatter\"]");
+        // tags is read back via `tags::text` from a Postgres JSONB column,
+        // which canonicalizes the array text with a space after each comma.
+        assert_eq!(note.tags, "[\"meta\", \"frontmatter\"]");
         assert_eq!(note.content, "Design body");
     }
 

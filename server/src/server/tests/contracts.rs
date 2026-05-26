@@ -102,7 +102,12 @@ async fn mcp_contract_task_and_epic_snapshot_shapes() {
             "project": project_path,
             "epic_id": epic["id"],
             "title": "Snapshot Task",
-            "description": "Task used for MCP snapshot contract testing"
+            "description": "Task used for MCP snapshot contract testing",
+            // task/feature/bug issue types require acceptance_criteria; without
+            // it task_create returns a validation error and the downstream
+            // task_show/task_list snapshots capture an empty board instead of a
+            // real task shape (the contract this test is meant to pin).
+            "acceptance_criteria": ["Snapshot task acceptance criterion"]
         }),
     )
     .await;

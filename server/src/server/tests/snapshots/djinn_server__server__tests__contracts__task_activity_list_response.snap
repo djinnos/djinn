@@ -3,6 +3,18 @@ source: src/server/tests/contracts.rs
 expression: task_activity
 ---
 {
-  "count": 0,
-  "entries": []
+  "entries": [
+    {
+      "id": "[UUID]",
+      "task_id": "[UUID]",
+      "actor_id": "[UUID]",
+      "actor_role": "user",
+      "event_type": "comment",
+      "payload": {
+        "body": "snapshot comment"
+      },
+      "created_at": "[TIMESTAMP]"
+    }
+  ],
+  "count": 1
 }

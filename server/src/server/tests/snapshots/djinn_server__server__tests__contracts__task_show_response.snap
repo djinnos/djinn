@@ -3,6 +3,32 @@ source: src/server/tests/contracts.rs
 expression: task_show
 ---
 {
-  "error": "invalid arguments for tool 'task_show': invalid type: null, expected a string",
-  "ok": false
+  "id": "[UUID]",
+  "short_id": "[SHORT_ID]",
+  "epic_id": "[UUID]",
+  "title": "Snapshot Task",
+  "description": "Task used for MCP snapshot contract testing",
+  "design": "",
+  "issue_type": "task",
+  "status": "open",
+  "priority": 0,
+  "owner": "",
+  "labels": [],
+  "memory_refs": [],
+  "acceptance_criteria": [
+    "Snapshot task acceptance criterion"
+  ],
+  "reopen_count": 0,
+  "continuation_count": 0,
+  "verification_failure_count": 0,
+  "total_reopen_count": 0,
+  "total_verification_failure_count": 0,
+  "intervention_count": 0,
+  "created_at": "[TIMESTAMP]",
+  "updated_at": "[TIMESTAMP]",
+  "closed_at": null,
+  "close_reason": null,
+  "merge_commit_sha": null,
+  "session_count": 0,
+  "active_session": null
 }

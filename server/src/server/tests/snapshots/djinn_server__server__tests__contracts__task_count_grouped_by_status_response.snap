@@ -3,5 +3,10 @@ source: src/server/tests/contracts.rs
 expression: task_count_status
 ---
 {
-  "groups": []
+  "groups": [
+    {
+      "key": "open",
+      "count": 1
+    }
+  ]
 }

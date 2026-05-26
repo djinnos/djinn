@@ -5,23 +5,23 @@ expression: epic_list
 {
   "epics": [
     {
-      "auto_breakdown": true,
-      "closed_at": null,
-      "color": "",
-      "created_at": "[TIMESTAMP]",
+      "id": "[UUID]",
+      "short_id": "[SHORT_ID]",
+      "title": "Snapshot Epic",
       "description": "Epic used for MCP snapshot contract testing",
       "emoji": "",
-      "id": "[UUID]",
-      "memory_refs": [],
-      "owner": "",
-      "short_id": "[SHORT_ID]",
+      "color": "",
       "status": "drafting",
-      "title": "Snapshot Epic",
-      "updated_at": "[TIMESTAMP]"
+      "owner": "",
+      "created_at": "[TIMESTAMP]",
+      "updated_at": "[TIMESTAMP]",
+      "closed_at": null,
+      "memory_refs": [],
+      "auto_breakdown": true
     }
   ],
-  "has_more": false,
+  "total_count": 1,
   "limit": 10,
   "offset": 0,
-  "total_count": 1
+  "has_more": false
 }
