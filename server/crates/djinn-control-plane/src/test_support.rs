@@ -142,6 +142,9 @@ impl RuntimeOps for StubRuntime {
     ) -> std::result::Result<(), String> {
         Err("stub: RuntimeOps::apply_environment_config not implemented".into())
     }
+    // Fire-and-forget pipeline kick; the stub owns no mirror manager, so this
+    // is a no-op (matching the trait contract for runtimes without one).
+    async fn trigger_mirror_refresh(&self, _project_id: &str) {}
 }
 
 /// GitOps stub. `git_actor` is effectively a read that creates a handle; it
