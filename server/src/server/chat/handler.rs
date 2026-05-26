@@ -184,7 +184,15 @@ pub(super) async fn completions_handler_impl(
         .map(|m| m.context_window)
         .unwrap_or(0);
 
-    let provider_credential = load_provider_credential(&provider_id, &state.agent_context())
+    // Resolve the provider credential UNDER the authenticated user's scope so
+    // per-user credentials (migration 28) prefer this user's own connected
+    // provider, falling back to the org-shared one. Unauthenticated chat
+    // resolves org-shared (user_id is None). Mirrors the worker dispatch path.
+    let provider_credential = SESSION_USER_ID
+        .scope(
+            user_id.clone(),
+            load_provider_credential(&provider_id, &state.agent_context()),
+        )
         .await
         .map_err(|e| {
             tracing::warn!(provider=%provider_id, error=%e, "provider credential resolution failed");

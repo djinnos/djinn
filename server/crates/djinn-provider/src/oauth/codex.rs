@@ -415,15 +415,26 @@ pub async fn start_codex_device_auth(
     // 3. Phase 2 — spawn a detached task that polls until tokens arrive,
     //    the user denies, or the TTL elapses. The SSE `credential.updated`
     //    event fires automatically when `save_to_db` commits.
+    //
+    //    The poll task outlives the inbound request, so the `SESSION_USER_ID`
+    //    task-local that scopes per-user credentials (migration 28) would be
+    //    lost. Capture the acting user *now* (while still inside the request
+    //    scope) and re-establish it inside the spawned task so the eventual
+    //    `save_to_db` → `set` stamps `owner_user_id = this user`. `None` (local
+    //    dev / no auth) writes the org-shared credential, as before.
+    let owner_user_id = djinn_core::auth_context::current_user_id();
     let poll_repo = repo.clone();
     let device_auth_id = uc.device_auth_id;
     let user_code = uc.user_code;
-    tokio::spawn(async move {
-        match poll_codex_device_auth(&device_auth_id, &user_code, interval, &poll_repo).await {
-            Ok(_) => tracing::info!("Codex: device-code flow completed, tokens persisted"),
-            Err(e) => tracing::warn!(error = %e, "Codex: device-code flow failed"),
-        }
-    });
+    tokio::spawn(djinn_core::auth_context::SESSION_USER_ID.scope(
+        owner_user_id,
+        async move {
+            match poll_codex_device_auth(&device_auth_id, &user_code, interval, &poll_repo).await {
+                Ok(_) => tracing::info!("Codex: device-code flow completed, tokens persisted"),
+                Err(e) => tracing::warn!(error = %e, "Codex: device-code flow failed"),
+            }
+        },
+    ));
 
     Ok(Some(session))
 }
