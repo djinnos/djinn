@@ -183,6 +183,27 @@ pub fn build_image_build_job(
 mkdir -p {docker_config}
 cp {auth_dir}/config.json {docker_config}/config.json
 
+# Wait for buildkitd to accept gRPC connections before building. buildctl
+# has no built-in connect retry, so a build dispatched while buildkitd is
+# mid-rollout (e.g. during a chart upgrade) dies with
+# `failed to list workers: ... connect: connection refused` and burns a
+# Job backoff attempt. `buildctl debug workers` is the same call that was
+# failing, so it's the right liveness probe. ~2min ceiling covers a pod
+# reschedule; if buildkitd is genuinely down the Job still fails, just
+# with a clearer signal after the wait.
+echo "waiting for buildkitd at $BUILDCTL_ADDR ..."
+for i in $(seq 1 60); do
+    if buildctl --addr "$BUILDCTL_ADDR" debug workers >/dev/null 2>&1; then
+        echo "buildkitd reachable after $((i)) attempt(s)"
+        break
+    fi
+    if [ "$i" -eq 60 ]; then
+        echo "buildkitd still unreachable after 60 attempts; failing" >&2
+        exit 1
+    fi
+    sleep 2
+done
+
 exec buildctl \
     --addr "$BUILDCTL_ADDR" \
     build \
