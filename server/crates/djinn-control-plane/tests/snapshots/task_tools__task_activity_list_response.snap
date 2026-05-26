@@ -1,20 +1,20 @@
 ---
-source: src/mcp_contract_tests/task_tools.rs
+source: crates/djinn-control-plane/tests/task_tools.rs
 expression: activity
 ---
 {
-  "count": 1,
   "entries": [
     {
+      "id": "[UUID]",
+      "task_id": "[UUID]",
       "actor_id": "[UUID]",
       "actor_role": "user",
-      "created_at": "[TIMESTAMP]",
       "event_type": "comment",
-      "id": "[UUID]",
       "payload": {
         "body": "hello"
       },
-      "task_id": "[UUID]"
+      "created_at": "[TIMESTAMP]"
     }
-  ]
+  ],
+  "count": 1
 }

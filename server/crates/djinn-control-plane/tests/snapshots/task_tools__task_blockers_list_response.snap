@@ -1,5 +1,5 @@
 ---
-source: src/mcp_contract_tests/task_tools.rs
+source: crates/djinn-control-plane/tests/task_tools.rs
 expression: blockers
 ---
 {
@@ -7,8 +7,8 @@ expression: blockers
     {
       "blocking_task_id": "[UUID]",
       "blocking_task_short_id": "[SHORT_ID]",
-      "blocking_task_status": "open",
       "blocking_task_title": "test-task",
+      "blocking_task_status": "open",
       "resolved": false
     }
   ]
