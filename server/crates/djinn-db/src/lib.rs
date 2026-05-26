@@ -65,6 +65,10 @@ pub use repositories::{
         sanitize_sqlite_fts5_query, slugify, task_branch_name, title_from_permalink,
         validate_postgres_tsvector_threshold, virtual_note_path_for_permalink,
     },
+    oauth::{
+        AuthorizationCode, McpAccessToken, NewAccessToken, NewAuthorizationCode, NewOAuthClient,
+        OAuthClient, OAuthRepository,
+    },
     org_config::{NewOrgConfig, OrgConfig, OrgConfigRepository},
     project::{
         ProjectConfig, ProjectDispatchReadiness, ProjectImage, ProjectImageStatus,

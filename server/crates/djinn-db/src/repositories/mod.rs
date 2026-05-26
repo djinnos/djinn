@@ -7,6 +7,7 @@ pub mod git_settings;
 pub mod init;
 pub mod models;
 pub mod note;
+pub mod oauth;
 pub mod org_config;
 pub mod project;
 pub mod repo_graph_cache;
