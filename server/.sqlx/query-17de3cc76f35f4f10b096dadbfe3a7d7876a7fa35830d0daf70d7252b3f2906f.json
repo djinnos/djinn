@@ -1,0 +1,50 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, name, base_url, env_var, seed_models::text AS \"seed_models!\", created_at\n             FROM custom_providers\n             ORDER BY created_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "base_url",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "env_var",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "seed_models!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      null,
+      false
+    ]
+  },
+  "hash": "17de3cc76f35f4f10b096dadbfe3a7d7876a7fa35830d0daf70d7252b3f2906f"
+}

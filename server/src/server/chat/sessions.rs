@@ -183,21 +183,25 @@ async fn list_chat_session_messages(
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("chat session not found: {id}")))?;
 
     let msg_repo = SessionMessageRepository::new(state.db().clone(), state.event_bus());
-    // Postgres: `$1` positional bind (not MySQL `?` — that 500s with
-    // "syntax error at or near \"ORDER\""), and content_json is JSONB so
-    // cast to text for the String tuple slot (downstream from_str parses it).
-    let rows = sqlx::query_as::<_, (String, String, String, Option<i64>, String)>(
-        "SELECT id, role, content_json::text, token_count, created_at \
-         FROM session_messages WHERE session_id = $1 ORDER BY created_at ASC",
+    // content_json is JSONB so cast to text for the String slot (downstream
+    // from_str parses it). `"content_json!"` forces the macro to type the
+    // nullable cast result as a non-null String.
+    let rows = sqlx::query!(
+        r#"SELECT id, role, content_json::text AS "content_json!", token_count, created_at
+         FROM session_messages WHERE session_id = $1 ORDER BY created_at ASC"#,
+        session.id,
     )
-    .bind(&session.id)
     .fetch_all(state.db().pool())
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let _ = msg_repo; // silence unused-var when only used for naming
 
     let mut messages = Vec::with_capacity(rows.len());
-    for (msg_id, role, content_json, _tokens, created_at) in rows {
+    for row in rows {
+        let msg_id = row.id;
+        let role = row.role;
+        let content_json = row.content_json;
+        let created_at = row.created_at;
         let content_value: Value = serde_json::from_str(&content_json).unwrap_or(Value::Null);
         let tool_calls = extract_tool_calls(&content_value);
         let attachments = extract_attachments(&content_value);

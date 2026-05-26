@@ -382,9 +382,8 @@ impl TaskRepository {
     pub async fn board_health(&self, stale_hours: i64) -> Result<serde_json::Value> {
         self.db.ensure_initialized().await?;
         // Per-epic task counts and % complete.
-        // NOTE: dynamic row extraction via sqlx::Row::get — macro conversion would require a full refactor to typed rows
-        let epic_rows = sqlx::query(
-            "SELECT e.id, e.short_id, e.title,
+        let epic_rows = sqlx::query!(
+            r#"SELECT e.id, e.short_id, e.title,
                     COUNT(t.id) AS total,
                     CAST(SUM(CASE WHEN t.status = 'closed' THEN 1 ELSE 0 END) AS BIGINT) AS closed,
                     CAST(SUM(CASE WHEN t.status IN (
@@ -397,28 +396,27 @@ impl TaskRepository {
              FROM epics e
              LEFT JOIN tasks t ON t.epic_id = e.id
              GROUP BY e.id
-             ORDER BY e.title",
+             ORDER BY e.title"#,
         )
         .fetch_all(self.db.pool())
         .await?;
         let epic_stats: Vec<serde_json::Value> = epic_rows
             .into_iter()
             .map(|row| {
-                use sqlx::Row;
-                let total: i64 = row.get(3);
-                let closed: i64 = row.get::<Option<i64>, _>(4).unwrap_or(0);
-                let in_review: i64 = row.get::<Option<i64>, _>(5).unwrap_or(0);
-                let oldest_review_at: Option<String> = row.get(6);
-                let pr_ready: i64 = row.get::<Option<i64>, _>(7).unwrap_or(0);
+                let total: i64 = row.total.unwrap_or(0);
+                let closed: i64 = row.closed.unwrap_or(0);
+                let in_review: i64 = row.in_review.unwrap_or(0);
+                let oldest_review_at: Option<String> = row.oldest_review_at;
+                let pr_ready: i64 = row.pr_ready.unwrap_or(0);
                 let pct = if total > 0 {
                     (closed as f64 / total as f64 * 1000.0).round() / 10.0
                 } else {
                     0.0
                 };
                 serde_json::json!({
-                    "epic_id":          row.get::<String, _>(0),
-                    "short_id":         row.get::<String, _>(1),
-                    "title":            row.get::<String, _>(2),
+                    "epic_id":          row.id,
+                    "short_id":         row.short_id,
+                    "title":            row.title,
                     "total":            total,
                     "closed":           closed,
                     "in_review":        in_review,
@@ -458,28 +456,26 @@ impl TaskRepository {
             .collect();
 
         // Review queue: tasks waiting in any review status.
-        // NOTE: dynamic row extraction via sqlx::Row::get — macro conversion would require a full refactor to typed rows
-        let review_rows = sqlx::query(
-            "SELECT t.id, t.short_id, t.title, t.status, t.updated_at,
+        let review_rows = sqlx::query!(
+            r#"SELECT t.id, t.short_id, t.title, t.status, t.updated_at,
                     e.short_id AS epic_short_id
              FROM tasks t
              JOIN epics e ON t.epic_id = e.id
              WHERE t.status IN ('needs_task_review','in_task_review','approved','pr_draft','pr_review','closed')
-             ORDER BY t.updated_at ASC",
+             ORDER BY t.updated_at ASC"#,
         )
         .fetch_all(self.db.pool())
         .await?;
         let review_queue: Vec<serde_json::Value> = review_rows
             .into_iter()
             .map(|row| {
-                use sqlx::Row;
                 serde_json::json!({
-                    "id":            row.get::<String, _>(0),
-                    "short_id":      row.get::<String, _>(1),
-                    "title":         row.get::<String, _>(2),
-                    "status":        row.get::<String, _>(3),
-                    "updated_at":    row.get::<String, _>(4),
-                    "epic_short_id": row.get::<String, _>(5),
+                    "id":            row.id,
+                    "short_id":      row.short_id,
+                    "title":         row.title,
+                    "status":        row.status,
+                    "updated_at":    row.updated_at,
+                    "epic_short_id": row.epic_short_id,
                 })
             })
             .collect();

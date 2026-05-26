@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) AS \"count!: i64\"\n             FROM information_schema.tables\n             WHERE table_schema = current_schema()\n               AND table_name   = '_sqlx_migrations'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "498f575e26455ae8b04a64fc37c98d9916e8ce17a8b0a8471c8d3db73a325a00"
+}

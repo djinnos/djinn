@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT target_branch, auto_merge, sync_enabled, sync_remote,\n                    graph_excluded_paths::text AS graph_excluded_paths,\n                    graph_orphan_ignore::text AS graph_orphan_ignore\n               FROM projects WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "target_branch",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "auto_merge",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 2,
+        "name": "sync_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 3,
+        "name": "sync_remote",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "graph_excluded_paths",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "graph_orphan_ignore",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "c82e8b96cb140e56631b4fb75a8536fa87c93d2bddea7894c0ae720af8598072"
+}
