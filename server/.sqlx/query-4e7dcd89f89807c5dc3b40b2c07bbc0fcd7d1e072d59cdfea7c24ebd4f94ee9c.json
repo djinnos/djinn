@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT image_status, graph_warmed_at FROM projects WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "image_status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "graph_warmed_at",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "4e7dcd89f89807c5dc3b40b2c07bbc0fcd7d1e072d59cdfea7c24ebd4f94ee9c"
+}

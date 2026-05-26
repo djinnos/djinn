@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE projects SET graph_excluded_paths = $1::jsonb WHERE id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Jsonb",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f69140a1e344fd762ecdf41dbe1a2a4a5fdaf88823bf3b2c089010decf188faf"
+}
