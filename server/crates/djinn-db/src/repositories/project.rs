@@ -969,10 +969,9 @@ mod tests {
     // verification_cache, ...). Dolt currently drops the connection mid-
     // cascade and the driver surfaces it as `Sqlx(Io UnexpectedEof)` —
     // reproducible on 100% of runs against the current image. The same
-    // code path works fine against vanilla MySQL 8.0; filed as a Dolt
-    // cascade-limitation issue. Re-enable once Dolt can execute the
-    // multi-cascade DELETE without closing the conn.
-    #[ignore = "Dolt multi-cascade DELETE drops the connection; tracked as server-side regression"]
+    // The Dolt multi-cascade DELETE bug that forced this `#[ignore]` was
+    // resolved by the MySQL→Postgres cut-over; re-enabled (Postgres executes
+    // the cascade DELETE cleanly).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delete_project() {
         let (bus, captured) = capturing_bus();

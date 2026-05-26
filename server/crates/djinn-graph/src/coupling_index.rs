@@ -614,10 +614,9 @@ mod tests {
     }
 
     // End-to-end test: build a tiny git repo in a tempdir, ingest, query.
-    // Guarded by #[ignore] so CI without a test-Dolt instance does not
-    // fail — flip the ignore to run locally once `:3307` is up.
+    // Runs against the test Postgres on :5433 (template-clone) plus a local
+    // git binary (present in CI). Re-enabled after the MySQL→Postgres cut-over.
     #[tokio::test]
-    #[ignore = "requires test Dolt at :3307 and a local git binary"]
     async fn end_to_end_ingest_and_query() {
         use djinn_db::Database;
 
