@@ -62,7 +62,11 @@ mod tests {
         note_id: &str,
         previous_overview: Option<String>,
     ) -> djinn_memory::Note {
-        for _ in 0..40 {
+        // 5s budget (200 x 25ms). Summary regeneration runs as a background
+        // task; the prior 1s budget (40 x 25ms) timed out under full-suite
+        // CPU/DB contention, returning a still-empty note and flaking the
+        // assertion. Widened per the repo's poll-budget flake-fix convention.
+        for _ in 0..200 {
             let note = repo.get(note_id).await.unwrap().unwrap();
             if note
                 .abstract_

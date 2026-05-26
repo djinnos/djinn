@@ -340,12 +340,15 @@ mod tests {
         assert!(second.is_none(), "second concurrent claim must coalesce");
 
         drop(first);
-        // The drop spawns the release task; yield until it lands.
-        for _ in 0..50 {
-            tokio::task::yield_now().await;
+        // The guard's Drop *spawns* a task to release the slot, so release is
+        // asynchronous. Poll with real time (not bare `yield_now`, which gives
+        // the spawned task ~no wall-clock to run on a multi-thread runtime and
+        // races ~5% of the time) until it lands.
+        for _ in 0..200 {
             if try_claim_project(project_id).await.is_some() {
                 return;
             }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         panic!("slot never released after first guard drop");
     }
