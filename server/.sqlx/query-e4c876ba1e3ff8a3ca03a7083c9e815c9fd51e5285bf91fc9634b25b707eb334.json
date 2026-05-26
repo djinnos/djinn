@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id AS \"id!\", project_id AS \"project_id!\",\n                name AS \"name!\", base_role AS \"base_role!\",\n                description AS \"description!\", system_prompt_extensions::text AS \"system_prompt_extensions!\",\n                model_preference, verification_command,\n                mcp_servers::text AS \"mcp_servers!\", skills::text AS \"skills!\",\n                is_default AS \"is_default!: bool\",\n                (SELECT string_agg(h.proposed_text, E'\\n\\n---\\n\\n' ORDER BY h.created_at ASC)\n                 FROM learned_prompt_history h\n                 WHERE h.agent_id = agents.id\n                   AND h.action IN ('keep','confirmed')\n                ) AS learned_prompt,\n                created_at AS \"created_at!\", updated_at AS \"updated_at!\"\n             FROM agents\n             ORDER BY project_id ASC, is_default DESC, base_role ASC, name ASC",
+  "query": "SELECT id AS \"id!\", project_id AS \"project_id!\",\n                name AS \"name!\", base_role AS \"base_role!\",\n                description AS \"description!\",\n                CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'\n                     THEN system_prompt_extensions #>> '{}' ELSE '' END AS \"system_prompt_extensions!\",\n                model_preference, verification_command,\n                mcp_servers::text AS \"mcp_servers!\", skills::text AS \"skills!\",\n                is_default AS \"is_default!: bool\",\n                (SELECT string_agg(h.proposed_text, E'\\n\\n---\\n\\n' ORDER BY h.created_at ASC)\n                 FROM learned_prompt_history h\n                 WHERE h.agent_id = agents.id\n                   AND h.action IN ('keep','confirmed')\n                ) AS learned_prompt,\n                created_at AS \"created_at!\", updated_at AS \"updated_at!\"\n             FROM agents\n             WHERE project_id = $1 ORDER BY is_default DESC, base_role ASC, name ASC",
   "describe": {
     "columns": [
       {
@@ -75,7 +75,9 @@
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Text"
+      ]
     },
     "nullable": [
       false,
@@ -94,5 +96,5 @@
       false
     ]
   },
-  "hash": "1dc8882b6574e25d4ef4f479e5f0c9371d4a9172fe19266a3bdcac02130def77"
+  "hash": "e4c876ba1e3ff8a3ca03a7083c9e815c9fd51e5285bf91fc9634b25b707eb334"
 }

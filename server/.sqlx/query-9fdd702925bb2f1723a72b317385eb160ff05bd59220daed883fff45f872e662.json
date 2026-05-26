@@ -8,7 +8,7 @@
         "Varchar",
         "Text",
         "Jsonb",
-        "Bpchar",
+        "Varchar",
         "Text"
       ]
     },

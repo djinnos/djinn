@@ -11,7 +11,7 @@
       {
         "ordinal": 1,
         "name": "content_hash",
-        "type_info": "Bpchar"
+        "type_info": "Varchar"
       }
     ],
     "parameters": {
