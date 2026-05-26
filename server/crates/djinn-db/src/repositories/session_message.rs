@@ -157,8 +157,12 @@ impl SessionMessageRepository {
         self.db.ensure_initialized().await?;
 
         // NOTE: dynamic SQL — IN-clause placeholder count is runtime-dependent;
-        // compile-time check not possible with variadic bindings.
-        let placeholders: Vec<String> = (0..session_ids.len()).map(|_| "?".to_string()).collect();
+        // compile-time check not possible with variadic bindings. Postgres
+        // positional placeholders ($1, $2, …), NOT MySQL `?` — the latter is
+        // a syntax error inside `IN (...)` and 500'd the whole chat-sessions
+        // list (`syntax error at or near ","`), leaving the chat tab empty.
+        let placeholders: Vec<String> =
+            (1..=session_ids.len()).map(|n| format!("${n}")).collect();
         let sql = format!(
             "SELECT session_id, role, content_json, created_at \
              FROM session_messages \
