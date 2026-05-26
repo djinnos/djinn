@@ -87,12 +87,10 @@ impl NoteRepository {
             return Ok(HashMap::new());
         }
 
-        let placeholders = std::iter::repeat_n("?", note_ids.len())
-            .collect::<Vec<_>>()
-            .join(", ");
+        // Postgres $N binds; no fixed params precede the IN list.
         let sql = format!(
             "SELECT id, confidence FROM notes WHERE id IN ({})",
-            placeholders
+            crate::repositories::pg_placeholders(note_ids.len(), 1)
         );
 
         // NOTE: dynamic SQL — compile-time check not possible (runtime IN list)
@@ -113,14 +111,12 @@ impl NoteRepository {
             return Ok(Vec::new());
         }
 
-        let placeholders = std::iter::repeat_n("?", candidate_ids.len())
-            .collect::<Vec<_>>()
-            .join(", ");
+        // project_id is bound as $1, so the IN list starts at $2.
         let query = format!(
             "SELECT id, access_count, created_at, updated_at
              FROM notes
              WHERE project_id = $1 AND id IN ({})",
-            placeholders
+            crate::repositories::pg_placeholders(candidate_ids.len(), 2)
         );
 
         // NOTE: dynamic SQL — compile-time check not possible (runtime IN list)

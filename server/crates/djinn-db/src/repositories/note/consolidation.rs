@@ -652,10 +652,11 @@ fn canonical_pair(left: &str, right: &str) -> (String, String) {
     }
 }
 
-fn sql_placeholders(count: usize, _start_index: usize) -> String {
-    std::iter::repeat_n("?", count)
-        .collect::<Vec<_>>()
-        .join(", ")
+fn sql_placeholders(count: usize, start_index: usize) -> String {
+    // Postgres positional binds ($N) honoring the caller's start offset.
+    // Previously emitted MySQL `?` and ignored start_index, which 500'd
+    // with "syntax error at or near \",\"" on Postgres.
+    crate::repositories::pg_placeholders(count, start_index)
 }
 
 fn sanitize_fts5_query(query: &str) -> Option<String> {

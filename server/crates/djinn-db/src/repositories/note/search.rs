@@ -278,10 +278,9 @@ impl NoteRepository {
             return Ok(vec![]);
         }
 
-        let placeholders = std::iter::repeat_n("?", ranked_ids.len())
-            .collect::<Vec<_>>()
-            .join(", ");
-        // NOTE: dynamic SQL (IN list built from ranked candidate ids) — compile-time check not possible
+        // NOTE: dynamic SQL (IN list built from ranked candidate ids).
+        // project_id is $1, so the IN list starts at $2 (Postgres binds).
+        let placeholders = crate::repositories::pg_placeholders(ranked_ids.len(), 2);
         let sql = format!(
             "SELECT id, permalink, title, folder, note_type,
                     COALESCE(abstract, substr(content, 1, 200)) as abstract_text
@@ -349,11 +348,14 @@ impl NoteRepository {
         }
 
         let note_ids: Vec<String> = raw_matches.iter().map(|row| row.note_id.clone()).collect();
-        let placeholders = std::iter::repeat_n("?", note_ids.len())
-            .collect::<Vec<_>>()
-            .join(", ");
+        // Postgres positional binds. Fixed params occupy $1..=$5
+        // (project_id, folder×2, note_type×2); the branch-filter IN list
+        // follows starting at $6, and the note-id IN list starts right
+        // after the branch values. Bind order below must match exactly.
         let (branch_filter_sql, branch_filter_values) =
-            embedding_branch_filter_sql(task_branch.as_deref());
+            embedding_branch_filter_sql(task_branch.as_deref(), 6);
+        let note_ids_start = 6 + branch_filter_values.len();
+        let placeholders = crate::repositories::pg_placeholders(note_ids.len(), note_ids_start);
         let folder_val = folder.unwrap_or("");
         let note_type_val = note_type.unwrap_or("");
         // NOTE: dynamic SQL (IN list + branch filter clause built at runtime) — compile-time check not possible

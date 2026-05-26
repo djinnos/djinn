@@ -695,10 +695,17 @@ impl DjinnMcpServer {
             )
             .await
         {
-            Ok(project) => Json(ProjectAddResponse {
-                status: "ok".into(),
-                project: ProjectInfo::from_project(&project),
-            }),
+            Ok(project) => {
+                // Kick the mirror→stack→image→graph pipeline immediately so
+                // the freshly added repo's stack gets detected and its image
+                // enqueued now, instead of waiting up to a full mirror-fetch
+                // tick. Fire-and-forget; the periodic tick is the backstop.
+                self.state.trigger_mirror_refresh(&project.id).await;
+                Json(ProjectAddResponse {
+                    status: "ok".into(),
+                    project: ProjectInfo::from_project(&project),
+                })
+            }
             Err(e) => Json(ProjectAddResponse {
                 status: format!("error: {e}"),
                 project: ProjectInfo::unknown(display_name),

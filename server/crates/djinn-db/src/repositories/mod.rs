@@ -21,3 +21,31 @@ pub mod user;
 pub mod user_settings;
 pub mod verification_cache;
 pub mod verification_result;
+
+/// Render `count` Postgres positional placeholders starting at `$start`.
+///
+/// `pg_placeholders(3, 1)` → `"$1, $2, $3"`; `pg_placeholders(2, 6)` →
+/// `"$6, $7"`. Used by the dynamic `IN (...)` builders whose bind count is
+/// only known at runtime. Postgres rejects MySQL-style `?` placeholders
+/// (`syntax error at or near ","`), so every such builder must emit `$N`
+/// numbered to match its bind order — including the offset for any fixed
+/// params bound before the IN list.
+pub(crate) fn pg_placeholders(count: usize, start: usize) -> String {
+    (start..start + count)
+        .map(|n| format!("${n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::pg_placeholders;
+
+    #[test]
+    fn pg_placeholders_numbers_from_start() {
+        assert_eq!(pg_placeholders(3, 1), "$1, $2, $3");
+        assert_eq!(pg_placeholders(2, 6), "$6, $7");
+        assert_eq!(pg_placeholders(1, 1), "$1");
+        assert_eq!(pg_placeholders(0, 1), "");
+    }
+}

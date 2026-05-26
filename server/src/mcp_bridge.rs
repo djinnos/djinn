@@ -474,6 +474,31 @@ impl RuntimeOps for AppState {
                 .map_err(|e| format!("db write: {e}"))
         }
     }
+
+    async fn trigger_mirror_refresh(&self, project_id: &str) {
+        // Fire-and-forget: a fresh mirror clone + stack detection + image
+        // enqueue can take many seconds, and the caller (project_add) wants a
+        // snappy response. Errors are logged and swallowed — the periodic
+        // mirror-fetch tick retries anything that fails here.
+        let state = self.clone();
+        let project_id = project_id.to_string();
+        tokio::spawn(async move {
+            match crate::mirror_fetcher::fetch_project(&state, &project_id).await {
+                Ok(true) => {
+                    tracing::info!(project_id, "post-add mirror refresh complete")
+                }
+                Ok(false) => tracing::debug!(
+                    project_id,
+                    "post-add mirror refresh skipped: project not GitHub-linked yet"
+                ),
+                Err(err) => tracing::warn!(
+                    project_id,
+                    error = %err,
+                    "post-add mirror refresh failed; periodic tick will retry"
+                ),
+            }
+        });
+    }
 }
 
 #[async_trait]

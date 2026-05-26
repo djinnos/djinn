@@ -355,11 +355,10 @@ impl SessionRepository {
         if task_ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        let placeholders: Vec<String> = (0..task_ids.len()).map(|_| "?".to_string()).collect();
-        // NOTE: dynamic SQL (IN list built at runtime) — compile-time check not possible
+        // NOTE: dynamic SQL (IN list built at runtime). Postgres $N binds.
         let sql = format!(
             "SELECT task_id, COUNT(*) as cnt FROM sessions WHERE task_id IN ({}) GROUP BY task_id",
-            placeholders.join(", ")
+            crate::repositories::pg_placeholders(task_ids.len(), 1)
         );
         let mut q = sqlx::query_as::<_, (String, i64)>(&sql);
         for id in task_ids {

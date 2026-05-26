@@ -78,6 +78,26 @@ async fn run_tick(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolve a project's GitHub coords + cached installation id, then run the
+/// full mirror→stack→image→graph pipeline once.
+///
+/// Returns `Ok(false)` when the project isn't GitHub-linked yet (no coords or
+/// no cached installation id) — those rows are skipped silently, exactly as
+/// the periodic tick skips them. Used by the post-add trigger so a freshly
+/// added repo doesn't have to wait up to a full tick for its stack to be
+/// detected and its image enqueued.
+pub(crate) async fn fetch_project(state: &AppState, project_id: &str) -> anyhow::Result<bool> {
+    let repo = ProjectRepository::new(state.db().clone(), state.event_bus());
+    let Some((owner, repo_name)) = repo.get_github_coords(project_id).await? else {
+        return Ok(false);
+    };
+    let Some(installation_id) = repo.get_installation_id(project_id).await? else {
+        return Ok(false);
+    };
+    fetch_one(state, project_id, &owner, &repo_name, installation_id).await?;
+    Ok(true)
+}
+
 /// Mint a fresh installation token and refresh the mirror for one project.
 /// Separated so the imperative refresh endpoint can call it directly.
 pub(crate) async fn fetch_one(

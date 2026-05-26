@@ -112,6 +112,12 @@ pub trait RuntimeOps: Send + Sync {
         project_id: &str,
         config: &djinn_stack::environment::EnvironmentConfig,
     ) -> Result<(), String>;
+    /// Kick the full mirror→stack→image→graph pipeline for a single project
+    /// out-of-band — e.g. right after a repo is added — so it doesn't wait up
+    /// to a full mirror-fetch tick for its stack to be detected and its image
+    /// enqueued. Fire-and-forget: returns once the work is scheduled, not once
+    /// it completes. A no-op on runtimes that don't own the mirror manager.
+    async fn trigger_mirror_refresh(&self, project_id: &str);
 }
 
 // ── Git ─────────────────────────────────────────────────────────────────────────

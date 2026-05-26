@@ -228,6 +228,12 @@ impl bridge::RuntimeOps for AgentRuntimeOps {
              route project_environment_config_set through djinn-server's MCP endpoint"
             .into())
     }
+
+    async fn trigger_mirror_refresh(&self, _project_id: &str) {
+        // The agent-internal runtime doesn't own the mirror manager — only
+        // the server-side AppState impl does. No-op here; the server's
+        // periodic mirror-fetch tick still covers this project.
+    }
 }
 
 /// Fallback `RepoGraphOps` implementation used when `AgentContext` is built

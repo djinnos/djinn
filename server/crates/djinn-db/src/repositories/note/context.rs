@@ -284,15 +284,12 @@ impl NoteRepository {
         }
 
         let ids: Vec<String> = candidates.iter().map(|(id, _)| id.clone()).collect();
-        let placeholders = std::iter::repeat_n("?", ids.len())
-            .collect::<Vec<_>>()
-            .join(", ");
-
+        // Postgres $N binds; no fixed params precede the IN list.
         let sql = format!(
             "SELECT id, permalink, title, note_type, COALESCE(overview, substr(content, 1, 500)) as disclosure_text
              FROM notes
              WHERE id IN ({})",
-            placeholders
+            crate::repositories::pg_placeholders(ids.len(), 1)
         );
 
         // NOTE: dynamic SQL — compile-time check not possible (runtime IN list)
@@ -344,15 +341,12 @@ impl NoteRepository {
         }
 
         let ids: Vec<String> = candidates.iter().map(|(id, _)| id.clone()).collect();
-        let placeholders = std::iter::repeat_n("?", ids.len())
-            .collect::<Vec<_>>()
-            .join(", ");
-
+        // Postgres $N binds; no fixed params precede the IN list.
         let sql = format!(
             "SELECT id, permalink, title, note_type, COALESCE(abstract, substr(content, 1, 100)) as disclosure_text
              FROM notes
              WHERE id IN ({})",
-            placeholders
+            crate::repositories::pg_placeholders(ids.len(), 1)
         );
 
         // NOTE: dynamic SQL — compile-time check not possible (runtime IN list)

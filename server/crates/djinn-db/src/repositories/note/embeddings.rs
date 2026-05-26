@@ -189,11 +189,17 @@ fn embedding_query_branches(branch: Option<&str>) -> Vec<String> {
     branches
 }
 
-pub(super) fn embedding_branch_filter_sql(branch: Option<&str>) -> (String, Vec<String>) {
+/// Build the `m.branch IN (...)` fragment + its bind values. `start` is
+/// the first Postgres positional index for this fragment's binds — the
+/// caller must pass the count of params it binds BEFORE this fragment + 1,
+/// and bind `branches` in that slot order. Returns `("", [])` semantics
+/// preserved via an empty IN list when there are no branches (caller skips).
+pub(super) fn embedding_branch_filter_sql(
+    branch: Option<&str>,
+    start: usize,
+) -> (String, Vec<String>) {
     let branches = embedding_query_branches(branch);
-    let placeholders = std::iter::repeat_n("?", branches.len())
-        .collect::<Vec<_>>()
-        .join(", ");
+    let placeholders = crate::repositories::pg_placeholders(branches.len(), start);
     (format!("m.branch IN ({placeholders})"), branches)
 }
 

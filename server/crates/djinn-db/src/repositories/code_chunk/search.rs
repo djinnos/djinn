@@ -199,18 +199,15 @@ pub async fn hydrate_chunk_ids(
     }
     db.ensure_initialized().await?;
 
-    let placeholders = std::iter::repeat_n("?", chunk_id_scores.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    // NOTE: dynamic SQL (IN-list of chunk ids built at runtime) — the
-    // placeholders are filled exclusively from the caller-supplied
-    // string list, every value is rebound rather than interpolated.
+    // NOTE: dynamic SQL (IN-list of chunk ids built at runtime) — values
+    // are rebound, never interpolated. project_id is $1, so the IN list
+    // starts at $2 (Postgres positional binds).
     let sql = format!(
         "SELECT id, file_path, symbol_key, kind, start_line, end_line
            FROM code_chunks
           WHERE project_id = $1
             AND id IN ({})",
-        placeholders
+        crate::repositories::pg_placeholders(chunk_id_scores.len(), 2)
     );
 
     let mut q = sqlx::query_as::<

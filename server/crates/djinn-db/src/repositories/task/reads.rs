@@ -607,12 +607,9 @@ impl TaskRepository {
             return Ok(0);
         }
 
-        // Build placeholders for the NOT IN clause
-        let placeholders: String = peer_task_ids
-            .iter()
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(",");
+        // NOT IN placeholders: peer_user_id is bound as $1, so the list
+        // starts at $2 (Postgres positional binds; `?` is a syntax error).
+        let placeholders = crate::repositories::pg_placeholders(peer_task_ids.len(), 2);
 
         // Find tasks owned by peer that are not in their export and not already closed
         let sql_select = format!(
@@ -631,12 +628,8 @@ impl TaskRepository {
             return Ok(0);
         }
 
-        // Close the tasks with peer_reconciled reason using SQLite's built-in timestamp.
-        let placeholders: String = tasks_to_close
-            .iter()
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(",");
+        // IN placeholders: no fixed param precedes the list, so start at $1.
+        let placeholders = crate::repositories::pg_placeholders(tasks_to_close.len(), 1);
 
         let sql_update = format!(
             r#"UPDATE tasks SET status = 'closed', close_reason = 'peer_reconciled',
