@@ -339,6 +339,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     //    through `SupervisorServices` too so the worker can run without a
     //    local Database connection.
     let in_pod_db = bootstrap_warm_database()
+        .await
         .context("bootstrap in-Pod database for WorkerSupervisorServices")?;
     let agent_context = build_worker_agent_context(in_pod_db, rpc.clone(), spec.project_id.clone());
     let worker_services: Arc<dyn SupervisorServices> = Arc::new(WorkerSupervisorServices::new(
@@ -518,7 +519,7 @@ fn build_worker_agent_context(
 /// exit.  The heavy pipeline's progress lands in shared DB caches that
 /// the server process reads on subsequent graph queries.
 async fn run_warm_graph(project_id: &str) -> Result<()> {
-    let db = bootstrap_warm_database()?;
+    let db = bootstrap_warm_database().await?;
     let ctx = WorkerWarmContext {
         db,
         indexer_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -601,12 +602,22 @@ async fn run_warm_graph(project_id: &str) -> Result<()> {
 /// only manage one configuration surface:
 ///
 /// * `DJINN_DATABASE_URL` — full DSN (required).
-fn bootstrap_warm_database() -> Result<Database> {
+async fn bootstrap_warm_database() -> Result<Database> {
     let url = std::env::var("DJINN_DATABASE_URL")
         .map_err(|_| anyhow::anyhow!("DJINN_DATABASE_URL must be set for the warm worker pod"))?;
 
     let connect = DatabaseConnectConfig::Postgres(PostgresDatabaseConfig { url });
-    Database::open_with_config(connect).context("open warm worker database")
+    let db = Database::open_with_config(connect).context("open warm worker database")?;
+    // Worker pods must never run the migrator: it grabs a global advisory
+    // lock that contends with the migrate-Job / peer pods, and our 10s
+    // `lock_timeout` then cancels the statement ("canceling statement due to
+    // lock timeout"), wedging stage setup — the worker failures seen during
+    // deploys. Verify the schema lock-free and mark the DB initialized so
+    // every later repository call short-circuits `ensure_initialized()`.
+    db.verify_and_mark_initialized()
+        .await
+        .context("verify worker database schema is current")?;
+    Ok(db)
 }
 
 /// Compile-time sanity: the paths the worker contract publishes to the

@@ -330,6 +330,28 @@ impl Database {
         Ok(())
     }
 
+    /// App and worker pods must **never** run the migrator: it takes the
+    /// migrator's global advisory lock (`pg_advisory_lock`), which contends
+    /// with the migrate-Job and peer pods. Under our 10s `lock_timeout` that
+    /// surfaces as "canceling statement due to lock timeout" and wedges any
+    /// first-query path — observed wedging worker stage setup during deploys
+    /// (the migrate-Job holds the lock while a freshly-spawned worker boots).
+    ///
+    /// This verifies the schema is current (lock-free, same contract as the
+    /// server app pod) and then marks the `OnceCell` initialized, so every
+    /// later `ensure_initialized()` short-circuits and no query ever triggers
+    /// the lazy migrator. Only `djinn-server --migrate-only` (the Helm
+    /// pre-upgrade Job) runs migrations.
+    pub async fn verify_and_mark_initialized(&self) -> DbResult<()> {
+        if self.readonly {
+            return Ok(());
+        }
+        self.verify_schema_is_current().await?;
+        // `OnceCell::set` errors only if already initialized — benign here.
+        let _ = self.initialized.set(());
+        Ok(())
+    }
+
     pub async fn ensure_initialized(&self) -> DbResult<()> {
         if self.readonly {
             return Ok(());
