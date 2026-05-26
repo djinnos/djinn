@@ -163,8 +163,10 @@ impl SessionMessageRepository {
         // list (`syntax error at or near ","`), leaving the chat tab empty.
         let placeholders: Vec<String> =
             (1..=session_ids.len()).map(|n| format!("${n}")).collect();
+        // content_json is JSONB; cast to text so it decodes into the
+        // String tuple slot (sqlx won't coerce JSONB→String otherwise).
         let sql = format!(
-            "SELECT session_id, role, content_json, created_at \
+            "SELECT session_id, role, content_json::text, created_at \
              FROM session_messages \
              WHERE session_id IN ({}) \
              ORDER BY created_at ASC",
