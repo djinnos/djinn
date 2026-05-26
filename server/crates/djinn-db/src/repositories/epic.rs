@@ -664,12 +664,16 @@ fn epic_sort_to_sql(sort: &str) -> &'static str {
 
 async fn short_id_exists(pool: &sqlx::PgPool, table: &str, short_id: &str) -> Result<bool> {
     // NOTE: dynamic SQL (table name interpolated; values are internal constants only) — compile-time check not possible
-    let sql = format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE short_id = $1)");
-    Ok(sqlx::query_scalar::<_, i64>(&sql)
-        .bind(short_id)
-        .fetch_one(pool)
-        .await?
-        > 0)
+    // Postgres `EXISTS(...)` returns BOOLEAN — decode as `bool`, not i64
+    // (MySQL returned 0/1, so this was `<_, i64> > 0` pre-cutover and 500d
+    // with "i64 (INT8) is not compatible with SQL type BOOL", breaking
+    // epic AND task creation, which both mint short_ids via this helper).
+    Ok(sqlx::query_scalar::<_, bool>(&format!(
+        "SELECT EXISTS(SELECT 1 FROM {table} WHERE short_id = $1)"
+    ))
+    .bind(short_id)
+    .fetch_one(pool)
+    .await?)
 }
 
 #[cfg(test)]
