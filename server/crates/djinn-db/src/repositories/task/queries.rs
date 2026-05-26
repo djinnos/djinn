@@ -143,13 +143,13 @@ impl TaskRepository {
         // NOTE: dynamic SQL (WHERE clause built from optional filters) — compile-time check not possible
         let sql = format!(
             "SELECT t.id, t.project_id, t.short_id, t.epic_id, t.title, t.description, t.design,
-                    t.issue_type, t.status, t.priority, t.owner, t.labels,
-                    t.acceptance_criteria, t.reopen_count, t.continuation_count,
+                    t.issue_type, t.status, t.priority, t.owner, t.labels::text AS labels,
+                    t.acceptance_criteria::text AS acceptance_criteria, t.reopen_count, t.continuation_count,
                     t.verification_failure_count,
                     t.total_reopen_count, t.total_verification_failure_count,
                     t.intervention_count, t.last_intervention_at,
                     t.created_at, t.updated_at, t.closed_at,
-                    t.close_reason, t.merge_commit_sha, t.pr_url, t.merge_conflict_metadata, t.memory_refs
+                    t.close_reason, t.merge_commit_sha, t.pr_url, t.merge_conflict_metadata, t.memory_refs::text AS memory_refs
              FROM tasks t
              WHERE {where_sql}
              ORDER BY t.priority ASC, t.created_at ASC
@@ -187,13 +187,13 @@ impl TaskRepository {
         // NOTE: dynamic SQL (WHERE clause built from optional filters) — compile-time check not possible
         let sql = format!(
             "SELECT t.id, t.project_id, t.short_id, t.epic_id, t.title, t.description, t.design,
-                    t.issue_type, t.status, t.priority, t.owner, t.labels,
-                    t.acceptance_criteria, t.reopen_count, t.continuation_count,
+                    t.issue_type, t.status, t.priority, t.owner, t.labels::text AS labels,
+                    t.acceptance_criteria::text AS acceptance_criteria, t.reopen_count, t.continuation_count,
                     t.verification_failure_count,
                     t.total_reopen_count, t.total_verification_failure_count,
                     t.intervention_count, t.last_intervention_at,
                     t.created_at, t.updated_at, t.closed_at,
-                    t.close_reason, t.merge_commit_sha, t.pr_url, t.merge_conflict_metadata, t.memory_refs
+                    t.close_reason, t.merge_commit_sha, t.pr_url, t.merge_conflict_metadata, t.memory_refs::text AS memory_refs
              FROM tasks t
              WHERE {where_sql}
              ORDER BY t.priority ASC, t.created_at ASC
@@ -286,12 +286,12 @@ impl TaskRepository {
         // NOTE: dynamic SQL (WHERE + ORDER clauses built from request) — compile-time check not possible
         let sql = format!(
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    status, priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
+                    status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
                     (SELECT COUNT(*) FROM blockers b
                      JOIN tasks bt ON b.blocking_task_id = bt.id
                      WHERE b.task_id = tasks.id AND bt.status != 'closed') AS unresolved_blocker_count
@@ -560,12 +560,12 @@ impl TaskRepository {
                 // NOTE: dynamic SQL (stale_hours inlined) — compile-time check not possible
                 let sql = format!(
                     r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                            status, priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
+                            status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                             reopen_count, continuation_count, verification_failure_count,
                             total_reopen_count, total_verification_failure_count,
                             intervention_count, last_intervention_at,
                             created_at, updated_at, closed_at,
-                            close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!"
+                            close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs
                      FROM tasks
                      WHERE status = 'in_progress'
                        AND updated_at < to_char((now() at time zone 'utc') - (interval '1 hour' * {stale_hours}), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#

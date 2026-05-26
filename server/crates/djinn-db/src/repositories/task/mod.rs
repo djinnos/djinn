@@ -714,12 +714,16 @@ pub(super) fn extract_constraint_name(db_err: &dyn sqlx::error::DatabaseError) -
 }
 
 pub(super) async fn short_id_exists(pool: &PgPool, table: &str, short_id: &str) -> Result<bool> {
+    // Postgres `EXISTS(...)` returns BOOLEAN — decode as `bool`, not i64
+    // (MySQL returned 0/1, so this was `<_, i64> > 0` pre-cutover and 500d
+    // with "i64 (INT8) is not compatible with SQL type BOOL", breaking task
+    // creation, which mints short_ids via this helper). Mirrors the sibling
+    // fix in epic.rs::short_id_exists (commit 511888d0f).
     let sql = format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE short_id = $1)");
-    Ok(sqlx::query_scalar::<_, i64>(&sql)
+    Ok(sqlx::query_scalar::<_, bool>(&sql)
         .bind(short_id)
         .fetch_one(pool)
-        .await?
-        > 0)
+        .await?)
 }
 
 /// Reopen a closed epic when a task is added to it or moved to it.

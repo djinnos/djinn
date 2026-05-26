@@ -487,7 +487,7 @@ impl EpicRepository {
         // NOTE: dynamic SQL (WHERE + ORDER clauses built from optional filters; uses inlined EPIC_COLS projection) — compile-time check not possible
         let sql = format!(
             r#"SELECT id, project_id, short_id, title, description, emoji, color, status,
-                    owner, created_at, updated_at, closed_at, memory_refs::text AS "memory_refs!",
+                    owner, created_at, updated_at, closed_at, memory_refs::text AS memory_refs,
                     auto_breakdown, originating_adr_id
              FROM epics WHERE {where_sql} ORDER BY {order_sql} LIMIT {limit_ph} OFFSET {offset_ph}"#
         );

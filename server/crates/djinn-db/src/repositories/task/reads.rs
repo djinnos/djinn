@@ -65,12 +65,12 @@ impl TaskRepository {
         // NOTE: dynamic SQL (optional blocker_filter fragment) — compile-time check not possible
         let sql = format!(
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    status, priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
+                    status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!"
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs
              FROM tasks WHERE status = $1 {blocker_filter} ORDER BY priority, created_at"#
         );
         Ok(sqlx::query_as::<_, Task>(&sql)
@@ -192,24 +192,24 @@ impl TaskRepository {
         // NOTE: dynamic SQL (SELECT variant depends on project filter) — compile-time check not possible
         let sql = if project_id.is_some() {
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    status, priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
+                    status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!"
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs
              FROM tasks
              WHERE project_id = $1
                AND (status != 'closed' OR closed_at > to_char((now() at time zone 'utc') - interval '1 hour', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
              ORDER BY priority, created_at"#
         } else {
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    status, priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
+                    status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                     reopen_count, continuation_count, verification_failure_count,
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!"
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs
              FROM tasks
              WHERE (status != 'closed' OR closed_at > to_char((now() at time zone 'utc') - interval '1 hour', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
              ORDER BY priority, created_at"#

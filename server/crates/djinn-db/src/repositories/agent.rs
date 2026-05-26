@@ -508,8 +508,8 @@ impl AgentRepository {
         // NOTE: dynamic SQL (WHERE clause built from optional filters; uses inlined AGENT_COLUMNS projection) — compile-time check not possible
         let sql = format!(
             r#"SELECT id, project_id, name, base_role, description,
-                    system_prompt_extensions::text AS "system_prompt_extensions!", model_preference, verification_command,
-                    mcp_servers::text AS "mcp_servers!", skills::text AS "skills!", is_default,
+                    system_prompt_extensions::text AS system_prompt_extensions, model_preference, verification_command,
+                    mcp_servers::text AS mcp_servers, skills::text AS skills, is_default,
                     (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
                      FROM learned_prompt_history h
                      WHERE h.agent_id = agents.id
