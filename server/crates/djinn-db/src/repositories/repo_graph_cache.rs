@@ -35,26 +35,19 @@ impl RepoGraphCacheRepository {
 
     pub async fn get(&self, project_id: &str, commit_sha: &str) -> Result<Option<CachedRepoGraph>> {
         self.db.ensure_initialized().await?;
-        // NOTE: Dolt reports LONGBLOB columns without the binary-charset
-        // flag that sqlx-mysql's macro relies on to pick a `Vec<u8>` decoder,
-        // so the `query_as!` form attempts a UTF-8 decode and fails on
-        // bincoded payloads. We pull the blob out of a row explicitly.
-        use sqlx::Row;
-        Ok(sqlx::query(
+        // Postgres `bytea` decodes cleanly into `Vec<u8>` via the macro, so
+        // the historical non-macro workaround (Dolt's missing binary-charset
+        // flag forced a UTF-8 decode on bincoded blobs) is no longer needed.
+        Ok(sqlx::query_as!(
+            CachedRepoGraph,
             "SELECT project_id, commit_sha, graph_blob, built_at
              FROM repo_graph_cache
              WHERE project_id = $1 AND commit_sha = $2",
+            project_id,
+            commit_sha,
         )
-        .bind(project_id)
-        .bind(commit_sha)
         .fetch_optional(self.db.pool())
-        .await?
-        .map(|row| CachedRepoGraph {
-            project_id: row.get("project_id"),
-            commit_sha: row.get("commit_sha"),
-            graph_blob: row.get("graph_blob"),
-            built_at: row.get("built_at"),
-        }))
+        .await?)
     }
 
     /// Return the most recently warmed entry for `project_id`, regardless
@@ -63,23 +56,17 @@ impl RepoGraphCacheRepository {
     /// `origin/main` has since advanced past the pinned commit.
     pub async fn latest_for_project(&self, project_id: &str) -> Result<Option<CachedRepoGraph>> {
         self.db.ensure_initialized().await?;
-        use sqlx::Row;
-        Ok(sqlx::query(
+        Ok(sqlx::query_as!(
+            CachedRepoGraph,
             "SELECT project_id, commit_sha, graph_blob, built_at
              FROM repo_graph_cache
              WHERE project_id = $1
              ORDER BY built_at DESC
              LIMIT 1",
+            project_id,
         )
-        .bind(project_id)
         .fetch_optional(self.db.pool())
-        .await?
-        .map(|row| CachedRepoGraph {
-            project_id: row.get("project_id"),
-            commit_sha: row.get("commit_sha"),
-            graph_blob: row.get("graph_blob"),
-            built_at: row.get("built_at"),
-        }))
+        .await?)
     }
 
     pub async fn upsert(&self, entry: RepoGraphCacheInsert<'_>) -> Result<()> {
@@ -102,15 +89,13 @@ impl RepoGraphCacheRepository {
         // Stamp the project row so the coordinator's dispatch gate can see
         // that the warm pipeline has completed at least once for this project.
         // Intentionally best-effort: a stamp failure must not roll back the
-        // cache write, so we log and continue. Uses the non-macro
-        // `sqlx::query` form so builds work on databases that haven't yet
-        // applied migration 9.
-        if let Err(e) = sqlx::query(
+        // cache write, so we log and continue.
+        if let Err(e) = sqlx::query!(
             r#"UPDATE projects
                SET graph_warmed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
              WHERE id = $1"#,
+            entry.project_id,
         )
-        .bind(entry.project_id)
         .execute(self.db.pool())
         .await
         {

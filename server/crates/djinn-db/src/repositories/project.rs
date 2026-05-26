@@ -462,38 +462,25 @@ impl ProjectRepository {
 
     pub async fn get_config(&self, id: &str) -> Result<Option<ProjectConfig>> {
         self.db.ensure_initialized().await?;
-        // Non-macro form because `graph_excluded_paths` and
-        // `graph_orphan_ignore` (migration 12) aren't in the sqlx
-        // offline cache yet; matches the pattern used for
-        // `environment_config` / `graph_warmed_at` which also post-date
-        // the cache baseline.
-        use sqlx::Row;
-        // NOTE: column aliases are bare names (no `!`). The `"col!"`
-        // non-null-override syntax is a `sqlx::query!`-MACRO feature only —
-        // outside the macro it becomes part of the literal column name and
-        // breaks `row.try_get("col")` lookups (previously silently fell
-        // back to `unwrap_or_default()`, losing real data).
-        let row = sqlx::query(
+        let row = sqlx::query!(
             r#"SELECT target_branch, auto_merge, sync_enabled, sync_remote,
                     graph_excluded_paths::text AS graph_excluded_paths,
                     graph_orphan_ignore::text AS graph_orphan_ignore
                FROM projects WHERE id = $1"#,
+            id,
         )
-        .bind(id)
         .fetch_optional(self.db.pool())
         .await?;
         let Some(row) = row else {
             return Ok(None);
         };
-        let graph_excluded_paths: String =
-            row.try_get("graph_excluded_paths").unwrap_or_default();
-        let graph_orphan_ignore: String =
-            row.try_get("graph_orphan_ignore").unwrap_or_default();
+        let graph_excluded_paths: String = row.graph_excluded_paths.unwrap_or_default();
+        let graph_orphan_ignore: String = row.graph_orphan_ignore.unwrap_or_default();
         Ok(Some(ProjectConfig {
-            target_branch: row.try_get("target_branch")?,
-            auto_merge: row.try_get("auto_merge")?,
-            sync_enabled: row.try_get("sync_enabled")?,
-            sync_remote: row.try_get("sync_remote").ok(),
+            target_branch: row.target_branch,
+            auto_merge: row.auto_merge,
+            sync_enabled: row.sync_enabled,
+            sync_remote: row.sync_remote,
             graph_excluded_paths: parse_json_string_list(&graph_excluded_paths),
             graph_orphan_ignore: parse_json_string_list(&graph_orphan_ignore),
         }))
@@ -539,15 +526,15 @@ impl ProjectRepository {
                     .map_err(|e| crate::Error::InvalidData(format!(
                         "graph_excluded_paths: {e}"
                     )))?;
-                // Non-macro UPDATE because the column post-dates the
-                // sqlx offline cache baseline (migration 12).
-                // `$1::jsonb` cast required: bind is `&str`, column is JSONB.
-                // sqlx::query (non-macro) doesn't auto-cast like the macro form.
-                sqlx::query(
+                // The `$1::jsonb` cast makes the macro type this bind as
+                // `serde_json::Value`; `canonical` is already-validated JSON.
+                let canonical: serde_json::Value = serde_json::from_str(&canonical)
+                    .unwrap_or_else(|_| serde_json::Value::Array(vec![]));
+                sqlx::query!(
                     "UPDATE projects SET graph_excluded_paths = $1::jsonb WHERE id = $2",
+                    canonical,
+                    id,
                 )
-                .bind(&canonical)
-                .bind(id)
                 .execute(self.db.pool())
                 .await?;
             }
@@ -556,11 +543,13 @@ impl ProjectRepository {
                     .map_err(|e| crate::Error::InvalidData(format!(
                         "graph_orphan_ignore: {e}"
                     )))?;
-                sqlx::query(
+                let canonical: serde_json::Value = serde_json::from_str(&canonical)
+                    .unwrap_or_else(|_| serde_json::Value::Array(vec![]));
+                sqlx::query!(
                     "UPDATE projects SET graph_orphan_ignore = $1::jsonb WHERE id = $2",
+                    canonical,
+                    id,
                 )
-                .bind(&canonical)
-                .bind(id)
                 .execute(self.db.pool())
                 .await?;
             }
@@ -670,11 +659,10 @@ impl ProjectRepository {
     /// been applied, which is what the caller wants.
     pub async fn get_environment_config(&self, project_id: &str) -> Result<Option<String>> {
         self.db.ensure_initialized().await?;
-        // Bare alias — `"col!"` is macro-only syntax (see get_config note).
-        Ok(sqlx::query_scalar::<_, String>(
-            r#"SELECT environment_config::text AS environment_config FROM projects WHERE id = $1"#,
+        Ok(sqlx::query_scalar!(
+            r#"SELECT environment_config::text AS "environment_config!" FROM projects WHERE id = $1"#,
+            project_id,
         )
-        .bind(project_id)
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -690,23 +678,25 @@ impl ProjectRepository {
     /// image is no longer authoritative. The next reconcile tick sees
     /// the `None` and builds again.
     ///
-    /// Non-macro `sqlx::query` — see `get_environment_config` for the
-    /// reason.
     pub async fn set_environment_config(
         &self,
         project_id: &str,
         environment_config_json: &str,
     ) -> Result<()> {
         self.db.ensure_initialized().await?;
-        // `$1::jsonb` cast required: bind is `&str`, column is JSONB.
-        sqlx::query(
+        // The `$1::jsonb` cast makes the macro type this bind as
+        // `serde_json::Value`; callers pass pre-validated JSON.
+        let environment_config: serde_json::Value =
+            serde_json::from_str(environment_config_json)
+                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+        sqlx::query!(
             "UPDATE projects
                 SET environment_config = $1::jsonb,
                     image_hash = NULL
               WHERE id = $2",
+            environment_config,
+            project_id,
         )
-        .bind(environment_config_json)
-        .bind(project_id)
         .execute(self.db.pool())
         .await?;
         Ok(())
@@ -717,13 +707,11 @@ impl ProjectRepository {
     /// at startup, spots rows with an empty config, and rewrites them
     /// from the stack.
     ///
-    /// Non-macro `sqlx::query_as` — see `get_environment_config` for
-    /// the reason.
     pub async fn list_for_reseed(&self) -> Result<Vec<ProjectReseedRow>> {
         self.db.ensure_initialized().await?;
-        // Bare aliases — `"col!"` is macro-only syntax (see get_config note).
-        Ok(sqlx::query_as::<_, ProjectReseedRow>(
-            r#"SELECT id, stack::text AS stack, environment_config::text AS environment_config FROM projects"#,
+        Ok(sqlx::query_as!(
+            ProjectReseedRow,
+            r#"SELECT id, stack::text AS "stack!", environment_config::text AS "environment_config!" FROM projects"#,
         )
         .fetch_all(self.db.pool())
         .await?)
@@ -790,31 +778,24 @@ impl ProjectRepository {
     /// `graph_warmed_at` stamp. Returns `Ok(None)` when the project id is
     /// unknown.
     ///
-    /// Uses the non-macro `sqlx::query` form because the `graph_warmed_at`
-    /// column was added in migration 9 — older DBs that haven't run the
-    /// migration yet still compile (the query fails at runtime with a
-    /// clear schema error, which the caller surfaces).
     pub async fn get_dispatch_readiness(
         &self,
         project_id: &str,
     ) -> Result<Option<ProjectDispatchReadiness>> {
         self.db.ensure_initialized().await?;
-        use sqlx::Row;
         // `graph_warmed_at` is a VARCHAR(64) RFC3339 string matching the
         // schema-wide timestamp convention (see migration 2). An empty
         // string means "never warmed".
-        let row = sqlx::query(
+        let row = sqlx::query!(
             "SELECT image_status, graph_warmed_at FROM projects WHERE id = $1",
+            project_id,
         )
-        .bind(project_id)
         .fetch_optional(self.db.pool())
         .await?;
         Ok(row.map(|r| {
-            let stamp = r
-                .try_get::<String, _>("graph_warmed_at")
-                .unwrap_or_default();
+            let stamp = r.graph_warmed_at;
             ProjectDispatchReadiness {
-                image_status: r.get::<String, _>("image_status"),
+                image_status: r.image_status,
                 graph_warmed_at: if stamp.is_empty() { None } else { Some(stamp) },
             }
         }))

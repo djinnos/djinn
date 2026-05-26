@@ -276,15 +276,13 @@ impl CommitFileChangeRepository {
     /// one-shot backfill from `commit_file_changes`.
     pub async fn pair_events_count_for_project(&self, project_id: &str) -> Result<usize> {
         self.db.ensure_initialized().await?;
-        use sqlx::Row;
-        let row = sqlx::query(
-            "SELECT COUNT(*) AS row_count \
-             FROM coupling_pair_events WHERE project_id = $1",
+        let count: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "row_count!: i64"
+             FROM coupling_pair_events WHERE project_id = $1"#,
+            project_id,
         )
-        .bind(project_id)
         .fetch_one(self.db.pool())
         .await?;
-        let count: i64 = row.get("row_count");
         Ok(count.max(0) as usize)
     }
 
@@ -297,19 +295,18 @@ impl CommitFileChangeRepository {
     /// memory. Idempotent — re-running just upserts the same events.
     pub async fn rebuild_pair_events_for_project(&self, project_id: &str) -> Result<usize> {
         self.db.ensure_initialized().await?;
-        use sqlx::Row;
 
         // Pull rows ordered by (commit_sha, file_path) so we can group
         // a single sweep without an in-memory hash. Per-commit work is
         // bounded by MAX_FILES_PER_COMMIT_FOR_PAIRS²/2 = 105 pair
         // candidates; commits that exceed the cap are dropped.
-        let rows = sqlx::query(
+        let rows = sqlx::query!(
             "SELECT commit_sha, file_path, committed_at \
              FROM commit_file_changes \
              WHERE project_id = $1 \
              ORDER BY commit_sha ASC, file_path ASC",
+            project_id,
         )
-        .bind(project_id)
         .fetch_all(self.db.pool())
         .await?;
 
@@ -321,9 +318,9 @@ impl CommitFileChangeRepository {
         let mut buffer: Vec<CouplingPairEvent> = Vec::with_capacity(FLUSH_AT);
 
         for row in rows {
-            let sha: String = row.get("commit_sha");
-            let file: String = row.get("file_path");
-            let committed_at: String = row.get("committed_at");
+            let sha: String = row.commit_sha;
+            let file: String = row.file_path;
+            let committed_at: String = row.committed_at;
 
             if Some(&sha) != current_sha.as_ref() {
                 if let (Some(prev_sha), Some(prev_at)) =
@@ -359,14 +356,12 @@ impl CommitFileChangeRepository {
     /// Read the per-project ingest cursor (last SHA walked).
     pub async fn get_cursor(&self, project_id: &str) -> Result<Option<String>> {
         self.db.ensure_initialized().await?;
-        use sqlx::Row;
-        Ok(sqlx::query(
+        Ok(sqlx::query_scalar!(
             "SELECT last_indexed_sha FROM coupling_cursor WHERE project_id = $1",
+            project_id,
         )
-        .bind(project_id)
         .fetch_optional(self.db.pool())
-        .await?
-        .map(|row| row.get("last_indexed_sha")))
+        .await?)
     }
 
     /// Advance the per-project cursor to `sha`. Idempotent.
@@ -378,15 +373,15 @@ impl CommitFileChangeRepository {
         // `\<newline>` as a continuation. Conflict target is the PK
         // `project_id` (coupling_cursor has no event_key column — that's
         // coupling_pair_events; an earlier sweep mis-copied the target).
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO coupling_cursor (project_id, last_indexed_sha, last_updated_at) \
              VALUES ($1, $2, to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')) \
              ON CONFLICT (project_id) DO UPDATE SET \
                last_indexed_sha = EXCLUDED.last_indexed_sha, \
                last_updated_at = EXCLUDED.last_updated_at",
+            project_id,
+            sha,
         )
-        .bind(project_id)
-        .bind(sha)
         .execute(self.db.pool())
         .await?;
         Ok(())
@@ -410,30 +405,31 @@ impl CommitFileChangeRepository {
         // on either side. UNION ALL the two halves, project the
         // counterpart as `file_path`, then aggregate.
         let limit = limit.clamp(1, 500) as i64;
-        let rows: Vec<CoupledFile> = sqlx::query_as(
-            "SELECT \
-                file_path, \
-                CAST(COUNT(DISTINCT commit_sha) AS BIGINT) AS co_edit_count, \
-                MAX(committed_at) AS last_co_edit, \
-                string_agg(DISTINCT commit_sha, ',' ORDER BY committed_at DESC) AS supporting_commit_samples \
-             FROM ( \
-                 SELECT file_b AS file_path, commit_sha, committed_at \
-                   FROM coupling_pair_events \
-                  WHERE project_id = $1 AND file_a = $2 \
-                 UNION ALL \
-                 SELECT file_a AS file_path, commit_sha, committed_at \
-                   FROM coupling_pair_events \
-                  WHERE project_id = $3 AND file_b = $4 \
-             ) AS peers \
-             GROUP BY file_path \
-             ORDER BY co_edit_count DESC, last_co_edit DESC, file_path ASC \
-             LIMIT $5",
+        let rows: Vec<CoupledFile> = sqlx::query_as!(
+            CoupledFile,
+            r#"SELECT
+                file_path AS "file_path!",
+                CAST(COUNT(DISTINCT commit_sha) AS BIGINT) AS "co_edit_count!",
+                MAX(committed_at) AS "last_co_edit!",
+                string_agg(DISTINCT commit_sha, ',' ORDER BY commit_sha DESC) AS "supporting_commit_samples_raw!"
+             FROM (
+                 SELECT file_b AS file_path, commit_sha, committed_at
+                   FROM coupling_pair_events
+                  WHERE project_id = $1 AND file_a = $2
+                 UNION ALL
+                 SELECT file_a AS file_path, commit_sha, committed_at
+                   FROM coupling_pair_events
+                  WHERE project_id = $3 AND file_b = $4
+             ) AS peers
+             GROUP BY file_path
+             ORDER BY COUNT(DISTINCT commit_sha) DESC, MAX(committed_at) DESC, file_path ASC
+             LIMIT $5"#,
+            project_id,
+            file_path,
+            project_id,
+            file_path,
+            limit,
         )
-        .bind(project_id)
-        .bind(file_path)
-        .bind(project_id)
-        .bind(file_path)
-        .bind(limit)
         .fetch_all(self.db.pool())
         .await?;
         Ok(rows)
@@ -451,39 +447,41 @@ impl CommitFileChangeRepository {
         self.db.ensure_initialized().await?;
         let limit = limit.clamp(1, 500) as i64;
         let rows: Vec<FileChurn> = match since {
-            Some(ts) => sqlx::query_as(
-                "SELECT \
-                    file_path, \
-                    CAST(COUNT(DISTINCT commit_sha) AS BIGINT) AS commit_count, \
-                    CAST(COALESCE(SUM(insertions), 0) AS BIGINT) AS insertions, \
-                    CAST(COALESCE(SUM(deletions), 0) AS BIGINT) AS deletions, \
-                    MAX(committed_at) AS last_commit_at \
-                 FROM commit_file_changes \
-                 WHERE project_id = $1 AND committed_at >= $2 \
-                 GROUP BY file_path \
-                 ORDER BY commit_count DESC, last_commit_at DESC, file_path ASC \
-                 LIMIT $3",
+            Some(ts) => sqlx::query_as!(
+                FileChurn,
+                r#"SELECT
+                    file_path AS "file_path!",
+                    CAST(COUNT(DISTINCT commit_sha) AS BIGINT) AS "commit_count!",
+                    CAST(COALESCE(SUM(insertions), 0) AS BIGINT) AS "insertions!",
+                    CAST(COALESCE(SUM(deletions), 0) AS BIGINT) AS "deletions!",
+                    MAX(committed_at) AS "last_commit_at!"
+                 FROM commit_file_changes
+                 WHERE project_id = $1 AND committed_at >= $2
+                 GROUP BY file_path
+                 ORDER BY COUNT(DISTINCT commit_sha) DESC, MAX(committed_at) DESC, file_path ASC
+                 LIMIT $3"#,
+                project_id,
+                ts,
+                limit,
             )
-            .bind(project_id)
-            .bind(ts)
-            .bind(limit)
             .fetch_all(self.db.pool())
             .await?,
-            None => sqlx::query_as(
-                "SELECT \
-                    file_path, \
-                    CAST(COUNT(DISTINCT commit_sha) AS BIGINT) AS commit_count, \
-                    CAST(COALESCE(SUM(insertions), 0) AS BIGINT) AS insertions, \
-                    CAST(COALESCE(SUM(deletions), 0) AS BIGINT) AS deletions, \
-                    MAX(committed_at) AS last_commit_at \
-                 FROM commit_file_changes \
-                 WHERE project_id = $1 \
-                 GROUP BY file_path \
-                 ORDER BY commit_count DESC, last_commit_at DESC, file_path ASC \
-                 LIMIT $2",
+            None => sqlx::query_as!(
+                FileChurn,
+                r#"SELECT
+                    file_path AS "file_path!",
+                    CAST(COUNT(DISTINCT commit_sha) AS BIGINT) AS "commit_count!",
+                    CAST(COALESCE(SUM(insertions), 0) AS BIGINT) AS "insertions!",
+                    CAST(COALESCE(SUM(deletions), 0) AS BIGINT) AS "deletions!",
+                    MAX(committed_at) AS "last_commit_at!"
+                 FROM commit_file_changes
+                 WHERE project_id = $1
+                 GROUP BY file_path
+                 ORDER BY COUNT(DISTINCT commit_sha) DESC, MAX(committed_at) DESC, file_path ASC
+                 LIMIT $2"#,
+                project_id,
+                limit,
             )
-            .bind(project_id)
-            .bind(limit)
             .fetch_all(self.db.pool())
             .await?,
         };
@@ -525,37 +523,39 @@ impl CommitFileChangeRepository {
         // self-join, this is a straight indexed range scan on
         // `idx_recent` (with `since`) or PK prefix (without).
         let rows: Vec<CoupledPair> = match since {
-            Some(ts) => sqlx::query_as(
-                "SELECT \
-                    file_a, \
-                    file_b, \
-                    CAST(COUNT(*) AS BIGINT) AS co_edits, \
-                    MAX(committed_at) AS last_co_edit \
-                 FROM coupling_pair_events \
-                 WHERE project_id = $1 AND committed_at >= $2 \
-                 GROUP BY file_a, file_b \
-                 ORDER BY co_edits DESC, last_co_edit DESC, file_a ASC, file_b ASC \
-                 LIMIT $3",
+            Some(ts) => sqlx::query_as!(
+                CoupledPair,
+                r#"SELECT
+                    file_a AS "file_a!",
+                    file_b AS "file_b!",
+                    CAST(COUNT(*) AS BIGINT) AS "co_edits!",
+                    MAX(committed_at) AS "last_co_edit!"
+                 FROM coupling_pair_events
+                 WHERE project_id = $1 AND committed_at >= $2
+                 GROUP BY file_a, file_b
+                 ORDER BY COUNT(*) DESC, MAX(committed_at) DESC, file_a ASC, file_b ASC
+                 LIMIT $3"#,
+                project_id,
+                ts,
+                limit,
             )
-            .bind(project_id)
-            .bind(ts)
-            .bind(limit)
             .fetch_all(self.db.pool())
             .await?,
-            None => sqlx::query_as(
-                "SELECT \
-                    file_a, \
-                    file_b, \
-                    CAST(COUNT(*) AS BIGINT) AS co_edits, \
-                    MAX(committed_at) AS last_co_edit \
-                 FROM coupling_pair_events \
-                 WHERE project_id = $1 \
-                 GROUP BY file_a, file_b \
-                 ORDER BY co_edits DESC, last_co_edit DESC, file_a ASC, file_b ASC \
-                 LIMIT $2",
+            None => sqlx::query_as!(
+                CoupledPair,
+                r#"SELECT
+                    file_a AS "file_a!",
+                    file_b AS "file_b!",
+                    CAST(COUNT(*) AS BIGINT) AS "co_edits!",
+                    MAX(committed_at) AS "last_co_edit!"
+                 FROM coupling_pair_events
+                 WHERE project_id = $1
+                 GROUP BY file_a, file_b
+                 ORDER BY COUNT(*) DESC, MAX(committed_at) DESC, file_a ASC, file_b ASC
+                 LIMIT $2"#,
+                project_id,
+                limit,
             )
-            .bind(project_id)
-            .bind(limit)
             .fetch_all(self.db.pool())
             .await?,
         };
@@ -576,27 +576,29 @@ impl CommitFileChangeRepository {
         self.db.ensure_initialized().await?;
         let limit = limit.clamp(1, 200_000) as i64;
         let rows: Vec<CouplingPairEvent> = match since {
-            Some(ts) => sqlx::query_as(
+            Some(ts) => sqlx::query_as!(
+                CouplingPairEvent,
                 "SELECT project_id, file_a, file_b, commit_sha, committed_at \
                  FROM coupling_pair_events \
                  WHERE project_id = $1 AND committed_at >= $2 \
                  ORDER BY committed_at DESC \
                  LIMIT $3",
+                project_id,
+                ts,
+                limit,
             )
-            .bind(project_id)
-            .bind(ts)
-            .bind(limit)
             .fetch_all(self.db.pool())
             .await?,
-            None => sqlx::query_as(
+            None => sqlx::query_as!(
+                CouplingPairEvent,
                 "SELECT project_id, file_a, file_b, commit_sha, committed_at \
                  FROM coupling_pair_events \
                  WHERE project_id = $1 \
                  ORDER BY committed_at DESC \
                  LIMIT $2",
+                project_id,
+                limit,
             )
-            .bind(project_id)
-            .bind(limit)
             .fetch_all(self.db.pool())
             .await?,
         };

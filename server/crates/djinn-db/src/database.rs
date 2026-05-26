@@ -188,16 +188,16 @@ impl Database {
                 Box::pin(async move {
                     // Bound how long any single statement can run before the
                     // server kills it.
-                    sqlx::query("SET statement_timeout = '30s'")
+                    sqlx::query!("SET statement_timeout = '30s'")
                         .execute(&mut *conn)
                         .await?;
                     // Bound how long any explicit lock acquisition can wait.
-                    sqlx::query("SET lock_timeout = '10s'")
+                    sqlx::query!("SET lock_timeout = '10s'")
                         .execute(&mut *conn)
                         .await?;
                     // Reap connections that started a transaction and walked
                     // away; matches MySQL's wait_timeout role.
-                    sqlx::query("SET idle_in_transaction_session_timeout = '60s'")
+                    sqlx::query!("SET idle_in_transaction_session_timeout = '60s'")
                         .execute(&mut *conn)
                         .await?;
                     Ok(())
@@ -237,11 +237,11 @@ impl Database {
     /// should not need to probe the schema at runtime.
     pub async fn table_exists(&self, table_name: &str) -> DbResult<bool> {
         self.ensure_initialized().await?;
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM information_schema.tables \
-             WHERE table_schema = current_schema() AND table_name = $1",
+        let count: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count!: i64" FROM information_schema.tables
+             WHERE table_schema = current_schema() AND table_name = $1"#,
+            table_name,
         )
-        .bind(table_name)
         .fetch_one(&self.pool)
         .await?;
         Ok(count > 0)
@@ -283,11 +283,11 @@ impl Database {
         // Detect the "no migrations table at all" case up front so we can
         // give the operator a clear error message instead of a generic
         // "_sqlx_migrations not found" SQL exception.
-        let migrations_table_exists: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) \
-             FROM information_schema.tables \
-             WHERE table_schema = current_schema() \
-               AND table_name   = '_sqlx_migrations'",
+        let migrations_table_exists: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count!: i64"
+             FROM information_schema.tables
+             WHERE table_schema = current_schema()
+               AND table_name   = '_sqlx_migrations'"#,
         )
         .fetch_one(&self.pool)
         .await
@@ -411,6 +411,9 @@ async fn clone_postgres_test_template(server_prefix: &str, test_db: &str) -> DbR
     // Boot any stragglers off the template. Without this, parallel tests
     // racing on the template see `ERROR: source database "djinn_test_template"
     // is being accessed by other users`.
+    // Non-macro: this is a side-effecting `SELECT pg_terminate_backend(...)`
+    // executed for effect only. The `query!` macro types it as a row-returning
+    // query (no `.execute()`), so we keep the plain form here.
     sqlx::query(
         "SELECT pg_terminate_backend(pid) \
            FROM pg_stat_activity \
