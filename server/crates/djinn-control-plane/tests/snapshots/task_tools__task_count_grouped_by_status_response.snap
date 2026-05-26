@@ -1,17 +1,16 @@
 ---
-source: src/mcp_contract_tests/task_tools.rs
-assertion_line: 454
+source: crates/djinn-control-plane/tests/task_tools.rs
 expression: grouped
 ---
 {
   "groups": [
     {
-      "count": 1,
-      "key": "in_progress"
+      "key": "in_progress",
+      "count": 1
     },
     {
-      "count": 1,
-      "key": "open"
+      "key": "open",
+      "count": 1
     }
   ]
 }

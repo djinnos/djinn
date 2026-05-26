@@ -1,12 +1,12 @@
 ---
-source: src/mcp_contract_tests/task_tools.rs
+source: crates/djinn-control-plane/tests/task_tools.rs
 expression: priority_grouped
 ---
 {
   "groups": [
     {
-      "count": 2,
-      "key": "2"
+      "key": "2",
+      "count": 2
     }
   ]
 }
