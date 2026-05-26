@@ -12,7 +12,7 @@ use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     Container, EmptyDirVolumeSource, EnvVar, KeyToPath, PersistentVolumeClaimVolumeSource, PodSpec,
     PodTemplateSpec, ProjectedVolumeSource, ResourceRequirements, SecretVolumeSource,
-    ServiceAccountTokenProjection, Volume, VolumeMount, VolumeProjection,
+    ServiceAccountTokenProjection, Toleration, Volume, VolumeMount, VolumeProjection,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -226,11 +226,21 @@ pub fn build_task_run_job(
         crate::env_config::env_config_volume(project_id),
     ];
 
+    // Pin Pods to a dedicated NodePool when the operator has configured one.
+    // Both fields stay `None` if the corresponding config entry is empty so
+    // the rendered manifest is identical to the pre-feature shape.
+    let node_selector = (!config.node_selector.is_empty())
+        .then(|| config.node_selector.clone());
+    let tolerations: Option<Vec<Toleration>> = (!config.tolerations.is_empty())
+        .then(|| config.tolerations.clone());
+
     let pod_spec = PodSpec {
         service_account_name: Some(config.service_account.clone()),
         restart_policy: Some("Never".to_string()),
         containers: vec![container],
         volumes: Some(volumes),
+        node_selector,
+        tolerations,
         // Give the worker enough time after SIGTERM to flush its final
         // RPC frame (TerminalReport) before SIGKILL — K8s default 30s is
         // tight when the supervisor is mid-stream over a slow link.
@@ -449,6 +459,13 @@ mod tests {
             Some(cfg.task_run_termination_grace_period_seconds),
         );
         assert_eq!(pod.termination_grace_period_seconds, Some(60));
+
+        // Default config carries no scheduling hints — the PodSpec fields
+        // must stay `None` so the manifest is byte-identical to the
+        // pre-feature shape. Anything else would mean existing installs
+        // started seeing nodeSelector/tolerations they didn't ask for.
+        assert!(pod.node_selector.is_none(), "default config must not set nodeSelector");
+        assert!(pod.tolerations.is_none(), "default config must not set tolerations");
 
         // Exactly one container named "worker".
         assert_eq!(pod.containers.len(), 1);
@@ -673,5 +690,46 @@ mod tests {
             envs.get("DJINN_DATABASE_URL").copied(),
             Some("postgres://djinn@djinn-postgres.djinn.svc:5432/djinn")
         );
+    }
+
+    /// When the operator has configured nodeSelector + tolerations (typical
+    /// case: a dedicated NodePool tainted/labelled for djinn builds), the
+    /// task-run PodSpec must carry both so the scheduler picks the right
+    /// pool *and* the kubelet doesn't reject the Pod at admission.
+    #[test]
+    fn task_run_pod_scheduling_propagates_from_config() {
+        let mut cfg = KubernetesConfig::for_testing();
+        cfg.node_selector.insert("workload-type".into(), "djinn".into());
+        cfg.tolerations.push(Toleration {
+            key: Some("workload-type".into()),
+            operator: Some("Equal".into()),
+            value: Some("djinn".into()),
+            effect: Some("NoSchedule".into()),
+            ..Toleration::default()
+        });
+
+        let job = build_task_run_job(
+            &cfg,
+            &Uuid::now_v7(),
+            "proj-xyz",
+            "djinn-taskrun-test",
+            "registry.example:5000/djinn-project-p:abc123def456",
+        );
+
+        let pod = job
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .expect("pod spec set");
+
+        let ns = pod.node_selector.as_ref().expect("nodeSelector set");
+        assert_eq!(ns.get("workload-type").map(String::as_str), Some("djinn"));
+
+        let tols = pod.tolerations.as_ref().expect("tolerations set");
+        assert_eq!(tols.len(), 1);
+        assert_eq!(tols[0].key.as_deref(), Some("workload-type"));
+        assert_eq!(tols[0].operator.as_deref(), Some("Equal"));
+        assert_eq!(tols[0].value.as_deref(), Some("djinn"));
+        assert_eq!(tols[0].effect.as_deref(), Some("NoSchedule"));
     }
 }

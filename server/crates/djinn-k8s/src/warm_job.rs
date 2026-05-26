@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     Container, EmptyDirVolumeSource, EnvVar, PersistentVolumeClaimVolumeSource, PodSpec,
-    PodTemplateSpec, ResourceRequirements, Volume, VolumeMount,
+    PodTemplateSpec, ResourceRequirements, Toleration, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -189,11 +189,22 @@ exec {bin} warm-graph "{project_id}"
         crate::env_config::env_config_volume(project_id),
     ];
 
+    // Warm Pods must land on the same NodePool as the task-runs they pre-warm
+    // — otherwise the warmup is wasted. Both fields are `None` when no
+    // operator scheduling hints are configured, keeping the manifest shape
+    // unchanged for existing installs.
+    let node_selector = (!config.node_selector.is_empty())
+        .then(|| config.node_selector.clone());
+    let tolerations: Option<Vec<Toleration>> = (!config.tolerations.is_empty())
+        .then(|| config.tolerations.clone());
+
     let pod_spec = PodSpec {
         service_account_name: Some(config.service_account.clone()),
         restart_policy: Some("Never".to_string()),
         containers: vec![container],
         volumes: Some(volumes),
+        node_selector,
+        tolerations,
         ..PodSpec::default()
     };
 
@@ -292,6 +303,12 @@ mod tests {
         assert_eq!(pod.restart_policy.as_deref(), Some("Never"));
         assert_eq!(pod.service_account_name.as_deref(), Some(cfg.service_account.as_str()));
         assert_eq!(pod.containers.len(), 1);
+
+        // Default config carries no scheduling hints — manifest must be
+        // byte-identical to the pre-feature shape. Mirrors the equivalent
+        // assertion in job.rs.
+        assert!(pod.node_selector.is_none(), "default config must not set nodeSelector");
+        assert!(pod.tolerations.is_none(), "default config must not set tolerations");
 
         let container = &pod.containers[0];
         assert_eq!(container.name, "warmer");
@@ -417,5 +434,39 @@ mod tests {
     #[test]
     fn sanitize_id_lowercases_and_maps_disallowed_chars() {
         assert_eq!(sanitize_id("Proj_ABC/xyz"), "proj-abc-xyz");
+    }
+
+    /// Warm Pods must inherit the same scheduling hints as task-runs —
+    /// otherwise they'd land on a different pool and the canonical-graph
+    /// cache they pre-populate wouldn't be reused by the task-run that
+    /// adopts it. The config struct carries one shared set of hints for
+    /// exactly this reason; this test guards the wiring through to the
+    /// warm-Job PodSpec.
+    #[test]
+    fn warm_pod_scheduling_propagates_from_config() {
+        let mut cfg = KubernetesConfig::for_testing();
+        cfg.node_selector.insert("workload-type".into(), "djinn".into());
+        cfg.tolerations.push(Toleration {
+            key: Some("workload-type".into()),
+            operator: Some("Equal".into()),
+            value: Some("djinn".into()),
+            effect: Some("NoSchedule".into()),
+            ..Toleration::default()
+        });
+
+        let job = build_warm_job(&cfg, "proj-xyz", "reg.example:5000/djinn-project-p:abc123");
+        let pod = job
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .expect("pod spec set");
+
+        let ns = pod.node_selector.as_ref().expect("nodeSelector set");
+        assert_eq!(ns.get("workload-type").map(String::as_str), Some("djinn"));
+
+        let tols = pod.tolerations.as_ref().expect("tolerations set");
+        assert_eq!(tols.len(), 1);
+        assert_eq!(tols[0].key.as_deref(), Some("workload-type"));
+        assert_eq!(tols[0].effect.as_deref(), Some("NoSchedule"));
     }
 }

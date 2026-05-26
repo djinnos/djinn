@@ -85,6 +85,26 @@ resources:
     limits:
       cpu: "2"
       memory: "4Gi"
+    # Pod scheduling for both task-run and warm Jobs. Warm Pods pre-warm the
+    # graph cache that task-runs later adopt, so they MUST land on the same
+    # NodePool — that's why one set of hints covers both.
+    #
+    # Typical use case: a dedicated Karpenter NodePool tainted
+    # `workload-type=djinn:NoSchedule` and labelled `workload-type=djinn`.
+    # Set nodeSelector to target it and add the matching toleration:
+    #
+    #   nodeSelector:
+    #     workload-type: djinn
+    #   tolerations:
+    #     - key: workload-type
+    #       operator: Equal
+    #       value: djinn
+    #       effect: NoSchedule
+    #
+    # Empty defaults leave the fields unset — any node that the Pod's other
+    # constraints allow is eligible (preserves the pre-feature behavior).
+    nodeSelector: {}
+    tolerations: []
 
 # -----------------------------------------------------------------------------
 # Storage

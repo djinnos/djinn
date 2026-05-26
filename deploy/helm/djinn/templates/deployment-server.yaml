@@ -163,6 +163,20 @@ spec:
                         (include "djinn.fullname" .)
                         (include "djinn.namespace" .)
                         (.Values.service.rpcPort | int) | quote }}
+            # Pod scheduling for task-run + warm Jobs. JSON-encoded so the
+            # controller can deserialize directly into k8s_openapi types
+            # without bringing a YAML parser into the dispatch path. The
+            # `with` blocks omit the env var entirely when the values are
+            # empty defaults, leaving the controller on its built-in fallback
+            # (no scheduling hints — matches pre-feature behavior).
+            {{- with .Values.resources.taskrun.nodeSelector }}
+            - name: DJINN_K8S_NODE_SELECTOR
+              value: {{ toJson . | quote }}
+            {{- end }}
+            {{- with .Values.resources.taskrun.tolerations }}
+            - name: DJINN_K8S_TOLERATIONS
+              value: {{ toJson . | quote }}
+            {{- end }}
             - name: DJINN_VAULT_KEY_PATH
               value: /var/run/secrets/djinn/vault.key
             - name: GITHUB_APP_PRIVATE_KEY_PATH

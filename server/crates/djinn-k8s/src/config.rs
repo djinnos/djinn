@@ -1,5 +1,8 @@
 //! Runtime configuration shared by every `djinn-k8s` helper.
 
+use std::collections::BTreeMap;
+
+use k8s_openapi::api::core::v1::Toleration;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for `KubernetesRuntime`.
@@ -80,6 +83,19 @@ pub struct KubernetesConfig {
     /// Memory limit on the warm Pod container. Hard ceiling so a runaway
     /// indexer can't OOM the node. Default `4Gi`.
     pub warm_memory_limit: String,
+    /// `spec.nodeSelector` applied to both task-run and warm Pods. Empty map
+    /// leaves the field unset (any node tolerating the Pod's other constraints
+    /// is eligible). Operators typically use this together with `tolerations`
+    /// to pin builds onto a dedicated NodePool — e.g. nodeSelector
+    /// `workload-type: djinn` plus a matching toleration for a
+    /// `workload-type=djinn:NoSchedule` taint. Surfaced in the chart as
+    /// `resources.taskrun.nodeSelector`.
+    pub node_selector: BTreeMap<String, String>,
+    /// `spec.tolerations` applied to both task-run and warm Pods. Empty vec
+    /// leaves the field unset. Same NodePool-pinning use case as
+    /// `node_selector` above. Surfaced in the chart as
+    /// `resources.taskrun.tolerations`.
+    pub tolerations: Vec<Toleration>,
 }
 
 impl KubernetesConfig {
@@ -108,6 +124,8 @@ impl KubernetesConfig {
             warm_cpu_limit: "2".into(),
             warm_memory_request: "2Gi".into(),
             warm_memory_limit: "4Gi".into(),
+            node_selector: BTreeMap::new(),
+            tolerations: Vec::new(),
         }
     }
 
@@ -142,6 +160,8 @@ impl KubernetesConfig {
     /// | `DJINN_K8S_WARM_CPU_LIMIT` | `warm_cpu_limit` | `2` |
     /// | `DJINN_K8S_WARM_MEMORY_REQUEST` | `warm_memory_request` | `2Gi` |
     /// | `DJINN_K8S_WARM_MEMORY_LIMIT` | `warm_memory_limit` | `4Gi` |
+    /// | `DJINN_K8S_NODE_SELECTOR` | `node_selector` | `{}` (parsed as a JSON object of string→string) |
+    /// | `DJINN_K8S_TOLERATIONS` | `tolerations` | `[]` (parsed as a JSON array of k8s `Toleration` objects) |
     ///
     /// `DJINN_DATABASE_URL` is read from djinn-server's own environment (the
     /// Helm chart projects it via `envFrom: configMap djinn-config`) and
@@ -253,6 +273,30 @@ impl KubernetesConfig {
         if let Ok(v) = std::env::var("DJINN_K8S_WARM_MEMORY_LIMIT") {
             cfg.warm_memory_limit = v;
         }
+        if let Ok(v) = std::env::var("DJINN_K8S_NODE_SELECTOR") {
+            if !v.is_empty() {
+                match serde_json::from_str::<BTreeMap<String, String>>(&v) {
+                    Ok(map) => cfg.node_selector = map,
+                    Err(e) => tracing::warn!(
+                        value = %v,
+                        error = %e,
+                        "DJINN_K8S_NODE_SELECTOR not valid JSON (expected object of string→string) — keeping default"
+                    ),
+                }
+            }
+        }
+        if let Ok(v) = std::env::var("DJINN_K8S_TOLERATIONS") {
+            if !v.is_empty() {
+                match serde_json::from_str::<Vec<Toleration>>(&v) {
+                    Ok(t) => cfg.tolerations = t,
+                    Err(e) => tracing::warn!(
+                        value = %v,
+                        error = %e,
+                        "DJINN_K8S_TOLERATIONS not valid JSON (expected array of Toleration objects) — keeping default"
+                    ),
+                }
+            }
+        }
         cfg
     }
 }
@@ -306,6 +350,47 @@ mod tests {
             std::env::remove_var("DJINN_K8S_SERVER_ADDR");
             std::env::remove_var("DJINN_K8S_TTL_SECONDS");
             std::env::remove_var("DJINN_DATABASE_URL");
+        }
+    }
+
+    /// `from_env()` parses the JSON-encoded scheduling env vars (operators
+    /// set these to pin task-run + warm Pods to a dedicated NodePool).
+    #[test]
+    fn from_env_parses_pod_scheduling_json() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved_ns = std::env::var("DJINN_K8S_NODE_SELECTOR").ok();
+        let saved_tol = std::env::var("DJINN_K8S_TOLERATIONS").ok();
+        // SAFETY: serialized against sibling tests via ENV_LOCK.
+        unsafe {
+            std::env::set_var(
+                "DJINN_K8S_NODE_SELECTOR",
+                r#"{"workload-type":"djinn"}"#,
+            );
+            std::env::set_var(
+                "DJINN_K8S_TOLERATIONS",
+                r#"[{"key":"workload-type","operator":"Equal","value":"djinn","effect":"NoSchedule"}]"#,
+            );
+        }
+        let cfg = KubernetesConfig::from_env();
+        assert_eq!(
+            cfg.node_selector.get("workload-type").map(String::as_str),
+            Some("djinn"),
+        );
+        assert_eq!(cfg.tolerations.len(), 1);
+        let t = &cfg.tolerations[0];
+        assert_eq!(t.key.as_deref(), Some("workload-type"));
+        assert_eq!(t.operator.as_deref(), Some("Equal"));
+        assert_eq!(t.value.as_deref(), Some("djinn"));
+        assert_eq!(t.effect.as_deref(), Some("NoSchedule"));
+        unsafe {
+            match saved_ns {
+                Some(prev) => std::env::set_var("DJINN_K8S_NODE_SELECTOR", prev),
+                None => std::env::remove_var("DJINN_K8S_NODE_SELECTOR"),
+            }
+            match saved_tol {
+                Some(prev) => std::env::set_var("DJINN_K8S_TOLERATIONS", prev),
+                None => std::env::remove_var("DJINN_K8S_TOLERATIONS"),
+            }
         }
     }
 
