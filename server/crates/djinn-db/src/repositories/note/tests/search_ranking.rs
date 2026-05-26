@@ -1,6 +1,26 @@
 use super::*;
 use crate::repositories::note::NoteSearchParams;
 
+/// Pin every non-lexical RRF signal (temporal recency, access_count,
+/// confidence) to a fixed value across all notes in a project so a
+/// lexical-ranking assertion is not perturbed by creation-order timestamp
+/// differences. Used by the title/tags-over-content ranking tests.
+async fn equalize_non_lexical_signals(db: &Database, project_id: &str) {
+    sqlx::query!(
+        "UPDATE notes
+         SET created_at = '2026-01-01T00:00:00.000Z',
+             updated_at = '2026-01-01T00:00:00.000Z',
+             last_accessed = '2026-01-01T00:00:00.000Z',
+             access_count = 0,
+             confidence = 1.0
+         WHERE project_id = $1",
+        project_id
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn semantic_candidate_branch_resolution_tracks_task_and_canonical_metadata() {
     let _guard = super::sqlite_vec_test_lock().lock().await;
@@ -194,14 +214,22 @@ async fn fts5_search_folder_filter() {
     assert_eq!(results[0].folder, "design");
 }
 
+// Postgres tsvector ranking: the generated `notes.search_vector` weights
+// title=A above content=C (migration 29), so `ts_rank` scores a title match
+// above a content match. We equalize every *non-lexical* RRF signal (temporal
+// recency, access_count, confidence) across the two notes — exactly like the
+// `search_rrf_*` tests below isolate their own signal — so the lexical
+// title-over-content weighting is the sole differentiator the fused ranking
+// can act on. (Without this, the temporal-recency boost on the
+// later-created note ties the RRF score and the assertion races on float
+// noise.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "MySQL FULLTEXT applies equal weight across indexed columns; title-vs-content ranking was SQLite FTS5-specific (bm25 weights). See replacement_notes on PostgresTsvector plans."]
-async fn fts5_search_prefers_title_over_content() {
+async fn fts_search_prefers_title_over_content() {
     let tmp = crate::database::test_tempdir().unwrap();
     let db = Database::open_in_memory().unwrap();
     let (tx, _rx) = broadcast::channel(256);
     let project = make_project(&db, tmp.path()).await;
-    let repo = NoteRepository::new(db, event_bus_for(&tx));
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
 
     repo.create(
         &project.id,
@@ -222,6 +250,8 @@ async fn fts5_search_prefers_title_over_content() {
     .await
     .unwrap();
 
+    equalize_non_lexical_signals(&db, &project.id).await;
+
     let results = repo
         .search(NoteSearchParams {
             project_id: &project.id,
@@ -239,14 +269,18 @@ async fn fts5_search_prefers_title_over_content() {
     assert_eq!(results[0].title, "rankneedle in title");
 }
 
+// Postgres tsvector ranking: migration 29 weights tags=B above content=C, so
+// a note carrying the query term in its *tag* outranks one that only mentions
+// it in body prose. As in `fts_search_prefers_title_over_content`, we
+// equalize the non-lexical RRF signals so the tag-over-content weighting is
+// the deciding factor.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "MySQL FULLTEXT applies equal weight across indexed columns; tags-vs-content ranking was SQLite FTS5-specific (bm25 weights). See replacement_notes on PostgresTsvector plans."]
-async fn fts5_search_prefers_tags_over_content() {
+async fn fts_search_prefers_tags_over_content() {
     let tmp = crate::database::test_tempdir().unwrap();
     let db = Database::open_in_memory().unwrap();
     let (tx, _rx) = broadcast::channel(256);
     let project = make_project(&db, tmp.path()).await;
-    let repo = NoteRepository::new(db, event_bus_for(&tx));
+    let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
 
     repo.create(
         &project.id,
@@ -266,6 +300,8 @@ async fn fts5_search_prefers_tags_over_content() {
     )
     .await
     .unwrap();
+
+    equalize_non_lexical_signals(&db, &project.id).await;
 
     let results = repo
         .search(NoteSearchParams {

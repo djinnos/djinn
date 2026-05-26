@@ -130,8 +130,23 @@ async fn consolidation_lists_db_note_groups_and_clusters_deterministically() {
     );
 }
 
+// Postgres tsvector dedup threshold semantics.
+//
+// The SQLite version of this test relied on a *negated bm25* below-threshold
+// cutoff (-3.0): `alpha OR omega OR zeta` matched all three disjoint notes
+// under FTS5's OR semantics, and the cutoff pruned the weak matches. That
+// doesn't port to Postgres: `sanitize_postgres_tsquery` AND-joins terms and
+// `ts_rank` only ever yields *positive* scores, so the dedup threshold for
+// the `PostgresTsvector` backend is `0.0` — i.e. "any real `@@` lexical match
+// qualifies; everything that fails to match is below threshold and excluded"
+// (see `lexical_search_threshold` and `validate_postgres_tsvector_threshold`
+// in lexical_search.rs).
+//
+// This test asserts that empirically-correct semantics directly: of three
+// notes with fully disjoint vocabularies, a query carrying only one note's
+// term returns exactly that note (its ts_rank is above the 0.0 threshold) and
+// excludes the other two (they never match `@@`, so they fall below it).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "Below-threshold filter was tuned to negated SQLite bm25 scores; MySQL FULLTEXT in natural-language mode returns all term-bearing rows with positive scores, so the dedup threshold semantics don't port. Needs a new empirical threshold when PostgresTsvector dedup is retuned (see replacement_notes on the plan)."]
 async fn consolidation_clusters_ignore_below_threshold_inputs() {
     let tmp = crate::database::test_tempdir().unwrap();
     let db = Database::open_in_memory().unwrap();
@@ -139,15 +154,16 @@ async fn consolidation_clusters_ignore_below_threshold_inputs() {
     let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
     let project = make_project(&db, tmp.path()).await;
 
-    repo.create_db_note(
-        &project.id,
-        "Sparse note one",
-        "alpha unique tokens only",
-        "pattern",
-        "[]",
-    )
-    .await
-    .unwrap();
+    let alpha = repo
+        .create_db_note(
+            &project.id,
+            "Sparse note one",
+            "alpha unique tokens only",
+            "pattern",
+            "[]",
+        )
+        .await
+        .unwrap();
     repo.create_db_note(
         &project.id,
         "Sparse note two",
@@ -167,17 +183,28 @@ async fn consolidation_clusters_ignore_below_threshold_inputs() {
     .await
     .unwrap();
 
+    // Query carries only the first note's distinctive term. The other two
+    // notes share no lexemes with the query, so they sit below the 0.0
+    // tsvector dedup threshold and must be excluded.
     let candidates = repo
-        .dedup_candidates(
-            &project.id,
-            "patterns",
-            "pattern",
-            "alpha OR omega OR zeta",
-            16,
-        )
+        .dedup_candidates(&project.id, "patterns", "pattern", "alpha", 16)
         .await
         .unwrap();
-    assert!(candidates.len() <= 1);
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].id, alpha.id);
+    // ts_rank scores for real matches are strictly positive; the normalized
+    // score the repository surfaces is the raw ts_rank (score_descending), so
+    // it must clear the 0.0 below-threshold cutoff.
+    assert!(candidates[0].score > 0.0);
+
+    // A query whose terms appear in no note at all yields nothing — every
+    // candidate is below threshold.
+    let none = repo
+        .dedup_candidates(&project.id, "patterns", "pattern", "nonexistentlexeme", 16)
+        .await
+        .unwrap();
+    assert!(none.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
