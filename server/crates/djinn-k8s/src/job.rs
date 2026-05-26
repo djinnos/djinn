@@ -460,6 +460,13 @@ mod tests {
         );
         assert_eq!(pod.termination_grace_period_seconds, Some(60));
 
+        // Default config carries no scheduling hints — the PodSpec fields
+        // must stay `None` so the manifest is byte-identical to the
+        // pre-feature shape. Anything else would mean existing installs
+        // started seeing nodeSelector/tolerations they didn't ask for.
+        assert!(pod.node_selector.is_none(), "default config must not set nodeSelector");
+        assert!(pod.tolerations.is_none(), "default config must not set tolerations");
+
         // Exactly one container named "worker".
         assert_eq!(pod.containers.len(), 1);
         let container = &pod.containers[0];
@@ -683,5 +690,46 @@ mod tests {
             envs.get("DJINN_DATABASE_URL").copied(),
             Some("postgres://djinn@djinn-postgres.djinn.svc:5432/djinn")
         );
+    }
+
+    /// When the operator has configured nodeSelector + tolerations (typical
+    /// case: a dedicated NodePool tainted/labelled for djinn builds), the
+    /// task-run PodSpec must carry both so the scheduler picks the right
+    /// pool *and* the kubelet doesn't reject the Pod at admission.
+    #[test]
+    fn task_run_pod_scheduling_propagates_from_config() {
+        let mut cfg = KubernetesConfig::for_testing();
+        cfg.node_selector.insert("workload-type".into(), "djinn".into());
+        cfg.tolerations.push(Toleration {
+            key: Some("workload-type".into()),
+            operator: Some("Equal".into()),
+            value: Some("djinn".into()),
+            effect: Some("NoSchedule".into()),
+            ..Toleration::default()
+        });
+
+        let job = build_task_run_job(
+            &cfg,
+            &Uuid::now_v7(),
+            "proj-xyz",
+            "djinn-taskrun-test",
+            "registry.example:5000/djinn-project-p:abc123def456",
+        );
+
+        let pod = job
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .expect("pod spec set");
+
+        let ns = pod.node_selector.as_ref().expect("nodeSelector set");
+        assert_eq!(ns.get("workload-type").map(String::as_str), Some("djinn"));
+
+        let tols = pod.tolerations.as_ref().expect("tolerations set");
+        assert_eq!(tols.len(), 1);
+        assert_eq!(tols[0].key.as_deref(), Some("workload-type"));
+        assert_eq!(tols[0].operator.as_deref(), Some("Equal"));
+        assert_eq!(tols[0].value.as_deref(), Some("djinn"));
+        assert_eq!(tols[0].effect.as_deref(), Some("NoSchedule"));
     }
 }
