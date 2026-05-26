@@ -708,6 +708,11 @@ pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
         shared_schemas::tool_memory_build_context(),
         true,
     ));
+    // Workers may deliberately record durable knowledge (decisions, patterns,
+    // pitfalls hit during the task) — complements the automatic post-session
+    // extraction. Previously memory writes were Architect-only.
+    tool_values.push(serialize_tool(shared_schemas::tool_memory_write(), false));
+    tool_values.push(serialize_tool(shared_schemas::tool_memory_edit(), false));
     tool_values.push(serialize_tool(tool_request_lead(), false));
     tool_values.push(serialize_tool(
         crate::roles::finalize::tool_submit_work(),
@@ -801,6 +806,10 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
         true,
     ));
     tool_values.push(serialize_tool(shared_schemas::tool_memory_orphans(), true));
+    // Patrol may curate the knowledge base directly (annotate/fix notes during
+    // the Memory Health Review), so expose write + edit alongside the read tools.
+    tool_values.push(serialize_tool(shared_schemas::tool_memory_write(), false));
+    tool_values.push(serialize_tool(shared_schemas::tool_memory_edit(), false));
     // Agent effectiveness review tools (migrated from Architect §10 per ADR-051
     // patrol ownership migration).
     tool_values.push(serialize_tool(shared_schemas::tool_role_metrics(), true));

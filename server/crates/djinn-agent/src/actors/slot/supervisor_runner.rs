@@ -314,6 +314,26 @@ pub(crate) async fn run_supervisor_dispatch(
                 runtime = ?runtime_kind,
                 "supervisor dispatch: task-run complete"
             );
+            // Phase 2.2: post-session knowledge extraction. Fire-and-forget on
+            // the long-lived server (it owns the embedding model + Qdrant, so
+            // notes created here get embedded; worker pods are ephemeral and
+            // lack that config). Gated on real work having run — skip
+            // interrupted/empty runs so we don't burn an LLM call on nothing.
+            // Extraction is fully isolated: any failure is logged and never
+            // affects the task-run outcome.
+            if !report.stages_completed.is_empty() {
+                let app_state_ext = app_state.clone();
+                let task_id_ext = task.id.clone();
+                let task_run_id_ext = report.task_run_id.clone();
+                tokio::spawn(async move {
+                    crate::actors::slot::session_extraction::run_post_session_extraction(
+                        task_id_ext,
+                        task_run_id_ext,
+                        app_state_ext,
+                    )
+                    .await;
+                });
+            }
             Ok(())
         }
         (Err(e), teardown_result) => {

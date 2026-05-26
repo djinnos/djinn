@@ -815,6 +815,83 @@ expression: tool_schemas_planner()
     "concurrent_safe": true
   },
   {
+    "name": "memory_write",
+    "description": "Create a new memory note. Memory notes live in Dolt — this is the canonical way to author them; do not attempt filesystem writes. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief [singleton], roadmap [singleton]). Use [[wikilinks]] in content to connect notes.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "title",
+        "content",
+        "type"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Note title"
+        },
+        "content": {
+          "type": "string",
+          "description": "Markdown content of the note. Use [[wikilinks]] to connect to other notes."
+        },
+        "type": {
+          "type": "string",
+          "description": "Note type: adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief (singleton), roadmap (singleton)"
+        },
+        "status": {
+          "type": "string",
+          "description": "Optional explicit status. For ADRs, use \"proposed\" to mark it as an in-flight proposal."
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional tags for categorisation"
+        }
+      }
+    },
+    "concurrent_safe": false
+  },
+  {
+    "name": "memory_edit",
+    "description": "Edit an existing memory note in-place. Memory notes live in Dolt — this is the canonical way to amend them; do not attempt filesystem writes. Operations: \"append\" (add to end), \"prepend\" (add after frontmatter), \"find_replace\" (exact text replacement, requires find_text), \"replace_section\" (replace content under a markdown heading, requires section).",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "identifier",
+        "operation",
+        "content"
+      ],
+      "properties": {
+        "identifier": {
+          "type": "string",
+          "description": "Note permalink or title"
+        },
+        "operation": {
+          "type": "string",
+          "description": "Edit operation: append, prepend, find_replace, replace_section"
+        },
+        "content": {
+          "type": "string",
+          "description": "New content to insert or replace with"
+        },
+        "find_text": {
+          "type": "string",
+          "description": "Required for find_replace: exact text to search for"
+        },
+        "section": {
+          "type": "string",
+          "description": "Required for replace_section: heading text identifying the section"
+        },
+        "type": {
+          "type": "string",
+          "description": "If provided and different from current type, move the note to the new type's folder"
+        }
+      }
+    },
+    "concurrent_safe": false
+  },
+  {
     "name": "agent_metrics",
     "description": "Show execution quality metrics for a role to support prompt tuning and intervention decisions.",
     "inputSchema": {

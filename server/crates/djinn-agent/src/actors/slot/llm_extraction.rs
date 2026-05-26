@@ -13,12 +13,16 @@
 //!
 //! All errors are logged as warnings; nothing propagates to the caller.
 //!
-//! # Dead code caveat — handoff #5 / Phase 2.2
+//! # Wiring (Phase 2.2)
 //!
-//! Until the supervisor's `stage::teardown` rewires this pipeline
-//! (tracked in `/home/fernando/.claude/plans/compiled-tinkering-island.md`),
-//! the module compiles but has no production caller. The file-level
-//! `#[allow(dead_code)]` is intentional — it is NOT a bug report.
+//! [`run_llm_extraction`] is driven by
+//! `session_extraction::run_post_session_extraction`, which runs server-side
+//! (fire-and-forget) when a task-run completes. The production path resolves
+//! the model via `resolve_memory_provider` — which falls back to the org's
+//! configured model priority when no dedicated memory model is set, so it
+//! reuses the same model the task ran on with no extra credential plumbing.
+//! The file-level `#[allow(dead_code)]` is retained only to cover the
+//! `_with_provider` test entry points and helpers exercised solely by tests.
 
 #![allow(dead_code)]
 

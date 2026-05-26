@@ -11,12 +11,15 @@
 //!
 //! No LLM calls are made here — this is purely structural parsing.
 //!
-//! # Dead code caveat — handoff #5 / Phase 2.2
+//! # Wiring (Phase 2.2)
 //!
-//! Until the supervisor's `stage::teardown` rewires this pipeline
-//! (tracked in `/home/fernando/.claude/plans/compiled-tinkering-island.md`),
-//! the module compiles but has no production caller. The file-level
-//! `#[allow(dead_code)]` is intentional — it is NOT a bug report.
+//! [`run_post_session_extraction`] is the production entry point, called
+//! (fire-and-forget) from `supervisor_runner` when a task-run completes on
+//! the **server** — the long-lived process that owns the embedding model +
+//! Qdrant, so notes created here get embedded. Sessions run on ephemeral
+//! worker pods, so extraction must NOT run there. The file-level
+//! `#[allow(dead_code)]` is retained only to cover helpers that are still
+//! exercised solely by unit tests.
 
 #![allow(dead_code)]
 
@@ -26,6 +29,74 @@ use djinn_core::message::{ContentBlock, Message, Role};
 use serde::{Deserialize, Serialize};
 
 use crate::context::AgentContext;
+
+/// Server-side post-task-run knowledge extraction (Phase 2.2 wiring).
+///
+/// Called fire-and-forget from `supervisor_runner` once a task-run completes
+/// with real work. For each session of THIS run (matched by `task_run_id`)
+/// that hasn't already been extracted, run structural extraction and then the
+/// LLM distillation that writes `case`/`pattern`/`pitfall` notes. Idempotent:
+/// a session whose `event_taxonomy` is already set is skipped (so retries /
+/// re-dispatches don't double-extract). All failures are best-effort logged —
+/// extraction must never affect task-run outcomes.
+pub(crate) async fn run_post_session_extraction(
+    task_id: String,
+    task_run_id: String,
+    app_state: AgentContext,
+) {
+    let session_repo =
+        djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let msg_repo =
+        djinn_db::SessionMessageRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+
+    let sessions = match session_repo.list_for_task(&task_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(task_id = %task_id, error = %e, "post_session_extraction: list_for_task failed");
+            return;
+        }
+    };
+
+    for session in sessions {
+        // Only sessions produced by this task-run.
+        if session.task_run_id.as_deref() != Some(task_run_id.as_str()) {
+            continue;
+        }
+        // Idempotency: a set event_taxonomy means this session was already
+        // extracted (structural extraction writes it).
+        if matches!(
+            session_repo.get_event_taxonomy_json(&session.id).await,
+            Ok(Some(_))
+        ) {
+            continue;
+        }
+
+        let messages = match msg_repo.load_conversation(&session.id).await {
+            Ok(conv) => conv.messages,
+            Err(e) => {
+                tracing::warn!(session_id = %session.id, error = %e, "post_session_extraction: load_conversation failed");
+                continue;
+            }
+        };
+        // Trivial sessions aren't worth an LLM call.
+        if messages.len() < 2 {
+            continue;
+        }
+
+        tracing::info!(
+            task_id = %task_id,
+            session_id = %session.id,
+            agent_type = %session.agent_type,
+            messages = messages.len(),
+            "post_session_extraction: extracting knowledge from session"
+        );
+        if let Some(taxonomy) =
+            run_structural_extraction(session.id.clone(), messages, app_state.clone()).await
+        {
+            super::llm_extraction::run_llm_extraction(session.id, taxonomy, app_state.clone()).await;
+        }
+    }
+}
 
 // ── Event taxonomy ────────────────────────────────────────────────────────────
 
