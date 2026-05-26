@@ -45,6 +45,34 @@ clause **only for `lsp`**.  Every other code-reading or analysis
 capability remains symmetric; future additions still land on both
 surfaces unless an amendment says otherwise.
 
+## Amendment 2026-05-26 — chat may curate the code-graph noise filter
+
+`project_graph_exclusions_get` / `project_graph_exclusions_set` are added
+to the chat allowlist (`CHAT_ALLOWED_MCP_TOOLS` in `chat_tools.rs`).
+Previously they were lumped with the admin/config setters
+(`project_config_set`, `project_environment_config_*`) and explicitly
+forbidden on chat.  That classification was wrong for this pair:
+
+- **Editing the filter is zero-cost and query-time only.**  The setter
+  rewrites the project's `graph_excluded_paths` / `graph_orphan_ignore`
+  lists; the filter is applied *after* the canonical warmer cache returns
+  results (`tools/graph_exclusions.rs`), so a change never invalidates the
+  warm cache and carries none of the blast radius of an environment-config
+  or devcontainer edit.
+- **It's graph curation, not deployment config.**  Hiding `**/*_test.go`,
+  `testdata/**`, generated/mock dirs, etc. from `code_graph` is the
+  natural companion to the read-side `code_graph` ops chat already owns.
+  Without a write path, the user could *see* graph noise from chat but had
+  no way to act on it — exactly the gap that prompted this amendment.
+- **Schema is OpenAI-safe.**  Params are `project` plus two optional
+  `string[]` lists, with no free-form object, so it does not reproduce the
+  OpenAI-400 that kept `project_environment_config_set` off the surface.
+
+The genuine admin-config setters (`project_config_set`,
+`project_environment_config_set/reset`, credentials, providers, settings)
+remain forbidden.  Guarded by `chat_allows_graph_exclusion_management` in
+`chat_tools.rs`.
+
 ## Context
 
 ### Empirical signal: `code_graph` is essentially unused

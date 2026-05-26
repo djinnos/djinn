@@ -209,6 +209,18 @@ const CHAT_ALLOWED_MCP_TOOLS: &[&str] = &[
     "epic_update",
     "epic_close",
     "epic_reopen",
+    // Code-graph noise filter (read + write). Chat curates a project's
+    // `graph_excluded_paths` / `graph_orphan_ignore` lists directly. This
+    // is graph curation, not admin config: the setter is a zero-cost,
+    // query-time filter edit (the canonical warmer cache is untouched), so
+    // it carries none of the blast radius of `project_config_set` /
+    // `project_environment_config_set`. Aligns chat with the ADR-050 §2
+    // posture (chat is the interactive Architect, with board/memory writes).
+    // Param schema is `project` + two optional `string[]` lists — no
+    // free-form object, so it doesn't hit the OpenAI-400 that kept
+    // `project_environment_config_set` off the surface.
+    "project_graph_exclusions_get",
+    "project_graph_exclusions_set",
     // GitHub read
     "github_fetch_file",
 ];
@@ -583,8 +595,11 @@ mod tests {
             "project_environment_config_get",
             "project_config_set",
             "project_config_get",
-            "project_graph_exclusions_set",
-            "project_graph_exclusions_get",
+            // NOTE: project_graph_exclusions_set/_get are NO LONGER forbidden
+            // — they're now chat-allowed graph curation (asserted present by
+            // `chat_allows_graph_exclusion_management` below). They stay OUT
+            // of this list because they're not admin config: editing the
+            // filter is zero-cost and query-time only.
             "project_add_from_github",
             "project_remove",
             "credential_set",
@@ -665,6 +680,28 @@ mod tests {
             !is_chat_allowed_mcp_tool("epic_delete"),
             "`epic_delete` is destructive and must never be chat-allowed"
         );
+    }
+
+    /// Code-graph noise-filter curation is chat-allowed (read + write):
+    /// `project_graph_exclusions_get` / `project_graph_exclusions_set`.
+    /// Unlike `project_config_set` / `project_environment_config_set`,
+    /// editing the filter is a zero-cost, query-time-only operation (the
+    /// canonical warmer cache is untouched), so it's classed as graph
+    /// curation rather than admin config. Pinned so the pair can't silently
+    /// drop off the surface; the sibling admin-config setters stay out.
+    #[test]
+    fn chat_allows_graph_exclusion_management() {
+        assert!(
+            is_chat_allowed_mcp_tool("project_graph_exclusions_get"),
+            "`project_graph_exclusions_get` must be chat-allowed (graph curation)"
+        );
+        assert!(
+            is_chat_allowed_mcp_tool("project_graph_exclusions_set"),
+            "`project_graph_exclusions_set` must be chat-allowed (graph curation)"
+        );
+        // The genuine admin-config setters stay off the chat surface.
+        assert!(!is_chat_allowed_mcp_tool("project_config_set"));
+        assert!(!is_chat_allowed_mcp_tool("project_environment_config_set"));
     }
 
     /// `is_chat_allowed_tool` unions the two routing-tier lists. Disjoint
