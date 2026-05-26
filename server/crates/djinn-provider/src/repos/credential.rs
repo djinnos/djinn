@@ -206,29 +206,59 @@ impl CredentialRepository {
         }
     }
 
-    /// Delete all credentials for a given `provider_id`.
+    /// Delete the *acting user's* credentials for a given `provider_id` (the
+    /// "disconnect provider" path). Scoped by `current_user_id()`: an
+    /// authenticated user only removes their own rows — they can NEVER wipe
+    /// another user's API keys, and (when acting as a user) they don't touch
+    /// the org-shared fallback either. With no user context (local single-user
+    /// dev / background) this removes the org-shared rows, preserving the
+    /// historical "remove all" feel for that deployment shape.
+    ///
     /// Returns the number of rows deleted. Emits `CredentialDeleted` for each.
     pub async fn delete_by_provider(&self, provider_id: &str) -> Result<u64> {
         ensure_db!(self.db);
-        let ids: Vec<String> =
-            sqlx::query_scalar!("SELECT id FROM credentials WHERE provider_id = $1", provider_id)
+        let owner = djinn_core::auth_context::current_user_id();
+
+        let ids: Vec<String> = match owner.as_deref() {
+            Some(uid) => {
+                sqlx::query_scalar!(
+                    "SELECT id FROM credentials WHERE provider_id = $1 AND owner_user_id = $2",
+                    provider_id,
+                    uid
+                )
                 .fetch_all(self.db.pool())
-                .await?;
+                .await?
+            }
+            None => {
+                sqlx::query_scalar!(
+                    "SELECT id FROM credentials WHERE provider_id = $1 AND owner_user_id IS NULL",
+                    provider_id
+                )
+                .fetch_all(self.db.pool())
+                .await?
+            }
+        };
 
         if ids.is_empty() {
             return Ok(0);
         }
 
-        let result = sqlx::query!("DELETE FROM credentials WHERE provider_id = $1", provider_id)
-            .execute(self.db.pool())
-            .await?;
+        // Delete by the exact id set we just resolved (keeps the scoping logic
+        // in one place rather than duplicating the owner predicate).
+        let mut deleted = 0u64;
+        for id in &ids {
+            let r = sqlx::query!("DELETE FROM credentials WHERE id = $1", id)
+                .execute(self.db.pool())
+                .await?;
+            deleted += r.rows_affected();
+        }
 
         for id in ids {
             self.events
                 .send(DjinnEventEnvelope::credential_deleted(&id));
         }
 
-        Ok(result.rows_affected())
+        Ok(deleted)
     }
 
     /// Check whether a credential `key_name` is resolvable for the acting user
@@ -602,6 +632,57 @@ mod tests {
             })
             .await;
         assert_eq!(resolved.as_deref(), Some("sk-carol"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_by_provider_only_removes_acting_users_rows() {
+        use djinn_core::auth_context::SESSION_USER_ID;
+        let db = Database::open_in_memory().unwrap();
+        let alice = seed_user(&db, 5101, "erin").await;
+        let bob = seed_user(&db, 5102, "frank").await;
+        let repo = CredentialRepository::new(db.clone(), EventBus::noop());
+
+        repo.set_with_owner("openai", "OPENAI_API_KEY", "org", None)
+            .await
+            .unwrap();
+        repo.set_with_owner("openai", "OPENAI_API_KEY", "alice-key", Some(&alice))
+            .await
+            .unwrap();
+        repo.set_with_owner("openai", "OPENAI_API_KEY", "bob-key", Some(&bob))
+            .await
+            .unwrap();
+
+        // Alice disconnects openai → only her row goes.
+        let deleted = SESSION_USER_ID
+            .scope(Some(alice.clone()), async {
+                repo.delete_by_provider("openai").await.unwrap()
+            })
+            .await;
+        assert_eq!(deleted, 1);
+
+        // Bob's and the org-shared rows survive.
+        assert_eq!(
+            repo.get_decrypted_for_user("OPENAI_API_KEY", Some(&bob))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("bob-key")
+        );
+        assert_eq!(
+            repo.get_decrypted_for_user("OPENAI_API_KEY", None)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("org")
+        );
+        // Alice now resolves the org-shared fallback (her private row is gone).
+        assert_eq!(
+            repo.get_decrypted_for_user("OPENAI_API_KEY", Some(&alice))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("org")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
