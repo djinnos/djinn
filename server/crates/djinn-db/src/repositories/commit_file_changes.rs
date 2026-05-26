@@ -168,11 +168,21 @@ impl CommitFileChangeRepository {
              (project_id, commit_sha, file_path, change_kind, committed_at, \
               author_email, insertions, deletions, old_path) VALUES ",
         );
+        // Postgres positional binds ($N), not MySQL `?` — the latter is a
+        // syntax error inside a VALUES tuple ("syntax error at or near ','").
+        const COLS: usize = 9;
         for i in 0..rows.len() {
             if i > 0 {
                 sql.push(',');
             }
-            sql.push_str("(?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            sql.push('(');
+            for c in 0..COLS {
+                if c > 0 {
+                    sql.push_str(", ");
+                }
+                sql.push_str(&format!("${}", i * COLS + c + 1));
+            }
+            sql.push(')');
         }
         sql.push_str(
             " ON CONFLICT (project_id, commit_sha, file_path) DO UPDATE SET \
@@ -221,11 +231,20 @@ impl CommitFileChangeRepository {
             "INSERT INTO coupling_pair_events \
              (event_key, project_id, file_a, file_b, commit_sha, committed_at) VALUES ",
         );
+        // Postgres positional binds ($N), not MySQL `?`.
+        const COLS: usize = 6;
         for i in 0..events.len() {
             if i > 0 {
                 sql.push(',');
             }
-            sql.push_str("(?, ?, ?, ?, ?, ?)");
+            sql.push('(');
+            for c in 0..COLS {
+                if c > 0 {
+                    sql.push_str(", ");
+                }
+                sql.push_str(&format!("${}", i * COLS + c + 1));
+            }
+            sql.push(')');
         }
         // Replays must be no-ops. The conflict is now on the synthetic
         // event_key (the PK); same natural tuple → same key → same
