@@ -301,12 +301,11 @@ impl NoteRepository {
                 && missing_sections.len() == required_sections.len();
             let looks_task_local = looks_task_local(&note.title, &note.content);
             let is_orphan = !sqlx::query_scalar!(
-                r#"SELECT EXISTS(SELECT 1 FROM note_links WHERE target_id = $1) AS "exists!: i64""#,
+                r#"SELECT EXISTS(SELECT 1 FROM note_links WHERE target_id = $1) AS "exists!: bool""#,
                 note.id
             )
             .fetch_one(self.db.pool())
-            .await?
-                > 0;
+            .await?;
 
             if (!missing_sections.is_empty() || content_len < 220 || paragraph_count < 3)
                 && seen.insert((note.id.clone(), "underspecified"))

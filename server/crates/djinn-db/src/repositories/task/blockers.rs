@@ -33,13 +33,13 @@ impl TaskRepository {
                              UNION
                              SELECT b.task_id FROM blockers b JOIN reach r ON b.blocking_task_id = r.id
                          )
-                         SELECT EXISTS(SELECT 1 FROM reach WHERE id = $2) AS "exists!: i64""#,
+                         SELECT EXISTS(SELECT 1 FROM reach WHERE id = $2) AS "exists!: bool""#,
                         task_id,
                         blocking_id
                     )
                     .fetch_one(&mut *tx)
                     .await?;
-                    if would_cycle > 0 {
+                    if would_cycle {
                         return Err(Error::Internal(
                             "would create circular blocker dependency".into(),
                         ));
@@ -166,13 +166,13 @@ impl TaskRepository {
                                  UNION
                                  SELECT b.task_id FROM blockers b JOIN reach r ON b.blocking_task_id = r.id
                              )
-                             SELECT EXISTS(SELECT 1 FROM reach WHERE id = $2) AS "exists!: i64""#,
+                             SELECT EXISTS(SELECT 1 FROM reach WHERE id = $2) AS "exists!: bool""#,
                             task_id,
                             blocking_id
                         )
                         .fetch_one(&mut *tx)
                         .await?;
-                        if would_cycle > 0 {
+                        if would_cycle {
                             return Err(Error::Internal(
                                 "would create circular blocker dependency".into(),
                             ));
