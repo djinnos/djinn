@@ -55,6 +55,90 @@ async fn chat_uses_router_derived_tool_schemas() {
     assert!(names.contains("execution_kill_task"));
 }
 
+/// The curated chat surface (`filter_chat_allowed_mcp_schemas`) is what the
+/// chat completions handler hands to the provider. Every `object`-typed
+/// (sub)schema in it must carry a `properties` field — OpenAI/Codex's strict
+/// validator 400s on object schemas without one (the original bug that
+/// motivated the allowlist). This guards the ADR-050 board-management writes
+/// (`task_create`/`task_update`/`task_transition`/`task_comment_add`/
+/// `task_claim`, `epic_create`/`epic_update`/`epic_close`/`epic_reopen`)
+/// against silently shipping a non-compliant schema.
+#[tokio::test]
+async fn chat_allowed_mcp_schemas_are_strict_validator_safe() {
+    fn object_schemas_missing_properties(path: &str, value: &Value, missing: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                // An object-typed subschema that is not a pure reference
+                // (`$ref`/`anyOf`/`oneOf`/`allOf` describe shape elsewhere)
+                // must declare `properties`.
+                let is_object = matches!(map.get("type"), Some(Value::String(t)) if t == "object");
+                let defers_elsewhere = map.contains_key("$ref")
+                    || map.contains_key("anyOf")
+                    || map.contains_key("oneOf")
+                    || map.contains_key("allOf");
+                if is_object && !defers_elsewhere && !map.contains_key("properties") {
+                    missing.push(format!("{path} is type=object without `properties`"));
+                }
+                for (k, v) in map {
+                    object_schemas_missing_properties(&format!("{path}/{k}"), v, missing);
+                }
+            }
+            Value::Array(items) => {
+                for (idx, item) in items.iter().enumerate() {
+                    object_schemas_missing_properties(&format!("{path}[{idx}]"), item, missing);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+    let mcp = djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state());
+    let chat_schemas =
+        djinn_agent::chat_tools::filter_chat_allowed_mcp_schemas(mcp.all_tool_schemas());
+
+    let names: std::collections::HashSet<String> = chat_schemas
+        .iter()
+        .filter_map(|v| {
+            v.get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    for required in [
+        "task_create",
+        "task_update",
+        "task_transition",
+        "task_comment_add",
+        "task_claim",
+        "epic_create",
+        "epic_update",
+        "epic_close",
+        "epic_reopen",
+    ] {
+        assert!(
+            names.contains(required),
+            "chat board-management write `{required}` missing from filtered chat surface"
+        );
+    }
+
+    let mut missing = Vec::new();
+    for schema in &chat_schemas {
+        let name = schema
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("<unknown>");
+        if let Some(input) = schema.get("inputSchema") {
+            object_schemas_missing_properties(&format!("{name}.inputSchema"), input, &mut missing);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "chat tool schemas with object params lacking `properties` (would 400 the strict validator):\n  {}",
+        missing.join("\n  ")
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_tools_list_schemas_do_not_use_nonstandard_uint_or_nullable_without_type() {
     fn collect_bad_formats(

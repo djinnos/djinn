@@ -149,13 +149,24 @@ pub fn is_chat_extension_tool(name: &str) -> bool {
 /// Curated allowlist of server-wide `DjinnMcpServer` tools the chat may
 /// call. Shipping the full `DjinnMcpServer::all_tool_schemas()` to the
 /// model leaks every admin/write surface (credential_set,
-/// project_environment_config_set, task_update, settings_set, …) —
-/// also trips OpenAI's strict schema validator on a few tools whose
-/// `object` parameters lack a `properties` field.
+/// project_environment_config_set, settings_set, provider_*, agent_*, …) —
+/// also trips OpenAI/Codex's strict schema validator on a few tools whose
+/// `object` parameters accept arbitrary JSON with no `properties` field
+/// (the provider 400s on the offending tool index). Every tool added here
+/// must therefore produce a schema in which every `object`-typed (sub)schema
+/// carries a `properties` field and no parameter is an open-ended JSON map.
 ///
-/// Entries here are strictly read-oriented from chat's perspective, plus
-/// the one ADR-050-parity write (`epic_create`) and the GitHub file
-/// fetch. Admin, runtime, and provider tools are not on this list.
+/// Entries here are read-oriented from chat's perspective, plus the
+/// ADR-050 "board management" writes the chat retains (the user-approved
+/// set: task create/update/transition/comment/claim and epic
+/// create/update/close/reopen) and the GitHub file fetch. Admin, secrets,
+/// config, provider, agent, runtime, and kill tools remain excluded.
+///
+/// The 8 board-management writes below are all flat string/scalar/string-array
+/// params (`task_create`/`task_update` additionally take
+/// `acceptance_criteria`, an `anyOf` of a string and a fully-`properties`'d
+/// `AcceptanceCriterionStatus` object) — none accept an arbitrary JSON map,
+/// so they pass the strict validator without a sanitizer change.
 const CHAT_ALLOWED_MCP_TOOLS: &[&str] = &[
     // Read-only memory
     "memory_read",
@@ -187,8 +198,17 @@ const CHAT_ALLOWED_MCP_TOOLS: &[&str] = &[
     "epic_list",
     "epic_tasks",
     "epic_count",
-    // ADR-050 §2 parity: the single knowledge-base write chat retains.
+    // ADR-050 board-management writes chat retains (user-approved set).
+    // Admin/secrets/config/providers/agents/runtime/kill stay excluded.
+    "task_create",
+    "task_update",
+    "task_transition",
+    "task_comment_add",
+    "task_claim",
     "epic_create",
+    "epic_update",
+    "epic_close",
+    "epic_reopen",
     // GitHub read
     "github_fetch_file",
 ];
@@ -581,14 +601,11 @@ mod tests {
             "memory_delete",
             "memory_move",
             "memory_confirm",
-            "task_create",
-            "task_update",
-            "task_transition",
-            "task_claim",
-            "task_comment_add",
-            "epic_update",
-            "epic_close",
-            "epic_reopen",
+            // Board-management writes (task_create/update/transition/claim/
+            // comment_add, epic_create/update/close/reopen) are now ALLOWED
+            // per the ADR-050 board-management amendment — they are asserted
+            // present by `chat_allows_board_management_writes` below, not
+            // forbidden here. `epic_delete` is destructive and stays out.
             "epic_delete",
             "agent_create",
             "agent_update",
@@ -618,6 +635,38 @@ mod tests {
         }
     }
 
+    /// The ADR-050 board-management writes the user approved for chat: task
+    /// create/update/transition/comment/claim and epic
+    /// create/update/close/reopen. Pinned so the set can't silently shrink.
+    /// `epic_delete` is deliberately excluded (destructive) and is guarded
+    /// by `chat_allowlist_excludes_admin_and_write_tools`.
+    #[test]
+    fn chat_allows_board_management_writes() {
+        let required: &[&str] = &[
+            "task_create",
+            "task_update",
+            "task_transition",
+            "task_comment_add",
+            "task_claim",
+            "epic_create",
+            "epic_update",
+            "epic_close",
+            "epic_reopen",
+        ];
+        for tool in required {
+            assert!(
+                is_chat_allowed_mcp_tool(tool),
+                "chat board-management surface regression: `{tool}` must be \
+                 on CHAT_ALLOWED_MCP_TOOLS (ADR-050 board-management amendment)"
+            );
+        }
+        // The destructive epic write stays out.
+        assert!(
+            !is_chat_allowed_mcp_tool("epic_delete"),
+            "`epic_delete` is destructive and must never be chat-allowed"
+        );
+    }
+
     /// `is_chat_allowed_tool` unions the two routing-tier lists. Disjoint
     /// by construction — a tool is either dispatched in-process or via
     /// the MCP router, never both. This test asserts that invariant and
@@ -630,10 +679,12 @@ mod tests {
         // MCP tools are in.
         assert!(is_chat_allowed_tool("memory_read"));
         assert!(is_chat_allowed_tool("epic_create"));
-        // Admin/write tools are out.
+        // Board-management writes are in (ADR-050 amendment).
+        assert!(is_chat_allowed_tool("task_update"));
+        // Admin/secrets/config tools are out.
         assert!(!is_chat_allowed_tool("credential_set"));
         assert!(!is_chat_allowed_tool("project_environment_config_set"));
-        assert!(!is_chat_allowed_tool("task_update"));
+        assert!(!is_chat_allowed_tool("epic_delete"));
         // Totally unknown names are out.
         assert!(!is_chat_allowed_tool("not_a_real_tool"));
 
