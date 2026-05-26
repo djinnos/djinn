@@ -1404,12 +1404,11 @@ mod tests {
         }
     }
 
-    // FIXME(rpc-harness): this in-process serve_on_tcp + RpcServices::from_stream
-    // round-trip deadlocks deterministically (independent of runtime flavor).
-    // The real load_task RPC path is covered end-to-end by
-    // djinn-agent-worker's `in_pod_drive` test (real worker binary), so no
-    // coverage is lost; tracked for a harness fix.
-    #[ignore = "rpc-harness deadlock; real path covered by djinn-agent-worker in_pod_drive"]
+    /// Drive a full `load_task` round-trip over the in-process unix-socket
+    /// transport via `RpcServices::connect_unix`.  The teardown ordering
+    /// mirrors the production worker: drop `rpc` (closing the outbound
+    /// channel) *before* awaiting the writer task — see the teardown comment
+    /// below for why awaiting the writer first deadlocks.
     #[tokio::test]
     async fn server_routes_load_task() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1435,11 +1434,19 @@ mod tests {
         assert_eq!(task.id, "wire-task-1");
         assert_eq!(task.title, "loaded:wire-task-1");
 
-        // Teardown.
-        client_cancel.cancel();
-        handle.cancel();
-        let _ = bg.reader.await;
+        // Teardown.  Mirror the production ordering in
+        // `djinn-agent-worker` main.rs: the client writer loop exits only
+        // when its outbound `mpsc::Sender<Frame>` (owned by every
+        // `Arc<RpcServices>`) is fully dropped — it deliberately ignores
+        // the cancel token so an in-flight terminal status update can still
+        // be flushed on the real path.  So drop `rpc` *first* (closing the
+        // channel and letting the writer drain), await the writer, then
+        // cancel + await the reader, which is parked on a blocking read.
+        drop(rpc);
         let _ = bg.writer.await;
+        client_cancel.cancel();
+        let _ = bg.reader.await;
+        handle.cancel();
         let _ = handle.join.await;
     }
 
@@ -1540,9 +1547,6 @@ mod tests {
 
     /// A TCP connection with an accepted token MUST be able to round-trip
     /// a LoadTask through the shared dispatch loop.
-    // FIXME(rpc-harness): see `server_routes_load_task` — same deterministic
-    // in-process RPC round-trip deadlock; real path covered by in_pod_drive.
-    #[ignore = "rpc-harness deadlock; real path covered by djinn-agent-worker in_pod_drive"]
     #[tokio::test]
     async fn serve_on_tcp_accepts_valid_token_and_routes_rpc() {
         let services: Arc<dyn SupervisorServices> = Arc::new(FakeServices {
@@ -1582,9 +1586,15 @@ mod tests {
             .expect("rpc load_task");
         assert_eq!(task.id, "tcp-task-1");
 
+        // Teardown — same ordering as `server_routes_load_task`: the client
+        // writer loop only exits once its outbound channel closes, which
+        // requires dropping every `Arc<RpcServices>` first.  Awaiting the
+        // writer before dropping `rpc` would deadlock (the writer ignores
+        // the cancel token by design).
+        drop(rpc);
+        let _ = bg.writer.await;
         cancel.cancel();
         let _ = bg.reader.await;
-        let _ = bg.writer.await;
         handle.cancel();
         let _ = handle.join.await;
     }
