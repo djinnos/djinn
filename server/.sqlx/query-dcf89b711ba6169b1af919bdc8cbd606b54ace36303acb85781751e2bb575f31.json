@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, provider_id, key_name, created_at, updated_at\n                 FROM credentials\n                 ORDER BY provider_id, key_name",
+  "query": "SELECT id, provider_id, key_name, owner_user_id, created_at, updated_at\n                 FROM credentials\n                 ORDER BY provider_id, key_name",
   "describe": {
     "columns": [
       {
@@ -20,11 +20,16 @@
       },
       {
         "ordinal": 3,
-        "name": "created_at",
+        "name": "owner_user_id",
         "type_info": "Varchar"
       },
       {
         "ordinal": 4,
+        "name": "created_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
         "name": "updated_at",
         "type_info": "Varchar"
       }
@@ -36,9 +41,10 @@
       false,
       false,
       false,
+      true,
       false,
       false
     ]
   },
-  "hash": "f20792303ed228aaa0005d0e02d4980cf83fa7136ef183f2bf4e587bcf27d853"
+  "hash": "dcf89b711ba6169b1af919bdc8cbd606b54ace36303acb85781751e2bb575f31"
 }

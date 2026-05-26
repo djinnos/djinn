@@ -15,6 +15,13 @@ pub struct CredentialSetInput {
     pub key_name: String,
     /// The raw API key value to store encrypted.
     pub api_key: String,
+    /// Admin path: when `true`, store this as the ORG-SHARED fallback
+    /// credential (`owner_user_id = NULL`) that any user without a personal
+    /// credential for the same key_name will resolve. When `false`/absent, the
+    /// credential is stamped private to the acting user (the connect-flow
+    /// default). Defaults to `false`.
+    #[serde(default)]
+    pub org_shared: bool,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -93,10 +100,20 @@ impl DjinnMcpServer {
 
         let repo = CredentialRepository::new(self.state.db().clone(), self.state.event_bus());
 
-        match repo
-            .set(&input.provider_id, &input.key_name, &input.api_key)
-            .await
-        {
+        // `org_shared` is the explicit admin path: write an org-shared
+        // (`owner_user_id = NULL`) credential regardless of the acting user.
+        // Otherwise `set()` stamps the credential private to the acting user
+        // (read from `SESSION_USER_ID`); with no user context this also yields
+        // an org-shared credential (local/single-user dev).
+        let result = if input.org_shared {
+            repo.set_with_owner(&input.provider_id, &input.key_name, &input.api_key, None)
+                .await
+        } else {
+            repo.set(&input.provider_id, &input.key_name, &input.api_key)
+                .await
+        };
+
+        match result {
             Ok(cred) => Json(CredentialSetResponse {
                 ok: true,
                 success: true,

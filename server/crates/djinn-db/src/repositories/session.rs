@@ -556,8 +556,9 @@ impl SessionRepository {
         .await?)
     }
 
-    /// List chat sessions for the current user, newest first (by last
-    /// assistant/user message; falls back to `started_at`).
+    /// List ALL chat sessions, newest first. Unscoped — retained only for
+    /// internal/admin callers and tests. User-facing HTTP handlers must use
+    /// [`Self::list_chat_for_user`] so a user only sees their own sessions.
     pub async fn list_chat_sessions(&self) -> Result<Vec<SessionRecord>> {
         self.db.ensure_initialized().await?;
         // COALESCE against the most recent message's created_at so a freshly
@@ -580,6 +581,60 @@ impl SessionRepository {
         )
         .fetch_all(self.db.pool())
         .await?)
+    }
+
+    /// List chat sessions owned by `user_id` (private chat: Part 2 of per-user
+    /// isolation), newest first.
+    ///
+    /// Privacy decision for legacy rows: sessions with
+    /// `created_by_user_id IS NULL` (created before attribution shipped, or by
+    /// the unauthenticated local-dev path) are NEVER returned to an
+    /// authenticated user — they belong to "no one" and showing them would
+    /// leak pre-multiuser history into every account. They remain reachable
+    /// only via the unscoped local-dev path (`list_chat_sessions`, used when no
+    /// GitHub App is configured).
+    pub async fn list_chat_for_user(&self, user_id: &str) -> Result<Vec<SessionRecord>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            SessionRecord,
+            r#"SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,
+                    s.started_at, s.ended_at,
+                    s.status AS "status!", s.tokens_in, s.tokens_out,
+                    s.task_run_id, s.title
+             FROM sessions s
+             LEFT JOIN (
+                SELECT session_id, MAX(created_at) AS last_at
+                FROM session_messages
+                GROUP BY session_id
+             ) m ON m.session_id = s.id
+             WHERE s.agent_type = 'chat' AND s.created_by_user_id = $1
+             ORDER BY COALESCE(m.last_at, s.started_at) DESC"#,
+            user_id,
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// Return the `created_by_user_id` for a chat session, if the session
+    /// exists and is chat-typed. `Ok(None)` distinguishes "no such chat
+    /// session" — used by handlers to authorize ownership (and return 404
+    /// rather than 403 so a probe can't learn a session id exists).
+    ///
+    /// The outer `Option` is presence of the row; the inner `Option` is the
+    /// nullable column. Returns `Ok(Some(None))` for a legacy unattributed
+    /// session that exists but has no owner.
+    pub async fn chat_session_owner(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<Option<String>>> {
+        self.db.ensure_initialized().await?;
+        let row = sqlx::query!(
+            "SELECT created_by_user_id FROM sessions WHERE id = $1 AND agent_type = 'chat'",
+            session_id
+        )
+        .fetch_optional(self.db.pool())
+        .await?;
+        Ok(row.map(|r| r.created_by_user_id))
     }
 
     /// Overwrite a chat session's title.  No-op if the session is not chat-typed.
@@ -1009,6 +1064,111 @@ mod tests {
 
         let last = repo.last_message_at(&session.id).await.unwrap();
         assert!(last.is_none(), "fresh session has no messages");
+    }
+
+    // ── Private chat sessions (Part 2 of per-user isolation) ─────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_chat_for_user_scopes_to_owner_and_hides_legacy_null() {
+        use crate::repositories::user::UserRepository;
+        use djinn_core::auth_context::SESSION_USER_ID;
+
+        let db = test_db();
+        db.ensure_initialized().await.unwrap();
+        let users = UserRepository::new(db.clone());
+        let alice = users
+            .upsert_from_github(50001, "alice-chat", None, None)
+            .await
+            .unwrap()
+            .id;
+        let bob = users
+            .upsert_from_github(50002, "bob-chat", None, None)
+            .await
+            .unwrap()
+            .id;
+
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        // Alice's chat session (stamped via the task-local upsert path).
+        let alice_sid = uuid::Uuid::now_v7().to_string();
+        SESSION_USER_ID
+            .scope(Some(alice.clone()), async {
+                repo.upsert_chat_session(&alice_sid, "openai/gpt-5")
+                    .await
+                    .unwrap();
+            })
+            .await;
+
+        // Bob's chat session.
+        let bob_sid = uuid::Uuid::now_v7().to_string();
+        SESSION_USER_ID
+            .scope(Some(bob.clone()), async {
+                repo.upsert_chat_session(&bob_sid, "openai/gpt-5")
+                    .await
+                    .unwrap();
+            })
+            .await;
+
+        // Legacy unattributed chat session (no user scope → NULL owner).
+        let legacy_sid = uuid::Uuid::now_v7().to_string();
+        repo.upsert_chat_session(&legacy_sid, "openai/gpt-5")
+            .await
+            .unwrap();
+
+        // Alice sees only her own — not Bob's, not the legacy-NULL one.
+        let alice_list = repo.list_chat_for_user(&alice).await.unwrap();
+        assert_eq!(alice_list.len(), 1);
+        assert_eq!(alice_list[0].id, alice_sid);
+
+        // Bob sees only his own.
+        let bob_list = repo.list_chat_for_user(&bob).await.unwrap();
+        assert_eq!(bob_list.len(), 1);
+        assert_eq!(bob_list[0].id, bob_sid);
+
+        // Unscoped admin list sees all three.
+        assert_eq!(repo.list_chat_sessions().await.unwrap().len(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chat_session_owner_distinguishes_missing_owned_and_legacy() {
+        use crate::repositories::user::UserRepository;
+        use djinn_core::auth_context::SESSION_USER_ID;
+
+        let db = test_db();
+        db.ensure_initialized().await.unwrap();
+        let alice = UserRepository::new(db.clone())
+            .upsert_from_github(60001, "alice-owner", None, None)
+            .await
+            .unwrap()
+            .id;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        // Owned session.
+        let owned = uuid::Uuid::now_v7().to_string();
+        SESSION_USER_ID
+            .scope(Some(alice.clone()), async {
+                repo.upsert_chat_session(&owned, "openai/gpt-5")
+                    .await
+                    .unwrap();
+            })
+            .await;
+
+        // Legacy-NULL session.
+        let legacy = uuid::Uuid::now_v7().to_string();
+        repo.upsert_chat_session(&legacy, "openai/gpt-5")
+            .await
+            .unwrap();
+
+        // Owned → Some(Some(alice)).
+        assert_eq!(
+            repo.chat_session_owner(&owned).await.unwrap(),
+            Some(Some(alice.clone()))
+        );
+        // Legacy → Some(None) (exists, no owner).
+        assert_eq!(repo.chat_session_owner(&legacy).await.unwrap(), Some(None));
+        // Missing → None.
+        let missing = uuid::Uuid::now_v7().to_string();
+        assert_eq!(repo.chat_session_owner(&missing).await.unwrap(), None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

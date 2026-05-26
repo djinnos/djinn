@@ -136,6 +136,26 @@ pub(crate) async fn run_supervisor_dispatch(
         model_id_per_role,
     };
 
+    // ── Resolve the task's creator for per-user credential scoping ────────
+    //
+    // Per-user provider credentials (migration 28) resolve against the acting
+    // user via the `SESSION_USER_ID` task-local. The worker dispatch path has
+    // no inbound HTTP request to inherit that from, so we explicitly set it to
+    // the task's `created_by_user_id` — a task uses ITS CREATOR's credential,
+    // falling back to the org-shared one when the column is NULL (background /
+    // pre-multiuser tasks). The `Task` model doesn't surface this column, so
+    // read it directly. A lookup error or missing column is non-fatal: we just
+    // resolve org-shared, preserving historical behaviour.
+    let created_by_user_id: Option<String> = sqlx::query_scalar!(
+        "SELECT created_by_user_id FROM tasks WHERE id = $1",
+        task.id
+    )
+    .fetch_optional(app_state.db.pool())
+    .await
+    .ok()
+    .flatten()
+    .flatten();
+
     // ── Resolve per-role provider credentials (Phase 7a) ──────────────────
     //
     // The host pulls every role's credential from the vault (or OAuth token
@@ -143,27 +163,37 @@ pub(crate) async fn run_supervisor_dispatch(
     // Secret. Fast-fail on resolution errors so the operator sees a clean
     // dispatch-time failure in session logs instead of a Pod that crash-loops
     // because the model client can't authenticate.
+    //
+    // The whole resolution loop runs under `SESSION_USER_ID = task creator` so
+    // every `load_provider_credential` → `get_decrypted` (and the codex/copilot
+    // OAuth token loads) resolves that user's private credential first.
     let mut credentials = ResolvedCredentials::default();
-    for role in spec.flow.role_sequence() {
-        let model_id = spec
-            .model_id_per_role
-            .get(role)
-            .cloned()
-            .unwrap_or_else(|| model_id.clone());
-        let (provider_id, _model_name) = parse_model_id(&model_id).map_err(|e| {
-            anyhow::anyhow!(
-                "supervisor dispatch: cannot parse model id `{model_id}` for role {role:?}: {e}"
-            )
-        })?;
-        let cred = load_provider_credential(&provider_id, &app_state)
-            .await
-            .map_err(|e| {
+    let resolve_creds = async {
+        for role in spec.flow.role_sequence() {
+            let model_id = spec
+                .model_id_per_role
+                .get(role)
+                .cloned()
+                .unwrap_or_else(|| model_id.clone());
+            let (provider_id, _model_name) = parse_model_id(&model_id).map_err(|e| {
                 anyhow::anyhow!(
-                    "supervisor dispatch: load_provider_credential({provider_id}) for role {role:?}: {e}"
+                    "supervisor dispatch: cannot parse model id `{model_id}` for role {role:?}: {e}"
                 )
             })?;
-        credentials.insert(*role, cred.to_serializable());
-    }
+            let cred = load_provider_credential(&provider_id, &app_state)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "supervisor dispatch: load_provider_credential({provider_id}) for role {role:?}: {e}"
+                    )
+                })?;
+            credentials.insert(*role, cred.to_serializable());
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+    djinn_core::auth_context::SESSION_USER_ID
+        .scope(created_by_user_id, resolve_creds)
+        .await?;
 
     // ── Resolve the runtime ───────────────────────────────────────────────
     let mirror = match app_state.mirror.as_ref() {

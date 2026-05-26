@@ -16,7 +16,16 @@ impl CredentialRepository {
         Self { db, events }
     }
 
-    /// Upsert a credential by `key_name`. Encrypts `raw_value` before storage.
+    /// Upsert a credential by `key_name`, owned by the *acting user* read from
+    /// the `SESSION_USER_ID` task-local (`current_user_id()`). Encrypts
+    /// `raw_value` before storage.
+    ///
+    /// When a request runs under an authenticated user's scope (chat / MCP /
+    /// the connect flows), this stamps `owner_user_id` so the credential is
+    /// private to that user. When no user context is present (background
+    /// agents, local single-user dev), `owner_user_id` is NULL and the
+    /// credential becomes the org-shared fallback — preserving the historical
+    /// single-credential behaviour.
     ///
     /// Emits `CredentialCreated` on insert, `CredentialUpdated` on update.
     /// The event payload never includes the encrypted value.
@@ -26,40 +35,87 @@ impl CredentialRepository {
         key_name: &str,
         raw_value: &str,
     ) -> Result<Credential> {
+        let owner = djinn_core::auth_context::current_user_id();
+        self.set_with_owner(provider_id, key_name, raw_value, owner.as_deref())
+            .await
+    }
+
+    /// Upsert a credential with an explicit `owner_user_id`. Pass `None` to
+    /// write/overwrite the org-shared fallback credential (the admin path);
+    /// pass `Some(user_id)` to write a user-private credential.
+    ///
+    /// Upsert is scoped to the (key_name, owner) pair so a user's private
+    /// credential never clobbers the org-shared one and vice-versa. The two
+    /// partial unique indexes from migration 28 guarantee at most one row per
+    /// scope, so the conflict targets below are well-defined.
+    pub async fn set_with_owner(
+        &self,
+        provider_id: &str,
+        key_name: &str,
+        raw_value: &str,
+        owner_user_id: Option<&str>,
+    ) -> Result<Credential> {
         let encrypted = crypto::encrypt(raw_value)?;
         ensure_db!(self.db);
-        let existing_id: Option<String> =
-            sqlx::query_scalar!("SELECT id FROM credentials WHERE key_name = $1", key_name)
-                .fetch_optional(self.db.pool())
-                .await?;
+
+        let existing_id: Option<String> = self.scoped_id(key_name, owner_user_id).await?;
         let id = existing_id
             .clone()
             .unwrap_or_else(|| Uuid::now_v7().to_string());
         let is_new = existing_id.is_none();
 
-        sqlx::query!(
-            r#"INSERT INTO credentials (id, provider_id, key_name, encrypted_value,
-                                      created_at, updated_at)
-             VALUES ($1, $2, $3, $4,
-                     to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-                     to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
-             ON CONFLICT (key_name) DO UPDATE SET
-                 provider_id     = EXCLUDED.provider_id,
-                 encrypted_value = EXCLUDED.encrypted_value,
-                 updated_at      = EXCLUDED.updated_at"#,
-            id,
-            provider_id,
-            key_name,
-            encrypted,
-        )
-        .execute(self.db.pool())
-        .await?;
+        // The two partial unique indexes require distinct conflict targets:
+        // `(key_name) WHERE owner_user_id IS NULL` for the org-shared row, and
+        // `(key_name, owner_user_id) WHERE owner_user_id IS NOT NULL` for the
+        // per-user rows. Branch on the owner so the planner picks the right
+        // arbiter index.
+        match owner_user_id {
+            None => {
+                sqlx::query!(
+                    r#"INSERT INTO credentials (id, provider_id, key_name, owner_user_id,
+                                              encrypted_value, created_at, updated_at)
+                     VALUES ($1, $2, $3, NULL, $4,
+                             to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                             to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+                     ON CONFLICT (key_name) WHERE owner_user_id IS NULL DO UPDATE SET
+                         provider_id     = EXCLUDED.provider_id,
+                         encrypted_value = EXCLUDED.encrypted_value,
+                         updated_at      = EXCLUDED.updated_at"#,
+                    id,
+                    provider_id,
+                    key_name,
+                    encrypted,
+                )
+                .execute(self.db.pool())
+                .await?;
+            }
+            Some(owner) => {
+                sqlx::query!(
+                    r#"INSERT INTO credentials (id, provider_id, key_name, owner_user_id,
+                                              encrypted_value, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5,
+                             to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                             to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+                     ON CONFLICT (key_name, owner_user_id) WHERE owner_user_id IS NOT NULL DO UPDATE SET
+                         provider_id     = EXCLUDED.provider_id,
+                         encrypted_value = EXCLUDED.encrypted_value,
+                         updated_at      = EXCLUDED.updated_at"#,
+                    id,
+                    provider_id,
+                    key_name,
+                    owner,
+                    encrypted,
+                )
+                .execute(self.db.pool())
+                .await?;
+            }
+        }
 
         let cred = sqlx::query_as!(
             Credential,
-            "SELECT id, provider_id, key_name, created_at, updated_at
-             FROM credentials WHERE key_name = $1",
-            key_name,
+            r#"SELECT id, provider_id, key_name, owner_user_id, created_at, updated_at
+             FROM credentials WHERE id = $1"#,
+            id,
         )
         .fetch_one(self.db.pool())
         .await?;
@@ -75,26 +131,65 @@ impl CredentialRepository {
         Ok(cred)
     }
 
-    /// List all credentials. Never returns raw key values.
+    /// Resolve the row id for a `(key_name, owner)` scope. Exact match: a NULL
+    /// owner only matches the org-shared row; a non-NULL owner only matches
+    /// that user's private row (no fallback — callers that want fallback use
+    /// [`Self::get_decrypted_for_user`]).
+    async fn scoped_id(&self, key_name: &str, owner_user_id: Option<&str>) -> Result<Option<String>> {
+        let id = match owner_user_id {
+            None => {
+                sqlx::query_scalar!(
+                    "SELECT id FROM credentials WHERE key_name = $1 AND owner_user_id IS NULL",
+                    key_name
+                )
+                .fetch_optional(self.db.pool())
+                .await?
+            }
+            Some(owner) => {
+                sqlx::query_scalar!(
+                    "SELECT id FROM credentials WHERE key_name = $1 AND owner_user_id = $2",
+                    key_name,
+                    owner
+                )
+                .fetch_optional(self.db.pool())
+                .await?
+            }
+        };
+        Ok(id)
+    }
+
+    /// List all credentials (every owner). Never returns raw key values.
     pub async fn list(&self) -> Result<Vec<Credential>> {
         ensure_db!(self.db);
         Ok(sqlx::query_as!(
             Credential,
-            "SELECT id, provider_id, key_name, created_at, updated_at
+            r#"SELECT id, provider_id, key_name, owner_user_id, created_at, updated_at
                  FROM credentials
-                 ORDER BY provider_id, key_name",
+                 ORDER BY provider_id, key_name"#,
         )
         .fetch_all(self.db.pool())
         .await?)
     }
 
-    /// Delete a credential by `key_name`. Emits `CredentialDeleted` with the ID.
+    /// Delete the credential `key_name` owned by the *acting user* (read from
+    /// `current_user_id()`). With no user context this deletes the org-shared
+    /// row. Disconnect flows are symmetric with [`Self::set`]: a user
+    /// disconnecting a provider only removes their own credential, never
+    /// another user's or (when acting as a user) the org-shared fallback.
     pub async fn delete(&self, key_name: &str) -> Result<bool> {
+        let owner = djinn_core::auth_context::current_user_id();
+        self.delete_for_owner(key_name, owner.as_deref()).await
+    }
+
+    /// Delete the credential for an explicit `(key_name, owner)` scope.
+    /// Emits `CredentialDeleted` with the ID.
+    pub async fn delete_for_owner(
+        &self,
+        key_name: &str,
+        owner_user_id: Option<&str>,
+    ) -> Result<bool> {
         ensure_db!(self.db);
-        let deleted_id: Option<String> =
-            sqlx::query_scalar!("SELECT id FROM credentials WHERE key_name = $1", key_name)
-                .fetch_optional(self.db.pool())
-                .await?;
+        let deleted_id: Option<String> = self.scoped_id(key_name, owner_user_id).await?;
 
         if let Some(ref id) = deleted_id {
             sqlx::query!("DELETE FROM credentials WHERE id = $1", id)
@@ -111,39 +206,109 @@ impl CredentialRepository {
         }
     }
 
-    /// Delete all credentials for a given `provider_id`.
+    /// Delete the *acting user's* credentials for a given `provider_id` (the
+    /// "disconnect provider" path). Scoped by `current_user_id()`: an
+    /// authenticated user only removes their own rows — they can NEVER wipe
+    /// another user's API keys, and (when acting as a user) they don't touch
+    /// the org-shared fallback either. With no user context (local single-user
+    /// dev / background) this removes the org-shared rows, preserving the
+    /// historical "remove all" feel for that deployment shape.
+    ///
     /// Returns the number of rows deleted. Emits `CredentialDeleted` for each.
     pub async fn delete_by_provider(&self, provider_id: &str) -> Result<u64> {
         ensure_db!(self.db);
-        let ids: Vec<String> =
-            sqlx::query_scalar!("SELECT id FROM credentials WHERE provider_id = $1", provider_id)
+        let owner = djinn_core::auth_context::current_user_id();
+
+        let ids: Vec<String> = match owner.as_deref() {
+            Some(uid) => {
+                sqlx::query_scalar!(
+                    "SELECT id FROM credentials WHERE provider_id = $1 AND owner_user_id = $2",
+                    provider_id,
+                    uid
+                )
                 .fetch_all(self.db.pool())
-                .await?;
+                .await?
+            }
+            None => {
+                sqlx::query_scalar!(
+                    "SELECT id FROM credentials WHERE provider_id = $1 AND owner_user_id IS NULL",
+                    provider_id
+                )
+                .fetch_all(self.db.pool())
+                .await?
+            }
+        };
 
         if ids.is_empty() {
             return Ok(0);
         }
 
-        let result = sqlx::query!("DELETE FROM credentials WHERE provider_id = $1", provider_id)
-            .execute(self.db.pool())
-            .await?;
+        // Delete by the exact id set we just resolved (keeps the scoping logic
+        // in one place rather than duplicating the owner predicate).
+        let mut deleted = 0u64;
+        for id in &ids {
+            let r = sqlx::query!("DELETE FROM credentials WHERE id = $1", id)
+                .execute(self.db.pool())
+                .await?;
+            deleted += r.rows_affected();
+        }
 
         for id in ids {
             self.events
                 .send(DjinnEventEnvelope::credential_deleted(&id));
         }
 
-        Ok(result.rows_affected())
+        Ok(deleted)
     }
 
-    /// Check whether a credential with the given `key_name` exists (without decrypting).
+    /// Check whether a credential `key_name` is resolvable for the acting user
+    /// (their own row, else the org-shared fallback), without decrypting.
     pub async fn exists(&self, key_name: &str) -> Result<bool> {
+        let owner = djinn_core::auth_context::current_user_id();
+        self.exists_for_user(key_name, owner.as_deref()).await
+    }
+
+    /// Check whether `key_name` is resolvable for `user_id` (their own row,
+    /// else the org-shared fallback), without decrypting.
+    pub async fn exists_for_user(
+        &self,
+        key_name: &str,
+        user_id: Option<&str>,
+    ) -> Result<bool> {
         ensure_db!(self.db);
-        let found: Option<String> =
-            sqlx::query_scalar!("SELECT id FROM credentials WHERE key_name = $1", key_name)
-                .fetch_optional(self.db.pool())
-                .await?;
+        let found: Option<String> = self.resolve_id_for_user(key_name, user_id).await?;
         Ok(found.is_some())
+    }
+
+    /// Resolve the credential row id for `key_name` honouring the user-then-org
+    /// fallback: prefer the acting user's private row, otherwise the org-shared
+    /// (`owner_user_id IS NULL`) row. Returns `None` when neither exists.
+    async fn resolve_id_for_user(
+        &self,
+        key_name: &str,
+        user_id: Option<&str>,
+    ) -> Result<Option<String>> {
+        // Try the user's own credential first.
+        if let Some(uid) = user_id {
+            if let Some(id) = sqlx::query_scalar!(
+                "SELECT id FROM credentials WHERE key_name = $1 AND owner_user_id = $2",
+                key_name,
+                uid
+            )
+            .fetch_optional(self.db.pool())
+            .await?
+            {
+                return Ok(Some(id));
+            }
+        }
+        // Fall back to the org-shared row.
+        let id = sqlx::query_scalar!(
+            "SELECT id FROM credentials WHERE key_name = $1 AND owner_user_id IS NULL",
+            key_name
+        )
+        .fetch_optional(self.db.pool())
+        .await?;
+        Ok(id)
     }
 
     /// Return the raw encrypted ciphertext blob for `key_name` without
@@ -153,22 +318,63 @@ impl CredentialRepository {
     /// stored value is actually encrypted (non-empty and distinct from
     /// plaintext). Production code should use [`Self::get_decrypted`].
     pub async fn get_encrypted_raw(&self, key_name: &str) -> Result<Option<Vec<u8>>> {
+        let owner = djinn_core::auth_context::current_user_id();
+        self.get_encrypted_raw_for_user(key_name, owner.as_deref())
+            .await
+    }
+
+    /// Owner-aware variant of [`Self::get_encrypted_raw`] (test fixture).
+    pub async fn get_encrypted_raw_for_user(
+        &self,
+        key_name: &str,
+        user_id: Option<&str>,
+    ) -> Result<Option<Vec<u8>>> {
         ensure_db!(self.db);
+        let Some(id) = self.resolve_id_for_user(key_name, user_id).await? else {
+            return Ok(None);
+        };
         let blob: Option<Vec<u8>> =
-            sqlx::query_scalar!("SELECT encrypted_value FROM credentials WHERE key_name = $1", key_name)
+            sqlx::query_scalar!("SELECT encrypted_value FROM credentials WHERE id = $1", id)
                 .fetch_optional(self.db.pool())
                 .await?;
         Ok(blob)
     }
 
-    /// Decrypt and return the raw API key for `key_name`.
+    /// Decrypt and return the raw API key for `key_name`, resolved against the
+    /// *acting user* read from the `SESSION_USER_ID` task-local
+    /// (`current_user_id()`): the user's own credential is preferred, falling
+    /// back to the org-shared (`owner_user_id IS NULL`) credential.
+    ///
+    /// Callers that must resolve against a specific user without relying on the
+    /// task-local (e.g. the worker dispatch path stamping the task creator's
+    /// id) should use [`Self::get_decrypted_for_user`] directly.
     ///
     /// Called by `AgentSupervisor` at dispatch time to obtain the key for
     /// provider creation. Never exposed via MCP tools.
     pub async fn get_decrypted(&self, key_name: &str) -> Result<Option<String>> {
+        let user_id = djinn_core::auth_context::current_user_id();
+        self.get_decrypted_for_user(key_name, user_id.as_deref())
+            .await
+    }
+
+    /// Decrypt and return the raw API key for `key_name`, resolved against an
+    /// explicit `user_id`: prefer that user's own credential, otherwise the
+    /// org-shared (`owner_user_id IS NULL`) fallback. `user_id = None` resolves
+    /// only the org-shared credential.
+    ///
+    /// User A can never read user B's credential through this method: it only
+    /// ever returns A's own row or the org-shared row.
+    pub async fn get_decrypted_for_user(
+        &self,
+        key_name: &str,
+        user_id: Option<&str>,
+    ) -> Result<Option<String>> {
         ensure_db!(self.db);
+        let Some(id) = self.resolve_id_for_user(key_name, user_id).await? else {
+            return Ok(None);
+        };
         let blob: Option<Vec<u8>> =
-            sqlx::query_scalar!("SELECT encrypted_value FROM credentials WHERE key_name = $1", key_name)
+            sqlx::query_scalar!("SELECT encrypted_value FROM credentials WHERE id = $1", id)
                 .fetch_optional(self.db.pool())
                 .await?;
 
@@ -297,5 +503,222 @@ mod tests {
 
         let v = repo.get_decrypted("ANTHROPIC_API_KEY").await.unwrap();
         assert_eq!(v.as_deref(), Some("v2"));
+    }
+
+    // ── Per-user isolation (migration 28) ──────────────────────────────────
+
+    /// Seed a real `users` row so the `credentials.owner_user_id` FK holds.
+    async fn seed_user(db: &Database, github_id: i64, login: &str) -> String {
+        db.ensure_initialized().await.unwrap();
+        djinn_db::UserRepository::new(db.clone())
+            .upsert_from_github(github_id, login, None, None)
+            .await
+            .unwrap()
+            .id
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn user_credential_is_preferred_over_org_shared() {
+        let db = Database::open_in_memory().unwrap();
+        let user_a = seed_user(&db, 1001, "alice").await;
+        let repo = CredentialRepository::new(db.clone(), EventBus::noop());
+
+        // Org-shared fallback (no owner).
+        repo.set_with_owner("openai", "OPENAI_API_KEY", "sk-org-shared", None)
+            .await
+            .unwrap();
+        // Alice's private credential.
+        repo.set_with_owner("openai", "OPENAI_API_KEY", "sk-alice", Some(&user_a))
+            .await
+            .unwrap();
+
+        // Both rows coexist under the same key_name.
+        assert_eq!(repo.list().await.unwrap().len(), 2);
+
+        // Alice resolves her own.
+        let alice = repo
+            .get_decrypted_for_user("OPENAI_API_KEY", Some(&user_a))
+            .await
+            .unwrap();
+        assert_eq!(alice.as_deref(), Some("sk-alice"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn falls_back_to_org_shared_when_user_has_none() {
+        let db = Database::open_in_memory().unwrap();
+        let user_b = seed_user(&db, 1002, "bob").await;
+        let repo = CredentialRepository::new(db.clone(), EventBus::noop());
+
+        repo.set_with_owner("openai", "OPENAI_API_KEY", "sk-org-shared", None)
+            .await
+            .unwrap();
+
+        // Bob has no private credential → resolves the org-shared one.
+        let resolved = repo
+            .get_decrypted_for_user("OPENAI_API_KEY", Some(&user_b))
+            .await
+            .unwrap();
+        assert_eq!(resolved.as_deref(), Some("sk-org-shared"));
+
+        // None acting-user also resolves org-shared (worker/local-dev path).
+        let resolved_none = repo
+            .get_decrypted_for_user("OPENAI_API_KEY", None)
+            .await
+            .unwrap();
+        assert_eq!(resolved_none.as_deref(), Some("sk-org-shared"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn user_a_cannot_read_user_b_credential() {
+        let db = Database::open_in_memory().unwrap();
+        let user_a = seed_user(&db, 2001, "alice2").await;
+        let user_b = seed_user(&db, 2002, "bob2").await;
+        let repo = CredentialRepository::new(db.clone(), EventBus::noop());
+
+        // Only Bob has a credential; no org-shared fallback exists.
+        repo.set_with_owner("openai", "OPENAI_API_KEY", "sk-bob-secret", Some(&user_b))
+            .await
+            .unwrap();
+
+        // Alice resolves nothing — she cannot see Bob's private credential,
+        // and there is no org-shared row to fall back to.
+        let alice = repo
+            .get_decrypted_for_user("OPENAI_API_KEY", Some(&user_a))
+            .await
+            .unwrap();
+        assert!(
+            alice.is_none(),
+            "user A must not resolve user B's private credential"
+        );
+
+        // Bob still resolves his own.
+        let bob = repo
+            .get_decrypted_for_user("OPENAI_API_KEY", Some(&user_b))
+            .await
+            .unwrap();
+        assert_eq!(bob.as_deref(), Some("sk-bob-secret"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_stamps_owner_from_task_local() {
+        use djinn_core::auth_context::SESSION_USER_ID;
+        let db = Database::open_in_memory().unwrap();
+        let user_a = seed_user(&db, 3001, "carol").await;
+        let repo = CredentialRepository::new(db.clone(), EventBus::noop());
+
+        // Under a user scope, `set` (the connect-flow entry point) stamps
+        // owner_user_id automatically.
+        SESSION_USER_ID
+            .scope(Some(user_a.clone()), async {
+                repo.set("openai", "OPENAI_API_KEY", "sk-carol")
+                    .await
+                    .unwrap();
+            })
+            .await;
+
+        let owner: Option<String> = sqlx::query_scalar!(
+            "SELECT owner_user_id FROM credentials WHERE key_name = $1",
+            "OPENAI_API_KEY"
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(owner.as_deref(), Some(user_a.as_str()));
+
+        // Carol resolves her own credential via the task-local-driven getter.
+        let resolved = SESSION_USER_ID
+            .scope(Some(user_a.clone()), async {
+                repo.get_decrypted("OPENAI_API_KEY").await.unwrap()
+            })
+            .await;
+        assert_eq!(resolved.as_deref(), Some("sk-carol"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_by_provider_only_removes_acting_users_rows() {
+        use djinn_core::auth_context::SESSION_USER_ID;
+        let db = Database::open_in_memory().unwrap();
+        let alice = seed_user(&db, 5101, "erin").await;
+        let bob = seed_user(&db, 5102, "frank").await;
+        let repo = CredentialRepository::new(db.clone(), EventBus::noop());
+
+        repo.set_with_owner("openai", "OPENAI_API_KEY", "org", None)
+            .await
+            .unwrap();
+        repo.set_with_owner("openai", "OPENAI_API_KEY", "alice-key", Some(&alice))
+            .await
+            .unwrap();
+        repo.set_with_owner("openai", "OPENAI_API_KEY", "bob-key", Some(&bob))
+            .await
+            .unwrap();
+
+        // Alice disconnects openai → only her row goes.
+        let deleted = SESSION_USER_ID
+            .scope(Some(alice.clone()), async {
+                repo.delete_by_provider("openai").await.unwrap()
+            })
+            .await;
+        assert_eq!(deleted, 1);
+
+        // Bob's and the org-shared rows survive.
+        assert_eq!(
+            repo.get_decrypted_for_user("OPENAI_API_KEY", Some(&bob))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("bob-key")
+        );
+        assert_eq!(
+            repo.get_decrypted_for_user("OPENAI_API_KEY", None)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("org")
+        );
+        // Alice now resolves the org-shared fallback (her private row is gone).
+        assert_eq!(
+            repo.get_decrypted_for_user("OPENAI_API_KEY", Some(&alice))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("org")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn private_and_org_credentials_independently_upsert() {
+        let db = Database::open_in_memory().unwrap();
+        let user_a = seed_user(&db, 4001, "dave").await;
+        let repo = CredentialRepository::new(db.clone(), EventBus::noop());
+
+        repo.set_with_owner("openai", "OPENAI_API_KEY", "org-v1", None)
+            .await
+            .unwrap();
+        repo.set_with_owner("openai", "OPENAI_API_KEY", "dave-v1", Some(&user_a))
+            .await
+            .unwrap();
+        // Re-upsert each scope independently.
+        repo.set_with_owner("openai", "OPENAI_API_KEY", "org-v2", None)
+            .await
+            .unwrap();
+        repo.set_with_owner("openai", "OPENAI_API_KEY", "dave-v2", Some(&user_a))
+            .await
+            .unwrap();
+
+        assert_eq!(repo.list().await.unwrap().len(), 2, "still exactly two rows");
+        assert_eq!(
+            repo.get_decrypted_for_user("OPENAI_API_KEY", None)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("org-v2")
+        );
+        assert_eq!(
+            repo.get_decrypted_for_user("OPENAI_API_KEY", Some(&user_a))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("dave-v2")
+        );
     }
 }

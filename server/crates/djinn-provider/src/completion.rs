@@ -469,6 +469,7 @@ mod tests {
             id: "cred".to_string(),
             provider_id: provider_id.to_string(),
             key_name: key_name.to_string(),
+            owner_user_id: None,
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         }
