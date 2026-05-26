@@ -1517,7 +1517,40 @@ impl CoordinatorActor {
                     //      task's PrOpened) clears the project's slot.
                     //   2. No pr_url yet → genuine first-open failure
                     //      (auth, permissions, bad ref, etc.) — surface.
-                    if task.pr_url.is_some() {
+                    // Unrecoverable: the task_branch doesn't exist in the
+                    // mirror (a run was cancelled before it pushed — see the
+                    // cancel-gate in djinn-supervisor). Retrying a read-only
+                    // clone of a missing branch loops forever, so re-queue the
+                    // task (`PrConflict`: approved → open) to get a fresh
+                    // worker run that recreates and pushes the branch.
+                    let branch_missing = reason.contains("clone_ephemeral")
+                        && reason.contains("not found in upstream origin");
+                    if branch_missing && task.pr_url.is_none() {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            error = %reason,
+                            "CoordinatorActor: approved task has no task_branch in mirror (run interrupted before push) — re-queueing (PrConflict: approved → open)"
+                        );
+                        if let Err(e) = repo
+                            .transition(
+                                &task.id,
+                                TransitionAction::PrConflict,
+                                "coordinator",
+                                "system",
+                                Some("approved with no pushed task_branch; re-running worker to recreate it"),
+                                None,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                error = %e,
+                                "CoordinatorActor: failed to re-queue branch-missing approved task"
+                            );
+                        }
+                        self.pr_errors.remove(&task.project_id);
+                        self.publish_status();
+                    } else if task.pr_url.is_some() {
                         tracing::info!(
                             task_id = %task.short_id,
                             stage = %stage,

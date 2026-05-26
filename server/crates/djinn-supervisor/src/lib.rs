@@ -486,8 +486,21 @@ impl TaskRunSupervisor {
                         // Worker finished cleanly → submit_task_review
                         // (in_progress → needs_task_review). Architect has no
                         // analogous transition in the current state machine.
-                        if role_kind == RoleKind::Worker
-                            && let Err(e) = self
+                        //
+                        // Gate on the cancel token: a stall-kill / preempt can
+                        // flip cancel mid-stage and the agent may still emit a
+                        // late StageOutcome. We must NOT advance the task on a
+                        // cancelled run — doing so walked tasks all the way to
+                        // `approved` with no pushed task_branch (the kw7s
+                        // PR-open loop). Leave it in_progress for redispatch.
+                        if role_kind == RoleKind::Worker {
+                            if self.services.cancel().is_cancelled() {
+                                tracing::debug!(
+                                    task_run_id = %run_id,
+                                    task_id = %spec.task_id,
+                                    "supervisor: run cancelled — skipping submit_task_review (task stays in_progress for redispatch)"
+                                );
+                            } else if let Err(e) = self
                                 .services
                                 .transition_task(
                                     spec.task_id.clone(),
@@ -495,20 +508,31 @@ impl TaskRunSupervisor {
                                     None,
                                 )
                                 .await
-                        {
-                            tracing::warn!(
-                                task_run_id = %run_id,
-                                task_id = %spec.task_id,
-                                error = %e,
-                                "supervisor: post-worker submit_task_review transition skipped"
-                            );
+                            {
+                                tracing::warn!(
+                                    task_run_id = %run_id,
+                                    task_id = %spec.task_id,
+                                    error = %e,
+                                    "supervisor: post-worker submit_task_review transition skipped"
+                                );
+                            }
                         }
                     }
                     StageOutcome::ReviewerApproved => {
                         // Reviewer signed off → task_review_approve
                         // (in_task_review → approved). The host's PR-open
                         // path then fires pr_created (approved → pr_draft).
-                        if let Err(e) = self
+                        //
+                        // Cancel-gated for the same reason as submit_task_review
+                        // above: a cancelled reviewer run must not approve a task
+                        // (that's how kw7s reached `approved` with no branch).
+                        if self.services.cancel().is_cancelled() {
+                            tracing::debug!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                "supervisor: run cancelled — skipping task_review_approve (task stays in_task_review for redispatch)"
+                            );
+                        } else if let Err(e) = self
                             .services
                             .transition_task(
                                 spec.task_id.clone(),
