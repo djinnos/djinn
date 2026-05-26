@@ -13,6 +13,7 @@ mod auth;
 mod chat;
 mod github_install;
 mod mcp_handler;
+mod oauth;
 mod org_sync;
 mod project_tools;
 mod state;
@@ -37,6 +38,7 @@ pub fn router(state: AppState, serve_ui: bool) -> Router {
         .route("/mcp", post(mcp_handler::mcp_handler))
         .merge(agents::router())
         .merge(auth::router())
+        .merge(oauth::router())
         .merge(github_install::router())
         .merge(crate::mirror_fetcher::router())
         .merge(org_sync::router())

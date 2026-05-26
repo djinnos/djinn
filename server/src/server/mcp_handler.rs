@@ -1,11 +1,11 @@
 use axum::extract::{Request, State};
-use axum::http::{HeaderValue, StatusCode};
-use axum::response::IntoResponse;
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use djinn_core::auth_context::{SESSION_USER_ID, SESSION_USER_TOKEN};
 use serde_json::Value;
 
 use super::AppState;
-use super::auth::authenticate;
+use super::oauth::{self, AuthOutcome};
 
 pub(super) async fn mcp_handler(State(state): State<AppState>, req: Request) -> impl IntoResponse {
     let headers = req.headers().clone();
@@ -16,22 +16,31 @@ pub(super) async fn mcp_handler(State(state): State<AppState>, req: Request) -> 
         .map(std::path::PathBuf::from)
         .filter(|path| path.join(".git").exists());
 
-    // Resolve the authenticated user's GitHub access token *and* stable
-    // `users.id` (if any), and thread both through MCP dispatch via tokio
-    // task-locals:
-    //   - `SESSION_USER_TOKEN` — read by tools that call user-scoped
-    //     GitHub endpoints via `current_user_token()`.
-    //   - `SESSION_USER_ID`    — read by repository inserts so new rows
-    //     on `tasks`, `epics`, and `sessions` carry `created_by_user_id`
-    //     attribution via `current_user_id()`.
+    // Resolve the request to a user via EITHER the existing `djinn_session`
+    // cookie OR an `Authorization: Bearer <token>` MCP access token, threading
+    // both the GitHub access token and the stable `users.id` through MCP
+    // dispatch via tokio task-locals:
+    //   - `SESSION_USER_TOKEN` — read by tools that call user-scoped GitHub
+    //     endpoints via `current_user_token()`. For bearer-auth requests this
+    //     is a best-effort lookup of the user's freshest live GitHub session
+    //     token, and may be `None` (acceptable for v1 — most task tools only
+    //     need `user_id` for attribution).
+    //   - `SESSION_USER_ID`    — read by repository inserts so new rows on
+    //     `tasks`, `epics`, and `sessions` carry `created_by_user_id`.
+    //
+    // Auth requirement (cut-over): MCP now requires authentication *when the
+    // GitHub App is configured* (the multi-user deployment shape). Local
+    // single-user dev with no GitHub App configured keeps the historical
+    // unauthenticated path so it still works without the OAuth round-trip.
+    let auth_required = state.app_config().await.is_some();
     let (user_token, user_id): (Option<String>, Option<String>) =
-        match authenticate(&state, &headers).await {
-            Ok(Some(user)) => (Some(user.github_access_token), Some(user.id)),
-            Ok(None) => (None, None),
-            Err(err) => {
-                tracing::warn!(error = %err, "mcp_handler: authenticate failed; proceeding unauth");
-                (None, None)
+        match oauth::resolve_request_user(&state, &headers).await {
+            AuthOutcome::User(u) => (u.github_access_token, Some(u.user_id)),
+            AuthOutcome::Missing | AuthOutcome::InvalidBearer if auth_required => {
+                return unauthorized_response();
             }
+            // Unauthenticated local-dev path: proceed without attribution.
+            AuthOutcome::Missing | AuthOutcome::InvalidBearer => (None, None),
         };
 
     let body = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
@@ -75,6 +84,17 @@ pub(super) async fn mcp_handler(State(state): State<AppState>, req: Request) -> 
     if payload.get("method").and_then(Value::as_str) == Some("initialize") {
         resp.headers_mut()
             .insert("mcp-session-id", HeaderValue::from_static("test-session"));
+    }
+    resp
+}
+
+/// 401 with the RFC 9728 `WWW-Authenticate` challenge pointing MCP clients at
+/// the protected-resource metadata so they can discover the AS and begin the
+/// OAuth connect flow.
+fn unauthorized_response() -> Response {
+    let mut resp = (StatusCode::UNAUTHORIZED, "authentication required").into_response();
+    if let Ok(hv) = HeaderValue::from_str(&oauth::www_authenticate_value()) {
+        resp.headers_mut().insert(header::WWW_AUTHENTICATE, hv);
     }
     resp
 }

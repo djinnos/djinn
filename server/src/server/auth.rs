@@ -52,9 +52,9 @@ use djinn_db::{
 use djinn_provider::github_app::jwt::mint_app_jwt_anyhow;
 use djinn_provider::oauth::github_app_user::{self, GithubUserTokens};
 
-const SESSION_COOKIE: &str = "djinn_session";
+pub(super) const SESSION_COOKIE: &str = "djinn_session";
 const OAUTH_STATE_COOKIE: &str = "djinn_oauth_state";
-const DEFAULT_PUBLIC_URL: &str = "http://127.0.0.1:8372";
+pub(super) const DEFAULT_PUBLIC_URL: &str = "http://127.0.0.1:8372";
 const SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 30; // 30 days
 const STATE_COOKIE_TTL_SECS: i64 = 60 * 10; // 10 minutes
 
@@ -707,7 +707,7 @@ async fn check_org_membership(access_token: &str, org_login: &str) -> Result<boo
 
 // ─── Cookie + misc helpers ────────────────────────────────────────────────────
 
-fn public_url() -> String {
+pub(super) fn public_url() -> String {
     std::env::var("DJINN_PUBLIC_URL").unwrap_or_else(|_| DEFAULT_PUBLIC_URL.to_string())
 }
 
@@ -731,7 +731,7 @@ fn cookie_secure() -> bool {
     }
 }
 
-fn set_cookie(headers: &mut HeaderMap, name: &str, value: &str, max_age: i64) {
+pub(super) fn set_cookie(headers: &mut HeaderMap, name: &str, value: &str, max_age: i64) {
     let secure = if cookie_secure() { "; Secure" } else { "" };
     let cookie =
         format!("{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}");
@@ -755,7 +755,7 @@ fn clear_cookie(headers: &mut HeaderMap, name: &str) {
     }
 }
 
-fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+pub(super) fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     for value in headers.get_all(header::COOKIE).iter() {
         let Ok(s) = value.to_str() else { continue };
         for part in s.split(';') {
@@ -770,7 +770,7 @@ fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     None
 }
 
-fn random_token_b64() -> String {
+pub(super) fn random_token_b64() -> String {
     let mut bytes = [0u8; 32];
     ring::rand::SystemRandom::new()
         .fill(&mut bytes)
@@ -778,13 +778,13 @@ fn random_token_b64() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn rfc3339_in(seconds: i64) -> String {
+pub(super) fn rfc3339_in(seconds: i64) -> String {
     use time::format_description::well_known::Rfc3339;
     let t = time::OffsetDateTime::now_utc() + time::Duration::seconds(seconds);
     t.format(&Rfc3339).unwrap_or_else(|_| String::new())
 }
 
-fn session_expired(expires_at: &str) -> bool {
+pub(super) fn session_expired(expires_at: &str) -> bool {
     use time::format_description::well_known::Rfc3339;
     let Ok(expiry) = time::OffsetDateTime::parse(expires_at, &Rfc3339) else {
         // If we can't parse it, be safe and treat as expired.
@@ -802,7 +802,7 @@ fn sanitize_redirect(raw: Option<&str>) -> String {
     }
 }
 
-fn urlencode(s: &str) -> String {
+pub(super) fn urlencode(s: &str) -> String {
     // Minimal percent-encoder for the handful of URL components we paste in
     // by hand. We avoid pulling in `urlencoding`/`percent-encoding` by only
     // encoding the characters that actually matter for query/value strings.
@@ -819,7 +819,7 @@ fn urlencode(s: &str) -> String {
     out
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(super) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
