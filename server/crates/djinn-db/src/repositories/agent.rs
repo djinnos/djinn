@@ -1183,15 +1183,12 @@ mod tests {
 
         let error = result.expect_err("second default should violate unique partial index");
         let message = error.to_string().to_lowercase();
-        // Accept either the legacy SQLite message or the MySQL/Dolt duplicate-key
-        // message. Dolt phrases it as "duplicate unique key given"; vanilla
-        // MySQL says "duplicate entry". Both flows still point at the partial
-        // unique index `uq_agents_project_default_base`.
+        // Postgres phrases a unique violation as `duplicate key value violates
+        // unique constraint "<name>"`; the partial index guarding one default
+        // per (project, base_role) is `uq_agents_one_default_per_base_role`.
         assert!(
-            message.contains("unique constraint failed: agents.project_id, agents.base_role")
-                || message.contains("duplicate entry")
-                || message.contains("duplicate unique key")
-                || message.contains("uq_agents_project_default_base"),
+            message.contains("duplicate key value violates unique constraint")
+                || message.contains("uq_agents_one_default_per_base_role"),
             "unexpected error: {message}"
         );
 

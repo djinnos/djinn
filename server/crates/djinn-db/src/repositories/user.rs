@@ -10,7 +10,7 @@
 //! stays nullable until Phase 2 performs the backfill.
 //!
 //! All queries use compile-time-checked `sqlx::query!` / `sqlx::query_as!`
-//! against the MySQL/Dolt schema (see `migrations_mysql/3_users_and_org_config.sql`).
+//! against the Postgres schema (see `migrations_postgres/3_users_and_org_config.sql`).
 
 use serde::{Deserialize, Serialize};
 

@@ -1,9 +1,9 @@
-//! Enforce that committed MySQL migrations are canonically named with
+//! Enforce that committed Postgres migrations are canonically named with
 //! strictly-increasing version prefixes. sqlx records a per-file checksum
 //! in `_sqlx_migrations` on first apply and will refuse to restart if a
 //! previously-applied file is later mutated — that runtime guarantee is
-//! verified in integration tests that exercise the live Dolt server; this
-//! unit test just pins the file-naming contract.
+//! verified in integration tests that exercise the live Postgres server;
+//! this unit test just pins the file-naming contract.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -34,17 +34,17 @@ fn canonical_entries(dir: &Path) -> Vec<(u64, String)> {
 }
 
 #[test]
-fn mysql_migration_names_are_canonical_and_increasing() {
-    let entries = canonical_entries(&migrations_dir("migrations_mysql"));
+fn postgres_migration_names_are_canonical_and_increasing() {
+    let entries = canonical_entries(&migrations_dir("migrations_postgres"));
     assert!(
         !entries.is_empty(),
-        "must have at least one mysql migration"
+        "must have at least one postgres migration"
     );
     let mut last = 0_u64;
     for (v, _) in &entries {
         assert!(
             *v > last,
-            "mysql migration versions must strictly increase; saw {v} after {last}"
+            "postgres migration versions must strictly increase; saw {v} after {last}"
         );
         last = *v;
     }

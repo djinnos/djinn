@@ -192,22 +192,21 @@ jobs:
         working-directory: server
     env:
       RUSTFLAGS: "-D warnings -C link-arg=-fuse-ld=mold"
-      DJINN_TEST_MYSQL_URL: "mysql://root@127.0.0.1:3308"
-    # Ephemeral MySQL for djinn-db integration tests. The workspace
-    # `.cargo/config.toml` points DATABASE_URL and DJINN_TEST_MYSQL_URL
-    # at :3308, matching the `mysql-test` service in docker-compose.yml —
-    # CI inherits those values automatically, so we just need the port
-    # forwarded here.
+    # Ephemeral Postgres for djinn-db integration tests (the MySQL/Dolt
+    # cut-over shipped in v0.2.x). The workspace `.cargo/config.toml`
+    # points DATABASE_URL (compile-time sqlx macros) and
+    # DJINN_TEST_DATABASE_URL (runtime per-test DB clones) at :5433 — CI
+    # inherits those automatically, so we just forward the port here.
     services:
-      mysql:
-        image: mysql:8.4
+      postgres:
+        image: postgres:16
         env:
-          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
-          MYSQL_DATABASE: djinn
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: djinn
         ports:
-          - 3308:3306
+          - 5433:5432
         options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-cmd="pg_isready -U postgres"
           --health-interval=5s --health-timeout=3s --health-retries=20
     steps:
       - uses: actions/checkout@v4
@@ -232,17 +231,36 @@ jobs:
         with:
           tool: sqlx-cli
 
+      # The compile-time sqlx::query! macros connect to DATABASE_URL
+      # (:5433/djinn via .cargo/config.toml), so the schema must exist
+      # before the test binaries build.
       - name: Apply djinn-db migrations
         working-directory: server/crates/djinn-db
         env:
-          DATABASE_URL: mysql://root@127.0.0.1:3308/djinn
-        run: sqlx migrate run --source migrations_mysql
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
+        run: sqlx migrate run --source migrations_postgres
 
-      - name: Build MySQL test template
+      # Per-test databases clone from `djinn_test_template` (see
+      # Database::open_in_memory). Build it, migrate it, and flag it as a
+      # TEMPLATE so `CREATE DATABASE … TEMPLATE djinn_test_template` works.
+      - name: Build Postgres test template
+        env:
+          PGPASSWORD: postgres
         run: |
-          until mysql -h 127.0.0.1 -P 3308 -uroot -e "SELECT 1" >/dev/null 2>&1; do sleep 1; done
-          mysql -h 127.0.0.1 -P 3308 -uroot -e "DROP DATABASE IF EXISTS djinn_test_template; CREATE DATABASE djinn_test_template"
-          cd server/crates/djinn-db && DATABASE_URL=mysql://root@127.0.0.1:3308/djinn_test_template sqlx migrate run --source migrations_mysql
+          until pg_isready -h 127.0.0.1 -p 5433 -U postgres >/dev/null 2>&1; do sleep 1; done
+          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS djinn_test_template"
+          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE djinn_test_template"
+          cd crates/djinn-db && DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5433/djinn_test_template sqlx migrate run --source migrations_postgres
+          psql -h 127.0.0.1 -p 5433 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'"
+
+      # Tests default DJINN_VAULT_KEY_PATH to /var/tmp/djinn-test-vault
+      # (.cargo/config.toml); create the disk-backed key the crypto layer
+      # expects so vault-touching tests don't fall back to the prod path.
+      - name: Create test vault key
+        run: |
+          mkdir -p /var/tmp/djinn-test-vault
+          openssl rand -out /var/tmp/djinn-test-vault/vault.key 32
+          chmod 600 /var/tmp/djinn-test-vault/vault.key
 
       - name: Configure git identity for tests
         run: |
