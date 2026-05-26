@@ -86,15 +86,62 @@ pub struct Database {
     bootstrap: DatabaseBootstrapInfo,
     capabilities: DatabaseBackendCapabilities,
     initialized: Arc<OnceCell<()>>,
-    test_branch: Option<TestDbInit>,
+    test_branch: Option<Arc<TestDbInit>>,
 }
 
 /// Postgres template-clone test isolation: per-test `djinn_test_<uuid>`
 /// database cloned from `djinn_test_template` via `CREATE DATABASE … TEMPLATE`.
-#[derive(Clone, Debug)]
+///
+/// Held behind an `Arc` inside [`Database`] (which is `Clone`) so the `Drop`
+/// below fires exactly once — when the last clone of the test's `Database` is
+/// dropped — and DROPs the per-test database. Without this, every DB-backed
+/// test leaks its `djinn_test_<uuid>` clone and the tmpfs-backed test Postgres
+/// fills up within a single run, making the suite impossible to run
+/// repeatedly. Best-effort: hard-kills (SIGKILL / nextest `terminate-after`)
+/// still leak, but normal completion and panics clean up.
+#[derive(Debug)]
 struct TestDbInit {
     server_prefix: String,
     test_db: String,
+}
+
+impl Drop for TestDbInit {
+    fn drop(&mut self) {
+        let server_prefix = self.server_prefix.clone();
+        let test_db = self.test_db.clone();
+        // `Drop` is sync and may run on a current-thread test runtime (where
+        // `block_in_place` panics) or during runtime shutdown, so issue the
+        // async DROP from a dedicated thread with its own short-lived runtime.
+        let _ = std::thread::spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            rt.block_on(async move {
+                let admin_url = format!("{server_prefix}/postgres");
+                let Ok(mut conn) =
+                    <sqlx::postgres::PgConnection as sqlx::Connection>::connect(&admin_url).await
+                else {
+                    return;
+                };
+                // Evict any lingering sessions, then drop. `test_db` is an
+                // internally-generated `djinn_test_<uuidv7>` name, not caller
+                // input, so the inline interpolation is safe. Best-effort.
+                let _ = sqlx::query(&format!(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+                     WHERE datname = '{test_db}' AND pid <> pg_backend_pid()"
+                ))
+                .execute(&mut conn)
+                .await;
+                let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{test_db}\""))
+                    .execute(&mut conn)
+                    .await;
+            });
+        })
+        .join();
+    }
 }
 
 impl Database {
@@ -133,10 +180,10 @@ impl Database {
         Self::open_postgres_inner(
             &PostgresDatabaseConfig { url },
             4,
-            Some(TestDbInit {
+            Some(Arc::new(TestDbInit {
                 server_prefix,
                 test_db,
-            }),
+            })),
         )
     }
 
@@ -167,7 +214,7 @@ impl Database {
     fn open_postgres_inner(
         config: &PostgresDatabaseConfig,
         max_connections: u32,
-        test_branch: Option<TestDbInit>,
+        test_branch: Option<Arc<TestDbInit>>,
     ) -> DbResult<Self> {
         let mut opts = PgConnectOptions::from_str(&config.url)?;
         // For the Postgres test path, disable sqlx's prepared-statement cache.
@@ -363,17 +410,14 @@ impl Database {
         self.initialized
             .get_or_try_init(|| async move {
                 match test_branch {
-                    Some(TestDbInit {
-                        server_prefix,
-                        test_db,
-                    }) => {
+                    Some(init) => {
                         // Clone the pre-built `djinn_test_template` database
                         // into the per-test database. The template Job
                         // (`make test-db-postgres-template`) must have run
                         // already — if it hasn't, the clone fails with a
                         // clear "template database does not exist" error
                         // and the operator knows what to do.
-                        clone_postgres_test_template(&server_prefix, &test_db).await?;
+                        clone_postgres_test_template(&init.server_prefix, &init.test_db).await?;
                     }
                     None => {
                         migrations::ensure_postgres_database_exists(&url).await?;
