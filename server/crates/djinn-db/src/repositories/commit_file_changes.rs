@@ -372,12 +372,18 @@ impl CommitFileChangeRepository {
     /// Advance the per-project cursor to `sha`. Idempotent.
     pub async fn set_cursor(&self, project_id: &str, sha: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
+        // NOTE: plain string, not r#""# — in a raw string the `\`
+        // line-continuations are LITERAL backslashes and Postgres rejects
+        // them ("syntax error at or near \"\\\""). A normal string treats
+        // `\<newline>` as a continuation. Conflict target is the PK
+        // `project_id` (coupling_cursor has no event_key column — that's
+        // coupling_pair_events; an earlier sweep mis-copied the target).
         sqlx::query(
-            r#"INSERT INTO coupling_cursor (project_id, last_indexed_sha, last_updated_at) \
-             VALUES ($1, $2, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')) \
-             ON CONFLICT (event_key) DO UPDATE SET \
+            "INSERT INTO coupling_cursor (project_id, last_indexed_sha, last_updated_at) \
+             VALUES ($1, $2, to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')) \
+             ON CONFLICT (project_id) DO UPDATE SET \
                last_indexed_sha = EXCLUDED.last_indexed_sha, \
-               last_updated_at = EXCLUDED.last_updated_at"#,
+               last_updated_at = EXCLUDED.last_updated_at",
         )
         .bind(project_id)
         .bind(sha)
