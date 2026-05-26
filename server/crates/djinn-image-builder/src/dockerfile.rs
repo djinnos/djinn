@@ -132,10 +132,16 @@ pub fn generate_dockerfile(
 
 // ---- section emitters ---------------------------------------------------
 
-// Base image is hard-coded since the 2026-04-22 cleanup — djinn's image
-// runs verification only (clippy/check/test/lint), never ships anything,
-// so the libc flavor is irrelevant.
-const BASE_IMAGE: &str = "debian:bookworm-slim";
+// Base image must match the glibc of `djinn-agent-runtime`
+// (debian:trixie-slim, see server/docker/djinn-agent-runtime-base.Dockerfile)
+// because the `djinn-agent-worker` binary is COPY'd out of that runtime
+// image and executed *inside* this devcontainer image (warm-graph jobs +
+// task runs). The worker links GLIBC 2.39 / GLIBCXX 3.4.32 from trixie;
+// on the older bookworm base (glibc 2.36) it dies at startup with
+// `version 'GLIBC_2.38' not found`. The 2026-04-22 cleanup comment that
+// claimed "libc flavor is irrelevant" predated the in-image worker — it
+// is very much relevant now, so keep this pinned to trixie.
+const BASE_IMAGE: &str = "debian:trixie-slim";
 const BASE_SETUP_SCRIPT: &str = "base-debian.sh";
 
 fn emit_from(df: &mut String, _config: &EnvironmentConfig) {
@@ -583,7 +589,7 @@ mod tests {
     #[test]
     fn empty_config_emits_base_and_worker_only() {
         let df = generate_dockerfile(&minimal_valid_config(), &agent_worker()).unwrap();
-        assert!(df.dockerfile.contains("FROM debian:bookworm-slim"));
+        assert!(df.dockerfile.contains("FROM debian:trixie-slim"));
         assert!(df.dockerfile.contains("COPY --from=djinn/agent-worker:sha256-deadbeef"));
         assert!(df.dockerfile.contains("install-agent-worker.sh"));
         assert!(!df.dockerfile.contains("install-rust.sh"));
@@ -720,7 +726,7 @@ mod tests {
         // is now fixed regardless of what the config carried.
         let cfg = minimal_valid_config();
         let df = generate_dockerfile(&cfg, &agent_worker()).unwrap();
-        assert!(df.dockerfile.contains("FROM debian:bookworm-slim"));
+        assert!(df.dockerfile.contains("FROM debian:trixie-slim"));
         assert!(df.dockerfile.contains("/tmp/djinn-scripts/base-debian.sh"));
     }
 }
