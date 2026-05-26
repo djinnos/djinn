@@ -8,7 +8,7 @@
         "Varchar",
         "Text",
         "Text",
-        "Int4",
+        "Int8",
         "Varchar",
         "Jsonb",
         "Jsonb",

@@ -51,7 +51,7 @@
       {
         "ordinal": 9,
         "name": "priority",
-        "type_info": "Int4"
+        "type_info": "Int8"
       },
       {
         "ordinal": 10,
@@ -71,32 +71,32 @@
       {
         "ordinal": 13,
         "name": "reopen_count",
-        "type_info": "Int4"
+        "type_info": "Int8"
       },
       {
         "ordinal": 14,
         "name": "continuation_count",
-        "type_info": "Int4"
+        "type_info": "Int8"
       },
       {
         "ordinal": 15,
         "name": "verification_failure_count",
-        "type_info": "Int4"
+        "type_info": "Int8"
       },
       {
         "ordinal": 16,
         "name": "total_reopen_count",
-        "type_info": "Int4"
+        "type_info": "Int8"
       },
       {
         "ordinal": 17,
         "name": "total_verification_failure_count",
-        "type_info": "Int4"
+        "type_info": "Int8"
       },
       {
         "ordinal": 18,
         "name": "intervention_count",
-        "type_info": "Int4"
+        "type_info": "Int8"
       },
       {
         "ordinal": 19,

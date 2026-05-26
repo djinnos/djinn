@@ -81,8 +81,6 @@ impl TaskRepository {
         let ac_str = acceptance_criteria.unwrap_or("[]");
         let ac: serde_json::Value = serde_json::from_str(ac_str)
             .map_err(|e| crate::Error::InvalidData(format!("invalid json for tasks.acceptance_criteria: {e}")))?;
-        let priority: i32 = priority.try_into()
-            .map_err(|_| crate::Error::InvalidData("priority exceeds i32 range".into()))?;
         // Phase 3B: stamp `created_by_user_id` from the task-local set at
         // the MCP dispatch root (`SESSION_USER_ID`). `None` for
         // agent/background callers with no user context — schema allows
@@ -186,7 +184,7 @@ impl TaskRepository {
         let empty = "";
         let epic_id_none: Option<&str> = None;
         let issue_type = "task";
-        let priority = 1_i32;
+        let priority = 1_i64;
         sqlx::query!(
             "INSERT INTO tasks
                 (id, project_id, short_id, epic_id, title, description, design,
@@ -226,8 +224,6 @@ impl TaskRepository {
         acceptance_criteria: &str,
     ) -> Result<Task> {
         self.db.ensure_initialized().await?;
-        let priority: i32 = priority.try_into()
-            .map_err(|_| crate::Error::InvalidData("priority exceeds i32 range".into()))?;
         let labels_value: serde_json::Value = serde_json::from_str(labels)
             .map_err(|e| crate::Error::InvalidData(format!("invalid json for tasks.labels: {e}")))?;
         let ac_value: serde_json::Value = serde_json::from_str(acceptance_criteria)
@@ -529,8 +525,6 @@ impl TaskRepository {
     /// production code mutates this through [`Self::increment_continuation_count`].
     pub async fn set_continuation_count(&self, id: &str, count: i64) -> Result<()> {
         self.db.ensure_initialized().await?;
-        let count: i32 = count.try_into()
-            .map_err(|_| crate::Error::InvalidData("count exceeds i32 range".into()))?;
         let id_owned = id.to_owned();
 
         crate::retry::retry_on_serialization_failure(
@@ -561,8 +555,6 @@ impl TaskRepository {
     /// production code increments this through the transition path.
     pub async fn set_verification_failure_count(&self, id: &str, count: i64) -> Result<()> {
         self.db.ensure_initialized().await?;
-        let count: i32 = count.try_into()
-            .map_err(|_| crate::Error::InvalidData("count exceeds i32 range".into()))?;
         let id_owned = id.to_owned();
 
         crate::retry::retry_on_serialization_failure(

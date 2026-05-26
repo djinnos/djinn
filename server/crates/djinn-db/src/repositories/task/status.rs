@@ -188,7 +188,7 @@ impl TaskRepository {
                     let conflict_meta_ref = effective_conflict_metadata.as_deref();
 
                     // Apply all side effects atomically.
-                    let reopen_inc_val: i32 = if apply.increment_reopen { 1 } else { 0 };
+                    let reopen_inc_val: i64 = if apply.increment_reopen { 1 } else { 0 };
                     sqlx::query!(
                         r#"UPDATE tasks SET
                             status = $1,
@@ -309,7 +309,7 @@ impl TaskRepository {
                         ""
                     };
                     // Only increment reopen_count on actual reopen transitions (not open->open)
-                    let reopen_inc: i32 = if status == "open" && from_task.status != "open" {
+                    let reopen_inc: i64 = if status == "open" && from_task.status != "open" {
                         1
                     } else {
                         0
@@ -384,7 +384,7 @@ impl TaskRepository {
                         task_select_where_id!(id).fetch_one(self.db.pool()).await?;
 
                     // Only increment reopen_count on actual reopen transitions (not open->open)
-                    let reopen_inc: i32 = if status == "open" && from_task.status != "open" {
+                    let reopen_inc: i64 = if status == "open" && from_task.status != "open" {
                         1
                     } else {
                         0

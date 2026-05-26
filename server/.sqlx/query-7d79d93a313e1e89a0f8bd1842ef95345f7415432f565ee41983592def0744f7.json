@@ -13,7 +13,7 @@
         "Text",
         "Text",
         "Varchar",
-        "Int4",
+        "Int8",
         "Varchar",
         "Varchar"
       ]

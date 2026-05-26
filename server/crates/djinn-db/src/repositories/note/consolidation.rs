@@ -495,11 +495,6 @@ impl NoteConsolidationRepository {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
 
-        let scanned_i32 = params.scanned_note_count as i32;
-        let candidate_i32 = params.candidate_cluster_count as i32;
-        let consolidated_cluster_i32 = params.consolidated_cluster_count as i32;
-        let consolidated_note_i32 = params.consolidated_note_count as i32;
-        let source_i32 = params.source_note_count as i32;
         sqlx::query!(
             "INSERT INTO consolidation_run_metrics (
                 id, project_id, status, note_type,
@@ -511,11 +506,11 @@ impl NoteConsolidationRepository {
             params.project_id,
             params.status,
             params.note_type,
-            scanned_i32,
-            candidate_i32,
-            consolidated_cluster_i32,
-            consolidated_note_i32,
-            source_i32,
+            params.scanned_note_count,
+            params.candidate_cluster_count,
+            params.consolidated_cluster_count,
+            params.consolidated_note_count,
+            params.source_note_count,
             params.started_at,
             params.completed_at,
             params.error_message
