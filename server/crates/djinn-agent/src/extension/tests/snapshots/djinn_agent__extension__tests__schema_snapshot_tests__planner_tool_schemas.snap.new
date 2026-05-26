@@ -1,0 +1,1026 @@
+---
+source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
+assertion_line: 236
+expression: tool_schemas_planner()
+---
+[
+  {
+    "name": "task_show",
+    "description": "Show details of a work item including recent activity and blockers.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Task UUID or short ID"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "task_list",
+    "description": "List tasks with optional filters and pagination.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "issue_type": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "integer"
+        },
+        "text": {
+          "type": "string",
+          "description": "Free-text search in title/description"
+        },
+        "label": {
+          "type": "string"
+        },
+        "parent": {
+          "type": "string",
+          "description": "Epic ID to filter by"
+        },
+        "sort": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "offset": {
+          "type": "integer"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "task_activity_list",
+    "description": "Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect Lead guidance, reviewer feedback, or verification history.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Task UUID or short ID"
+        },
+        "event_type": {
+          "type": "string",
+          "description": "Filter by event type: comment, status_changed, commands_run, merge_conflict, task_review_start"
+        },
+        "actor_role": {
+          "type": "string",
+          "description": "Filter by actor: lead, reviewer, worker, verification, system"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Max entries to return (default 30, max 50)"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "memory_read",
+    "description": "Read a note by permalink or title.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "identifier"
+      ],
+      "properties": {
+        "identifier": {
+          "type": "string",
+          "description": "Permalink or title"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "memory_search",
+    "description": "Search notes in project memory.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "query"
+      ],
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "folder": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Task ID for affinity scoring; defaults to the current session task"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "memory_list",
+    "description": "List notes in project memory. Returns compact summaries without full content.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "folder": {
+          "type": "string",
+          "description": "Filter by folder (e.g. \"decisions\")"
+        },
+        "type": {
+          "type": "string",
+          "description": "Filter by note type (e.g. \"adr\", \"reference\", \"research\")"
+        },
+        "depth": {
+          "type": "integer",
+          "description": "Depth control: 0 = unlimited, 1 = exact folder (default), N = N levels"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "shell",
+    "description": "Execute shell commands in the task worktree. Commands always run from the worktree root.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "command"
+      ],
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "Shell command to execute"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "description": "Timeout in milliseconds (default 120000)"
+        }
+      }
+    },
+    "concurrent_safe": false
+  },
+  {
+    "name": "read",
+    "description": "Read a file with line numbers and pagination. Rejects binary files.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "file_path"
+      ]
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "lsp",
+    "description": "Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols with optional depth/kind/name filtering). Line and character are 1-based for non-symbol operations.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "operation",
+        "file_path"
+      ],
+      "properties": {
+        "operation": {
+          "type": "string",
+          "enum": [
+            "hover",
+            "definition",
+            "references",
+            "symbols"
+          ],
+          "description": "LSP operation to perform"
+        },
+        "file_path": {
+          "type": "string",
+          "description": "Absolute or worktree-relative file path"
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based line number (required for hover, definition, references)"
+        },
+        "character": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based column number (required for hover, definition, references when symbol is omitted)"
+        },
+        "symbol": {
+          "type": "string",
+          "description": "Optional symbol name path for hover, definition, or references as an alternative to line+character"
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum nesting depth for operation='symbols'. 0 = top-level only; omitted = unlimited"
+        },
+        "kind": {
+          "type": "string",
+          "description": "Comma-separated symbol kind filter for operation='symbols' (e.g. function,method,struct,class,interface,enum,variable,constant,module,field,property,constructor,type_parameter)"
+        },
+        "name_filter": {
+          "type": "string",
+          "description": "Case-insensitive substring filter applied to symbol names and name paths for operation='symbols'"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "ci_job_log",
+    "description": "Fetch the full log for a GitHub Actions CI job. When CI fails, the activity log tells you the job_id. Call this tool to see the actual error output. Optionally filter to a specific failed step name. If the output is large, use output_view or output_grep to navigate it.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "job_id"
+      ],
+      "properties": {
+        "job_id": {
+          "type": "integer",
+          "description": "The GitHub Actions job ID from the CI failure activity"
+        },
+        "step": {
+          "type": "string",
+          "description": "Optional step name to filter the log to (e.g. 'Tests')"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "github_search",
+    "description": "Search GitHub code across public repositories using the GitHub Code Search API. Returns compact, navigable matches with snippets, file paths, URLs, and metadata. Each result has a result_id for reference. Use github_fetch_file to inspect the full file of a promising result.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "query"
+      ],
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search query. Supports GitHub code search syntax."
+        },
+        "language": {
+          "type": "string",
+          "description": "Programming language filter (e.g. \"Rust\", \"Python\", \"TypeScript\")"
+        },
+        "repo": {
+          "type": "string",
+          "description": "Repository filter in \"owner/repo\" format (e.g. \"tokio-rs/tokio\")"
+        },
+        "path": {
+          "type": "string",
+          "description": "Path filter to search within specific directories (e.g. \"src/\")"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "github_fetch_file",
+    "description": "Fetch the full contents of a file from a public GitHub repository. Use after github_search to inspect a promising result. Supports optional start_line/end_line for reading specific sections of large files.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "repo",
+        "path"
+      ],
+      "properties": {
+        "repo": {
+          "type": "string",
+          "description": "Repository in \"owner/repo\" format (e.g. \"tokio-rs/tokio\")"
+        },
+        "path": {
+          "type": "string",
+          "description": "File path within the repository (e.g. \"src/lib.rs\")"
+        },
+        "ref": {
+          "type": "string",
+          "description": "Branch, tag, or commit SHA (default: default branch)"
+        },
+        "start_line": {
+          "type": "integer",
+          "description": "First line to return (1-based, inclusive)"
+        },
+        "end_line": {
+          "type": "integer",
+          "description": "Last line to return (1-based, inclusive)"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "output_view",
+    "description": "Paginated view of a truncated tool output. When a tool result was truncated, the full output is stashed and can be browsed here by tool_use_id.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "tool_use_id"
+      ],
+      "properties": {
+        "tool_use_id": {
+          "type": "string",
+          "description": "The tool_use_id from the truncated result"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Line offset (0-based, default 0)"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of lines to return (default 200)"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "output_grep",
+    "description": "Regex search within a truncated tool output. Returns matching lines with context from the full stashed output.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "tool_use_id",
+        "pattern"
+      ],
+      "properties": {
+        "tool_use_id": {
+          "type": "string",
+          "description": "The tool_use_id from the truncated result"
+        },
+        "pattern": {
+          "type": "string",
+          "description": "Regex pattern to search for"
+        },
+        "context_lines": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Lines of context around each match (default 3)"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "write",
+    "description": "Write content to a file, creating it or overwriting if it exists. Path must be within the task worktree.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "path",
+        "content"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Absolute or worktree-relative file path"
+        },
+        "content": {
+          "type": "string",
+          "description": "File content to write"
+        }
+      }
+    },
+    "concurrent_safe": false
+  },
+  {
+    "name": "edit",
+    "description": "Edit a file by replacing exact text. Finds old_text and replaces with new_text. Fails if old_text is not found or is ambiguous (appears multiple times).",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "path",
+        "old_text",
+        "new_text"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Absolute or worktree-relative file path"
+        },
+        "old_text": {
+          "type": "string",
+          "description": "Exact text to find and replace"
+        },
+        "new_text": {
+          "type": "string",
+          "description": "Replacement text"
+        }
+      }
+    },
+    "concurrent_safe": false
+  },
+  {
+    "name": "task_create",
+    "description": "Create a new task under an epic. Agents should use this only when explicitly allowed by their role and task design.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "epic_id",
+        "title",
+        "acceptance_criteria"
+      ],
+      "properties": {
+        "epic_id": {
+          "type": "string",
+          "description": "Parent epic UUID or short ID"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "design": {
+          "type": "string"
+        },
+        "acceptance_criteria": {
+          "type": "array",
+          "items": {},
+          "description": "Required. Each item is either a plain string or an object with 'criterion' (string) and optional 'met' (bool) fields. Tasks without acceptance criteria cannot be dispatched.",
+          "minItems": 1
+        },
+        "issue_type": {
+          "type": "string",
+          "description": "Task type: 'task' (default for worker-routed code work), 'planning' for epic metadata operations (epic_update, epic_close, memory_refs management, roadmap/AC changes, or other metadata-only maintenance), 'spike' for research, 'review' for code review. Use 'planning' when the work requires epic management tools or primarily updates epic metadata instead of code."
+        },
+        "priority": {
+          "type": "integer"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "parent_id": {
+          "type": "string"
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "blocked_by": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Task IDs (UUID or short_id) that must complete before this task can be dispatched."
+        }
+      }
+    },
+    "concurrent_safe": false
+  },
+  {
+    "name": "task_update",
+    "description": "Update task fields and manage blocker relationships. Use blocked_by_add/blocked_by_remove to enforce task sequencing — a task with unresolved blockers will not be dispatched.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Task UUID or short ID"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "design": {
+          "type": "string"
+        },
+        "acceptance_criteria": {
+          "type": "array",
+          "items": {},
+          "description": "Each item is either a plain string or an object with 'criterion' (string) and optional 'met' (bool) fields."
+        },
+        "status": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "integer"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "epic_id": {
+          "type": "string"
+        },
+        "memory_refs_add": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "memory_refs_remove": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "blocked_by_add": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Task IDs (UUID or short_id) to add as blockers. Task will not be dispatched until all blockers are resolved."
+        },
+        "blocked_by_remove": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Task IDs (UUID or short_id) to remove as blockers."
+        }
+      }
+    },
+    "concurrent_safe": false
+  },
+  {
+    "name": "task_blocked_list",
+    "description": "List tasks that are blocked by the given task. Use before decomposing to check downstream dependents.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Task UUID or short ID"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "epic_show",
+    "description": "Show details for an epic by UUID or short ID.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Epic UUID or short ID"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "epic_update",
+    "description": "Update epic fields (title/description) and accept memory ref delta args for planner workflows.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Epic UUID or short ID"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "memory_refs_add": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "memory_refs_remove": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "concurrent_safe": false
+  },
+  {
+    "name": "epic_tasks",
+    "description": "List tasks for an epic with pagination.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Epic UUID or short ID"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "offset": {
+          "type": "integer"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "epic_close",
+    "description": "Close an epic. Use when all work is complete and no further waves are needed.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Epic UUID or short ID"
+        }
+      }
+    },
+    "concurrent_safe": false
+  },
+  {
+    "name": "task_transition",
+    "description": "Transition a task using a named workflow action.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "id",
+        "action"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Task UUID or short ID"
+        },
+        "action": {
+          "type": "string",
+          "description": "Transition action name"
+        },
+        "reason": {
+          "type": "string",
+          "description": "Reason for the transition. Required for force_close when no replacement_task_ids are provided."
+        },
+        "replacement_task_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "UUIDs or short IDs of replacement tasks. Required for force_close when no reason is provided."
+        }
+      }
+    },
+    "concurrent_safe": false
+  },
+  {
+    "name": "task_comment_add",
+    "description": "Add a comment or strategic observation to a task's activity log.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "id",
+        "body"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Task UUID or short ID"
+        },
+        "body": {
+          "type": "string",
+          "description": "Comment body to add to the activity log"
+        }
+      }
+    },
+    "concurrent_safe": false
+  },
+  {
+    "name": "memory_build_context",
+    "description": "Build a curated memory context pack for a task or query by combining note retrieval and ranking. Use this before deep analysis to gather relevant project history and decisions.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task ID to gather related memory for; defaults to current session task when omitted"
+        },
+        "query": {
+          "type": "string",
+          "description": "Optional free-text query to bias retrieval"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Maximum notes to include (default 8)"
+        },
+        "min_confidence": {
+          "type": "number",
+          "description": "Minimum confidence threshold for related notes (default 0.1). Notes below this are excluded."
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "memory_health",
+    "description": "Returns aggregate health report: total notes, broken link count, orphan note count, duplicate cluster count, low-confidence note count, stale note count, stale notes by folder.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "memory_extracted_audit",
+    "description": "Audit existing extracted case/pattern/pitfall notes against ADR-054 taxonomy and required structure. Returns grouped cleanup backlogs for merge candidates, underspecified notes, demotion-to-working-spec candidates, and archive candidates, plus rerun guidance.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "memory_broken_links",
+    "description": "Lists all broken wikilinks with source context (permalink, title, raw text, target permalink).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "folder": {
+          "type": "string",
+          "description": "Optional folder filter (e.g. \"decisions\")"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "memory_orphans",
+    "description": "Lists notes with zero inbound links. Excludes catalogs and singletons (brief, roadmap).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "folder": {
+          "type": "string",
+          "description": "Optional folder filter (e.g. \"pitfalls\")"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "agent_metrics",
+    "description": "Show execution quality metrics for a role to support prompt tuning and intervention decisions.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "role"
+      ],
+      "properties": {
+        "role": {
+          "type": "string",
+          "description": "Role name (worker, reviewer, lead, planner, architect)"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "agent_create",
+    "description": "Create a new specialist agent extending a base role (worker or reviewer). Use when existing agents lack capabilities for a specific domain.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "name",
+        "base_role"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Unique agent name within the project"
+        },
+        "base_role": {
+          "type": "string",
+          "description": "Base role to extend: worker or reviewer"
+        },
+        "description": {
+          "type": "string",
+          "description": "Short description of what this agent specialises in"
+        },
+        "system_prompt_extensions": {
+          "type": "string",
+          "description": "Additional system prompt content appended to the base role prompt"
+        },
+        "model_preference": {
+          "type": "string",
+          "description": "Preferred model ID (falls back to project default)"
+        }
+      }
+    },
+    "concurrent_safe": false
+  },
+  {
+    "name": "task_delete_branch",
+    "description": "Delete the task's git branch, worktree, and paused session so the next worker starts with a clean slate.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Task UUID or short ID"
+        }
+      }
+    },
+    "concurrent_safe": false
+  },
+  {
+    "name": "task_archive_activity",
+    "description": "Soft-delete all activity entries (comments, session errors, rejections) for a task. The worker on the next attempt will only see post-intervention activity.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Task UUID or short ID"
+        }
+      }
+    },
+    "concurrent_safe": false
+  },
+  {
+    "name": "task_reset_counters",
+    "description": "Reset reopen_count and continuation_count to zero. Use when the task has been meaningfully rescoped and old retry history is no longer relevant.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Task UUID or short ID"
+        }
+      }
+    },
+    "concurrent_safe": false
+  },
+  {
+    "name": "task_kill_session",
+    "description": "Kill the paused worker session and delete its saved conversation. The next dispatch will start a fresh session. Unlike task_delete_branch, this preserves the branch and any committed code.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Task UUID or short ID"
+        }
+      }
+    },
+    "concurrent_safe": false
+  },
+  {
+    "name": "agent_amend_prompt",
+    "description": "Append a prompt amendment to a specialist agent role's learned_prompt. The amendment is appended after existing content (never replacing it) and logged to learned_prompt_history. Only applicable to specialist roles (worker, reviewer base_role). Do NOT use on architect, lead, or planner roles.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "agent_id",
+        "amendment"
+      ],
+      "properties": {
+        "project": {
+          "type": "string",
+          "description": "Absolute project path"
+        },
+        "agent_id": {
+          "type": "string",
+          "description": "Agent UUID or name to amend"
+        },
+        "amendment": {
+          "type": "string",
+          "description": "Amendment text to append to learned_prompt"
+        },
+        "metrics_snapshot": {
+          "type": "string",
+          "description": "JSON string of current metrics for the history record"
+        }
+      }
+    },
+    "concurrent_safe": false
+  },
+  {
+    "name": "submit_grooming",
+    "description": "Signal that the grooming session is complete. Report per-task actions taken. Your session ends after this call.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "tasks_reviewed": {
+          "type": "array",
+          "description": "Per-task grooming entries",
+          "items": {
+            "type": "object",
+            "required": [
+              "task_id",
+              "action"
+            ],
+            "properties": {
+              "task_id": {
+                "type": "string",
+                "description": "Task UUID or short_id"
+              },
+              "action": {
+                "type": "string",
+                "enum": [
+                  "promoted",
+                  "improved",
+                  "skipped"
+                ],
+                "description": "Action taken on this task"
+              },
+              "changes": {
+                "type": "string",
+                "description": "Description of changes made to this task"
+              }
+            }
+          }
+        },
+        "summary": {
+          "type": "string",
+          "description": "Optional overall summary of the grooming session"
+        },
+        "next_patrol_minutes": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 60,
+          "description": "Planner patrol only (per ADR-051 §1): minutes until the next board-health patrol should run (5-60). Set when the current task is a review-type patrol (`issue_type=\"review\"`, title contains \"patrol\"). Omit for decomposition or intervention sessions."
+        },
+        "decision": {
+          "type": "string",
+          "enum": [
+            "execute",
+            "close",
+            "escalate"
+          ],
+          "description": "Outcome decision: 'execute' = wave was created or board work continues (coordinator dispatches the new tasks); 'close' = epic is complete and the planning task should close (set `reason` in summary); 'escalate' = board state needs human attention. Optional — defaults to 'execute' when omitted."
+        }
+      }
+    },
+    "concurrent_safe": false
+  }
+]

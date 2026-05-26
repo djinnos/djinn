@@ -1134,6 +1134,11 @@ expression: signatures
           "description": "Env-var style key name (e.g. 'ANTHROPIC_API_KEY').",
           "type": "string"
         },
+        "org_shared": {
+          "default": false,
+          "description": "Admin path: when `true`, store this as the ORG-SHARED fallback\ncredential (`owner_user_id = NULL`) that any user without a personal\ncredential for the same key_name will resolve. When `false`/absent, the\ncredential is stamped private to the acting user (the connect-flow\ndefault). Defaults to `false`.",
+          "type": "boolean"
+        },
         "provider_id": {
           "description": "Provider ID this key belongs to (e.g. 'anthropic', 'openai').",
           "type": "string"

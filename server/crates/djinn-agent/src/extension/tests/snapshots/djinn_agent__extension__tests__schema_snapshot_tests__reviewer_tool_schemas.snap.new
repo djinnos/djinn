@@ -1,0 +1,475 @@
+---
+source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
+assertion_line: 212
+expression: tool_schemas_reviewer()
+---
+[
+  {
+    "name": "task_show",
+    "description": "Show details of a work item including recent activity and blockers.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Task UUID or short ID"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "task_list",
+    "description": "List tasks with optional filters and pagination.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "issue_type": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "integer"
+        },
+        "text": {
+          "type": "string",
+          "description": "Free-text search in title/description"
+        },
+        "label": {
+          "type": "string"
+        },
+        "parent": {
+          "type": "string",
+          "description": "Epic ID to filter by"
+        },
+        "sort": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "offset": {
+          "type": "integer"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "task_activity_list",
+    "description": "Query a task's activity log with optional filters. Returns comments, status transitions, verification results, and other events. Use to inspect Lead guidance, reviewer feedback, or verification history.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Task UUID or short ID"
+        },
+        "event_type": {
+          "type": "string",
+          "description": "Filter by event type: comment, status_changed, commands_run, merge_conflict, task_review_start"
+        },
+        "actor_role": {
+          "type": "string",
+          "description": "Filter by actor: lead, reviewer, worker, verification, system"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Max entries to return (default 30, max 50)"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "memory_read",
+    "description": "Read a note by permalink or title.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "identifier"
+      ],
+      "properties": {
+        "identifier": {
+          "type": "string",
+          "description": "Permalink or title"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "memory_search",
+    "description": "Search notes in project memory.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "query"
+      ],
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "folder": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Task ID for affinity scoring; defaults to the current session task"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "memory_list",
+    "description": "List notes in project memory. Returns compact summaries without full content.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "folder": {
+          "type": "string",
+          "description": "Filter by folder (e.g. \"decisions\")"
+        },
+        "type": {
+          "type": "string",
+          "description": "Filter by note type (e.g. \"adr\", \"reference\", \"research\")"
+        },
+        "depth": {
+          "type": "integer",
+          "description": "Depth control: 0 = unlimited, 1 = exact folder (default), N = N levels"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "shell",
+    "description": "Execute shell commands in the task worktree. Commands always run from the worktree root.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "command"
+      ],
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "Shell command to execute"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "description": "Timeout in milliseconds (default 120000)"
+        }
+      }
+    },
+    "concurrent_safe": false
+  },
+  {
+    "name": "read",
+    "description": "Read a file with line numbers and pagination. Rejects binary files.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "file_path"
+      ]
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "lsp",
+    "description": "Query the Language Server Protocol for code navigation. Operations: hover (type info at position), definition (go to definition), references (find all references), symbols (list document symbols with optional depth/kind/name filtering). Line and character are 1-based for non-symbol operations.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "operation",
+        "file_path"
+      ],
+      "properties": {
+        "operation": {
+          "type": "string",
+          "enum": [
+            "hover",
+            "definition",
+            "references",
+            "symbols"
+          ],
+          "description": "LSP operation to perform"
+        },
+        "file_path": {
+          "type": "string",
+          "description": "Absolute or worktree-relative file path"
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based line number (required for hover, definition, references)"
+        },
+        "character": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based column number (required for hover, definition, references when symbol is omitted)"
+        },
+        "symbol": {
+          "type": "string",
+          "description": "Optional symbol name path for hover, definition, or references as an alternative to line+character"
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum nesting depth for operation='symbols'. 0 = top-level only; omitted = unlimited"
+        },
+        "kind": {
+          "type": "string",
+          "description": "Comma-separated symbol kind filter for operation='symbols' (e.g. function,method,struct,class,interface,enum,variable,constant,module,field,property,constructor,type_parameter)"
+        },
+        "name_filter": {
+          "type": "string",
+          "description": "Case-insensitive substring filter applied to symbol names and name paths for operation='symbols'"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "ci_job_log",
+    "description": "Fetch the full log for a GitHub Actions CI job. When CI fails, the activity log tells you the job_id. Call this tool to see the actual error output. Optionally filter to a specific failed step name. If the output is large, use output_view or output_grep to navigate it.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "job_id"
+      ],
+      "properties": {
+        "job_id": {
+          "type": "integer",
+          "description": "The GitHub Actions job ID from the CI failure activity"
+        },
+        "step": {
+          "type": "string",
+          "description": "Optional step name to filter the log to (e.g. 'Tests')"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "github_search",
+    "description": "Search GitHub code across public repositories using the GitHub Code Search API. Returns compact, navigable matches with snippets, file paths, URLs, and metadata. Each result has a result_id for reference. Use github_fetch_file to inspect the full file of a promising result.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "query"
+      ],
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search query. Supports GitHub code search syntax."
+        },
+        "language": {
+          "type": "string",
+          "description": "Programming language filter (e.g. \"Rust\", \"Python\", \"TypeScript\")"
+        },
+        "repo": {
+          "type": "string",
+          "description": "Repository filter in \"owner/repo\" format (e.g. \"tokio-rs/tokio\")"
+        },
+        "path": {
+          "type": "string",
+          "description": "Path filter to search within specific directories (e.g. \"src/\")"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "github_fetch_file",
+    "description": "Fetch the full contents of a file from a public GitHub repository. Use after github_search to inspect a promising result. Supports optional start_line/end_line for reading specific sections of large files.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "repo",
+        "path"
+      ],
+      "properties": {
+        "repo": {
+          "type": "string",
+          "description": "Repository in \"owner/repo\" format (e.g. \"tokio-rs/tokio\")"
+        },
+        "path": {
+          "type": "string",
+          "description": "File path within the repository (e.g. \"src/lib.rs\")"
+        },
+        "ref": {
+          "type": "string",
+          "description": "Branch, tag, or commit SHA (default: default branch)"
+        },
+        "start_line": {
+          "type": "integer",
+          "description": "First line to return (1-based, inclusive)"
+        },
+        "end_line": {
+          "type": "integer",
+          "description": "Last line to return (1-based, inclusive)"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "output_view",
+    "description": "Paginated view of a truncated tool output. When a tool result was truncated, the full output is stashed and can be browsed here by tool_use_id.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "tool_use_id"
+      ],
+      "properties": {
+        "tool_use_id": {
+          "type": "string",
+          "description": "The tool_use_id from the truncated result"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Line offset (0-based, default 0)"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of lines to return (default 200)"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "output_grep",
+    "description": "Regex search within a truncated tool output. Returns matching lines with context from the full stashed output.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "tool_use_id",
+        "pattern"
+      ],
+      "properties": {
+        "tool_use_id": {
+          "type": "string",
+          "description": "The tool_use_id from the truncated result"
+        },
+        "pattern": {
+          "type": "string",
+          "description": "Regex pattern to search for"
+        },
+        "context_lines": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Lines of context around each match (default 3)"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "memory_build_context",
+    "description": "Build a curated memory context pack for a task or query by combining note retrieval and ranking. Use this before deep analysis to gather relevant project history and decisions.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task ID to gather related memory for; defaults to current session task when omitted"
+        },
+        "query": {
+          "type": "string",
+          "description": "Optional free-text query to bias retrieval"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Maximum notes to include (default 8)"
+        },
+        "min_confidence": {
+          "type": "number",
+          "description": "Minimum confidence threshold for related notes (default 0.1). Notes below this are excluded."
+        }
+      }
+    },
+    "concurrent_safe": false
+  },
+  {
+    "name": "submit_review",
+    "description": "Submit the task review outcome with per-criterion AC verdicts. This atomically sets acceptance criteria met/unmet state on the task. Your session ends after this call.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "task_id",
+        "verdict"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short_id"
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "approved",
+            "rejected"
+          ],
+          "description": "Overall review verdict"
+        },
+        "acceptance_criteria": {
+          "type": "array",
+          "description": "Per-criterion verdicts that atomically set AC met/unmet state on the task",
+          "items": {
+            "type": "object",
+            "required": [
+              "criterion",
+              "met"
+            ],
+            "properties": {
+              "criterion": {
+                "type": "string",
+                "description": "Text of the criterion"
+              },
+              "met": {
+                "type": "boolean",
+                "description": "Whether this criterion is met"
+              }
+            }
+          }
+        },
+        "feedback": {
+          "type": "string",
+          "description": "Feedback or rejection reason for the worker"
+        }
+      }
+    },
+    "concurrent_safe": false
+  }
+]
