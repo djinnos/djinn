@@ -170,6 +170,14 @@ pub fn build_image_build_job(
     // ConfigMap mount. `--output type=image,...,push=true` pushes to
     // Zot; `--export-cache` / `--import-cache` hit the same registry's
     // cache repo so subsequent builds reuse layer exports.
+    // `image-manifest=true,oci-mediatypes=true` on --export-cache is
+    // required for ECR (and other OCI-strict registries): buildkit's
+    // default cache export writes a non-OCI cache-manifest media type
+    // that ECR rejects with `PUT .../manifests/latest: 400 Bad Request`.
+    // Writing the cache as an OCI image manifest instead makes ECR accept
+    // it. The `--output` already carries oci-mediatypes=true; the cache
+    // export needs both flags. Registries that auto-accept the default
+    // media type (Zot, GHCR) are unaffected by the stricter encoding.
     let builder_script = format!(
         r#"set -euo pipefail
 mkdir -p {docker_config}
@@ -182,7 +190,7 @@ exec buildctl \
     --local context={ctx_dir} \
     --local dockerfile={ctx_dir} \
     --output type=image,name="$IMAGE_TAG",push=true,oci-mediatypes=true \
-    --export-cache type=registry,ref={registry}/cache/{project_id},mode=max \
+    --export-cache type=registry,ref={registry}/cache/{project_id},mode=max,image-manifest=true,oci-mediatypes=true \
     --import-cache type=registry,ref={registry}/cache/{project_id}
 "#,
         auth_dir = REGISTRY_AUTH_MOUNT_DIR,
@@ -416,6 +424,15 @@ mod tests {
         assert!(
             !script.contains("devcontainer"),
             "script must not reference devcontainer-cli:\n{script}"
+        );
+        // ECR rejects buildkit's default cache-manifest media type with a
+        // 400 on PUT .../manifests/latest; the export must request an OCI
+        // image manifest. Regression guard for the 2026-05-25 fix.
+        assert!(
+            script.contains("--export-cache")
+                && script.contains("image-manifest=true")
+                && script.contains("oci-mediatypes=true"),
+            "cache export must use OCI image-manifest media types for ECR:\n{script}"
         );
         assert!(
             !script.contains("git clone"),
