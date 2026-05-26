@@ -150,7 +150,9 @@ async fn repository_backed_mutation_flow_preserves_frontmatter_and_index_side_ef
         .await
         .unwrap();
     assert_eq!(created.permalink, "patterns/source-note");
-    assert!(created.content.contains("tags: [\"fs\",\"core\"]"));
+    // The returned content is re-rendered from the persisted note, whose tags
+    // come back via `tags::text` from Postgres JSONB (space after each comma).
+    assert!(created.content.contains("tags: [\"fs\", \"core\"]"));
 
     let created_note = repo
         .get_by_permalink(&project_id, "patterns/source-note")
@@ -159,7 +161,7 @@ async fn repository_backed_mutation_flow_preserves_frontmatter_and_index_side_ef
         .unwrap();
     assert_eq!(created_note.title, "Source Note");
     assert_eq!(created_note.note_type, "pattern");
-    assert_eq!(created_note.tags, "[\"fs\",\"core\"]");
+    assert_eq!(created_note.tags, "[\"fs\", \"core\"]");
     assert_eq!(repo.broken_links(&project_id, None).await.unwrap().len(), 0);
     let graph = repo.graph(&project_id).await.unwrap();
     assert_eq!(graph.edges.len(), 1);
@@ -175,14 +177,14 @@ async fn repository_backed_mutation_flow_preserves_frontmatter_and_index_side_ef
         )
         .await
         .unwrap();
-    assert!(updated.content.contains("tags: [\"fs\",\"updated\"]"));
+    assert!(updated.content.contains("tags: [\"fs\", \"updated\"]"));
 
     let updated_note = repo
         .get_by_permalink(&project_id, "patterns/source-note")
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(updated_note.tags, "[\"fs\",\"updated\"]");
+    assert_eq!(updated_note.tags, "[\"fs\", \"updated\"]");
     assert_eq!(updated_note.content, "Now links to [[Missing Note]].");
     assert!(repo.graph(&project_id).await.unwrap().edges.is_empty());
     let broken = repo.broken_links(&project_id, None).await.unwrap();
@@ -214,7 +216,7 @@ async fn repository_backed_mutation_flow_preserves_frontmatter_and_index_side_ef
     assert_eq!(renamed_note.title, "Renamed Note");
     assert_eq!(renamed_note.note_type, "research");
     assert_eq!(renamed_note.folder, "research");
-    assert_eq!(renamed_note.tags, "[\"fs\",\"updated\"]");
+    assert_eq!(renamed_note.tags, "[\"fs\", \"updated\"]");
 
     let renamed_file = core
         .read_file(&project_id, "research/renamed-note.md")

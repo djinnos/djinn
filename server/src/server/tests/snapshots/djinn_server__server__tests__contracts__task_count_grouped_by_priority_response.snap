@@ -3,5 +3,10 @@ source: src/server/tests/contracts.rs
 expression: task_count_priority
 ---
 {
-  "groups": []
+  "groups": [
+    {
+      "key": "0",
+      "count": 1
+    }
+  ]
 }

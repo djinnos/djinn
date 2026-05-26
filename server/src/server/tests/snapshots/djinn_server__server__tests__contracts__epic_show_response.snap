@@ -3,21 +3,21 @@ source: src/server/tests/contracts.rs
 expression: epic_show
 ---
 {
-  "auto_breakdown": true,
-  "closed_at": null,
-  "closed_count": 0,
-  "color": "",
-  "created_at": "[TIMESTAMP]",
+  "id": "[UUID]",
+  "short_id": "[SHORT_ID]",
+  "title": "Snapshot Epic",
   "description": "Epic used for MCP snapshot contract testing",
   "emoji": "",
-  "id": "[UUID]",
-  "in_progress_count": 0,
-  "memory_refs": [],
-  "open_count": 0,
-  "owner": "",
-  "short_id": "[SHORT_ID]",
+  "color": "",
   "status": "drafting",
-  "task_count": 0,
-  "title": "Snapshot Epic",
-  "updated_at": "[TIMESTAMP]"
+  "owner": "",
+  "created_at": "[TIMESTAMP]",
+  "updated_at": "[TIMESTAMP]",
+  "closed_at": null,
+  "memory_refs": [],
+  "auto_breakdown": true,
+  "task_count": 1,
+  "open_count": 1,
+  "in_progress_count": 0,
+  "closed_count": 0
 }
