@@ -474,12 +474,32 @@ async fn worker_drives_real_supervisor_in_pod() {
     )
     .await;
 
-    // 4. Spawn the worker binary. Inherits DJINN_TEST_DATABASE_URL so the
-    //    in-Pod `bootstrap_warm_database()` lands on the same isolated
-    //    Postgres database this crate's other DB-touching tests use.
+    // 4. Provision a migrated per-test Postgres database for the worker
+    //    subprocess. The worker's `bootstrap_warm_database()` opens
+    //    `DJINN_DATABASE_URL` and calls `verify_and_mark_initialized()`,
+    //    which is deliberately lock-free and DOES NOT run migrations (in
+    //    production the Helm pre-upgrade Job migrates first). So we cannot
+    //    hand the worker the bare `…/postgres` admin DB — it has no
+    //    `_sqlx_migrations` table and the worker would die at boot with
+    //    "schema is behind / _sqlx_migrations table missing".
+    //
+    //    `Database::open_in_memory()` allocates a fresh
+    //    `djinn_test_<uuid>` database; forcing initialization (any query
+    //    via `table_exists`) clones it from the pre-built
+    //    `djinn_test_template` (all migrations applied). We then read the
+    //    resulting per-test DSN off `bootstrap_info().target` and hand
+    //    *that* to the worker. The handle is kept alive for the duration
+    //    of the test so the database stays around for the subprocess.
+    let worker_db = djinn_db::Database::open_in_memory().expect("allocate per-test worker db");
+    worker_db
+        .table_exists("tasks")
+        .await
+        .expect("clone djinn_test_template into per-test worker db");
+    let worker_db_url = worker_db.bootstrap_info().target.clone();
+
+    // 5. Spawn the worker binary against the migrated per-test database.
     let exe = env!("CARGO_BIN_EXE_djinn-agent-worker");
-    let test_db_url = std::env::var("DJINN_TEST_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1:5433/postgres".into());
+    let test_db_url = worker_db_url;
     let mut child = Command::new(exe)
         .arg("task-run")
         .env("DJINN_SERVER_ADDR", addr.to_string())
