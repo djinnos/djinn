@@ -342,6 +342,23 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         "ensure_canonical_graph: build pipeline complete"
     );
 
+    // Never cache an empty graph. A real project always indexes to >0
+    // nodes; node_count==0 means this warmer ran without the project
+    // source (e.g. the server-side in-process AppStateGraphWarmer, whose
+    // server-local clone may be absent) or the indexer produced nothing.
+    // Persisting it poisons the (project_id, commit_sha)-keyed cache: the
+    // K8s warm pod that DOES have source then cache-hits the empty blob
+    // and skips indexing forever. Skip both the DB upsert and the
+    // in-memory install so the next warm with real source re-indexes.
+    if node_count == 0 {
+        tracing::warn!(
+            project_id = %project_id,
+            commit_sha = %commit_sha,
+            "ensure_canonical_graph: indexed 0 nodes — not caching (likely warmer without project source); leaving cache for a source-bearing warm"
+        );
+        return Ok((handle, graph));
+    }
+
     if let Err(e) = cache_repo
         .upsert(RepoGraphCacheInsert {
             project_id,
