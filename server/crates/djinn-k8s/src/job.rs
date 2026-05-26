@@ -270,6 +270,17 @@ pub fn build_task_run_job(
     let template = PodTemplateSpec {
         metadata: Some(ObjectMeta {
             labels: Some(labels.clone()),
+            // Protect in-flight task-run Pods from Karpenter consolidation /
+            // node-drain eviction. An evicted worker loses its RPC stream to
+            // the server mid-stage, so the run ends `Interrupted/[]` and no
+            // stage completes (observed on staging: every run interrupted by
+            // "Evicted: Underutilized" consolidation). The Pod is short-lived
+            // and bounded by `active_deadline_seconds`, so opting out of
+            // voluntary disruption can't pin a node indefinitely.
+            annotations: Some(BTreeMap::from([(
+                "karpenter.sh/do-not-disrupt".to_string(),
+                "true".to_string(),
+            )])),
             ..ObjectMeta::default()
         }),
         spec: Some(pod_spec),

@@ -16,6 +16,12 @@ spec:
     metadata:
       labels:
         {{- include "djinn.qdrant.selectorLabels" . | nindent 8 }}
+      annotations:
+        # Qdrant holds the note/code embedding vectors. Protect it from
+        # Karpenter consolidation eviction (observed on staging:
+        # "Evicted pod: Underutilized") — a stateful store shouldn't be
+        # shuffled between nodes for bin-packing.
+        karpenter.sh/do-not-disrupt: "true"
     spec:
       containers:
         - name: qdrant

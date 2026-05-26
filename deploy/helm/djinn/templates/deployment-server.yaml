@@ -17,6 +17,13 @@ spec:
   template:
     metadata:
       annotations:
+        # Protect the control plane from Karpenter consolidation eviction. The
+        # server is the RPC hub + coordinator; if it's drained for bin-packing,
+        # every in-flight worker loses its RPC stream and its run ends
+        # Interrupted/[] (and the Recreate rollout gap is re-incurred for no
+        # deploy). Voluntary-disruption opt-out only; it can still be drained
+        # for a real node failure or a chart rollout.
+        karpenter.sh/do-not-disrupt: "true"
         # Rotate Pod when any of its mounted config changes — kagent pattern.
         # `sha256sum` of the rendered template text is enough for detection.
         checksum/configmap: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
