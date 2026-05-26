@@ -115,6 +115,12 @@ async fn chat_allowed_mcp_schemas_are_strict_validator_safe() {
         "epic_update",
         "epic_close",
         "epic_reopen",
+        // ADR-050 §2 amendment 2026-05-26 — chat curates the code-graph
+        // noise filter. Pinned here so the pair also gets strict-validator
+        // coverage (their `Option<Vec<String>>` params must not regress
+        // into an object-without-properties schema).
+        "project_graph_exclusions_get",
+        "project_graph_exclusions_set",
     ] {
         assert!(
             names.contains(required),
