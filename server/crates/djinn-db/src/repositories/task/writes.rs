@@ -1,6 +1,24 @@
 use super::task_select_where_id;
 use super::*;
 
+/// Parse a caller-supplied JSON string destined for one of the array-shaped
+/// JSONB columns (`labels`, `acceptance_criteria`, `memory_refs`).
+///
+/// These columns are `JSONB NOT NULL DEFAULT '[]'::jsonb` (see
+/// `migrations_postgres/1_initial_schema.sql` + `4_default_json_columns.sql`).
+/// Many callers — and the test helpers — pass an empty/blank string to mean
+/// "no value", which is not valid JSON and would otherwise blow up with an
+/// `EOF while parsing` error after the MySQL→Postgres cut-over (MySQL's JSON
+/// path tolerated this; JSONB does not). Treat blank input as the column
+/// default `[]` so empty input round-trips instead of erroring.
+fn parse_json_array_column(column: &str, raw: &str) -> Result<serde_json::Value> {
+    if raw.trim().is_empty() {
+        return Ok(serde_json::json!([]));
+    }
+    serde_json::from_str(raw)
+        .map_err(|e| crate::Error::InvalidData(format!("invalid json for tasks.{column}: {e}")))
+}
+
 impl TaskRepository {
     #[allow(clippy::too_many_arguments)]
     pub async fn create(
@@ -78,9 +96,10 @@ impl TaskRepository {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
         let short_id = self.generate_short_id(&id).await?;
-        let ac_str = acceptance_criteria.unwrap_or("[]");
-        let ac: serde_json::Value = serde_json::from_str(ac_str)
-            .map_err(|e| crate::Error::InvalidData(format!("invalid json for tasks.acceptance_criteria: {e}")))?;
+        let ac = parse_json_array_column(
+            "acceptance_criteria",
+            acceptance_criteria.unwrap_or("[]"),
+        )?;
         // Phase 3B: stamp `created_by_user_id` from the task-local set at
         // the MCP dispatch root (`SESSION_USER_ID`). `None` for
         // agent/background callers with no user context — schema allows
@@ -224,10 +243,8 @@ impl TaskRepository {
         acceptance_criteria: &str,
     ) -> Result<Task> {
         self.db.ensure_initialized().await?;
-        let labels_value: serde_json::Value = serde_json::from_str(labels)
-            .map_err(|e| crate::Error::InvalidData(format!("invalid json for tasks.labels: {e}")))?;
-        let ac_value: serde_json::Value = serde_json::from_str(acceptance_criteria)
-            .map_err(|e| crate::Error::InvalidData(format!("invalid json for tasks.acceptance_criteria: {e}")))?;
+        let labels_value = parse_json_array_column("labels", labels)?;
+        let ac_value = parse_json_array_column("acceptance_criteria", acceptance_criteria)?;
         let id_owned = id.to_owned();
         let title_owned = title.to_owned();
         let description_owned = description.to_owned();
@@ -488,8 +505,7 @@ impl TaskRepository {
     pub async fn set_acceptance_criteria(&self, id: &str, ac_json: &str) -> Result<Task> {
         self.db.ensure_initialized().await?;
         let id_owned = id.to_owned();
-        let ac_value: serde_json::Value = serde_json::from_str(ac_json)
-            .map_err(|e| crate::Error::InvalidData(format!("invalid json for tasks.acceptance_criteria: {e}")))?;
+        let ac_value = parse_json_array_column("acceptance_criteria", ac_json)?;
 
         let task: Task = crate::retry::retry_on_serialization_failure(
             crate::retry::DEFAULT_MAX_TX_RETRIES,
@@ -620,8 +636,7 @@ impl TaskRepository {
     pub async fn update_memory_refs(&self, id: &str, memory_refs_json: &str) -> Result<Task> {
         self.db.ensure_initialized().await?;
         let id_owned = id.to_owned();
-        let memory_refs_value: serde_json::Value = serde_json::from_str(memory_refs_json)
-            .map_err(|e| crate::Error::InvalidData(format!("invalid json for tasks.memory_refs: {e}")))?;
+        let memory_refs_value = parse_json_array_column("memory_refs", memory_refs_json)?;
 
         let task: Task = crate::retry::retry_on_serialization_failure(
             crate::retry::DEFAULT_MAX_TX_RETRIES,
