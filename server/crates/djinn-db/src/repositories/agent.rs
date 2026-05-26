@@ -121,6 +121,19 @@ pub struct LearnedPromptHistoryEntry {
 // satisfy it (verified during batch 4).  Each caller therefore passes the
 // full SELECT body as a single raw string literal.
 
+/// Wrap free-text `system_prompt_extensions` content for storage in the
+/// `agents.system_prompt_extensions` JSONB column.
+///
+/// Pre-cut-over this column was `TEXT NOT NULL DEFAULT ''` and held arbitrary
+/// prompt text (the model field is a plain `String`; the slot lifecycle appends
+/// it verbatim to the base system prompt). The MySQL→Postgres cut-over typed it
+/// as JSONB, so we store the text as a JSON *string* value — which round-trips
+/// losslessly when read back with `#>> '{}'`. Empty input becomes an empty JSON
+/// string rather than erroring or collapsing to `{}` (which would lose data).
+fn system_prompt_extensions_value(text: &str) -> serde_json::Value {
+    serde_json::Value::String(text.to_owned())
+}
+
 pub struct AgentRepository {
     db: Database,
     events: EventBus,
@@ -138,7 +151,9 @@ impl AgentRepository {
             Agent,
             r#"SELECT id AS "id!", project_id AS "project_id!",
                 name AS "name!", base_role AS "base_role!",
-                description AS "description!", system_prompt_extensions::text AS "system_prompt_extensions!",
+                description AS "description!",
+                CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'
+                     THEN system_prompt_extensions #>> '{}' ELSE '' END AS "system_prompt_extensions!",
                 model_preference, verification_command,
                 mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
@@ -208,7 +223,9 @@ impl AgentRepository {
             Agent,
             r#"SELECT id AS "id!", project_id AS "project_id!",
                 name AS "name!", base_role AS "base_role!",
-                description AS "description!", system_prompt_extensions::text AS "system_prompt_extensions!",
+                description AS "description!",
+                CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'
+                     THEN system_prompt_extensions #>> '{}' ELSE '' END AS "system_prompt_extensions!",
                 model_preference, verification_command,
                 mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
@@ -237,7 +254,9 @@ impl AgentRepository {
             Agent,
             r#"SELECT id AS "id!", project_id AS "project_id!",
                 name AS "name!", base_role AS "base_role!",
-                description AS "description!", system_prompt_extensions::text AS "system_prompt_extensions!",
+                description AS "description!",
+                CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'
+                     THEN system_prompt_extensions #>> '{}' ELSE '' END AS "system_prompt_extensions!",
                 model_preference, verification_command,
                 mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
@@ -270,7 +289,9 @@ impl AgentRepository {
             Agent,
             r#"SELECT id AS "id!", project_id AS "project_id!",
                 name AS "name!", base_role AS "base_role!",
-                description AS "description!", system_prompt_extensions::text AS "system_prompt_extensions!",
+                description AS "description!",
+                CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'
+                     THEN system_prompt_extensions #>> '{}' ELSE '' END AS "system_prompt_extensions!",
                 model_preference, verification_command,
                 mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
@@ -296,7 +317,9 @@ impl AgentRepository {
             Agent,
             r#"SELECT id AS "id!", project_id AS "project_id!",
                 name AS "name!", base_role AS "base_role!",
-                description AS "description!", system_prompt_extensions::text AS "system_prompt_extensions!",
+                description AS "description!",
+                CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'
+                     THEN system_prompt_extensions #>> '{}' ELSE '' END AS "system_prompt_extensions!",
                 model_preference, verification_command,
                 mcp_servers::text AS "mcp_servers!", skills::text AS "skills!",
                 is_default AS "is_default!: bool",
@@ -324,9 +347,12 @@ impl AgentRepository {
         let mcp_servers = input.mcp_servers.unwrap_or("[]");
         let skills = input.skills.unwrap_or("[]");
         let is_default_bool = input.is_default;
-        // JSONB columns require Value/Json. Parse the caller's string blobs once.
-        let system_prompt_value: serde_json::Value =
-            serde_json::from_str(input.system_prompt_extensions).unwrap_or_else(|_| serde_json::json!({}));
+        // JSONB columns require Value/Json. `mcp_servers`/`skills` are genuine
+        // JSON arrays (parse the caller's blob). `system_prompt_extensions` is
+        // free-text prompt content (the model field is a plain `String` and the
+        // slot lifecycle appends it verbatim) — store it as a JSON *string*
+        // value so the JSONB column round-trips the text losslessly.
+        let system_prompt_value = system_prompt_extensions_value(input.system_prompt_extensions);
         let mcp_servers_value: serde_json::Value =
             serde_json::from_str(mcp_servers).unwrap_or_else(|_| serde_json::json!([]));
         let skills_value: serde_json::Value =
@@ -362,8 +388,7 @@ impl AgentRepository {
 
     pub async fn update(&self, id: &str, input: AgentUpdateInput<'_>) -> Result<Agent> {
         self.db.ensure_initialized().await?;
-        let system_prompt_value: serde_json::Value = serde_json::from_str(input.system_prompt_extensions)
-            .map_err(|e| Error::InvalidData(format!("invalid json for agents.system_prompt_extensions: {e}")))?;
+        let system_prompt_value = system_prompt_extensions_value(input.system_prompt_extensions);
         let mcp_servers_value: serde_json::Value = serde_json::from_str(input.mcp_servers)
             .map_err(|e| Error::InvalidData(format!("invalid json for agents.mcp_servers: {e}")))?;
         let skills_value: serde_json::Value = serde_json::from_str(input.skills)
@@ -474,8 +499,7 @@ impl AgentRepository {
         extensions: &str,
     ) -> Result<u64> {
         self.db.ensure_initialized().await?;
-        let extensions_value: serde_json::Value = serde_json::from_str(extensions)
-            .map_err(|e| Error::InvalidData(format!("invalid json for agents.system_prompt_extensions: {e}")))?;
+        let extensions_value = system_prompt_extensions_value(extensions);
         let result = sqlx::query!(
             r#"UPDATE agents SET system_prompt_extensions = $1,
                     updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
@@ -508,7 +532,9 @@ impl AgentRepository {
         // NOTE: dynamic SQL (WHERE clause built from optional filters; uses inlined AGENT_COLUMNS projection) — compile-time check not possible
         let sql = format!(
             r#"SELECT id, project_id, name, base_role, description,
-                    system_prompt_extensions::text AS system_prompt_extensions, model_preference, verification_command,
+                    CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'
+                         THEN system_prompt_extensions #>> '{{}}' ELSE '' END AS system_prompt_extensions,
+                    model_preference, verification_command,
                     mcp_servers::text AS mcp_servers, skills::text AS skills, is_default,
                     (SELECT string_agg(h.proposed_text, E'\n\n---\n\n' ORDER BY h.created_at ASC)
                      FROM learned_prompt_history h

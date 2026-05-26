@@ -13,7 +13,7 @@
         "Varchar",
         "Jsonb",
         "Text",
-        "Bpchar",
+        "Varchar",
         "Jsonb"
       ]
     },

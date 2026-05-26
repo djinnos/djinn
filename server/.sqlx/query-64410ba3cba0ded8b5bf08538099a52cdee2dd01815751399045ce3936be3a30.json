@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id AS \"id!\", project_id AS \"project_id!\",\n                name AS \"name!\", base_role AS \"base_role!\",\n                description AS \"description!\", system_prompt_extensions::text AS \"system_prompt_extensions!\",\n                model_preference, verification_command,\n                mcp_servers::text AS \"mcp_servers!\", skills::text AS \"skills!\",\n                is_default AS \"is_default!: bool\",\n                (SELECT string_agg(h.proposed_text, E'\\n\\n---\\n\\n' ORDER BY h.created_at ASC)\n                 FROM learned_prompt_history h\n                 WHERE h.agent_id = agents.id\n                   AND h.action IN ('keep','confirmed')\n                ) AS learned_prompt,\n                created_at AS \"created_at!\", updated_at AS \"updated_at!\"\n             FROM agents\n             WHERE project_id = $1 AND base_role = $2 AND is_default = TRUE LIMIT 1",
+  "query": "SELECT id AS \"id!\", project_id AS \"project_id!\",\n                name AS \"name!\", base_role AS \"base_role!\",\n                description AS \"description!\",\n                CASE WHEN jsonb_typeof(system_prompt_extensions) = 'string'\n                     THEN system_prompt_extensions #>> '{}' ELSE '' END AS \"system_prompt_extensions!\",\n                model_preference, verification_command,\n                mcp_servers::text AS \"mcp_servers!\", skills::text AS \"skills!\",\n                is_default AS \"is_default!: bool\",\n                (SELECT string_agg(h.proposed_text, E'\\n\\n---\\n\\n' ORDER BY h.created_at ASC)\n                 FROM learned_prompt_history h\n                 WHERE h.agent_id = agents.id\n                   AND h.action IN ('keep','confirmed')\n                ) AS learned_prompt,\n                created_at AS \"created_at!\", updated_at AS \"updated_at!\"\n             FROM agents WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -76,7 +76,6 @@
     ],
     "parameters": {
       "Left": [
-        "Text",
         "Text"
       ]
     },
@@ -97,5 +96,5 @@
       false
     ]
   },
-  "hash": "d807a72405b1f56fc1cf9a34fc243880a50b94d640f760db6fc0a5fa4668aa3f"
+  "hash": "64410ba3cba0ded8b5bf08538099a52cdee2dd01815751399045ce3936be3a30"
 }
