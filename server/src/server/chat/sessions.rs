@@ -14,14 +14,99 @@
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::{delete, get, patch},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::server::AppState;
+use crate::server::auth::authenticate;
 use djinn_db::{ProjectRepository, SessionMessageRepository, SessionRepository};
+
+/// Outcome of chat-session auth gating, mirroring the `/mcp` handler:
+///   * `User(id)`  — an authenticated user; scope all queries to their id.
+///   * `OpenLocal` — no GitHub App configured (local/single-user dev); preserve
+///     the historical open behavior (no per-user scoping).
+///   * the `Err` 401 case is returned directly by [`gate`].
+enum ChatAuth {
+    User(String),
+    OpenLocal,
+}
+
+/// Resolve the request to a [`ChatAuth`] using the same rule as `/mcp`:
+/// when the GitHub App is configured (multi-user deployment), require auth and
+/// return 401 if absent; when it is NOT configured, preserve open local-dev
+/// behavior regardless of whether a cookie is present.
+async fn gate(state: &AppState, headers: &HeaderMap) -> Result<ChatAuth, (StatusCode, String)> {
+    let auth_required = state.app_config().await.is_some();
+    match authenticate(state, headers).await {
+        Ok(Some(user)) => Ok(ChatAuth::User(user.id)),
+        Ok(None) if auth_required => {
+            Err((StatusCode::UNAUTHORIZED, "authentication required".into()))
+        }
+        Ok(None) => Ok(ChatAuth::OpenLocal),
+        Err(err) => {
+            // A DB error during auth is a server fault when auth is required;
+            // in open local-dev we degrade to the open path rather than 500.
+            if auth_required {
+                Err((StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
+            } else {
+                tracing::warn!(error = %err, "chat sessions: authenticate failed; proceeding open (no App configured)");
+                Ok(ChatAuth::OpenLocal)
+            }
+        }
+    }
+}
+
+/// Authorize a chat session against the acting user for the mutate/read-one
+/// handlers. Returns 404 (not 403) when the session doesn't exist OR belongs to
+/// a different user, so a probe cannot learn that a session id exists.
+///
+/// Legacy unattributed sessions (`created_by_user_id IS NULL`): when auth is
+/// required, they are treated as nobody's and return 404 to every user —
+/// privacy-preserving (no cross-account leakage). In open local-dev they remain
+/// fully accessible.
+async fn authorize_session(
+    repo: &SessionRepository,
+    auth: &ChatAuth,
+    session_id: &str,
+) -> Result<(), (StatusCode, String)> {
+    let not_found = || {
+        (
+            StatusCode::NOT_FOUND,
+            format!("chat session not found: {session_id}"),
+        )
+    };
+    match auth {
+        ChatAuth::OpenLocal => {
+            // Existence check only (chat-typed) — historical behavior.
+            if repo
+                .get_chat_session(session_id)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                .is_none()
+            {
+                return Err(not_found());
+            }
+            Ok(())
+        }
+        ChatAuth::User(uid) => {
+            match repo
+                .chat_session_owner(session_id)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            {
+                // Owned by this user.
+                Some(Some(owner)) if &owner == uid => Ok(()),
+                // Exists but owned by someone else, or legacy-NULL: 404.
+                Some(_) => Err(not_found()),
+                // No such chat session.
+                None => Err(not_found()),
+            }
+        }
+    }
+}
 
 pub(in crate::server) fn router() -> Router<AppState> {
     Router::new()
@@ -109,12 +194,22 @@ fn parse_to_millis(raw: &str) -> i64 {
 
 async fn list_chat_sessions(
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Json<ListChatSessionsResponse>, (StatusCode, String)> {
+    let auth = gate(&state, &headers).await?;
     let repo = SessionRepository::new(state.db().clone(), state.event_bus());
-    let sessions = repo
-        .list_chat_sessions()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let sessions = match &auth {
+        // Authenticated multi-user deployment: only this user's sessions.
+        ChatAuth::User(uid) => repo
+            .list_chat_for_user(uid)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+        // Open local-dev (no GitHub App): historical unscoped listing.
+        ChatAuth::OpenLocal => repo
+            .list_chat_sessions()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+    };
 
     // Chat sessions are project-less by invariant, so `project_slug` is
     // always None — but we resolve a slug for any non-null project_id
@@ -173,9 +268,13 @@ async fn list_chat_sessions(
 
 async fn list_chat_session_messages(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<ListChatMessagesResponse>, (StatusCode, String)> {
+    let auth = gate(&state, &headers).await?;
     let repo = SessionRepository::new(state.db().clone(), state.event_bus());
+    // Authorize ownership (404 on miss/foreign/legacy-NULL — no existence leak).
+    authorize_session(&repo, &auth, &id).await?;
     let session = repo
         .get_chat_session(&id)
         .await
@@ -292,6 +391,7 @@ struct PatchSessionBody {
 
 async fn rename_chat_session(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<PatchSessionBody>,
 ) -> Result<StatusCode, (StatusCode, String)> {
@@ -302,16 +402,10 @@ async fn rename_chat_session(
     if trimmed.chars().count() > 255 {
         return Err((StatusCode::BAD_REQUEST, "title too long (max 255)".into()));
     }
+    let auth = gate(&state, &headers).await?;
     let repo = SessionRepository::new(state.db().clone(), state.event_bus());
-    // Ensure the target exists (and is chat-typed) before writing.
-    if repo
-        .get_chat_session(&id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .is_none()
-    {
-        return Err((StatusCode::NOT_FOUND, format!("chat session not found: {id}")));
-    }
+    // Authorize ownership (and existence) before writing.
+    authorize_session(&repo, &auth, &id).await?;
     repo.update_chat_title(&id, trimmed)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -322,9 +416,14 @@ async fn rename_chat_session(
 
 async fn delete_chat_session(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let auth = gate(&state, &headers).await?;
     let repo = SessionRepository::new(state.db().clone(), state.event_bus());
+    // Authorize ownership (and existence) before deleting — 404 on miss/foreign
+    // so we don't leak existence or let a user delete another's session.
+    authorize_session(&repo, &auth, &id).await?;
     let affected = repo
         .delete_chat_session(&id)
         .await
