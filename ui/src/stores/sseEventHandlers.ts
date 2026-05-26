@@ -90,16 +90,18 @@ let epicDeletedUnsub: (() => void) | null = null;
 export function initSSEEventHandlers(): () => void {
   const { subscribe } = sseStore.getState();
 
-  // Task events — SSE sends snake_case MCP payloads wrapped in {type,action,data}
-  // Only apply events for the currently selected project to avoid cross-project flicker.
+  // Task events — SSE sends snake_case MCP payloads wrapped in {type,action,data}.
+  // The store holds ALL projects' tasks unconditionally; per-page filtering
+  // (Kanban's URL project filter, Memory's selected project, etc.) is the
+  // responsibility of each page. Filtering here by the global selectedProjectId
+  // would silently starve the Kanban/Roadmap of live updates for any project
+  // other than the one picked on the Memory/Code Graph picker.
   taskCreatedUnsub = subscribe("task_created", (event: SSEEvent) => {
     const task = normalizeSSEPayload(unwrapPayload(event.data)) as unknown as Task;
     if (!task.id || !task.title) {
       console.warn("[SSE] task_created with missing id/title, skipping:", task);
       return;
     }
-    const selectedProject = projectStore.getState().getSelectedProject();
-    if (selectedProject && task.project_id !== selectedProject.id) return;
     taskStore.getState().addTask(task);
     queryClient.setQueryData(["tasks"], (current: Task[] | undefined) =>
       current ? [...current, task] : [task]
@@ -109,8 +111,6 @@ export function initSSEEventHandlers(): () => void {
   taskUpdatedUnsub = subscribe("task_updated", (event: SSEEvent) => {
     const task = normalizeSSEPayload(unwrapPayload(event.data)) as unknown as Task;
     if (!task.id) return;
-    const selectedProject = projectStore.getState().getSelectedProject();
-    if (selectedProject && task.project_id !== selectedProject.id) return;
 
     // SSE task.updated payloads don't include active_session or session_count
     // (those are only added by MCP task_list/task_show). Preserve the values
@@ -160,8 +160,6 @@ export function initSSEEventHandlers(): () => void {
   // Epic events — SSE sends snake_case MCP payloads wrapped in {type,action,data}
   epicCreatedUnsub = subscribe("epic_created", (event: SSEEvent) => {
     const payload = unwrapPayload(event.data);
-    const selectedProject = projectStore.getState().getSelectedProject();
-    if (selectedProject && payload.project_id && payload.project_id !== selectedProject.id) return;
     const epic = payload as unknown as Epic;
     epicStore.getState().addEpic(epic);
     queryClient.setQueryData(["epics"], (current: Epic[] | undefined) =>
@@ -171,8 +169,6 @@ export function initSSEEventHandlers(): () => void {
 
   epicUpdatedUnsub = subscribe("epic_updated", (event: SSEEvent) => {
     const payload = unwrapPayload(event.data);
-    const selectedProject = projectStore.getState().getSelectedProject();
-    if (selectedProject && payload.project_id && payload.project_id !== selectedProject.id) return;
     const epic = payload as unknown as Epic;
     epicStore.getState().updateEpic(epic);
     queryClient.setQueryData(["epics"], (current: Epic[] | undefined) =>
