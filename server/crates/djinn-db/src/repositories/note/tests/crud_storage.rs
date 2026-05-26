@@ -247,7 +247,11 @@ async fn upsert_db_note_by_permalink_creates_and_updates_repo_map_note() {
 
     assert_eq!(updated.id, created.id);
     assert_eq!(updated.content, "src/lib.rs");
-    assert_eq!(updated.tags, r#"["repo-map","updated"]"#);
+    // JSONB normalizes array whitespace on round-trip; compare parsed values.
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&updated.tags).unwrap(),
+        serde_json::from_str::<serde_json::Value>(r#"["repo-map","updated"]"#).unwrap(),
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

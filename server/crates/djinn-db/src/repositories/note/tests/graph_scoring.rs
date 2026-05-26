@@ -57,7 +57,7 @@ async fn task_affinity_scores_task_epic_blocker_and_max() {
     let epic_id = uuid::Uuid::now_v7().to_string();
     sqlx::query(
         "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, owner, memory_refs)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)",
     )
     .bind(&epic_id)
     .bind(&project.id)
@@ -76,7 +76,7 @@ async fn task_affinity_scores_task_epic_blocker_and_max() {
     sqlx::query(
         "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
                             issue_type, priority, owner, status, continuation_count, memory_refs)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)",
     )
     .bind(&task_id)
     .bind(&project.id)
@@ -99,7 +99,7 @@ async fn task_affinity_scores_task_epic_blocker_and_max() {
     sqlx::query(
         "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
                             issue_type, priority, owner, status, continuation_count, memory_refs)
-         VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+         VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)",
     )
     .bind(&blocker_id)
     .bind(&project.id)
@@ -180,7 +180,7 @@ async fn task_affinity_scores_include_repo_map_neighbors_for_task_memory_refs() 
     sqlx::query(
         "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
                             issue_type, priority, owner, status, continuation_count, memory_refs)
-         VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+         VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)",
     )
     .bind(&task_id)
     .bind(&project.id)

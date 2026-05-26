@@ -1109,7 +1109,12 @@ mod tests {
         repo.set_stack(&project.id, payload).await.unwrap();
 
         let fetched = repo.get_stack(&project.id).await.unwrap().unwrap();
-        assert_eq!(fetched, payload);
+        // JSONB normalizes whitespace/key-order on round-trip, so compare the
+        // parsed values rather than the raw serialized strings.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&fetched).unwrap(),
+            serde_json::from_str::<serde_json::Value>(payload).unwrap(),
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
