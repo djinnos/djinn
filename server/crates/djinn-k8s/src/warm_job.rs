@@ -112,14 +112,16 @@ exec {bin} warm-graph "{project_id}"
         // silently absent.
         env_var("RUST_LOG", "info,djinn=debug"),
     ];
-    // Forward the server's DB configuration so `bootstrap_warm_database`
-    // in djinn-agent-worker connects to the same Dolt/MySQL instance as
-    // the server. Without these, the warm binary falls back to
-    // `mysql://root@127.0.0.1:3306/djinn` and fails with connection
-    // refused inside the Pod. DJINN_SERVER_ADDR is intentionally absent
-    // — `warm-graph` doesn't dial djinn-server.
+    // Forward the server's DB connection so `bootstrap_warm_database` in
+    // djinn-agent-worker reaches the same Postgres instance as the server.
+    // The worker hard-requires `DJINN_DATABASE_URL` (it errors out with
+    // "DJINN_DATABASE_URL must be set for the warm worker pod" if absent)
+    // — the postgres cut-over renamed this from DJINN_MYSQL_URL, and the
+    // task-run path (job.rs) was updated but this warm path was missed.
+    // DJINN_SERVER_ADDR is intentionally absent — `warm-graph` doesn't
+    // dial djinn-server.
     if let Some(url) = config.database_url.as_deref() {
-        env.push(env_var("DJINN_MYSQL_URL", url));
+        env.push(env_var("DJINN_DATABASE_URL", url));
     }
 
     let container = Container {
@@ -268,7 +270,7 @@ mod tests {
     #[test]
     fn builds_warm_job_manifest_with_expected_shape() {
         let mut cfg = KubernetesConfig::for_testing();
-        cfg.database_url = Some("mysql://root@djinn-mysql:3306/djinn".into());
+        cfg.database_url = Some("postgres://djinn@djinn-postgres:5432/djinn".into());
         let job = build_warm_job(&cfg, "proj-xyz", "reg.example:5000/djinn-project-p:abc123");
 
         let meta = &job.metadata;
@@ -327,12 +329,14 @@ mod tests {
             Some(format!("{WORKSPACE_MOUNT_DIR}/proj-xyz").as_str()),
         );
         // DB env forwarded from KubernetesConfig so the warm Pod shares
-        // the server's MySQL target instead of falling back to the warm
-        // binary's 127.0.0.1:3306 default.
+        // the server's Postgres target. The worker hard-requires
+        // DJINN_DATABASE_URL (postgres cut-over renamed it from
+        // DJINN_MYSQL_URL); regression guard for the warm-path miss.
         assert_eq!(
-            envs.get("DJINN_MYSQL_URL").copied(),
-            Some("mysql://root@djinn-mysql:3306/djinn"),
+            envs.get("DJINN_DATABASE_URL").copied(),
+            Some("postgres://djinn@djinn-postgres:5432/djinn"),
         );
+        assert!(!envs.contains_key("DJINN_MYSQL_URL"));
 
         let mounts = container.volume_mounts.as_ref().expect("mounts");
         assert_eq!(mounts.len(), 3, "mirror + workspace + env-config");
