@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     Container, EmptyDirVolumeSource, EnvVar, PersistentVolumeClaimVolumeSource, PodSpec,
-    PodTemplateSpec, ResourceRequirements, Volume, VolumeMount,
+    PodTemplateSpec, ResourceRequirements, Toleration, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -189,11 +189,22 @@ exec {bin} warm-graph "{project_id}"
         crate::env_config::env_config_volume(project_id),
     ];
 
+    // Warm Pods must land on the same NodePool as the task-runs they pre-warm
+    // — otherwise the warmup is wasted. Both fields are `None` when no
+    // operator scheduling hints are configured, keeping the manifest shape
+    // unchanged for existing installs.
+    let node_selector = (!config.node_selector.is_empty())
+        .then(|| config.node_selector.clone());
+    let tolerations: Option<Vec<Toleration>> = (!config.tolerations.is_empty())
+        .then(|| config.tolerations.clone());
+
     let pod_spec = PodSpec {
         service_account_name: Some(config.service_account.clone()),
         restart_policy: Some("Never".to_string()),
         containers: vec![container],
         volumes: Some(volumes),
+        node_selector,
+        tolerations,
         ..PodSpec::default()
     };
 

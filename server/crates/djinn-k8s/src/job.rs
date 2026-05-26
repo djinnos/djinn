@@ -12,7 +12,7 @@ use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     Container, EmptyDirVolumeSource, EnvVar, KeyToPath, PersistentVolumeClaimVolumeSource, PodSpec,
     PodTemplateSpec, ProjectedVolumeSource, ResourceRequirements, SecretVolumeSource,
-    ServiceAccountTokenProjection, Volume, VolumeMount, VolumeProjection,
+    ServiceAccountTokenProjection, Toleration, Volume, VolumeMount, VolumeProjection,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -226,11 +226,21 @@ pub fn build_task_run_job(
         crate::env_config::env_config_volume(project_id),
     ];
 
+    // Pin Pods to a dedicated NodePool when the operator has configured one.
+    // Both fields stay `None` if the corresponding config entry is empty so
+    // the rendered manifest is identical to the pre-feature shape.
+    let node_selector = (!config.node_selector.is_empty())
+        .then(|| config.node_selector.clone());
+    let tolerations: Option<Vec<Toleration>> = (!config.tolerations.is_empty())
+        .then(|| config.tolerations.clone());
+
     let pod_spec = PodSpec {
         service_account_name: Some(config.service_account.clone()),
         restart_policy: Some("Never".to_string()),
         containers: vec![container],
         volumes: Some(volumes),
+        node_selector,
+        tolerations,
         // Give the worker enough time after SIGTERM to flush its final
         // RPC frame (TerminalReport) before SIGKILL — K8s default 30s is
         // tight when the supervisor is mid-stream over a slow link.
