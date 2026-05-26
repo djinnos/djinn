@@ -183,9 +183,12 @@ async fn list_chat_session_messages(
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("chat session not found: {id}")))?;
 
     let msg_repo = SessionMessageRepository::new(state.db().clone(), state.event_bus());
+    // Postgres: `$1` positional bind (not MySQL `?` — that 500s with
+    // "syntax error at or near \"ORDER\""), and content_json is JSONB so
+    // cast to text for the String tuple slot (downstream from_str parses it).
     let rows = sqlx::query_as::<_, (String, String, String, Option<i64>, String)>(
-        "SELECT id, role, content_json, token_count, created_at \
-         FROM session_messages WHERE session_id = ? ORDER BY created_at ASC",
+        "SELECT id, role, content_json::text, token_count, created_at \
+         FROM session_messages WHERE session_id = $1 ORDER BY created_at ASC",
     )
     .bind(&session.id)
     .fetch_all(state.db().pool())
