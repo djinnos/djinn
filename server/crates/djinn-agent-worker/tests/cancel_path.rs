@@ -445,10 +445,24 @@ async fn worker_observes_host_initiated_cancel() {
     )
     .await;
 
-    // 4. Spawn worker.
+    // 4. Provision a migrated per-test Postgres database for the worker
+    //    subprocess. The worker's `bootstrap_warm_database()` calls the
+    //    lock-free `verify_and_mark_initialized()`, which never runs
+    //    migrations (the Helm pre-upgrade Job does that in production), so
+    //    the bare `…/postgres` admin DB would make it die at boot with
+    //    "_sqlx_migrations table missing". `open_in_memory()` + a query to
+    //    force the `djinn_test_template` clone gives us a migrated per-test
+    //    DSN we read off `bootstrap_info().target`. Keep the handle alive
+    //    so the DB persists for the subprocess.
+    let worker_db = djinn_db::Database::open_in_memory().expect("allocate per-test worker db");
+    worker_db
+        .table_exists("tasks")
+        .await
+        .expect("clone djinn_test_template into per-test worker db");
+    let test_db_url = worker_db.bootstrap_info().target.clone();
+
+    // 4b. Spawn worker against the migrated per-test database.
     let exe = env!("CARGO_BIN_EXE_djinn-agent-worker");
-    let test_db_url = std::env::var("DJINN_TEST_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1:5433/postgres".into());
     let mut child = Command::new(exe)
         .arg("task-run")
         .env("DJINN_SERVER_ADDR", addr.to_string())
