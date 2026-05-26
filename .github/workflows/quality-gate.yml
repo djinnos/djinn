@@ -253,6 +253,74 @@ jobs:
         run: cargo nextest run --workspace --all-targets --all-features --profile ci
 
   # ╔══════════════════════════════════════════════════════════════════╗
+  # ║  sqlx offline-cache freshness gate                               ║
+  # ║                                                                  ║
+  # ║  The compile-checked `sqlx::query!` macros validate SQL against  ║
+  # ║  a live schema. Their results are committed to `server/.sqlx/`   ║
+  # ║  so the rest of CI (and prod builds) can compile with            ║
+  # ║  SQLX_OFFLINE=true. If a query changes but the cache isn't       ║
+  # ║  regenerated (`make sqlx-prepare`), the offline build silently   ║
+  # ║  uses stale type info. This job stands up a Postgres matching    ║
+  # ║  the schema and fails if the committed cache is out of date.     ║
+  # ╚══════════════════════════════════════════════════════════════════╝
+
+  server-sqlx-cache:
+    name: Server sqlx Cache
+    needs: changes
+    if: needs.changes.outputs.server == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      # `cargo sqlx prepare --check` connects to DATABASE_URL to re-derive
+      # each query's type info, then diffs it against the committed
+      # `.sqlx/`. Point it at the ephemeral Postgres service below.
+      DATABASE_URL: "postgres://postgres:postgres@127.0.0.1:5433/djinn"
+    # Ephemeral Postgres mirroring the prod backend (the MySQL cut-over
+    # shipped in v0.2.x). Port :5433 matches the workspace
+    # `.cargo/config.toml` so the sqlx macros resolve the same DB.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: djinn
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s --health-timeout=3s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: rustup toolchain install
+        working-directory: server
+
+      - uses: rui314/setup-mold@v1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          shared-key: server-quality
+          cache-on-failure: true
+          cache-all-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Prebuilt binary — avoids a multi-minute Rust build of sqlx-cli.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli
+
+      - name: Apply djinn-db migrations
+        working-directory: server/crates/djinn-db
+        run: sqlx migrate run --source migrations_postgres
+
+      - name: Verify .sqlx offline cache is up to date
+        run: cargo sqlx prepare --check --workspace
+
+  # ╔══════════════════════════════════════════════════════════════════╗
   # ║  UI                                                              ║
   # ╚══════════════════════════════════════════════════════════════════╝
 
@@ -296,6 +364,7 @@ jobs:
       - warm-cache-test
       - server-clippy
       - server-test
+      - server-sqlx-cache
       - ui-frontend
     steps:
       - name: Check results
@@ -305,6 +374,7 @@ jobs:
             "${{ needs.warm-cache-test.result }}"
             "${{ needs.server-clippy.result }}"
             "${{ needs.server-test.result }}"
+            "${{ needs.server-sqlx-cache.result }}"
             "${{ needs.ui-frontend.result }}"
           )
           for r in "${results[@]}"; do
