@@ -64,6 +64,19 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         merge_into: None,
         auth_only: false,
     },
+    // OpenAI-compatible. Already present in models.dev (`fireworks-ai`) with the
+    // right `api` base_url + model list; listed here only so the env-var
+    // bootstrap upserts FIREWORKS_API_KEY into the vault. `id` must match the
+    // catalog provider id so dispatch-time credential lookup resolves.
+    BuiltinProvider {
+        id: "fireworks-ai",
+        display_name: "Fireworks AI",
+        required_env_vars: &["FIREWORKS_API_KEY"],
+        oauth_keys: &[],
+        docs_url: "https://fireworks.ai/docs/",
+        merge_into: None,
+        auth_only: false,
+    },
     // OAuth-only provider whose capabilities are folded into "openai" in the
     // catalog.  Internally still a distinct provider for dispatch & models.
     BuiltinProvider {
