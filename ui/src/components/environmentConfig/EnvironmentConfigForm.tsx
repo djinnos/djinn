@@ -34,6 +34,7 @@ import {
   type Languages,
   type Workspace,
   LANGUAGE_KEYS,
+  pruneOrphanLanguages,
 } from "@/api/environmentConfig";
 import { HookCommandList } from "@/components/environmentConfig/HookCommandList";
 
@@ -126,12 +127,14 @@ function InlineField({
 // ── Workspaces ──────────────────────────────────────────────────────────
 
 function WorkspacesSection({ config, onChange }: Props) {
-  // A workspace pinned to language X is meaningless unless the image
-  // actually installs X, so any path that sets/changes a workspace's
-  // language auto-enables that language in config.languages (with the
-  // same defaults the toggle uses). We never auto-disable — removing
-  // the last Go workspace doesn't nuke Go config, since the user may
-  // want it installed for scripts or tests.
+  // Workspaces are the source of truth for which languages the image
+  // installs. Setting/changing a workspace's language auto-enables it in
+  // config.languages (with the toggle's defaults); removing a workspace —
+  // or pointing it at a different language — prunes any language no longer
+  // pinned by a workspace (see `pruneOrphanLanguages`). The build emits an
+  // install block for any non-null languages.X, so a stale entry would
+  // keep installing forever. To keep a language with no workspace (rare —
+  // e.g. for a lifecycle hook), use the Raw JSON tab, which skips pruning.
   const ensureLanguageEnabled = (langs: Languages, lang: string): Languages => {
     if (!LANGUAGE_KEYS.includes(lang as LanguageKey)) return langs;
     if (langs[lang as LanguageKey] !== undefined) return langs;
@@ -145,13 +148,19 @@ function WorkspacesSection({ config, onChange }: Props) {
       typeof patch.language === "string"
         ? ensureLanguageEnabled(config.languages, patch.language)
         : config.languages;
-    onChange({ ...config, workspaces: nextWorkspaces, languages: nextLanguages });
+    onChange(
+      pruneOrphanLanguages({
+        ...config,
+        workspaces: nextWorkspaces,
+        languages: nextLanguages,
+      }),
+    );
   };
 
   const remove = (idx: number) => {
     const next = config.workspaces.slice();
     next.splice(idx, 1);
-    onChange({ ...config, workspaces: next });
+    onChange(pruneOrphanLanguages({ ...config, workspaces: next }));
   };
 
   const add = () => {

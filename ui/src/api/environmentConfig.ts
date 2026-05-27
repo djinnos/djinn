@@ -154,6 +154,41 @@ export function normalizeConfig(
 }
 
 /**
+ * Drop every `languages` entry not pinned by at least one workspace.
+ *
+ * The Form models languages purely through workspaces: picking a language
+ * in a workspace auto-enables it (see `ensureLanguageEnabled` in
+ * EnvironmentConfigForm). The inverse has to hold too — the image-builder
+ * emits an install block for ANY non-null `languages.X`
+ * (`emit_python_block` & friends in dockerfile.rs), independent of the
+ * workspace list. Without this reconcile, removing a workspace leaves an
+ * orphaned language that keeps installing into the image with no Form
+ * control to clear it (you could only fix it from the Raw JSON tab).
+ *
+ * Guard: with NO workspaces we can't infer intent (and a fresh detection
+ * may populate `languages` before `workspaces`), so leave `languages`
+ * untouched. Unknown keys pass through. This runs on form mutations +
+ * save only — the Raw JSON editor is the escape hatch for the rare
+ * language-without-a-workspace case (e.g. installed only for a hook).
+ *
+ * Returns the same object reference when nothing changed.
+ */
+export function pruneOrphanLanguages(config: EnvironmentConfig): EnvironmentConfig {
+  if (config.workspaces.length === 0) return config;
+  const used = new Set(config.workspaces.map((w) => w.language));
+  const next: Languages = {};
+  let changed = false;
+  for (const [key, value] of Object.entries(config.languages)) {
+    if ((LANGUAGE_KEYS as string[]).includes(key) && !used.has(key)) {
+      changed = true;
+      continue;
+    }
+    (next as Record<string, unknown>)[key] = value;
+  }
+  return changed ? { ...config, languages: next } : config;
+}
+
+/**
  * Fetch the current environment_config for a project.
  *
  * Returns `null` on a fresh row that the boot reseed hook hasn't touched

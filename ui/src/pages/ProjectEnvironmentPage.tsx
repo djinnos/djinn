@@ -38,6 +38,7 @@ import {
   type EnvironmentConfig,
   fetchEnvironmentConfig,
   normalizeConfig,
+  pruneOrphanLanguages,
   resetEnvironmentConfig,
   saveEnvironmentConfig,
 } from "@/api/environmentConfig";
@@ -122,8 +123,11 @@ export function ProjectEnvironmentPage() {
   const handleSave = async () => {
     if (!projectId || !config) return;
     // If user is in raw mode, make sure what we send is exactly what they
-    // see (they may have hand-edited keys the form doesn't know about).
-    let toSave: unknown = config;
+    // see (they may have hand-edited keys the form doesn't know about) —
+    // raw is the escape hatch, so it skips language pruning. Form mode
+    // reconciles languages to the workspace list, clearing any orphan left
+    // behind by an earlier workspace removal.
+    let toSave: unknown;
     if (mode === "raw") {
       const parsed = tryParseRaw(rawText);
       if (!parsed.ok) {
@@ -131,6 +135,8 @@ export function ProjectEnvironmentPage() {
         return;
       }
       toSave = parsed.value;
+    } else {
+      toSave = pruneOrphanLanguages(config);
     }
     setSaving(true);
     try {
