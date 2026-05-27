@@ -53,7 +53,14 @@ function ModelsTab() {
           </p>
         </div>
 
-        {!codexConnected && <CodexSignInCard onConnected={() => void loadData()} />}
+        {/* Always render: shows the sign-in CTA when disconnected, and the
+            connected state (with a Remove/Disconnect button) when connected —
+            previously gated on `!codexConnected`, so once connected there was
+            no way to disconnect from this tab. */}
+        <CodexSignInCard
+          alreadyConnected={codexConnected}
+          onConnected={() => void loadData()}
+        />
 
         <div className="rounded-lg border border-border bg-card px-4 py-3">
           <div className="flex flex-wrap items-center gap-3">
