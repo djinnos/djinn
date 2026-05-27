@@ -565,21 +565,23 @@ function ModelSection({ targetId }: { targetId: string }) {
     queryFn: () => fetchAutomationModelSelection(targetId),
   });
 
-  // Local working copy of the ordered selection; seeded from the server and
-  // kept isolated from the current-user settings store. We sync from the
-  // server value during render (the React-recommended "adjust state while
-  // rendering" pattern — https://react.dev/reference/react/useState#storing-
-  // information-from-previous-renders) instead of an effect: when the admin
-  // has unsaved edits (`dirty`) we hold onto their working copy until they
-  // save, otherwise we mirror whatever the server last returned.
+  // Local working copy of the ordered selection + per-model caps; seeded from
+  // the server and kept isolated from the current-user settings store. We sync
+  // from the server value during render (the React-recommended "adjust state
+  // while rendering" pattern — https://react.dev/reference/react/useState#
+  // storing-information-from-previous-renders) instead of an effect: when the
+  // admin has unsaved edits (`dirty`) we hold onto their working copy until
+  // they save, otherwise we mirror whatever the server last returned.
   const [order, setOrder] = useState<string[]>([]);
+  const [caps, setCaps] = useState<Record<string, number>>({});
   const [dirty, setDirty] = useState(false);
-  const [lastServer, setLastServer] = useState<string[] | undefined>(undefined);
+  const [lastServer, setLastServer] = useState<typeof selection.data>(undefined);
 
   if (selection.data && selection.data !== lastServer) {
     setLastServer(selection.data);
     if (!dirty) {
-      setOrder(selection.data);
+      setOrder(selection.data.models);
+      setCaps(selection.data.maxSessions);
     }
   }
 
@@ -595,9 +597,15 @@ function ModelSection({ targetId }: { targetId: string }) {
   );
 
   const saveMutation = useMutation({
-    mutationFn: (models: string[]) => saveAutomationModelSelection(targetId, models),
+    mutationFn: () => {
+      // Only persist caps for models still in the list, defaulting to 1.
+      const maxSessions: Record<string, number> = {};
+      for (const id of order) maxSessions[id] = caps[id] ?? 1;
+      return saveAutomationModelSelection(targetId, order, maxSessions);
+    },
     onSuccess: (saved) => {
-      setOrder(saved);
+      setOrder(saved.models);
+      setCaps(saved.maxSessions);
       setDirty(false);
       queryClient.setQueryData(automationKeys.modelSelection(targetId), saved);
       showToast.success("Automation models saved");
@@ -619,6 +627,10 @@ function ModelSection({ targetId }: { targetId: string }) {
   };
   const handleReorder = (next: string[]) => {
     setOrder(next);
+    setDirty(true);
+  };
+  const updateCap = (id: string, value: number) => {
+    setCaps((prev) => ({ ...prev, [id]: value }));
     setDirty(true);
   };
 
@@ -644,7 +656,7 @@ function ModelSection({ targetId }: { targetId: string }) {
               variant="outline"
               size="sm"
               disabled={saveMutation.isPending}
-              onClick={() => saveMutation.mutate(order)}
+              onClick={() => saveMutation.mutate()}
             >
               {saveMutation.isPending ? "Saving…" : "Save"}
             </Button>
@@ -681,6 +693,8 @@ function ModelSection({ targetId }: { targetId: string }) {
               key={modelId}
               modelId={modelId}
               model={modelsById.get(modelId)}
+              maxConcurrent={caps[modelId] ?? 1}
+              onUpdateCap={(value) => updateCap(modelId, value)}
               onRemove={() => removeModel(modelId)}
             />
           ))}
@@ -693,15 +707,34 @@ function ModelSection({ targetId }: { targetId: string }) {
 function ModelRow({
   modelId,
   model,
+  maxConcurrent,
+  onUpdateCap,
   onRemove,
 }: {
   modelId: string;
   model: AutomationModel | undefined;
+  maxConcurrent: number;
+  onUpdateCap: (value: number) => void;
   onRemove: () => void;
 }) {
   const controls = useDragControls();
   const providerId = model?.provider_id ?? modelId.split("/")[0] ?? "unknown";
   const name = model?.name ?? stripProviderPrefix(modelId);
+
+  const [sessionText, setSessionText] = useState(String(maxConcurrent));
+  useEffect(() => {
+    setSessionText(String(maxConcurrent));
+  }, [maxConcurrent]);
+
+  const commitSessions = () => {
+    const v = parseInt(sessionText, 10);
+    if (!isNaN(v) && v >= 1 && v <= 10) {
+      onUpdateCap(v);
+      setSessionText(String(v));
+    } else {
+      setSessionText(String(maxConcurrent));
+    }
+  };
 
   return (
     <Reorder.Item value={modelId} dragListener={false} dragControls={controls} className="list-none">
@@ -718,6 +751,19 @@ function ModelRow({
         <div className="min-w-0 flex-1">
           <div className="truncate font-semibold">{name}</div>
           <div className="text-xs text-muted-foreground/60">{formatProvider(providerId)}</div>
+        </div>
+        {/* Per-model concurrency cap for the automation user. */}
+        <div className="flex shrink-0 items-center gap-2">
+          <Label className="text-sm text-muted-foreground">Sessions:</Label>
+          <Input
+            type="text"
+            inputMode="numeric"
+            value={sessionText}
+            onChange={(e) => setSessionText(e.target.value)}
+            onBlur={commitSessions}
+            onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+            className="h-9 w-16 text-center"
+          />
         </div>
         <Button
           variant="ghost"

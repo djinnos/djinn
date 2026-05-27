@@ -8,7 +8,6 @@ import { useProviders } from '@/hooks/settings/useProviders';
 import { useAgentConfig } from '@/hooks/settings/useAgentConfig';
 import { useUserSettings } from '@/hooks/settings/useUserSettings';
 import { useServerHealth } from '@/hooks/useServerHealth';
-import { useAuthUser } from '@/components/AuthGate';
 import { cn } from '@/lib/utils';
 
 function ModelsTab() {
@@ -22,7 +21,6 @@ function ModelsTab() {
   } = useProviders();
 
   const agentConfig = useAgentConfig();
-  const isAdmin = useAuthUser()?.isAdmin ?? false;
 
   if (loading) {
     return <div className="rounded-lg border border-border bg-card p-6">Loading providers...</div>;
@@ -41,7 +39,7 @@ function ModelsTab() {
 
   return (
     <div className="flex flex-col gap-6 flex-1 min-h-0">
-      <AgentConfig {...agentConfig} isAdmin={isAdmin} />
+      <AgentConfig {...agentConfig} />
 
       <div className="border-t border-border" />
 

@@ -5,8 +5,6 @@ vi.mock('@/api/settings', async () => {
   return {
     ...actual,
     fetchProviderModels: vi.fn(),
-    fetchGlobalMaxSessions: vi.fn(),
-    saveGlobalMaxSessions: vi.fn(),
   };
 });
 
@@ -16,11 +14,7 @@ vi.mock('@/api/userSettings', () => ({
 }));
 
 import { useSettingsStore } from './settingsStore';
-import {
-  fetchProviderModels,
-  fetchGlobalMaxSessions,
-  saveGlobalMaxSessions,
-} from '@/api/settings';
+import { fetchProviderModels } from '@/api/settings';
 import { fetchUserSettings, patchUserSettings } from '@/api/userSettings';
 import type { ProviderModelsConnectedOutputSchema } from '@/api/generated/mcp-tools.gen';
 
@@ -35,23 +29,21 @@ describe('settingsStore', () => {
   beforeEach(() => {
     useSettingsStore.setState({
       models: [],
-      globalMaxSessions: {},
       availableModels: [],
       isLoading: false,
       isSaving: false,
       error: null,
       hasUnsavedChanges: false,
-      hasUnsavedCapChanges: false,
     });
     vi.clearAllMocks();
   });
 
-  it('loads per-user models and enriches with global caps', async () => {
+  it('loads per-user models with per-user caps', async () => {
     vi.mocked(fetchUserSettings).mockResolvedValue({
       autoApprovePrs: false,
       models: ['p1/m1'],
+      maxSessions: { 'p1/m1': 3 },
     });
-    vi.mocked(fetchGlobalMaxSessions).mockResolvedValue({ 'p1/m1': 3 });
     await useSettingsStore.getState().loadSettings();
     expect(useSettingsStore.getState().models[0].model).toBe('m1');
     expect(useSettingsStore.getState().models[0].max_concurrent).toBe(3);
@@ -66,12 +58,11 @@ describe('settingsStore', () => {
     expect(useSettingsStore.getState().models).toHaveLength(1);
     expect(useSettingsStore.getState().models[0].max_concurrent).toBe(5);
     expect(useSettingsStore.getState().hasUnsavedChanges).toBe(true);
-    expect(useSettingsStore.getState().hasUnsavedCapChanges).toBe(true);
     st.removeModel(0);
     expect(useSettingsStore.getState().models).toHaveLength(0);
   });
 
-  it('loads provider models and saves the per-user model list', async () => {
+  it('loads provider models and saves the per-user model list + caps', async () => {
     const providerModels = [
       {
         id: 'p1/m1',
@@ -90,19 +81,30 @@ describe('settingsStore', () => {
     expect(useSettingsStore.getState().availableModels).toHaveLength(1);
 
     useSettingsStore.getState().addModel({ model: 'm1', provider: 'p1' });
-    vi.mocked(patchUserSettings).mockResolvedValue({ autoApprovePrs: false, models: ['p1/m1'] });
+    vi.mocked(patchUserSettings).mockResolvedValue({
+      autoApprovePrs: false,
+      models: ['p1/m1'],
+      maxSessions: { 'p1/m1': 1 },
+    });
     await useSettingsStore.getState().saveSettings();
-    expect(patchUserSettings).toHaveBeenCalledWith({ models: ['p1/m1'] });
-    // No cap edit happened, so global save is skipped.
-    expect(saveGlobalMaxSessions).not.toHaveBeenCalled();
+    expect(patchUserSettings).toHaveBeenCalledWith({
+      models: ['p1/m1'],
+      maxSessions: { 'p1/m1': 1 },
+    });
   });
 
-  it('persists global caps only when an admin edits a cap', async () => {
+  it('persists per-user caps when a cap is edited', async () => {
     useSettingsStore.getState().addModel({ model: 'm1', provider: 'p1' });
     useSettingsStore.getState().updateMaxSessions(0, 4);
-    vi.mocked(patchUserSettings).mockResolvedValue({ autoApprovePrs: false, models: ['p1/m1'] });
-    vi.mocked(saveGlobalMaxSessions).mockResolvedValue(undefined);
+    vi.mocked(patchUserSettings).mockResolvedValue({
+      autoApprovePrs: false,
+      models: ['p1/m1'],
+      maxSessions: { 'p1/m1': 4 },
+    });
     await useSettingsStore.getState().saveSettings();
-    expect(saveGlobalMaxSessions).toHaveBeenCalledWith({ 'p1/m1': 4 });
+    expect(patchUserSettings).toHaveBeenCalledWith({
+      models: ['p1/m1'],
+      maxSessions: { 'p1/m1': 4 },
+    });
   });
 });

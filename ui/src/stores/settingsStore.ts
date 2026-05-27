@@ -1,8 +1,6 @@
 import { create } from 'zustand';
 import {
   fetchProviderModels,
-  fetchGlobalMaxSessions,
-  saveGlobalMaxSessions,
   combineModelId,
   splitModelId,
   ModelEntry,
@@ -19,20 +17,16 @@ export type { ModelEntry };
 
 export interface SettingsState {
   /**
-   * The user's ordered model list (priority top → bottom). Sourced from
-   * per-user `user_settings.models`. `max_concurrent` is enriched from the
-   * GLOBAL operator caps and is only meaningful/editable for admins.
+   * The user's ordered model list (priority top → bottom). Both the order and
+   * each `max_concurrent` cap are PER-USER, sourced from `user_settings`
+   * (`models` + `max_sessions`). Every user edits their own caps.
    */
   models: ModelEntry[];
-  /** Global per-model concurrency caps, keyed by full `provider/model` id. */
-  globalMaxSessions: Record<string, number>;
   availableModels: ProviderModel[];
   isLoading: boolean;
   isSaving: boolean;
   error: string | null;
   hasUnsavedChanges: boolean;
-  /** Set when an admin edits a per-model cap, so save also persists globals. */
-  hasUnsavedCapChanges: boolean;
 }
 
 export interface SettingsActions {
@@ -49,16 +43,14 @@ export interface SettingsActions {
 
 const initialState: SettingsState = {
   models: [],
-  globalMaxSessions: {},
   availableModels: [],
   isLoading: false,
   isSaving: false,
   error: null,
   hasUnsavedChanges: false,
-  hasUnsavedCapChanges: false,
 };
 
-/** Build the displayed `ModelEntry[]` from per-user model ids + global caps. */
+/** Build the displayed `ModelEntry[]` from per-user model ids + per-user caps. */
 function buildEntries(
   modelIds: string[],
   maxSessions: Record<string, number>,
@@ -84,25 +76,16 @@ export const useSettingsStore = create<SettingsState & SettingsActions>((set, ge
   loadSettings: async () => {
     set({ isLoading: true, error: null });
     try {
-      // Per-user model list is the source of truth for which models appear.
+      // Per-user settings are the source of truth for both the model list and
+      // each model's concurrency cap.
       const userSettings = await fetchUserSettings();
-      // Global caps are operator-managed; fetch best-effort (non-admins still
-      // read them, they just can't edit). Default to {} if the call fails.
-      let globalMaxSessions: Record<string, number> = {};
-      try {
-        globalMaxSessions = await fetchGlobalMaxSessions();
-      } catch {
-        globalMaxSessions = {};
-      }
       // Keep the shared user-settings query in sync so the chat picker sees
       // the same selection without a second fetch.
       queryClient.setQueryData(USER_SETTINGS_QUERY_KEY, userSettings);
       set({
-        models: buildEntries(userSettings.models, globalMaxSessions),
-        globalMaxSessions,
+        models: buildEntries(userSettings.models, userSettings.maxSessions),
         isLoading: false,
         hasUnsavedChanges: false,
-        hasUnsavedCapChanges: false,
       });
     } catch (error) {
       set({
@@ -162,8 +145,8 @@ export const useSettingsStore = create<SettingsState & SettingsActions>((set, ge
 
     const newModels = [...models];
     newModels[index] = { ...entry, max_concurrent: maxConcurrent };
-    // Per-model caps are GLOBAL — track separately so save persists them.
-    set({ models: newModels, hasUnsavedCapChanges: true });
+    // Per-model caps are PER-USER now — a normal unsaved change.
+    set({ models: newModels, hasUnsavedChanges: true });
   },
 
   removeModelsByProvider: (provider: string) => {
@@ -175,28 +158,21 @@ export const useSettingsStore = create<SettingsState & SettingsActions>((set, ge
   },
 
   saveSettings: async () => {
-    const { models, hasUnsavedChanges, hasUnsavedCapChanges, globalMaxSessions } = get();
+    const { models } = get();
 
     set({ isSaving: true, error: null });
     try {
-      // Per-user ordered model list — every signed-in user can edit their own.
-      if (hasUnsavedChanges) {
-        const modelIds = models.map((m) => combineModelId(m.provider, m.model));
-        const next = await patchUserSettings({ models: modelIds });
-        queryClient.setQueryData(USER_SETTINGS_QUERY_KEY, next);
+      // Per-user ordered model list + per-model caps — every signed-in user
+      // edits their own. Persist both in a single patch so the order and the
+      // caps stay in lockstep.
+      const modelIds = models.map((m) => combineModelId(m.provider, m.model));
+      const maxSessions: Record<string, number> = {};
+      for (const m of models) {
+        maxSessions[combineModelId(m.provider, m.model)] = m.max_concurrent;
       }
-      // Global concurrency caps — admin-only server-side. Only attempt when an
-      // admin actually edited a cap (non-admins never see the cap field, so
-      // hasUnsavedCapChanges stays false for them).
-      if (hasUnsavedCapChanges) {
-        const merged = { ...globalMaxSessions };
-        for (const m of models) {
-          merged[combineModelId(m.provider, m.model)] = m.max_concurrent;
-        }
-        await saveGlobalMaxSessions(merged);
-        set({ globalMaxSessions: merged });
-      }
-      set({ isSaving: false, hasUnsavedChanges: false, hasUnsavedCapChanges: false });
+      const next = await patchUserSettings({ models: modelIds, maxSessions });
+      queryClient.setQueryData(USER_SETTINGS_QUERY_KEY, next);
+      set({ isSaving: false, hasUnsavedChanges: false });
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to save settings';

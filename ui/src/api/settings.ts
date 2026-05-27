@@ -1,19 +1,10 @@
 import { callMcpTool } from "@/api/mcpClient";
-import type { McpToolOutput, ProviderModelsConnectedOutputSchema } from "@/api/generated/mcp-tools.gen";
+import type { ProviderModelsConnectedOutputSchema } from "@/api/generated/mcp-tools.gen";
 
 export interface ModelEntry {
   model: string;
   provider: string;
   max_concurrent: number;
-}
-
-type SettingsGetToolResponse = McpToolOutput<"settings_get">;
-
-interface ParsedSettingsGet {
-  settings?: {
-    max_sessions?: Record<string, number> | null;
-  };
-  error?: string;
 }
 
 function splitModelId(modelId: string): { provider: string; model: string } {
@@ -35,36 +26,6 @@ function combineModelId(provider: string, model: string): string {
 }
 
 export { splitModelId, combineModelId };
-
-/**
- * Global, operator-managed per-model concurrency caps (`settings_get.max_sessions`).
- * The model LIST itself is now per-user (see `@/api/userSettings`); this map only
- * carries the operational caps, which the Models tab renders/edits for admins.
- */
-export async function fetchGlobalMaxSessions(): Promise<Record<string, number>> {
-  const response = (await callMcpTool("settings_get", {})) as SettingsGetToolResponse;
-  const parsed = response as ParsedSettingsGet;
-  if (parsed.error) {
-    throw new Error(parsed.error);
-  }
-  return parsed.settings?.max_sessions ?? {};
-}
-
-/**
- * Persist the global per-model concurrency caps. Admin-only server-side —
- * non-admin callers get `{ ok: false, error }`, surfaced as a thrown error.
- */
-export async function saveGlobalMaxSessions(
-  maxSessions: Record<string, number>,
-): Promise<void> {
-  const response = await callMcpTool("settings_set", {
-    max_sessions: maxSessions,
-  });
-
-  if (!response.ok) {
-    throw new Error(response.error ?? "Failed to save settings");
-  }
-}
 
 export type ProviderModel = ProviderModelsConnectedOutputSchema.ProviderModelOutput;
 

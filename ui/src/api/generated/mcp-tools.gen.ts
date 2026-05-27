@@ -3607,7 +3607,10 @@ export namespace SettingsGetOutputSchema {
    */
   dispatch_limit?: number
   /**
-   * Per-model concurrent session caps, e.g. `{"openai/gpt-4o": 4}`.
+   * LEGACY/ignored. Per-model concurrency caps are now **per-user**
+   * (`user_settings.max_sessions`) and the slot pool is elastic, so this
+   * global field is no longer written or read. Retained only so existing
+   * `settings.raw` rows still parse under `deny_unknown_fields`.
    */
   max_sessions?: {
   [k: string]: number
@@ -3652,12 +3655,6 @@ export namespace SettingsSetInputSchema {
    */
   dispatch_limit?: number
   /**
-   * Per-model concurrent session caps (e.g. {"openai/gpt-4o": 4}). Omit to keep current value.
-   */
-  max_sessions?: {
-  [k: string]: number
-  }
-  /**
    * Enable the Linux-only ADR-057 memory FUSE mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.
    */
   memory_mount_enabled?: boolean
@@ -3667,6 +3664,9 @@ export namespace SettingsSetInputSchema {
   memory_mount_path?: string
   /**
    * Ordered list of models available to all agents (e.g. ["openai/gpt-4o"]). Omit to keep current value.
+   * This is the deployment FALLBACK list (used for tasks with no creator and
+   * users with no per-user selection); per-user model selection + concurrency
+   * caps live in `user_settings_*`.
    */
   models?: string[]
   [k: string]: any
@@ -4339,6 +4339,13 @@ export namespace UserSettingsGetOutputSchema {
   auto_approve_prs: boolean
   error?: string
   /**
+   * This user's per-model concurrency caps (`{ "provider/model": cap }`).
+   * The sole admission control at dispatch; empty ⇒ default 1 per model.
+   */
+  max_sessions: {
+  [k: string]: number
+  }
+  /**
    * This user's ordered model selection (highest priority first), full
    * `provider/model` ids. Empty when the user has no explicit selection
    * (callers then fall back to the global deployment model list).
@@ -4361,6 +4368,15 @@ export namespace UserSettingsSetInputSchema {
    */
   auto_approve_prs?: boolean
   /**
+   * Per-model concurrency caps for THIS user (`{ "provider/model": cap }`).
+   * How many sessions of each model may run concurrently for this user — the
+   * sole admission control (no global ceiling). Pass `{}` to clear (→ default
+   * 1 per model). Omit to keep the current value.
+   */
+  max_sessions?: {
+  [k: string]: number
+  }
+  /**
    * Ordered model selection for THIS user (highest priority first), as full
    * `provider/model` ids. Each must be a model on a provider this user has
    * connected. Pass `[]` to clear the selection (→ global fallback). Omit to
@@ -4382,6 +4398,12 @@ export namespace UserSettingsSetOutputSchema {
   applied: boolean
   auto_approve_prs?: boolean
   error?: string
+  /**
+   * The resulting per-model concurrency caps after the patch.
+   */
+  max_sessions?: {
+  [k: string]: number
+  }
   /**
    * The resulting model selection after the patch.
    */

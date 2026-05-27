@@ -20,7 +20,10 @@ pub struct DjinnSettings {
     pub dispatch_limit: Option<u32>,
     /// Ordered list of models available to agents, e.g. `["openai/gpt-4o"]`.
     pub models: Option<Vec<String>>,
-    /// Per-model concurrent session caps, e.g. `{"openai/gpt-4o": 4}`.
+    /// LEGACY/ignored. Per-model concurrency caps are now **per-user**
+    /// (`user_settings.max_sessions`) and the slot pool is elastic, so this
+    /// global field is no longer written or read. Retained only so existing
+    /// `settings.raw` rows still parse under `deny_unknown_fields`.
     #[schemars(with = "Option<HashMap<String, i64>>")]
     pub max_sessions: Option<HashMap<String, u32>>,
     /// Enable the ADR-057 Linux memory mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.

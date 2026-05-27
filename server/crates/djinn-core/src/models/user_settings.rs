@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -11,6 +13,13 @@ pub struct UserSettings {
     /// column (`user_settings.models`, migration 31).
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub models: Option<Vec<String>>,
+    /// Per-user, per-model concurrency caps (`{ "provider/model": cap }`). The
+    /// sole admission control at dispatch — the slot pool spawns on demand, with
+    /// no global ceiling. `None`/absent ⇒ default 1 per selected model.
+    /// Persisted as a JSON-object TEXT column (`user_settings.max_sessions`,
+    /// migration 32).
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub max_sessions: Option<HashMap<String, u32>>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -24,6 +33,7 @@ impl UserSettings {
             user_id: user_id.to_string(),
             auto_approve_prs: false,
             models: None,
+            max_sessions: None,
             created_at: String::new(),
             updated_at: String::new(),
         }

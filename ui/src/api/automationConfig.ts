@@ -57,30 +57,50 @@ export async function fetchAutomationConnectedModels(
   return models;
 }
 
-/** The automation user's ordered model selection (high → low priority). */
+/** The automation user's ordered model selection plus per-model caps. */
+export interface AutomationModelSelection {
+  /** Full `"provider/model"` ids, high → low priority. */
+  models: string[];
+  /** Per-model concurrency caps keyed by full `"provider/model"` id. */
+  maxSessions: Record<string, number>;
+}
+
+function parseMaxSessions(raw: unknown): Record<string, number> {
+  return raw && typeof raw === "object" ? (raw as Record<string, number>) : {};
+}
+
+/** The automation user's ordered model selection (high → low priority) + caps. */
 export async function fetchAutomationModelSelection(
   targetUserId: string,
-): Promise<string[]> {
+): Promise<AutomationModelSelection> {
   const response = await callMcpTool("user_settings_get", { target_user_id: targetUserId });
   if (response.ok === false) {
     throw new Error(response.error ?? "Failed to load automation settings");
   }
-  return Array.isArray(response.models) ? response.models : [];
+  return {
+    models: Array.isArray(response.models) ? response.models : [],
+    maxSessions: parseMaxSessions(response.max_sessions),
+  };
 }
 
-/** Persist the automation user's ordered model selection. */
+/** Persist the automation user's ordered model selection and per-model caps. */
 export async function saveAutomationModelSelection(
   targetUserId: string,
   models: string[],
-): Promise<string[]> {
+  maxSessions: Record<string, number>,
+): Promise<AutomationModelSelection> {
   const response = await callMcpTool("user_settings_set", {
     target_user_id: targetUserId,
     models,
+    max_sessions: maxSessions,
   });
   if (!response.ok) {
     throw new Error(response.error ?? "Failed to save automation models");
   }
-  return Array.isArray(response.models) ? response.models : models;
+  return {
+    models: Array.isArray(response.models) ? response.models : models,
+    maxSessions: parseMaxSessions(response.max_sessions),
+  };
 }
 
 /** Store an API key credential owned by the automation user. */

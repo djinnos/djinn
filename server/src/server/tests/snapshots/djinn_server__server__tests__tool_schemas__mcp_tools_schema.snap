@@ -7102,7 +7102,7 @@ expression: signatures
                 "format": "int64",
                 "type": "integer"
               },
-              "description": "Per-model concurrent session caps, e.g. `{\"openai/gpt-4o\": 4}`.",
+              "description": "LEGACY/ignored. Per-model concurrency caps are now **per-user**\n(`user_settings.max_sessions`) and the slot pool is elastic, so this\nglobal field is no longer written or read. Retained only so existing\n`settings.raw` rows still parse under `deny_unknown_fields`.",
               "nullable": true,
               "type": "object"
             },
@@ -7197,15 +7197,6 @@ expression: signatures
           "nullable": true,
           "type": "integer"
         },
-        "max_sessions": {
-          "additionalProperties": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "description": "Per-model concurrent session caps (e.g. {\"openai/gpt-4o\": 4}). Omit to keep current value.",
-          "nullable": true,
-          "type": "object"
-        },
         "memory_mount_enabled": {
           "description": "Enable the Linux-only ADR-057 memory FUSE mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.",
           "nullable": true,
@@ -7217,7 +7208,7 @@ expression: signatures
           "type": "string"
         },
         "models": {
-          "description": "Ordered list of models available to all agents (e.g. [\"openai/gpt-4o\"]). Omit to keep current value.",
+          "description": "Ordered list of models available to all agents (e.g. [\"openai/gpt-4o\"]). Omit to keep current value.\nThis is the deployment FALLBACK list (used for tasks with no creator and\nusers with no per-user selection); per-user model selection + concurrency\ncaps live in `user_settings_*`.",
           "items": {
             "type": "string"
           },
@@ -8477,6 +8468,14 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "max_sessions": {
+          "additionalProperties": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "description": "This user's per-model concurrency caps (`{ \"provider/model\": cap }`).\nThe sole admission control at dispatch; empty ⇒ default 1 per model.",
+          "type": "object"
+        },
         "models": {
           "description": "This user's ordered model selection (highest priority first), full\n`provider/model` ids. Empty when the user has no explicit selection\n(callers then fall back to the global deployment model list).",
           "items": {
@@ -8496,7 +8495,8 @@ expression: signatures
       "required": [
         "ok",
         "auto_approve_prs",
-        "models"
+        "models",
+        "max_sessions"
       ],
       "title": "UserSettingsGetResponse",
       "type": "object"
@@ -8511,6 +8511,15 @@ expression: signatures
           "description": "Enable or disable auto-approve. Omit to keep the current value.",
           "nullable": true,
           "type": "boolean"
+        },
+        "max_sessions": {
+          "additionalProperties": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "description": "Per-model concurrency caps for THIS user (`{ \"provider/model\": cap }`).\nHow many sessions of each model may run concurrently for this user — the\nsole admission control (no global ceiling). Pass `{}` to clear (→ default\n1 per model). Omit to keep the current value.",
+          "nullable": true,
+          "type": "object"
         },
         "models": {
           "description": "Ordered model selection for THIS user (highest priority first), as full\n`provider/model` ids. Each must be a model on a provider this user has\nconnected. Pass `[]` to clear the selection (→ global fallback). Omit to\nkeep the current value.",
@@ -8543,6 +8552,15 @@ expression: signatures
         "error": {
           "nullable": true,
           "type": "string"
+        },
+        "max_sessions": {
+          "additionalProperties": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "description": "The resulting per-model concurrency caps after the patch.",
+          "nullable": true,
+          "type": "object"
         },
         "models": {
           "description": "The resulting model selection after the patch.",

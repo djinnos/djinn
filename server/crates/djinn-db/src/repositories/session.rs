@@ -287,6 +287,33 @@ impl SessionRepository {
         .await?)
     }
 
+    /// Count currently-running sessions grouped by `(creator_user_id, model_id)`.
+    /// The creator is the session's own `created_by_user_id` when set (e.g. chat
+    /// sessions), else the owning task's `created_by_user_id` (the COALESCE +
+    /// LEFT JOIN). This is the real-time source of truth the coordinator uses to
+    /// enforce per-user, per-model concurrency caps at dispatch. Indexed on
+    /// `status`, `task_id`, and `created_by_user_id`.
+    pub async fn count_active_by_user_and_model(
+        &self,
+    ) -> Result<Vec<(Option<String>, String, i64)>> {
+        self.db.ensure_initialized().await?;
+        let rows = sqlx::query!(
+            r#"SELECT COALESCE(s.created_by_user_id, t.created_by_user_id) AS creator,
+                      s.model_id AS "model_id!",
+                      COUNT(*) AS "cnt!"
+                 FROM sessions s
+                 LEFT JOIN tasks t ON t.id = s.task_id
+                WHERE s.status = 'running'
+                GROUP BY COALESCE(s.created_by_user_id, t.created_by_user_id), s.model_id"#
+        )
+        .fetch_all(self.db.pool())
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.creator, r.model_id, r.cnt))
+            .collect())
+    }
+
     pub async fn list_active_in_project(&self, project_id: &str) -> Result<Vec<SessionRecord>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
@@ -732,6 +759,89 @@ mod tests {
         .unwrap();
 
         (epic.project_id, task_id)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn count_active_by_user_and_model_groups_by_task_creator_and_model() {
+        let db = test_db();
+        let (bus, _captured) = capturing_bus();
+        db.ensure_initialized().await.unwrap();
+
+        let user_a = uuid::Uuid::now_v7().to_string();
+        let user_b = uuid::Uuid::now_v7().to_string();
+        for (uid, gid, login) in [(&user_a, 7001i64, "count-a"), (&user_b, 7002i64, "count-b")] {
+            sqlx::query!(
+                "INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)",
+                uid,
+                gid,
+                login
+            )
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+
+        let epic = EpicRepository::new(db.clone(), bus.clone())
+            .create("E", "", "", "", "", None)
+            .await
+            .unwrap();
+        let project_id = epic.project_id.clone();
+
+        async fn mk_task(db: &Database, project_id: &str, epic_id: &str, creator: &str) -> String {
+            let id = uuid::Uuid::now_v7().to_string();
+            let short_id = format!("t{}{}", &id[..6], &id[id.len() - 6..]);
+            sqlx::query!(
+                "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
+                                    issue_type, priority, owner, status, continuation_count,
+                                    labels, acceptance_criteria, memory_refs, created_by_user_id)
+                 VALUES ($1,$2,$3,$4,'T','','','task',0,'','open',0,'[]'::jsonb,'[]'::jsonb,'[]'::jsonb,$5)",
+                id, project_id, short_id, epic_id, creator
+            )
+            .execute(db.pool())
+            .await
+            .unwrap();
+            id
+        }
+
+        let repo = SessionRepository::new(db.clone(), bus.clone());
+        // A: 2 running on gpt + 1 on kimi; B: 1 on gpt. Sessions carry no own
+        // created_by_user_id (no task-local), so the count must come via the
+        // task-creator join.
+        for model in ["openai/gpt", "openai/gpt", "x/kimi"] {
+            let t = mk_task(&db, &project_id, &epic.id, &user_a).await;
+            repo.create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&t),
+                model,
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+            })
+            .await
+            .unwrap();
+        }
+        let tb = mk_task(&db, &project_id, &epic.id, &user_b).await;
+        repo.create(CreateSessionParams {
+            project_id: &project_id,
+            task_id: Some(&tb),
+            model: "openai/gpt",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+        })
+        .await
+        .unwrap();
+
+        let map: std::collections::HashMap<(String, String), i64> = repo
+            .count_active_by_user_and_model()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|(c, m, n)| c.map(|c| ((c, m), n)))
+            .collect();
+        assert_eq!(map.get(&(user_a.clone(), "openai/gpt".to_string())), Some(&2));
+        assert_eq!(map.get(&(user_a.clone(), "x/kimi".to_string())), Some(&1));
+        assert_eq!(map.get(&(user_b.clone(), "openai/gpt".to_string())), Some(&1));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

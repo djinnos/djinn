@@ -198,14 +198,24 @@ impl SlotPool {
             return Err(PoolError::SessionAlreadyActive { task_id });
         }
 
-        let slot_id = self
-            .free_slots
-            .entry(model_id.clone())
-            .or_default()
-            .pop()
-            .ok_or(PoolError::AtCapacity {
-                model_id: model_id.clone(),
-            })?;
+        // Elastic: there is no fixed per-model ceiling. Admission is gated
+        // per-user by the coordinator (each user's per-model cap); if that gate
+        // let this dispatch through, ensure a slot exists — reuse a free one, or
+        // spawn a fresh slot on demand (Karpenter backs the worker pod). The
+        // `AtCapacity` arm is now just an unreachable safety net.
+        let slot_id = match self.free_slots.entry(model_id.clone()).or_default().pop() {
+            Some(id) => id,
+            None => {
+                self.spawn_slot(model_id.clone());
+                self.free_slots
+                    .entry(model_id.clone())
+                    .or_default()
+                    .pop()
+                    .ok_or(PoolError::AtCapacity {
+                        model_id: model_id.clone(),
+                    })?
+            }
+        };
 
         let slot = self.slot(slot_id)?;
         if let Err(err) = slot.run_task(task_id.clone(), project_path).await {

@@ -5,6 +5,8 @@
 //! parameter on these tools, by design. An unauthenticated caller gets a
 //! clear error rather than reading or mutating someone else's settings.
 
+use std::collections::HashMap;
+
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +39,10 @@ pub struct UserSettingsGetResponse {
     /// `provider/model` ids. Empty when the user has no explicit selection
     /// (callers then fall back to the global deployment model list).
     pub models: Vec<String>,
+    /// This user's per-model concurrency caps (`{ "provider/model": cap }`).
+    /// The sole admission control at dispatch; empty ⇒ default 1 per model.
+    #[schemars(with = "std::collections::HashMap<String, i64>")]
+    pub max_sessions: HashMap<String, u32>,
     pub error: Option<String>,
 }
 
@@ -49,6 +55,12 @@ pub struct UserSettingsSetParams {
     /// connected. Pass `[]` to clear the selection (→ global fallback). Omit to
     /// keep the current value.
     pub models: Option<Vec<String>>,
+    /// Per-model concurrency caps for THIS user (`{ "provider/model": cap }`).
+    /// How many sessions of each model may run concurrently for this user — the
+    /// sole admission control (no global ceiling). Pass `{}` to clear (→ default
+    /// 1 per model). Omit to keep the current value.
+    #[schemars(with = "Option<std::collections::HashMap<String, i64>>")]
+    pub max_sessions: Option<HashMap<String, u32>>,
     /// Admin-only: act on behalf of this user id (e.g. the automation service
     /// user). Non-admins must omit it.
     #[serde(default)]
@@ -62,6 +74,9 @@ pub struct UserSettingsSetResponse {
     pub auto_approve_prs: Option<bool>,
     /// The resulting model selection after the patch.
     pub models: Option<Vec<String>>,
+    /// The resulting per-model concurrency caps after the patch.
+    #[schemars(with = "Option<std::collections::HashMap<String, i64>>")]
+    pub max_sessions: Option<HashMap<String, u32>>,
     pub error: Option<String>,
 }
 
@@ -91,6 +106,7 @@ impl DjinnMcpServer {
                     user_id: None,
                     auto_approve_prs: false,
                     models: Vec::new(),
+                    max_sessions: HashMap::new(),
                     error: Some(missing_session()),
                 });
             }
@@ -100,6 +116,7 @@ impl DjinnMcpServer {
                     user_id: None,
                     auto_approve_prs: false,
                     models: Vec::new(),
+                    max_sessions: HashMap::new(),
                     error: Some(e),
                 });
             }
@@ -111,6 +128,7 @@ impl DjinnMcpServer {
                 user_id: Some(user_id),
                 auto_approve_prs: s.auto_approve_prs,
                 models: s.models.unwrap_or_default(),
+                max_sessions: s.max_sessions.unwrap_or_default(),
                 error: None,
             }),
             Err(e) => Json(UserSettingsGetResponse {
@@ -118,6 +136,7 @@ impl DjinnMcpServer {
                 user_id: Some(user_id),
                 auto_approve_prs: false,
                 models: Vec::new(),
+                max_sessions: HashMap::new(),
                 error: Some(e.to_string()),
             }),
         }
@@ -143,6 +162,7 @@ impl DjinnMcpServer {
                     applied: false,
                     auto_approve_prs: None,
                     models: None,
+                    max_sessions: None,
                     error: Some(missing_session()),
                 });
             }
@@ -152,6 +172,7 @@ impl DjinnMcpServer {
                     applied: false,
                     auto_approve_prs: None,
                     models: None,
+                    max_sessions: None,
                     error: Some(e),
                 });
             }
@@ -164,6 +185,7 @@ impl DjinnMcpServer {
                 applied: false,
                 auto_approve_prs: None,
                 models: None,
+                max_sessions: None,
                 error: Some(msg),
             })
         };
@@ -187,6 +209,17 @@ impl DjinnMcpServer {
             applied = true;
         }
 
+        // Per-user, per-model concurrency caps. No validation against connected
+        // providers (caps for not-yet-connected models are harmless — they only
+        // bind once a model is actually dispatched); non-positive values are
+        // dropped on read.
+        if let Some(max_sessions) = p.max_sessions.as_ref() {
+            if let Err(e) = repo.upsert_max_sessions(&user_id, max_sessions).await {
+                return err(e.to_string());
+            }
+            applied = true;
+        }
+
         if let Some(target) = p.auto_approve_prs {
             if let Err(e) = repo.upsert_auto_approve_prs(&user_id, target).await {
                 return err(e.to_string());
@@ -194,10 +227,9 @@ impl DjinnMcpServer {
             applied = true;
         }
 
-        // A changed model selection alters the union of models the fleet must
-        // be able to dispatch, so recompute slot-pool capacity and trigger a
-        // dispatch pass. No-op for auto-approve-only patches.
-        if p.models.is_some() {
+        // A changed model selection or cap can make more work dispatchable now,
+        // so kick a dispatch pass. No-op for auto-approve-only patches.
+        if p.models.is_some() || p.max_sessions.is_some() {
             self.state.apply_user_model_change().await;
         }
 
@@ -207,6 +239,7 @@ impl DjinnMcpServer {
                 applied,
                 auto_approve_prs: Some(s.auto_approve_prs),
                 models: Some(s.models.unwrap_or_default()),
+                max_sessions: Some(s.max_sessions.unwrap_or_default()),
                 error: None,
             }),
             Err(e) => err(e.to_string()),

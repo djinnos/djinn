@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use djinn_agent::actors::slot::{ModelSlotConfig, SlotPoolConfig};
 use djinn_agent::resource_monitor::MemoryStatus;
 use djinn_core::models::DjinnSettings;
-use djinn_db::{SettingsRepository, UserSettingsRepository};
+use djinn_db::SettingsRepository;
 use djinn_provider::repos::CredentialRepository;
 
 use super::{AppState, SETTINGS_RAW_KEY};
@@ -15,67 +15,27 @@ const AUTO_MAX_SLOTS_CAP: u32 = 8;
 const ALL_ROLES: &[&str] = &["worker", "reviewer", "lead", "planner", "architect"];
 
 impl AppState {
-    fn slot_pool_config_for_settings(
-        settings: &DjinnSettings,
-        extra_models: &[String],
-    ) -> SlotPoolConfig {
-        // Capacity covers the UNION of the global deployment model list and
-        // every user's per-user selection — a task runs with its creator's
-        // chosen model, so the pool must have a slot for any of them.
-        let mut models_list = settings.models_or_default();
-        let mut seen: HashSet<String> = models_list.iter().cloned().collect();
-        for m in extra_models {
-            if seen.insert(m.clone()) {
-                models_list.push(m.clone());
-            }
-        }
-        let max_sessions = settings.max_sessions_or_default();
-
+    fn slot_pool_config_for_settings(settings: &DjinnSettings) -> SlotPoolConfig {
+        // The slot pool is now ELASTIC: `dispatch` spawns a slot on demand and
+        // admission is gated per-user (each user's per-model cap) by the
+        // coordinator — there is no per-model ceiling here. This config only
+        // pre-warms a few slots for the global deployment model list;
+        // per-user-selected models that aren't in this list spawn on first use.
+        let models_list = settings.models_or_default();
         let all_roles: HashSet<String> = ALL_ROLES.iter().map(|r| r.to_string()).collect();
+        let model_count = models_list.iter().filter(|id| id.contains('/')).count();
+        let auto_default = Self::auto_default_slots(model_count);
 
-        // Count total unique models (from both models list and max_sessions keys) to
-        // divide auto-detected budget across them.
-        let listed: HashSet<&str> = models_list.iter().map(String::as_str).collect();
-        let extra_model_count = max_sessions
-            .keys()
-            .filter(|id| id.contains('/') && !listed.contains(id.as_str()))
-            .count();
-        let total_model_count =
-            models_list.iter().filter(|id| id.contains('/')).count() + extra_model_count;
-
-        // Compute auto-detected default slots per model from system memory.
-        let auto_default = Self::auto_default_slots(total_model_count);
-
-        let models = models_list
+        let mut models: Vec<ModelSlotConfig> = models_list
             .iter()
             .filter(|id| id.contains('/'))
-            .map(|model_id| {
-                let max_slots = match max_sessions.get(model_id) {
-                    Some(&explicit) => explicit,
-                    None => auto_default,
-                };
-                ModelSlotConfig {
-                    max_slots,
-                    roles: all_roles.clone(),
-                    model_id: model_id.clone(),
-                }
-            })
-            .collect();
-
-        // Also include models that only appear in max_sessions but not the list.
-        let extra: Vec<ModelSlotConfig> = max_sessions
-            .iter()
-            .filter(|(id, _)| id.contains('/') && !listed.contains(id.as_str()))
-            .map(|(model_id, &max_slots)| ModelSlotConfig {
-                max_slots,
+            .map(|model_id| ModelSlotConfig {
+                max_slots: auto_default,
                 roles: all_roles.clone(),
                 model_id: model_id.clone(),
             })
             .collect();
-
-        let mut all_models: Vec<ModelSlotConfig> = models;
-        all_models.extend(extra);
-        all_models.sort_by(|a, b| a.model_id.cmp(&b.model_id));
+        models.sort_by(|a, b| a.model_id.cmp(&b.model_id));
 
         let role_priorities: HashMap<String, Vec<String>> = ALL_ROLES
             .iter()
@@ -83,7 +43,7 @@ impl AppState {
             .collect();
 
         SlotPoolConfig {
-            models: all_models,
+            models,
             role_priorities,
         }
     }
@@ -174,23 +134,11 @@ impl AppState {
         }
     }
 
-    /// Distinct union of every user's per-user model selection, for sizing the
-    /// shared slot pool. Best-effort: a DB error logs and yields an empty list
-    /// (the pool then covers only the global deployment models).
-    async fn all_user_selected_models(&self) -> Vec<String> {
-        UserSettingsRepository::new(self.db().clone())
-            .all_selected_models()
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "failed to load per-user model selections for slot pool");
-                Vec::new()
-            })
-    }
-
-    /// React to a change in some user's per-user model selection: re-derive the
-    /// slot-pool capacity for the new union of selections and trigger a
-    /// dispatch pass. Re-applies the (unchanged) global coordinator config too,
-    /// which is idempotent. Called from `user_settings_set`.
+    /// React to a change in some user's per-user model selection or caps. The
+    /// elastic slot pool sizes itself on demand and the per-user cap is enforced
+    /// at dispatch, so this just re-applies the (idempotent) global runtime
+    /// config and triggers a dispatch pass for responsiveness. Called from
+    /// `user_settings_set`.
     pub async fn apply_user_model_change(&self) {
         let repo = SettingsRepository::new(self.db().clone(), self.event_bus());
         let settings = match repo.get(SETTINGS_RAW_KEY).await {
@@ -281,9 +229,8 @@ impl AppState {
         }
 
         if let Some(pool) = self.pool().await {
-            let user_models = self.all_user_selected_models().await;
             let _ = pool
-                .reconfigure(Self::slot_pool_config_for_settings(settings, &user_models))
+                .reconfigure(Self::slot_pool_config_for_settings(settings))
                 .await;
         }
 

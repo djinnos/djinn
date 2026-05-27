@@ -185,7 +185,7 @@ async fn parallel_completions_finish_concurrently() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn model_priority_fallback_uses_next_model_when_primary_full() {
+async fn elastic_pool_spawns_on_demand_without_capacity_fallback() {
     let (app_state, cancel, _temp) = test_app_state();
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
@@ -239,9 +239,13 @@ async fn model_priority_fallback_uses_next_model_when_primary_full() {
     .await
     .expect("third dispatch should succeed");
 
+    // Elastic pool: there is no per-model ceiling — repeated dispatches to the
+    // first-priority model all spawn on demand (past the pre-warm count), so we
+    // never fall back to model-b and never hit AtCapacity. Per-user concurrency
+    // is now enforced by the coordinator's per-(user,model) gate, not the pool.
     assert_eq!(m1, "model-a");
-    assert_eq!(m2, "model-b");
-    assert_eq!(m3, "model-b");
+    assert_eq!(m2, "model-a");
+    assert_eq!(m3, "model-a");
 
     let fourth = dispatch_for_role(
         &pool,
@@ -252,12 +256,24 @@ async fn model_priority_fallback_uses_next_model_when_primary_full() {
         &model_roles,
     )
     .await;
-    assert!(matches!(fourth, Err(PoolError::AtCapacity { .. })));
+    assert_eq!(
+        fourth.expect("elastic dispatch always succeeds (spawns on demand)"),
+        "model-a"
+    );
 
     pool.interrupt_all("test cleanup")
         .await
         .expect("interrupt_all should succeed");
-    wait_until_no_sessions(&pool, &["task-1".into(), "task-2".into(), "task-3".into()]).await;
+    wait_until_no_sessions(
+        &pool,
+        &[
+            "task-1".into(),
+            "task-2".into(),
+            "task-3".into(),
+            "task-4".into(),
+        ],
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -311,12 +327,24 @@ async fn role_isolation_skips_models_that_do_not_serve_role() {
         &model_roles,
     )
     .await;
-    assert!(matches!(second, Err(PoolError::AtCapacity { .. })));
+    // Elastic: sonnet spawns a second slot on demand. The point of this test is
+    // role isolation — opus (reviewer-only) is skipped, so both worker tasks
+    // land on sonnet, never opus.
+    assert_eq!(
+        second.expect("elastic dispatch succeeds on the worker-serving model"),
+        "sonnet"
+    );
+    let status = pool.get_status().await.expect("status should succeed");
+    assert_eq!(
+        status.per_model.get("opus").map(|s| s.free),
+        Some(1),
+        "opus (reviewer-only) must stay untouched by worker dispatches"
+    );
 
     pool.interrupt_all("test cleanup")
         .await
         .expect("interrupt_all should succeed");
-    wait_until_no_sessions(&pool, &["worker-1".into()]).await;
+    wait_until_no_sessions(&pool, &["worker-1".into(), "worker-2".into()]).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -340,10 +368,8 @@ async fn reconfigure_scale_up_adds_free_slots_for_dispatch() {
     pool.dispatch("up-2", "/tmp/project", "model-a")
         .await
         .expect("dispatch 2 should succeed");
-    assert!(matches!(
-        pool.dispatch("up-3", "/tmp/project", "model-a").await,
-        Err(PoolError::AtCapacity { .. })
-    ));
+    // (No AtCapacity check at the pre-warm count of 2 — the pool is elastic.
+    // This test now verifies that scaling UP pre-warms additional FREE slots.)
 
     pool.reconfigure(make_config(
         vec![model("model-a", 4, &["worker"])],
@@ -417,24 +443,33 @@ async fn reconfigure_scale_down_drains_busy_slots_then_retires_them() {
         .expect("interrupt_all should succeed");
     wait_until_no_sessions(&pool, &task_ids).await;
 
+    // Scale-down still drained the idle slots back to the pre-warm count of 2.
     let status_after = pool.get_status().await.expect("status should succeed");
     assert_eq!(status_after.total_slots, 2);
 
+    // Elastic: the 2 retained slots are reused, and a 3rd dispatch spawns a new
+    // slot on demand — there is no per-model capacity ceiling anymore.
     pool.dispatch("down-next-1", "/tmp/project", "model-a")
         .await
         .expect("dispatch should succeed");
     pool.dispatch("down-next-2", "/tmp/project", "model-a")
         .await
         .expect("dispatch should succeed");
-    assert!(matches!(
-        pool.dispatch("down-next-3", "/tmp/project", "model-a")
-            .await,
-        Err(PoolError::AtCapacity { .. })
-    ));
+    pool.dispatch("down-next-3", "/tmp/project", "model-a")
+        .await
+        .expect("elastic dispatch spawns a slot on demand");
     pool.interrupt_all("test cleanup")
         .await
         .expect("interrupt_all should succeed");
-    wait_until_no_sessions(&pool, &["down-next-1".into(), "down-next-2".into()]).await;
+    wait_until_no_sessions(
+        &pool,
+        &[
+            "down-next-1".into(),
+            "down-next-2".into(),
+            "down-next-3".into(),
+        ],
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

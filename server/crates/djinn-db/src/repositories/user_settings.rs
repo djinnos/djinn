@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use djinn_core::models::UserSettings;
 
@@ -20,6 +20,23 @@ fn parse_models(raw: Option<&str>) -> Option<Vec<String>> {
     }
 }
 
+/// Parse the `max_sessions` TEXT column (a JSON `{model_id: cap}` object).
+/// Non-positive caps are dropped (0 is meaningless → treat as unset → default
+/// 1 downstream). `NULL`, empty, `{}`, or invalid JSON all read as `None`.
+fn parse_max_sessions(raw: Option<&str>) -> Option<HashMap<String, u32>> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    match serde_json::from_str::<HashMap<String, u32>>(raw) {
+        Ok(m) => {
+            let m: HashMap<String, u32> = m.into_iter().filter(|(_, c)| *c > 0).collect();
+            if m.is_empty() { None } else { Some(m) }
+        }
+        Err(_) => None,
+    }
+}
+
 pub struct UserSettingsRepository {
     db: Database,
 }
@@ -38,7 +55,7 @@ impl UserSettingsRepository {
         // it into `Vec<String>` directly.
         let row = sqlx::query!(
             r#"SELECT user_id, auto_approve_prs AS "auto_approve_prs!: bool",
-                      models, created_at, updated_at
+                      models, max_sessions, created_at, updated_at
                FROM user_settings WHERE user_id = $1"#,
             user_id,
         )
@@ -48,6 +65,7 @@ impl UserSettingsRepository {
             user_id: r.user_id,
             auto_approve_prs: r.auto_approve_prs,
             models: parse_models(r.models.as_deref()),
+            max_sessions: parse_max_sessions(r.max_sessions.as_deref()),
             created_at: r.created_at,
             updated_at: r.updated_at,
         }))
@@ -122,6 +140,36 @@ impl UserSettingsRepository {
                      to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
              ON CONFLICT (user_id) DO UPDATE SET
                  models = EXCLUDED.models,
+                 updated_at = EXCLUDED.updated_at"#,
+            user_id,
+            json,
+        )
+        .execute(self.db.pool())
+        .await?;
+        self.get(user_id).await?.ok_or_else(|| {
+            crate::Error::Internal(format!("user_settings row missing after upsert for {user_id}"))
+        })
+    }
+
+    /// Upsert the per-user, per-model concurrency caps (`{model_id: cap}`),
+    /// stored as a JSON-object TEXT value. Pass an empty map to clear caps
+    /// (stored as `{}`, read back as `None` → default 1 per model). Returns the
+    /// resulting row.
+    pub async fn upsert_max_sessions(
+        &self,
+        user_id: &str,
+        max_sessions: &HashMap<String, u32>,
+    ) -> Result<UserSettings> {
+        self.db.ensure_initialized().await?;
+        let json = serde_json::to_string(max_sessions)
+            .map_err(|e| crate::Error::Internal(format!("serialize user max_sessions: {e}")))?;
+        sqlx::query!(
+            r#"INSERT INTO user_settings (user_id, auto_approve_prs, max_sessions, created_at, updated_at)
+             VALUES ($1, FALSE, $2,
+                     to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                     to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+             ON CONFLICT (user_id) DO UPDATE SET
+                 max_sessions = EXCLUDED.max_sessions,
                  updated_at = EXCLUDED.updated_at"#,
             user_id,
             json,
@@ -323,5 +371,36 @@ mod tests {
                 "x/y".to_string(),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn upsert_max_sessions_round_trips_clears_and_coexists() {
+        let db = Database::open_in_memory().expect("in-memory db");
+        let user_id = seed_user(&db, "caps").await;
+        let repo = UserSettingsRepository::new(db);
+
+        assert!(repo.get_or_default(&user_id).await.unwrap().max_sessions.is_none());
+
+        let caps = HashMap::from([
+            ("openai/gpt-5.5".to_string(), 2u32),
+            ("fireworks-ai/kimi".to_string(), 3u32),
+        ]);
+        let row = repo.upsert_max_sessions(&user_id, &caps).await.unwrap();
+        assert_eq!(row.max_sessions.as_ref().unwrap().get("openai/gpt-5.5"), Some(&2));
+        assert_eq!(row.max_sessions.as_ref().unwrap().get("fireworks-ai/kimi"), Some(&3));
+
+        // Coexists with the model selection (independent column patch).
+        repo.upsert_models(&user_id, &["openai/gpt-5.5".to_string()])
+            .await
+            .unwrap();
+        let s = repo.get(&user_id).await.unwrap().unwrap();
+        assert_eq!(s.models.unwrap(), vec!["openai/gpt-5.5".to_string()]);
+        assert_eq!(s.max_sessions.unwrap().get("openai/gpt-5.5"), Some(&2));
+
+        // Caps of 0 are dropped on read (→ default downstream); empty clears.
+        repo.upsert_max_sessions(&user_id, &HashMap::from([("x/y".to_string(), 0u32)]))
+            .await
+            .unwrap();
+        assert!(repo.get(&user_id).await.unwrap().unwrap().max_sessions.is_none());
     }
 }

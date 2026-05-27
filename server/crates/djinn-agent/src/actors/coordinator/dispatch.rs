@@ -344,6 +344,34 @@ impl CoordinatorActor {
             }
         };
 
+        // Per-user, per-model concurrency: current running counts keyed by
+        // (creator, model), seeded from the DB and bumped locally on each
+        // dispatch this pass. A task only dispatches while its creator is under
+        // their own cap for the chosen model — the sole admission control, since
+        // the slot pool is elastic (spawns on demand, no global ceiling).
+        let mut running_by_user_model: HashMap<(String, String), u32> =
+            match SessionRepository::new(
+                self.db.clone(),
+                crate::events::event_bus_for(&self.events_tx),
+            )
+            .count_active_by_user_and_model()
+            .await
+            {
+                Ok(rows) => rows
+                    .into_iter()
+                    .filter_map(|(creator, model, cnt)| {
+                        creator.map(|c| ((c, model), u32::try_from(cnt).unwrap_or(0)))
+                    })
+                    .collect(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "CoordinatorActor: per-user concurrency counts failed; proceeding without caps");
+                    HashMap::new()
+                }
+            };
+        // Memoized per-creator cap maps (model_id → max concurrent) for this pass.
+        let mut creator_caps: HashMap<String, std::collections::HashMap<String, u32>> =
+            HashMap::new();
+
         // Cache readiness per project across this dispatch pass so we don't
         // hammer the DB on every task.
         let gate_enabled = readiness_gate_enabled();
@@ -530,6 +558,40 @@ impl CoordinatorActor {
                 }
                 continue;
             }
+
+            // Per-user cap gate: keep only models where this task's creator is
+            // under their own concurrency cap (default 1 when unset). Eligible
+            // but all-at-cap ⇒ the user is simply busy — skip this pass (NOT
+            // terminal, no streak/cooldown; retries next tick as their sessions
+            // free). Tasks with no creator (legacy NULL) are ungated.
+            if let Some(c) = creator.as_deref() {
+                if !creator_caps.contains_key(c) {
+                    let caps = djinn_db::UserSettingsRepository::new(self.db.clone())
+                        .get(c)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|s| s.max_sessions)
+                        .unwrap_or_default();
+                    creator_caps.insert(c.to_string(), caps);
+                }
+                let caps = &creator_caps[c];
+                model_ids.retain(|m| {
+                    let used = running_by_user_model
+                        .get(&(c.to_string(), m.clone()))
+                        .copied()
+                        .unwrap_or(0);
+                    used < caps.get(m).copied().unwrap_or(1)
+                });
+                if model_ids.is_empty() {
+                    tracing::debug!(
+                        task_id = %task.short_id,
+                        role,
+                        "CoordinatorActor: task owner at per-model concurrency cap — deferring"
+                    );
+                    continue;
+                }
+            }
             let model_ids: &[String] = &model_ids;
 
             match self.pool.has_session(&task.id).await {
@@ -604,6 +666,17 @@ impl CoordinatorActor {
                         },
                     );
                     self.dispatched += 1;
+                    // Bump the per-user running count for the model actually
+                    // used (the first health-available one — the elastic pool
+                    // accepts it), so further same-creator+model tasks in THIS
+                    // pass respect the cap before the session row is visible.
+                    if let Some(c) = creator.as_deref()
+                        && let Some(used) = model_ids.iter().find(|m| self.health.is_available(m))
+                    {
+                        *running_by_user_model
+                            .entry((c.to_string(), used.clone()))
+                            .or_insert(0) += 1;
+                    }
                 }
                 DispatchOutcome::AtCapacity => {
                     tracing::debug!(

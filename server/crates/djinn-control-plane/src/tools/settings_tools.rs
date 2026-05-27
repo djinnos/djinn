@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 
@@ -33,10 +31,10 @@ pub struct SettingsSetParams {
     #[schemars(with = "Option<i64>")]
     pub dispatch_limit: Option<u32>,
     /// Ordered list of models available to all agents (e.g. ["openai/gpt-4o"]). Omit to keep current value.
+    /// This is the deployment FALLBACK list (used for tasks with no creator and
+    /// users with no per-user selection); per-user model selection + concurrency
+    /// caps live in `user_settings_*`.
     pub models: Option<Vec<String>>,
-    /// Per-model concurrent session caps (e.g. {"openai/gpt-4o": 4}). Omit to keep current value.
-    #[schemars(with = "Option<HashMap<String, i64>>")]
-    pub max_sessions: Option<HashMap<String, u32>>,
     /// Enable the Linux-only ADR-057 memory FUSE mount for filesystem-first note workflows. Disabled by default; requires a Linux build with the `memory-mount` cargo feature. The mounted path serves the current session-selected task/worktree view when available and otherwise falls back to the canonical `main` view.
     pub memory_mount_enabled: Option<bool>,
     /// Absolute path for the Linux memory mount. The directory must already exist and be empty at startup. This path hosts the current session-selected memory view; no additional branch directories are exposed in this slice.
@@ -135,9 +133,6 @@ impl DjinnMcpServer {
         }
         if let Some(v) = p.models {
             settings.models = Some(v);
-        }
-        if let Some(v) = p.max_sessions {
-            settings.max_sessions = Some(v);
         }
         if let Some(v) = p.memory_mount_enabled {
             settings.memory_mount_enabled = Some(v);
