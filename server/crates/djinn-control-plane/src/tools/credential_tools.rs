@@ -3,6 +3,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::server::DjinnMcpServer;
+use djinn_core::auth_context::current_user_id;
 use djinn_provider::repos::CredentialRepository;
 
 // ── credential_set ────────────────────────────────────────────────────────────
@@ -141,7 +142,9 @@ impl DjinnMcpServer {
     pub async fn credential_list(&self) -> Json<CredentialListResponse> {
         let repo = CredentialRepository::new(self.state.db().clone(), self.state.event_bus());
 
-        let credentials = match repo.list().await {
+        // Per-user: the caller's own credentials plus org-shared fallbacks, so
+        // the UI's "configured" state never reflects another user's keys.
+        let credentials = match repo.list_for_user(current_user_id().as_deref()).await {
             Ok(creds) => creds
                 .iter()
                 .map(|c| CredentialSummary {

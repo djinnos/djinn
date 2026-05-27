@@ -444,6 +444,10 @@ impl RuntimeOps for AppState {
         AppState::reset_runtime_settings(self).await;
     }
 
+    async fn apply_user_model_change(&self) {
+        AppState::apply_user_model_change(self).await;
+    }
+
     async fn persist_model_health_state(&self) {
         AppState::persist_model_health_state(self).await;
     }

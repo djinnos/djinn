@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, github_id, github_login, github_name, github_avatar_url,\n                      is_member_of_org AS \"is_member_of_org!: bool\",\n                      last_seen_at, created_at\n               FROM users\n               ORDER BY github_login",
+  "query": "SELECT id, github_id, github_login, github_name, github_avatar_url,\n                      is_member_of_org AS \"is_member_of_org!: bool\",\n                      is_admin AS \"is_admin!: bool\",\n                      last_seen_at, created_at\n               FROM users\n               ORDER BY github_login",
   "describe": {
     "columns": [
       {
@@ -35,11 +35,16 @@
       },
       {
         "ordinal": 6,
+        "name": "is_admin!: bool",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
         "name": "last_seen_at",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "created_at",
         "type_info": "Varchar"
       }
@@ -54,9 +59,10 @@
       true,
       true,
       false,
+      false,
       true,
       false
     ]
   },
-  "hash": "80e75a180d52a1fd26ea8872367a29438b83e42d1f830ed5bb100f3c225fbe3f"
+  "hash": "e43bba6069441647e469a09b3ac09eb2b919df95fee4dc75625505baefcae351"
 }

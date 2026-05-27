@@ -129,6 +129,61 @@ impl McpState {
         self.runtime.reset_runtime_settings().await;
     }
 
+    /// Recompute fleet slot-pool capacity for the new union of per-user model
+    /// selections and trigger a dispatch pass. Delegates to the runtime.
+    pub async fn apply_user_model_change(&self) {
+        self.runtime.apply_user_model_change().await;
+    }
+
+    /// Validate that every model in `models` belongs to a provider connected
+    /// *for `user_id`* (their own credential or the org-shared fallback). Used
+    /// by `user_settings_set` so a user can't select a model on a provider they
+    /// haven't connected. Empty selection is always valid.
+    pub async fn validate_models_for_user(
+        &self,
+        models: &[String],
+        user_id: Option<&str>,
+    ) -> Result<(), String> {
+        use std::collections::HashSet;
+        if models.is_empty() {
+            return Ok(());
+        }
+        let configured_provider_ids: HashSet<String> = models
+            .iter()
+            .map(|model| {
+                model
+                    .split_once('/')
+                    .map(|(provider_id, _)| provider_id)
+                    .unwrap_or(model.as_str())
+                    .to_string()
+            })
+            .collect();
+
+        let repo = djinn_provider::repos::CredentialRepository::new(
+            self.db.clone(),
+            self.event_bus.clone(),
+        );
+        let credentials = repo
+            .list_for_user(user_id)
+            .await
+            .map_err(|e| format!("list credentials: {e}"))?;
+        let connected = self.catalog.connected_provider_ids(&credentials);
+
+        let mut missing: Vec<String> = configured_provider_ids
+            .difference(&connected)
+            .cloned()
+            .collect();
+        missing.sort();
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "models reference providers you haven't connected: {}",
+                missing.join(", ")
+            ))
+        }
+    }
+
     pub async fn persist_model_health_state(&self) {
         self.runtime.persist_model_health_state().await;
     }
@@ -218,6 +273,7 @@ pub mod stubs {
             Ok(())
         }
         async fn trigger_mirror_refresh(&self, _: &str) {}
+        async fn apply_user_model_change(&self) {}
     }
 
     pub struct StubGitOps;

@@ -123,12 +123,15 @@ function ModelRow({
   availableModels,
   onRemoveModel,
   onUpdateMaxSessions,
+  showCap,
 }: {
   entry: AgentModelEntry;
   index: number;
   availableModels: ProviderModel[];
   onRemoveModel: (index: number) => void;
   onUpdateMaxSessions: (index: number, maxConcurrent: number) => void;
+  /** Render the global per-model concurrency cap field (admin-only). */
+  showCap: boolean;
 }) {
   const controls = useDragControls();
   const [sessionText, setSessionText] = useState(String(entry.max_concurrent));
@@ -174,19 +177,21 @@ function ModelRow({
           </div>
           <div className="text-xs text-muted-foreground/60">{formatProvider(entry.provider)}</div>
         </div>
-        {/* Max sessions */}
-        <div className="flex items-center gap-2 shrink-0">
-          <Label className="text-sm text-muted-foreground">Sessions:</Label>
-          <Input
-            type="text"
-            inputMode="numeric"
-            value={sessionText}
-            onChange={(e) => setSessionText(e.target.value)}
-            onBlur={commitSessions}
-            onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-            className="w-16 h-9 text-center"
-          />
-        </div>
+        {/* Max sessions — global/operational cap, only editable by admins. */}
+        {showCap && (
+          <div className="flex items-center gap-2 shrink-0">
+            <Label className="text-sm text-muted-foreground">Sessions:</Label>
+            <Input
+              type="text"
+              inputMode="numeric"
+              value={sessionText}
+              onChange={(e) => setSessionText(e.target.value)}
+              onBlur={commitSessions}
+              onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+              className="w-16 h-9 text-center"
+            />
+          </div>
+        )}
         {/* Remove */}
         <Button
           variant="ghost"
@@ -216,6 +221,11 @@ interface AgentConfigProps {
   onSave: () => void;
   hideHeader?: boolean;
   hideEmptyState?: boolean;
+  /**
+   * When true, render the per-model concurrency cap field (a global,
+   * operator-managed setting). Non-admins only see the ordered model list.
+   */
+  isAdmin?: boolean;
 }
 
 export function AgentConfig({
@@ -233,6 +243,7 @@ export function AgentConfig({
   onSave,
   hideHeader,
   hideEmptyState,
+  isAdmin = false,
 }: AgentConfigProps) {
   // Track reorder via framer-motion Reorder — it gives us the new array order directly.
   const modelsRef = useRef(models);
@@ -275,7 +286,7 @@ export function AgentConfig({
       {!hideHeader && (
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h3 className="text-xl font-bold">Models</h3>
+            <h3 className="text-xl font-bold">Your models</h3>
             <p className="text-sm text-muted-foreground">Priority = top → bottom (fallback order)</p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -329,6 +340,7 @@ export function AgentConfig({
                   availableModels={availableModels}
                   onRemoveModel={onRemoveModel}
                   onUpdateMaxSessions={onUpdateMaxSessions}
+                  showCap={isAdmin}
                 />
               ))}
             </Reorder.Group>

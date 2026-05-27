@@ -448,21 +448,39 @@ impl CoordinatorActor {
                 continue;
             };
 
-            // Look up the default DB role for this task's project + base_role.
-            // If model_preference is set and resolves to a known model, prepend it
-            // so the coordinator prefers it over the globally configured priorities.
+            // Resolve the model fallback list for this task with precedence:
+            //   1. the task CREATOR's per-user selection (user_settings.models),
+            //   2. the project's default-role model_preference,
+            //   3. the global per-role priorities.
+            // A task runs with its creator's chosen models first; credentials
+            // already resolve per-creator at run time (supervisor_runner), so
+            // this keeps selection and resolution consistently per-user.
+            let user_model_ids = self
+                .resolve_user_model_priority(task.created_by_user_id.as_deref())
+                .await;
             let model_preference_ids = self
-                .resolve_role_model_preference(&task.project_id, role)
+                .resolve_role_model_preference(
+                    &task.project_id,
+                    role,
+                    task.created_by_user_id.as_deref(),
+                )
                 .await;
             let combined_models: Vec<String>;
-            let model_ids: &[String] = if model_preference_ids.is_empty() {
+            let model_ids: &[String] = if user_model_ids.is_empty() && model_preference_ids.is_empty()
+            {
                 base_model_ids
             } else {
-                // Prepend model_preference; deduplicate while preserving order.
+                // Merge user → project preference → global base, dropping
+                // duplicates while preserving the precedence order.
                 let mut seen = std::collections::HashSet::new();
-                let mut merged =
-                    Vec::with_capacity(model_preference_ids.len() + base_model_ids.len());
-                for id in model_preference_ids.iter().chain(base_model_ids.iter()) {
+                let mut merged = Vec::with_capacity(
+                    user_model_ids.len() + model_preference_ids.len() + base_model_ids.len(),
+                );
+                for id in user_model_ids
+                    .iter()
+                    .chain(model_preference_ids.iter())
+                    .chain(base_model_ids.iter())
+                {
                     if seen.insert(id.clone()) {
                         merged.push(id.clone());
                     }
@@ -878,6 +896,60 @@ impl CoordinatorActor {
         }
     }
 
+    /// Resolve the task CREATOR's per-user model selection
+    /// (`user_settings.models`), validated against that user's connected
+    /// providers (own + org-shared fallback). Returns the ordered, full
+    /// `provider/model` ids the creator selected and can still use. Empty when
+    /// the task has no creator, the user made no selection, or none of the
+    /// selected models' providers are connected for them — callers then fall
+    /// back to the project preference / global priorities.
+    async fn resolve_user_model_priority(&self, created_by_user_id: Option<&str>) -> Vec<String> {
+        #[cfg(test)]
+        {
+            let _ = created_by_user_id;
+            #[allow(clippy::needless_return)]
+            return Vec::new();
+        }
+
+        #[cfg(not(test))]
+        {
+            let Some(uid) = created_by_user_id else {
+                return Vec::new();
+            };
+            let us_repo = djinn_db::UserSettingsRepository::new(self.db.clone());
+            let models = match us_repo.get(uid).await {
+                Ok(Some(s)) => s.models.unwrap_or_default(),
+                _ => return Vec::new(),
+            };
+            if models.is_empty() {
+                return Vec::new();
+            }
+
+            // Drop any selected model whose provider the creator no longer has
+            // connected (own or org-shared) — never trust a stale selection.
+            let cred_repo = djinn_provider::repos::CredentialRepository::new(
+                self.db.clone(),
+                crate::events::event_bus_for(&self.events_tx),
+            );
+            let credentials = match cred_repo.list_for_user(Some(uid)).await {
+                Ok(c) => c,
+                Err(_) => return Vec::new(),
+            };
+            let connected = self.catalog.connected_provider_ids(&credentials);
+            if connected.is_empty() {
+                return Vec::new();
+            }
+
+            models
+                .into_iter()
+                .filter(|m| {
+                    let provider = m.split_once('/').map(|(p, _)| p).unwrap_or(m.as_str());
+                    connected.contains(provider)
+                })
+                .collect()
+        }
+    }
+
     /// Resolve a `provider/model` list for a DB role's `model_preference`.
     ///
     /// Looks up the default AgentRole for `(project_id, base_role)`.  If the
@@ -892,10 +964,11 @@ impl CoordinatorActor {
         &self,
         project_id: &str,
         base_role: &str,
+        created_by_user_id: Option<&str>,
     ) -> Vec<String> {
         #[cfg(test)]
         {
-            let _ = (project_id, base_role);
+            let _ = (project_id, base_role, created_by_user_id);
             #[allow(clippy::needless_return)]
             return Vec::new();
         }
@@ -935,7 +1008,9 @@ impl CoordinatorActor {
                 self.db.clone(),
                 crate::events::event_bus_for(&self.events_tx),
             );
-            let credentials = match cred_repo.list().await {
+            // Validate against the task creator's connected providers (own +
+            // org-shared fallback) — never another user's private credential.
+            let credentials = match cred_repo.list_for_user(created_by_user_id).await {
                 Ok(c) => c,
                 Err(_) => return Vec::new(),
             };

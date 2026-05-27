@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use djinn_agent::actors::slot::{ModelSlotConfig, SlotPoolConfig};
 use djinn_agent::resource_monitor::MemoryStatus;
 use djinn_core::models::DjinnSettings;
-use djinn_db::SettingsRepository;
+use djinn_db::{SettingsRepository, UserSettingsRepository};
 use djinn_provider::repos::CredentialRepository;
 
 use super::{AppState, SETTINGS_RAW_KEY};
@@ -15,8 +15,20 @@ const AUTO_MAX_SLOTS_CAP: u32 = 8;
 const ALL_ROLES: &[&str] = &["worker", "reviewer", "lead", "planner", "architect"];
 
 impl AppState {
-    fn slot_pool_config_for_settings(settings: &DjinnSettings) -> SlotPoolConfig {
-        let models_list = settings.models_or_default();
+    fn slot_pool_config_for_settings(
+        settings: &DjinnSettings,
+        extra_models: &[String],
+    ) -> SlotPoolConfig {
+        // Capacity covers the UNION of the global deployment model list and
+        // every user's per-user selection — a task runs with its creator's
+        // chosen model, so the pool must have a slot for any of them.
+        let mut models_list = settings.models_or_default();
+        let mut seen: HashSet<String> = models_list.iter().cloned().collect();
+        for m in extra_models {
+            if seen.insert(m.clone()) {
+                models_list.push(m.clone());
+            }
+        }
         let max_sessions = settings.max_sessions_or_default();
 
         let all_roles: HashSet<String> = ALL_ROLES.iter().map(|r| r.to_string()).collect();
@@ -162,6 +174,32 @@ impl AppState {
         }
     }
 
+    /// Distinct union of every user's per-user model selection, for sizing the
+    /// shared slot pool. Best-effort: a DB error logs and yields an empty list
+    /// (the pool then covers only the global deployment models).
+    async fn all_user_selected_models(&self) -> Vec<String> {
+        UserSettingsRepository::new(self.db().clone())
+            .all_selected_models()
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "failed to load per-user model selections for slot pool");
+                Vec::new()
+            })
+    }
+
+    /// React to a change in some user's per-user model selection: re-derive the
+    /// slot-pool capacity for the new union of selections and trigger a
+    /// dispatch pass. Re-applies the (unchanged) global coordinator config too,
+    /// which is idempotent. Called from `user_settings_set`.
+    pub async fn apply_user_model_change(&self) {
+        let repo = SettingsRepository::new(self.db().clone(), self.event_bus());
+        let settings = match repo.get(SETTINGS_RAW_KEY).await {
+            Ok(Some(s)) => DjinnSettings::from_db_value(&s.value),
+            _ => DjinnSettings::default(),
+        };
+        self.apply_runtime_settings(&settings).await;
+    }
+
     pub async fn reset_runtime_settings(&self) {
         *self.inner.memory_mount.lock().await = None;
         if let Some(coordinator) = self.coordinator().await {
@@ -243,8 +281,9 @@ impl AppState {
         }
 
         if let Some(pool) = self.pool().await {
+            let user_models = self.all_user_selected_models().await;
             let _ = pool
-                .reconfigure(Self::slot_pool_config_for_settings(settings))
+                .reconfigure(Self::slot_pool_config_for_settings(settings, &user_models))
                 .await;
         }
 

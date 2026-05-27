@@ -12,8 +12,9 @@ import { CodeGraphPage } from "@/pages/CodeGraphPage";
 import { ProposalsPage } from "@/pages/ProposalsPage";
 import { RepositoriesPage } from "@/pages/RepositoriesPage";
 import { ProjectEnvironmentPage } from "@/pages/ProjectEnvironmentPage";
+import { UsersPage } from "@/pages/UsersPage";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
-import { AuthGate } from "@/components/AuthGate";
+import { AuthGate, useAuthUser } from "@/components/AuthGate";
 import { useEffect, useRef } from "react";
 import { useProjectsBootstrap } from "@/hooks/useProjectsBootstrap";
 import { Navigate, Route, Routes } from "react-router-dom";
@@ -25,6 +26,7 @@ import { useProjectGateStore } from "@/stores/projectGateStore";
 import { RepositoryOnboarding } from "@/components/RepositoryOnboarding";
 
 function MainLayout() {
+  const isAdmin = useAuthUser()?.isAdmin ?? false;
   return (
     <main className="flex h-screen overflow-hidden bg-background">
       <Sidebar />
@@ -52,6 +54,12 @@ function MainLayout() {
 
             {/* Per-project pages */}
             <Route path="/projects/:id/environment" element={<ProjectEnvironmentPage />} />
+
+            {/* Users — admin-only roster; non-admins are bounced to the board */}
+            <Route
+              path="/users"
+              element={isAdmin ? <UsersPage /> : <Navigate to="/kanban" replace />}
+            />
 
             {/* Settings */}
             <Route path="/settings" element={<SettingsPage />} />

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { fetchProviderModels } from '@/api/settings';
+import { fetchProviderModels, type ProviderModel } from '@/api/settings';
+import { userSettingsQueryOptions } from '@/api/queryOptions';
 import { sendChatMessage } from '@/api/chat';
 import { getChatSessionMessages } from '@/api/chatSessions';
 import { Shimmer } from '@/components/ai-elements/shimmer';
@@ -62,7 +63,25 @@ export function ChatView() {
   const [toolCalls, setToolCalls] = useState<StreamingToolCall[]>([]);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
-  const { data: models = [] } = useQuery({ queryKey: ['provider-models-connected'], queryFn: fetchProviderModels });
+  const { data: connectedModels = [] } = useQuery({ queryKey: ['provider-models-connected'], queryFn: fetchProviderModels });
+  // Shared per-user selection (same query the Settings → Models tab uses).
+  const { data: userSettings } = useQuery(userSettingsQueryOptions());
+
+  // Order/filter the connected (tool_call-capable) models by the user's
+  // per-user `models` selection: when non-empty, show exactly those ids in
+  // that priority order, dropping any that aren't connected. When empty, fall
+  // back to the full connected list.
+  const models = useMemo<ProviderModel[]>(() => {
+    const selection = userSettings?.models ?? [];
+    if (selection.length === 0) return connectedModels;
+    const byId = new Map(connectedModels.map((m) => [m.id, m]));
+    const ordered: ProviderModel[] = [];
+    for (const id of selection) {
+      const match = byId.get(id);
+      if (match) ordered.push(match);
+    }
+    return ordered;
+  }, [connectedModels, userSettings?.models]);
 
   // Lazily fetch messages for the active session. The store treats this as
   // a cache seed — subsequent edits during streaming stay in memory.

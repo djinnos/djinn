@@ -456,6 +456,7 @@ mod tests {
             github_name: None,
             github_avatar_url: None,
             is_member_of_org: is_member,
+            is_admin: false,
             last_seen_at: None,
             created_at: "2024-01-01T00:00:00.000Z".to_string(),
         }

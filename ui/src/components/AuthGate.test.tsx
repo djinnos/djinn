@@ -99,6 +99,7 @@ describe("AuthGate", () => {
       login: "alice",
       name: null,
       avatarUrl: null,
+      isAdmin: false,
     });
     vi.mocked(fetchSetupStatus).mockResolvedValue({
       needsAppInstall: false,

@@ -26,6 +26,10 @@ pub struct User {
     pub github_name: Option<String>,
     pub github_avatar_url: Option<String>,
     pub is_member_of_org: bool,
+    /// Admin privilege bit. The first user to sign in (when no admin exists
+    /// yet) is stamped admin by the auth callback; gates the global runtime
+    /// settings. See migration 30.
+    pub is_admin: bool,
     pub last_seen_at: Option<String>,
     pub created_at: String,
 }
@@ -86,6 +90,7 @@ impl UserRepository {
             User,
             r#"SELECT id, github_id, github_login, github_name, github_avatar_url,
                       is_member_of_org AS "is_member_of_org!: bool",
+                      is_admin AS "is_admin!: bool",
                       last_seen_at, created_at
                FROM users WHERE github_id = $1"#,
             github_id,
@@ -102,6 +107,7 @@ impl UserRepository {
             User,
             r#"SELECT id, github_id, github_login, github_name, github_avatar_url,
                       is_member_of_org AS "is_member_of_org!: bool",
+                      is_admin AS "is_admin!: bool",
                       last_seen_at, created_at
                FROM users WHERE id = $1"#,
             id,
@@ -116,6 +122,7 @@ impl UserRepository {
             User,
             r#"SELECT id, github_id, github_login, github_name, github_avatar_url,
                       is_member_of_org AS "is_member_of_org!: bool",
+                      is_admin AS "is_admin!: bool",
                       last_seen_at, created_at
                FROM users WHERE github_id = $1"#,
             github_id,
@@ -137,6 +144,34 @@ impl UserRepository {
         .execute(self.db.pool())
         .await?;
         Ok(())
+    }
+
+    /// Flip `is_admin` without touching other attributes. Used by the auth
+    /// callback to stamp the bootstrap admin, and available for manual/admin
+    /// promotion paths.
+    pub async fn set_admin_status(&self, id: &str, is_admin: bool) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            "UPDATE users SET is_admin = $1 WHERE id = $2",
+            is_admin,
+            id,
+        )
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Count users with `is_admin = TRUE`. The auth callback uses this to
+    /// bootstrap the first signer-in as admin: when this returns 0, the
+    /// just-upserted user is stamped admin.
+    pub async fn admin_count(&self) -> Result<i64> {
+        self.db.ensure_initialized().await?;
+        let n: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count!" FROM users WHERE is_admin = TRUE"#,
+        )
+        .fetch_one(self.db.pool())
+        .await?;
+        Ok(n)
     }
 
     /// Bump `last_seen_at` to the current server time for a user known to
@@ -165,6 +200,7 @@ impl UserRepository {
             User,
             r#"SELECT id, github_id, github_login, github_name, github_avatar_url,
                       is_member_of_org AS "is_member_of_org!: bool",
+                      is_admin AS "is_admin!: bool",
                       last_seen_at, created_at
                FROM users
                ORDER BY github_login"#,
@@ -250,5 +286,25 @@ mod tests {
         repo.set_member_status(&user.id, true).await.unwrap();
         let after_grant = repo.get_by_id(&user.id).await.unwrap().unwrap();
         assert!(after_grant.is_member_of_org);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn admin_count_and_set_admin_status() {
+        let repo = UserRepository::new(test_db());
+        assert_eq!(repo.admin_count().await.unwrap(), 0);
+
+        let u = repo
+            .upsert_from_github(7, "first", None, None)
+            .await
+            .unwrap();
+        assert!(!u.is_admin, "new users default to non-admin");
+        assert_eq!(repo.admin_count().await.unwrap(), 0);
+
+        repo.set_admin_status(&u.id, true).await.unwrap();
+        assert_eq!(repo.admin_count().await.unwrap(), 1);
+        assert!(repo.get_by_id(&u.id).await.unwrap().unwrap().is_admin);
+
+        repo.set_admin_status(&u.id, false).await.unwrap();
+        assert_eq!(repo.admin_count().await.unwrap(), 0);
     }
 }

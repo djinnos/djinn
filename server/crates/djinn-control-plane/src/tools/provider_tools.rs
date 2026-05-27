@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::server::DjinnMcpServer;
+use djinn_core::auth_context::current_user_id;
 use djinn_core::models::{Model, Provider};
 use djinn_provider::catalog::builtin;
 use djinn_provider::catalog::health::ModelHealth;
@@ -394,7 +395,10 @@ impl DjinnMcpServer {
         let merged_ids = builtin::merged_provider_ids();
         let credential_repo =
             CredentialRepository::new(self.state.db().clone(), self.state.event_bus());
-        let (credential_provider_ids, credential_key_names) = match credential_repo.list().await {
+        let (credential_provider_ids, credential_key_names) = match credential_repo
+            .list_for_user(current_user_id().as_deref())
+            .await
+        {
             Ok(creds) => {
                 let provider_ids = creds.iter().map(|c| c.provider_id.clone()).collect();
                 let key_names = creds.iter().map(|c| c.key_name.clone()).collect();
@@ -452,7 +456,10 @@ impl DjinnMcpServer {
         let merged_ids = builtin::merged_provider_ids();
         let credential_repo =
             CredentialRepository::new(self.state.db().clone(), self.state.event_bus());
-        let (credential_provider_ids, credential_key_names) = match credential_repo.list().await {
+        let (credential_provider_ids, credential_key_names) = match credential_repo
+            .list_for_user(current_user_id().as_deref())
+            .await
+        {
             Ok(creds) => {
                 let provider_ids = creds.iter().map(|c| c.provider_id.clone()).collect();
                 let key_names = creds.iter().map(|c| c.key_name.clone()).collect();
@@ -556,10 +563,13 @@ impl DjinnMcpServer {
         let merged_ids = builtin::merged_provider_ids();
         let credential_repo =
             CredentialRepository::new(self.state.db().clone(), self.state.event_bus());
-        let credentials = credential_repo.list().await.unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "provider_models_connected: failed to load credentials");
-            Vec::new()
-        });
+        let credentials = credential_repo
+            .list_for_user(current_user_id().as_deref())
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "provider_models_connected: failed to load credentials");
+                Vec::new()
+            });
         let connected_set = self.state.catalog().connected_provider_ids(&credentials);
 
         // Collect connected provider IDs including merged children.

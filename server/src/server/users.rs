@@ -22,6 +22,8 @@ struct UserResponse {
     github_name: Option<String>,
     github_avatar_url: Option<String>,
     is_member_of_org: bool,
+    is_admin: bool,
+    last_seen_at: Option<String>,
 }
 
 impl From<&User> for UserResponse {
@@ -32,6 +34,8 @@ impl From<&User> for UserResponse {
             github_name: u.github_name.clone(),
             github_avatar_url: u.github_avatar_url.clone(),
             is_member_of_org: u.is_member_of_org,
+            is_admin: u.is_admin,
+            last_seen_at: u.last_seen_at.clone(),
         }
     }
 }

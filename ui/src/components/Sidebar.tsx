@@ -15,6 +15,7 @@ import {
   Idea01Icon,
   ConnectIcon,
   GithubIcon,
+  UserGroupIcon,
 } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react';
 import logoSvg from '@/assets/logo.svg';
@@ -140,6 +141,8 @@ export function Sidebar() {
       setActiveSection('proposals');
     } else if (location.pathname.startsWith('/repositories')) {
       setActiveSection('repositories');
+    } else if (location.pathname.startsWith('/users')) {
+      setActiveSection('users');
     } else if (location.pathname.startsWith('/settings')) {
       setActiveSection('settings');
     } else {
@@ -231,6 +234,14 @@ export function Sidebar() {
 
       {/* Footer */}
       <div className="border-t p-3 space-y-2">
+        {user?.isAdmin && (
+          <NavItem
+            icon={<HugeiconsIcon icon={UserGroupIcon} size={16} />}
+            label="Users"
+            isActive={activeSection === 'users'}
+            onClick={() => navigate('/users')}
+          />
+        )}
         <NavItem
           icon={<HugeiconsIcon icon={Settings01Icon} size={16} />}
           label="Settings"

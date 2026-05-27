@@ -118,6 +118,11 @@ pub trait RuntimeOps: Send + Sync {
     /// enqueued. Fire-and-forget: returns once the work is scheduled, not once
     /// it completes. A no-op on runtimes that don't own the mirror manager.
     async fn trigger_mirror_refresh(&self, project_id: &str);
+    /// React to a change in some user's per-user model selection: re-derive the
+    /// shared slot-pool capacity for the new union of all users' selections and
+    /// trigger a dispatch pass. Fire-and-forget; a no-op on runtimes without a
+    /// live coordinator/pool.
+    async fn apply_user_model_change(&self);
 }
 
 // ── Git ─────────────────────────────────────────────────────────────────────────

@@ -54,6 +54,7 @@ mod tests {
             Ok(())
         }
         async fn trigger_mirror_refresh(&self, _: &str) {}
+        async fn apply_user_model_change(&self) {}
     }
 
     #[async_trait::async_trait]
@@ -82,6 +83,7 @@ mod tests {
             Ok(())
         }
         async fn trigger_mirror_refresh(&self, _: &str) {}
+        async fn apply_user_model_change(&self) {}
     }
 
     fn event_bus_for(tx: &broadcast::Sender<DjinnEventEnvelope>) -> EventBus {

@@ -149,6 +149,9 @@ pub struct AuthenticatedUser {
     pub login: String,
     pub name: Option<String>,
     pub avatar_url: Option<String>,
+    /// Admin privilege, sourced from the joined `users` row. Gates global
+    /// runtime settings and the Users admin page.
+    pub is_admin: bool,
     /// The raw cookie token, for callers that want to refresh or revoke it.
     #[serde(skip)]
     pub session_token: String,
@@ -186,6 +189,7 @@ pub async fn authenticate(
         login: user.github_login,
         name: user.github_name,
         avatar_url: user.github_avatar_url,
+        is_admin: user.is_admin,
         session_token: session.token,
         github_access_token: session.github_access_token,
     }))
@@ -199,6 +203,8 @@ struct MeResponse {
     login: String,
     name: Option<String>,
     avatar_url: Option<String>,
+    /// Whether this user is an admin (gates the global settings + Users page).
+    is_admin: bool,
     /// GitHub org this deployment is locked to. Surfaced so the web client can
     /// show "signed in as <login> on <org>" without a second round-trip.
     /// `None` when the deployment hasn't finished the manifest flow yet.
@@ -214,6 +220,7 @@ async fn me(State(state): State<AppState>, headers: HeaderMap) -> Response {
                 login: user.login,
                 name: user.name,
                 avatar_url: user.avatar_url,
+                is_admin: user.is_admin,
                 org_login,
             })
             .into_response()
@@ -507,6 +514,26 @@ async fn github_callback(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
+
+    // Bootstrap admin: the first user to sign in (when no admin exists yet)
+    // becomes admin. This is the only automatic admin grant — further changes
+    // are manual `UPDATE users SET is_admin = …`. Best-effort: a failure here
+    // must not block sign-in (the next login retries while admin_count is 0).
+    if !user_row.is_admin {
+        match users_repo.admin_count().await {
+            Ok(0) => {
+                if let Err(e) = users_repo.set_admin_status(&user_row.id, true).await {
+                    tracing::warn!(error = %e, user_id = %user_row.id, "auth callback: failed to stamp bootstrap admin");
+                } else {
+                    tracing::info!(user_id = %user_row.id, login = %user.login, "auth callback: stamped first user as admin");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "auth callback: admin_count check failed; skipping bootstrap");
+            }
+        }
+    }
 
     // 6. Persist a new session row, linked to the users table via `user_fk`.
     //

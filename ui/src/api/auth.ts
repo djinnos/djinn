@@ -14,6 +14,7 @@ export interface User {
   login: string;
   name: string | null;
   avatarUrl: string | null;
+  isAdmin: boolean;
 }
 
 interface ServerUser {
@@ -21,6 +22,7 @@ interface ServerUser {
   login: string;
   name?: string | null;
   avatar_url?: string | null;
+  is_admin?: boolean;
 }
 
 function mapUser(raw: ServerUser): User {
@@ -29,6 +31,7 @@ function mapUser(raw: ServerUser): User {
     login: raw.login,
     name: raw.name ?? null,
     avatarUrl: raw.avatar_url ?? null,
+    isAdmin: raw.is_admin ?? false,
   };
 }
 

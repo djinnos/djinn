@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT user_id, auto_approve_prs AS \"auto_approve_prs!: bool\",\n                    created_at, updated_at\n               FROM user_settings WHERE user_id = $1",
+  "query": "SELECT user_id, auto_approve_prs AS \"auto_approve_prs!: bool\",\n                      models, created_at, updated_at\n               FROM user_settings WHERE user_id = $1",
   "describe": {
     "columns": [
       {
@@ -15,11 +15,16 @@
       },
       {
         "ordinal": 2,
+        "name": "models",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
         "name": "created_at",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 3,
+        "ordinal": 4,
         "name": "updated_at",
         "type_info": "Varchar"
       }
@@ -32,9 +37,10 @@
     "nullable": [
       false,
       false,
+      true,
       false,
       false
     ]
   },
-  "hash": "b3aba5a44899fca6416e336fa163853ec7ff2d4505a457feac3e6ad8faeb30f7"
+  "hash": "f1c2536f2008bf09d2cfe7ab7665a29134342a359426511f1c2fc28a248fdc40"
 }

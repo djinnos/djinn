@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n                 s.token                            AS s_token,\n                 s.github_login                     AS s_github_login,\n                 s.github_name                      AS s_github_name,\n                 s.github_avatar_url                AS s_github_avatar_url,\n                 s.github_access_token              AS s_github_access_token,\n                 s.github_access_token_expires_at   AS s_github_access_token_expires_at,\n                 s.github_refresh_token             AS s_github_refresh_token,\n                 s.github_refresh_token_expires_at  AS s_github_refresh_token_expires_at,\n                 s.created_at                       AS s_created_at,\n                 s.expires_at                       AS s_expires_at,\n                 s.user_fk                          AS s_user_fk,\n                 u.id                               AS u_id,\n                 u.github_id                        AS u_github_id,\n                 u.github_login                     AS u_github_login,\n                 u.github_name                      AS u_github_name,\n                 u.github_avatar_url                AS u_github_avatar_url,\n                 u.is_member_of_org                 AS \"u_is_member_of_org!: bool\",\n                 u.last_seen_at                     AS u_last_seen_at,\n                 u.created_at                       AS u_created_at\n               FROM user_auth_sessions s\n               INNER JOIN users u ON u.id = s.user_fk\n               WHERE s.token = $1",
+  "query": "SELECT\n                 s.token                            AS s_token,\n                 s.github_login                     AS s_github_login,\n                 s.github_name                      AS s_github_name,\n                 s.github_avatar_url                AS s_github_avatar_url,\n                 s.github_access_token              AS s_github_access_token,\n                 s.github_access_token_expires_at   AS s_github_access_token_expires_at,\n                 s.github_refresh_token             AS s_github_refresh_token,\n                 s.github_refresh_token_expires_at  AS s_github_refresh_token_expires_at,\n                 s.created_at                       AS s_created_at,\n                 s.expires_at                       AS s_expires_at,\n                 s.user_fk                          AS s_user_fk,\n                 u.id                               AS u_id,\n                 u.github_id                        AS u_github_id,\n                 u.github_login                     AS u_github_login,\n                 u.github_name                      AS u_github_name,\n                 u.github_avatar_url                AS u_github_avatar_url,\n                 u.is_member_of_org                 AS \"u_is_member_of_org!: bool\",\n                 u.is_admin                         AS \"u_is_admin!: bool\",\n                 u.last_seen_at                     AS u_last_seen_at,\n                 u.created_at                       AS u_created_at\n               FROM user_auth_sessions s\n               INNER JOIN users u ON u.id = s.user_fk\n               WHERE s.token = $1",
   "describe": {
     "columns": [
       {
@@ -90,11 +90,16 @@
       },
       {
         "ordinal": 17,
+        "name": "u_is_admin!: bool",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 18,
         "name": "u_last_seen_at",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 18,
+        "ordinal": 19,
         "name": "u_created_at",
         "type_info": "Varchar"
       }
@@ -122,9 +127,10 @@
       true,
       true,
       false,
+      false,
       true,
       false
     ]
   },
-  "hash": "f3487d028882cbc9904e028b8a551c26eba193962329b0d92d5cf660426c54d4"
+  "hash": "30f7d42306bdb26e6b9cb1a80b53a53c492d7225b38e2de82dcecdcfda31c5cc"
 }

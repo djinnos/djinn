@@ -1,7 +1,24 @@
+use std::collections::HashSet;
+
 use djinn_core::models::UserSettings;
 
 use crate::Result;
 use crate::database::Database;
+
+/// Parse the `models` TEXT column (a JSON array of model ids) into the typed
+/// list. `NULL`, empty, an empty array, or invalid JSON all read as `None`
+/// (= "no explicit selection"), so a corrupt value degrades to the global
+/// fallback rather than erroring the whole settings read.
+fn parse_models(raw: Option<&str>) -> Option<Vec<String>> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    match serde_json::from_str::<Vec<String>>(raw) {
+        Ok(v) if !v.is_empty() => Some(v),
+        _ => None,
+    }
+}
 
 pub struct UserSettingsRepository {
     db: Database,
@@ -16,15 +33,24 @@ impl UserSettingsRepository {
     /// Callers that want a defaults-baseline can use `get_or_default`.
     pub async fn get(&self, user_id: &str) -> Result<Option<UserSettings>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as!(
-            UserSettings,
+        // `models` is a JSON-array TEXT column, so we read the raw string with
+        // `query!` and parse it rather than letting `query_as!` try to decode
+        // it into `Vec<String>` directly.
+        let row = sqlx::query!(
             r#"SELECT user_id, auto_approve_prs AS "auto_approve_prs!: bool",
-                    created_at, updated_at
+                      models, created_at, updated_at
                FROM user_settings WHERE user_id = $1"#,
             user_id,
         )
         .fetch_optional(self.db.pool())
-        .await?)
+        .await?;
+        Ok(row.map(|r| UserSettings {
+            user_id: r.user_id,
+            auto_approve_prs: r.auto_approve_prs,
+            models: parse_models(r.models.as_deref()),
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }))
     }
 
     /// Read-side convenience: never returns `None`. Callers downstream of
@@ -79,6 +105,55 @@ impl UserSettingsRepository {
         self.get(user_id).await?.ok_or_else(|| {
             crate::Error::Internal(format!("user_settings row missing after upsert for {user_id}"))
         })
+    }
+
+    /// Upsert the per-user ordered model selection. `models` is stored verbatim
+    /// (order preserved = priority high→low) as a JSON-array TEXT value. Pass an
+    /// empty slice to clear the selection (stored as `[]`, read back as `None`
+    /// → global fallback). Returns the resulting row.
+    pub async fn upsert_models(&self, user_id: &str, models: &[String]) -> Result<UserSettings> {
+        self.db.ensure_initialized().await?;
+        let json = serde_json::to_string(models)
+            .map_err(|e| crate::Error::Internal(format!("serialize user models: {e}")))?;
+        sqlx::query!(
+            r#"INSERT INTO user_settings (user_id, auto_approve_prs, models, created_at, updated_at)
+             VALUES ($1, FALSE, $2,
+                     to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                     to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+             ON CONFLICT (user_id) DO UPDATE SET
+                 models = EXCLUDED.models,
+                 updated_at = EXCLUDED.updated_at"#,
+            user_id,
+            json,
+        )
+        .execute(self.db.pool())
+        .await?;
+        self.get(user_id).await?.ok_or_else(|| {
+            crate::Error::Internal(format!("user_settings row missing after upsert for {user_id}"))
+        })
+    }
+
+    /// Distinct union of every user's selected model ids (order not meaningful
+    /// here). The slot pool uses this to size capacity for the union of all
+    /// users' per-user model selections, since per-user dispatch may run any of
+    /// them. Skips users with no explicit selection.
+    pub async fn all_selected_models(&self) -> Result<Vec<String>> {
+        self.db.ensure_initialized().await?;
+        let rows = sqlx::query!("SELECT models FROM user_settings WHERE models IS NOT NULL")
+            .fetch_all(self.db.pool())
+            .await?;
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for r in rows {
+            if let Some(list) = parse_models(r.models.as_deref()) {
+                for m in list {
+                    if seen.insert(m.clone()) {
+                        out.push(m);
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -175,5 +250,78 @@ mod tests {
             .unwrap();
 
         assert!(repo.get(&user_id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn upsert_models_round_trips_and_clears() {
+        let db = Database::open_in_memory().expect("in-memory db");
+        let user_id = seed_user(&db, "models").await;
+        let repo = UserSettingsRepository::new(db);
+
+        assert!(repo.get_or_default(&user_id).await.unwrap().models.is_none());
+
+        let models = vec![
+            "openai/gpt-5.5".to_string(),
+            "anthropic/claude-opus-4-7".to_string(),
+        ];
+        let row = repo.upsert_models(&user_id, &models).await.unwrap();
+        assert_eq!(row.models.as_deref(), Some(models.as_slice()));
+        // Order is preserved on read-back (priority high→low).
+        assert_eq!(
+            repo.get(&user_id).await.unwrap().unwrap().models.unwrap(),
+            models
+        );
+
+        // Clearing stores `[]`, which reads back as None (→ global fallback).
+        let cleared = repo.upsert_models(&user_id, &[]).await.unwrap();
+        assert!(cleared.models.is_none());
+    }
+
+    #[tokio::test]
+    async fn models_and_auto_approve_do_not_clobber_each_other() {
+        let db = Database::open_in_memory().expect("in-memory db");
+        let user_id = seed_user(&db, "coexist").await;
+        let repo = UserSettingsRepository::new(db);
+
+        repo.upsert_auto_approve_prs(&user_id, true).await.unwrap();
+        repo.upsert_models(&user_id, &["openai/gpt-5.5".to_string()])
+            .await
+            .unwrap();
+
+        let s = repo.get(&user_id).await.unwrap().unwrap();
+        assert!(
+            s.auto_approve_prs,
+            "models upsert must not clobber auto_approve_prs"
+        );
+        assert_eq!(s.models.unwrap(), vec!["openai/gpt-5.5".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn all_selected_models_unions_across_users() {
+        let db = Database::open_in_memory().expect("in-memory db");
+        let a = seed_user(&db, "u-a").await;
+        let b = seed_user(&db, "u-b").await;
+        let repo = UserSettingsRepository::new(db);
+
+        repo.upsert_models(&a, &["openai/gpt-5.5".to_string(), "x/y".to_string()])
+            .await
+            .unwrap();
+        repo.upsert_models(
+            &b,
+            &["x/y".to_string(), "anthropic/claude-opus-4-7".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let mut all = repo.all_selected_models().await.unwrap();
+        all.sort();
+        assert_eq!(
+            all,
+            vec![
+                "anthropic/claude-opus-4-7".to_string(),
+                "openai/gpt-5.5".to_string(),
+                "x/y".to_string(),
+            ]
+        );
     }
 }

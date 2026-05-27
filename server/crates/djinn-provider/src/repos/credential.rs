@@ -171,6 +171,29 @@ impl CredentialRepository {
         .await?)
     }
 
+    /// List the credentials *visible to `user_id`*: that user's own rows plus
+    /// the org-shared (`owner_user_id IS NULL`) fallback rows — the same
+    /// visibility rule [`Self::resolve_id_for_user`] uses for resolution.
+    /// `user_id = None` returns only the org-shared rows (local/background).
+    ///
+    /// This is what connection-status / connected-model listings must use so a
+    /// provider connected via another user's private credential (e.g. their
+    /// personal Codex sub) is NOT reported as connected for everyone. Never
+    /// returns raw key values.
+    pub async fn list_for_user(&self, user_id: Option<&str>) -> Result<Vec<Credential>> {
+        ensure_db!(self.db);
+        Ok(sqlx::query_as!(
+            Credential,
+            r#"SELECT id, provider_id, key_name, owner_user_id, created_at, updated_at
+                 FROM credentials
+                WHERE owner_user_id IS NULL OR owner_user_id = $1
+                ORDER BY provider_id, key_name"#,
+            user_id,
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
     /// Delete the credential `key_name` owned by the *acting user* (read from
     /// `current_user_id()`). With no user context this deletes the org-shared
     /// row. Disconnect flows are symmetric with [`Self::set`]: a user
@@ -720,5 +743,54 @@ mod tests {
                 .as_deref(),
             Some("dave-v2")
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_for_user_returns_own_plus_org_shared_only() {
+        use std::collections::HashSet;
+        let db = Database::open_in_memory().unwrap();
+        let user_a = seed_user(&db, 6001, "gina").await;
+        let user_b = seed_user(&db, 6002, "hank").await;
+        let repo = CredentialRepository::new(db.clone(), EventBus::noop());
+
+        repo.set_with_owner("openai", "OPENAI_API_KEY", "org", None)
+            .await
+            .unwrap(); // org-shared fallback
+        repo.set_with_owner(
+            "chatgpt_codex",
+            "__OAUTH_CHATGPT_CODEX",
+            "a-codex",
+            Some(&user_a),
+        )
+        .await
+        .unwrap(); // A's personal Codex sub
+        repo.set_with_owner("anthropic", "ANTHROPIC_API_KEY", "b-key", Some(&user_b))
+            .await
+            .unwrap(); // B's private key
+
+        // A sees org-shared + own, never B's.
+        let a = repo.list_for_user(Some(&user_a)).await.unwrap();
+        let a_keys: HashSet<&str> = a.iter().map(|c| c.key_name.as_str()).collect();
+        assert!(a_keys.contains("OPENAI_API_KEY"));
+        assert!(a_keys.contains("__OAUTH_CHATGPT_CODEX"));
+        assert!(
+            !a_keys.contains("ANTHROPIC_API_KEY"),
+            "user A must not see user B's private credential"
+        );
+
+        // B sees org-shared + own, never A's Codex.
+        let b = repo.list_for_user(Some(&user_b)).await.unwrap();
+        let b_keys: HashSet<&str> = b.iter().map(|c| c.key_name.as_str()).collect();
+        assert!(b_keys.contains("OPENAI_API_KEY"));
+        assert!(b_keys.contains("ANTHROPIC_API_KEY"));
+        assert!(
+            !b_keys.contains("__OAUTH_CHATGPT_CODEX"),
+            "user B must not see user A's personal Codex credential"
+        );
+
+        // None (local/background) sees only the org-shared row.
+        let none = repo.list_for_user(None).await.unwrap();
+        assert_eq!(none.len(), 1);
+        assert_eq!(none[0].key_name, "OPENAI_API_KEY");
     }
 }

@@ -143,6 +143,7 @@ impl RuntimeOps for StubRuntime {
         Err("stub: RuntimeOps::apply_environment_config not implemented".into())
     }
     async fn trigger_mirror_refresh(&self, _project_id: &str) {}
+    async fn apply_user_model_change(&self) {}
 }
 
 /// GitOps stub. `git_actor` is effectively a read that creates a handle; it

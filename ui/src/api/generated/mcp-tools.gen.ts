@@ -4303,6 +4303,12 @@ export namespace UserSettingsGetOutputSchema {
    */
   auto_approve_prs: boolean
   error?: string
+  /**
+   * This user's ordered model selection (highest priority first), full
+   * `provider/model` ids. Empty when the user has no explicit selection
+   * (callers then fall back to the global deployment model list).
+   */
+  models: string[]
   ok: boolean
   /**
    * `users.id` of the signed-in caller (echoed so the UI can sanity-check identity).
@@ -4319,6 +4325,13 @@ export namespace UserSettingsSetInputSchema {
    * Enable or disable auto-approve. Omit to keep the current value.
    */
   auto_approve_prs?: boolean
+  /**
+   * Ordered model selection for THIS user (highest priority first), as full
+   * `provider/model` ids. Each must be a model on a provider this user has
+   * connected. Pass `[]` to clear the selection (→ global fallback). Omit to
+   * keep the current value.
+   */
+  models?: string[]
   [k: string]: any
   }
 
@@ -4329,6 +4342,10 @@ export namespace UserSettingsSetOutputSchema {
   applied: boolean
   auto_approve_prs?: boolean
   error?: string
+  /**
+   * The resulting model selection after the patch.
+   */
+  models?: string[]
   ok: boolean
   [k: string]: any
   }

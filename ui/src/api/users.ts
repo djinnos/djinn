@@ -7,6 +7,9 @@ export interface OrgUser {
   github_name: string | null;
   github_avatar_url: string | null;
   is_member_of_org: boolean;
+  is_admin: boolean;
+  /** Optional last-seen timestamp (ISO 8601), surfaced when the server sends it. */
+  last_seen_at?: string | null;
 }
 
 export async function fetchUsers(): Promise<OrgUser[]> {

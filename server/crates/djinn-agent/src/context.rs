@@ -234,6 +234,10 @@ impl bridge::RuntimeOps for AgentRuntimeOps {
         // the server-side AppState impl does. No-op here; the server's
         // periodic mirror-fetch tick still covers this project.
     }
+    async fn apply_user_model_change(&self) {
+        // Slot-pool/coordinator reconfiguration is owned by the server-side
+        // AppState impl. No-op for the agent-internal runtime.
+    }
 }
 
 /// Fallback `RepoGraphOps` implementation used when `AgentContext` is built

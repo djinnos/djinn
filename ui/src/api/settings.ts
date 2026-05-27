@@ -7,17 +7,10 @@ export interface ModelEntry {
   max_concurrent: number;
 }
 
-export interface SettingsResponse {
-  models: ModelEntry[];
-}
-
 type SettingsGetToolResponse = McpToolOutput<"settings_get">;
 
 interface ParsedSettingsGet {
   settings?: {
-    models?: string[] | null;
-    // Legacy: per-role map from older server versions.
-    model_priority?: Record<string, string[]> | null;
     max_sessions?: Record<string, number> | null;
   };
   error?: string;
@@ -41,71 +34,30 @@ function combineModelId(provider: string, model: string): string {
   return `${provider}/${model}`;
 }
 
-export async function fetchSettings(): Promise<SettingsResponse> {
+export { splitModelId, combineModelId };
+
+/**
+ * Global, operator-managed per-model concurrency caps (`settings_get.max_sessions`).
+ * The model LIST itself is now per-user (see `@/api/userSettings`); this map only
+ * carries the operational caps, which the Models tab renders/edits for admins.
+ */
+export async function fetchGlobalMaxSessions(): Promise<Record<string, number>> {
   const response = (await callMcpTool("settings_get", {})) as SettingsGetToolResponse;
   const parsed = response as ParsedSettingsGet;
   if (parsed.error) {
     throw new Error(parsed.error);
   }
-
-  const maxSessions = parsed.settings?.max_sessions ?? {};
-
-  // Prefer the flat `models` list (current schema). Fall back to the legacy
-  // per-role `model_priority` map, then to `max_sessions` keys.
-  const seen = new Set<string>();
-  const modelIds: string[] = [];
-
-  const flatModels = parsed.settings?.models;
-  if (flatModels && flatModels.length > 0) {
-    for (const id of flatModels) {
-      if (!seen.has(id)) {
-        seen.add(id);
-        modelIds.push(id);
-      }
-    }
-  } else {
-    // Legacy: per-role model_priority map from older servers.
-    const modelPriority = parsed.settings?.model_priority ?? {};
-    for (const ids of Object.values(modelPriority ?? {})) {
-      for (const id of ids) {
-        if (!seen.has(id)) {
-          seen.add(id);
-          modelIds.push(id);
-        }
-      }
-    }
-  }
-
-  if (modelIds.length === 0) {
-    for (const id of Object.keys(maxSessions ?? {})) {
-      if (!seen.has(id)) {
-        seen.add(id);
-        modelIds.push(id);
-      }
-    }
-  }
-
-  const models: ModelEntry[] = modelIds.map((modelId) => {
-    const { provider, model } = splitModelId(modelId);
-    return {
-      provider,
-      model,
-      max_concurrent: (maxSessions ?? {})[modelId] ?? 1,
-    };
-  });
-
-  return { models };
+  return parsed.settings?.max_sessions ?? {};
 }
 
-export async function saveSettings(settings: SettingsResponse): Promise<void> {
-  const modelIds = settings.models.map((m) => combineModelId(m.provider, m.model));
-  const maxSessions = settings.models.reduce<Record<string, number>>((acc, m) => {
-    acc[combineModelId(m.provider, m.model)] = m.max_concurrent;
-    return acc;
-  }, {});
-
+/**
+ * Persist the global per-model concurrency caps. Admin-only server-side —
+ * non-admin callers get `{ ok: false, error }`, surfaced as a thrown error.
+ */
+export async function saveGlobalMaxSessions(
+  maxSessions: Record<string, number>,
+): Promise<void> {
   const response = await callMcpTool("settings_set", {
-    models: modelIds,
     max_sessions: maxSessions,
   });
 
