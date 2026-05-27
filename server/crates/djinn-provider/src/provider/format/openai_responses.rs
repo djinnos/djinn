@@ -86,6 +86,19 @@ impl OpenAIResponsesProvider {
             }
         }
 
+        // Diagnostic: surface exactly what each request sends so worker vs chat
+        // divergence (model, tool_choice, base_url) is visible in logs instead
+        // of having to guess from a masked "empty assistant turn".
+        tracing::info!(
+            target: "djinn_provider::request",
+            model = %self.config.model_id,
+            base_url = %self.config.base_url,
+            tools = tools.len(),
+            tool_choice = ?tool_choice,
+            reasoning = is_reasoning_capable_model(&self.config.model_id),
+            "openai_responses: building request"
+        );
+
         body
     }
 
@@ -330,6 +343,31 @@ fn parse_responses_line(line: &str, accumulated_items: &mut Vec<OutputItemInfo>)
                     input: usage.input_tokens,
                     output: usage.output_tokens,
                 }));
+            }
+
+            // Diagnostic: a `response.completed` carrying NO message and NO
+            // function_call (reasoning-only or empty output) is the source of
+            // the masked "empty assistant turn". Surface what the model
+            // actually returned so we stop guessing.
+            let n_msg = final_items
+                .iter()
+                .filter(|i| matches!(i, OutputItemInfo::Message {}))
+                .count();
+            let n_call = final_items
+                .iter()
+                .filter(|i| matches!(i, OutputItemInfo::FunctionCall { .. }))
+                .count();
+            let n_reasoning = final_items
+                .iter()
+                .filter(|i| matches!(i, OutputItemInfo::Reasoning {}))
+                .count();
+            if n_msg == 0 && n_call == 0 {
+                tracing::warn!(
+                    target: "djinn_provider::request",
+                    total_items = final_items.len(),
+                    reasoning_items = n_reasoning,
+                    "openai_responses: response.completed with NO message and NO function_call (reasoning-only/empty) — surfaces upstream as an empty assistant turn"
+                );
             }
 
             ParsedLine::Events(events)
