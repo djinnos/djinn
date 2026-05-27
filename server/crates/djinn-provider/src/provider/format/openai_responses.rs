@@ -87,9 +87,10 @@ impl OpenAIResponsesProvider {
         }
 
         // Diagnostic: surface exactly what each request sends so worker vs chat
-        // divergence (model, tool_choice, base_url) is visible in logs instead
-        // of having to guess from a masked "empty assistant turn".
-        tracing::info!(
+        // divergence (model, tool_choice, base_url) is visible under
+        // `djinn=debug` instead of having to guess from a masked "empty
+        // assistant turn". Kept at debug to avoid per-turn info-log noise.
+        tracing::debug!(
             target: "djinn_provider::request",
             model = %self.config.model_id,
             base_url = %self.config.base_url,

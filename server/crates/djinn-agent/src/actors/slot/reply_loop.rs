@@ -261,19 +261,7 @@ pub(crate) async fn run_reply_loop(
             // Only force tool_choice=required for providers known to handle it
             // well.  Many reasoning models (Kimi K2.5, GLM-4.7, Qwen 3.5)
             // reject or mishandle "required" when thinking mode is active.
-            //
-            // Self-heal: if a prior turn this loop came back EMPTY (e.g. the
-            // ChatGPT-account Codex backend returns reasoning-only with no
-            // message/function_call when "required" is forced — observed during
-            // an OpenAI degradation, gpt-5.5 + 22 tools), retry with "auto"
-            // instead of re-forcing "required" (which just empties again).
-            // Keeps "required" as the default the nudge loop relies on, but
-            // unblocks the task when the backend won't honor it.
-            let tool_choice = if empty_turn_retries > 0 && !tools.is_empty() {
-                Some(djinn_provider::provider::ToolChoice::Auto)
-            } else {
-                tool_choice_for_turn(model_id, tools)
-            };
+            let tool_choice = tool_choice_for_turn(model_id, tools);
             let stream_result = provider.stream(conversation, tools, tool_choice).await;
             let stream = match stream_result {
                 Ok(s) => s,
