@@ -730,15 +730,47 @@ impl TaskRunSupervisor {
                     // have no PR semantics; the merge-landing flows go
                     // through `open_pr`.
                     match spec.flow {
-                        SupervisorFlow::Planning | SupervisorFlow::Spike => {
-                            TaskRunOutcome::Closed {
-                                reason: format!(
-                                    "{} flow completed (last stage: {:?})",
-                                    spec.flow.as_str(),
-                                    last_stage_role
-                                ),
+                        SupervisorFlow::Spike => {
+                            // The Architect is a read-only consultant (ADR-051):
+                            // it records spike findings to memory but never
+                            // transitions the board. So a completed Spike would
+                            // otherwise stay `open`, and the coordinator would
+                            // re-dispatch it every ~30s in a tight loop (the same
+                            // failure mode the planner-review `close` above guards
+                            // against) — and, worse, block every task that depends
+                            // on the spike. Force-close it here on success.
+                            // Planning closes via the Planner agent's own board
+                            // transitions, so it needs no force-close.
+                            let reason = format!(
+                                "{} flow completed (last stage: {:?})",
+                                spec.flow.as_str(),
+                                last_stage_role
+                            );
+                            if let Err(e) = self
+                                .services
+                                .transition_task(
+                                    spec.task_id.clone(),
+                                    "close".into(),
+                                    Some(reason.clone()),
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    task_run_id = %run_id,
+                                    task_id = %spec.task_id,
+                                    error = %e,
+                                    "supervisor: spike-completion close transition skipped"
+                                );
                             }
+                            TaskRunOutcome::Closed { reason }
                         }
+                        SupervisorFlow::Planning => TaskRunOutcome::Closed {
+                            reason: format!(
+                                "{} flow completed (last stage: {:?})",
+                                spec.flow.as_str(),
+                                last_stage_role
+                            ),
+                        },
                         SupervisorFlow::NewTask
                         | SupervisorFlow::ReviewResponse
                         | SupervisorFlow::ConflictRetry => {
