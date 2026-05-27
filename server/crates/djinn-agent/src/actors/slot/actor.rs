@@ -60,7 +60,12 @@ impl SlotActor {
                     }
                     join_result = &mut running.join => {
                         if let Err(e) = join_result {
-                            tracing::warn!(slot_id = self.id, model_id = %self.model_id, error = %e, "slot lifecycle join failed");
+                            // A panicked/aborted lifecycle leaves no task-status
+                            // transition behind, so surface it loudly with the
+                            // task id — otherwise the task silently bounces back
+                            // to `open` and the only signal is the coordinator's
+                            // re-dispatch streak.
+                            tracing::error!(slot_id = self.id, model_id = %self.model_id, task_id = %running.task_id, error = %e, "slot lifecycle task panicked/aborted");
                         }
                         self.emit_completion_event(&running).await;
                         if drain_requested {

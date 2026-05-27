@@ -208,6 +208,48 @@ impl UserRepository {
         .fetch_all(self.db.pool())
         .await?)
     }
+
+    /// Idempotently create the synthetic "automation" service user (sentinel
+    /// `github_id = AUTOMATION_GITHUB_ID`). Seeded once at startup; owns
+    /// system-initiated work. `is_member_of_org` and `is_admin` are FALSE — the
+    /// org-membership sync skips the sentinel and it never grants privilege.
+    /// Returns the row (existing or newly inserted).
+    pub async fn ensure_automation_user(&self) -> Result<User> {
+        self.db.ensure_initialized().await?;
+        let new_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query!(
+            r#"INSERT INTO users
+                (id, github_id, github_login, github_name, github_avatar_url,
+                 is_member_of_org, is_admin)
+             VALUES ($1, $2, $3, $4, NULL, FALSE, FALSE)
+             ON CONFLICT (github_id) DO NOTHING"#,
+            new_id,
+            djinn_core::AUTOMATION_GITHUB_ID,
+            djinn_core::AUTOMATION_LOGIN,
+            djinn_core::AUTOMATION_NAME,
+        )
+        .execute(self.db.pool())
+        .await?;
+
+        self.get_by_github_id(djinn_core::AUTOMATION_GITHUB_ID)
+            .await?
+            .ok_or_else(|| {
+                crate::Error::Internal("automation user missing after ensure".to_string())
+            })
+    }
+
+    /// Resolve the automation service user's surrogate `id`, if it has been
+    /// seeded. Cheap lookup by the sentinel `github_id`; callers may cache the
+    /// result (the id is stable for the life of the deployment).
+    pub async fn automation_user_id(&self) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_scalar!(
+            "SELECT id FROM users WHERE github_id = $1",
+            djinn_core::AUTOMATION_GITHUB_ID,
+        )
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
 }
 
 #[cfg(test)]
@@ -305,6 +347,28 @@ mod tests {
         assert!(repo.get_by_id(&u.id).await.unwrap().unwrap().is_admin);
 
         repo.set_admin_status(&u.id, false).await.unwrap();
+        assert_eq!(repo.admin_count().await.unwrap(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ensure_automation_user_is_idempotent_and_unprivileged() {
+        let repo = UserRepository::new(test_db());
+        assert!(repo.automation_user_id().await.unwrap().is_none());
+
+        let a = repo.ensure_automation_user().await.unwrap();
+        assert_eq!(a.github_id, djinn_core::AUTOMATION_GITHUB_ID);
+        assert_eq!(a.github_login, djinn_core::AUTOMATION_LOGIN);
+        assert!(!a.is_member_of_org, "automation is not an org member");
+        assert!(!a.is_admin, "automation is not an admin");
+
+        // Idempotent: a second call returns the same row, no duplicate.
+        let again = repo.ensure_automation_user().await.unwrap();
+        assert_eq!(again.id, a.id, "automation user id is stable");
+        assert_eq!(
+            repo.automation_user_id().await.unwrap().as_deref(),
+            Some(a.id.as_str())
+        );
+        // Seeding automation never creates an admin.
         assert_eq!(repo.admin_count().await.unwrap(), 0);
     }
 }

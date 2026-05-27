@@ -266,17 +266,12 @@ impl CoordinatorActor {
             return;
         }
 
-        let mut role_models: HashMap<&'static str, Vec<String>> = HashMap::new();
-        for role in self.role_registry.model_pool_roles() {
-            let model_ids = self.resolve_dispatch_models_for_role(role).await;
-            if !model_ids.is_empty() {
-                role_models.insert(role, model_ids);
-            }
-        }
-        if role_models.is_empty() {
-            tracing::warn!("CoordinatorActor: no configured model found, skipping dispatch");
-            return;
-        }
+        // Base per-role eligibility is resolved INSIDE the task loop, scoped to
+        // each task's creator's credentials (the same set the worker resolves
+        // with) — so we can't precompute one global list. Memoize per
+        // (role, creator) for this pass since most tasks share a creator.
+        let mut role_models_cache: HashMap<(&'static str, Option<String>), Vec<String>> =
+            HashMap::new();
 
         let repo = self.task_repo();
         let mut ready: Vec<djinn_core::models::Task> = match repo
@@ -422,6 +417,21 @@ impl CoordinatorActor {
                         next_streak,
                         cooldown,
                     }) => {
+                        // After MAX consecutive same-role failures the task is
+                        // structurally doomed (e.g. its run can never complete);
+                        // fail it terminally instead of looping forever.
+                        if next_streak >= MAX_DISPATCH_FAILURES {
+                            self.terminally_fail_task(
+                                &task,
+                                role,
+                                "repeated dispatch failures: the task could not complete after \
+                                 multiple attempts. Resolve the underlying issue and reopen.",
+                            )
+                            .await;
+                            self.dispatch_failure_streak.remove(&task.id);
+                            self.dispatch_cooldowns.remove(&task.id);
+                            continue;
+                        }
                         self.dispatch_failure_streak
                             .insert(task.id.clone(), next_streak);
                         tracing::warn!(
@@ -443,51 +453,84 @@ impl CoordinatorActor {
             if exhausted_roles.contains(role) {
                 continue;
             }
-            let Some(base_model_ids) = role_models.get(role) else {
-                tracing::warn!(task_id = %task.short_id, role, "CoordinatorActor: no model configured for task role");
-                continue;
+            let creator = task.created_by_user_id.clone();
+
+            // Base per-role eligibility, scoped to THIS task's creator's
+            // credentials (own + org-shared) — the same set the worker resolves
+            // with — so the coordinator never offers a model it can't auth.
+            // Memoized per (role, creator) for the pass.
+            let base_model_ids = match role_models_cache.get(&(role, creator.clone())) {
+                Some(v) => v.clone(),
+                None => {
+                    let v = self
+                        .resolve_dispatch_models_for_role(role, creator.as_deref())
+                        .await;
+                    role_models_cache.insert((role, creator.clone()), v.clone());
+                    v
+                }
             };
 
-            // Resolve the model fallback list for this task with precedence:
-            //   1. the task CREATOR's per-user selection (user_settings.models),
-            //   2. the project's default-role model_preference,
-            //   3. the global per-role priorities.
-            // A task runs with its creator's chosen models first; credentials
-            // already resolve per-creator at run time (supervisor_runner), so
-            // this keeps selection and resolution consistently per-user.
-            let user_model_ids = self
-                .resolve_user_model_priority(task.created_by_user_id.as_deref())
-                .await;
+            // Final fallback list, precedence: creator's per-user selection →
+            // project default-role preference → role base. All scoped to the
+            // creator, so selection and runtime resolution stay consistent.
+            let user_model_ids = self.resolve_user_model_priority(creator.as_deref()).await;
             let model_preference_ids = self
-                .resolve_role_model_preference(
-                    &task.project_id,
-                    role,
-                    task.created_by_user_id.as_deref(),
-                )
+                .resolve_role_model_preference(&task.project_id, role, creator.as_deref())
                 .await;
-            let combined_models: Vec<String>;
-            let model_ids: &[String] = if user_model_ids.is_empty() && model_preference_ids.is_empty()
+            let mut seen = std::collections::HashSet::new();
+            let mut model_ids: Vec<String> = Vec::with_capacity(
+                user_model_ids.len() + model_preference_ids.len() + base_model_ids.len(),
+            );
+            for id in user_model_ids
+                .iter()
+                .chain(model_preference_ids.iter())
+                .chain(base_model_ids.iter())
             {
-                base_model_ids
-            } else {
-                // Merge user → project preference → global base, dropping
-                // duplicates while preserving the precedence order.
-                let mut seen = std::collections::HashSet::new();
-                let mut merged = Vec::with_capacity(
-                    user_model_ids.len() + model_preference_ids.len() + base_model_ids.len(),
-                );
-                for id in user_model_ids
-                    .iter()
-                    .chain(model_preference_ids.iter())
-                    .chain(base_model_ids.iter())
-                {
-                    if seen.insert(id.clone()) {
-                        merged.push(id.clone());
-                    }
+                if seen.insert(id.clone()) {
+                    model_ids.push(id.clone());
                 }
-                combined_models = merged;
-                &combined_models
-            };
+            }
+
+            // No model whose provider this task's owner has connected → the task
+            // is structurally undispatchable (the canary). Don't loop it forever
+            // (which, for a patrol, blocks all future patrols). Back off with the
+            // escalating cooldown, and after MAX consecutive misses fail it
+            // terminally with an actionable reason.
+            if model_ids.is_empty() {
+                let streak = {
+                    let s = self
+                        .dispatch_failure_streak
+                        .entry(task.id.clone())
+                        .or_insert(0);
+                    *s = s.saturating_add(1);
+                    *s
+                };
+                if streak >= MAX_DISPATCH_FAILURES {
+                    self.terminally_fail_task(
+                        &task,
+                        role,
+                        "no model available for this task's owner: none of the role's configured \
+                         models have a provider connected for them. Connect a provider/model for \
+                         the owner (or the automation user) and reopen.",
+                    )
+                    .await;
+                    self.dispatch_failure_streak.remove(&task.id);
+                    self.dispatch_cooldowns.remove(&task.id);
+                } else {
+                    let cooldown = escalating_dispatch_cooldown(streak);
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        role,
+                        streak,
+                        cooldown_secs = cooldown.as_secs(),
+                        "CoordinatorActor: no eligible model for task owner — backing off"
+                    );
+                    self.dispatch_cooldowns
+                        .insert(task.id.clone(), StdInstant::now() + cooldown);
+                }
+                continue;
+            }
+            let model_ids: &[String] = &model_ids;
 
             match self.pool.has_session(&task.id).await {
                 Ok(true) => continue,
@@ -896,6 +939,41 @@ impl CoordinatorActor {
         }
     }
 
+    /// Fail a task terminally (`ForceClose`) with an actionable reason. Used
+    /// when a task is structurally undispatchable (its owner has no model with a
+    /// connected provider) or has failed too many consecutive times. Looping
+    /// forever is worse than a clear terminal state — and for board patrols a
+    /// non-closed orphan blocks all future patrols, so closing it self-cleans
+    /// that guard.
+    async fn terminally_fail_task(
+        &self,
+        task: &djinn_core::models::Task,
+        role: &str,
+        reason: &str,
+    ) {
+        tracing::warn!(
+            task_id = %task.short_id,
+            role,
+            status = %task.status,
+            reason,
+            "CoordinatorActor: failing task terminally (undispatchable / max retries)"
+        );
+        let repo = self.task_repo();
+        if let Err(e) = repo
+            .transition(
+                &task.id,
+                TransitionAction::ForceClose,
+                "coordinator",
+                "system",
+                Some(reason),
+                None,
+            )
+            .await
+        {
+            tracing::warn!(task_id = %task.short_id, error = %e, "CoordinatorActor: terminal close failed");
+        }
+    }
+
     /// Resolve the task CREATOR's per-user model selection
     /// (`user_settings.models`), validated against that user's connected
     /// providers (own + org-shared fallback). Returns the ordered, full
@@ -1067,7 +1145,23 @@ impl CoordinatorActor {
         reason: &str,
         project_id: &str,
     ) {
-        let model_ids = self.resolve_dispatch_models_for_role("planner").await;
+        let task_repo = TaskRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        // The escalation runs under the SOURCE task's creator (the human it acts
+        // on behalf of); resolves to None → automation via create_in_project
+        // when the source is itself unowned. Used for both model eligibility and
+        // creation attribution so they stay consistent.
+        let source_creator = task_repo
+            .get(source_task_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|t| t.created_by_user_id);
+        let model_ids = self
+            .resolve_dispatch_models_for_role("planner", source_creator.as_deref())
+            .await;
         if model_ids.is_empty() {
             tracing::warn!(
                 source_task_id = %source_task_id,
@@ -1085,26 +1179,25 @@ impl CoordinatorActor {
             return;
         };
 
-        let task_repo = TaskRepository::new(
-            self.db.clone(),
-            crate::events::event_bus_for(&self.events_tx),
-        );
         let title = format!("Planner escalation: {}", &reason[..reason.len().min(80)]);
         let description = format!(
             "Escalated from task {source_task_id}. Lead could not resolve — Planner review required.\n\nReason: {reason}"
         );
-        let review_task = match task_repo
-            .create_in_project(
-                project_id,
-                None,
-                &title,
-                &description,
-                "Review the escalated task and either resolve it, reshape the work, or leave a 'Requires human review' comment.",
-                "review",
-                0,
-                "system",
-                Some("open"),
-                None,
+        let review_task = match djinn_core::auth_context::SESSION_USER_ID
+            .scope(
+                source_creator,
+                task_repo.create_in_project(
+                    project_id,
+                    None,
+                    &title,
+                    &description,
+                    "Review the escalated task and either resolve it, reshape the work, or leave a 'Requires human review' comment.",
+                    "review",
+                    0,
+                    "system",
+                    Some("open"),
+                    None,
+                ),
             )
             .await
         {
@@ -1366,8 +1459,19 @@ impl CoordinatorActor {
         #[cfg(test)]
         eprintln!("[patrol] step 3: no existing non-closed patrol task");
 
-        // Resolve models for the "planner" role.
-        let model_ids = self.resolve_dispatch_models_for_role("planner").await;
+        // The patrol runs as the automation service user (its review task is
+        // attributed to automation via create_in_project), so scope planner-role
+        // eligibility to automation's connected providers. Empty → skip BEFORE
+        // creating the review task, so a misconfigured automation never leaves
+        // an orphan patrol task blocking future patrols.
+        let automation_id = djinn_db::UserRepository::new(self.db.clone())
+            .automation_user_id()
+            .await
+            .ok()
+            .flatten();
+        let model_ids = self
+            .resolve_dispatch_models_for_role("planner", automation_id.as_deref())
+            .await;
         tracing::debug!(model_ids = ?model_ids, "CoordinatorActor: patrol — resolved models");
         #[cfg(test)]
         eprintln!("[patrol] step 4: resolved models: {:?}", model_ids);

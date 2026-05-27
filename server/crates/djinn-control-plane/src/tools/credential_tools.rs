@@ -3,7 +3,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::server::DjinnMcpServer;
-use djinn_core::auth_context::current_user_id;
+use crate::tools::acting_user;
 use djinn_provider::repos::CredentialRepository;
 
 // ── credential_set ────────────────────────────────────────────────────────────
@@ -23,6 +23,10 @@ pub struct CredentialSetInput {
     /// default). Defaults to `false`.
     #[serde(default)]
     pub org_shared: bool,
+    /// Admin-only: act on behalf of this user id (e.g. the automation service
+    /// user). Non-admins must omit it.
+    #[serde(default)]
+    pub target_user_id: Option<String>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -35,6 +39,14 @@ pub struct CredentialSetResponse {
 }
 
 // ── credential_list ───────────────────────────────────────────────────────────
+
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct CredentialListInput {
+    /// Admin-only: act on behalf of this user id (e.g. the automation service
+    /// user). Non-admins must omit it.
+    #[serde(default)]
+    pub target_user_id: Option<String>,
+}
 
 #[derive(Serialize, JsonSchema)]
 pub struct CredentialListResponse {
@@ -110,8 +122,33 @@ impl DjinnMcpServer {
             repo.set_with_owner(&input.provider_id, &input.key_name, &input.api_key, None)
                 .await
         } else {
-            repo.set(&input.provider_id, &input.key_name, &input.api_key)
-                .await
+            // Non-org_shared: stamp the credential to the effective user. With
+            // no `target_user_id` this is the acting user; an admin may target
+            // another user (e.g. the automation service user).
+            let effective = match acting_user::resolve_effective_user(
+                self.state.db(),
+                input.target_user_id.as_deref(),
+            )
+            .await
+            {
+                Ok(u) => u,
+                Err(e) => {
+                    return Json(CredentialSetResponse {
+                        ok: false,
+                        success: false,
+                        id: String::new(),
+                        key_name: input.key_name,
+                        error: Some(e),
+                    });
+                }
+            };
+            repo.set_with_owner(
+                &input.provider_id,
+                &input.key_name,
+                &input.api_key,
+                effective.as_deref(),
+            )
+            .await
         };
 
         match result {
@@ -139,12 +176,31 @@ impl DjinnMcpServer {
     #[tool(
         description = "List all stored credentials. Never returns raw key values — only metadata (id, provider_id, key_name, timestamps)."
     )]
-    pub async fn credential_list(&self) -> Json<CredentialListResponse> {
+    pub async fn credential_list(
+        &self,
+        Parameters(input): Parameters<CredentialListInput>,
+    ) -> Json<CredentialListResponse> {
         let repo = CredentialRepository::new(self.state.db().clone(), self.state.event_bus());
 
         // Per-user: the caller's own credentials plus org-shared fallbacks, so
-        // the UI's "configured" state never reflects another user's keys.
-        let credentials = match repo.list_for_user(current_user_id().as_deref()).await {
+        // the UI's "configured" state never reflects another user's keys. An
+        // admin may pass `target_user_id` to inspect another user's set.
+        let effective = match acting_user::resolve_effective_user(
+            self.state.db(),
+            input.target_user_id.as_deref(),
+        )
+        .await
+        {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::warn!(error = %e, "credential_list: act-as denied");
+                return Json(CredentialListResponse {
+                    credentials: vec![],
+                });
+            }
+        };
+
+        let credentials = match repo.list_for_user(effective.as_deref()).await {
             Ok(creds) => creds
                 .iter()
                 .map(|c| CredentialSummary {

@@ -4,29 +4,11 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use serde::{Deserialize, Serialize};
 
 use crate::server::DjinnMcpServer;
-use djinn_core::auth_context::current_user_id;
+use crate::tools::acting_user::require_admin;
 use djinn_core::models::DjinnSettings;
-use djinn_db::{Database, SettingsRepository, UserRepository};
+use djinn_db::SettingsRepository;
 
 const SETTINGS_RAW_KEY: &str = "settings.raw";
-
-/// Admin gate for global/operational settings mutations.
-///
-/// Returns `Ok(())` when the acting user is an admin, OR when there is no user
-/// context at all (`current_user_id()` is `None`) — the local single-user /
-/// background-agent trusted path, matching the credential repository's
-/// "no session ⇒ org-shared/trusted" convention. An authenticated non-admin is
-/// rejected with a human-readable message.
-async fn require_admin(db: Database) -> Result<(), String> {
-    let Some(uid) = current_user_id() else {
-        return Ok(());
-    };
-    match UserRepository::new(db).get_by_id(&uid).await {
-        Ok(Some(u)) if u.is_admin => Ok(()),
-        Ok(_) => Err("admin privileges are required to change global settings".to_string()),
-        Err(e) => Err(format!("admin check failed: {e}")),
-    }
-}
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct SettingsGetParams {
@@ -134,7 +116,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<SettingsSetParams>,
     ) -> Json<SettingsSetResponse> {
-        if let Err(error) = require_admin(self.state.db().clone()).await {
+        if let Err(error) = require_admin(self.state.db()).await {
             return Json(SettingsSetResponse {
                 ok: false,
                 applied: false,
@@ -183,7 +165,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(_): Parameters<SettingsResetParams>,
     ) -> Json<SettingsResetResponse> {
-        if let Err(error) = require_admin(self.state.db().clone()).await {
+        if let Err(error) = require_admin(self.state.db()).await {
             return Json(SettingsResetResponse {
                 ok: false,
                 deleted: false,

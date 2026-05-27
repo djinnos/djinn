@@ -141,6 +141,15 @@ pub(super) const DISPATCH_COOLDOWN: Duration = Duration::from_secs(60);
 /// Upper bound on the escalating per-task dispatch cooldown.
 pub(super) const MAX_DISPATCH_COOLDOWN: Duration = Duration::from_secs(30 * 60);
 
+/// Consecutive failed dispatch attempts (same role) — whether the run failed or
+/// the task's owner has no model that resolves a credential — after which the
+/// task is failed **terminally** instead of looping forever. Combined with the
+/// escalating cooldown this spans hours, so transient provider/credential blips
+/// never reach it; only structurally-undispatchable tasks do. Terminal close
+/// also self-cleans the patrol guard (a non-closed patrol blocks all future
+/// patrols).
+pub(super) const MAX_DISPATCH_FAILURES: u32 = 10;
+
 /// A task that becomes dispatch-ready again (with no active session) within
 /// this window of its last dispatch is treated as a failed attempt and backed
 /// off. Wide enough to catch SLOW failures — e.g. a worker that runs ~30s and

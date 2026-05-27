@@ -1072,7 +1072,16 @@ expression: signatures
   {
     "name": "credential_list",
     "input_schema": {
-      "properties": {},
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "target_user_id": {
+          "default": null,
+          "description": "Admin-only: act on behalf of this user id (e.g. the automation service\nuser). Non-admins must omit it.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "CredentialListInput",
       "type": "object"
     },
     "output_schema": {
@@ -1141,6 +1150,12 @@ expression: signatures
         },
         "provider_id": {
           "description": "Provider ID this key belongs to (e.g. 'anthropic', 'openai').",
+          "type": "string"
+        },
+        "target_user_id": {
+          "default": null,
+          "description": "Admin-only: act on behalf of this user id (e.g. the automation service\nuser). Non-admins must omit it.",
+          "nullable": true,
           "type": "string"
         }
       },
@@ -5842,7 +5857,16 @@ expression: signatures
   {
     "name": "provider_catalog",
     "input_schema": {
-      "properties": {},
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "target_user_id": {
+          "default": null,
+          "description": "Admin-only: act on behalf of this user id (e.g. the automation service\nuser). Non-admins must omit it.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "ProviderCatalogInput",
       "type": "object"
     },
     "output_schema": {
@@ -5940,7 +5964,16 @@ expression: signatures
   {
     "name": "provider_connected",
     "input_schema": {
-      "properties": {},
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "target_user_id": {
+          "default": null,
+          "description": "Admin-only: act on behalf of this user id (e.g. the automation service\nuser). Non-admins must omit it.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "ProviderConnectedInput",
       "type": "object"
     },
     "output_schema": {
@@ -6266,7 +6299,16 @@ expression: signatures
   {
     "name": "provider_models_connected",
     "input_schema": {
-      "properties": {},
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "target_user_id": {
+          "default": null,
+          "description": "Admin-only: act on behalf of this user id (e.g. the automation service\nuser). Non-admins must omit it.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "ProviderModelsConnectedInput",
       "type": "object"
     },
     "output_schema": {
@@ -6372,6 +6414,12 @@ expression: signatures
       "properties": {
         "provider_id": {
           "description": "Provider ID to start OAuth for (accepts catalog aliases, e.g. 'github-copilot').",
+          "type": "string"
+        },
+        "target_user_id": {
+          "default": null,
+          "description": "Admin-only: act on behalf of this user id (e.g. the automation service\nuser). Non-admins must omit it.",
+          "nullable": true,
           "type": "string"
         }
       },
@@ -8407,6 +8455,14 @@ expression: signatures
     "name": "user_settings_get",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "target_user_id": {
+          "default": null,
+          "description": "Admin-only: act on behalf of this user id (e.g. the automation service\nuser). Non-admins must omit it.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
       "title": "UserSettingsGetParams",
       "type": "object"
     },
@@ -8463,6 +8519,12 @@ expression: signatures
           },
           "nullable": true,
           "type": "array"
+        },
+        "target_user_id": {
+          "default": null,
+          "description": "Admin-only: act on behalf of this user id (e.g. the automation service\nuser). Non-admins must omit it.",
+          "nullable": true,
+          "type": "string"
         }
       },
       "title": "UserSettingsSetParams",

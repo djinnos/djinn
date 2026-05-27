@@ -275,6 +275,11 @@ impl RoleRegistry {
             .map(|rule| rule.role_name)
     }
     /// Unique model-pool role names (dispatch_role from RoleConfig).
+    ///
+    /// Dispatch no longer enumerates roles up front (model eligibility is now
+    /// resolved per task, scoped to its creator, via `dispatch_role_for_task`);
+    /// retained as tested RoleRegistry API.
+    #[allow(dead_code)]
     pub(crate) fn model_pool_roles(&self) -> Vec<&'static str> {
         let mut seen = HashSet::new();
         self.roles

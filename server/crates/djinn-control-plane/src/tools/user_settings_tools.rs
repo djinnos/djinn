@@ -9,11 +9,16 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use serde::{Deserialize, Serialize};
 
 use crate::server::DjinnMcpServer;
-use djinn_core::auth_context::current_user_id;
+use crate::tools::acting_user;
 use djinn_db::UserSettingsRepository;
 
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct UserSettingsGetParams {}
+#[derive(Deserialize, schemars::JsonSchema, Default)]
+pub struct UserSettingsGetParams {
+    /// Admin-only: act on behalf of this user id (e.g. the automation service
+    /// user). Non-admins must omit it.
+    #[serde(default)]
+    pub target_user_id: Option<String>,
+}
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct UserSettingsGetResponse {
@@ -44,6 +49,10 @@ pub struct UserSettingsSetParams {
     /// connected. Pass `[]` to clear the selection (→ global fallback). Omit to
     /// keep the current value.
     pub models: Option<Vec<String>>,
+    /// Admin-only: act on behalf of this user id (e.g. the automation service
+    /// user). Non-admins must omit it.
+    #[serde(default)]
+    pub target_user_id: Option<String>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -67,16 +76,33 @@ impl DjinnMcpServer {
         Errors when no authenticated session is present.")]
     pub async fn user_settings_get(
         &self,
-        Parameters(_): Parameters<UserSettingsGetParams>,
+        Parameters(p): Parameters<UserSettingsGetParams>,
     ) -> Json<UserSettingsGetResponse> {
-        let Some(user_id) = current_user_id() else {
-            return Json(UserSettingsGetResponse {
-                ok: false,
-                user_id: None,
-                auto_approve_prs: false,
-                models: Vec::new(),
-                error: Some(missing_session()),
-            });
+        let user_id = match acting_user::resolve_effective_user(
+            self.state.db(),
+            p.target_user_id.as_deref(),
+        )
+        .await
+        {
+            Ok(Some(u)) => u,
+            Ok(None) => {
+                return Json(UserSettingsGetResponse {
+                    ok: false,
+                    user_id: None,
+                    auto_approve_prs: false,
+                    models: Vec::new(),
+                    error: Some(missing_session()),
+                });
+            }
+            Err(e) => {
+                return Json(UserSettingsGetResponse {
+                    ok: false,
+                    user_id: None,
+                    auto_approve_prs: false,
+                    models: Vec::new(),
+                    error: Some(e),
+                });
+            }
         };
         let repo = UserSettingsRepository::new(self.state.db().clone());
         match repo.get_or_default(&user_id).await {
@@ -104,14 +130,31 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<UserSettingsSetParams>,
     ) -> Json<UserSettingsSetResponse> {
-        let Some(user_id) = current_user_id() else {
-            return Json(UserSettingsSetResponse {
-                ok: false,
-                applied: false,
-                auto_approve_prs: None,
-                models: None,
-                error: Some(missing_session()),
-            });
+        let user_id = match acting_user::resolve_effective_user(
+            self.state.db(),
+            p.target_user_id.as_deref(),
+        )
+        .await
+        {
+            Ok(Some(u)) => u,
+            Ok(None) => {
+                return Json(UserSettingsSetResponse {
+                    ok: false,
+                    applied: false,
+                    auto_approve_prs: None,
+                    models: None,
+                    error: Some(missing_session()),
+                });
+            }
+            Err(e) => {
+                return Json(UserSettingsSetResponse {
+                    ok: false,
+                    applied: false,
+                    auto_approve_prs: None,
+                    models: None,
+                    error: Some(e),
+                });
+            }
         };
         let repo = UserSettingsRepository::new(self.state.db().clone());
 

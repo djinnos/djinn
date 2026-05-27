@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::server::DjinnMcpServer;
-use djinn_core::auth_context::current_user_id;
+use crate::tools::acting_user;
 use djinn_core::models::{Model, Provider};
 use djinn_provider::catalog::builtin;
 use djinn_provider::catalog::health::ModelHealth;
@@ -131,6 +131,14 @@ impl From<ModelHealth> for ModelHealthOutput {
 
 // ── provider_catalog ──────────────────────────────────────────────────────────
 
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct ProviderCatalogInput {
+    /// Admin-only: act on behalf of this user id (e.g. the automation service
+    /// user). Non-admins must omit it.
+    #[serde(default)]
+    pub target_user_id: Option<String>,
+}
+
 #[derive(Serialize, JsonSchema)]
 pub struct ProviderCatalogResponse {
     pub providers: Vec<ProviderCatalogItem>,
@@ -156,6 +164,14 @@ pub struct ProviderCatalogItem {
 }
 
 // ── provider_connected ────────────────────────────────────────────────────────
+
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct ProviderConnectedInput {
+    /// Admin-only: act on behalf of this user id (e.g. the automation service
+    /// user). Non-admins must omit it.
+    #[serde(default)]
+    pub target_user_id: Option<String>,
+}
 
 #[derive(Serialize, JsonSchema)]
 pub struct ProviderConnectedResponse {
@@ -201,6 +217,14 @@ pub struct ProviderModelOutput {
 
 // ── provider_models_connected ─────────────────────────────────────────────────
 
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct ProviderModelsConnectedInput {
+    /// Admin-only: act on behalf of this user id (e.g. the automation service
+    /// user). Non-admins must omit it.
+    #[serde(default)]
+    pub target_user_id: Option<String>,
+}
+
 #[derive(Serialize, JsonSchema)]
 pub struct ProviderModelsConnectedResponse {
     pub models: Vec<ProviderModelOutput>,
@@ -213,6 +237,10 @@ pub struct ProviderModelsConnectedResponse {
 pub struct ProviderOauthStartInput {
     /// Provider ID to start OAuth for (accepts catalog aliases, e.g. 'github-copilot').
     pub provider_id: String,
+    /// Admin-only: act on behalf of this user id (e.g. the automation service
+    /// user). Non-admins must omit it.
+    #[serde(default)]
+    pub target_user_id: Option<String>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -390,13 +418,31 @@ impl DjinnMcpServer {
     #[tool(
         description = "List providers Djinn can use. Includes built-ins, custom providers, and OpenAI-compatible catalog providers."
     )]
-    pub async fn provider_catalog(&self) -> Json<ProviderCatalogResponse> {
+    pub async fn provider_catalog(
+        &self,
+        Parameters(input): Parameters<ProviderCatalogInput>,
+    ) -> Json<ProviderCatalogResponse> {
         let builtin_ids = builtin::builtin_provider_ids();
         let merged_ids = builtin::merged_provider_ids();
+        let effective_user = match acting_user::resolve_effective_user(
+            self.state.db(),
+            input.target_user_id.as_deref(),
+        )
+        .await
+        {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::warn!(error = %e, "provider_catalog: act-as denied");
+                return Json(ProviderCatalogResponse {
+                    providers: vec![],
+                    total: 0,
+                });
+            }
+        };
         let credential_repo =
             CredentialRepository::new(self.state.db().clone(), self.state.event_bus());
         let (credential_provider_ids, credential_key_names) = match credential_repo
-            .list_for_user(current_user_id().as_deref())
+            .list_for_user(effective_user.as_deref())
             .await
         {
             Ok(creds) => {
@@ -451,13 +497,31 @@ impl DjinnMcpServer {
     #[tool(
         description = "List connected providers only. Returns providers that have a stored API key or active OAuth token."
     )]
-    pub async fn provider_connected(&self) -> Json<ProviderConnectedResponse> {
+    pub async fn provider_connected(
+        &self,
+        Parameters(input): Parameters<ProviderConnectedInput>,
+    ) -> Json<ProviderConnectedResponse> {
         let builtin_ids = builtin::builtin_provider_ids();
         let merged_ids = builtin::merged_provider_ids();
+        let effective_user = match acting_user::resolve_effective_user(
+            self.state.db(),
+            input.target_user_id.as_deref(),
+        )
+        .await
+        {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::warn!(error = %e, "provider_connected: act-as denied");
+                return Json(ProviderConnectedResponse {
+                    providers: vec![],
+                    total: 0,
+                });
+            }
+        };
         let credential_repo =
             CredentialRepository::new(self.state.db().clone(), self.state.event_bus());
         let (credential_provider_ids, credential_key_names) = match credential_repo
-            .list_for_user(current_user_id().as_deref())
+            .list_for_user(effective_user.as_deref())
             .await
         {
             Ok(creds) => {
@@ -558,13 +622,31 @@ impl DjinnMcpServer {
     #[tool(
         description = "List all available models across all connected providers. Returns models grouped by provider with capabilities and pricing."
     )]
-    pub async fn provider_models_connected(&self) -> Json<ProviderModelsConnectedResponse> {
+    pub async fn provider_models_connected(
+        &self,
+        Parameters(input): Parameters<ProviderModelsConnectedInput>,
+    ) -> Json<ProviderModelsConnectedResponse> {
         let builtin_ids = builtin::builtin_provider_ids();
         let merged_ids = builtin::merged_provider_ids();
+        let effective_user = match acting_user::resolve_effective_user(
+            self.state.db(),
+            input.target_user_id.as_deref(),
+        )
+        .await
+        {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::warn!(error = %e, "provider_models_connected: act-as denied");
+                return Json(ProviderModelsConnectedResponse {
+                    models: vec![],
+                    total: 0,
+                });
+            }
+        };
         let credential_repo =
             CredentialRepository::new(self.state.db().clone(), self.state.event_bus());
         let credentials = credential_repo
-            .list_for_user(current_user_id().as_deref())
+            .list_for_user(effective_user.as_deref())
             .await
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "provider_models_connected: failed to load credentials");
@@ -680,6 +762,21 @@ impl DjinnMcpServer {
             ));
         };
 
+        // Resolve the effective owner for the stored OAuth token. With no
+        // `target_user_id` this is the acting user; an admin may target another
+        // user (e.g. the automation service user, which can't self-configure).
+        let effective_user = match acting_user::resolve_effective_user(
+            self.state.db(),
+            input.target_user_id.as_deref(),
+        )
+        .await
+        {
+            Ok(u) => u,
+            Err(e) => {
+                return Json(failure(input.provider_id, Some(builtin_id), false, e));
+            }
+        };
+
         // Resolve OAuth keys (own + merged children, e.g. "openai" inherits "chatgpt_codex" keys).
         let oauth_keys = builtin::all_oauth_keys_for_provider(builtin_id);
         let effective_id = if oauth_keys.is_empty() {
@@ -719,7 +816,9 @@ impl DjinnMcpServer {
                 // polling task. The UI displays the user_code and waits for
                 // the `credential.updated` SSE event to confirm sign-in.
                 let events = self.state.event_bus();
-                match codex::start_codex_device_auth(credential_repo, &events).await {
+                match codex::start_codex_device_auth(credential_repo, &events, effective_user)
+                    .await
+                {
                     Ok(None) => Json(ProviderOauthStartResponse {
                         // Already connected (cached token valid or silently refreshed).
                         ok: true,

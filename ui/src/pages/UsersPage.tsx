@@ -1,10 +1,13 @@
+import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { HugeiconsIcon } from '@hugeicons/react';
-import { ShieldUserIcon, UserGroupIcon } from '@hugeicons/core-free-icons';
+import { Settings02Icon, ShieldUserIcon, UserGroupIcon } from '@hugeicons/core-free-icons';
 import { usersQueryOptions } from '@/api/queryOptions';
 import { userDisplayName, type OrgUser } from '@/api/users';
 import { InlineError } from '@/components/InlineError';
+import { AutomationConfig, ServiceBadge } from '@/components/AutomationConfig';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { relativeTime } from '@/components/memory/memoryUtils';
 
@@ -61,6 +64,7 @@ export function UsersPage() {
 function UserRow({ user }: { user: OrgUser }) {
   const displayName = userDisplayName(user);
   const initial = (displayName[0] ?? '?').toUpperCase();
+  const [configureOpen, setConfigureOpen] = useState(false);
 
   return (
     <li className="flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3">
@@ -79,6 +83,7 @@ function UserRow({ user }: { user: OrgUser }) {
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium text-foreground">{displayName}</span>
+          {user.is_service && <ServiceBadge />}
           {user.is_admin && (
             <Badge variant="secondary" className="gap-1">
               <HugeiconsIcon icon={ShieldUserIcon} size={12} />
@@ -92,10 +97,29 @@ function UserRow({ user }: { user: OrgUser }) {
         <p className="truncate text-xs text-muted-foreground">@{user.github_login}</p>
       </div>
 
-      {user.last_seen_at && (
-        <span className="shrink-0 text-xs text-muted-foreground" title={user.last_seen_at}>
-          Last seen {relativeTime(user.last_seen_at)}
-        </span>
+      {user.is_service ? (
+        <>
+          <Button
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            onClick={() => setConfigureOpen(true)}
+          >
+            <HugeiconsIcon icon={Settings02Icon} size={14} />
+            Configure
+          </Button>
+          <AutomationConfig
+            user={user}
+            open={configureOpen}
+            onOpenChange={setConfigureOpen}
+          />
+        </>
+      ) : (
+        user.last_seen_at && (
+          <span className="shrink-0 text-xs text-muted-foreground" title={user.last_seen_at}>
+            Last seen {relativeTime(user.last_seen_at)}
+          </span>
+        )
       )}
     </li>
   );

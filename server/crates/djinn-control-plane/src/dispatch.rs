@@ -6,7 +6,9 @@ use crate::server::DjinnMcpServer;
 use crate::tools::agent_tools::{
     AgentCreateParams, AgentListParams, AgentMetricsParams, AgentShowParams, AgentUpdateParams,
 };
-use crate::tools::credential_tools::{CredentialDeleteInput, CredentialSetInput};
+use crate::tools::credential_tools::{
+    CredentialDeleteInput, CredentialListInput, CredentialSetInput,
+};
 use crate::tools::epic_tools::{
     EpicCloseParams, EpicCountParams, EpicCreateParams, EpicDeleteParams, EpicListParams,
     EpicReopenParams, EpicShowParams, EpicTasksParams, EpicUpdateParams,
@@ -34,8 +36,9 @@ use crate::tools::proposal_tools::{
     ProposeAdrAcceptParams, ProposeAdrListParams, ProposeAdrRejectParams, ProposeAdrShowParams,
 };
 use crate::tools::provider_tools::{
-    ModelHealthInput, ProviderModelLookupInput, ProviderModelsInput, ProviderOauthStartInput,
-    ProviderRemoveInput, ProviderValidateInput,
+    ModelHealthInput, ProviderCatalogInput, ProviderConnectedInput, ProviderModelLookupInput,
+    ProviderModelsConnectedInput, ProviderModelsInput, ProviderOauthStartInput, ProviderRemoveInput,
+    ProviderValidateInput,
 };
 use crate::tools::session_tools::{
     SessionActiveParams, SessionListParams, SessionMessagesParams, SessionShowParams,
@@ -101,7 +104,11 @@ impl DjinnMcpServer {
                 self.credential_set(Parameters(decode_args::<CredentialSetInput>(name, args)?))
                     .await,
             ),
-            "credential_list" => map_json(name, self.credential_list().await),
+            "credential_list" => map_json(
+                name,
+                self.credential_list(Parameters(decode_args::<CredentialListInput>(name, args)?))
+                    .await,
+            ),
             "credential_delete" => map_json(
                 name,
                 self.credential_delete(Parameters(decode_args::<CredentialDeleteInput>(
@@ -273,14 +280,30 @@ impl DjinnMcpServer {
                 self.model_health(Parameters(decode_args::<ModelHealthInput>(name, args)?))
                     .await,
             ),
-            "provider_catalog" => map_json(name, self.provider_catalog().await),
-            "provider_connected" => map_json(name, self.provider_connected().await),
+            "provider_catalog" => map_json(
+                name,
+                self.provider_catalog(Parameters(decode_args::<ProviderCatalogInput>(name, args)?))
+                    .await,
+            ),
+            "provider_connected" => map_json(
+                name,
+                self.provider_connected(Parameters(decode_args::<ProviderConnectedInput>(
+                    name, args,
+                )?))
+                .await,
+            ),
             "provider_models" => map_json(
                 name,
                 self.provider_models(Parameters(decode_args::<ProviderModelsInput>(name, args)?))
                     .await,
             ),
-            "provider_models_connected" => map_json(name, self.provider_models_connected().await),
+            "provider_models_connected" => map_json(
+                name,
+                self.provider_models_connected(Parameters(decode_args::<
+                    ProviderModelsConnectedInput,
+                >(name, args)?))
+                .await,
+            ),
             "provider_oauth_start" => map_json(
                 name,
                 self.provider_oauth_start(Parameters(decode_args::<ProviderOauthStartInput>(

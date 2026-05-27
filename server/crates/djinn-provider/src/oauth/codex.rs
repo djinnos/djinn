@@ -350,6 +350,7 @@ pub struct CodexDeviceAuth {
 pub async fn start_codex_device_auth(
     repo: CredentialRepository,
     events: &EventBus,
+    owner_user_id: Option<String>,
 ) -> Result<Option<CodexDeviceAuth>> {
     // 1. If we already have usable tokens, skip the flow.
     if let Some(cached) = CodexTokens::load_from_db(&repo).await {
@@ -418,11 +419,12 @@ pub async fn start_codex_device_auth(
     //
     //    The poll task outlives the inbound request, so the `SESSION_USER_ID`
     //    task-local that scopes per-user credentials (migration 28) would be
-    //    lost. Capture the acting user *now* (while still inside the request
-    //    scope) and re-establish it inside the spawned task so the eventual
-    //    `save_to_db` → `set` stamps `owner_user_id = this user`. `None` (local
-    //    dev / no auth) writes the org-shared credential, as before.
-    let owner_user_id = djinn_core::auth_context::current_user_id();
+    //    lost. The caller resolves the effective owner *now* (while still inside
+    //    the request scope) and passes it in as `owner_user_id`; we re-establish
+    //    it inside the spawned task so the eventual `save_to_db` → `set` stamps
+    //    `owner_user_id = this user`. `None` (local dev / no auth) writes the
+    //    org-shared credential, as before. An admin may pass another user's id
+    //    here to connect OAuth on their behalf (e.g. the automation service user).
     let poll_repo = repo.clone();
     let device_auth_id = uc.device_auth_id;
     let user_code = uc.user_code;

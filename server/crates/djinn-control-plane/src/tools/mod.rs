@@ -1,3 +1,4 @@
+pub mod acting_user;
 pub mod agent_tools;
 pub mod credential_tools;
 pub mod epic_ops;

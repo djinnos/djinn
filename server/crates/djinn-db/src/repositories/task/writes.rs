@@ -100,24 +100,40 @@ impl TaskRepository {
             "acceptance_criteria",
             acceptance_criteria.unwrap_or("[]"),
         )?;
-        // Stamp `created_by_user_id` from the task-local set at the MCP
-        // dispatch root (`SESSION_USER_ID`). For agent/background callers
-        // with no session (e.g. the Planner breaking down an epic), fall
-        // back to the parent epic's creator so spawned tasks belong to the
-        // human who owns the epic rather than appearing as system/unowned.
-        // `None` only when there is neither a session user nor an owned epic.
+        // Stamp `created_by_user_id` with the effective creator, in order:
+        //   1. the session user (`SESSION_USER_ID`, set at the MCP dispatch
+        //      root) — a human acting directly;
+        //   2. the parent epic's creator — Planner work spawned under an owned
+        //      epic belongs to that human;
+        //   3. the synthetic "automation" service user — system-initiated work
+        //      (patrols, wave-planning, escalations) gets a real identity so
+        //      every per-user dispatch axis (credential, model priority, fleet,
+        //      spend) resolves under it instead of degrading to "no user".
+        // Only NULL when automation hasn't been seeded (e.g. unit tests) and
+        // there's no session/epic creator.
         let created_by_user_id = match djinn_core::auth_context::current_user_id() {
             Some(uid) => Some(uid),
-            None => match epic_id {
-                Some(eid) => sqlx::query_scalar!(
-                    "SELECT created_by_user_id FROM epics WHERE id = $1",
-                    eid
-                )
-                .fetch_optional(self.db.pool())
-                .await?
-                .flatten(),
-                None => None,
-            },
+            None => {
+                let from_epic = match epic_id {
+                    Some(eid) => sqlx::query_scalar!(
+                        "SELECT created_by_user_id FROM epics WHERE id = $1",
+                        eid
+                    )
+                    .fetch_optional(self.db.pool())
+                    .await?
+                    .flatten(),
+                    None => None,
+                };
+                match from_epic {
+                    Some(uid) => Some(uid),
+                    None => sqlx::query_scalar!(
+                        "SELECT id FROM users WHERE github_id = $1",
+                        djinn_core::AUTOMATION_GITHUB_ID
+                    )
+                    .fetch_optional(self.db.pool())
+                    .await?,
+                }
+            }
         };
 
         let project_id_owned = project_id.to_owned();

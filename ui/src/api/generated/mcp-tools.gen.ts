@@ -592,6 +592,11 @@ export namespace CredentialDeleteOutputSchema {
 export type CredentialDeleteOutput = CredentialDeleteOutputSchema.CredentialDeleteOutput;
 export namespace CredentialListInputSchema {
   export interface CredentialListInput {
+  /**
+   * Admin-only: act on behalf of this user id (e.g. the automation service
+   * user). Non-admins must omit it.
+   */
+  target_user_id?: string
   [k: string]: any
   }
 
@@ -635,6 +640,11 @@ export namespace CredentialSetInputSchema {
    * Provider ID this key belongs to (e.g. 'anthropic', 'openai').
    */
   provider_id: string
+  /**
+   * Admin-only: act on behalf of this user id (e.g. the automation service
+   * user). Non-admins must omit it.
+   */
+  target_user_id?: string
   [k: string]: any
   }
 
@@ -3034,6 +3044,11 @@ export namespace ProposeAdrShowOutputSchema {
 export type ProposeAdrShowOutput = ProposeAdrShowOutputSchema.ProposeAdrShowOutput;
 export namespace ProviderCatalogInputSchema {
   export interface ProviderCatalogInput {
+  /**
+   * Admin-only: act on behalf of this user id (e.g. the automation service
+   * user). Non-admins must omit it.
+   */
+  target_user_id?: string
   [k: string]: any
   }
 
@@ -3066,6 +3081,11 @@ export namespace ProviderCatalogOutputSchema {
 export type ProviderCatalogOutput = ProviderCatalogOutputSchema.ProviderCatalogOutput;
 export namespace ProviderConnectedInputSchema {
   export interface ProviderConnectedInput {
+  /**
+   * Admin-only: act on behalf of this user id (e.g. the automation service
+   * user). Non-admins must omit it.
+   */
+  target_user_id?: string
   [k: string]: any
   }
 
@@ -3178,6 +3198,11 @@ export namespace ProviderModelsOutputSchema {
 export type ProviderModelsOutput = ProviderModelsOutputSchema.ProviderModelsOutput;
 export namespace ProviderModelsConnectedInputSchema {
   export interface ProviderModelsConnectedInput {
+  /**
+   * Admin-only: act on behalf of this user id (e.g. the automation service
+   * user). Non-admins must omit it.
+   */
+  target_user_id?: string
   [k: string]: any
   }
 
@@ -3217,6 +3242,11 @@ export namespace ProviderOauthStartInputSchema {
    * Provider ID to start OAuth for (accepts catalog aliases, e.g. 'github-copilot').
    */
   provider_id: string
+  /**
+   * Admin-only: act on behalf of this user id (e.g. the automation service
+   * user). Non-admins must omit it.
+   */
+  target_user_id?: string
   [k: string]: any
   }
 
@@ -4286,6 +4316,11 @@ export namespace TaskUpdateOutputSchema {
 export type TaskUpdateOutput = TaskUpdateOutputSchema.TaskUpdateOutput;
 export namespace UserSettingsGetInputSchema {
   export interface UserSettingsGetInput {
+  /**
+   * Admin-only: act on behalf of this user id (e.g. the automation service
+   * user). Non-admins must omit it.
+   */
+  target_user_id?: string
   [k: string]: any
   }
 
@@ -4332,6 +4367,11 @@ export namespace UserSettingsSetInputSchema {
    * keep the current value.
    */
   models?: string[]
+  /**
+   * Admin-only: act on behalf of this user id (e.g. the automation service
+   * user). Non-admins must omit it.
+   */
+  target_user_id?: string
   [k: string]: any
   }
 

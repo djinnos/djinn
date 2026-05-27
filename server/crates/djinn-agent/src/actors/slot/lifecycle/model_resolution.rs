@@ -147,7 +147,14 @@ pub(crate) async fn resolve_role_model_preference(
         app_state.db.clone(),
         app_state.event_bus.clone(),
     );
-    let credentials = match cred_repo.list().await {
+    // Scope to the acting user (the task creator — supervisor_runner runs this
+    // under `SESSION_USER_ID.scope(created_by_user_id)`, same as
+    // `load_provider_credential`), so preference-matching sees exactly the
+    // providers this task can authenticate, never another user's private creds.
+    let credentials = match cred_repo
+        .list_for_user(djinn_core::auth_context::current_user_id().as_deref())
+        .await
+    {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(

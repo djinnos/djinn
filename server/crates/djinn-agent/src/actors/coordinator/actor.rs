@@ -750,9 +750,14 @@ impl CoordinatorActor {
 
     /// Resolve dispatch models for a given role from configured priorities,
     /// falling back to credential-backed tool-capable models.
-    pub(super) async fn resolve_dispatch_models_for_role(&self, _role: &str) -> Vec<String> {
+    pub(super) async fn resolve_dispatch_models_for_role(
+        &self,
+        _role: &str,
+        user_id: Option<&str>,
+    ) -> Vec<String> {
         #[cfg(test)]
         {
+            let _ = user_id;
             vec![DEFAULT_MODEL_ID.to_owned()]
         }
 
@@ -762,7 +767,11 @@ impl CoordinatorActor {
                 self.db.clone(),
                 crate::events::event_bus_for(&self.events_tx),
             );
-            let credentials = match cred_repo.list().await {
+            // Scope eligibility to the SAME credentials the runtime will use for
+            // this task's creator (own + org-shared) — never the global unscoped
+            // set — so the coordinator can't deem a model dispatchable that the
+            // worker then can't authenticate.
+            let credentials = match cred_repo.list_for_user(user_id).await {
                 Ok(credentials) => credentials,
                 Err(_) => return Vec::new(),
             };
