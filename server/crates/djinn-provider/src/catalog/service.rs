@@ -443,6 +443,32 @@ mod tests {
     }
 
     #[test]
+    fn connected_includes_openai_via_chatgpt_codex_merge() {
+        let catalog = CatalogService::new();
+        let cred = |provider_id: &str, key_name: &str, owner: Option<&str>| {
+            djinn_core::models::Credential {
+                id: provider_id.into(),
+                provider_id: provider_id.into(),
+                key_name: key_name.into(),
+                owner_user_id: owner.map(str::to_string),
+                created_at: String::new(),
+                updated_at: String::new(),
+            }
+        };
+        let creds = vec![
+            cred("chatgpt_codex", "__OAUTH_CHATGPT_CODEX", Some("u1")),
+            cred("fireworks-ai", "FIREWORKS_API_KEY", None),
+        ];
+        let connected = catalog.connected_provider_ids(&creds);
+        assert!(connected.contains("chatgpt_codex"), "got {connected:?}");
+        assert!(connected.contains("fireworks-ai"), "got {connected:?}");
+        assert!(
+            connected.contains("openai"),
+            "chatgpt_codex must merge → openai connected; got {connected:?}"
+        );
+    }
+
+    #[test]
     fn list_models_for_known_provider() {
         let catalog = CatalogService::new();
         let models = catalog.list_models("anthropic");

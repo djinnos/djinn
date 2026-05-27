@@ -406,6 +406,36 @@ impl CredentialRepository {
             None => Ok(None),
         }
     }
+
+    /// Decrypt and return the raw value for `key_name` owned *exactly* by
+    /// `user_id` — **no** org-shared (`owner_user_id IS NULL`) fallback. Pass
+    /// `None` to read only the org-shared row.
+    ///
+    /// Unlike [`Self::get_decrypted_for_user`] (which prefers the user's row but
+    /// falls back to the org-shared one), this asks the strict question "does
+    /// *this* identity already hold its own value?". Use it for "start an OAuth
+    /// connect flow" short-circuits: an admin connecting a provider on the
+    /// automation service user's behalf must not latch onto their *own* (or the
+    /// org-shared) token and wrongly report the target as already connected.
+    pub async fn get_decrypted_exact_owner(
+        &self,
+        key_name: &str,
+        user_id: Option<&str>,
+    ) -> Result<Option<String>> {
+        ensure_db!(self.db);
+        let Some(id) = self.scoped_id(key_name, user_id).await? else {
+            return Ok(None);
+        };
+        let blob: Option<Vec<u8>> =
+            sqlx::query_scalar!("SELECT encrypted_value FROM credentials WHERE id = $1", id)
+                .fetch_optional(self.db.pool())
+                .await?;
+
+        match blob {
+            Some(b) => Ok(Some(crypto::decrypt(&b)?)),
+            None => Ok(None),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -792,5 +822,59 @@ mod tests {
         let none = repo.list_for_user(None).await.unwrap();
         assert_eq!(none.len(), 1);
         assert_eq!(none[0].key_name, "OPENAI_API_KEY");
+    }
+
+    /// End-to-end replica of the coordinator's `resolve_user_model_priority`
+    /// body (real DB + repos + catalog), reproducing the exact staging setup:
+    /// a user who selected `openai/gpt-5.5` and connected Codex (`chatgpt_codex`
+    /// OAuth, which merges into `openai`) + an org-shared fireworks key. The
+    /// per-method `#[cfg(test)]` stub means the live suite never exercises this,
+    /// so we replicate it inline. The model MUST stay eligible.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn user_model_priority_keeps_openai_via_codex_merge() {
+        use crate::catalog::CatalogService;
+        use djinn_db::UserSettingsRepository;
+
+        let db = Database::open_in_memory().unwrap();
+        let uid = seed_user(&db, 9001, "fern").await;
+        let repo = CredentialRepository::new(db.clone(), EventBus::noop());
+        repo.set_with_owner("chatgpt_codex", "__OAUTH_CHATGPT_CODEX", "tok", Some(&uid))
+            .await
+            .unwrap();
+        repo.set_with_owner("fireworks-ai", "FIREWORKS_API_KEY", "fk", None)
+            .await
+            .unwrap();
+        UserSettingsRepository::new(db.clone())
+            .upsert_models(&uid, &["openai/gpt-5.5".to_string()])
+            .await
+            .unwrap();
+
+        // ── replicate resolve_user_model_priority ──
+        let models = UserSettingsRepository::new(db.clone())
+            .get(&uid)
+            .await
+            .unwrap()
+            .unwrap()
+            .models
+            .unwrap();
+        let creds = repo.list_for_user(Some(&uid)).await.unwrap();
+        let connected = CatalogService::new().connected_provider_ids(&creds);
+        let result: Vec<String> = models
+            .into_iter()
+            .filter(|m| {
+                let p = m.split_once('/').map(|(p, _)| p).unwrap_or(m.as_str());
+                connected.contains(p)
+            })
+            .collect();
+
+        assert!(
+            connected.contains("openai"),
+            "codex merge should connect openai; connected={connected:?}"
+        );
+        assert_eq!(
+            result,
+            vec!["openai/gpt-5.5".to_string()],
+            "openai/gpt-5.5 must remain eligible; connected={connected:?}"
+        );
     }
 }
