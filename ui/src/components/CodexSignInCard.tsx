@@ -10,7 +10,7 @@ import {
 import { HugeiconsIcon } from '@hugeicons/react';
 
 import { Button } from '@/components/ui/button';
-import { startProviderOAuth } from '@/api/server';
+import { startProviderOAuth, removeProviderFull } from '@/api/server';
 import { showToast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 
@@ -41,6 +41,7 @@ interface Props {
 
 export function CodexSignInCard({ alreadyConnected, onConnected, className }: Props) {
   const [phase, setPhase] = useState<CardPhase>({ kind: 'idle' });
+  const [removing, setRemoving] = useState(false);
   // Show the green "connected" panel when either the parent told us we're
   // already connected (and the user hasn't interacted) or the flow just
   // completed in this session.
@@ -77,6 +78,28 @@ export function CodexSignInCard({ alreadyConnected, onConnected, className }: Pr
         kind: 'error',
         message: error instanceof Error ? error.message : 'OAuth flow failed',
       });
+    }
+  };
+
+  // Codex connects under the `openai` provider (merge_into), but its credential
+  // is stored as `chatgpt_codex`. The generic SettingsPage chip list gates
+  // removal on `openai` (not self-serve) so it never exposes a Remove here —
+  // disconnect the codex credential directly by its own provider id.
+  const handleRemove = async () => {
+    setRemoving(true);
+    try {
+      await removeProviderFull('chatgpt_codex');
+      setPhase({ kind: 'idle' });
+      showToast.success('ChatGPT disconnected', {
+        description: 'You can sign in again to reconnect.',
+      });
+      onConnected?.(); // let the parent reload provider/credential state
+    } catch (error) {
+      showToast.error('Could not disconnect', {
+        description: error instanceof Error ? error.message : 'Unknown error',
+      });
+    } finally {
+      setRemoving(false);
     }
   };
 
@@ -178,6 +201,15 @@ export function CodexSignInCard({ alreadyConnected, onConnected, className }: Pr
             onClick={() => void handleConnect()}
           >
             Reconnect
+          </Button>
+          <Button
+            variant="ghost"
+            size="lg"
+            disabled={removing}
+            className="w-full text-sm text-destructive hover:text-destructive"
+            onClick={() => void handleRemove()}
+          >
+            {removing ? 'Removing…' : 'Remove / Disconnect'}
           </Button>
         </>
       )}
