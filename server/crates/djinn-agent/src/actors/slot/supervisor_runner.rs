@@ -175,7 +175,7 @@ pub(crate) async fn run_supervisor_dispatch(
                 .get(role)
                 .cloned()
                 .unwrap_or_else(|| model_id.clone());
-            let (provider_id, _model_name) = parse_model_id(&model_id).map_err(|e| {
+            let (provider_id, model_name) = parse_model_id(&model_id).map_err(|e| {
                 anyhow::anyhow!(
                     "supervisor dispatch: cannot parse model id `{model_id}` for role {role:?}: {e}"
                 )
@@ -187,7 +187,12 @@ pub(crate) async fn run_supervisor_dispatch(
                         "supervisor dispatch: load_provider_credential({provider_id}) for role {role:?}: {e}"
                     )
                 })?;
-            credentials.insert(*role, cred.to_serializable());
+            // OAuth configs (codex/copilot) hardcode a provider-default model;
+            // stamp the resolved per-role model so the worker — which uses this
+            // snapshot directly and never runs the live `cfg.model_id =
+            // resolved.model_name` override — requests the user's configured
+            // model instead of e.g. `gpt-5.1-codex`.
+            credentials.insert(*role, cred.with_model_id(&model_name).to_serializable());
         }
         Ok::<(), anyhow::Error>(())
     };

@@ -660,6 +660,25 @@ impl ProviderCredential {
     /// `ProviderCapabilities` constituents) deliberately do not implement
     /// `Serialize`, so the wire mirror is the load-bearing seam keeping
     /// `djinn-provider` free of a serde-everywhere derive sprawl.
+    /// Stamp the resolved per-role model onto an OAuth-derived config.
+    ///
+    /// OAuth provider configs (codex, copilot) are built with a hardcoded
+    /// provider-default model (e.g. `CODEX_DEFAULT_MODEL = "gpt-5.1-codex"`).
+    /// On the live (server) stage path that gets overridden by
+    /// `resolved.model_name` (stage.rs), but the worker runs the dispatched
+    /// credential snapshot directly as `provider_override`, so that override
+    /// never runs there. Without this, every codex/copilot worker run ignores
+    /// the user's configured model and sends the provider default — which a
+    /// ChatGPT-account Codex token rejects ("model not supported …"). Apply it
+    /// here so the snapshot carries the user's model. No-op for API-key creds
+    /// (the worker stamps those from the spec's per-role model).
+    pub fn with_model_id(mut self, model_id: &str) -> Self {
+        if let ProviderCredential::OAuthConfig(cfg) = &mut self {
+            cfg.model_id = model_id.to_string();
+        }
+        self
+    }
+
     pub fn to_serializable(&self) -> djinn_runtime::SerializableCredential {
         match self {
             ProviderCredential::ApiKey(key_name, api_key) => {
