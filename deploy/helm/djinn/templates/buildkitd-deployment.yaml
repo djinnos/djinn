@@ -30,6 +30,14 @@ spec:
         {{- include "djinn.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: buildkitd
       annotations:
+        # Protect in-flight builds from Karpenter consolidation eviction. This
+        # is a single shared replicas:1 + Recreate daemon, so any eviction (the
+        # "Evicted pod: Underutilized" consolidation case) tears down EVERY
+        # concurrent build mid-stream — the build Jobs see their gRPC transport
+        # close with `GOAWAY graceful_stop` while exporting layers. Voluntary-
+        # disruption opt-out only; it can still be drained for a real node
+        # failure or a chart rollout. Mirrors server/qdrant.
+        karpenter.sh/do-not-disrupt: "true"
         # AppArmor unconfined is required for rootless + user-namespace
         # orchestration. Seccomp Unconfined is the same story — BuildKit's
         # rootless OCI worker uses syscalls blocked by the default profile.
