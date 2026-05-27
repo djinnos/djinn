@@ -319,11 +319,23 @@ impl CoordinatorActor {
 
         let mut exhausted_roles: HashSet<&'static str> = HashSet::new();
 
-        // Expire stale cooldowns and old dispatch timestamps.
-        self.dispatch_cooldowns
-            .retain(|_, instant| instant.elapsed() < DISPATCH_COOLDOWN);
+        // Expire elapsed cooldowns (value = cooldown EXPIRY instant) and old
+        // dispatch timestamps. Keep dispatch timestamps for the full
+        // failure-detection window so SLOW failures (a ~30s worker run that
+        // fails on empty/throttled provider turns) are still attributed and
+        // backed off, instead of slipping past a short window and re-dispatching
+        // every tick.
+        let prune_now = StdInstant::now();
+        self.dispatch_cooldowns.retain(|_, expiry| *expiry > prune_now);
         self.last_dispatched
-            .retain(|_, instant| instant.elapsed() < RAPID_FAILURE_THRESHOLD);
+            .retain(|_, instant| instant.elapsed() < FAILURE_DETECTION_WINDOW);
+        // Drop failure streaks for tasks no longer tracked (succeeded → not
+        // re-dispatched → timestamp expired, and not currently cooling down).
+        let tracked_dispatched = &self.last_dispatched;
+        let tracked_cooldowns = &self.dispatch_cooldowns;
+        self.dispatch_failure_streak.retain(|id, _| {
+            tracked_dispatched.contains_key(id) || tracked_cooldowns.contains_key(id)
+        });
 
         // Bug #18 guard: skip any task that already has a running session.
         // Without this the coordinator tick re-dispatches the same task every
@@ -394,26 +406,40 @@ impl CoordinatorActor {
                     continue;
                 }
             }
-            // Detect rapid failure: if this task was dispatched very recently and
-            // is already back as ready, it failed lifecycle early → add to cooldown.
-            if let Some(last) = self.last_dispatched.get(&task.id)
-                && last.elapsed() < RAPID_FAILURE_THRESHOLD
-            {
-                tracing::warn!(
-                    task_id = %task.short_id,
-                    elapsed_ms = last.elapsed().as_millis(),
-                    cooldown_secs = DISPATCH_COOLDOWN.as_secs(),
-                    "CoordinatorActor: rapid failure detected, adding dispatch cooldown"
-                );
-                self.dispatch_cooldowns
-                    .insert(task.id.clone(), StdInstant::now());
-            }
-            // Skip tasks in cooldown (recently failed lifecycle setup).
+            // Skip tasks still inside an active dispatch cooldown.
             if self.dispatch_cooldowns.contains_key(&task.id) {
                 tracing::debug!(
                     task_id = %task.short_id,
                     "CoordinatorActor: task in dispatch cooldown, skipping"
                 );
+                continue;
+            }
+            // A task that is dispatch-ready again (no active session — guarded
+            // above) after a recent dispatch means the prior run FAILED. Consume
+            // the dispatch marker so each failed attempt counts exactly once,
+            // bump the per-task failure streak, and apply an ESCALATING cooldown.
+            // This is what stops a persistent failure — notably a provider
+            // throttle that returns empty turns every ~30s — from re-dispatching
+            // every coordinator tick and storming the backend.
+            if self
+                .last_dispatched
+                .remove(&task.id)
+                .is_some_and(|last| last.elapsed() < FAILURE_DETECTION_WINDOW)
+            {
+                let streak = {
+                    let n = self.dispatch_failure_streak.entry(task.id.clone()).or_insert(0);
+                    *n = n.saturating_add(1);
+                    *n
+                };
+                let cooldown = escalating_dispatch_cooldown(streak);
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    streak,
+                    cooldown_secs = cooldown.as_secs(),
+                    "CoordinatorActor: repeated task failure — backing off dispatch (escalating cooldown)"
+                );
+                self.dispatch_cooldowns
+                    .insert(task.id.clone(), StdInstant::now() + cooldown);
                 continue;
             }
 

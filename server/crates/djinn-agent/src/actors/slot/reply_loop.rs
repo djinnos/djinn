@@ -13,9 +13,9 @@ pub(super) mod error_handling;
 mod streaming;
 mod tool_dispatch;
 use error_handling::{
-    MAX_COMPACTION_RETRIES, is_context_length_error, is_orphaned_tool_call_error,
-    next_nudge_message, should_retry_after_tool_call_compaction, should_retry_empty_assistant_turn,
-    should_retry_empty_stream, tool_choice_for_turn,
+    MAX_COMPACTION_RETRIES, empty_turn_backoff, is_context_length_error,
+    is_orphaned_tool_call_error, next_nudge_message, should_retry_after_tool_call_compaction,
+    should_retry_empty_assistant_turn, should_retry_empty_stream, tool_choice_for_turn,
 };
 use streaming::{StreamLoopContext, consume_provider_stream};
 #[cfg(test)]
@@ -423,16 +423,21 @@ pub(crate) async fn run_reply_loop(
             if !saw_round_event {
                 if let Some(next_retry) = should_retry_empty_stream(saw_round_event, empty_turn_retries) {
                     empty_turn_retries = next_retry;
+                    let backoff = empty_turn_backoff(empty_turn_retries);
                     tracing::warn!(
                         task_id = %task_id,
                         retry = empty_turn_retries,
-                        "ReplyLoop: provider stream ended without events; retrying"
+                        backoff_secs = backoff.as_secs(),
+                        "ReplyLoop: provider stream ended without events; backing off then retrying"
                     );
+                    tokio::time::sleep(backoff).await;
                     continue;
                 }
                 let diag = runtime_fs_diagnostics(project_path, worktree_path);
                 return Err(anyhow::anyhow!(
-                    "provider stream ended without any events (after {} retries); {}",
+                    "provider returned {} empty/no-event turns — the backend likely refused or \
+                     throttled the request (a ChatGPT-account Codex rate limit returns empty 200s, \
+                     not 429s; verify provider/account status or switch to an API-key backend); {}",
                     empty_turn_retries, diag
                 ));
             }
@@ -460,16 +465,21 @@ pub(crate) async fn run_reply_loop(
                     should_retry_empty_assistant_turn(assistant_content.is_empty(), empty_turn_retries)
                 {
                     empty_turn_retries = next_retry;
+                    let backoff = empty_turn_backoff(empty_turn_retries);
                     tracing::warn!(
                         task_id = %task_id,
                         retry = empty_turn_retries,
-                        "ReplyLoop: provider returned empty assistant turn; retrying"
+                        backoff_secs = backoff.as_secs(),
+                        "ReplyLoop: provider returned empty assistant turn; backing off then retrying"
                     );
+                    tokio::time::sleep(backoff).await;
                     continue;
                 }
                 let diag = runtime_fs_diagnostics(project_path, worktree_path);
                 return Err(anyhow::anyhow!(
-                    "provider returned empty assistant turn (after {} retries); {}",
+                    "provider returned {} empty assistant turns — the backend likely refused or \
+                     throttled the request (a ChatGPT-account Codex rate limit returns empty 200s, \
+                     not 429s; verify provider/account status or switch to an API-key backend); {}",
                     empty_turn_retries, diag
                 ));
             }

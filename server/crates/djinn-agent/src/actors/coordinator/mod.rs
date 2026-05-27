@@ -324,6 +324,7 @@ mod tests {
             pr_errors: HashMap::new(),
             last_dispatched: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
+            dispatch_failure_streak: HashMap::new(),
             verification_tracker: VerificationTracker::default(),
             consolidation_runner: Arc::new(consolidation::DbConsolidationRunner::new(db.clone())),
             last_stale_sweep: StdInstant::now(),

@@ -117,15 +117,53 @@ pub(super) const TASK_OUTCOME_CONFIDENCE_SIGNAL: f64 = 0.1;
 pub(super) const TASK_OUTCOME_REOPEN_COUNT: &str = "reopen_count";
 pub(super) const TASK_OUTCOME_FAILED_CLOSE: &str = "failed_closed";
 
-/// Cooldown before re-dispatching a task that failed lifecycle setup
-/// (e.g. missing credential).  Prevents hot dispatch loops.
+/// Base cooldown before re-dispatching a task that failed (lifecycle setup, a
+/// crashed run, or a provider that returned empty/throttled turns). Escalates
+/// per consecutive failure via [`escalating_dispatch_cooldown`] to prevent hot
+/// re-dispatch loops that hammer a degraded provider.
 pub(super) const DISPATCH_COOLDOWN: Duration = Duration::from_secs(60);
 
-/// If a task becomes dispatch-ready again within this threshold of its last
-/// dispatch, it is considered a rapid failure and placed in cooldown.
-pub(super) const RAPID_FAILURE_THRESHOLD: Duration = Duration::from_secs(10);
+/// Upper bound on the escalating per-task dispatch cooldown.
+pub(super) const MAX_DISPATCH_COOLDOWN: Duration = Duration::from_secs(30 * 60);
+
+/// A task that becomes dispatch-ready again (with no active session) within
+/// this window of its last dispatch is treated as a failed attempt and backed
+/// off. Wide enough to catch SLOW failures — e.g. a worker that runs ~30s and
+/// then fails on empty/throttled provider turns. The old 10s threshold missed
+/// these entirely, so they re-dispatched every coordinator tick and stormed the
+/// provider (the root of the 2026-05-27 Codex empty-turn outage amplification).
+pub(super) const FAILURE_DETECTION_WINDOW: Duration = Duration::from_secs(35 * 60);
+
+/// Escalating cooldown for a task on its `streak`-th consecutive failed
+/// dispatch: `DISPATCH_COOLDOWN * 2^(streak-1)`, capped at [`MAX_DISPATCH_COOLDOWN`].
+/// streak 1 → 60s, 2 → 120s, 3 → 240s, … 6+ → 1800s. A transient provider
+/// throttle thus decays from "hammered every tick" to "probed every ~30 min".
+pub(super) fn escalating_dispatch_cooldown(streak: u32) -> Duration {
+    let shift = streak.saturating_sub(1).min(20);
+    let secs = DISPATCH_COOLDOWN
+        .as_secs()
+        .saturating_mul(1u64 << shift)
+        .min(MAX_DISPATCH_COOLDOWN.as_secs());
+    Duration::from_secs(secs)
+}
+
 #[cfg(test)]
 pub(super) const DEFAULT_MODEL_ID: &str = "test/mock";
+
+#[cfg(test)]
+mod cooldown_tests {
+    use super::*;
+
+    #[test]
+    fn escalating_cooldown_grows_then_caps() {
+        assert_eq!(escalating_dispatch_cooldown(0), Duration::from_secs(60));
+        assert_eq!(escalating_dispatch_cooldown(1), Duration::from_secs(60));
+        assert_eq!(escalating_dispatch_cooldown(2), Duration::from_secs(120));
+        assert_eq!(escalating_dispatch_cooldown(3), Duration::from_secs(240));
+        assert_eq!(escalating_dispatch_cooldown(6), MAX_DISPATCH_COOLDOWN);
+        assert_eq!(escalating_dispatch_cooldown(1_000), MAX_DISPATCH_COOLDOWN);
+    }
+}
 
 // ─── Error ───────────────────────────────────────────────────────────────────
 

@@ -71,6 +71,17 @@ pub(super) fn should_retry_empty_assistant_turn(
     }
 }
 
+/// Backoff before retrying an empty / no-event provider turn. A 200-empty
+/// completion is a refusal/throttle signal, not a transient blip — notably the
+/// ChatGPT-account Codex backend (`chatgpt.com/backend-api/codex`) signals
+/// rate limiting by returning an empty `response.completed` (HTTP 200) instead
+/// of a 429. Spacing retries out avoids hammering a degraded backend into a
+/// deeper/longer throttle. Schedule: 3s, 9s, 27s, capped at 30s.
+pub(super) fn empty_turn_backoff(retry: u32) -> std::time::Duration {
+    let secs = 3u64.saturating_pow(retry.clamp(1, 3)).min(30);
+    std::time::Duration::from_secs(secs)
+}
+
 pub(super) fn should_retry_after_tool_call_compaction(
     compacted: bool,
     turn_has_tool_calls: bool,
@@ -141,6 +152,16 @@ mod tests {
         // Negative cases.
         assert!(!is_orphaned_tool_call_error_str("rate limited"));
         assert!(!is_orphaned_tool_call_error_str("context length exceeded"));
+    }
+
+    #[test]
+    fn empty_turn_backoff_increases_then_caps() {
+        assert_eq!(empty_turn_backoff(1), std::time::Duration::from_secs(3));
+        assert_eq!(empty_turn_backoff(2), std::time::Duration::from_secs(9));
+        assert_eq!(empty_turn_backoff(3), std::time::Duration::from_secs(27));
+        // Defensive: clamps so an out-of-range retry never panics or runs away.
+        assert_eq!(empty_turn_backoff(0), std::time::Duration::from_secs(3));
+        assert_eq!(empty_turn_backoff(10), std::time::Duration::from_secs(27));
     }
 
     #[test]

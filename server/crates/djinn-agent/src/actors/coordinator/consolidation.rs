@@ -446,6 +446,7 @@ mod tests {
             pr_errors: std::collections::HashMap::new(),
             last_dispatched: std::collections::HashMap::new(),
             dispatch_cooldowns: std::collections::HashMap::new(),
+            dispatch_failure_streak: std::collections::HashMap::new(),
             verification_tracker: VerificationTracker::default(),
             consolidation_runner: runner,
             last_stale_sweep: StdInstant::now(),

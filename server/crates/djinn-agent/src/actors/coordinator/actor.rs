@@ -52,11 +52,18 @@ pub(super) struct CoordinatorActor {
     /// Per-project PR creation errors (project_id → error message).
     pub(super) pr_errors: HashMap<String, String>,
     /// Per-task dispatch tracking: task UUID → last dispatch instant.
-    /// When a task becomes ready again within `RAPID_FAILURE_THRESHOLD` of its
-    /// last dispatch, it is placed in cooldown for `DISPATCH_COOLDOWN` to prevent
-    /// hot dispatch loops (e.g. missing credential → release → re-dispatch).
+    /// When a task becomes ready again (no active session) within
+    /// `FAILURE_DETECTION_WINDOW` of its last dispatch, the prior run failed →
+    /// it is placed in an escalating cooldown to prevent hot dispatch loops
+    /// (missing credential, crash, or a provider returning empty/throttled turns).
     pub(super) last_dispatched: HashMap<String, StdInstant>,
+    /// Task UUID → cooldown EXPIRY instant. A task is skipped for dispatch while
+    /// an entry exists; entries are pruned once their expiry passes.
     pub(super) dispatch_cooldowns: HashMap<String, StdInstant>,
+    /// Task UUID → count of consecutive failed dispatches, driving the
+    /// escalating `dispatch_cooldowns` backoff. Cleared once a task stops
+    /// re-appearing as a failure (success → not re-dispatched → entry expires).
+    pub(super) dispatch_failure_streak: HashMap<String, u32>,
     /// Shared tracker for in-flight verification background tasks.
     pub(super) verification_tracker: VerificationTracker,
     pub(super) consolidation_runner: Arc<dyn ConsolidationRunner>,
@@ -185,6 +192,7 @@ impl CoordinatorActor {
             pr_errors: HashMap::new(),
             last_dispatched: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
+            dispatch_failure_streak: HashMap::new(),
             verification_tracker,
             consolidation_runner: consolidation_runner
                 .unwrap_or_else(|| Arc::new(DbConsolidationRunner::new(db.clone()))),
