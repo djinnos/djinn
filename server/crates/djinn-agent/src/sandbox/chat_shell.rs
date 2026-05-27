@@ -839,24 +839,4 @@ mod tests {
         // the plan's §Verification, `test_shell_sandbox_denies_network`
         // and friends) exercise the 30s path end-to-end.
     }
-
-    /// Landlock write-denial needs a binary that tries to `open(O_WRONLY |
-    /// O_CREAT)` a path and reports the errno. None of the allowlisted
-    /// commands except `tee`/`sh` (both denied) naturally do this without
-    /// ambiguity. `find -delete` is blocked by argv validation, not
-    /// Landlock, so it doesn't prove the ruleset applied. Defer to the
-    /// commit-6 integration tests where we can shell out to a purpose-built
-    /// test helper.
-    #[tokio::test]
-    #[ignore = "needs a purpose-built write-probe binary; commit 6 integration covers this"]
-    async fn write_denied_under_landlock() {}
-
-    /// Network denial: the argv allowlist already excludes every
-    /// network-capable tool (`curl`, `wget`, `nc`, `ssh`, `getent`,
-    /// `nslookup`, `ip`, `ss`). Proving the netns unshare itself denies
-    /// egress requires a purpose-built `socket(AF_INET, ...)` probe
-    /// binary. Deferred to commit-6 integration tests.
-    #[tokio::test]
-    #[ignore = "needs a purpose-built socket-probe binary; commit 6 integration covers this"]
-    async fn network_denied_if_netns_available() {}
 }

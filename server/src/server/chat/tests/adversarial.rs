@@ -106,19 +106,3 @@ async fn test_shell_sandbox_denies_writes() {
     // `rejects_sh_c_attempt` for the in-crate proof; the full HTTP
     // round-trip is covered by the kind-local Tilt smoke.
 }
-
-/// Shell sandbox denies every network egress path.  `curl`, `nc`,
-/// `getent`, `nslookup`, `ip`, `ss` are all off the argv allowlist, so
-/// the deny happens before `CLONE_NEWNET` is even needed.  Covered by
-/// the in-crate test `rejects_disallowed_command`.
-#[tokio::test]
-#[ignore = "requires netns probe; covered by in-crate sandbox tests + Tilt smoke"]
-async fn test_shell_sandbox_denies_network() {}
-
-/// `cat /proc/1/environ` inside the sandbox returns the sandbox env,
-/// not djinn-server's env.  Guaranteed by `env_clear()` + allowlist in
-/// `ChatShellSandbox::run`; tested directly via `env_scrubbed` in
-/// `sandbox/chat_shell.rs`.
-#[tokio::test]
-#[ignore = "requires namespaces; in-crate env_scrubbed test covers the same guarantee"]
-async fn test_shell_sandbox_denies_proc_leak() {}
