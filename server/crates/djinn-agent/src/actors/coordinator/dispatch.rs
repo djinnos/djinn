@@ -1070,17 +1070,9 @@ impl CoordinatorActor {
             let us_repo = djinn_db::UserSettingsRepository::new(self.db.clone());
             let models = match us_repo.get(uid).await {
                 Ok(Some(s)) => s.models.unwrap_or_default(),
-                Ok(None) => {
-                    tracing::warn!(target: "dispatch_diag", uid = %uid, "DIAG: user_settings.get -> None");
-                    return Vec::new();
-                }
-                Err(e) => {
-                    tracing::warn!(target: "dispatch_diag", uid = %uid, error = %e, "DIAG: user_settings.get -> Err");
-                    return Vec::new();
-                }
+                _ => return Vec::new(),
             };
             if models.is_empty() {
-                tracing::warn!(target: "dispatch_diag", uid = %uid, "DIAG: models empty");
                 return Vec::new();
             }
 
@@ -1092,30 +1084,20 @@ impl CoordinatorActor {
             );
             let credentials = match cred_repo.list_for_user(Some(uid)).await {
                 Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(target: "dispatch_diag", uid = %uid, error = %e, "DIAG: list_for_user -> Err");
-                    return Vec::new();
-                }
+                Err(_) => return Vec::new(),
             };
             let connected = self.catalog.connected_provider_ids(&credentials);
-            let result: Vec<String> = models
-                .iter()
+            if connected.is_empty() {
+                return Vec::new();
+            }
+
+            models
+                .into_iter()
                 .filter(|m| {
                     let provider = m.split_once('/').map(|(p, _)| p).unwrap_or(m.as_str());
                     connected.contains(provider)
                 })
-                .cloned()
-                .collect();
-            tracing::warn!(
-                target: "dispatch_diag",
-                uid = %uid,
-                selected = ?models,
-                cred_providers = ?credentials.iter().map(|c| c.provider_id.as_str()).collect::<Vec<_>>(),
-                connected = ?connected,
-                eligible = ?result,
-                "DIAG: resolve_user_model_priority"
-            );
-            result
+                .collect()
         }
     }
 
