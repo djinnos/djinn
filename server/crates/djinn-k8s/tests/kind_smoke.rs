@@ -118,6 +118,9 @@ fn test_config() -> KubernetesConfig {
 /// planner, so there is nothing here that would demand real mirror volumes.
 fn sample_spec(task_id: &str) -> TaskRunSpec {
     TaskRunSpec {
+        // `prepare` parses this back to a Uuid for the resource name, so it
+        // must be a valid UUID string.
+        task_run_id: uuid::Uuid::now_v7().to_string(),
         task_id: task_id.into(),
         project_id: format!("proj-{task_id}"),
         trigger: TaskRunTrigger::NewTask,

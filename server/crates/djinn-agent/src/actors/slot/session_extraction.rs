@@ -98,6 +98,70 @@ pub(crate) async fn run_post_session_extraction(
     }
 }
 
+/// One-shot recovery sweep: run post-session extraction over every COMPLETED
+/// task-run whose sessions were never extracted (`event_taxonomy IS NULL`).
+///
+/// This backfills runs that completed *before* the streamed-report fix wired
+/// extraction up (and any run whose worker died before streaming a report, so
+/// the live trigger never fired). It reuses the live server's fully-wired
+/// `AgentContext` — same provider/catalog/db the per-run trigger uses — so it
+/// must run inside the server process, not a separate binary (a standalone
+/// boot would also `interrupt_stale_sessions`, clobbering the live server).
+///
+/// Idempotent: [`run_post_session_extraction`] skips any session whose
+/// `event_taxonomy` is already set, so re-running this is safe and cheap.
+/// Sequential by design — extraction makes an LLM call per session, and we
+/// don't want a backfill to stampede the provider.
+///
+/// Selector follows the agreed policy: ALL completed runs with unextracted
+/// sessions (not just the latest), so retries / manually-repaired older runs
+/// aren't starved.
+pub async fn run_extraction_backfill(app_state: AgentContext) {
+    // Runtime (non-macro) query so this doesn't depend on the sqlx offline
+    // cache. `event_taxonomy` is the per-session extraction marker; a
+    // `completed` run includes PR-opened / closed / escalated outcomes.
+    let candidates: Vec<(String, String)> = match sqlx::query_as(
+        "SELECT DISTINCT s.task_id, s.task_run_id \
+         FROM sessions s \
+         JOIN task_runs tr ON tr.id = s.task_run_id \
+         WHERE tr.status = 'completed' \
+           AND s.event_taxonomy IS NULL \
+           AND s.task_id IS NOT NULL \
+           AND s.task_run_id IS NOT NULL \
+         ORDER BY s.task_run_id",
+    )
+    .fetch_all(app_state.db.pool())
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!(error = %e, "extraction_backfill: candidate query failed; aborting sweep");
+            return;
+        }
+    };
+
+    let total = candidates.len();
+    tracing::info!(
+        task_runs = total,
+        "extraction_backfill: starting one-shot sweep over completed, unextracted task-runs"
+    );
+
+    for (idx, (task_id, task_run_id)) in candidates.into_iter().enumerate() {
+        tracing::info!(
+            task_id = %task_id,
+            task_run_id = %task_run_id,
+            progress = format!("{}/{}", idx + 1, total),
+            "extraction_backfill: extracting task-run"
+        );
+        run_post_session_extraction(task_id, task_run_id, app_state.clone()).await;
+    }
+
+    tracing::info!(
+        task_runs = total,
+        "extraction_backfill: sweep complete"
+    );
+}
+
 // ── Event taxonomy ────────────────────────────────────────────────────────────
 
 /// Aggregated event counts extracted from a completed session's tool log.

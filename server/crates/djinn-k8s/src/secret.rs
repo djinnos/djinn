@@ -128,6 +128,7 @@ mod tests {
     fn task_run_secret_roundtrips_bincoded_spec() {
         // Shape mirrors djinn_runtime::spec::tests::task_run_spec_bincode_roundtrip.
         let spec = TaskRunSpec {
+            task_run_id: "019e6a03-8aef-7201-9c9d-d7ba17613a0b".to_string(),
             task_id: "task-abc".to_string(),
             project_id: "proj-xyz".to_string(),
             trigger: TaskRunTrigger::NewTask,

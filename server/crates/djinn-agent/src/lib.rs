@@ -49,6 +49,11 @@ pub mod resource_monitor;
 
 pub mod actors;
 
+/// One-shot recovery sweep that backfills post-session knowledge extraction
+/// over completed-but-unextracted task-runs. Triggered from the server boot
+/// path behind an env flag — see `run_extraction_backfill` for the policy.
+pub use actors::slot::session_extraction::run_extraction_backfill;
+
 // ─── AgentType ────────────────────────────────────────────────────────────────
 
 /// Role an agent is playing within Djinn.

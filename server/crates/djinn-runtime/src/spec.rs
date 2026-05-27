@@ -103,6 +103,15 @@ pub fn role_sequence(flow: SupervisorFlow) -> &'static [RoleKind] {
 /// All runtime-variable data the supervisor needs to execute one task-run.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskRunSpec {
+    /// The canonical task-run id, minted once by the host coordinator before
+    /// `prepare`. This is the SINGLE id for the whole run: the K8s runtime
+    /// derives its resource name / registry key from it, the in-pod
+    /// `TaskRunSupervisor` uses it for the `task_runs` row + every session, and
+    /// the terminal `TaskRunReport` carries it back. Unifying it here removes
+    /// the old split where `prepare` and the supervisor each minted their own
+    /// `Uuid`, leaving the host's report id pointing at a row that never
+    /// existed (the bug that silently disabled post-session extraction).
+    pub task_run_id: String,
     pub task_id: String,
     pub project_id: String,
     pub trigger: TaskRunTrigger,
@@ -179,6 +188,7 @@ mod tests {
         per_role.insert(RoleKind::Worker, "anthropic/claude-opus-4.7".to_string());
 
         let spec = TaskRunSpec {
+            task_run_id: "019e6a03-8aef-7201-9c9d-d7ba17613a0b".to_string(),
             task_id: "task-abc".to_string(),
             project_id: "proj-xyz".to_string(),
             trigger: TaskRunTrigger::NewTask,
@@ -191,6 +201,7 @@ mod tests {
         let bytes = bincode::serialize(&spec).expect("serialize");
         let back: TaskRunSpec = bincode::deserialize(&bytes).expect("deserialize");
 
+        assert_eq!(back.task_run_id, spec.task_run_id);
         assert_eq!(back.task_id, spec.task_id);
         assert_eq!(back.project_id, spec.project_id);
         assert_eq!(back.trigger, spec.trigger);

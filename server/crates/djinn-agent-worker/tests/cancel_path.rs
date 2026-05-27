@@ -405,6 +405,7 @@ async fn worker_observes_host_initiated_cancel() {
     let mut per_role = HashMap::new();
     per_role.insert(RoleKind::Planner, "openai/gpt-4o".to_string());
     let spec = TaskRunSpec {
+        task_run_id: format!("run-{task_id}"),
         task_id: task_id.into(),
         project_id: project_id.into(),
         trigger: TaskRunTrigger::NewTask,

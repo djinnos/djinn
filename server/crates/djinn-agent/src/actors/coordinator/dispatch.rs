@@ -1507,6 +1507,10 @@ impl CoordinatorActor {
             // That's fine: whichever fires first wins, the second is a
             // no-op force-push (same SHA) and an InvalidTransition skip.
             let spec = djinn_runtime::TaskRunSpec {
+                // PR-open-only flow: this spec drives `supervisor_pr_open`, not
+                // a full task-run, so the id is never persisted as a `task_runs`
+                // row — but the field is required, so mint a fresh one.
+                task_run_id: uuid::Uuid::now_v7().to_string(),
                 task_id: task.id.clone(),
                 project_id: task.project_id.clone(),
                 trigger: djinn_core::models::TaskRunTrigger::NewTask,

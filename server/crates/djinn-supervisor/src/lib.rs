@@ -160,7 +160,11 @@ impl TaskRunSupervisor {
 
     /// Drive a task-run from start to terminal state.
     pub async fn run(&self, spec: TaskRunSpec) -> Result<TaskRunReport, SupervisorError> {
-        let run_id = uuid::Uuid::now_v7().to_string();
+        // Use the host-minted canonical id rather than minting our own — the
+        // host's runtime, the `task_runs` row, every session, and the terminal
+        // report must all share ONE id so post-session extraction can match
+        // sessions back to the run the host dispatched.
+        let run_id = spec.task_run_id.clone();
         let trigger_str = spec.trigger.as_str().to_string();
 
         info!(

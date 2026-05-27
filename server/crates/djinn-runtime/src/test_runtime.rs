@@ -412,6 +412,7 @@ mod tests {
 
     fn dummy_spec(task_id: &str) -> TaskRunSpec {
         TaskRunSpec {
+            task_run_id: format!("run-{task_id}"),
             task_id: task_id.into(),
             project_id: "p1".into(),
             trigger: TaskRunTrigger::NewTask,

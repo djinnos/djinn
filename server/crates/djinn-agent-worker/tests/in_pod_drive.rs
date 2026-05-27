@@ -417,6 +417,7 @@ async fn worker_drives_real_supervisor_in_pod() {
     let mut per_role = HashMap::new();
     per_role.insert(RoleKind::Planner, "openai/gpt-4o".to_string());
     let spec = TaskRunSpec {
+        task_run_id: format!("run-{task_id}"),
         task_id: task_id.into(),
         project_id: project_id.into(),
         trigger: TaskRunTrigger::NewTask,

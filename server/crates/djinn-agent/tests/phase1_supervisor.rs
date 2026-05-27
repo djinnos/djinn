@@ -232,6 +232,7 @@ async fn supervisor_clones_from_mirror_without_worktrees() {
 
     // 5. Spike flow = single Architect stage — minimizes reply_loop surface.
     let spec = TaskRunSpec {
+        task_run_id: uuid::Uuid::now_v7().to_string(),
         task_id: task.id.clone(),
         project_id: project.id.clone(),
         trigger: TaskRunTrigger::NewTask,
@@ -480,6 +481,7 @@ async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
     let supervisor = TaskRunSupervisor::new(mirror.clone(), services);
 
     let spec = TaskRunSpec {
+        task_run_id: uuid::Uuid::now_v7().to_string(),
         task_id: task.id.clone(),
         project_id: project.id.clone(),
         trigger: TaskRunTrigger::NewTask,

@@ -126,7 +126,16 @@ pub(crate) async fn run_supervisor_dispatch(
     }
 
     // ── Build the spec ────────────────────────────────────────────────────
+    //
+    // Mint the canonical task-run id HERE, once, and thread it through the
+    // spec. The runtime (`prepare`) derives its K8s resource name + registry
+    // key from it, and the in-pod `TaskRunSupervisor` writes the `task_runs`
+    // row + every session under it. One id end-to-end means the terminal
+    // report's id matches the persisted sessions, which is what post-session
+    // extraction keys off.
+    let task_run_id = uuid::Uuid::now_v7().to_string();
     let spec = TaskRunSpec {
+        task_run_id,
         task_id: task.id.clone(),
         project_id: task.project_id.clone(),
         trigger,
@@ -267,26 +276,23 @@ pub(crate) async fn run_supervisor_dispatch(
         }
     });
 
+    // Consume the worker's terminal report off the BiStream. For BOTH runtimes
+    // `attach_stdio` bridges the worker's RPC events — including the final
+    // `WorkerEvent::TerminalReport` — onto `events_rx`, so the report we read
+    // here carries the REAL run id + the stages the in-pod supervisor actually
+    // completed. This is the authoritative result. `teardown` below only
+    // synthesizes a stub (`Interrupted`, no stages) for the case where the
+    // worker died before it could emit a report; we fall back to that stub
+    // only when the stream yielded nothing.
+    //
+    // (Until this change the Kubernetes path discarded the stream and relied on
+    // teardown's stub, which always reported `Interrupted`/`[]` under a
+    // host-minted id that matched no persisted row — silently disabling
+    // post-session extraction. See `~/.claude/plans/memory-extraction-fix.md`.)
     let bistream_result = runtime.attach_stdio(&handle).await;
-    let report_result = match runtime_kind {
-        RuntimeKind::Test => match bistream_result {
-            Ok(bistream) => await_report_from_stream(bistream).await,
-            Err(e) => Err(anyhow::anyhow!("runtime.attach_stdio failed: {e}")),
-        },
-        RuntimeKind::Kubernetes => {
-            // PR 4 pt2: the K8s attach_stdio is still a detached placeholder
-            // (the real BiStream is fed by the launcher-side TCP dispatch,
-            // which `serve_on_tcp` owns at djinn-server boot).  Fall back to
-            // synthesizing the terminal TaskRunReport from the Job's
-            // terminal state — that's exactly what KubernetesRuntime::teardown
-            // already computes.  Formalising the BiStream hand-off between
-            // serve_on_tcp and the dispatch loop is the follow-up PR.
-            //
-            // We still attach for its side effects (object-safety + future
-            // compatibility) but ignore the returned stream.
-            let _ = bistream_result;
-            Ok(())
-        }
+    let report_result: anyhow::Result<Option<TaskRunReport>> = match bistream_result {
+        Ok(bistream) => await_report_from_stream(bistream, &kill).await,
+        Err(e) => Err(anyhow::anyhow!("runtime.attach_stdio failed: {e}")),
     };
 
     // Stop the cancel watcher regardless of success path.
@@ -310,7 +316,12 @@ pub(crate) async fn run_supervisor_dispatch(
     reap_orphan_task_run(&app_state, &task.id, reap_status).await;
 
     match (report_result, teardown) {
-        (Ok(()), Ok(report)) => {
+        (Ok(streamed), Ok(teardown_report)) => {
+            // Prefer the streamed terminal report — it carries the real run id
+            // and the stages the in-pod supervisor actually completed. The
+            // teardown report is a stub fallback for the no-report case (worker
+            // died before emitting), which still feeds the orphan reap above.
+            let report = select_terminal_report(streamed, teardown_report);
             tracing::info!(
                 task_id = %task.short_id,
                 task_run_id = %report.task_run_id,
@@ -324,6 +335,8 @@ pub(crate) async fn run_supervisor_dispatch(
             // notes created here get embedded; worker pods are ephemeral and
             // lack that config). Gated on real work having run — skip
             // interrupted/empty runs so we don't burn an LLM call on nothing.
+            // `report.task_run_id` is the canonical id the sessions were
+            // written under, so `run_post_session_extraction` matches them.
             // Extraction is fully isolated: any failure is logged and never
             // affects the task-run outcome.
             if !report.stages_completed.is_empty() {
@@ -351,7 +364,7 @@ pub(crate) async fn run_supervisor_dispatch(
             );
             Err(e)
         }
-        (Ok(()), Err(e)) => {
+        (Ok(_streamed), Err(e)) => {
             tracing::warn!(
                 task_id = %task.short_id,
                 error = %e,
@@ -371,6 +384,21 @@ fn report_to_terminal_status(report: &TaskRunReport) -> TaskRunStatus {
         TaskRunOutcome::Failed { .. } => TaskRunStatus::Failed,
         TaskRunOutcome::Interrupted => TaskRunStatus::Interrupted,
     }
+}
+
+/// Choose the authoritative terminal report for a completed dispatch.
+///
+/// The streamed worker report (when present) wins: it carries the canonical
+/// run id the sessions were persisted under and the stages actually completed.
+/// The runtime's teardown report is a stub fallback used only when the worker
+/// died before emitting a report. Keeping this as a named function makes the
+/// "streamed id beats teardown id" invariant — the one that gates post-session
+/// extraction — directly testable.
+fn select_terminal_report(
+    streamed: Option<TaskRunReport>,
+    teardown: TaskRunReport,
+) -> TaskRunReport {
+    streamed.unwrap_or(teardown)
 }
 
 async fn reap_orphan_task_run(
@@ -403,30 +431,175 @@ async fn reap_orphan_task_run(
     }
 }
 
-/// Drain a [`BiStream`] until we see a [`StreamEvent::Report`] frame.
+/// Drain a [`BiStream`] until we see the terminal [`StreamEvent::Report`]
+/// frame, returning the [`TaskRunReport`] it carries.
 ///
-/// Used by the TestRuntime path — `TestRuntime` forwards the
-/// [`TaskRunReport`] produced by [`SupervisorTaskRunner`] as a terminal
-/// `StreamEvent::Report` on `events_rx` before closing the channel.  We drop
-/// non-terminal frames (they're already observed via the event-bus /
-/// tracing seams in-process).
-async fn await_report_from_stream(mut stream: BiStream) -> anyhow::Result<()> {
-    while let Some(frame) = stream.events_rx.recv().await {
-        match frame {
-            StreamEvent::Report(_report) => {
-                // The terminal report is the signal the run is done; the
-                // supervisor has already persisted state.  Nothing to do
-                // here beyond returning success.
-                return Ok(());
+/// Both runtimes bridge the worker's events onto `events_rx`: `TestRuntime`
+/// forwards the [`TaskRunReport`] produced by [`SupervisorTaskRunner`], and
+/// `KubernetesRuntime::attach_stdio` forwards the worker's
+/// `WorkerEvent::TerminalReport` from its RPC connection. We drop non-terminal
+/// frames (already observed via the event-bus / DB-write seams) and return:
+///
+/// - `Ok(Some(report))` — the worker emitted its terminal report. This is the
+///   authoritative result (real run id + completed stages).
+/// - `Ok(None)` — the channel closed (worker exited / connection dropped) or
+///   the `kill` token fired before any report arrived. The caller falls back
+///   to the runtime's teardown stub.
+///
+/// Bounded by `kill`: a hung worker connection can't pin the slot past the
+/// cancel the slot actor already requested.
+async fn await_report_from_stream(
+    mut stream: BiStream,
+    kill: &CancellationToken,
+) -> anyhow::Result<Option<TaskRunReport>> {
+    loop {
+        tokio::select! {
+            biased;
+            _ = kill.cancelled() => {
+                tracing::debug!(
+                    "supervisor dispatch: kill fired while awaiting terminal report; \
+                     proceeding to teardown"
+                );
+                return Ok(None);
             }
-            other => {
-                tracing::trace!(event = ?other, "supervisor dispatch: dropping non-terminal frame");
+            frame = stream.events_rx.recv() => {
+                match frame {
+                    Some(StreamEvent::Report(report)) => return Ok(Some(report)),
+                    Some(other) => {
+                        tracing::trace!(event = ?other, "supervisor dispatch: dropping non-terminal frame");
+                    }
+                    // Channel closed without a terminal report — the supervisor
+                    // path persists state as a side effect; the caller uses the
+                    // teardown stub for the terminal status.
+                    None => return Ok(None),
+                }
             }
         }
     }
-    // Channel closed without a terminal report — treat as success; the
-    // supervisor path persists state as a side effect, and TestRuntime's
-    // `teardown` synthesizes a report from the join handle anyway.
-    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use djinn_runtime::RoleKind;
+
+    fn report(id: &str, stages: Vec<RoleKind>, outcome: TaskRunOutcome) -> TaskRunReport {
+        TaskRunReport {
+            task_run_id: id.to_string(),
+            outcome,
+            stages_completed: stages,
+        }
+    }
+
+    /// The regression guard: the host's transport/teardown id (A) and the
+    /// in-pod/persisted id (B) differ. Post-session extraction must key off the
+    /// streamed report (B), under which the sessions were actually written —
+    /// NOT the teardown stub (A), which matches no persisted row. Before this
+    /// fix the K8s path used the stub, silently disabling extraction.
+    #[test]
+    fn streamed_report_wins_over_teardown_stub() {
+        let streamed = report(
+            "id-B-persisted",
+            vec![RoleKind::Worker, RoleKind::Reviewer],
+            TaskRunOutcome::PrOpened {
+                url: "https://example/pr/1".into(),
+                sha: "deadbeef".into(),
+            },
+        );
+        let teardown_stub = report("id-A-transport", vec![], TaskRunOutcome::Interrupted);
+
+        let chosen = select_terminal_report(Some(streamed), teardown_stub);
+
+        assert_eq!(
+            chosen.task_run_id, "id-B-persisted",
+            "extraction id must come from the streamed report, not the teardown stub"
+        );
+        assert!(
+            !chosen.stages_completed.is_empty(),
+            "real stages must survive so the extraction gate opens"
+        );
+    }
+
+    /// No streamed report (worker died before emitting) → fall back to the
+    /// teardown stub so the orphan-reap terminal status is still applied.
+    #[test]
+    fn teardown_stub_used_when_no_streamed_report() {
+        let teardown_stub = report("id-A-transport", vec![], TaskRunOutcome::Interrupted);
+        let chosen = select_terminal_report(None, teardown_stub);
+        assert_eq!(chosen.task_run_id, "id-A-transport");
+        assert!(chosen.stages_completed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn await_report_returns_streamed_report() {
+        let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
+        let kill = CancellationToken::new();
+        let streamed = report(
+            "id-B",
+            vec![RoleKind::Worker],
+            TaskRunOutcome::Closed {
+                reason: "done".into(),
+            },
+        );
+        events_tx
+            .send(StreamEvent::Report(streamed))
+            .await
+            .expect("send report");
+
+        let got = await_report_from_stream(bistream, &kill)
+            .await
+            .expect("await ok");
+        assert_eq!(got.expect("some report").task_run_id, "id-B");
+    }
+
+    #[tokio::test]
+    async fn await_report_drops_non_terminal_frames_then_returns_report() {
+        let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
+        let kill = CancellationToken::new();
+        events_tx
+            .send(StreamEvent::AssistantDelta {
+                session_id: "s1".into(),
+                text: "thinking".into(),
+            })
+            .await
+            .unwrap();
+        events_tx
+            .send(StreamEvent::Report(report(
+                "id-B",
+                vec![RoleKind::Worker],
+                TaskRunOutcome::Interrupted,
+            )))
+            .await
+            .unwrap();
+
+        let got = await_report_from_stream(bistream, &kill)
+            .await
+            .expect("await ok");
+        assert_eq!(got.expect("some report").task_run_id, "id-B");
+    }
+
+    #[tokio::test]
+    async fn await_report_returns_none_when_kill_fires() {
+        // Sender kept alive so recv() would otherwise pend forever — kill must
+        // bound the wait.
+        let (bistream, _events_tx, _requests_rx) = BiStream::new_in_memory(8);
+        let kill = CancellationToken::new();
+        kill.cancel();
+        let got = await_report_from_stream(bistream, &kill)
+            .await
+            .expect("await ok");
+        assert!(got.is_none());
+    }
+
+    #[tokio::test]
+    async fn await_report_returns_none_when_channel_closes_without_report() {
+        let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
+        let kill = CancellationToken::new();
+        drop(events_tx);
+        let got = await_report_from_stream(bistream, &kill)
+            .await
+            .expect("await ok");
+        assert!(got.is_none());
+    }
 }
 

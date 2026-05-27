@@ -444,6 +444,7 @@ mod tests {
 
     fn fake_spec() -> TaskRunSpec {
         TaskRunSpec {
+            task_run_id: "run-t1".into(),
             task_id: "t1".into(),
             project_id: "p1".into(),
             trigger: TaskRunTrigger::NewTask,

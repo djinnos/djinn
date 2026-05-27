@@ -228,7 +228,16 @@ impl SessionRuntime for KubernetesRuntime {
         spec: &TaskRunSpec,
         credentials: &ResolvedCredentials,
     ) -> Result<RunHandle, RuntimeError> {
-        let task_run_id = Uuid::now_v7();
+        // The canonical id is minted by the host coordinator and carried on the
+        // spec — `prepare` no longer mints its own. Parse it back to a `Uuid`
+        // for the resource-name / label derivations; a non-UUID id is a
+        // programmer error in the dispatch path.
+        let task_run_id = Uuid::parse_str(&spec.task_run_id).map_err(|e| {
+            RuntimeError::Prepare(format!(
+                "spec.task_run_id `{}` is not a valid UUID: {e}",
+                spec.task_run_id
+            ))
+        })?;
         let task_run_id_str = task_run_id.to_string();
         let ns = &self.config.namespace;
         let resource_name = task_run_resource_name(&task_run_id);
@@ -899,6 +908,7 @@ mod tests {
         let resource_name = task_run_resource_name(&task_run_id);
 
         let spec = TaskRunSpec {
+            task_run_id: task_run_id.to_string(),
             task_id: "task-abc".to_string(),
             project_id: "proj-xyz".to_string(),
             trigger: TaskRunTrigger::NewTask,

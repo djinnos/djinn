@@ -171,6 +171,25 @@ async fn async_main() {
         });
     state.initialize_agents().await;
 
+    // One-time recovery sweep: backfill post-session knowledge extraction over
+    // completed task-runs whose sessions were never extracted — history from
+    // before the streamed-report fix, plus any run whose worker died before
+    // streaming a terminal report. Opt-in via `DJINN_BACKFILL_EXTRACTION` so it
+    // only runs when an operator asks for it; it's idempotent (skips sessions
+    // already marked with an `event_taxonomy`), so a stray re-run is harmless.
+    // Runs in the background using the live, fully-wired AgentContext so the
+    // server keeps serving while it sweeps.
+    if std::env::var("DJINN_BACKFILL_EXTRACTION")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        tracing::info!("DJINN_BACKFILL_EXTRACTION set — spawning one-time extraction backfill");
+        let ctx = state.agent_context();
+        tokio::spawn(async move {
+            djinn_agent::run_extraction_backfill(ctx).await;
+        });
+    }
+
     // Keep a handle on AppState so we can tear the TCP RPC listener down
     // gracefully after the HTTP server's shutdown future resolves.
     // `server::router(...)` moves the state into the router.
