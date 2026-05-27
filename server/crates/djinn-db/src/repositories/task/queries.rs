@@ -149,7 +149,8 @@ impl TaskRepository {
                     t.total_reopen_count, t.total_verification_failure_count,
                     t.intervention_count, t.last_intervention_at,
                     t.created_at, t.updated_at, t.closed_at,
-                    t.close_reason, t.merge_commit_sha, t.pr_url, t.merge_conflict_metadata, t.memory_refs::text AS memory_refs
+                    t.close_reason, t.merge_commit_sha, t.pr_url, t.merge_conflict_metadata, t.memory_refs::text AS memory_refs,
+                    t.agent_type, t.created_by_user_id
              FROM tasks t
              WHERE {where_sql}
              ORDER BY t.priority ASC, t.created_at ASC
@@ -193,7 +194,8 @@ impl TaskRepository {
                     t.total_reopen_count, t.total_verification_failure_count,
                     t.intervention_count, t.last_intervention_at,
                     t.created_at, t.updated_at, t.closed_at,
-                    t.close_reason, t.merge_commit_sha, t.pr_url, t.merge_conflict_metadata, t.memory_refs::text AS memory_refs
+                    t.close_reason, t.merge_commit_sha, t.pr_url, t.merge_conflict_metadata, t.memory_refs::text AS memory_refs,
+                    t.agent_type, t.created_by_user_id
              FROM tasks t
              WHERE {where_sql}
              ORDER BY t.priority ASC, t.created_at ASC
@@ -766,5 +768,88 @@ pub(super) fn sort_to_sql(sort: &str) -> &'static str {
         "updated_desc" => "updated_at DESC",
         "closed" => "closed_at DESC, created_at DESC",
         _ => "priority ASC, created_at ASC", // default: "priority"
+    }
+}
+
+#[cfg(test)]
+mod ready_projection_tests {
+    //! Regression: `list_ready` (and `claim`) must project the
+    //! `#[sqlx(default)]` columns the coordinator relies on — chiefly
+    //! `created_by_user_id`. Because that column is `#[sqlx(default)]` on
+    //! `Task`, omitting it from the SELECT does NOT error; it silently yields
+    //! `None`. That made the dispatcher treat every ready task as creator-less,
+    //! collapsing per-user model + credential resolution to the org-shared
+    //! fallback and emitting "no eligible model for task owner" for tasks whose
+    //! owner had a perfectly good per-user model/provider configured.
+    use super::*;
+    use crate::database::Database;
+    use crate::repositories::user::UserRepository;
+    use djinn_core::auth_context::SESSION_USER_ID;
+    use djinn_core::events::EventBus;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_ready_projects_created_by_user_id() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+
+        let project_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query!(
+            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
+            project_id,
+            "p",
+            "test",
+            format!("ready-projection-{project_id}"),
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // FK on tasks.created_by_user_id requires a real users row.
+        let user = UserRepository::new(db.clone())
+            .upsert_from_github(525252, "ready-projection-tester", Some("Tester"), None)
+            .await
+            .unwrap();
+        let user_id = user.id.clone();
+
+        let repo = TaskRepository::new(db.clone(), EventBus::noop());
+        // Insert under SESSION_USER_ID so the row is stamped with the creator.
+        let task_id = SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                repo.create_in_project(
+                    &project_id,
+                    None,
+                    "ready + attributed",
+                    "",
+                    "",
+                    "task",
+                    0,
+                    "",
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+                .id
+            })
+            .await;
+
+        let ready = repo
+            .list_ready(ReadyQuery {
+                project_id: Some(project_id.clone()),
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let got = ready
+            .iter()
+            .find(|t| t.id == task_id)
+            .expect("a freshly-created open task must appear in list_ready");
+        assert_eq!(
+            got.created_by_user_id.as_deref(),
+            Some(user_id.as_str()),
+            "list_ready must SELECT created_by_user_id, not default it to None"
+        );
     }
 }
