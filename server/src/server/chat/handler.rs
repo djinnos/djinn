@@ -494,10 +494,13 @@ async fn run_chat_loop(
 ) {
     let agent_ctx = state.agent_context();
     let mut loop_count = 0usize;
-    // Accumulated assistant content across every provider turn of the
-    // tool loop.  Persisted to `session_messages` once the loop exits
-    // (successful `done` or `error`).  Also fed to the auto-title pass.
-    let mut persisted_assistant_content: Vec<ContentBlock> = Vec::new();
+    // Assistant content accumulated across every provider turn of the tool
+    // loop, kept in memory only to seed the auto-title pass. Persistence is
+    // incremental (see below): each assistant turn and its paired
+    // tool-result user row are written to `session_messages` in
+    // conversation order the moment they finalize, so a reload never yields
+    // a `function_call` without its `function_call_output`.
+    let mut assistant_content_for_title: Vec<ContentBlock> = Vec::new();
     let mut completed_ok = false;
 
     loop {
@@ -572,10 +575,19 @@ async fn run_chat_loop(
                             },
                         ))
                         .await;
-                    // Persist whatever assistant content we accumulated
-                    // on the way down so the UI can reconstruct a
-                    // partial conversation on refresh.
-                    persist_assistant_turn(&state, &session_id, &persisted_assistant_content).await;
+                    // Prior turns were already persisted incrementally and
+                    // are well-formed. Persist this turn's partial text /
+                    // reasoning so a refresh can show it — but DROP any
+                    // buffered tool calls: their results will never be
+                    // produced, and persisting a `function_call` with no
+                    // `function_call_output` is exactly the orphan that
+                    // wedges the next turn.
+                    let mut partial: Vec<ContentBlock> = Vec::new();
+                    partial.append(&mut turn_provider_state);
+                    if !turn_text.is_empty() {
+                        partial.push(ContentBlock::Text { text: turn_text });
+                    }
+                    persist_turn(&state, &session_id, "assistant", &partial).await;
                     return;
                 }
             }
@@ -594,7 +606,8 @@ async fn run_chat_loop(
                     },
                 ))
                 .await;
-            persist_assistant_turn(&state, &session_id, &persisted_assistant_content).await;
+            // Prior turns already persisted incrementally; this turn has no
+            // content worth storing.
             return;
         }
 
@@ -604,7 +617,14 @@ async fn run_chat_loop(
             assistant_content.push(ContentBlock::Text { text: turn_text });
         }
         assistant_content.extend(tool_calls.clone());
-        persisted_assistant_content.extend(assistant_content.clone());
+        // Persist this assistant turn immediately, in the exact shape it
+        // will be replayed. Its tool-call results are written as a paired
+        // user row right after they're computed (below), so the persisted
+        // history always carries matching function_call /
+        // function_call_output items — the fix for the "No tool output
+        // found for function call" 400 on follow-up turns.
+        persist_turn(&state, &session_id, "assistant", &assistant_content).await;
+        assistant_content_for_title.extend(assistant_content.clone());
         if !assistant_content.is_empty() {
             conversation.push(Message {
                 role: Role::Assistant,
@@ -755,6 +775,11 @@ async fn run_chat_loop(
             }
         }
         if !tool_results.is_empty() {
+            // Persist the tool results as their own user row, paired with
+            // the assistant turn above. Previously these were dropped,
+            // leaving the persisted `function_call` orphaned and breaking
+            // the next turn's request.
+            persist_turn(&state, &session_id, "user", &tool_results).await;
             conversation.push(Message {
                 role: Role::User,
                 content: tool_results,
@@ -763,10 +788,8 @@ async fn run_chat_loop(
         }
     }
 
-    // Persist the full accumulated assistant turn before we fire the
-    // title generation / done events so that a refresh mid-title-pass
-    // still sees the assistant message.
-    persist_assistant_turn(&state, &session_id, &persisted_assistant_content).await;
+    // Every turn was persisted incrementally as it finalized, so there is
+    // nothing left to flush here before the title / done events.
 
     // Server-side auto-title pass.  Only runs on successful completion
     // (completed_ok) AND when the session was still on the default
@@ -778,7 +801,7 @@ async fn run_chat_loop(
         let title = generate_chat_title(
             &state,
             user_turn_for_title.as_deref(),
-            &persisted_assistant_content,
+            &assistant_content_for_title,
             &model_id,
             &session_id,
         )
@@ -804,27 +827,27 @@ async fn run_chat_loop(
     let _ = tx.send(Event::default().event("done").data("{}")).await;
 }
 
-/// Persist the accumulated assistant turn to `session_messages`.
+/// Persist one conversation turn to `session_messages`.
 ///
-/// Schema stored in `content_json` for assistant messages:
-///
-///   [ContentBlock, …]
-///
-/// where each element is a provider-native `djinn_provider::message::
-/// ContentBlock`.  In particular, every `ToolUse` block keeps its full
-/// `input` JSON so the UI can reconstruct the tool-call args on
-/// reload.  Empty turns (no text, no tool calls) are skipped.
-async fn persist_assistant_turn(state: &AppState, session_id: &str, content: &[ContentBlock]) {
+/// Schema stored in `content_json` is `[ContentBlock, …]`, where each
+/// element is a provider-native `djinn_provider::message::ContentBlock`.
+/// Assistant turns keep every `ToolUse` block (with its full `input` JSON)
+/// so the UI can reconstruct the tool-call args on reload; the matching
+/// tool-result turn is persisted as a `user` row holding the `ToolResult`
+/// blocks. Writing both, in conversation order, is what keeps a reloaded
+/// history's `function_call` / `function_call_output` items paired. Empty
+/// turns (no content blocks) are skipped.
+async fn persist_turn(state: &AppState, session_id: &str, role: &str, content: &[ContentBlock]) {
     if content.is_empty() {
         return;
     }
     let repo = SessionMessageRepository::new(state.db().clone(), state.event_bus());
     let content_json = serde_json::to_string(content).unwrap_or_else(|_| "[]".to_string());
     if let Err(e) = repo
-        .insert_message(session_id, "", "assistant", &content_json, None)
+        .insert_message(session_id, "", role, &content_json, None)
         .await
     {
-        tracing::warn!(session_id=%session_id, error=%e, "failed to persist assistant chat turn");
+        tracing::warn!(session_id=%session_id, role=%role, error=%e, "failed to persist chat turn");
     }
 }
 

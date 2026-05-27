@@ -119,10 +119,16 @@ impl SessionMessageRepository {
 
         let rows = sqlx::query_as!(
             SessionMessage,
+            // Tiebreak on `id` (a uuid_v7 generated at insert time, so
+            // insertion-ordered) so two turns persisted in the same
+            // millisecond — e.g. an assistant tool-call turn and its paired
+            // tool-result row — always reload in the order they were
+            // written. Without it a same-ms tie could surface a
+            // function_call_output before its function_call.
             r#"SELECT id, session_id, role, content_json::text AS "content_json!", token_count, created_at
              FROM session_messages
              WHERE session_id = $1
-             ORDER BY created_at ASC"#,
+             ORDER BY created_at ASC, id ASC"#,
             session_id,
         )
         .fetch_all(self.db.pool())
@@ -169,7 +175,7 @@ impl SessionMessageRepository {
             "SELECT session_id, role, content_json::text, created_at \
              FROM session_messages \
              WHERE session_id IN ({}) \
-             ORDER BY created_at ASC",
+             ORDER BY created_at ASC, id ASC",
             placeholders.join(", ")
         );
 

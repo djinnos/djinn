@@ -166,6 +166,68 @@ async fn list_messages_round_trips_tool_calls_with_input() {
     );
 }
 
+/// The tool-result `user` row that incremental persistence writes after an
+/// assistant tool-call turn must NOT surface as its own (contentless)
+/// bubble — it is folded into the preceding assistant message, stamping
+/// `success` per call so the UI status dot is right on reload.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_messages_folds_tool_results_into_preceding_assistant() {
+    let db = test_helpers::create_test_db();
+    let session_repo = SessionRepository::new(db.clone(), EventBus::noop());
+    let message_repo = SessionMessageRepository::new(db.clone(), EventBus::noop());
+
+    let chat_id = uuid::Uuid::now_v7().to_string();
+    session_repo
+        .upsert_chat_session(&chat_id, "openai/gpt-4o-mini")
+        .await
+        .unwrap();
+
+    // user → assistant(text + two tool_use) → user(two tool_result), exactly
+    // as `run_chat_loop` now persists a tool turn.
+    let user_content = json!([{"type": "text", "text": "look it up"}]);
+    message_repo
+        .insert_message(&chat_id, "", "user", &user_content.to_string(), None)
+        .await
+        .unwrap();
+
+    let assistant_content = json!([
+        {"type": "text", "text": "On it."},
+        {"type": "tool_use", "id": "call-ok", "name": "memory_search", "input": {"q": "a"}},
+        {"type": "tool_use", "id": "call-bad", "name": "code_graph", "input": {"q": "b"}}
+    ]);
+    message_repo
+        .insert_message(&chat_id, "", "assistant", &assistant_content.to_string(), None)
+        .await
+        .unwrap();
+
+    let tool_results = json!([
+        {"type": "tool_result", "tool_use_id": "call-ok", "content": [{"type": "text", "text": "hit"}], "is_error": false},
+        {"type": "tool_result", "tool_use_id": "call-bad", "content": [{"type": "text", "text": "boom"}], "is_error": true}
+    ]);
+    message_repo
+        .insert_message(&chat_id, "", "user", &tool_results.to_string(), None)
+        .await
+        .unwrap();
+
+    let app = test_helpers::create_test_app_with_db(db);
+    let (status, body) = get_json(app, &format!("/api/chat/sessions/{chat_id}/messages")).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let messages = body["messages"].as_array().unwrap();
+
+    // The tool-result row is folded away — two messages, not three.
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["role"].as_str().unwrap(), "user");
+    assert_eq!(messages[1]["role"].as_str().unwrap(), "assistant");
+
+    // Both tool calls are present, with success matched by call_id.
+    let tool_calls = messages[1]["tool_calls"].as_array().unwrap();
+    assert_eq!(tool_calls.len(), 2);
+    assert_eq!(tool_calls[0]["name"].as_str().unwrap(), "memory_search");
+    assert_eq!(tool_calls[0]["success"].as_bool().unwrap(), true);
+    assert_eq!(tool_calls[1]["name"].as_str().unwrap(), "code_graph");
+    assert_eq!(tool_calls[1]["success"].as_bool().unwrap(), false);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn patch_updates_chat_title() {
     let db = test_helpers::create_test_db();

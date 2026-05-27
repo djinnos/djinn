@@ -292,7 +292,7 @@ async fn list_chat_session_messages(
     // nullable cast result as a non-null String.
     let rows = sqlx::query!(
         r#"SELECT id, role, content_json::text AS "content_json!", token_count, created_at
-         FROM session_messages WHERE session_id = $1 ORDER BY created_at ASC"#,
+         FROM session_messages WHERE session_id = $1 ORDER BY created_at ASC, id ASC"#,
         session.id,
     )
     .fetch_all(state.db().pool())
@@ -300,17 +300,45 @@ async fn list_chat_session_messages(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let _ = msg_repo; // silence unused-var when only used for naming
 
-    let mut messages = Vec::with_capacity(rows.len());
+    let mut messages: Vec<ChatMessageDTO> = Vec::with_capacity(rows.len());
+    // Tool-use ids (in block order) of the most recently pushed assistant
+    // message, so a following tool-result row can be matched back by call_id.
+    let mut last_assistant_tool_ids: Vec<String> = Vec::new();
     for row in rows {
         let msg_id = row.id;
         let role = row.role;
-        let content_json = row.content_json;
         let created_at = row.created_at;
-        let raw_content_value: Value = serde_json::from_str(&content_json).unwrap_or(Value::Null);
+        let raw_content_value: Value = serde_json::from_str(&row.content_json).unwrap_or(Value::Null);
         let content_value = redact_provider_internal_blocks(&raw_content_value);
+
+        // A user row that is purely tool_result blocks is the persisted
+        // pairing for the preceding assistant turn's tool calls — tool
+        // results are stored as their own row so the replayed history keeps
+        // function_call / function_call_output paired. Fold each outcome
+        // into that assistant message's tool_calls (so the UI's red/green
+        // status dot is correct on reload) rather than rendering a
+        // contentless user bubble.
+        if role == "user"
+            && let Some(outcomes) = tool_result_outcomes(&content_value)
+        {
+            if let Some(prev) = messages.last_mut()
+                && prev.role == "assistant"
+            {
+                merge_tool_outcomes(&mut prev.tool_calls, &last_assistant_tool_ids, &outcomes);
+            }
+            // Folded into the preceding assistant turn (or, with no such
+            // turn, dropped) — never surfaced as a standalone message.
+            continue;
+        }
+
         let tool_calls = extract_tool_calls(&content_value);
         let attachments = extract_attachments(&content_value);
         let content = surface_content(&content_value);
+        last_assistant_tool_ids = if role == "assistant" {
+            tool_use_ids(&content_value)
+        } else {
+            Vec::new()
+        };
         messages.push(ChatMessageDTO {
             id: msg_id,
             role,
@@ -388,6 +416,71 @@ fn extract_attachments(content: &Value) -> Option<Value> {
         None
     } else {
         Some(Value::Array(filtered))
+    }
+}
+
+/// If `content` is a non-empty array consisting solely of `tool_result`
+/// blocks, return each block's `(tool_use_id, is_error)` outcome. Such a
+/// row is the persisted pairing for the preceding assistant turn's tool
+/// calls; it is folded into that message rather than rendered on its own.
+fn tool_result_outcomes(content: &Value) -> Option<Vec<(String, bool)>> {
+    let arr = content.as_array()?;
+    if arr.is_empty() {
+        return None;
+    }
+    let mut outcomes = Vec::with_capacity(arr.len());
+    for block in arr {
+        if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+            return None;
+        }
+        let id = block
+            .get("tool_use_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let is_error = block
+            .get("is_error")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        outcomes.push((id, is_error));
+    }
+    Some(outcomes)
+}
+
+/// `tool_use` block ids, in array order, so a following tool-result row can
+/// be matched back to the tool calls produced by [`extract_tool_calls`]
+/// (which walks the same array in the same order).
+fn tool_use_ids(content: &Value) -> Vec<String> {
+    content
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
+                .map(|b| {
+                    b.get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Stamp `success` onto each tool call from its matching tool-result
+/// outcome. `ids[i]` is the call_id of `tool_calls[i]` (both built in block
+/// order); the outcome carrying that id sets success (`true` unless the
+/// result was an error).
+fn merge_tool_outcomes(
+    tool_calls: &mut [ChatToolCallDTO],
+    ids: &[String],
+    outcomes: &[(String, bool)],
+) {
+    for (i, call) in tool_calls.iter_mut().enumerate() {
+        let Some(id) = ids.get(i) else { continue };
+        if let Some((_, is_error)) = outcomes.iter().find(|(rid, _)| rid == id) {
+            call.success = Some(!is_error);
+        }
     }
 }
 

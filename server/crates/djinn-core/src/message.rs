@@ -529,8 +529,36 @@ impl Conversation {
     /// and tool results become `function_call_output` items.
     pub fn to_openai_responses_input(&self) -> (Option<String>, Vec<serde_json::Value>) {
         use serde_json::json;
+        use std::collections::HashSet;
         let mut input_items: Vec<serde_json::Value> = Vec::new();
         let mut instructions: Option<String> = None;
+
+        // Tool-call / tool-result pairing invariant. The Responses API
+        // rejects a `function_call` whose `call_id` has no matching
+        // `function_call_output` ("No tool output found for function call
+        // …", HTTP 400) and, symmetrically, an output with no call. A turn
+        // interrupted mid-tool-call (provider stream error, crash) or a
+        // legacy session persisted before tool results were stored can leave
+        // such an orphan in the history; emitting it wedges every subsequent
+        // turn of the session. Collect the ids that are actually paired and
+        // drop the unpaired blocks below so one bad turn can't poison the
+        // conversation. (The live chat loop always appends a result before
+        // the next request, so this only ever drops genuinely-orphaned data.)
+        let mut tool_use_ids: HashSet<&str> = HashSet::new();
+        let mut tool_result_ids: HashSet<&str> = HashSet::new();
+        for msg in &self.messages {
+            for block in &msg.content {
+                match block {
+                    ContentBlock::ToolUse { id, .. } => {
+                        tool_use_ids.insert(id.as_str());
+                    }
+                    ContentBlock::ToolResult { tool_use_id, .. } => {
+                        tool_result_ids.insert(tool_use_id.as_str());
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         for msg in &self.messages {
             match msg.role {
@@ -579,6 +607,12 @@ impl Conversation {
                                 content,
                                 is_error,
                             } => {
+                                // Orphaned result (no matching call) — skip;
+                                // the Responses API rejects an output whose
+                                // call_id it never saw.
+                                if !tool_use_ids.contains(tool_use_id.as_str()) {
+                                    continue;
+                                }
                                 if !text_items.is_empty() {
                                     input_items.push(json!({
                                         "role": "user",
@@ -624,6 +658,12 @@ impl Conversation {
                                 text_items.push(json!({"type": "output_text", "text": text}));
                             }
                             ContentBlock::ToolUse { id, name, input } => {
+                                // Orphaned call (no matching result) — skip so
+                                // the Responses API doesn't 400. Keep buffered
+                                // text; it's still valid assistant output.
+                                if !tool_result_ids.contains(id.as_str()) {
+                                    continue;
+                                }
                                 if !text_items.is_empty() {
                                     input_items.push(json!({
                                         "role": "assistant",
@@ -1172,38 +1212,30 @@ mod tests {
         let (instructions, input) = mixed_provider_conversation().to_openai_responses_input();
 
         assert_eq!(instructions, Some("Follow policy.".to_string()));
-        assert_eq!(input.len(), 9);
+        // The orphaned tool result (`call_id: "orphan"` — no matching call)
+        // is dropped: the Responses API rejects an output for a call it never
+        // saw. With it gone, the two user texts that surrounded it collapse
+        // into a single input_text group.
+        assert_eq!(input.len(), 7);
         assert_eq!(
             input[0],
             json!({
                 "role": "user",
-                "content": [{"type": "input_text", "text": "Need weather"}]
+                "content": [
+                    {"type": "input_text", "text": "Need weather"},
+                    {"type": "input_text", "text": " now"}
+                ]
             })
         );
         assert_eq!(
             input[1],
-            json!({
-                "type": "function_call_output",
-                "call_id": "orphan",
-                "output": "Error: cached"
-            })
-        );
-        assert_eq!(
-            input[2],
-            json!({
-                "role": "user",
-                "content": [{"type": "input_text", "text": " now"}]
-            })
-        );
-        assert_eq!(
-            input[3],
             json!({
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": "Checking."}]
             })
         );
         assert_eq!(
-            input[4],
+            input[2],
             json!({
                 "type": "function_call",
                 "call_id": "call_1",
@@ -1212,20 +1244,105 @@ mod tests {
             })
         );
         assert_eq!(
-            input[5],
+            input[3],
             json!({
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": "Done."}]
             })
         );
         assert_eq!(
-            input[6],
+            input[4],
             json!({
                 "type": "function_call_output",
                 "call_id": "call_1",
                 "output": "72F\n sunny"
             })
         );
+        assert_eq!(
+            input[5],
+            json!({
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Thanks"}]
+            })
+        );
+        assert_eq!(
+            input[6],
+            json!({
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "It is 72F and sunny."}]
+            })
+        );
+        assert!(
+            !input.iter().any(|i| i["call_id"] == "orphan"),
+            "orphaned function_call_output must not be emitted"
+        );
+    }
+
+    #[test]
+    fn to_openai_responses_input_drops_orphaned_function_call() {
+        // Reproduces the "No tool output found for function call …" 400: an
+        // assistant turn made a tool call but its result was never recorded
+        // (interrupted stream, or history persisted before tool results
+        // were stored), then the conversation moved on. The orphaned
+        // `function_call` must not be emitted or the request is rejected.
+        let mut conversation = Conversation::new();
+        conversation.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::text("Let me check."),
+                ContentBlock::ToolUse {
+                    id: "call_orphan".into(),
+                    name: "search".into(),
+                    input: json!({"q": "x"}),
+                },
+            ],
+            metadata: None,
+        });
+        conversation.push(Message::user("never mind, what's 2+2?"));
+
+        let (_, input) = conversation.to_openai_responses_input();
+
+        // Assistant text survives; the dangling call is gone.
+        assert!(input.iter().any(|i| i["content"]
+            .as_array()
+            .is_some_and(|c| c.iter().any(|b| b["text"] == "Let me check."))));
+        assert!(
+            !input.iter().any(|i| i["type"] == "function_call"),
+            "orphaned function_call must be dropped"
+        );
+        assert!(!input.iter().any(|i| i["call_id"] == "call_orphan"));
+    }
+
+    #[test]
+    fn to_openai_responses_input_keeps_paired_tool_call() {
+        // The normal case: a tool call WITH its matching result round-trips
+        // intact — the invariant only drops genuine orphans.
+        let mut conversation = Conversation::new();
+        conversation.push(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_ok".into(),
+                name: "search".into(),
+                input: json!({"q": "x"}),
+            }],
+            metadata: None,
+        });
+        conversation.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_ok".into(),
+                content: vec![ContentBlock::text("result")],
+                is_error: false,
+            }],
+            metadata: None,
+        });
+
+        let (_, input) = conversation.to_openai_responses_input();
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["type"], "function_call");
+        assert_eq!(input[0]["call_id"], "call_ok");
+        assert_eq!(input[1]["type"], "function_call_output");
+        assert_eq!(input[1]["call_id"], "call_ok");
     }
 
     #[test]
