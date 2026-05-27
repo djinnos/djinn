@@ -14,9 +14,15 @@ use djinn_provider::repos::CustomProviderRepository;
 // ── Shared response helpers ───────────────────────────────────────────────────
 
 fn model_to_output(m: &Model) -> ProviderModelOutput {
-    // Always return the full "provider/model" form for API consumers.
-    // Internal IDs may be bare after normalization.
-    let full_id = if m.id.contains('/') {
+    // Always return the full "provider/model" form for API consumers, where
+    // the first path segment is the provider id and the remainder is the model
+    // id (which may itself contain slashes, e.g. Fireworks'
+    // "accounts/fireworks/models/kimi-k2p6" or OpenRouter's "vendor/model").
+    // Only skip prefixing when the id is *already* qualified with this
+    // provider's id — testing for a bare `contains('/')` would mistake a
+    // multi-segment model path for an already-qualified id and drop the
+    // provider, producing an unparseable reference at dispatch time.
+    let full_id = if m.id.starts_with(&format!("{}/", m.provider_id)) {
         m.id.clone()
     } else {
         format!("{}/{}", m.provider_id, m.id)
@@ -591,11 +597,23 @@ impl DjinnMcpServer {
                     .into_iter()
                     .map(move |m| {
                         let mut out = model_to_output(&m);
-                        out.provider_id = display_pid.clone();
-                        // Re-tag the full ID to use the display provider
-                        // (for merged children → parent namespace).
-                        let bare = m.id.split_once('/').map(|(_, name)| name).unwrap_or(&m.id);
-                        out.id = format!("{display_pid}/{bare}");
+                        // Only merged children need re-namespacing (child →
+                        // parent). For everything else `display_pid == pid` and
+                        // we must leave the id untouched — re-tagging here used
+                        // to split on the first '/', which silently dropped the
+                        // leading segment of multi-segment model paths (e.g.
+                        // Fireworks' "accounts/..."), corrupting the id.
+                        if display_pid != *pid {
+                            out.provider_id = display_pid.clone();
+                            // Strip the original provider prefix, keep the rest
+                            // (model id, slashes and all), re-prefix with parent.
+                            let rest = out
+                                .id
+                                .strip_prefix(&format!("{pid}/"))
+                                .unwrap_or(&out.id)
+                                .to_string();
+                            out.id = format!("{display_pid}/{rest}");
+                        }
                         out
                     })
             })
@@ -928,5 +946,65 @@ impl DjinnMcpServer {
             oauth_cleared,
             error: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use djinn_core::models::Pricing;
+
+    fn model(id: &str, provider_id: &str) -> Model {
+        Model {
+            id: id.to_string(),
+            provider_id: provider_id.to_string(),
+            name: "Test Model".to_string(),
+            tool_call: true,
+            reasoning: false,
+            attachment: false,
+            context_window: 0,
+            output_limit: 0,
+            pricing: Pricing::default(),
+        }
+    }
+
+    #[test]
+    fn full_id_prefixes_bare_model_ids() {
+        // Single-segment ids get the provider prepended.
+        assert_eq!(
+            model_to_output(&model("gpt-5.5", "openai")).id,
+            "openai/gpt-5.5"
+        );
+    }
+
+    #[test]
+    fn full_id_preserves_multi_segment_model_paths() {
+        // Regression: a models.dev id that is itself a slash-delimited path
+        // (Fireworks) must keep every segment and gain the provider prefix —
+        // not be mistaken for an already-qualified id and have its leading
+        // segment treated as the provider.
+        assert_eq!(
+            model_to_output(&model("accounts/fireworks/models/kimi-k2p6", "fireworks-ai")).id,
+            "fireworks-ai/accounts/fireworks/models/kimi-k2p6"
+        );
+        // The recovered "provider/model" split must round-trip back to the
+        // exact model id Fireworks expects.
+        let full = model_to_output(&model(
+            "accounts/fireworks/models/kimi-k2p6",
+            "fireworks-ai",
+        ))
+        .id;
+        let (provider, model_id) = full.split_once('/').unwrap();
+        assert_eq!(provider, "fireworks-ai");
+        assert_eq!(model_id, "accounts/fireworks/models/kimi-k2p6");
+    }
+
+    #[test]
+    fn full_id_does_not_double_prefix_already_qualified_ids() {
+        // Synthetic providers may already embed their own provider prefix.
+        assert_eq!(
+            model_to_output(&model("synthetic/GLM-4.7", "synthetic")).id,
+            "synthetic/GLM-4.7"
+        );
     }
 }
