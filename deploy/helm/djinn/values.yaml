@@ -321,6 +321,18 @@ extraEnv: []
 # - name: FOO
 #   value: bar
 
+# Extra `envFrom` sources merged into the server container after the
+# chart-rendered ConfigMap. Useful when an out-of-band sync (Doppler
+# operator, External Secrets Operator, Vault Agent Injector, ...) lands a
+# fat env-bag Secret in the namespace that you'd rather mount whole than
+# wire as N individual `extraEnv` entries via `valueFrom.secretKeyRef`.
+# Each entry is a standard core/v1 EnvFromSource (configMapRef / secretRef).
+extraEnvFrom: []
+# - secretRef:
+#     name: djinn-env
+# - configMapRef:
+#     name: extra-config
+
 # Node placement (applied to djinn-server Deployment).
 nodeSelector: {}
 tolerations: []

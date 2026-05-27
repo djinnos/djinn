@@ -95,6 +95,9 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "djinn.fullname" . }}-server
+            {{- with .Values.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           env:
             {{- if .Values.database.existingSecret }}
             # External DB URL pulled from a caller-owned Secret (typically
