@@ -40,7 +40,7 @@ EOF
 chmod 0644 /etc/profile.d/30-python.sh
 
 if [ "${SCIP_INDEXER:-}" = "scip-python" ]; then
-    if [ -n "${SCIP_PYTHON_VERSION:-}" ]; then
+    if [ -n "${SCIP_PYTHON_VERSION:-}" ] && [ "${SCIP_PYTHON_VERSION}" != "latest" ]; then
         uv tool install "scip-python==${SCIP_PYTHON_VERSION}"
     else
         uv tool install scip-python
