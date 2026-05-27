@@ -581,6 +581,23 @@ async fn run_chat_loop(
             }
         }
 
+        if turn_text.is_empty() && tool_calls.is_empty() {
+            tracing::warn!(
+                provider_state_items = turn_provider_state.len(),
+                "chat provider returned an empty assistant turn"
+            );
+            let _ = tx
+                .send(sse_json_event(
+                    "error",
+                    &ErrorPayload {
+                        message: "provider returned an empty response; this usually means the upstream Codex backend refused or throttled the request".to_string(),
+                    },
+                ))
+                .await;
+            persist_assistant_turn(&state, &session_id, &persisted_assistant_content).await;
+            return;
+        }
+
         let mut assistant_content = Vec::new();
         assistant_content.extend(turn_provider_state);
         if !turn_text.is_empty() {

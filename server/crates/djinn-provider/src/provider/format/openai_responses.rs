@@ -147,6 +147,7 @@ fn is_reasoning_capable_model(model_id: &str) -> bool {
 
 #[derive(Debug, Deserialize)]
 struct ResponseMetadata {
+    #[serde(default)]
     output: Vec<OutputItemInfo>,
     usage: Option<ResponseUsage>,
 }
@@ -784,6 +785,18 @@ mod tests {
             panic!("expected events");
         };
         assert!(events.is_empty());
+
+        let ParsedLine::Events(events) = parse_responses_line(completed, &mut acc) else {
+            panic!("expected events");
+        };
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], StreamEvent::Usage(_)));
+    }
+
+    #[test]
+    fn test_completed_missing_output_is_treated_as_empty_response() {
+        let completed = r#"{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":2}}}"#;
+        let mut acc = Vec::new();
 
         let ParsedLine::Events(events) = parse_responses_line(completed, &mut acc) else {
             panic!("expected events");
