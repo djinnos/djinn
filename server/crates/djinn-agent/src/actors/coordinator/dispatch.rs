@@ -326,16 +326,10 @@ impl CoordinatorActor {
         // backed off, instead of slipping past a short window and re-dispatching
         // every tick.
         let prune_now = StdInstant::now();
-        self.dispatch_cooldowns.retain(|_, expiry| *expiry > prune_now);
+        self.dispatch_cooldowns
+            .retain(|_, expiry| *expiry > prune_now);
         self.last_dispatched
-            .retain(|_, instant| instant.elapsed() < FAILURE_DETECTION_WINDOW);
-        // Drop failure streaks for tasks no longer tracked (succeeded → not
-        // re-dispatched → timestamp expired, and not currently cooling down).
-        let tracked_dispatched = &self.last_dispatched;
-        let tracked_cooldowns = &self.dispatch_cooldowns;
-        self.dispatch_failure_streak.retain(|id, _| {
-            tracked_dispatched.contains_key(id) || tracked_cooldowns.contains_key(id)
-        });
+            .retain(|_, marker| marker.instant.elapsed() < FAILURE_DETECTION_WINDOW);
 
         // Bug #18 guard: skip any task that already has a running session.
         // Without this the coordinator tick re-dispatches the same task every
@@ -348,10 +342,7 @@ impl CoordinatorActor {
         .list_active()
         .await
         {
-            Ok(sessions) => sessions
-                .into_iter()
-                .filter_map(|s| s.task_id)
-                .collect(),
+            Ok(sessions) => sessions.into_iter().filter_map(|s| s.task_id).collect(),
             Err(e) => {
                 tracing::warn!(error = %e, "CoordinatorActor: failed to load active sessions for dispatch guard; proceeding without it");
                 HashSet::new()
@@ -384,10 +375,7 @@ impl CoordinatorActor {
                             self.db.clone(),
                             crate::events::event_bus_for(&self.events_tx),
                         );
-                        let ok = match project_repo
-                            .get_dispatch_readiness(&task.project_id)
-                            .await
-                        {
+                        let ok = match project_repo.get_dispatch_readiness(&task.project_id).await {
                             Ok(Some(r)) => r.is_ready_for_dispatch(),
                             // Unknown project or DB error: fail-closed so a
                             // broken setup never silently burns tokens.
@@ -414,39 +402,44 @@ impl CoordinatorActor {
                 );
                 continue;
             }
-            // A task that is dispatch-ready again (no active session — guarded
-            // above) after a recent dispatch means the prior run FAILED. Consume
-            // the dispatch marker so each failed attempt counts exactly once,
-            // bump the per-task failure streak, and apply an ESCALATING cooldown.
-            // This is what stops a persistent failure — notably a provider
-            // throttle that returns empty turns every ~30s — from re-dispatching
-            // every coordinator tick and storming the backend.
-            if self
-                .last_dispatched
-                .remove(&task.id)
-                .is_some_and(|last| last.elapsed() < FAILURE_DETECTION_WINDOW)
-            {
-                let streak = {
-                    let n = self.dispatch_failure_streak.entry(task.id.clone()).or_insert(0);
-                    *n = n.saturating_add(1);
-                    *n
-                };
-                let cooldown = escalating_dispatch_cooldown(streak);
-                tracing::warn!(
-                    task_id = %task.short_id,
-                    streak,
-                    cooldown_secs = cooldown.as_secs(),
-                    "CoordinatorActor: repeated task failure — backing off dispatch (escalating cooldown)"
-                );
-                self.dispatch_cooldowns
-                    .insert(task.id.clone(), StdInstant::now() + cooldown);
-                continue;
-            }
-
             let ctx = DispatchContext;
             let Some(role) = self.role_registry.dispatch_role_for_task(&task, &ctx) else {
                 continue;
             };
+            // A task that is dispatch-ready again (no active session — guarded
+            // above) after a recent dispatch to the SAME role means the prior
+            // run failed. A different role means the previous stage succeeded
+            // and handed the task off (e.g. worker → reviewer), so clear any
+            // old streak and let it proceed.
+            if let Some(marker) = self.last_dispatched.remove(&task.id) {
+                let current_streak = self
+                    .dispatch_failure_streak
+                    .get(&task.id)
+                    .copied()
+                    .unwrap_or(0);
+                match classify_reappearing_dispatch(marker, role, current_streak) {
+                    Some(ReappearingDispatch::SameRoleFailure {
+                        next_streak,
+                        cooldown,
+                    }) => {
+                        self.dispatch_failure_streak
+                            .insert(task.id.clone(), next_streak);
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            role,
+                            streak = next_streak,
+                            cooldown_secs = cooldown.as_secs(),
+                            "CoordinatorActor: repeated task failure — backing off dispatch (escalating cooldown)"
+                        );
+                        self.dispatch_cooldowns
+                            .insert(task.id.clone(), StdInstant::now() + cooldown);
+                        continue;
+                    }
+                    Some(ReappearingDispatch::RoleTransition) | None => {
+                        self.dispatch_failure_streak.remove(&task.id);
+                    }
+                }
+            }
             if exhausted_roles.contains(role) {
                 continue;
             }
@@ -542,8 +535,13 @@ impl CoordinatorActor {
                         project_path,
                         "CoordinatorActor: task dispatched"
                     );
-                    self.last_dispatched
-                        .insert(task.id.clone(), StdInstant::now());
+                    self.last_dispatched.insert(
+                        task.id.clone(),
+                        DispatchMarker {
+                            instant: StdInstant::now(),
+                            role,
+                        },
+                    );
                     self.dispatched += 1;
                 }
                 DispatchOutcome::AtCapacity => {
@@ -1086,8 +1084,13 @@ impl CoordinatorActor {
                     project_id = %project_id,
                     "CoordinatorActor: Planner escalation dispatched"
                 );
-                self.last_dispatched
-                    .insert(review_task.id.clone(), StdInstant::now());
+                self.last_dispatched.insert(
+                    review_task.id.clone(),
+                    DispatchMarker {
+                        instant: StdInstant::now(),
+                        role: "planner",
+                    },
+                );
                 self.dispatched += 1;
                 self.publish_status();
             }
@@ -1363,8 +1366,13 @@ impl CoordinatorActor {
                     project_id = %project_id,
                     "CoordinatorActor: Planner patrol dispatched"
                 );
-                self.last_dispatched
-                    .insert(review_task.id.clone(), StdInstant::now());
+                self.last_dispatched.insert(
+                    review_task.id.clone(),
+                    DispatchMarker {
+                        instant: StdInstant::now(),
+                        role: "planner",
+                    },
+                );
                 self.dispatched += 1;
                 self.publish_status();
             }
@@ -1428,7 +1436,6 @@ impl CoordinatorActor {
         };
 
         for task in tasks {
-
             // Simple-lifecycle tasks normally close directly, but sessions that
             // produced durable artifacts (file changes, memory writes, or task
             // comments pointing at .djinn paths) must survive as branch/PR

@@ -1,7 +1,7 @@
 use crate::context::AgentContext;
+use djinn_db::SessionMessageRepository;
 use djinn_provider::message::{Conversation, Message, Role};
 use djinn_provider::provider::LlmProvider;
-use djinn_db::SessionMessageRepository;
 
 use super::prompts::{
     CompactionContext, last_user_text, rebuild_full_compaction_messages,
@@ -481,6 +481,9 @@ fn estimate_message_chars(msg: &Message) -> usize {
             ContentBlock::Image { data, .. } => data.len(),
             ContentBlock::Document { data, .. } => data.len(),
             ContentBlock::Thinking { thinking } => thinking.len(),
+            ContentBlock::OpenAIReasoning {
+                encrypted_content, ..
+            } => encrypted_content.len(),
         })
         .sum()
 }

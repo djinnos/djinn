@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 
+use djinn_core::events::DjinnEventEnvelope;
 use djinn_provider::message::ContentBlock;
 use djinn_provider::provider::{LlmProvider, StreamEvent};
-use djinn_core::events::DjinnEventEnvelope;
 
 use super::error_handling::{
     MAX_COMPACTION_RETRIES, is_context_length_error, is_orphaned_tool_call_error,
@@ -23,6 +23,7 @@ pub(super) type StreamingFut<'a> =
 pub(super) struct StreamTurnState {
     pub turn_text: String,
     pub turn_thinking: String,
+    pub turn_provider_state: Vec<ContentBlock>,
     pub turn_tool_calls: Vec<ContentBlock>,
     pub turn_tokens_in: u32,
     pub turn_tokens_out: u32,
@@ -38,6 +39,7 @@ impl StreamTurnState {
         Self {
             turn_text: String::new(),
             turn_thinking: String::new(),
+            turn_provider_state: Vec::new(),
             turn_tool_calls: Vec::new(),
             turn_tokens_in: 0,
             turn_tokens_out: 0,
@@ -192,9 +194,12 @@ pub(super) async fn consume_provider_stream(
                         }
                     }
                     StreamEvent::Delta(ContentBlock::ToolResult { .. })
-                    | StreamEvent::Delta(ContentBlock::Thinking { .. })
                     | StreamEvent::Delta(ContentBlock::Image { .. })
                     | StreamEvent::Delta(ContentBlock::Document { .. }) => {}
+                    StreamEvent::Delta(reasoning @ ContentBlock::OpenAIReasoning { .. })
+                    | StreamEvent::Delta(reasoning @ ContentBlock::Thinking { .. }) => {
+                        state.turn_provider_state.push(reasoning);
+                    }
                     StreamEvent::Thinking(thinking) => {
                         ctx.app_state.event_bus.send(DjinnEventEnvelope::session_message(
                             ctx.session_id,

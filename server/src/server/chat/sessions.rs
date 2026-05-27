@@ -279,7 +279,12 @@ async fn list_chat_session_messages(
         .get_chat_session(&id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("chat session not found: {id}")))?;
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("chat session not found: {id}"),
+            )
+        })?;
 
     let msg_repo = SessionMessageRepository::new(state.db().clone(), state.event_bus());
     // content_json is JSONB so cast to text for the String slot (downstream
@@ -301,7 +306,8 @@ async fn list_chat_session_messages(
         let role = row.role;
         let content_json = row.content_json;
         let created_at = row.created_at;
-        let content_value: Value = serde_json::from_str(&content_json).unwrap_or(Value::Null);
+        let raw_content_value: Value = serde_json::from_str(&content_json).unwrap_or(Value::Null);
+        let content_value = redact_provider_internal_blocks(&raw_content_value);
         let tool_calls = extract_tool_calls(&content_value);
         let attachments = extract_attachments(&content_value);
         let content = surface_content(&content_value);
@@ -316,6 +322,23 @@ async fn list_chat_session_messages(
     }
 
     Ok(Json(ListChatMessagesResponse { messages }))
+}
+
+fn redact_provider_internal_blocks(content: &Value) -> Value {
+    let Some(arr) = content.as_array() else {
+        return content.clone();
+    };
+    Value::Array(
+        arr.iter()
+            .filter(|block| {
+                !matches!(
+                    block.get("type").and_then(Value::as_str),
+                    Some("open_ai_reasoning") | Some("thinking")
+                )
+            })
+            .cloned()
+            .collect(),
+    )
 }
 
 /// Pull `{ name, input }` entries out of any `tool_use` content blocks.
@@ -382,6 +405,31 @@ fn surface_content(content: &Value) -> Value {
     content.clone()
 }
 
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{redact_provider_internal_blocks, surface_content};
+
+    #[test]
+    fn surface_content_hides_provider_internal_blocks() {
+        let stored = json!([
+            {
+                "type": "open_ai_reasoning",
+                "id": "rs_123",
+                "encrypted_content": "encrypted",
+                "summary": [],
+                "status": "completed"
+            },
+            {"type": "text", "text": "visible reply"}
+        ]);
+
+        let redacted = redact_provider_internal_blocks(&stored);
+
+        assert_eq!(surface_content(&redacted), json!("visible reply"));
+    }
+}
+
 // ─── PATCH /api/chat/sessions/:id ──────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -429,7 +477,10 @@ async fn delete_chat_session(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if affected == 0 {
-        return Err((StatusCode::NOT_FOUND, format!("chat session not found: {id}")));
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("chat session not found: {id}"),
+        ));
     }
     Ok(StatusCode::NO_CONTENT)
 }

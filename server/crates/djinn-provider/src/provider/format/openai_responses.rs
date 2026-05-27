@@ -36,6 +36,7 @@ impl OpenAIResponsesProvider {
             "model": self.config.model_id,
             "input": input_items,
             "instructions": instructions.unwrap_or_default(),
+            "include": ["reasoning.encrypted_content"],
             "store": false,
         });
 
@@ -159,7 +160,12 @@ struct ResponseUsage {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum OutputItemInfo {
-    Reasoning {},
+    Reasoning {
+        id: Option<String>,
+        encrypted_content: Option<String>,
+        summary: Option<Value>,
+        status: Option<String>,
+    },
     Message {},
     FunctionCall {
         call_id: String,
@@ -318,23 +324,38 @@ fn parse_responses_line(line: &str, accumulated_items: &mut Vec<OutputItemInfo>)
             };
 
             for item in final_items {
-                if let OutputItemInfo::FunctionCall {
-                    call_id,
-                    name,
-                    arguments,
-                    ..
-                } = item
-                {
-                    let input: Value = if arguments.is_empty() {
-                        json!({})
-                    } else {
-                        serde_json::from_str(arguments).unwrap_or(json!({}))
-                    };
-                    events.push(StreamEvent::Delta(ContentBlock::ToolUse {
-                        id: call_id.clone(),
-                        name: name.clone(),
-                        input,
-                    }));
+                match item {
+                    OutputItemInfo::Reasoning {
+                        id,
+                        encrypted_content: Some(encrypted_content),
+                        summary,
+                        status,
+                    } if !encrypted_content.is_empty() => {
+                        events.push(StreamEvent::Delta(ContentBlock::OpenAIReasoning {
+                            id: id.clone(),
+                            encrypted_content: encrypted_content.clone(),
+                            summary: summary.clone(),
+                            status: status.clone(),
+                        }));
+                    }
+                    OutputItemInfo::FunctionCall {
+                        call_id,
+                        name,
+                        arguments,
+                        ..
+                    } => {
+                        let input: Value = if arguments.is_empty() {
+                            json!({})
+                        } else {
+                            serde_json::from_str(arguments).unwrap_or(json!({}))
+                        };
+                        events.push(StreamEvent::Delta(ContentBlock::ToolUse {
+                            id: call_id.clone(),
+                            name: name.clone(),
+                            input,
+                        }));
+                    }
+                    _ => {}
                 }
             }
 
@@ -360,7 +381,7 @@ fn parse_responses_line(line: &str, accumulated_items: &mut Vec<OutputItemInfo>)
                 .count();
             let n_reasoning = final_items
                 .iter()
-                .filter(|i| matches!(i, OutputItemInfo::Reasoning {}))
+                .filter(|i| matches!(i, OutputItemInfo::Reasoning { .. }))
                 .count();
             if n_msg == 0 && n_call == 0 {
                 tracing::warn!(
@@ -518,6 +539,7 @@ mod tests {
         assert_eq!(req["model"], "gpt-5.1-codex");
         assert_eq!(req["store"], false);
         assert_eq!(req["stream"], true);
+        assert_eq!(req["include"], json!(["reasoning.encrypted_content"]));
 
         // System message becomes top-level instructions
         assert_eq!(req["instructions"], "You are helpful.");
@@ -582,6 +604,46 @@ mod tests {
         // Verify function_call_output
         assert_eq!(input[2]["call_id"], "call_1");
         assert_eq!(input[2]["output"], "file1.txt");
+    }
+
+    #[test]
+    fn test_build_request_preserves_encrypted_reasoning_before_tool_output() {
+        let provider = test_provider();
+        let mut conv = Conversation::new();
+        conv.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::OpenAIReasoning {
+                    id: Some("rs_1".into()),
+                    encrypted_content: "enc".into(),
+                    summary: Some(json!([])),
+                    status: Some("completed".into()),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "bash".into(),
+                    input: json!({"cmd": "pwd"}),
+                },
+            ],
+            metadata: None,
+        });
+        conv.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: vec![ContentBlock::text("/repo")],
+                is_error: false,
+            }],
+            metadata: None,
+        });
+
+        let req = provider.build_request(&conv, &[], None);
+        let input = req["input"].as_array().unwrap();
+        assert_eq!(input[0]["type"], "reasoning");
+        assert_eq!(input[0]["id"], "rs_1");
+        assert_eq!(input[0]["encrypted_content"], "enc");
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[2]["type"], "function_call_output");
     }
 
     #[test]
@@ -651,6 +713,32 @@ mod tests {
             }
             _ => panic!("expected usage"),
         }
+    }
+
+    #[test]
+    fn test_parse_completed_with_reasoning_and_function_call() {
+        let line = r#"{"type":"response.completed","response":{"output":[{"type":"reasoning","id":"rs_1","summary":[],"status":"completed","encrypted_content":"enc"},{"type":"function_call","call_id":"call_abc","name":"bash","arguments":"{\"cmd\":\"ls\"}"}],"usage":{"input_tokens":10,"output_tokens":5}}}"#;
+        let mut acc = Vec::new();
+        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc) else {
+            panic!("expected events");
+        };
+
+        assert_eq!(events.len(), 3);
+        match &events[0] {
+            StreamEvent::Delta(ContentBlock::OpenAIReasoning {
+                id,
+                encrypted_content,
+                ..
+            }) => {
+                assert_eq!(id.as_deref(), Some("rs_1"));
+                assert_eq!(encrypted_content, "enc");
+            }
+            _ => panic!("expected reasoning item"),
+        }
+        assert!(matches!(
+            &events[1],
+            StreamEvent::Delta(ContentBlock::ToolUse { id, .. }) if id == "call_abc"
+        ));
     }
 
     #[test]

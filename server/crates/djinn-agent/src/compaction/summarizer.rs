@@ -191,7 +191,7 @@ pub(super) fn format_messages_as_text(messages: &[Message]) -> String {
                         filename.as_deref().unwrap_or("file")
                     )
                 }
-                ContentBlock::Thinking { .. } => continue,
+                ContentBlock::Thinking { .. } | ContentBlock::OpenAIReasoning { .. } => continue,
             };
             out.push_str(&line);
             out.push('\n');

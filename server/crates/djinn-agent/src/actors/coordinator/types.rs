@@ -117,6 +117,21 @@ pub(super) const TASK_OUTCOME_CONFIDENCE_SIGNAL: f64 = 0.1;
 pub(super) const TASK_OUTCOME_REOPEN_COUNT: &str = "reopen_count";
 pub(super) const TASK_OUTCOME_FAILED_CLOSE: &str = "failed_closed";
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct DispatchMarker {
+    pub(super) instant: StdInstant,
+    pub(super) role: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReappearingDispatch {
+    SameRoleFailure {
+        next_streak: u32,
+        cooldown: Duration,
+    },
+    RoleTransition,
+}
+
 /// Base cooldown before re-dispatching a task that failed (lifecycle setup, a
 /// crashed run, or a provider that returned empty/throttled turns). Escalates
 /// per consecutive failure via [`escalating_dispatch_cooldown`] to prevent hot
@@ -147,6 +162,25 @@ pub(super) fn escalating_dispatch_cooldown(streak: u32) -> Duration {
     Duration::from_secs(secs)
 }
 
+pub(super) fn classify_reappearing_dispatch(
+    marker: DispatchMarker,
+    current_role: &'static str,
+    current_streak: u32,
+) -> Option<ReappearingDispatch> {
+    if marker.instant.elapsed() >= FAILURE_DETECTION_WINDOW {
+        return None;
+    }
+    if marker.role != current_role {
+        return Some(ReappearingDispatch::RoleTransition);
+    }
+
+    let next_streak = current_streak.saturating_add(1);
+    Some(ReappearingDispatch::SameRoleFailure {
+        next_streak,
+        cooldown: escalating_dispatch_cooldown(next_streak),
+    })
+}
+
 #[cfg(test)]
 pub(super) const DEFAULT_MODEL_ID: &str = "test/mock";
 
@@ -162,6 +196,35 @@ mod cooldown_tests {
         assert_eq!(escalating_dispatch_cooldown(3), Duration::from_secs(240));
         assert_eq!(escalating_dispatch_cooldown(6), MAX_DISPATCH_COOLDOWN);
         assert_eq!(escalating_dispatch_cooldown(1_000), MAX_DISPATCH_COOLDOWN);
+    }
+
+    #[test]
+    fn reappearing_same_role_is_failure_and_escalates_from_existing_streak() {
+        let marker = DispatchMarker {
+            instant: StdInstant::now(),
+            role: "worker",
+        };
+
+        assert_eq!(
+            classify_reappearing_dispatch(marker, "worker", 1),
+            Some(ReappearingDispatch::SameRoleFailure {
+                next_streak: 2,
+                cooldown: Duration::from_secs(120),
+            })
+        );
+    }
+
+    #[test]
+    fn reappearing_different_role_is_successful_stage_transition() {
+        let marker = DispatchMarker {
+            instant: StdInstant::now(),
+            role: "worker",
+        };
+
+        assert_eq!(
+            classify_reappearing_dispatch(marker, "reviewer", 4),
+            Some(ReappearingDispatch::RoleTransition)
+        );
     }
 }
 

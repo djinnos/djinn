@@ -1,12 +1,12 @@
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
-use djinn_provider::message::{ContentBlock, Conversation, Message, MessageMeta, Role};
 use crate::output_parser::ParsedAgentOutput;
 use crate::output_stash::OutputStash;
+use djinn_core::events::DjinnEventEnvelope;
+use djinn_provider::message::{ContentBlock, Conversation, Message, MessageMeta, Role};
 use djinn_provider::provider::LlmProvider;
 use djinn_provider::provider::telemetry;
-use djinn_core::events::DjinnEventEnvelope;
 
 use super::*;
 pub(super) mod error_handling;
@@ -347,6 +347,7 @@ pub(crate) async fn run_reply_loop(
             let streaming::StreamTurnState {
                 turn_text,
                 turn_thinking,
+                turn_provider_state,
                 turn_tool_calls,
                 turn_tokens_in,
                 turn_tokens_out,
@@ -444,6 +445,7 @@ pub(crate) async fn run_reply_loop(
 
             // ── Build the assistant message from this turn ───────────────────
             let mut assistant_content: Vec<ContentBlock> = Vec::new();
+            assistant_content.extend(turn_provider_state);
             if !turn_thinking.is_empty() {
                 assistant_content.push(ContentBlock::Thinking { thinking: turn_thinking.clone() });
             }
@@ -758,13 +760,13 @@ pub(crate) async fn run_reply_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use djinn_provider::message::{ContentBlock, Conversation, Message};
-    use djinn_provider::provider::ToolChoice;
-    use djinn_provider::provider::{LlmProvider, StreamEvent, TokenUsage};
     use crate::test_helpers;
     use djinn_core::message::Role;
     use djinn_db::repositories::session::CreateSessionParams;
     use djinn_db::{SessionMessageRepository, SessionRepository};
+    use djinn_provider::message::{ContentBlock, Conversation, Message};
+    use djinn_provider::provider::ToolChoice;
+    use djinn_provider::provider::{LlmProvider, StreamEvent, TokenUsage};
     use error_handling::supports_tool_choice_required;
     use futures::stream;
     use std::collections::VecDeque;

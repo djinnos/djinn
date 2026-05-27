@@ -68,6 +68,21 @@ pub enum ContentBlock {
     /// (providers that need round-tripping, like Anthropic extended thinking
     /// with signatures, are not yet supported).
     Thinking { thinking: String },
+
+    /// OpenAI Responses reasoning item used to preserve stateless reasoning
+    /// context across tool-call turns when `store=false`.
+    ///
+    /// This is provider state, not user-visible text. It should be serialized
+    /// back only to the Responses API and skipped by other providers.
+    OpenAIReasoning {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        encrypted_content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+    },
 }
 
 impl ContentBlock {
@@ -235,6 +250,9 @@ impl Conversation {
                 ContentBlock::Image { data, .. } => data.len(),
                 ContentBlock::Document { data, .. } => data.len(),
                 ContentBlock::Thinking { thinking } => thinking.len(),
+                ContentBlock::OpenAIReasoning {
+                    encrypted_content, ..
+                } => encrypted_content.len(),
             })
             .sum();
         chars / 4
@@ -327,7 +345,7 @@ impl Conversation {
                         .iter()
                         .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
                         .collect();
-                    // Thinking blocks are display-only; not sent back to OpenAI.
+                    // Thinking/provider-state blocks are not sent to Chat Completions.
 
                     if tool_uses.is_empty() {
                         // Plain assistant message.
@@ -409,7 +427,7 @@ impl Conversation {
                     let content: Vec<serde_json::Value> = msg
                         .content
                         .iter()
-                        .filter(|b| !is_thinking(b))
+                        .filter(|b| !is_provider_internal(b))
                         .map(content_block_to_anthropic)
                         .collect();
                     msgs.push(json!({"role": "user", "content": content}));
@@ -418,7 +436,7 @@ impl Conversation {
                     let content: Vec<serde_json::Value> = msg
                         .content
                         .iter()
-                        .filter(|b| !is_thinking(b))
+                        .filter(|b| !is_provider_internal(b))
                         .map(content_block_to_anthropic)
                         .collect();
                     msgs.push(json!({"role": "assistant", "content": content}));
@@ -475,6 +493,10 @@ impl Conversation {
                             }
                             ContentBlock::Thinking { .. } => {
                                 // Thinking blocks are display-only; skip for Google.
+                                vec![]
+                            }
+                            ContentBlock::OpenAIReasoning { .. } => {
+                                // Responses reasoning state is provider-private.
                                 vec![]
                             }
                             ContentBlock::ToolResult { content, .. } => content
@@ -619,6 +641,34 @@ impl Conversation {
                                     "arguments": arguments_str
                                 }));
                             }
+                            ContentBlock::OpenAIReasoning {
+                                id,
+                                encrypted_content,
+                                summary,
+                                status,
+                            } if !encrypted_content.is_empty() => {
+                                if !text_items.is_empty() {
+                                    input_items.push(json!({
+                                        "role": "assistant",
+                                        "content": std::mem::take(&mut text_items)
+                                    }));
+                                }
+
+                                let mut item = json!({
+                                    "type": "reasoning",
+                                    "encrypted_content": encrypted_content,
+                                });
+                                if let Some(id) = id {
+                                    item["id"] = json!(id);
+                                }
+                                if let Some(summary) = summary {
+                                    item["summary"] = summary.clone();
+                                }
+                                if let Some(status) = status {
+                                    item["status"] = json!(status);
+                                }
+                                input_items.push(item);
+                            }
                             _ => {}
                         }
                     }
@@ -691,13 +741,17 @@ fn content_block_to_anthropic(block: &ContentBlock) -> serde_json::Value {
         }
         // Thinking blocks are display-only; skip when serializing for the API.
         ContentBlock::Thinking { .. } => json!({"type": "text", "text": ""}),
+        ContentBlock::OpenAIReasoning { .. } => json!({"type": "text", "text": ""}),
     }
 }
 
-/// Returns `true` if the block is a `Thinking` variant (used to filter
-/// before serializing for provider APIs).
-fn is_thinking(block: &ContentBlock) -> bool {
-    matches!(block, ContentBlock::Thinking { .. })
+/// Returns `true` for content blocks that are internal to one provider and
+/// should not be serialized to unrelated provider APIs.
+fn is_provider_internal(block: &ContentBlock) -> bool {
+    matches!(
+        block,
+        ContentBlock::Thinking { .. } | ContentBlock::OpenAIReasoning { .. }
+    )
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -1172,6 +1226,52 @@ mod tests {
                 "output": "72F\n sunny"
             })
         );
+    }
+
+    #[test]
+    fn to_openai_responses_input_preserves_openai_reasoning_items() {
+        let mut conversation = Conversation::new();
+        conversation.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::OpenAIReasoning {
+                    id: Some("rs_1".into()),
+                    encrypted_content: "encrypted".into(),
+                    summary: Some(json!([])),
+                    status: Some("completed".into()),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "shell".into(),
+                    input: json!({"cmd": "pwd"}),
+                },
+            ],
+            metadata: None,
+        });
+        conversation.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: vec![ContentBlock::text("/repo")],
+                is_error: false,
+            }],
+            metadata: None,
+        });
+
+        let (_, input) = conversation.to_openai_responses_input();
+        assert_eq!(input.len(), 3);
+        assert_eq!(
+            input[0],
+            json!({
+                "type": "reasoning",
+                "id": "rs_1",
+                "encrypted_content": "encrypted",
+                "summary": [],
+                "status": "completed"
+            })
+        );
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[2]["type"], "function_call_output");
     }
 
     #[test]

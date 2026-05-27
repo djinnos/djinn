@@ -35,11 +35,11 @@ use djinn_agent::actors::slot::{
     format_family_for_provider, load_provider_credential, parse_model_id,
 };
 use djinn_agent::chat_tools::ChatResolvedProject;
+use djinn_control_plane::server::DjinnMcpServer;
 use djinn_core::auth_context::{SESSION_USER_ID, SESSION_USER_TOKEN};
 use djinn_db::{SessionMessageRepository, SessionRepository};
 use djinn_provider::message::{ContentBlock, Conversation, Message, Role};
 use djinn_provider::provider::{LlmProvider, StreamEvent, TelemetryMeta, create_provider};
-use djinn_control_plane::server::DjinnMcpServer;
 
 const MAX_TOOL_ITERATIONS: usize = 20;
 
@@ -53,8 +53,7 @@ const DEFAULT_CHAT_TITLE: &str = "New Chat";
 /// System prompt used for the out-of-band title generation pass.  Kept
 /// terse and instruction-only so the non-streamed second call stays
 /// well under 50 output tokens.
-const TITLE_GEN_SYSTEM_PROMPT: &str =
-    "Generate a concise 3-6 word title for this conversation. Return only the title text, nothing else.";
+const TITLE_GEN_SYSTEM_PROMPT: &str = "Generate a concise 3-6 word title for this conversation. Return only the title text, nothing else.";
 
 pub(super) fn sse_json_event<T: serde::Serialize>(event: &str, payload: &T) -> Event {
     Event::default()
@@ -94,6 +93,40 @@ fn incoming_to_content_blocks(content: ChatContent) -> Vec<ContentBlock> {
     }
 }
 
+fn latest_user_turn_from_incoming(
+    incoming: Vec<super::ChatMessage>,
+) -> Result<(Vec<Message>, Option<Vec<ContentBlock>>), (axum::http::StatusCode, String)> {
+    let last_incoming_index = incoming.len().saturating_sub(1);
+    let mut turns = Vec::with_capacity(incoming.len());
+    let mut last_user_content_for_persist = None;
+
+    for (idx, m) in incoming.into_iter().enumerate() {
+        let role = match m.role.as_str() {
+            "system" => Role::System,
+            "user" => Role::User,
+            "assistant" => Role::Assistant,
+            "tool" => Role::User,
+            _ => {
+                return Err((
+                    axum::http::StatusCode::BAD_REQUEST,
+                    format!("unsupported role: {}", m.role),
+                ));
+            }
+        };
+        let content = incoming_to_content_blocks(m.content);
+        if idx == last_incoming_index && matches!(role, Role::User) {
+            last_user_content_for_persist = Some(content.clone());
+        }
+        turns.push(Message {
+            role,
+            content,
+            metadata: None,
+        });
+    }
+
+    Ok((turns, last_user_content_for_persist))
+}
+
 pub(super) async fn completions_handler_impl(
     state: AppState,
     headers: HeaderMap,
@@ -111,15 +144,18 @@ pub(super) async fn completions_handler_impl(
     // assistant endpoint and not all flows mutate the database); they
     // simply leave the task-locals as None, which yields NULL
     // attribution columns — same as background-agent-initiated writes.
-    let (user_token, user_id): (Option<String>, Option<String>) =
-        match authenticate(&state, &headers).await {
-            Ok(Some(user)) => (Some(user.github_access_token), Some(user.id)),
-            Ok(None) => (None, None),
-            Err(err) => {
-                tracing::warn!(error = %err, "chat completions: authenticate failed; proceeding unauth");
-                (None, None)
-            }
-        };
+    let (user_token, user_id): (Option<String>, Option<String>) = match authenticate(
+        &state, &headers,
+    )
+    .await
+    {
+        Ok(Some(user)) => (Some(user.github_access_token), Some(user.id)),
+        Ok(None) => (None, None),
+        Err(err) => {
+            tracing::warn!(error = %err, "chat completions: authenticate failed; proceeding unauth");
+            (None, None)
+        }
+    };
     if req.model.trim().is_empty() {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
@@ -309,6 +345,29 @@ pub(super) async fn completions_handler_impl(
         None
     };
 
+    let (incoming_turns, last_user_content_for_persist) =
+        latest_user_turn_from_incoming(req.messages)?;
+
+    let message_repo = SessionMessageRepository::new(state.db().clone(), state.event_bus());
+    let persisted_history = message_repo
+        .load_conversation(&session_id)
+        .await
+        .map_err(|e| {
+            tracing::warn!(session_id=%session_id, error=%e, "failed to load persisted chat history");
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to load persisted chat history: {e}"),
+            )
+        })?;
+    let latest_user_already_persisted =
+        last_user_content_for_persist
+            .as_ref()
+            .is_some_and(|content| {
+                persisted_history.messages.last().is_some_and(|last| {
+                    matches!(last.role, Role::User) && last.content.as_slice() == content.as_slice()
+                })
+            });
+
     let mut conversation = Conversation::new();
     let system_message = super::prompt::system_message::build_system_message(
         DJINN_CHAT_SYSTEM_PROMPT,
@@ -319,36 +378,28 @@ pub(super) async fn completions_handler_impl(
     let (system_message, _chat_config) = apply_chat_skills(system_message).await;
     conversation.push(system_message);
 
-    // Extract the final user turn so we can persist it verbatim before
-    // streaming starts (persist-user-message-before-stream invariant).
-    // Earlier turns in `req.messages` are assumed already persisted by
-    // prior /completions calls on the same session_id.
-    let mut last_user_content_for_persist: Option<Vec<ContentBlock>> = None;
-
-    let incoming = req.messages;
-    let last_incoming_index = incoming.len().saturating_sub(1);
-    for (idx, m) in incoming.into_iter().enumerate() {
-        let role = match m.role.as_str() {
-            "system" => Role::System,
-            "user" => Role::User,
-            "assistant" => Role::Assistant,
-            "tool" => Role::User,
-            _ => {
-                return Err((
-                    axum::http::StatusCode::BAD_REQUEST,
-                    format!("unsupported role: {}", m.role),
-                ));
-            }
-        };
-        let content_blocks = incoming_to_content_blocks(m.content);
-        if idx == last_incoming_index && matches!(role, Role::User) {
-            last_user_content_for_persist = Some(content_blocks.clone());
+    if persisted_history.messages.is_empty() {
+        conversation.messages.extend(
+            incoming_turns
+                .into_iter()
+                .filter(|m| !matches!(m.role, Role::System)),
+        );
+    } else {
+        conversation.messages.extend(
+            persisted_history
+                .messages
+                .into_iter()
+                .filter(|m| !matches!(m.role, Role::System)),
+        );
+        if !latest_user_already_persisted
+            && let Some(content) = last_user_content_for_persist.clone()
+        {
+            conversation.push(Message {
+                role: Role::User,
+                content,
+                metadata: None,
+            });
         }
-        conversation.push(Message {
-            role,
-            content: content_blocks,
-            metadata: None,
-        });
     }
 
     // Persist the incoming user turn BEFORE we spawn the streaming task.
@@ -360,8 +411,7 @@ pub(super) async fn completions_handler_impl(
     // message::ContentBlock` JSON (adjacently-tagged on `type`, see
     // `djinn_core::message`).  The UI can reconstruct text + image +
     // document attachments without a separate `attachments` sidecar.
-    if let Some(ref content) = last_user_content_for_persist {
-        let message_repo = SessionMessageRepository::new(state.db().clone(), state.event_bus());
+    if !latest_user_already_persisted && let Some(ref content) = last_user_content_for_persist {
         let content_json = serde_json::to_string(content).unwrap_or_else(|_| "[]".to_string());
         // `task_id` is unused for chat — pass empty string (the repo
         // only consults it for the emitted event payload).
@@ -460,9 +510,7 @@ async fn run_chat_loop(
                 .send(sse_json_event(
                     "error",
                     &ErrorPayload {
-                        message: format!(
-                            "tool loop iteration cap reached ({MAX_TOOL_ITERATIONS})"
-                        ),
+                        message: format!("tool loop iteration cap reached ({MAX_TOOL_ITERATIONS})"),
                     },
                 ))
                 .await;
@@ -494,6 +542,7 @@ async fn run_chat_loop(
 
         tokio::pin!(stream);
         let mut turn_text = String::new();
+        let mut turn_provider_state: Vec<ContentBlock> = Vec::new();
         let mut tool_calls: Vec<ContentBlock> = Vec::new();
 
         while let Some(item) = stream.next().await {
@@ -506,6 +555,10 @@ async fn run_chat_loop(
                 }
                 Ok(StreamEvent::Delta(tool @ ContentBlock::ToolUse { .. })) => {
                     tool_calls.push(tool)
+                }
+                Ok(StreamEvent::Delta(state @ ContentBlock::OpenAIReasoning { .. }))
+                | Ok(StreamEvent::Delta(state @ ContentBlock::Thinking { .. })) => {
+                    turn_provider_state.push(state);
                 }
                 Ok(StreamEvent::Done) => break,
                 Ok(_) => {}
@@ -522,14 +575,14 @@ async fn run_chat_loop(
                     // Persist whatever assistant content we accumulated
                     // on the way down so the UI can reconstruct a
                     // partial conversation on refresh.
-                    persist_assistant_turn(&state, &session_id, &persisted_assistant_content)
-                        .await;
+                    persist_assistant_turn(&state, &session_id, &persisted_assistant_content).await;
                     return;
                 }
             }
         }
 
         let mut assistant_content = Vec::new();
+        assistant_content.extend(turn_provider_state);
         if !turn_text.is_empty() {
             assistant_content.push(ContentBlock::Text { text: turn_text });
         }
@@ -882,7 +935,11 @@ async fn generate_chat_title(
     }
 
     let cleaned = clean_generated_title(&text);
-    if cleaned.is_empty() { None } else { Some(cleaned) }
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
 }
 
 /// Concatenate all `Text` blocks in a content array into a single string.

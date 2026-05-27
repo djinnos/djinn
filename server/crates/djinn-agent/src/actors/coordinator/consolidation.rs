@@ -509,7 +509,7 @@ mod tests {
                 model: "test-model",
                 agent_type: "worker",
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .unwrap();
@@ -681,7 +681,7 @@ mod tests {
                 model: "test-model",
                 agent_type: "worker",
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .unwrap();
@@ -692,7 +692,7 @@ mod tests {
                 model: "test-model",
                 agent_type: "worker",
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .unwrap();
@@ -703,7 +703,7 @@ mod tests {
                 model: "test-model",
                 agent_type: "worker",
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .unwrap();
@@ -868,7 +868,7 @@ mod tests {
                 model: "test-model",
                 agent_type: "worker",
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .unwrap();
@@ -879,7 +879,7 @@ mod tests {
                 model: "test-model",
                 agent_type: "worker",
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .unwrap();

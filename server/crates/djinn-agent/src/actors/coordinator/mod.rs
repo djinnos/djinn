@@ -132,17 +132,20 @@ mod tests {
             .unwrap();
         // Satisfy the coordinator's readiness gate: mark the synthesized
         // default project as image-ready and stamp `graph_warmed_at`.
-        let project_repo = djinn_db::ProjectRepository::new(
-            db.clone(),
-            crate::events::event_bus_for(&tx),
-        );
+        let project_repo =
+            djinn_db::ProjectRepository::new(db.clone(), crate::events::event_bus_for(&tx));
         let image = djinn_db::ProjectImage {
-            tag: Some(format!("test-registry/djinn-project-{}:testhash", &epic.project_id)),
+            tag: Some(format!(
+                "test-registry/djinn-project-{}:testhash",
+                &epic.project_id
+            )),
             hash: Some("testhash".into()),
             status: djinn_db::ProjectImageStatus::READY.into(),
             last_error: None,
         };
-        let _ = project_repo.set_project_image(&epic.project_id, &image).await;
+        let _ = project_repo
+            .set_project_image(&epic.project_id, &image)
+            .await;
         let cache_repo = djinn_db::RepoGraphCacheRepository::new(db.clone());
         let _ = cache_repo
             .upsert(djinn_db::RepoGraphCacheInsert {
@@ -182,13 +185,7 @@ mod tests {
             .unwrap();
         let note_repo = NoteRepository::new(db.clone(), crate::events::event_bus_for(tx));
         let note = note_repo
-            .create(
-                &project.id,
-                title,
-                "body",
-                "research",
-                "[]",
-            )
+            .create(&project.id, title, "body", "research", "[]")
             .await
             .unwrap();
         let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(tx));
@@ -476,7 +473,7 @@ mod tests {
                 model: "test-model",
                 agent_type: "architect",
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .unwrap();
@@ -635,8 +632,7 @@ mod tests {
         // the workspace path from `task_runs.workspace_path` (migration 5);
         // migration 6 dropped the legacy `sessions.worktree_path` column.
         let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-        let task_run_repo =
-            djinn_db::repositories::task_run::TaskRunRepository::new(db.clone());
+        let task_run_repo = djinn_db::repositories::task_run::TaskRunRepository::new(db.clone());
         let run_id = uuid::Uuid::now_v7().to_string();
         task_run_repo
             .create(djinn_db::repositories::task_run::CreateTaskRunParams {
@@ -657,7 +653,7 @@ mod tests {
                 model: "test-model",
                 agent_type: "architect",
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .unwrap();

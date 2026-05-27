@@ -101,8 +101,8 @@ impl OpenAIProvider {
                             "content": text
                         }));
                     }
-                    // Thinking blocks are display-only; not sent to OpenAI.
-                    ContentBlock::Thinking { .. } => {}
+                    // Provider-private state is not sent to Chat Completions.
+                    ContentBlock::Thinking { .. } | ContentBlock::OpenAIReasoning { .. } => {}
                 }
             }
 
