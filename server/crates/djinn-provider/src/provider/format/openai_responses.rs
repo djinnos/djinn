@@ -81,7 +81,20 @@ impl OpenAIResponsesProvider {
 
             match tool_choice.unwrap_or(ToolChoice::Auto) {
                 ToolChoice::Auto => {}
-                ToolChoice::Required => body["tool_choice"] = json!("required"),
+                ToolChoice::Required => {
+                    // The ChatGPT-account Codex backend returns an empty
+                    // `response.completed` (reasoning-only, no message/
+                    // function_call) when `tool_choice:"required"` is combined
+                    // with a reasoning model + a large tool set — confirmed live:
+                    // gpt-5.5 + 22 tools + required → empty turn; chat works
+                    // because it uses "auto". The agent loop's nudge mechanism
+                    // still enforces tool-calls under "auto", so downgrade
+                    // required→auto for the codex backend only. Real OpenAI-API
+                    // (api.openai.com) and other providers keep "required".
+                    if !is_codex_backend(&self.config.base_url) {
+                        body["tool_choice"] = json!("required");
+                    }
+                }
                 ToolChoice::None => body["tool_choice"] = json!("none"),
             }
         }
@@ -128,6 +141,15 @@ impl OpenAIResponsesProvider {
 
 fn is_fireworks_base_url(base_url: &str) -> bool {
     base_url.contains("fireworks.ai")
+}
+
+/// The ChatGPT-account Codex backend (`https://chatgpt.com/backend-api/codex`),
+/// distinct from the standard OpenAI API (`api.openai.com`). It returns empty
+/// reasoning-only completions when `tool_choice:"required"` is forced on a
+/// reasoning model with a large tool set, so the agent loop must use "auto"
+/// for this endpoint.
+fn is_codex_backend(base_url: &str) -> bool {
+    base_url.contains("chatgpt.com/backend-api/codex")
 }
 
 /// Returns true for OpenAI models that support the Responses API `reasoning`
