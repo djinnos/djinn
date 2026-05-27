@@ -20,19 +20,28 @@ use djinn_db::{
 };
 
 pub(super) fn router() -> Router<AppState> {
+    // Namespaced under `/api` so `/agents` does not shadow the SPA client-side
+    // route of the same name: a hard refresh on `/agents` must fall through to
+    // the static `index.html` fallback, not hit this JSON handler.
     Router::new()
-        .route("/agents", get(list_agents).post(create_agent))
-        // /agents/metrics must be registered before /agents/:id to avoid being
-        // captured as a path parameter.
-        .route("/agents/metrics", get(agent_metrics))
-        .route("/agents/available-mcp-servers", get(available_mcp_servers))
-        .route("/agents/available-skills", get(available_skills))
+        .route("/api/agents", get(list_agents).post(create_agent))
+        // /api/agents/metrics must be registered before /api/agents/:id to
+        // avoid being captured as a path parameter.
+        .route("/api/agents/metrics", get(agent_metrics))
         .route(
-            "/agents/{id}/learned-prompt/history",
+            "/api/agents/available-mcp-servers",
+            get(available_mcp_servers),
+        )
+        .route("/api/agents/available-skills", get(available_skills))
+        .route(
+            "/api/agents/{id}/learned-prompt/history",
             get(learned_prompt_history),
         )
-        .route("/agents/{id}/learned-prompt", delete(clear_learned_prompt))
-        .route("/agents/{id}", put(update_agent).delete(delete_agent))
+        .route(
+            "/api/agents/{id}/learned-prompt",
+            delete(clear_learned_prompt),
+        )
+        .route("/api/agents/{id}", put(update_agent).delete(delete_agent))
 }
 
 // ── Serialisation helpers ─────────────────────────────────────────────────────

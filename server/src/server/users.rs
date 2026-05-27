@@ -1,4 +1,4 @@
-// HTTP handler for the /users REST endpoint consumed by the desktop frontend.
+// HTTP handler for the /api/users REST endpoint consumed by the desktop frontend.
 //
 // Surfaces the org's user roster so the UI can resolve a task's
 // `created_by_user_id` to a human-readable name/avatar (e.g. the Kanban
@@ -12,7 +12,10 @@ use crate::server::AppState;
 use djinn_db::{User, UserRepository};
 
 pub(super) fn router() -> Router<AppState> {
-    Router::new().route("/users", get(list_users))
+    // Namespaced under `/api` so it does not shadow the SPA client-side route
+    // of the same name: a hard refresh on `/users` must fall through to the
+    // static `index.html` fallback, not hit this JSON handler.
+    Router::new().route("/api/users", get(list_users))
 }
 
 #[derive(Serialize)]

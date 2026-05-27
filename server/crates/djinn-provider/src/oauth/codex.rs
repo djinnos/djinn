@@ -135,6 +135,41 @@ impl CodexTokens {
         None
     }
 
+    /// Load tokens owned *exactly* by `owner` from the encrypted credential DB,
+    /// with **no** org-shared fallback and no filesystem migration for targeted
+    /// users.
+    ///
+    /// Used by the device-flow short-circuit so connecting a fresh identity
+    /// (e.g. the automation service user) doesn't see the acting admin's — or
+    /// the org-shared — token and skip the flow. The filesystem-cache migration
+    /// only applies to the org-shared / local-dev identity (`owner == None`);
+    /// a per-user target never inherits a local fs cache.
+    pub async fn load_from_db_for_owner(
+        repo: &CredentialRepository,
+        owner: Option<&str>,
+    ) -> Option<Self> {
+        if let Ok(Some(json)) = repo
+            .get_decrypted_exact_owner(CODEX_OAUTH_DB_KEY, owner)
+            .await
+        {
+            if let Ok(tokens) = serde_json::from_str::<Self>(&json) {
+                return Some(tokens);
+            }
+            tracing::warn!("Codex: corrupt token JSON in DB, ignoring");
+        }
+        if owner.is_none() {
+            if let Some(tokens) = Self::load_cached() {
+                tracing::info!("Codex: migrating tokens from filesystem to DB");
+                if let Err(e) = tokens.save_to_db(repo).await {
+                    tracing::warn!("Codex: migration save failed: {e}");
+                }
+                let _ = std::fs::remove_file(Self::cache_path());
+                return Some(tokens);
+            }
+        }
+        None
+    }
+
     /// Persist tokens to the encrypted credential DB.
     pub async fn save_to_db(&self, repo: &CredentialRepository) -> Result<()> {
         let json = serde_json::to_string(self)?;
@@ -352,8 +387,16 @@ pub async fn start_codex_device_auth(
     events: &EventBus,
     owner_user_id: Option<String>,
 ) -> Result<Option<CodexDeviceAuth>> {
-    // 1. If we already have usable tokens, skip the flow.
-    if let Some(cached) = CodexTokens::load_from_db(&repo).await {
+    // 1. If the *target owner* already has its own usable tokens, skip the
+    //    flow. Resolve against `owner_user_id` with exact-owner semantics —
+    //    NOT the acting user's `SESSION_USER_ID` task-local, and NOT the
+    //    org-shared fallback. Otherwise an admin connecting OAuth on the
+    //    automation user's behalf short-circuits on their *own* (or an
+    //    org-shared) token and the UI flips straight to "Connected" without
+    //    ever writing a credential for the target.
+    if let Some(cached) =
+        CodexTokens::load_from_db_for_owner(&repo, owner_user_id.as_deref()).await
+    {
         if !cached.is_expired() {
             tracing::debug!("Codex: device-code short-circuit — cached token still valid");
             return Ok(None);
@@ -363,7 +406,13 @@ pub async fn start_codex_device_auth(
             Ok(tr) => {
                 let account_id = pick_account_id(&tr).or(cached.account_id.clone());
                 let tokens = token_response_to_tokens(tr, account_id);
-                let _ = tokens.save_to_db(&repo).await;
+                // Re-establish the target owner for the write so the refreshed
+                // token lands on *their* row, not the acting user's (the read
+                // above was owner-scoped, but `save_to_db` → `set` resolves the
+                // owner from the task-local).
+                let _ = djinn_core::auth_context::SESSION_USER_ID
+                    .scope(owner_user_id.clone(), async { tokens.save_to_db(&repo).await })
+                    .await;
                 tracing::info!("Codex: token refreshed silently, skipping device flow");
                 return Ok(None);
             }

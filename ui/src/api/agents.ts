@@ -71,7 +71,7 @@ export interface AvailableSkill {
 export async function fetchAvailableMcpServers(projectId: string): Promise<AvailableMcpServer[]> {
   const baseUrl = await getBaseUrl();
   const response = await fetch(
-    `${baseUrl}/agents/available-mcp-servers?project_id=${encodeURIComponent(projectId)}`,
+    `${baseUrl}/api/agents/available-mcp-servers?project_id=${encodeURIComponent(projectId)}`,
   );
   if (!response.ok) {
     throw new Error(`Failed to fetch available MCP servers: ${response.status}`);
@@ -83,7 +83,7 @@ export async function fetchAvailableMcpServers(projectId: string): Promise<Avail
 export async function fetchAvailableSkills(projectId: string): Promise<AvailableSkill[]> {
   const baseUrl = await getBaseUrl();
   const response = await fetch(
-    `${baseUrl}/agents/available-skills?project_id=${encodeURIComponent(projectId)}`,
+    `${baseUrl}/api/agents/available-skills?project_id=${encodeURIComponent(projectId)}`,
   );
   if (!response.ok) {
     throw new Error(`Failed to fetch available skills: ${response.status}`);
@@ -95,8 +95,8 @@ export async function fetchAvailableSkills(projectId: string): Promise<Available
 export async function fetchAgents(projectId?: string): Promise<Agent[]> {
   const baseUrl = await getBaseUrl();
   const url = projectId
-    ? `${baseUrl}/agents?project_id=${encodeURIComponent(projectId)}`
-    : `${baseUrl}/agents`;
+    ? `${baseUrl}/api/agents?project_id=${encodeURIComponent(projectId)}`
+    : `${baseUrl}/api/agents`;
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`Failed to fetch agents: ${response.status}`);
@@ -107,7 +107,7 @@ export async function fetchAgents(projectId?: string): Promise<Agent[]> {
 
 export async function createAgent(request: CreateAgentRequest): Promise<Agent> {
   const baseUrl = await getBaseUrl();
-  const response = await fetch(`${baseUrl}/agents`, {
+  const response = await fetch(`${baseUrl}/api/agents`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
@@ -121,7 +121,7 @@ export async function createAgent(request: CreateAgentRequest): Promise<Agent> {
 
 export async function updateAgent(id: string, request: UpdateAgentRequest): Promise<Agent> {
   const baseUrl = await getBaseUrl();
-  const response = await fetch(`${baseUrl}/agents/${id}`, {
+  const response = await fetch(`${baseUrl}/api/agents/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
@@ -135,7 +135,7 @@ export async function updateAgent(id: string, request: UpdateAgentRequest): Prom
 
 export async function deleteAgent(id: string): Promise<void> {
   const baseUrl = await getBaseUrl();
-  const response = await fetch(`${baseUrl}/agents/${id}`, {
+  const response = await fetch(`${baseUrl}/api/agents/${id}`, {
     method: "DELETE",
   });
   if (!response.ok) {
@@ -177,7 +177,7 @@ export interface AgentMetricsResponse {
 
 export async function fetchAgentMetrics(projectId: string): Promise<AgentMetricsResponse> {
   const baseUrl = await getBaseUrl();
-  const response = await fetch(`${baseUrl}/agents/metrics?project_id=${encodeURIComponent(projectId)}`);
+  const response = await fetch(`${baseUrl}/api/agents/metrics?project_id=${encodeURIComponent(projectId)}`);
   if (!response.ok) {
     throw new Error(`Failed to fetch agent metrics: ${response.status}`);
   }
@@ -186,7 +186,7 @@ export async function fetchAgentMetrics(projectId: string): Promise<AgentMetrics
 
 export async function fetchLearnedPromptHistory(id: string): Promise<LearnedPromptHistory> {
   const baseUrl = await getBaseUrl();
-  const response = await fetch(`${baseUrl}/agents/${id}/learned-prompt/history`);
+  const response = await fetch(`${baseUrl}/api/agents/${id}/learned-prompt/history`);
   if (!response.ok) {
     throw new Error(`Failed to fetch learned prompt history: ${response.status}`);
   }
@@ -195,7 +195,7 @@ export async function fetchLearnedPromptHistory(id: string): Promise<LearnedProm
 
 export async function clearLearnedPrompt(id: string): Promise<void> {
   const baseUrl = await getBaseUrl();
-  const response = await fetch(`${baseUrl}/agents/${id}/learned-prompt`, {
+  const response = await fetch(`${baseUrl}/api/agents/${id}/learned-prompt`, {
     method: "DELETE",
   });
   if (!response.ok) {

@@ -1,6 +1,6 @@
 import { getServerBaseUrl } from "@/api/serverUrl";
 
-/** A member of the deployment's GitHub org, as returned by `GET /users`. */
+/** A member of the deployment's GitHub org, as returned by `GET /api/users`. */
 export interface OrgUser {
   id: string;
   github_login: string;
@@ -21,7 +21,7 @@ export interface OrgUser {
 
 export async function fetchUsers(): Promise<OrgUser[]> {
   const baseUrl = getServerBaseUrl();
-  const response = await fetch(`${baseUrl}/users`);
+  const response = await fetch(`${baseUrl}/api/users`);
   if (!response.ok) {
     throw new Error(`Failed to fetch users: ${response.status}`);
   }
