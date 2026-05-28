@@ -92,6 +92,52 @@ pub(crate) struct PromptContext {
     pub prompt_verification_rules: Option<String>,
 }
 
+/// A read-only project an epic grants the task access to (read-only
+/// multi-repo). `path` is the on-disk read-only checkout inside the
+/// worktree when the project's mirror was available on the worker;
+/// `None` means only the slug-based DB tools (`code_graph` / `memory_*`)
+/// can reach it.
+#[derive(Debug, Clone)]
+pub(crate) struct ReadSourceInfo {
+    pub slug: String,
+    pub name: String,
+    pub path: Option<String>,
+}
+
+/// Append a "read-only repositories" section to the assembled system
+/// prompt. Tells the agent which OTHER registered projects it may read
+/// (and how) while keeping all writes pinned to the task's own project.
+/// No-op when the task has no read sources.
+fn append_read_sources_prompt(prompt: &str, read_sources: &[ReadSourceInfo]) -> String {
+    if read_sources.is_empty() {
+        return prompt.to_string();
+    }
+    let mut s = String::from(prompt);
+    s.push_str("\n\n## Additional read-only repositories\n");
+    s.push_str(
+        "This task's epic grants READ access to the other registered projects below \
+         (e.g. to migrate code from them). You MUST NOT write to, commit to, or open a \
+         PR against them — every write goes to THIS task's own project only.\n\n",
+    );
+    for rs in read_sources {
+        match &rs.path {
+            Some(path) => s.push_str(&format!(
+                "- **{}** ({}): query its dependency graph & notes by passing \
+                 `project=\"{}\"` to `code_graph` / `memory_*`; its files are checked out \
+                 read-only at `{}` for direct inspection.\n",
+                rs.slug, rs.name, rs.slug, path,
+            )),
+            None => s.push_str(&format!(
+                "- **{}** ({}): query its dependency graph & notes by passing \
+                 `project=\"{}\"` to `code_graph` / `memory_*` (a raw file checkout is not \
+                 available on this worker).\n",
+                rs.slug, rs.name, rs.slug,
+            )),
+        }
+    }
+    s
+}
+
 /// Inputs for [`build_prompt_context`].
 ///
 /// The supervisor path fills `conflict_ctx`,
@@ -123,6 +169,9 @@ pub(crate) struct PromptContextInputs<'a> {
     pub learned_prompt: Option<&'a str>,
     pub resolved_skills: &'a [ResolvedSkill],
     pub app_state: &'a AgentContext,
+    /// Read-only multi-repo: other registered projects the task's epic
+    /// allows it to read. Materialized + resolved by the caller.
+    pub read_sources: &'a [ReadSourceInfo],
 }
 
 /// Build the full prompt context (all `TaskContext` fields, base +
@@ -148,6 +197,7 @@ pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> Pro
         learned_prompt,
         resolved_skills,
         app_state,
+        read_sources,
     } = inputs;
 
     let conflict_files = conflict_ctx.map(|m| {
@@ -368,6 +418,9 @@ pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> Pro
         apply_role_extensions(&base_system_prompt, system_prompt_extensions, learned_prompt);
     // Append skills section after all other extensions.
     let system_prompt = apply_skills(&system_prompt_with_extensions, resolved_skills);
+    // Read-only multi-repo: advertise the epic's read-source projects last
+    // so the section survives all other extension/skill appends.
+    let system_prompt = append_read_sources_prompt(&system_prompt, read_sources);
 
     PromptContext {
         conflict_files,
