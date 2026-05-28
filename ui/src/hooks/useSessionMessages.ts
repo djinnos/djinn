@@ -108,7 +108,11 @@ export function useSessionMessages(taskId: string | null, projectSlug: string | 
   const [streamingThinking, setStreamingThinking] = useState<Map<string, string>>(new Map());
 
   const fetchData = useCallback(async () => {
-    if (!taskId || !projectSlug) return;
+    // The board is cross-project: a task's timeline resolves by its (globally
+    // unique) id server-side, so we must NOT gate on a selected project — the
+    // task being viewed may belong to a different project. `projectSlug` is
+    // passed only as an optional hint (helps disambiguate short_ids).
+    if (!taskId) return;
 
     setLoading(true);
     setError(null);
@@ -117,7 +121,7 @@ export function useSessionMessages(taskId: string | null, projectSlug: string | 
       // Single MCP call fetches sessions + messages + activity
       const result = await callMcpTool("task_timeline", {
         task_id: taskId,
-        project: projectSlug,
+        ...(projectSlug ? { project: projectSlug } : {}),
       });
 
       if (result.error) {

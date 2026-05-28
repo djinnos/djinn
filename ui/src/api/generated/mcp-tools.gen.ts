@@ -662,6 +662,41 @@ export namespace CredentialSetOutputSchema {
 
 }
 export type CredentialSetOutput = CredentialSetOutputSchema.CredentialSetOutput;
+export namespace EpicAddReadSourceInputSchema {
+  export interface EpicAddReadSourceInput {
+  /**
+   * Epic UUID or short_id.
+   */
+  id: string
+  /**
+   * The epic's OWN project (UUID or owner/repo slug) — the write target.
+   */
+  project: string
+  /**
+   * The read-source project to grant/revoke: UUID or owner/repo slug.
+   * Must reference an already-registered project.
+   */
+  read_source: string
+  [k: string]: any
+  }
+
+}
+export type EpicAddReadSourceInput = EpicAddReadSourceInputSchema.EpicAddReadSourceInput;
+export namespace EpicAddReadSourceOutputSchema {
+  /**
+   * Response for the read-only multi-repo read-source tools.
+   */
+  export interface EpicAddReadSourceOutput {
+  error?: string
+  /**
+   * The epic's read-source projects as `owner/repo` slugs.
+   */
+  read_sources?: string[]
+  [k: string]: any
+  }
+
+}
+export type EpicAddReadSourceOutput = EpicAddReadSourceOutputSchema.EpicAddReadSourceOutput;
 export namespace EpicCloseInputSchema {
   export interface EpicCloseInput {
   /**
@@ -762,6 +797,14 @@ export namespace EpicCreateInputSchema {
    * Absolute project path.
    */
   project: string
+  /**
+   * Read-only multi-repo: other registered projects (UUIDs or
+   * owner/repo slugs) this epic's tasks may READ while still writing
+   * only to `project`. Set this when the work consults another repo —
+   * e.g. migrating code FROM project A INTO this epic's project, pass
+   * `read_sources: ["owner/A"]`.
+   */
+  read_sources?: string[]
   /**
    * Initial status: "proposed", "drafting" (default), or "open".
    * Proposed epics (ADR-051 Epic C) are architect-drafted shells
@@ -885,6 +928,71 @@ export namespace EpicListOutputSchema {
 
 }
 export type EpicListOutput = EpicListOutputSchema.EpicListOutput;
+export namespace EpicListReadSourcesInputSchema {
+  export interface EpicListReadSourcesInput {
+  /**
+   * Epic UUID or short_id.
+   */
+  id: string
+  /**
+   * Absolute project path.
+   */
+  project: string
+  [k: string]: any
+  }
+
+}
+export type EpicListReadSourcesInput = EpicListReadSourcesInputSchema.EpicListReadSourcesInput;
+export namespace EpicListReadSourcesOutputSchema {
+  /**
+   * Response for the read-only multi-repo read-source tools.
+   */
+  export interface EpicListReadSourcesOutput {
+  error?: string
+  /**
+   * The epic's read-source projects as `owner/repo` slugs.
+   */
+  read_sources?: string[]
+  [k: string]: any
+  }
+
+}
+export type EpicListReadSourcesOutput = EpicListReadSourcesOutputSchema.EpicListReadSourcesOutput;
+export namespace EpicRemoveReadSourceInputSchema {
+  export interface EpicRemoveReadSourceInput {
+  /**
+   * Epic UUID or short_id.
+   */
+  id: string
+  /**
+   * The epic's OWN project (UUID or owner/repo slug) — the write target.
+   */
+  project: string
+  /**
+   * The read-source project to grant/revoke: UUID or owner/repo slug.
+   * Must reference an already-registered project.
+   */
+  read_source: string
+  [k: string]: any
+  }
+
+}
+export type EpicRemoveReadSourceInput = EpicRemoveReadSourceInputSchema.EpicRemoveReadSourceInput;
+export namespace EpicRemoveReadSourceOutputSchema {
+  /**
+   * Response for the read-only multi-repo read-source tools.
+   */
+  export interface EpicRemoveReadSourceOutput {
+  error?: string
+  /**
+   * The epic's read-source projects as `owner/repo` slugs.
+   */
+  read_sources?: string[]
+  [k: string]: any
+  }
+
+}
+export type EpicRemoveReadSourceOutput = EpicRemoveReadSourceOutputSchema.EpicRemoveReadSourceOutput;
 export namespace EpicReopenInputSchema {
   export interface EpicReopenInput {
   /**
@@ -3454,9 +3562,10 @@ export type SessionForTaskOutput = SessionForTaskOutputSchema.SessionForTaskOutp
 export namespace SessionListInputSchema {
   export interface SessionListInput {
   /**
-   * Absolute project path (required).
+   * Optional project hint (slug or UUID). Only needed to disambiguate a
+   * `short_id`; a task UUID resolves globally without it.
    */
-  project: string
+  project?: string
   /**
    * Task UUID or short_id.
    */
@@ -4120,9 +4229,10 @@ export type TaskShowOutput = TaskShowOutputSchema.TaskShowOutput;
 export namespace TaskTimelineInputSchema {
   export interface TaskTimelineInput {
   /**
-   * Absolute project path (required).
+   * Optional project hint (slug or UUID). Only needed to disambiguate a
+   * `short_id`; a task UUID resolves globally without it.
    */
-  project: string
+  project?: string
   /**
    * Task UUID or short_id.
    */
@@ -4415,7 +4525,7 @@ export namespace UserSettingsSetOutputSchema {
 }
 export type UserSettingsSetOutput = UserSettingsSetOutputSchema.UserSettingsSetOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "user_settings_get" | "user_settings_set";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_add_read_source" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "user_settings_get" | "user_settings_set";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -4429,11 +4539,14 @@ export interface McpToolMap {
   "credential_delete": { input: CredentialDeleteInput; output: CredentialDeleteOutput };
   "credential_list": { input: CredentialListInput; output: CredentialListOutput };
   "credential_set": { input: CredentialSetInput; output: CredentialSetOutput };
+  "epic_add_read_source": { input: EpicAddReadSourceInput; output: EpicAddReadSourceOutput };
   "epic_close": { input: EpicCloseInput; output: EpicCloseOutput };
   "epic_count": { input: EpicCountInput; output: EpicCountOutput };
   "epic_create": { input: EpicCreateInput; output: EpicCreateOutput };
   "epic_delete": { input: EpicDeleteInput; output: EpicDeleteOutput };
   "epic_list": { input: EpicListInput; output: EpicListOutput };
+  "epic_list_read_sources": { input: EpicListReadSourcesInput; output: EpicListReadSourcesOutput };
+  "epic_remove_read_source": { input: EpicRemoveReadSourceInput; output: EpicRemoveReadSourceOutput };
   "epic_reopen": { input: EpicReopenInput; output: EpicReopenOutput };
   "epic_show": { input: EpicShowInput; output: EpicShowOutput };
   "epic_tasks": { input: EpicTasksInput; output: EpicTasksOutput };

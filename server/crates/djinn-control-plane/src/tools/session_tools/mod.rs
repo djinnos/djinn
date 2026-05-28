@@ -13,8 +13,10 @@ use djinn_db::VerificationResultRepository;
 pub struct SessionListParams {
     /// Task UUID or short_id.
     pub task_id: Option<String>,
-    /// Absolute project path (required).
-    pub project: String,
+    /// Optional project hint (slug or UUID). Only needed to disambiguate a
+    /// `short_id`; a task UUID resolves globally without it.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -168,8 +170,10 @@ pub struct SessionShowResponse {
 pub struct TaskTimelineParams {
     /// Task UUID or short_id.
     pub task_id: Option<String>,
-    /// Absolute project path (required).
-    pub project: String,
+    /// Optional project hint (slug or UUID). Only needed to disambiguate a
+    /// `short_id`; a task UUID resolves globally without it.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -216,6 +220,35 @@ pub struct TaskTimelineResponse {
     pub error: Option<String>,
 }
 
+impl DjinnMcpServer {
+    /// Resolve a task for the read-only session views (`task_timeline`,
+    /// `session_list`). The Kanban is a cross-team board spanning many
+    /// projects, so a task's sessions must be reachable regardless of which
+    /// project the caller currently has selected. We resolve the task
+    /// GLOBALLY by id (a UUID is globally unique) and the callers then scope
+    /// every downstream query to the task's OWN `project_id` — never the
+    /// caller-supplied one. An optional `project` hint is honored first so a
+    /// `short_id` (unique only within a project) still resolves unambiguously
+    /// for callers that pass it (e.g. agents); it is otherwise ignored.
+    async fn resolve_task_for_session_view(
+        &self,
+        task_repo: &TaskRepository,
+        task_id: &str,
+        project_hint: Option<&str>,
+    ) -> Result<Option<djinn_core::models::Task>, String> {
+        if let Some(proj) = project_hint.filter(|p| !p.is_empty())
+            && let Ok(project_id) = self.resolve_project_id(proj).await
+            && let Some(task) = task_repo
+                .resolve_in_project(&project_id, task_id)
+                .await
+                .map_err(|e| e.to_string())?
+        {
+            return Ok(Some(task));
+        }
+        task_repo.resolve(task_id).await.map_err(|e| e.to_string())
+    }
+}
+
 #[tool_router(router = session_tool_router, vis = "pub")]
 impl DjinnMcpServer {
     /// List all sessions for a task, newest first by started_at.
@@ -227,16 +260,6 @@ impl DjinnMcpServer {
         Parameters(p): Parameters<SessionListParams>,
     ) -> Json<SessionListResponse> {
         let task_repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
-        let project_id = match self.resolve_project_id(&p.project).await {
-            Ok(id) => id,
-            Err(e) => {
-                return Json(SessionListResponse {
-                    task_id: None,
-                    sessions: None,
-                    error: Some(e),
-                });
-            }
-        };
         let task_id = match p.task_id.as_deref() {
             Some(id) => id,
             None => {
@@ -247,18 +270,28 @@ impl DjinnMcpServer {
                 });
             }
         };
-        let Some(task) = task_repo
-            .resolve_in_project(&project_id, task_id)
+        let task = match self
+            .resolve_task_for_session_view(&task_repo, task_id, p.project.as_deref())
             .await
-            .ok()
-            .flatten()
-        else {
-            return Json(SessionListResponse {
-                task_id: None,
-                sessions: None,
-                error: Some(format!("task not found: {}", task_id)),
-            });
+        {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                return Json(SessionListResponse {
+                    task_id: None,
+                    sessions: None,
+                    error: Some(format!("task not found: {}", task_id)),
+                });
+            }
+            Err(e) => {
+                return Json(SessionListResponse {
+                    task_id: None,
+                    sessions: None,
+                    error: Some(e),
+                });
+            }
         };
+        // Scope to the task's OWN project — the board is cross-project.
+        let project_id = task.project_id.clone();
 
         let repo = SessionRepository::new(self.state.db().clone(), self.state.event_bus());
         let task_run_repo =
@@ -533,21 +566,22 @@ impl DjinnMcpServer {
             })
         };
 
-        let project_id = match self.resolve_project_id(&p.project).await {
-            Ok(id) => id,
-            Err(e) => return err(e),
-        };
-
         let task_repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
         let task_id = match p.task_id.as_deref() {
             Some(id) => id,
             None => return err("task_id is required".to_string()),
         };
-        let task = match task_repo.resolve_in_project(&project_id, task_id).await {
+        let task = match self
+            .resolve_task_for_session_view(&task_repo, task_id, p.project.as_deref())
+            .await
+        {
             Ok(Some(t)) => t,
             Ok(None) => return err(format!("task not found: {}", task_id)),
-            Err(e) => return err(e.to_string()),
+            Err(e) => return err(e),
         };
+        // Scope every downstream query to the task's OWN project — never the
+        // caller's selected project (which differs on a cross-project board).
+        let project_id = task.project_id.clone();
 
         let session_repo = SessionRepository::new(self.state.db().clone(), self.state.event_bus());
         let msg_repo =

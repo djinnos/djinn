@@ -1198,6 +1198,53 @@ expression: signatures
     }
   },
   {
+    "name": "epic_add_read_source",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Epic UUID or short_id.",
+          "type": "string"
+        },
+        "project": {
+          "description": "The epic's OWN project (UUID or owner/repo slug) — the write target.",
+          "type": "string"
+        },
+        "read_source": {
+          "description": "The read-source project to grant/revoke: UUID or owner/repo slug.\nMust reference an already-registered project.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "id",
+        "read_source"
+      ],
+      "title": "EpicReadSourceParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Response for the read-only multi-repo read-source tools.",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "read_sources": {
+          "description": "The epic's read-source projects as `owner/repo` slugs.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        }
+      },
+      "title": "EpicReadSourcesResponse",
+      "type": "object"
+    }
+  },
+  {
     "name": "epic_close",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1388,6 +1435,14 @@ expression: signatures
         "project": {
           "description": "Absolute project path.",
           "type": "string"
+        },
+        "read_sources": {
+          "description": "Read-only multi-repo: other registered projects (UUIDs or\nowner/repo slugs) this epic's tasks may READ while still writing\nonly to `project`. Set this when the work consults another repo —\ne.g. migrating code FROM project A INTO this epic's project, pass\n`read_sources: [\"owner/A\"]`.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
         },
         "status": {
           "description": "Initial status: \"proposed\", \"drafting\" (default), or \"open\".\nProposed epics (ADR-051 Epic C) are architect-drafted shells\nthat never trigger auto-dispatch until explicitly accepted.",
@@ -1653,6 +1708,95 @@ expression: signatures
         }
       },
       "title": "EpicListResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "epic_list_read_sources",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Epic UUID or short_id.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Absolute project path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "id"
+      ],
+      "title": "EpicShowParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Response for the read-only multi-repo read-source tools.",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "read_sources": {
+          "description": "The epic's read-source projects as `owner/repo` slugs.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        }
+      },
+      "title": "EpicReadSourcesResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "epic_remove_read_source",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Epic UUID or short_id.",
+          "type": "string"
+        },
+        "project": {
+          "description": "The epic's OWN project (UUID or owner/repo slug) — the write target.",
+          "type": "string"
+        },
+        "read_source": {
+          "description": "The read-source project to grant/revoke: UUID or owner/repo slug.\nMust reference an already-registered project.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "id",
+        "read_source"
+      ],
+      "title": "EpicReadSourceParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Response for the read-only multi-repo read-source tools.",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "read_sources": {
+          "description": "The epic's read-source projects as `owner/repo` slugs.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        }
+      },
+      "title": "EpicReadSourcesResponse",
       "type": "object"
     }
   },
@@ -6829,7 +6973,9 @@ expression: signatures
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "project": {
-          "description": "Absolute project path (required).",
+          "default": null,
+          "description": "Optional project hint (slug or UUID). Only needed to disambiguate a\n`short_id`; a task UUID resolves globally without it.",
+          "nullable": true,
           "type": "string"
         },
         "task_id": {
@@ -6838,9 +6984,6 @@ expression: signatures
           "type": "string"
         }
       },
-      "required": [
-        "project"
-      ],
       "title": "SessionListParams",
       "type": "object"
     },
@@ -8037,7 +8180,9 @@ expression: signatures
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "project": {
-          "description": "Absolute project path (required).",
+          "default": null,
+          "description": "Optional project hint (slug or UUID). Only needed to disambiguate a\n`short_id`; a task UUID resolves globally without it.",
+          "nullable": true,
           "type": "string"
         },
         "task_id": {
@@ -8046,9 +8191,6 @@ expression: signatures
           "type": "string"
         }
       },
-      "required": [
-        "project"
-      ],
       "title": "TaskTimelineParams",
       "type": "object"
     },
