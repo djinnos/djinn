@@ -17,7 +17,7 @@ use crate::tools::validation::{
     validate_color, validate_description, validate_emoji, validate_epic_create_status,
     validate_limit, validate_offset, validate_owner, validate_sort, validate_title,
 };
-use djinn_db::{EpicCountQuery, EpicListQuery, EpicRepository};
+use djinn_db::{EpicCountQuery, EpicListQuery, EpicRepository, ProjectRepository};
 
 #[derive(Clone)]
 pub struct EpicListResponse {
@@ -89,8 +89,39 @@ pub struct EpicCountResponse {
     pub error: Option<String>,
 }
 
+/// Response for the read-only multi-repo read-source tools.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct EpicReadSourcesResponse {
+    /// The epic's read-source projects as `owner/repo` slugs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_sources: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 fn epic_not_found_error(id: &str) -> String {
     format!("epic not found: {id}")
+}
+
+/// Resolve an epic's read-source project IDs to `owner/repo` slugs for
+/// display. Falls back to the raw id if the project row is gone.
+async fn resolve_read_source_slugs(
+    epic_repo: &EpicRepository,
+    project_repo: &ProjectRepository,
+    epic_id: &str,
+) -> Result<Vec<String>, String> {
+    let ids = epic_repo
+        .read_sources(epic_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut slugs = Vec::with_capacity(ids.len());
+    for id in ids {
+        match project_repo.get(&id).await {
+            Ok(Some(p)) => slugs.push(format!("{}/{}", p.github_owner, p.github_repo)),
+            _ => slugs.push(id),
+        }
+    }
+    Ok(slugs)
 }
 
 // ── Param structs ────────────────────────────────────────────────────────────
@@ -118,6 +149,12 @@ pub struct EpicCreateParams {
     /// epic.  Threaded into the breakdown Planner's session context
     /// so downstream task creation inherits the architectural rationale.
     pub originating_adr_id: Option<String>,
+    /// Read-only multi-repo: other registered projects (UUIDs or
+    /// owner/repo slugs) this epic's tasks may READ while still writing
+    /// only to `project`. Set this when the work consults another repo —
+    /// e.g. migrating code FROM project A INTO this epic's project, pass
+    /// `read_sources: ["owner/A"]`.
+    pub read_sources: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -207,13 +244,24 @@ pub struct EpicCountParams {
     pub group_by: Option<String>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct EpicReadSourceParams {
+    /// The epic's OWN project (UUID or owner/repo slug) — the write target.
+    pub project: String,
+    /// Epic UUID or short_id.
+    pub id: String,
+    /// The read-source project to grant/revoke: UUID or owner/repo slug.
+    /// Must reference an already-registered project.
+    pub read_source: String,
+}
+
 // ── Tool implementations ─────────────────────────────────────────────────────
 
 #[tool_router(router = epic_tool_router, vis = "pub")]
 impl DjinnMcpServer {
     /// Create a new epic.
     #[tool(
-        description = "Create a new epic (top-level grouping entity). Returns the created epic."
+        description = "Create a new epic (top-level grouping entity). Returns the created epic. For read-only multi-repo work, pass `read_sources` with other registered projects (UUIDs or owner/repo slugs) the epic's tasks may READ — e.g. when the user wants to migrate code FROM project A INTO this epic's project, create the epic on the target project and set read_sources=[A]."
     )]
     pub async fn epic_create(
         &self,
@@ -301,10 +349,27 @@ impl DjinnMcpServer {
             )
             .await
         {
-            Ok(epic) => Json(EpicSingleResponse {
-                epic: Some(EpicModel::from(&epic)),
-                error: None,
-            }),
+            Ok(epic) => {
+                // Read-only multi-repo: seed any read sources requested at
+                // creation time (e.g. chat "migrate from A into B" →
+                // read_sources=[A]). Best-effort: unresolvable / self / dup
+                // sources are skipped so epic creation still succeeds.
+                if let Some(sources) = &p.read_sources {
+                    let project_repo =
+                        ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+                    for src in sources {
+                        if let Ok(Some(src_id)) = project_repo.resolve(src).await
+                            && src_id != epic.project_id
+                        {
+                            let _ = repo.add_read_source(&epic.id, &src_id).await;
+                        }
+                    }
+                }
+                Json(EpicSingleResponse {
+                    epic: Some(EpicModel::from(&epic)),
+                    error: None,
+                })
+            }
             Err(e) => Json(EpicSingleResponse {
                 epic: None,
                 error: Some(e.to_string()),
@@ -672,6 +737,167 @@ impl DjinnMcpServer {
                 total_count: None,
                 groups: None,
                 error: Some(e.to_string()),
+            }),
+        }
+    }
+
+    /// Grant an epic read-only access to another registered project.
+    #[tool(
+        description = "Grant an epic READ-ONLY access to another registered project (read-only multi-repo). The epic's tasks may then read that project's files, dependency graph, and notes, but still write ONLY to the epic's own project. Use when an epic needs to consult a source repo — e.g. migrating code FROM project A INTO the epic's project B, add A as a read source. `project` is the epic's own project; `id` is the epic UUID/short_id; `read_source` is the source project UUID or owner/repo slug (must already be registered). Returns the epic's updated read-source slug list."
+    )]
+    pub async fn epic_add_read_source(
+        &self,
+        Parameters(p): Parameters<EpicReadSourceParams>,
+    ) -> Json<EpicReadSourcesResponse> {
+        let project_id = match self.resolve_project_id(&p.project).await {
+            Ok(id) => id,
+            Err(e) => {
+                return Json(EpicReadSourcesResponse {
+                    read_sources: None,
+                    error: Some(e),
+                });
+            }
+        };
+        let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
+        let project_repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+        let Some(epic) = epic_repo
+            .resolve_in_project(&project_id, &p.id)
+            .await
+            .ok()
+            .flatten()
+        else {
+            return Json(EpicReadSourcesResponse {
+                read_sources: None,
+                error: Some(epic_not_found_error(&p.id)),
+            });
+        };
+        let source_id = match project_repo.resolve(&p.read_source).await {
+            Ok(Some(id)) => id,
+            _ => {
+                return Json(EpicReadSourcesResponse {
+                    read_sources: None,
+                    error: Some(format!("read-source project not found: {}", p.read_source)),
+                });
+            }
+        };
+        if source_id == epic.project_id {
+            return Json(EpicReadSourcesResponse {
+                read_sources: None,
+                error: Some("an epic cannot add its own project as a read source".to_string()),
+            });
+        }
+        if let Err(e) = epic_repo.add_read_source(&epic.id, &source_id).await {
+            return Json(EpicReadSourcesResponse {
+                read_sources: None,
+                error: Some(e.to_string()),
+            });
+        }
+        match resolve_read_source_slugs(&epic_repo, &project_repo, &epic.id).await {
+            Ok(slugs) => Json(EpicReadSourcesResponse {
+                read_sources: Some(slugs),
+                error: None,
+            }),
+            Err(e) => Json(EpicReadSourcesResponse {
+                read_sources: None,
+                error: Some(e),
+            }),
+        }
+    }
+
+    /// Revoke an epic's read-only access to a project.
+    #[tool(
+        description = "Revoke an epic's READ-ONLY access to another project (read-only multi-repo). `project` is the epic's own project; `id` is the epic UUID/short_id; `read_source` is the source project UUID or owner/repo slug. No-op if it wasn't a read source. Returns the epic's updated read-source slug list."
+    )]
+    pub async fn epic_remove_read_source(
+        &self,
+        Parameters(p): Parameters<EpicReadSourceParams>,
+    ) -> Json<EpicReadSourcesResponse> {
+        let project_id = match self.resolve_project_id(&p.project).await {
+            Ok(id) => id,
+            Err(e) => {
+                return Json(EpicReadSourcesResponse {
+                    read_sources: None,
+                    error: Some(e),
+                });
+            }
+        };
+        let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
+        let project_repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+        let Some(epic) = epic_repo
+            .resolve_in_project(&project_id, &p.id)
+            .await
+            .ok()
+            .flatten()
+        else {
+            return Json(EpicReadSourcesResponse {
+                read_sources: None,
+                error: Some(epic_not_found_error(&p.id)),
+            });
+        };
+        // Resolve the source ref; if it no longer resolves, fall back to the
+        // raw value so a stale grant can still be removed by id.
+        let source_id = project_repo
+            .resolve(&p.read_source)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| p.read_source.clone());
+        if let Err(e) = epic_repo.remove_read_source(&epic.id, &source_id).await {
+            return Json(EpicReadSourcesResponse {
+                read_sources: None,
+                error: Some(e.to_string()),
+            });
+        }
+        match resolve_read_source_slugs(&epic_repo, &project_repo, &epic.id).await {
+            Ok(slugs) => Json(EpicReadSourcesResponse {
+                read_sources: Some(slugs),
+                error: None,
+            }),
+            Err(e) => Json(EpicReadSourcesResponse {
+                read_sources: None,
+                error: Some(e),
+            }),
+        }
+    }
+
+    /// List an epic's read-only source projects.
+    #[tool(
+        description = "List the read-only source projects granted to an epic (read-only multi-repo). Returns the epic's read-source slug list (owner/repo). `project` is the epic's own project; `id` is the epic UUID/short_id."
+    )]
+    pub async fn epic_list_read_sources(
+        &self,
+        Parameters(p): Parameters<EpicShowParams>,
+    ) -> Json<EpicReadSourcesResponse> {
+        let project_id = match self.resolve_project_id(&p.project).await {
+            Ok(id) => id,
+            Err(e) => {
+                return Json(EpicReadSourcesResponse {
+                    read_sources: None,
+                    error: Some(e),
+                });
+            }
+        };
+        let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
+        let project_repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+        let Some(epic) = epic_repo
+            .resolve_in_project(&project_id, &p.id)
+            .await
+            .ok()
+            .flatten()
+        else {
+            return Json(EpicReadSourcesResponse {
+                read_sources: None,
+                error: Some(epic_not_found_error(&p.id)),
+            });
+        };
+        match resolve_read_source_slugs(&epic_repo, &project_repo, &epic.id).await {
+            Ok(slugs) => Json(EpicReadSourcesResponse {
+                read_sources: Some(slugs),
+                error: None,
+            }),
+            Err(e) => Json(EpicReadSourcesResponse {
+                read_sources: None,
+                error: Some(e),
             }),
         }
     }
