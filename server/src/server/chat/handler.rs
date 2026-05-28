@@ -245,9 +245,17 @@ pub(super) async fn completions_handler_impl(
     // that the FK on `session_messages` holds when we persist the
     // incoming user turn below.  Idempotent: subsequent requests with
     // the same id re-fetch the existing row.
+    //
+    // Scope under SESSION_USER_ID so `upsert_chat_session` stamps
+    // `created_by_user_id` via `current_user_id()`. Without this scope the
+    // row is owned by no one and `list_chat_for_user` filters it out — the
+    // user never sees their own new chats.
     let session_repo = SessionRepository::new(state.db().clone(), state.event_bus());
-    let session_row = session_repo
-        .upsert_chat_session(&session_id, &req.model)
+    let session_row = SESSION_USER_ID
+        .scope(
+            user_id.clone(),
+            session_repo.upsert_chat_session(&session_id, &req.model),
+        )
         .await
         .map_err(|e| {
             tracing::warn!(session_id=%session_id, error=%e, "chat session upsert failed");
