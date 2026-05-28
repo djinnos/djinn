@@ -271,6 +271,7 @@ impl CoordinatorActor {
                 //    tasks surviving a server restart).
                 _ = self.tick.tick() => {
                     self.enforce_session_stall_timeout().await;
+                    self.reap_idle_chat_sessions().await;
                     self.detect_and_recover_stuck_filtered(None).await;
 
                     // Check memory pressure before dispatching.

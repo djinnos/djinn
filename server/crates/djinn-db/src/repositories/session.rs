@@ -287,12 +287,19 @@ impl SessionRepository {
         .await?)
     }
 
-    /// Count currently-running sessions grouped by `(creator_user_id, model_id)`.
-    /// The creator is the session's own `created_by_user_id` when set (e.g. chat
-    /// sessions), else the owning task's `created_by_user_id` (the COALESCE +
-    /// LEFT JOIN). This is the real-time source of truth the coordinator uses to
-    /// enforce per-user, per-model concurrency caps at dispatch. Indexed on
-    /// `status`, `task_id`, and `created_by_user_id`.
+    /// Count currently-running *autonomous* sessions grouped by
+    /// `(creator_user_id, model_id)`. The creator is the session's own
+    /// `created_by_user_id` when set, else the owning task's
+    /// `created_by_user_id` (the COALESCE + LEFT JOIN). This is the real-time
+    /// source of truth the coordinator uses to enforce per-user, per-model
+    /// concurrency caps at dispatch. Indexed on `status`, `task_id`, and
+    /// `created_by_user_id`.
+    ///
+    /// Interactive `chat` sessions are deliberately EXCLUDED: they never flow
+    /// through the slot pool, are created `running` and linger that way for the
+    /// conversation's lifetime, and must not share a budget with autonomous
+    /// task-runs — otherwise an open (or leaked) chat tab silently starves the
+    /// user's task dispatch (fatal at `max_sessions = 1`).
     pub async fn count_active_by_user_and_model(
         &self,
     ) -> Result<Vec<(Option<String>, String, i64)>> {
@@ -304,6 +311,7 @@ impl SessionRepository {
                  FROM sessions s
                  LEFT JOIN tasks t ON t.id = s.task_id
                 WHERE s.status = 'running'
+                  AND s.agent_type <> 'chat'
                 GROUP BY COALESCE(s.created_by_user_id, t.created_by_user_id), s.model_id"#
         )
         .fetch_all(self.db.pool())
@@ -528,8 +536,10 @@ impl SessionRepository {
     /// by migration 15's CHECK constraint).  The initial title is "New
     /// Chat"; [`Self::update_chat_title`] overwrites it after the first
     /// assistant reply lands.  Safe to call on every /completions request:
-    /// if the id already exists we leave every column alone and return
-    /// the existing row (INSERT IGNORE + re-fetch).
+    /// if the id already exists we revive a previously-settled session back to
+    /// `running` (the coordinator settles idle chats to `completed` via
+    /// [`Self::settle_idle_chat`], and resuming the conversation must bring it
+    /// back to life) but otherwise leave its columns alone.
     pub async fn upsert_chat_session(
         &self,
         session_id: &str,
@@ -540,14 +550,18 @@ impl SessionRepository {
         let created_by_user_id = djinn_core::auth_context::current_user_id();
         let initial_title = "New Chat";
 
-        // ON CONFLICT DO NOTHING gives us idempotent create-if-missing without
-        // the extra round-trip a SELECT-then-INSERT would cost.
+        // Idempotent create-if-missing in a single round-trip. On conflict we
+        // only revive a settled (idle-reaped) session — when it's already
+        // `running` the guarded UPDATE is a no-op, so the title and other
+        // columns are preserved across turns.
         sqlx::query!(
             "INSERT INTO sessions
                 (id, project_id, task_id, model_id, agent_type, status,
                  created_by_user_id, task_run_id, title)
              VALUES ($1, NULL, NULL, $2, 'chat', 'running', $3, NULL, $4)
-             ON CONFLICT (id) DO NOTHING",
+             ON CONFLICT (id) DO UPDATE
+                SET status = 'running', ended_at = NULL
+              WHERE sessions.status <> 'running'",
             session_id,
             model_id,
             created_by_user_id,
@@ -567,6 +581,51 @@ impl SessionRepository {
         .await?;
 
         Ok(session)
+    }
+
+    /// List running chat sessions with their last-activity timestamp
+    /// (newest message, falling back to `started_at` for empty sessions).
+    /// Used by the coordinator's idle-chat reaper. Returns `(session_id,
+    /// last_activity_iso)`; timestamps are the varchar ISO-8601 strings stored
+    /// throughout, so callers compute idle in Rust.
+    pub async fn list_running_chat_with_last_activity(&self) -> Result<Vec<(String, String)>> {
+        self.db.ensure_initialized().await?;
+        let rows = sqlx::query!(
+            r#"SELECT s.id AS "id!",
+                      COALESCE(m.last_at, s.started_at) AS "last_activity!"
+                 FROM sessions s
+                 LEFT JOIN (
+                    SELECT session_id, MAX(created_at) AS last_at
+                    FROM session_messages
+                    GROUP BY session_id
+                 ) m ON m.session_id = s.id
+                WHERE s.agent_type = 'chat' AND s.status = 'running'"#
+        )
+        .fetch_all(self.db.pool())
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.id, r.last_activity))
+            .collect())
+    }
+
+    /// Settle an idle chat session: `running` → `completed`, stamping
+    /// `ended_at`. The conversation stays listed and resumable —
+    /// [`Self::upsert_chat_session`] revives it to `running` on the next turn.
+    /// Guarded on `status = 'running'` so it's a no-op for already-settled rows.
+    pub async fn settle_idle_chat(&self, session_id: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            r#"UPDATE sessions
+                 SET status = 'completed',
+                     ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+               WHERE id = $1 AND agent_type = 'chat' AND status = 'running'"#,
+            session_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        let _ = self.fetch_and_emit_update(session_id).await;
+        Ok(())
     }
 
     /// Fetch a single chat session by id (scoped to `agent_type = 'chat'`).
@@ -832,6 +891,22 @@ mod tests {
         .await
         .unwrap();
 
+        // A running chat session for user_a on the same model must NOT count:
+        // interactive chat shares no concurrency budget with autonomous
+        // task-runs (else an open/leaked chat tab starves dispatch).
+        let chat_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query!(
+            "INSERT INTO sessions
+                (id, project_id, task_id, model_id, agent_type, status,
+                 created_by_user_id, task_run_id, title)
+             VALUES ($1, NULL, NULL, 'openai/gpt', 'chat', 'running', $2, NULL, 'New Chat')",
+            chat_id,
+            user_a
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
         let map: std::collections::HashMap<(String, String), i64> = repo
             .count_active_by_user_and_model()
             .await
@@ -839,6 +914,7 @@ mod tests {
             .into_iter()
             .filter_map(|(c, m, n)| c.map(|c| ((c, m), n)))
             .collect();
+        // user_a's gpt count stays 2 — the chat session is excluded.
         assert_eq!(map.get(&(user_a.clone(), "openai/gpt".to_string())), Some(&2));
         assert_eq!(map.get(&(user_a.clone(), "x/kimi".to_string())), Some(&1));
         assert_eq!(map.get(&(user_b.clone(), "openai/gpt".to_string())), Some(&1));

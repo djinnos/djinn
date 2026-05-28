@@ -837,6 +837,53 @@ impl CoordinatorActor {
         }
     }
 
+    /// Settle chat sessions left `running` past the idle window.
+    ///
+    /// Chat rows are created `running` and never transition on their own — the
+    /// completions handler doesn't settle them and `interrupt_all_running` only
+    /// fires at startup — so without this they linger as zombie `running` rows
+    /// for the whole server lifetime (one per conversation, never closed when a
+    /// browser tab is abandoned or the SSE drops). They no longer occupy a
+    /// dispatch slot (`count_active_by_user_and_model` excludes chat), but
+    /// reaping keeps session state honest for observability and the chat list.
+    /// A settled session revives to `running` on its next turn via
+    /// `upsert_chat_session`. The stall sweep above can't cover these: it keys
+    /// on `task_id`, which is always NULL for chat.
+    pub(super) async fn reap_idle_chat_sessions(&self) {
+        /// Idle window before a chat session is considered settled: 30 minutes,
+        /// matching the worker stall timeout.
+        const CHAT_IDLE_TIMEOUT_SECS: u64 = 30 * 60;
+
+        let repo = SessionRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let rows = match repo.list_running_chat_with_last_activity().await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(error = %e, "CoordinatorActor: failed to list running chat sessions for idle reap");
+                return;
+            }
+        };
+        for (session_id, last_activity) in rows {
+            let Some(idle) = parse_iso_elapsed(&last_activity) else {
+                continue;
+            };
+            if idle <= CHAT_IDLE_TIMEOUT_SECS {
+                continue;
+            }
+            if let Err(e) = repo.settle_idle_chat(&session_id).await {
+                tracing::warn!(session_id = %session_id, error = %e, "CoordinatorActor: failed to settle idle chat session");
+                continue;
+            }
+            tracing::info!(
+                session_id = %session_id,
+                idle_seconds = idle,
+                "CoordinatorActor: settled idle chat session"
+            );
+        }
+    }
+
     /// On each tick: find tasks in active execution states with no active session
     /// and release them back to a dispatch-ready state (AGENT-08).
     ///
