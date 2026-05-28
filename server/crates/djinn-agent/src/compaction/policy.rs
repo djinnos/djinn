@@ -1,5 +1,3 @@
-use crate::context::AgentContext;
-use djinn_db::SessionMessageRepository;
 use djinn_provider::message::{Conversation, Message, Role};
 use djinn_provider::provider::LlmProvider;
 
@@ -144,23 +142,13 @@ pub(crate) async fn compact_conversation(
     conversation: &mut Conversation,
     session_id: &str,
     task_id: &str,
-    app_state: &AgentContext,
     ctx: CompactionContext,
     context_window: i64,
 ) -> bool {
-    let repo = SessionMessageRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    if let Err(e) = repo
-        .insert_messages_batch(session_id, task_id, &conversation.messages)
-        .await
-    {
-        tracing::warn!(
-            task_id = %task_id,
-            session_id = %session_id,
-            error = %e,
-            "compaction: failed to persist messages before compaction"
-        );
-    }
-
+    // NOTE: the conversation is already persisted incrementally by the reply
+    // loop (`persist_session_message` per assistant/tool-result turn), so we no
+    // longer batch-insert the full history here — doing so would duplicate
+    // every row in `session_messages`.
     let current_turn = conversation
         .messages
         .iter()

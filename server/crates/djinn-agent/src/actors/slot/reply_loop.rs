@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use crate::output_parser::ParsedAgentOutput;
 use crate::output_stash::OutputStash;
 use djinn_core::events::DjinnEventEnvelope;
+use djinn_db::SessionMessageRepository;
 use djinn_provider::message::{ContentBlock, Conversation, Message, MessageMeta, Role};
 use djinn_provider::provider::LlmProvider;
 use djinn_provider::provider::telemetry;
@@ -23,6 +24,37 @@ use tool_dispatch::extract_stash_content;
 use tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_concurrency_safety};
 
 const MAX_TURNS: u32 = 1000;
+
+/// Persist a single conversation message to `session_messages`, best-effort.
+///
+/// The worker/reviewer reply loop is the sole producer of task-session
+/// transcripts, so without this the conversation lives only in the (ephemeral,
+/// on K8s) worker process and is never durable — which silently starved
+/// post-session knowledge extraction (`load_conversation` returned empty →
+/// every session skipped at the `messages.len() < 2` gate). We write directly
+/// to the worker's DB handle (the same connection compaction already uses)
+/// rather than routing through an RPC, since the worker owns a real `Database`
+/// and the live-UI transcript is already handled by the `event_bus` bridge.
+/// Failures are logged and never propagated — persistence must not affect the
+/// task-run outcome.
+async fn persist_session_message(
+    repo: &SessionMessageRepository,
+    session_id: &str,
+    task_id: &str,
+    message: &Message,
+) {
+    if let Err(e) = repo
+        .insert_messages_batch(session_id, task_id, std::slice::from_ref(message))
+        .await
+    {
+        tracing::warn!(
+            session_id = %session_id,
+            task_id = %task_id,
+            error = %e,
+            "reply_loop: failed to persist session message"
+        );
+    }
+}
 
 fn serialize_message(msg: &Message) -> serde_json::Value {
     serde_json::to_value(msg).unwrap_or_else(|e| {
@@ -142,6 +174,20 @@ pub(crate) async fn run_reply_loop(
 
     let mut output =
         ParsedAgentOutput::new(role_name == "reviewer" || role_name == "task_reviewer");
+
+    // Persist the conversation as it unfolds so post-session knowledge
+    // extraction (and the durable UI transcript) has something to read. A
+    // resumed session's conversation was reloaded FROM `session_messages`, so
+    // re-persisting it would duplicate every row — only seed the opening
+    // turn(s) for fresh sessions. The system prompt is intentionally skipped
+    // (large, static, and not part of the transcript — mirrors the chat path).
+    let msg_repo =
+        SessionMessageRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    if !is_resumed_session {
+        for msg in conversation.messages.iter().filter(|m| m.role != Role::System) {
+            persist_session_message(&msg_repo, session_id, task_id, msg).await;
+        }
+    }
 
     // Token counts and last assistant text are declared outside the async block
     // so they survive the borrow and can be used for telemetry/return values.
@@ -278,7 +324,7 @@ pub(crate) async fn run_reply_loop(
                         llm.end_error("context_length_exceeded");
                     }
                     let compacted = crate::compaction::compact_conversation(
-                        provider, conversation, session_id, task_id, app_state,
+                        provider, conversation, session_id, task_id,
                         crate::compaction::CompactionContext::MidSession(role_name.to_string()),
                         context_window,
                     ).await;
@@ -401,7 +447,7 @@ pub(crate) async fn run_reply_loop(
                     "ReplyLoop: context_length_exceeded mid-stream; compacting reactively"
                 );
                 let compacted = crate::compaction::compact_conversation(
-                    provider, conversation, session_id, task_id, app_state,
+                    provider, conversation, session_id, task_id,
                     crate::compaction::CompactionContext::MidSession(role_name.to_string()),
                     context_window,
                 ).await;
@@ -514,6 +560,11 @@ pub(crate) async fn run_reply_loop(
                 &serialize_message(&assistant_msg),
             ));
 
+            // Durably persist the turn before it can be discarded by a
+            // subsequent compaction (which replaces/truncates the in-memory
+            // conversation a few lines below).
+            persist_session_message(&msg_repo, session_id, task_id, &assistant_msg).await;
+
             conversation.push(assistant_msg);
 
             // ── Compaction threshold check ────────────────────────────────────
@@ -530,7 +581,6 @@ pub(crate) async fn run_reply_loop(
                     conversation,
                     session_id,
                     task_id,
-                    app_state,
                     crate::compaction::CompactionContext::MidSession(role_name.to_string()),
                     context_window,
                 )
@@ -681,6 +731,7 @@ pub(crate) async fn run_reply_loop(
                 content: tool_result_blocks,
                 metadata: None,
             };
+            persist_session_message(&msg_repo, session_id, task_id, &tool_result_msg).await;
             conversation.push(tool_result_msg);
 
             // ── Post-dispatch finalize check for alternate finalize tools ─────
@@ -1115,11 +1166,29 @@ mod tests {
             "all 3 mock responses should be consumed"
         );
 
-        // No compaction should have fired: DB has NO persisted session messages.
+        // No compaction should have fired. Persisted message count is no
+        // longer the signal (the reply loop now persists every turn to the DB
+        // regardless of compaction); instead assert the conversation was never
+        // replaced by a summary — every turn is still present: system + initial
+        // user + two tool-call turns with their results + the final text turn.
+        assert!(
+            conv.messages.len() >= 6,
+            "compaction should not have fired — expected the full conversation, got {} messages",
+            conv.messages.len()
+        );
+        assert_eq!(
+            conv.messages[0].role,
+            djinn_provider::message::Role::System,
+            "first message should still be the original system prompt (not a summary)"
+        );
+
+        // Per-turn persistence: every non-system message is durably stored
+        // (the system prompt is intentionally skipped).
         let persisted = count_persisted_messages(&app_state, &session_id).await;
         assert_eq!(
-            persisted, 0,
-            "compaction should not have fired (no messages persisted), but found {persisted}"
+            persisted,
+            conv.messages.len() - 1,
+            "expected every non-system message persisted per-turn, got {persisted}"
         );
     }
 
@@ -1236,11 +1305,12 @@ mod tests {
             result
         );
 
-        // Compaction fired → messages persisted.
+        // Messages are persisted per-turn (independent of the reactive
+        // compaction that fired on the context-length error).
         let persisted = count_persisted_messages(&app_state, &session_id).await;
         assert!(
             persisted > 0,
-            "expected session messages persisted by reactive compaction"
+            "expected session messages persisted per-turn"
         );
     }
 
