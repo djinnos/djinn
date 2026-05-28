@@ -1793,6 +1793,18 @@ impl CoordinatorActor {
                         "CoordinatorActor: pushed latest task_branch to PR (re-cycle commits propagated)"
                     );
                 }
+                djinn_runtime::TaskRunOutcome::Closed { reason } => {
+                    // supervisor_pr_open found no commits ahead of base and
+                    // already closed the task (memory/notes-only run, etc.).
+                    // Clear any stale "PR blocked" banner from prior 422 ticks.
+                    self.pr_errors.remove(&task.project_id);
+                    self.publish_status();
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        reason = %reason,
+                        "CoordinatorActor: approved task had no commits to PR — closed as completed"
+                    );
+                }
                 djinn_runtime::TaskRunOutcome::Failed { stage, reason } => {
                     // Race-tolerant pr_errors gate. The coordinator's tick
                     // path and the supervisor body's own open_pr can fire

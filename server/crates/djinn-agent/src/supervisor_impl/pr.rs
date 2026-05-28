@@ -17,6 +17,7 @@
 //! 3. Runs [`crate::task_merge::squash_merge_via_mirror`] through the mirror.
 //! 4. Creates (or adopts/reopens) a GitHub PR for the squashed commit.
 
+use djinn_core::models::TransitionAction;
 use djinn_db::{ProjectRepository, TaskRepository};
 use djinn_git::GitError;
 use djinn_provider::github_api::{CreatePrParams, GitHubApiClient, PrState};
@@ -118,6 +119,68 @@ pub(crate) async fn supervisor_pr_open(
 
     let merge_target = default_target_branch(&spec.project_id, app_state).await;
 
+    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+
+    // No-commits guard. A task whose run produced no git diff (e.g. its
+    // deliverable was a memory/notes import, not code) leaves task_branch with
+    // zero commits ahead of the base. GitHub's create_pull_request then 422s
+    // ("No commits between <base> and task/<id>"), which the coordinator
+    // surfaces as a persistent "PR blocked" health banner and re-attempts every
+    // tick. There is nothing to open a PR with, so close the task as completed
+    // (Close is valid from any non-closed status — covers both the supervisor
+    // body's in_progress/verifying caller and the coordinator's approved
+    // re-cycle caller) and report the run as Closed rather than Failed.
+    match task_branch_commits_ahead(
+        mirror.as_ref(),
+        &spec.project_id,
+        &spec.task_branch,
+        &merge_target,
+    )
+    .await
+    {
+        Ok(0) => {
+            tracing::info!(
+                task_id = %task.id,
+                task_branch = %spec.task_branch,
+                base = %merge_target,
+                "supervisor PR-open: task_branch has no commits ahead of base — \
+                 nothing to open a PR with; closing the task as completed"
+            );
+            let reason = "no code changes were produced, so there is nothing to open a \
+                          pull request with (e.g. a memory/notes-only task); closing as completed";
+            if let Err(e) = task_repo
+                .transition(
+                    &task.id,
+                    TransitionAction::Close,
+                    "supervisor",
+                    "system",
+                    Some(reason),
+                    None,
+                )
+                .await
+            {
+                tracing::warn!(
+                    task_id = %task.id,
+                    error = %e,
+                    "supervisor PR-open: no-commits close transition skipped"
+                );
+            }
+            return TaskRunOutcome::Closed {
+                reason: reason.to_string(),
+            };
+        }
+        Ok(_) => {}
+        Err(e) => {
+            // Don't block the PR on a precheck failure — fall through to the
+            // normal push/open path (which will surface any real error).
+            tracing::warn!(
+                task_id = %task.id,
+                error = %e,
+                "supervisor PR-open: commits-ahead precheck failed; proceeding with normal PR path"
+            );
+        }
+    }
+
     let commit_type = if task.issue_type == "task" {
         "chore"
     } else {
@@ -131,7 +194,6 @@ pub(crate) async fn supervisor_pr_open(
     // to refs/heads/main, which branch-protected repos (Quality Gate etc.)
     // reject ("Changes must be made through a pull request"). The PR flow
     // below handles landing the change properly via human/CI review.
-    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let head_sha = match push_task_branch_to_github(
         mirror.as_ref(),
         &spec.project_id,
@@ -305,6 +367,41 @@ pub(crate) async fn supervisor_pr_open(
 /// local SHA the race winner pushed identical content and the operation is
 /// effectively a no-op — return success. Only when the remote SHA differs do
 /// we propagate the error.
+/// Count commits on `task_branch` that are not already reachable from `base`.
+///
+/// Clones the mirror ephemerally on `task_branch` (the same `--local --shared`
+/// clone the push path uses, so `origin/<base>` is present as a remote-tracking
+/// ref) and runs `git rev-list --count origin/<base>..HEAD`. A result of `0`
+/// means the branch has no new commits — there is nothing to open a PR with.
+async fn task_branch_commits_ahead(
+    mirror: &MirrorManager,
+    project_id: &str,
+    task_branch: &str,
+    base: &str,
+) -> Result<u64, GitError> {
+    use djinn_git::run_git_command;
+    let workspace = mirror
+        .clone_ephemeral(project_id, task_branch)
+        .await
+        .map_err(|e| GitError::Other(anyhow::anyhow!("clone_ephemeral {task_branch}: {e}")))?;
+    let out = run_git_command(
+        workspace.path_buf(),
+        vec![
+            "rev-list".into(),
+            "--count".into(),
+            format!("origin/{base}..HEAD"),
+        ],
+    )
+    .await?;
+    let count = out.stdout.trim().parse::<u64>().map_err(|e| {
+        GitError::Other(anyhow::anyhow!(
+            "rev-list --count returned unparseable output {:?}: {e}",
+            out.stdout
+        ))
+    })?;
+    Ok(count)
+}
+
 async fn push_task_branch_to_github(
     mirror: &MirrorManager,
     project_id: &str,
@@ -420,5 +517,68 @@ mod tests {
         // "reference already exists" qualifier is a different problem.
         let err = GitError::Other(anyhow::anyhow!("cannot lock ref 'foo': corrupted"));
         assert!(!is_concurrent_push_race(&err));
+    }
+}
+
+#[cfg(test)]
+mod commits_ahead_tests {
+    //! Regression for the no-commits PR guard: `task_branch_commits_ahead`
+    //! must report 0 for a branch identical to the base (the case that made
+    //! create_pull_request 422 and spammed the "PR blocked" banner) and the
+    //! real count otherwise.
+    use super::task_branch_commits_ahead;
+    use djinn_git::run_git_command;
+    use djinn_workspace::MirrorManager;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    async fn git(dir: &Path, args: &[&str]) {
+        run_git_command(dir.to_path_buf(), args.iter().map(|s| s.to_string()).collect())
+            .await
+            .unwrap_or_else(|e| panic!("git {args:?} failed: {e}"));
+    }
+
+    /// Seed a mirror at `<root>/<pid>.git` with `main`, a `task/empty` branch
+    /// pointing at the same commit as `main`, and a `task/withcommit` branch
+    /// carrying one extra commit.
+    async fn seed_mirror(root: &Path, pid: &str) {
+        let mirror = root.join(format!("{pid}.git"));
+        std::fs::create_dir_all(&mirror).unwrap();
+        git(&mirror, &["init", "-b", "main"]).await;
+        git(&mirror, &["config", "user.email", "t@example.com"]).await;
+        git(&mirror, &["config", "user.name", "t"]).await;
+        std::fs::write(mirror.join("README.md"), "base").unwrap();
+        git(&mirror, &["add", "-A"]).await;
+        git(&mirror, &["commit", "-m", "base"]).await;
+        // task/empty == main (no new commits ahead).
+        git(&mirror, &["branch", "task/empty"]).await;
+        // task/withcommit carries one extra commit.
+        git(&mirror, &["checkout", "-b", "task/withcommit"]).await;
+        std::fs::write(mirror.join("change.txt"), "x").unwrap();
+        git(&mirror, &["add", "-A"]).await;
+        git(&mirror, &["commit", "-m", "change"]).await;
+        git(&mirror, &["checkout", "main"]).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn zero_when_branch_has_no_new_commits() {
+        let root = TempDir::new().unwrap();
+        seed_mirror(root.path(), "proj1").await;
+        let mgr = MirrorManager::new(root.path());
+        let n = task_branch_commits_ahead(&mgr, "proj1", "task/empty", "main")
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "a branch identical to base must report 0 commits ahead");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn counts_new_commits_ahead_of_base() {
+        let root = TempDir::new().unwrap();
+        seed_mirror(root.path(), "proj2").await;
+        let mgr = MirrorManager::new(root.path());
+        let n = task_branch_commits_ahead(&mgr, "proj2", "task/withcommit", "main")
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "a branch with one extra commit must report 1");
     }
 }
