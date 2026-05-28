@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO epic_read_sources (epic_id, project_id) VALUES ($1, $2)\n             ON CONFLICT (epic_id, project_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "feaf58b384b3736bb60bfc30c0d7bdbb071722dd6a3115820fe49de56cef1edc"
+}

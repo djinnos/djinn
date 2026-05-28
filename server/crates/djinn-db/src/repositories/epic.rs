@@ -317,6 +317,68 @@ impl EpicRepository {
         Ok(epic)
     }
 
+    // ── Read sources (read-only multi-repo) ──────────────────────────────────
+
+    /// List the project IDs this epic is allowed to READ. Writes stay
+    /// pinned to the epic's own `project_id`; these are additional
+    /// read-only sources (e.g. the legacy repo in an A→B migration epic).
+    /// Ordered by when each grant was added.
+    pub async fn read_sources(&self, epic_id: &str) -> Result<Vec<String>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_scalar!(
+            "SELECT project_id FROM epic_read_sources WHERE epic_id = $1 ORDER BY created_at",
+            epic_id
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// Grant this epic read access to `project_id`. Idempotent. The
+    /// `project_id` must reference a registered project — the FK enforces
+    /// this, so a bad ref surfaces as a DB error; callers should resolve
+    /// the project first to return a friendly message.
+    pub async fn add_read_source(&self, epic_id: &str, project_id: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            "INSERT INTO epic_read_sources (epic_id, project_id) VALUES ($1, $2)
+             ON CONFLICT (epic_id, project_id) DO NOTHING",
+            epic_id,
+            project_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        if let Some(epic) = self.get(epic_id).await? {
+            self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+        }
+        Ok(())
+    }
+
+    /// Revoke this epic's read access to `project_id`. No-op if absent.
+    pub async fn remove_read_source(&self, epic_id: &str, project_id: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            "DELETE FROM epic_read_sources WHERE epic_id = $1 AND project_id = $2",
+            epic_id,
+            project_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        if let Some(epic) = self.get(epic_id).await? {
+            self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+        }
+        Ok(())
+    }
+
+    /// Resolve the effective read set for a task: the read sources of its
+    /// epic, or empty when the task has no epic. The task's own project is
+    /// the write target and is intentionally NOT included here.
+    pub async fn read_sources_for_task(&self, task_epic_id: Option<&str>) -> Result<Vec<String>> {
+        match task_epic_id {
+            Some(epic_id) => self.read_sources(epic_id).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
     // ── New methods (ADR-003) ────────────────────────────────────────────────
 
     /// Resolve an epic by UUID or short_id.
@@ -1028,6 +1090,68 @@ mod tests {
         let epic = repo.create("Draft", "", "", "", "", None).await.unwrap();
         assert_eq!(epic.status, "drafting");
         assert!(repo.reopen(&epic.id).await.is_err());
+    }
+
+    async fn insert_project(db: &Database, owner: &str) -> String {
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query!(
+            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
+            id,
+            owner,
+            owner,
+            format!("repo-{id}")
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        id
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_sources_add_list_remove() {
+        let db = test_db();
+        let repo = EpicRepository::new(db.clone(), EventBus::noop());
+        let epic = repo.create("Migration", "", "", "", "", None).await.unwrap();
+        let src_id = insert_project(&db, "legacy").await;
+
+        assert!(repo.read_sources(&epic.id).await.unwrap().is_empty());
+
+        repo.add_read_source(&epic.id, &src_id).await.unwrap();
+        // Idempotent — a second add does not duplicate the row.
+        repo.add_read_source(&epic.id, &src_id).await.unwrap();
+        assert_eq!(
+            repo.read_sources(&epic.id).await.unwrap(),
+            vec![src_id.clone()]
+        );
+        // read_sources_for_task resolves through the epic.
+        assert_eq!(
+            repo.read_sources_for_task(Some(&epic.id)).await.unwrap(),
+            vec![src_id.clone()]
+        );
+        assert!(repo.read_sources_for_task(None).await.unwrap().is_empty());
+
+        repo.remove_read_source(&epic.id, &src_id).await.unwrap();
+        assert!(repo.read_sources(&epic.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_sources_cascade_on_epic_delete() {
+        let db = test_db();
+        let repo = EpicRepository::new(db.clone(), EventBus::noop());
+        let epic = repo.create("E", "", "", "", "", None).await.unwrap();
+        let src_id = insert_project(&db, "src").await;
+        repo.add_read_source(&epic.id, &src_id).await.unwrap();
+
+        repo.delete(&epic.id).await.unwrap();
+
+        let remaining: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "c!: i64" FROM epic_read_sources WHERE epic_id = $1"#,
+            epic.id
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(remaining, 0);
     }
 
     #[test]
