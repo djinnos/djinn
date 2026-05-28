@@ -420,6 +420,7 @@ mod tests {
             task_branch: format!("djinn/{task_id}"),
             flow: SupervisorFlow::Planning,
             model_id_per_role: HashMap::new(),
+            read_source_project_ids: Vec::new(),
         }
     }
 

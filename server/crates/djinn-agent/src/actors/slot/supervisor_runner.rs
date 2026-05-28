@@ -133,6 +133,22 @@ pub(crate) async fn run_supervisor_dispatch(
     // row + every session under it. One id end-to-end means the terminal
     // report's id matches the persisted sessions, which is what post-session
     // extraction keys off.
+    // ── Resolve read-only multi-repo sources from the task's epic ─────────
+    //
+    // The epic may declare other registered projects whose code the worker
+    // is allowed to READ (writes stay pinned to `task.project_id`). Thread
+    // the set into the spec so the worker materializes each read-only
+    // alongside the primary workspace and the prompt advertises them.
+    // Non-fatal: an error just yields no read sources (feature degrades to
+    // plain single-repo).
+    let read_source_project_ids = djinn_db::EpicRepository::new(
+        app_state.db.clone(),
+        app_state.event_bus.clone(),
+    )
+    .read_sources_for_task(task.epic_id.as_deref())
+    .await
+    .unwrap_or_default();
+
     let task_run_id = uuid::Uuid::now_v7().to_string();
     let spec = TaskRunSpec {
         task_run_id,
@@ -143,6 +159,7 @@ pub(crate) async fn run_supervisor_dispatch(
         task_branch,
         flow,
         model_id_per_role,
+        read_source_project_ids,
     };
 
     // ── Resolve the task's creator for per-user credential scoping ────────

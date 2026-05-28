@@ -1774,6 +1774,8 @@ impl CoordinatorActor {
                 task_branch: format!("task/{}", task.short_id),
                 flow: djinn_runtime::SupervisorFlow::NewTask,
                 model_id_per_role: std::collections::HashMap::new(),
+                // PR-open-only flow: no workspace reads, so no read sources.
+                read_source_project_ids: Vec::new(),
             };
             let callbacks = crate::supervisor_impl::SupervisorCallbackContext {
                 agent_context: app_state.clone(),

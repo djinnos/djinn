@@ -240,6 +240,7 @@ async fn supervisor_clones_from_mirror_without_worktrees() {
         task_branch: "djinn/phase1-test".into(),
         flow: SupervisorFlow::Spike,
         model_id_per_role: Default::default(),
+        read_source_project_ids: Vec::new(),
     };
 
     // 6. Drive the run.  In this infrastructure-slice test we do NOT stub the
@@ -489,6 +490,7 @@ async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
         task_branch: "djinn/phase1-stub".into(),
         flow: SupervisorFlow::Spike,
         model_id_per_role: Default::default(),
+        read_source_project_ids: Vec::new(),
     };
 
     // 4. Drive the run — with the provider stubbed, the architect stage

@@ -452,6 +452,7 @@ mod tests {
             task_branch: "djinn/t1".into(),
             flow: SupervisorFlow::NewTask,
             model_id_per_role: HashMap::new(),
+            read_source_project_ids: Vec::new(),
         }
     }
 

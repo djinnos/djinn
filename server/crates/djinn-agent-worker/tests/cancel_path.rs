@@ -413,6 +413,7 @@ async fn worker_observes_host_initiated_cancel() {
         task_branch: "djinn/cancel-path".into(),
         flow: SupervisorFlow::Planning,
         model_id_per_role: per_role,
+        read_source_project_ids: Vec::new(),
     };
     let spec_path: PathBuf = cfg_dir.path().join("spec.bin");
     write_bin(&spec_path, &spec);

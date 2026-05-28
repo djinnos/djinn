@@ -136,6 +136,7 @@ mod tests {
             task_branch: "djinn/task-abc".to_string(),
             flow: SupervisorFlow::NewTask,
             model_id_per_role: HashMap::new(),
+            read_source_project_ids: Vec::new(),
         };
 
         let mut credentials = ResolvedCredentials::default();

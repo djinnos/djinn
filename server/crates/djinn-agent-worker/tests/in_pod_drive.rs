@@ -427,6 +427,7 @@ async fn worker_drives_real_supervisor_in_pod() {
         // while still exercising one full provider construction.
         flow: SupervisorFlow::Planning,
         model_id_per_role: per_role,
+        read_source_project_ids: Vec::new(),
     };
     let spec_path: PathBuf = cfg_dir.path().join("spec.bin");
     write_bin(&spec_path, &spec);

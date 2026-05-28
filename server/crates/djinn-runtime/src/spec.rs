@@ -129,6 +129,15 @@ pub struct TaskRunSpec {
     /// legacy `run_task_lifecycle` model selection.  Empty = fall back to
     /// catalog-default for every stage.
     pub model_id_per_role: HashMap<RoleKind, String>,
+    /// Project IDs this task-run may READ in addition to its own
+    /// `project_id` (the write target). Resolved at dispatch from the
+    /// task's epic `epic_read_sources`. The worker materializes each
+    /// read-only alongside the primary workspace and the agent's prompt
+    /// is told it may read them. Empty for tasks without read-source
+    /// grants. `#[serde(default)]` keeps older specs (host/worker version
+    /// skew during a rolling deploy) deserializable.
+    #[serde(default)]
+    pub read_source_project_ids: Vec<String>,
 }
 
 /// Terminal outcome of a task-run.
@@ -196,6 +205,7 @@ mod tests {
             task_branch: "djinn/task-abc".to_string(),
             flow: SupervisorFlow::NewTask,
             model_id_per_role: per_role,
+            read_source_project_ids: vec!["proj-read-1".to_string()],
         };
 
         let bytes = bincode::serialize(&spec).expect("serialize");
@@ -207,6 +217,7 @@ mod tests {
         assert_eq!(back.trigger, spec.trigger);
         assert_eq!(back.base_branch, spec.base_branch);
         assert_eq!(back.task_branch, spec.task_branch);
+        assert_eq!(back.read_source_project_ids, spec.read_source_project_ids);
         assert_eq!(back.flow, spec.flow);
         assert_eq!(back.model_id_per_role, spec.model_id_per_role);
     }
