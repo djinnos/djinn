@@ -37,12 +37,12 @@ This takes about 10 minutes. You do it once per deployment.
 1. Visit <https://github.com/settings/apps/new> (personal) or
    `https://github.com/organizations/<org>/settings/apps/new` (org-owned).
 2. **GitHub App name** — e.g. "Djinn Bot". Must be globally unique.
-3. **Homepage URL** — your server's public URL (e.g. `http://127.0.0.1:8372`
+3. **Homepage URL** — your server's public URL (e.g. `http://127.0.0.1:3000`
    for local dev).
 4. **Identifying and authorizing users** → enable
    **Request user authorization (OAuth) during installation**. Callback URL:
    ```
-   http://127.0.0.1:8372/auth/github/callback
+   http://127.0.0.1:3000/auth/github/callback
    ```
    (Swap in your `DJINN_PUBLIC_URL` host for production.)
 5. **Webhook** — disable unless you explicitly want webhook events;
@@ -67,37 +67,55 @@ On the App's settings page you now have:
 - The App's public slug — the last URL segment on its public page
   (`https://github.com/apps/<slug>`). → `GITHUB_APP_SLUG`.
 - Scroll to **Private keys** → **Generate a private key**. GitHub will
-  download a `.pem` file. Either:
-  - store it somewhere safe and set `GITHUB_APP_PRIVATE_KEY_PATH` to that
-    path, or
-  - paste the full PEM (with literal `\n` newlines or real line breaks)
-    into `GITHUB_APP_PRIVATE_KEY` in your `.env`.
+  download a `.pem` file — keep it handy for the next step.
 
-### 3. Fill in `.env`
+### 3. Configure the credentials
 
-Copy `server/.env.example` to `server/.env` and populate:
+Djinn does not read a `.env` file — supply the App config the same way the rest
+of your deployment is configured. You need four values: the App ID, the private
+key (PEM), the client ID, and the client secret (the slug is derived
+automatically).
+
+**Local dev (Tilt)** — drop the credentials into `.tilt/github-app/` (gitignored)
+and run `tilt up`. Tilt feeds them to the chart via `--set-file`, so the server
+picks them up on the next render — no manual restart:
 
 ```
-GITHUB_APP_ID=123456
-GITHUB_APP_SLUG=djinn-bot
-GITHUB_APP_CLIENT_ID=Iv1.xxxxxxxxxxxx
-GITHUB_APP_CLIENT_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-GITHUB_APP_PRIVATE_KEY_PATH=/abs/path/to/djinn-bot.2026-04-15.private-key.pem
+.tilt/github-app/app-id           # numeric App ID
+.tilt/github-app/client-id        # Iv1.* / Iv23li* client ID
+.tilt/github-app/client-secret    # client secret
+.tilt/github-app/private-key.pem  # the downloaded PEM
 ```
 
-Restart the server. On the first sign-in, if you have not yet installed the
-App, click **Connect GitHub** with `?install=1` (or use the `Install Djinn`
-button in the desktop app) to land on the install page. Grant it access to
-the repos you want Djinn to touch.
+**Kubernetes (Helm)** — set them in your values override (or point
+`secrets.githubApp.existingSecret` at a pre-created Secret exposing the same
+keys):
+
+```yaml
+secrets:
+  githubApp:
+    appId: "123456"
+    clientId: Iv1.xxxxxxxxxxxx
+    clientSecret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    privateKey: |
+      -----BEGIN RSA PRIVATE KEY-----
+      ...
+      -----END RSA PRIVATE KEY-----
+```
+
+On first sign-in, if you have not yet installed the App, click **Connect
+GitHub** with `?install=1` in the web client to land on the install page. Grant
+it access to the repos you want Djinn to touch.
 
 ### 4. Verify
 
 ```sh
-curl -s http://127.0.0.1:8372/auth/me
+curl -s http://127.0.0.1:3000/auth/me
 # → 401 until you sign in, then a JSON identity.
 ```
 
-And from the desktop MCP client:
+Once signed in, your installations appear in the **Repositories** tab of the
+web client. From any connected MCP client you can also call:
 
 - `github_app_installations` — should return the installations you granted.
 - `github_list_repos` — should now be populated with repos from each
@@ -114,4 +132,4 @@ And from the desktop MCP client:
   time so the push path never needs a user token.
 - Only the `GITHUB_APP_CLIENT_ID` / `GITHUB_APP_CLIENT_SECRET` names are
   honoured. Previous releases accepted a `GITHUB_OAUTH_CLIENT_ID` /
-  `CLIENT_SECRET` fallback; that has been removed — rename your `.env`.
+  `CLIENT_SECRET` fallback; that has been removed.
