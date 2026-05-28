@@ -11,7 +11,7 @@ use crate::tools::credential_tools::{
 };
 use crate::tools::epic_tools::{
     EpicCloseParams, EpicCountParams, EpicCreateParams, EpicDeleteParams, EpicListParams,
-    EpicReopenParams, EpicShowParams, EpicTasksParams, EpicUpdateParams,
+    EpicReadSourceParams, EpicReopenParams, EpicShowParams, EpicTasksParams, EpicUpdateParams,
 };
 use crate::tools::execution_tools::{ExecutionKillTaskParams, SessionForTaskParams};
 use crate::tools::github_app_tools::{GithubAppInstallUrlParams, GithubAppInstallationsParams};
@@ -159,6 +159,25 @@ impl DjinnMcpServer {
             "epic_count" => map_json(
                 name,
                 self.epic_count(Parameters(decode_args::<EpicCountParams>(name, args)?))
+                    .await,
+            ),
+            "epic_add_read_source" => map_json(
+                name,
+                self.epic_add_read_source(Parameters(decode_args::<EpicReadSourceParams>(
+                    name, args,
+                )?))
+                .await,
+            ),
+            "epic_remove_read_source" => map_json(
+                name,
+                self.epic_remove_read_source(Parameters(decode_args::<EpicReadSourceParams>(
+                    name, args,
+                )?))
+                .await,
+            ),
+            "epic_list_read_sources" => map_json(
+                name,
+                self.epic_list_read_sources(Parameters(decode_args::<EpicShowParams>(name, args)?))
                     .await,
             ),
             "execution_kill_task" => map_json(
