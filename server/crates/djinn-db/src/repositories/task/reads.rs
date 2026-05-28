@@ -70,7 +70,8 @@ impl TaskRepository {
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
+                    agent_type, created_by_user_id
              FROM tasks WHERE status = $1 {blocker_filter} ORDER BY priority, created_at"#
         );
         Ok(sqlx::query_as::<_, Task>(&sql)
@@ -197,7 +198,8 @@ impl TaskRepository {
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
+                    agent_type, created_by_user_id
              FROM tasks
              WHERE project_id = $1
                AND (status != 'closed' OR closed_at > to_char((now() at time zone 'utc') - interval '1 hour', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
@@ -209,7 +211,8 @@ impl TaskRepository {
                     total_reopen_count, total_verification_failure_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
+                    agent_type, created_by_user_id
              FROM tasks
              WHERE (status != 'closed' OR closed_at > to_char((now() at time zone 'utc') - interval '1 hour', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
              ORDER BY priority, created_at"#

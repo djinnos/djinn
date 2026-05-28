@@ -267,7 +267,8 @@ impl TaskRepository {
                     t.total_reopen_count, t.total_verification_failure_count,
                     t.intervention_count, t.last_intervention_at,
                     t.created_at, t.updated_at, t.closed_at,
-                    t.close_reason, t.merge_commit_sha, t.pr_url, t.merge_conflict_metadata, t.memory_refs::text AS memory_refs
+                    t.close_reason, t.merge_commit_sha, t.pr_url, t.merge_conflict_metadata, t.memory_refs::text AS memory_refs,
+                    t.agent_type, t.created_by_user_id
              FROM blockers b
              JOIN tasks t ON t.id = b.task_id
              WHERE b.blocking_task_id = $1

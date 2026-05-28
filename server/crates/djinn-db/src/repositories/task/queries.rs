@@ -852,4 +852,80 @@ mod ready_projection_tests {
             "list_ready must SELECT created_by_user_id, not default it to None"
         );
     }
+
+    /// Same projection gap, second query path: `list_by_status_filtered`
+    /// feeds the coordinator's `needs_task_review` / `needs_lead_intervention`
+    /// dispatch (reviewer / lead roles). It must also project
+    /// `created_by_user_id`, or those tasks dispatch creator-less and the
+    /// reviewer/lead role fails eligibility with "no eligible model for task
+    /// owner".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_by_status_filtered_projects_created_by_user_id() {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+
+        let project_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query!(
+            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
+            project_id,
+            "p",
+            "test",
+            format!("status-projection-{project_id}"),
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let user = UserRepository::new(db.clone())
+            .upsert_from_github(626262, "status-projection-tester", Some("Tester"), None)
+            .await
+            .unwrap();
+        let user_id = user.id.clone();
+
+        let repo = TaskRepository::new(db.clone(), EventBus::noop());
+        let task_id = SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                repo.create_in_project(
+                    &project_id,
+                    None,
+                    "needs review + attributed",
+                    "",
+                    "",
+                    "task",
+                    0,
+                    "",
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+                .id
+            })
+            .await;
+
+        // Park it in needs_task_review directly (the status the reviewer role
+        // dispatches from); the projection, not the transition path, is the SUT.
+        sqlx::query!(
+            "UPDATE tasks SET status = 'needs_task_review' WHERE id = $1",
+            task_id
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let in_review = repo
+            .list_by_status_filtered("needs_task_review", true)
+            .await
+            .unwrap();
+
+        let got = in_review
+            .iter()
+            .find(|t| t.id == task_id)
+            .expect("the needs_task_review task must appear in list_by_status_filtered");
+        assert_eq!(
+            got.created_by_user_id.as_deref(),
+            Some(user_id.as_str()),
+            "list_by_status_filtered must SELECT created_by_user_id, not default it to None"
+        );
+    }
 }
