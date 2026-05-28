@@ -108,17 +108,26 @@ impl WorkerSupervisorServices {
 /// session-affinity key (the worker has no session_id yet at construction).
 /// OAuth credentials deserialise the opaque JSON blob into
 /// [`OAuthConfigWire`] and back into a live [`ProviderConfig`].
+///
+/// `base_url_override` carries the catalog-resolved provider base URL for the
+/// API-key arm (the caller resolves it via `get_provider_base_url`); `None`
+/// falls back to [`default_base_url`]. It MUST be supplied for API-key
+/// third-party providers — `default_base_url` only knows Anthropic/Google and
+/// routes everything else to `api.openai.com`, so a Fireworks/Together/Groq key
+/// would otherwise hit the wrong host and 404. The OAuth arm ignores it (the
+/// wire blob already carries the correct base_url).
 pub(crate) fn build_provider_from_serializable(
     cred: &SerializableCredential,
     model_id: &str,
     context_window: u32,
+    base_url_override: Option<String>,
 ) -> Result<Arc<dyn LlmProvider>, StageError> {
     match cred {
         SerializableCredential::ApiKey { api_key, .. } => {
             let (provider_id, model_name) = parse_model_id(model_id)
                 .map_err(|e| StageError::ModelResolution(format!("parse_model_id: {e}")))?;
             let format_family = format_family_for_provider(&provider_id, &model_name);
-            let base_url = default_base_url(&provider_id);
+            let base_url = base_url_override.unwrap_or_else(|| default_base_url(&provider_id));
             let provider = create_provider(ProviderConfig {
                 base_url,
                 auth: auth_method_for_provider(&provider_id, api_key),
@@ -206,7 +215,23 @@ impl SupervisorServices for WorkerSupervisorServices {
             .await
             .unwrap_or(0)
             .max(0) as u32;
-        let provider = build_provider_from_serializable(cred, &model_id, context_window)?;
+        // Resolve the catalog base_url for API-key creds (OAuth carries its own
+        // in the wire blob). Without this the worker's `default_base_url` routes
+        // every non-Anthropic/Google provider to `api.openai.com` → 404. Mirrors
+        // the host stage's soft fallback to `default_base_url` on RPC error.
+        let base_url_override = if let SerializableCredential::ApiKey { .. } = cred {
+            let (provider_id, _) = parse_model_id(&model_id)
+                .map_err(|e| StageError::ModelResolution(format!("parse_model_id: {e}")))?;
+            Some(
+                self.get_provider_base_url(provider_id.clone())
+                    .await
+                    .unwrap_or_else(|_| default_base_url(&provider_id)),
+            )
+        } else {
+            None
+        };
+        let provider =
+            build_provider_from_serializable(cred, &model_id, context_window, base_url_override)?;
 
         worker_execute_stage(
             task,
