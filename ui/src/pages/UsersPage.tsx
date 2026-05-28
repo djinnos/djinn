@@ -5,7 +5,8 @@ import { Settings02Icon, ShieldUserIcon, UserGroupIcon } from '@hugeicons/core-f
 import { usersQueryOptions } from '@/api/queryOptions';
 import { userDisplayName, type OrgUser } from '@/api/users';
 import { InlineError } from '@/components/InlineError';
-import { AutomationConfig, ServiceBadge } from '@/components/AutomationConfig';
+import { UserConfigDialog, ServiceBadge } from '@/components/UserConfigDialog';
+import { useAuthUser } from '@/components/AuthGate';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -65,6 +66,10 @@ function UserRow({ user }: { user: OrgUser }) {
   const displayName = userDisplayName(user);
   const initial = (displayName[0] ?? '?').toUpperCase();
   const [configureOpen, setConfigureOpen] = useState(false);
+  // Admins configure others here; they manage their own models/limits on the
+  // normal Settings page, so hide Configure on their own row.
+  const me = useAuthUser();
+  const isSelf = me?.id === user.id;
 
   return (
     <li className="flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3">
@@ -97,7 +102,13 @@ function UserRow({ user }: { user: OrgUser }) {
         <p className="truncate text-xs text-muted-foreground">@{user.github_login}</p>
       </div>
 
-      {user.is_service ? (
+      {!user.is_service && user.last_seen_at && (
+        <span className="shrink-0 text-xs text-muted-foreground" title={user.last_seen_at}>
+          Last seen {relativeTime(user.last_seen_at)}
+        </span>
+      )}
+
+      {!isSelf && (
         <>
           <Button
             variant="outline"
@@ -108,18 +119,12 @@ function UserRow({ user }: { user: OrgUser }) {
             <HugeiconsIcon icon={Settings02Icon} size={14} />
             Configure
           </Button>
-          <AutomationConfig
+          <UserConfigDialog
             user={user}
             open={configureOpen}
             onOpenChange={setConfigureOpen}
           />
         </>
-      ) : (
-        user.last_seen_at && (
-          <span className="shrink-0 text-xs text-muted-foreground" title={user.last_seen_at}>
-            Last seen {relativeTime(user.last_seen_at)}
-          </span>
-        )
       )}
     </li>
   );

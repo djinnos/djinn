@@ -81,6 +81,70 @@ async fn session_list_filters_by_project_and_task() {
 }
 
 #[tokio::test]
+async fn timeline_and_list_resolve_task_across_projects_regardless_of_project_arg() {
+    // The Kanban board spans many projects: a task's sessions must resolve by
+    // the task's (globally unique) id even when the caller passes a *different*
+    // project — or none at all. Regression for the cross-project "task not
+    // found" error in the session pane (the UI's selected project may differ
+    // from the task's own project).
+    let harness = McpTestHarness::new().await;
+    let db = harness.db();
+    let project_a = common::create_test_project(db).await;
+    let epic_a = common::create_test_epic(db, &project_a.id).await;
+    let task_a = common::create_test_task(db, &project_a.id, &epic_a.id).await;
+    let _s = common::create_test_session(db, &project_a.id, &task_a.id).await;
+    // A second, unrelated project the UI might have "selected".
+    let project_b = common::create_test_project(db).await;
+
+    // task_timeline with the WRONG project hint → resolves by global UUID.
+    let payload = harness
+        .call_tool(
+            "task_timeline",
+            json!({ "task_id": task_a.id, "project": project_b.slug() }),
+        )
+        .await
+        .expect("task_timeline should dispatch");
+    assert_eq!(
+        payload.get("error"),
+        None,
+        "wrong-project hint must not 404: {payload:?}"
+    );
+    assert_eq!(
+        payload
+            .get("sessions")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len()),
+        Some(1)
+    );
+
+    // task_timeline with NO project → still resolves by global UUID.
+    let payload = harness
+        .call_tool("task_timeline", json!({ "task_id": task_a.id }))
+        .await
+        .expect("task_timeline should dispatch");
+    assert_eq!(
+        payload.get("error"),
+        None,
+        "missing project must not 404: {payload:?}"
+    );
+
+    // session_list likewise resolves cross-project with no project arg.
+    let payload = harness
+        .call_tool("session_list", json!({ "task_id": task_a.id }))
+        .await
+        .expect("session_list should dispatch");
+    assert_eq!(
+        payload.get("error"),
+        None,
+        "session_list missing project must not 404: {payload:?}"
+    );
+    assert_eq!(
+        payload.get("task_id").and_then(|v| v.as_str()),
+        Some(task_a.id.as_str())
+    );
+}
+
+#[tokio::test]
 async fn session_show_returns_full_shape_with_tokens() {
     let harness = McpTestHarness::new().await;
     let db = harness.db();

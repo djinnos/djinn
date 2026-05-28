@@ -6,13 +6,15 @@ import type {
 } from "@/api/generated/mcp-tools.gen";
 
 /**
- * Admin-side helpers for configuring the non-human "automation" service user.
+ * Admin-side helpers for configuring another user on their behalf — the
+ * non-human "automation" service user (which can't sign in to configure
+ * itself) as well as any human user an admin manages.
  *
- * Every call threads the automation user's id through the locked
+ * Every call threads the target user's id through the admin-gated
  * `target_user_id` arg so the server reads/writes THAT user's per-user config
  * instead of the acting admin's. These helpers deliberately bypass the global
  * `useProviders`/`settingsStore` singletons (which are scoped to the current
- * user) — the AutomationConfig component keeps the service user's state local
+ * user) — the UserConfigDialog component keeps the target user's state local
  * via react-query keyed on the target id. `target_user_id` is appended via the
  * generated input schemas' `[k: string]: any` index signature, so this stays
  * type-safe even before the generated MCP types regenerate to name the field

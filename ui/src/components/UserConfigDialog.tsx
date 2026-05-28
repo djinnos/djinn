@@ -86,14 +86,14 @@ const automationKeys = {
   modelSelection: (id: string) => ["automation", id, "model-selection"] as const,
 };
 
-interface AutomationConfigProps {
+interface UserConfigDialogProps {
   /** The automation service user — its `id` is threaded as `target_user_id`. */
   user: OrgUser;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
-export function AutomationConfig({ user, open, onOpenChange }: AutomationConfigProps) {
+export function UserConfigDialog({ user, open, onOpenChange }: UserConfigDialogProps) {
   const targetId = user.id;
 
   return (
