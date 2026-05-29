@@ -242,11 +242,17 @@ fn emit_language_blocks(
     Ok(())
 }
 
-// `rust-analyzer` is mandatory (the warm-graph SCIP indexer calls it), so
-// it's hard-coded rather than left to the environment config. `targets`
-// was dropped entirely in the 2026-04-22 cleanup — djinn's workflow
-// (clippy/check/test against the host target) never needs cross-targets.
-const RUST_COMPONENTS: &str = "rust-analyzer";
+// `rust-analyzer` is mandatory (the warm-graph SCIP indexer calls it).
+// `clippy` + `rustfmt` are baked in for the verification gate (`cargo clippy
+// -- -D warnings`, `cargo fmt --check`): without them rustup would try to
+// `component add` them at SESSION time for the repo's pinned toolchain, which
+// writes to the (non-root-owned) RUSTUP_HOME and fails with
+// "cannot write to /usr/local/rustup/tmp". install-rust.sh loops COMPONENTS
+// over every pinned toolchain, so they're present for the exact
+// rust-toolchain.toml version. `targets` was dropped in the 2026-04-22
+// cleanup — djinn's workflow (clippy/check/test against the host target)
+// never needs cross-targets.
+const RUST_COMPONENTS: &str = "rust-analyzer clippy rustfmt";
 
 fn emit_rust_block(df: &mut String, languages: &Languages, config: &EnvironmentConfig) {
     let Some(rust) = &languages.rust else { return };
@@ -639,7 +645,7 @@ mod tests {
             df.dockerfile
         );
         assert!(df.dockerfile.contains("DEFAULT_TOOLCHAIN=\"stable\""));
-        assert!(df.dockerfile.contains("COMPONENTS=\"rust-analyzer\""));
+        assert!(df.dockerfile.contains("COMPONENTS=\"rust-analyzer clippy rustfmt\""));
     }
 
     #[test]

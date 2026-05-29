@@ -61,7 +61,15 @@ pub fn compute_environment_hash(
     // so workspace-pinned toolchains (rust-toolchain.toml → 1.94.1)
     // can still be installed at session time without spilling into
     // the workspace.
-    hasher.update(b"env-config/v3\0");
+    //
+    // v3→v4: bake `clippy` + `rustfmt` into the Rust toolchain components
+    // (RUST_COMPONENTS in dockerfile.rs) so the verification gate
+    // (`cargo clippy -- -D warnings`, `cargo fmt --check`) doesn't trigger a
+    // session-time `rustup component add` against the read-only RUSTUP_HOME
+    // ("cannot write to /usr/local/rustup/tmp"). RUST_COMPONENTS is a hardcoded
+    // const (not part of `config_json`/`script_sha`), so this salt bump is what
+    // forces every cached project image to rebuild with the new components.
+    hasher.update(b"env-config/v4\0");
     hasher.update(config_json.as_bytes());
     hasher.update([0u8]);
     hasher.update(script_sha.as_bytes());
