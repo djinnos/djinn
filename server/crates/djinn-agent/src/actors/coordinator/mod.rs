@@ -65,6 +65,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::consolidation;
+    use super::dispatch::DispatchOutcome;
     use super::*;
     use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle};
     use crate::roles::RoleRegistry;
@@ -346,6 +347,78 @@ mod tests {
             dispatched: 0,
             recovered: 0,
         }
+    }
+
+    // ── Model failover via the health circuit-breaker ────────────────────────
+
+    /// A model tripped on a stall is skipped by `try_dispatch_to_pool`, which
+    /// fails over to the next model in the creator's ordered list. This is the
+    /// core failover behaviour: without feeding the breaker the first
+    /// (preferred) model is always `is_available` and always re-selected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stalled_model_is_skipped_and_dispatch_fails_over_to_next() {
+        use std::sync::{Arc, Mutex};
+
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let actor = coordinator_actor_for_tests(&db, &tx);
+
+        let bad = "openai/gpt-5.5".to_string();
+        let good = "openai/gpt-5.4".to_string();
+        let model_ids = vec![bad.clone(), good.clone()];
+
+        // Trip the preferred model on a zero-token stall.
+        actor.health.record_stall(&bad);
+        assert!(!actor.health.is_available(&bad));
+        assert!(actor.health.is_available(&good));
+
+        // Record which model the dispatch closure is actually invoked with.
+        let attempted: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let attempted_cl = attempted.clone();
+        let outcome = actor
+            .try_dispatch_to_pool("failover-test", &model_ids, |_pool, model_id| {
+                let attempted = attempted_cl.clone();
+                let model_id = model_id.to_owned();
+                async move {
+                    attempted.lock().unwrap().push(model_id);
+                    Ok::<(), PoolError>(())
+                }
+            })
+            .await;
+
+        assert!(matches!(outcome, DispatchOutcome::Dispatched));
+        let attempted = attempted.lock().unwrap().clone();
+        assert_eq!(
+            attempted,
+            vec![good.clone()],
+            "the stalled preferred model must be skipped; dispatch fails over to the next model"
+        );
+    }
+
+    /// Once the stalled model's cooldown expires it is available again, so the
+    /// preferred model is re-selected — the failover self-heals.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stalled_model_recovers_after_cooldown_expires() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let actor = coordinator_actor_for_tests(&db, &tx);
+
+        let bad = "openai/gpt-5.5".to_string();
+        actor.health.record_stall(&bad);
+        assert!(!actor.health.is_available(&bad));
+
+        // Simulate cooldown expiry, then a successful run resets the breaker.
+        actor.health.enable(&bad);
+        actor.health.record_success(&bad);
+        assert!(actor.health.is_available(&bad));
+
+        let model_ids = vec![bad.clone()];
+        let outcome = actor
+            .try_dispatch_to_pool("recover-test", &model_ids, |_pool, _model_id| async move {
+                Ok::<(), PoolError>(())
+            })
+            .await;
+        assert!(matches!(outcome, DispatchOutcome::Dispatched));
     }
 
     async fn create_simple_task(

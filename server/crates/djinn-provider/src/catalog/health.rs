@@ -11,6 +11,19 @@ const INITIAL_COOLDOWN: Duration = Duration::from_secs(5);
 /// Maximum cooldown: 5 minutes.
 const MAX_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 
+/// Minimum cooldown applied when a model is tripped via [`HealthTracker::record_stall`]
+/// (a zero-token / first-LLM-call-hung stall). This is the key knob that makes
+/// the model breaker actually drive *failover*: a stalled task gets re-dispatched
+/// after an escalating *task* cooldown that starts at 60s and grows to 120s/240s.
+/// If a stall only tripped the ordinary 5s model cooldown the model would be
+/// "healthy" again long before the task re-dispatches, so dispatch would re-pick
+/// the same bad model — no failover. Holding the model unavailable for 5 minutes
+/// guarantees the model is still cooling down on the task's next dispatch (even at
+/// the 240s task-cooldown rung), so the next model in the creator's ordered list
+/// is selected instead. The cooldown still auto-expires, so a one-off stall
+/// self-heals; repeated stalls escalate via the normal ladder and pin at the cap.
+const STALL_MIN_COOLDOWN: Duration = MAX_COOLDOWN;
+
 /// Wire-format health state for a single model.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelHealth {
@@ -133,6 +146,52 @@ impl HealthTracker {
                 "model circuit-breaker tripped"
             );
         }
+    }
+
+    /// Record a **stall** — a session that produced/consumed zero tokens and
+    /// had its first LLM call hung (the coordinator's zero-token kill). This is
+    /// a strong "this model/backend is bad right now" signal, so unlike
+    /// [`record_failure`] it trips the breaker **immediately** (no
+    /// consecutive-failure threshold) and with a cooldown floored at
+    /// [`STALL_MIN_COOLDOWN`].
+    ///
+    /// The floor is what makes failover actually happen: the task that owned
+    /// the stalled session is re-dispatched after an escalating *task* cooldown
+    /// (60s → 120s → 240s). A 5-minute model cooldown guarantees the model is
+    /// still unavailable when the task re-dispatches, so dispatch picks the next
+    /// model in the creator's ordered list instead of re-selecting the bad one.
+    /// The cooldown still auto-expires (self-heal), and repeated stalls escalate
+    /// `disable_ttl_trips` so a persistently-bad model stays demoted at the cap.
+    pub fn record_stall(&self, model_id: &str) {
+        let mut map = self.inner.lock().unwrap();
+        let state = map.entry(model_id.to_owned()).or_default();
+        state.consecutive_failures += 1;
+        state.total_failures += 1;
+
+        // If the previous cooldown expired, clear the flag so we can re-trip
+        // (and so `disable_ttl_trips` keeps escalating across stalls).
+        if state.auto_disabled && state.is_available() {
+            state.auto_disabled = false;
+            state.cooldown_until = None;
+        }
+
+        // Already cooling down from an earlier trip — don't shorten or reset it.
+        if state.auto_disabled {
+            return;
+        }
+
+        // Trip immediately, cooldown floored at STALL_MIN_COOLDOWN so it
+        // outlasts the task's redispatch cooldown and forces failover.
+        let cooldown = state.compute_cooldown().max(STALL_MIN_COOLDOWN);
+        state.auto_disabled = true;
+        state.cooldown_until = Some(Instant::now() + cooldown);
+        state.disable_ttl_trips += 1;
+        tracing::warn!(
+            model_id,
+            consecutive_failures = state.consecutive_failures,
+            cooldown_secs = cooldown.as_secs(),
+            "model circuit-breaker tripped on stall (failing over to next model)"
+        );
     }
 
     /// Returns `true` when the model is not circuit-breaker disabled
@@ -396,6 +455,94 @@ mod tests {
         let health = ht.model_health(TEST_MODEL);
         assert_eq!(health.disable_ttl_trips, 6);
         assert!(ht.is_available(TEST_MODEL));
+    }
+
+    #[test]
+    fn stall_trips_immediately_without_consecutive_threshold() {
+        let ht = HealthTracker::new();
+        // A single stall (well below CIRCUIT_BREAKER_THRESHOLD) disables the model.
+        ht.record_stall(TEST_MODEL);
+        assert!(!ht.is_available(TEST_MODEL));
+        let h = ht.model_health(TEST_MODEL);
+        assert!(h.auto_disabled);
+        assert_eq!(h.consecutive_failures, 1);
+        assert_eq!(h.total_failures, 1);
+        assert_eq!(h.disable_ttl_trips, 1);
+    }
+
+    #[test]
+    fn stall_cooldown_outlasts_task_redispatch_cooldown() {
+        // The coordinator re-dispatches a stalled task after an escalating
+        // *task* cooldown: 60s (streak 1) → 120s → 240s. The model cooldown
+        // from a stall must exceed those so the model is still unavailable when
+        // the task re-dispatches, forcing failover to the next model.
+        const MAX_TASK_REDISPATCH_COOLDOWN_SECS: u64 = 240;
+
+        let ht = HealthTracker::new();
+        ht.record_stall(TEST_MODEL);
+        let remaining = ht
+            .model_health(TEST_MODEL)
+            .cooldown_seconds_remaining
+            .expect("stalled model must be cooling down");
+        assert!(
+            remaining > MAX_TASK_REDISPATCH_COOLDOWN_SECS,
+            "stall cooldown {remaining}s must outlast the {MAX_TASK_REDISPATCH_COOLDOWN_SECS}s task redispatch cooldown"
+        );
+        // Specifically: floored at the 5-minute cap.
+        assert!(remaining <= STALL_MIN_COOLDOWN.as_secs());
+        assert!(remaining >= STALL_MIN_COOLDOWN.as_secs().saturating_sub(1));
+    }
+
+    #[test]
+    fn stall_self_heals_after_cooldown_then_success_resets() {
+        let ht = HealthTracker::new();
+        ht.record_stall(TEST_MODEL);
+        assert!(!ht.is_available(TEST_MODEL));
+
+        // Cooldown expires → model auto-re-enables (one-off stall self-heals).
+        expire_cooldown(&ht, TEST_MODEL);
+        assert!(ht.is_available(TEST_MODEL));
+        assert!(!ht.model_health(TEST_MODEL).auto_disabled);
+
+        // A successful turn resets the consecutive-failure counter.
+        ht.record_success(TEST_MODEL);
+        let h = ht.model_health(TEST_MODEL);
+        assert_eq!(h.consecutive_failures, 0);
+        assert_eq!(h.total_successes, 1);
+        assert!(ht.is_available(TEST_MODEL));
+    }
+
+    #[test]
+    fn repeated_stalls_escalate_trips_and_stay_capped() {
+        let ht = HealthTracker::new();
+        for expected_trip in 1..=4 {
+            ht.record_stall(TEST_MODEL);
+            let h = ht.model_health(TEST_MODEL);
+            assert_eq!(h.disable_ttl_trips, expected_trip);
+            assert!(h.auto_disabled);
+            // Every stall cooldown is floored at the cap.
+            let remaining = h.cooldown_seconds_remaining.unwrap();
+            assert!(remaining <= MAX_COOLDOWN.as_secs());
+            assert!(remaining >= MAX_COOLDOWN.as_secs().saturating_sub(1));
+            assert!(!ht.is_available(TEST_MODEL));
+            expire_cooldown(&ht, TEST_MODEL);
+        }
+    }
+
+    #[test]
+    fn stall_while_cooling_down_does_not_shorten_cooldown() {
+        let ht = HealthTracker::new();
+        ht.record_stall(TEST_MODEL);
+        let first = ht.model_health(TEST_MODEL);
+        assert_eq!(first.disable_ttl_trips, 1);
+
+        // A second stall arriving while still cooling down is a no-op for the
+        // cooldown window (no re-trip, no reset) — it only bumps failure counts.
+        ht.record_stall(TEST_MODEL);
+        let second = ht.model_health(TEST_MODEL);
+        assert_eq!(second.disable_ttl_trips, 1, "no re-trip while cooling down");
+        assert_eq!(second.consecutive_failures, 2);
+        assert!(!ht.is_available(TEST_MODEL));
     }
 
     #[test]

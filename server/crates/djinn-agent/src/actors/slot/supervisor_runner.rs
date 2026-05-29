@@ -411,6 +411,22 @@ pub(crate) async fn run_supervisor_dispatch(
                 runtime = ?runtime_kind,
                 "supervisor dispatch: task-run complete"
             );
+            // Feed the model circuit-breaker on a productive run. A terminal
+            // outcome that maps to `Completed` (PR opened / closed / escalated)
+            // with at least one completed stage means the model produced tokens
+            // and drove the flow to a terminal state — a clear "this model is
+            // healthy" signal. `record_success` resets the consecutive-failure
+            // counter and clears any expired cooldown, so a model that recovers
+            // isn't needlessly held in failover. We key on the dispatch-level
+            // `model_id` (the one the coordinator's `is_available` gate selects
+            // and would re-select), matching what `record_stall`/`record_failure`
+            // trip on the stall path. We deliberately do NOT reset on
+            // Interrupted/Failed/empty runs (those aren't evidence of recovery).
+            if !report.stages_completed.is_empty()
+                && matches!(report_to_terminal_status(&report), TaskRunStatus::Completed)
+            {
+                app_state.health_tracker.record_success(&model_id);
+            }
             // Phase 2.2: post-session knowledge extraction. Fire-and-forget on
             // the long-lived server (it owns the embedding model + Qdrant, so
             // notes created here get embedded; worker pods are ephemeral and

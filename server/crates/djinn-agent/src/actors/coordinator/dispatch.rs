@@ -22,7 +22,7 @@ fn readiness_gate_enabled() -> bool {
 }
 
 /// Result of a single `try_dispatch_to_pool` attempt.
-enum DispatchOutcome {
+pub(super) enum DispatchOutcome {
     /// Successfully dispatched to a slot.
     Dispatched,
     /// All candidate models are at capacity.
@@ -178,7 +178,7 @@ impl CoordinatorActor {
     ///
     /// `dispatch_fn` receives `(&SlotPoolHandle, &str)` — the pool handle and
     /// model_id — and returns the pool dispatch future's result.
-    async fn try_dispatch_to_pool<F, Fut>(
+    pub(super) async fn try_dispatch_to_pool<F, Fut>(
         &self,
         label: &str,
         model_ids: &[String],
@@ -820,6 +820,26 @@ impl CoordinatorActor {
 
             // Mark as killed so we don't re-kill and re-log on subsequent ticks.
             self.stall_killed.insert(task_id.to_owned());
+
+            // Feed the model circuit-breaker so dispatch fails over to the next
+            // model in the creator's ordered list on redispatch. A zero-token
+            // stall (first LLM call hung) is a strong "this model/backend is bad
+            // right now" signal → trip immediately with a long cooldown that
+            // outlasts the task's escalating redispatch cooldown (`record_stall`).
+            // A plain idle stall is a weaker signal (could be a genuinely long
+            // worker turn that went quiet), so we feed the gentler consecutive-
+            // failure breaker (`record_failure`) which only trips after repeats —
+            // this avoids needlessly demoting the user's preferred model on a
+            // single idle blip. Either way the cooldown auto-expires (self-heal)
+            // and a recovered model is reset by `record_success` on a real run.
+            // `self.health` is the same HealthTracker instance the dispatch
+            // `is_available` gate consults (cloned into slots), so this trip is
+            // visible to the very next dispatch pass.
+            if zero_tokens {
+                self.health.record_stall(&session.model_id);
+            } else {
+                self.health.record_failure(&session.model_id);
+            }
 
             let reason = if zero_tokens {
                 "zero-token (first LLM call hung)"
