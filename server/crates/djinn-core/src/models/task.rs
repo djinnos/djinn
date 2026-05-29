@@ -709,8 +709,14 @@ pub fn compute_transition(
         }
 
         TransitionAction::PrMerge => {
-            if *from != TaskStatus::PrReview {
-                return bad("pr_merge is only valid from pr_review");
+            // A merged PR is ground truth: the work landed, so the task must
+            // close regardless of which pre-merge state it was observed in.
+            // The merge can land while the task is still in `pr_draft` (merge
+            // queue / auto-merge merges before the poller undrafts → moves it
+            // to `pr_review`); rejecting it there wedged the PR poller in a
+            // detect-merge → illegal-transition loop with the task stuck open.
+            if !matches!(*from, TaskStatus::PrDraft | TaskStatus::PrReview) {
+                return bad("pr_merge is only valid from pr_draft or pr_review");
             }
             TransitionApply {
                 to_status: Some(TaskStatus::Closed),
@@ -916,7 +922,10 @@ mod tests {
                 TransitionAction::PrConflict,
                 TaskStatus::Approved | TaskStatus::PrDraft | TaskStatus::PrReview,
             ) => Some(TaskStatus::Open),
-            (TransitionAction::PrMerge, TaskStatus::PrReview) => Some(TaskStatus::Closed),
+            (
+                TransitionAction::PrMerge,
+                TaskStatus::PrDraft | TaskStatus::PrReview,
+            ) => Some(TaskStatus::Closed),
             (TransitionAction::PrChangesRequested, TaskStatus::PrReview) => Some(TaskStatus::Open),
             (TransitionAction::SubmitForMerge, TaskStatus::InProgress) => {
                 Some(TaskStatus::Approved)

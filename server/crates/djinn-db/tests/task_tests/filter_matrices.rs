@@ -71,6 +71,9 @@ use super::*;
 #[case("pr_review", TransitionAction::PrConflict, "open", None)]
 // pr_merge transitions pr_review → closed
 #[case("pr_review", TransitionAction::PrMerge, "closed", None)]
+// pr_merge also transitions pr_draft → closed (merge queue / auto-merge can
+// land the PR before the poller undrafts it into pr_review)
+#[case("pr_draft", TransitionAction::PrMerge, "closed", None)]
 // pr_changes_requested transitions pr_review → open (requires reason)
 #[case(
     "pr_review",
@@ -164,10 +167,9 @@ async fn valid_transition(
 // pr_conflict only from approved, pr_draft, or pr_review
 #[case("open", TransitionAction::PrConflict)]
 #[case("in_progress", TransitionAction::PrConflict)]
-// pr_merge only from pr_review
+// pr_merge only from pr_draft or pr_review
 #[case("open", TransitionAction::PrMerge)]
 #[case("in_task_review", TransitionAction::PrMerge)]
-#[case("pr_draft", TransitionAction::PrMerge)]
 // pr_changes_requested only from pr_review
 #[case("open", TransitionAction::PrChangesRequested)]
 #[case("in_task_review", TransitionAction::PrChangesRequested)]
