@@ -24,6 +24,23 @@ export RUSTUP_HOME="${RUSTUP_HOME:-/usr/local/rustup}"
 export CARGO_HOME="${CARGO_HOME:-/usr/local/cargo}"
 export PATH="${CARGO_HOME}/bin:${PATH}"
 
+# Rust build toolchain beyond rustc/cargo: a real linker + the sccache wrapper
+# that repos routinely pin in .cargo/config.toml (e.g. `linker = "clang"`,
+# `-fuse-ld=mold`, `rustc-wrapper = "sccache"`). Without these the image only
+# has gcc from build-essential, so `cargo check`/`clippy`/`build` fail at link
+# time (or on the missing wrapper) and the worker can't compile or debug Rust
+# at all. clang/lld/mold are required (the linker); sccache is best-effort so a
+# distro without the package never fails the image build.
+if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends clang lld mold
+    apt-get install -y --no-install-recommends sccache \
+        || echo "[install-rust] sccache unavailable via apt; repos pinning rustc-wrapper=sccache may need RUSTC_WRAPPER unset" >&2
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+fi
+
 DEFAULT_TOOLCHAIN_VALUE="${DEFAULT_TOOLCHAIN:-}"
 if [ -z "${DEFAULT_TOOLCHAIN_VALUE}" ]; then
     # shellcheck disable=SC2086
