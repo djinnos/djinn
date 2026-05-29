@@ -412,7 +412,7 @@ impl CoordinatorActor {
                     tracing::debug!(
                         task_id = %task.short_id,
                         project_id = %task.project_id,
-                        "CoordinatorActor: dispatch deferred — project devcontainer image + graph warm not both ready"
+                        "CoordinatorActor: dispatch deferred — project devcontainer image not ready"
                     );
                     continue;
                 }

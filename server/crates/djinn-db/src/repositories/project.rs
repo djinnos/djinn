@@ -867,11 +867,18 @@ pub struct ProjectDispatchReadiness {
 }
 
 impl ProjectDispatchReadiness {
-    /// True when the project's devcontainer image is `ready` AND the
-    /// canonical-graph warmer has stamped at least one completion. This is
-    /// the coordinator's hard gate for task dispatch.
+    /// True when the project's devcontainer image is `ready`.
+    ///
+    /// The devcontainer image is a genuine hard prerequisite — without it the
+    /// worker Pod has no environment to run in. The canonical-graph warm is
+    /// NOT: it's an optimization (RAG / architect context), and workers
+    /// tolerate a missing or stale graph. Gating dispatch on `graph_warmed_at`
+    /// meant a warmer that can't complete (e.g. OOM on a large monorepo, a
+    /// flaky SCIP indexer) permanently wedged ALL work on the project. We no
+    /// longer block on it — the warm still runs in the background and the
+    /// graph fills in for later tasks once it succeeds.
     pub fn is_ready_for_dispatch(&self) -> bool {
-        self.image_status == ProjectImageStatus::READY && self.graph_warmed_at.is_some()
+        self.image_status == ProjectImageStatus::READY
     }
 }
 
@@ -901,6 +908,40 @@ mod tests {
     use djinn_core::models::Project;
 
     use super::*;
+
+    #[test]
+    fn dispatch_readiness_gates_on_image_only_not_graph_warm() {
+        // Image ready, graph never warmed → still dispatchable (warm is an
+        // optimization, not a prerequisite; a stuck warmer must not wedge work).
+        let ready_no_graph = ProjectDispatchReadiness {
+            image_status: ProjectImageStatus::READY.to_string(),
+            graph_warmed_at: None,
+        };
+        assert!(ready_no_graph.is_ready_for_dispatch());
+
+        // Image ready + graph warmed → dispatchable.
+        let ready_warmed = ProjectDispatchReadiness {
+            image_status: ProjectImageStatus::READY.to_string(),
+            graph_warmed_at: Some("2026-05-29T00:00:00.000Z".to_string()),
+        };
+        assert!(ready_warmed.is_ready_for_dispatch());
+
+        // Image NOT ready → never dispatchable, regardless of graph.
+        for status in [
+            ProjectImageStatus::NONE,
+            ProjectImageStatus::BUILDING,
+            ProjectImageStatus::FAILED,
+        ] {
+            let img_not_ready = ProjectDispatchReadiness {
+                image_status: status.to_string(),
+                graph_warmed_at: Some("2026-05-29T00:00:00.000Z".to_string()),
+            };
+            assert!(
+                !img_not_ready.is_ready_for_dispatch(),
+                "image_status {status} must block dispatch"
+            );
+        }
+    }
 
     fn test_db() -> Database {
         Database::open_in_memory().unwrap()
