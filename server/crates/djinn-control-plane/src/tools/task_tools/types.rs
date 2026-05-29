@@ -352,6 +352,9 @@ pub struct TaskResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
     pub merge_conflict_metadata: Option<AnyJson>,
+    /// URL of the associated pull request, once one has been opened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
     /// Specialist role name assigned to this task, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
@@ -644,6 +647,9 @@ pub struct TaskListItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
     pub merge_conflict_metadata: Option<AnyJson>,
+    /// URL of the associated pull request, once one has been opened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
     pub unresolved_blocker_count: i64,
     /// Specialist role name assigned to this task, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -715,6 +721,7 @@ pub fn task_to_response(t: &Task) -> TaskResponse {
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok())
             .map(AnyJson),
+        pr_url: t.pr_url.clone(),
         agent_type: t.agent_type.clone(),
         created_by_user_id: t.created_by_user_id.clone(),
         warning: None,
@@ -754,6 +761,7 @@ pub fn task_to_list_item(
         close_reason: base.close_reason,
         merge_commit_sha: base.merge_commit_sha,
         merge_conflict_metadata: base.merge_conflict_metadata,
+        pr_url: base.pr_url,
         unresolved_blocker_count: t.unresolved_blocker_count,
         agent_type: t.agent_type.clone(),
         created_by_user_id: base.created_by_user_id,

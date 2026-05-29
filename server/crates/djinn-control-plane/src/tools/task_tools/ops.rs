@@ -71,6 +71,7 @@ pub(crate) fn task_to_response(task: &Task) -> TaskResponse {
             .as_deref()
             .and_then(|value| serde_json::from_str(value).ok())
             .map(crate::tools::AnyJson),
+        pr_url: task.pr_url.clone(),
         warning: None,
     }
 }
