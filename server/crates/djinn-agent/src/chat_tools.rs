@@ -119,7 +119,8 @@ fn serialize_chat_tool(tool: RmcpTool, concurrent_safe: bool) -> serde_json::Val
 /// keeps it).  See module-level docs + ADR-050 amendment.
 pub fn chat_extension_tool_schemas() -> Vec<serde_json::Value> {
     use crate::extension::tool_defs::{
-        tool_code_graph, tool_github_search, tool_pr_review_context,
+        tool_code_graph, tool_github_search, tool_output_grep, tool_output_view,
+        tool_pr_review_context,
     };
     vec![
         serialize_chat_tool(tool_chat_shell(), false),
@@ -128,6 +129,12 @@ pub fn chat_extension_tool_schemas() -> Vec<serde_json::Value> {
         serialize_chat_tool(tool_pr_review_context(), true),
         serialize_chat_tool(tool_github_search(), true),
         serialize_chat_tool(tool_project_list(), true),
+        // Stash navigation for truncated tool results. Served in-process
+        // against the chat loop's `OutputStash` (see the chat handler), not
+        // routed through `dispatch_chat_tool` — so they're advertised here
+        // but excluded from `CHAT_EXTENSION_TOOLS`.
+        serialize_chat_tool(tool_output_view(), true),
+        serialize_chat_tool(tool_output_grep(), true),
     ]
 }
 
@@ -144,6 +151,17 @@ const CHAT_EXTENSION_TOOLS: &[&str] = &[
 /// Returns `true` if this tool name is handled by the chat extension dispatch.
 pub fn is_chat_extension_tool(name: &str) -> bool {
     CHAT_EXTENSION_TOOLS.contains(&name)
+}
+
+/// Returns `true` for the stash-navigation tools (`output_view`,
+/// `output_grep`). These are *not* dispatched like other tools — the chat
+/// loop services them in-process against its per-request [`OutputStash`]
+/// (`djinn_agent::output_stash`) — so they live outside both
+/// [`CHAT_EXTENSION_TOOLS`] and [`CHAT_ALLOWED_MCP_TOOLS`]. Kept as a thin
+/// re-export of [`crate::output_stash::is_stash_tool`] so the chat surface and
+/// the dispatcher agree on the same two names.
+pub fn is_chat_stash_tool(name: &str) -> bool {
+    crate::output_stash::is_stash_tool(name)
 }
 
 /// Curated allowlist of server-wide `DjinnMcpServer` tools the chat may
@@ -239,7 +257,7 @@ pub fn is_chat_allowed_mcp_tool(name: &str) -> bool {
 /// tool exposed to chat?" should reach for this helper rather than OR-ing
 /// the two predicates by hand.
 pub fn is_chat_allowed_tool(name: &str) -> bool {
-    is_chat_extension_tool(name) || is_chat_allowed_mcp_tool(name)
+    is_chat_extension_tool(name) || is_chat_allowed_mcp_tool(name) || is_chat_stash_tool(name)
 }
 
 /// Filter an `all_tool_schemas()` list down to the chat-allowed subset.
@@ -522,6 +540,10 @@ mod tests {
             "pr_review_context",
             "github_search",
             "project_list",
+            // Stash navigation for truncated tool results — served in-process
+            // against the chat loop's OutputStash, not via dispatch_chat_tool.
+            "output_view",
+            "output_grep",
         ]
         .iter()
         .map(ToString::to_string)
@@ -533,6 +555,20 @@ mod tests {
             "chat tool surface drift — update chat_extension_tool_schemas() \
              in chat_tools.rs and ADR-050 §2 together"
         );
+    }
+
+    #[test]
+    fn stash_tools_are_allowed_but_not_dispatched_as_extension_tools() {
+        // Advertised + allowed…
+        assert!(is_chat_stash_tool("output_view"));
+        assert!(is_chat_stash_tool("output_grep"));
+        assert!(is_chat_allowed_tool("output_view"));
+        assert!(is_chat_allowed_tool("output_grep"));
+        // …but NOT routed through dispatch_chat_tool (the handler intercepts
+        // them against the OutputStash before the extension/MCP tiers).
+        assert!(!is_chat_extension_tool("output_view"));
+        assert!(!is_chat_extension_tool("output_grep"));
+        assert!(!is_chat_allowed_mcp_tool("output_view"));
     }
 
     /// Architect surface retains every read/analysis tool the chat used to

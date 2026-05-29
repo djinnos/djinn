@@ -3,16 +3,12 @@ use std::sync::{Arc, Mutex};
 
 use crate::extension;
 use djinn_provider::message::ContentBlock;
-use crate::output_stash::OutputStash;
+use crate::output_stash::{OutputStash, handle_stash_tool, is_stash_tool, render_tool_result};
 use djinn_provider::provider::telemetry;
 
 /// Maximum number of concurrent-safe tools that can execute in parallel within
 /// a single batch (ADR-048 §1A).
 pub(super) const MAX_TOOL_CONCURRENCY: usize = 8;
-
-/// Maximum characters per tool result to prevent context overflow.
-/// ~30k chars = 7.5k tokens — enough for diagnosis, safe with multiple calls.
-const MAX_TOOL_RESULT_CHARS: usize = 30_000;
 
 pub(super) fn tool_concurrency_safety(tools: &[serde_json::Value]) -> HashMap<String, bool> {
     tools
@@ -48,44 +44,6 @@ pub(super) fn is_tool_concurrent_safe(tool_metadata: &HashMap<String, bool>, nam
 /// message on the next user turn so provider tool-call pairing remains valid.
 pub(super) fn is_side_query_tool(tool_metadata: &HashMap<String, bool>, name: &str) -> bool {
     is_tool_concurrent_safe(tool_metadata, name)
-}
-
-/// Extract browsable content for the output stash.
-///
-/// For shell results, the LLM wants to browse raw stdout/stderr — not the
-/// `{"ok":true,"stdout":"..."}` JSON envelope.  For other tools the
-/// pretty-printed JSON is already useful, so we return `None` to let the
-/// caller fall back to the default.
-pub(super) fn extract_stash_content(tool_name: &str, value: &serde_json::Value) -> Option<String> {
-    if tool_name != "shell" {
-        return None;
-    }
-    let obj = value.as_object()?;
-    let stdout = obj.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
-    let stderr = obj.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
-    let exit_code = obj.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1);
-
-    let mut out = String::with_capacity(stdout.len() + stderr.len() + 64);
-    if !stdout.is_empty() {
-        out.push_str(stdout);
-    }
-    if !stderr.is_empty() {
-        if !out.is_empty() && !out.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push_str("--- stderr ---\n");
-        out.push_str(stderr);
-    }
-    if exit_code != 0 {
-        if !out.is_empty() && !out.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push_str(&format!("[exit code: {exit_code}]"));
-    }
-    if out.is_empty() {
-        return None;
-    }
-    Some(out)
 }
 
 pub(super) struct ToolDispatchContext<'a> {
@@ -160,40 +118,8 @@ pub(super) async fn dispatch_single_tool<'a>(
     role_name: &'a str,
     mcp_registry: Option<&'a crate::mcp_client::McpToolRegistry>,
 ) -> (usize, ContentBlock) {
-    if name == "output_view" || name == "output_grep" {
-        let result = {
-            let guard = stash.lock().unwrap();
-            let args_map = args.as_ref();
-            if name == "output_view" {
-                let tid = args_map
-                    .and_then(|m| m.get("tool_use_id"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let offset = args_map
-                    .and_then(|m| m.get("offset"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
-                let limit = args_map
-                    .and_then(|m| m.get("limit"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(200) as usize;
-                guard.view(tid, offset, limit)
-            } else {
-                let tid = args_map
-                    .and_then(|m| m.get("tool_use_id"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let pattern = args_map
-                    .and_then(|m| m.get("pattern"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let ctx_lines = args_map
-                    .and_then(|m| m.get("context_lines"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(3) as usize;
-                guard.grep(tid, pattern, ctx_lines)
-            }
-        };
+    if is_stash_tool(&name) {
+        let result = handle_stash_tool(&stash, &name, args.as_ref());
         let (content, is_error) = match result {
             Ok(text) => {
                 if let Some(ts) = &tool_span {
@@ -320,24 +246,7 @@ pub(super) async fn dispatch_single_tool<'a>(
     }
     let (content, is_error) = match result {
         Ok(value) => {
-            let mut text = if value.is_string() {
-                value.as_str().unwrap_or("").to_string()
-            } else {
-                serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
-            };
-            if text.len() > MAX_TOOL_RESULT_CHARS {
-                let stash_text =
-                    extract_stash_content(&name, &value).unwrap_or_else(|| text.clone());
-                stash
-                    .lock()
-                    .unwrap()
-                    .insert(id.clone(), name.clone(), stash_text);
-                let full_bytes = text.len();
-                text = crate::truncate::smart_truncate(&text, MAX_TOOL_RESULT_CHARS);
-                text.push_str(&format!(
-                    "\n\n[Full output stashed ({full_bytes} bytes). Use output_view(tool_use_id=\"{id}\") to paginate or output_grep(tool_use_id=\"{id}\", pattern=\"...\") to search.]"
-                ));
-            }
+            let text = render_tool_result(&stash, &id, &name, &value);
             if let Some(ts) = &tool_span {
                 ts.record_output(&text, false);
             }

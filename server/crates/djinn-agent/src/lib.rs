@@ -23,7 +23,7 @@ pub mod lsp;
 pub(crate) mod task_merge;
 pub(crate) mod oauth;
 pub(crate) mod output_parser;
-pub(crate) mod output_stash;
+pub mod output_stash;
 pub(crate) mod patch;
 pub mod prompts;
 pub mod mcp_client;

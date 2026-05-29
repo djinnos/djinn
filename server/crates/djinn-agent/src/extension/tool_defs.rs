@@ -195,7 +195,7 @@ pub(super) fn tool_ci_job_log() -> RmcpTool {
     )
 }
 
-pub(super) fn tool_output_view() -> RmcpTool {
+pub(crate) fn tool_output_view() -> RmcpTool {
     RmcpTool::new(
         "output_view".to_string(),
         "Paginated view of a truncated tool output. When a tool result was truncated, \
@@ -213,7 +213,7 @@ pub(super) fn tool_output_view() -> RmcpTool {
     )
 }
 
-pub(super) fn tool_output_grep() -> RmcpTool {
+pub(crate) fn tool_output_grep() -> RmcpTool {
     RmcpTool::new(
         "output_grep".to_string(),
         "Regex search within a truncated tool output. Returns matching lines with \

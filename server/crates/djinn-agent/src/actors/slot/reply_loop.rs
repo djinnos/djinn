@@ -20,7 +20,7 @@ use error_handling::{
 };
 use streaming::{StreamLoopContext, consume_provider_stream};
 #[cfg(test)]
-use tool_dispatch::extract_stash_content;
+use crate::output_stash::extract_stash_content;
 use tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_concurrency_safety};
 
 const MAX_TURNS: u32 = 1000;

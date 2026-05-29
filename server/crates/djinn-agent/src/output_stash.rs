@@ -8,11 +8,23 @@
 //! hit. Each reply-loop instance owns its own stash — no cross-session sharing.
 
 use std::collections::VecDeque;
+use std::sync::Mutex;
 
 /// Maximum number of stashed entries.
 const MAX_ENTRIES: usize = 10;
 /// Maximum total bytes across all entries.
 const MAX_TOTAL_BYTES: usize = 5 * 1024 * 1024; // 5 MB
+
+/// Maximum characters per tool result handed to the model. Results larger than
+/// this are stashed in full and replaced inline with a `smart_truncate`d view
+/// plus an `output_view`/`output_grep` navigation hint.
+///
+/// ~30k chars ≈ 7.5k tokens — enough for diagnosis, safe with multiple calls,
+/// and well under the provider's per-string limit. Shared by every surface
+/// that feeds tool results back into a conversation (the worker reply loop and
+/// the chat loop) so the two can never drift — the chat path lacking this clamp
+/// is what let a ~12 MB tool result reach the provider and 400 the request.
+pub const MAX_TOOL_RESULT_CHARS: usize = 30_000;
 
 struct StashedOutput {
     tool_use_id: String,
@@ -20,13 +32,13 @@ struct StashedOutput {
     full_text: String,
 }
 
-pub(crate) struct OutputStash {
+pub struct OutputStash {
     entries: VecDeque<StashedOutput>,
     total_bytes: usize,
 }
 
 impl OutputStash {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             entries: VecDeque::new(),
             total_bytes: 0,
@@ -34,7 +46,7 @@ impl OutputStash {
     }
 
     /// Stash full tool output. Evicts oldest entries if count or byte limits are exceeded.
-    pub(crate) fn insert(&mut self, tool_use_id: String, tool_name: String, full_text: String) {
+    pub fn insert(&mut self, tool_use_id: String, tool_name: String, full_text: String) {
         let new_bytes = full_text.len();
 
         // Evict until we have room for the new entry (both count and bytes).
@@ -55,7 +67,7 @@ impl OutputStash {
     }
 
     /// Paginated line view of a stashed output.
-    pub(crate) fn view(
+    pub fn view(
         &self,
         tool_use_id: &str,
         offset: usize,
@@ -97,7 +109,7 @@ impl OutputStash {
     }
 
     /// Regex search within a stashed output, returning matching lines with context.
-    pub(crate) fn grep(
+    pub fn grep(
         &self,
         tool_use_id: &str,
         pattern: &str,
@@ -179,7 +191,7 @@ impl OutputStash {
     }
 
     /// Clear all stashed outputs (called after compaction).
-    pub(crate) fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.entries.clear();
         self.total_bytes = 0;
     }
@@ -195,6 +207,135 @@ impl OutputStash {
                      only exist for results that were truncated."
                 )
             })
+    }
+}
+
+impl Default for OutputStash {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Extract the browsable text to stash for a tool result.
+///
+/// For `shell` the model wants to page through raw stdout/stderr — not the
+/// `{"ok":true,"stdout":"…"}` JSON envelope — so we splice those fields into a
+/// log-like view. For every other tool we return `None` and the caller stashes
+/// the pretty-printed JSON as-is.
+pub fn extract_stash_content(tool_name: &str, value: &serde_json::Value) -> Option<String> {
+    if tool_name != "shell" {
+        return None;
+    }
+    let obj = value.as_object()?;
+    let stdout = obj.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+    let stderr = obj.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+    let exit_code = obj.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1);
+
+    let mut out = String::with_capacity(stdout.len() + stderr.len() + 64);
+    if !stdout.is_empty() {
+        out.push_str(stdout);
+    }
+    if !stderr.is_empty() {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("--- stderr ---\n");
+        out.push_str(stderr);
+    }
+    if exit_code != 0 {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("[exit code: {exit_code}]"));
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(out)
+}
+
+/// Render a successful tool result to the text handed back to the model.
+///
+/// Serializes `value` to text (raw string, or pretty JSON), and when that
+/// exceeds [`MAX_TOOL_RESULT_CHARS`] stashes the full output under
+/// `tool_use_id` and returns a `smart_truncate`d view with an
+/// `output_view`/`output_grep` navigation hint appended.
+///
+/// This is the single chokepoint both the worker reply loop and the chat loop
+/// route successful tool results through, so neither can ever ship an
+/// unbounded result into a conversation again.
+pub fn render_tool_result(
+    stash: &Mutex<OutputStash>,
+    tool_use_id: &str,
+    tool_name: &str,
+    value: &serde_json::Value,
+) -> String {
+    let mut text = if value.is_string() {
+        value.as_str().unwrap_or("").to_string()
+    } else {
+        serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+    };
+    if text.len() > MAX_TOOL_RESULT_CHARS {
+        let stash_text = extract_stash_content(tool_name, value).unwrap_or_else(|| text.clone());
+        stash.lock().unwrap().insert(
+            tool_use_id.to_string(),
+            tool_name.to_string(),
+            stash_text,
+        );
+        let full_bytes = text.len();
+        text = crate::truncate::smart_truncate(&text, MAX_TOOL_RESULT_CHARS);
+        text.push_str(&format!(
+            "\n\n[Full output stashed ({full_bytes} bytes). Use output_view(tool_use_id=\"{tool_use_id}\") to paginate or output_grep(tool_use_id=\"{tool_use_id}\", pattern=\"...\") to search.]"
+        ));
+    }
+    text
+}
+
+/// `true` for the two stash-navigation tools handled in-process against the
+/// [`OutputStash`] rather than dispatched to a real handler.
+pub fn is_stash_tool(name: &str) -> bool {
+    name == "output_view" || name == "output_grep"
+}
+
+/// Service an `output_view` / `output_grep` call against the stash.
+///
+/// Returns `Ok(text)` for a successful view/grep (including the "no match" and
+/// "offset past end" informational cases) or `Err(message)` for an unknown
+/// `tool_use_id`, an invalid regex, or a name that isn't a stash tool.
+pub fn handle_stash_tool(
+    stash: &Mutex<OutputStash>,
+    name: &str,
+    args: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Result<String, String> {
+    let guard = stash.lock().unwrap();
+    let tid = args
+        .and_then(|m| m.get("tool_use_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    match name {
+        "output_view" => {
+            let offset = args
+                .and_then(|m| m.get("offset"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let limit = args
+                .and_then(|m| m.get("limit"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(200) as usize;
+            guard.view(tid, offset, limit)
+        }
+        "output_grep" => {
+            let pattern = args
+                .and_then(|m| m.get("pattern"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let ctx_lines = args
+                .and_then(|m| m.get("context_lines"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(3) as usize;
+            guard.grep(tid, pattern, ctx_lines)
+        }
+        other => Err(format!("not a stash tool: {other}")),
     }
 }
 
@@ -327,5 +468,62 @@ mod tests {
         let result = stash.grep("t1", "MATCH", 0).unwrap();
         assert!(result.len() <= 31_000); // small slack for footer
         assert!(result.contains("capped at 30KB"));
+    }
+
+    #[test]
+    fn render_small_result_is_passthrough() {
+        let stash = Mutex::new(OutputStash::new());
+        let value = serde_json::json!({"ok": true, "rows": 3});
+        let text = render_tool_result(&stash, "t1", "task_list", &value);
+        // Pretty JSON, untruncated, nothing stashed.
+        assert!(text.contains("\"rows\""));
+        assert!(!text.contains("Full output stashed"));
+        assert!(stash.lock().unwrap().view("t1", 0, 10).is_err());
+    }
+
+    #[test]
+    fn render_oversized_result_truncates_and_stashes() {
+        let stash = Mutex::new(OutputStash::new());
+        // A string value well over the clamp.
+        let big = "x".repeat(MAX_TOOL_RESULT_CHARS * 2);
+        let value = serde_json::Value::String(big.clone());
+        let text = render_tool_result(&stash, "call-1", "shell", &value);
+
+        // The inline text is clamped and carries the navigation hint…
+        assert!(text.len() < big.len());
+        assert!(text.contains("Full output stashed"));
+        assert!(text.contains("output_view(tool_use_id=\"call-1\")"));
+        // …and the full output is retrievable from the stash.
+        let viewed = handle_stash_tool(
+            &stash,
+            "output_view",
+            Some(&serde_json::json!({"tool_use_id": "call-1"}).as_object().unwrap().clone()),
+        )
+        .unwrap();
+        assert!(viewed.contains("xxx"));
+    }
+
+    #[test]
+    fn render_oversized_shell_stashes_raw_stdout() {
+        let stash = Mutex::new(OutputStash::new());
+        let stdout = "line\n".repeat(MAX_TOOL_RESULT_CHARS); // far over the clamp
+        let value = serde_json::json!({
+            "ok": true, "exit_code": 0, "stdout": stdout, "stderr": ""
+        });
+        render_tool_result(&stash, "sh-1", "shell", &value);
+        // The stash holds raw stdout (no JSON envelope), via extract_stash_content.
+        let grepped =
+            handle_stash_tool(&stash, "output_grep", Some(&serde_json::json!({
+                "tool_use_id": "sh-1", "pattern": "line"
+            }).as_object().unwrap().clone()))
+            .unwrap();
+        assert!(grepped.contains("line"));
+        assert!(!grepped.contains("\"stdout\""));
+    }
+
+    #[test]
+    fn handle_stash_tool_rejects_unknown_name() {
+        let stash = Mutex::new(OutputStash::new());
+        assert!(handle_stash_tool(&stash, "shell", None).is_err());
     }
 }

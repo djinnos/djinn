@@ -198,6 +198,38 @@ pub struct Conversation {
     pub messages: Vec<Message>,
 }
 
+/// Per-string ceiling for OpenAI Responses `input` items.
+///
+/// The Responses API rejects any single string field longer than 10 MiB with
+/// `string_above_max_length` (HTTP 400), which wedges *every* subsequent turn
+/// of a session whose persisted history contains an oversized item — e.g. a
+/// pre-truncation tool result. Upstream paths now clamp tool results to ~30k
+/// chars ([`djinn_agent::output_stash::MAX_TOOL_RESULT_CHARS`]), so this is a
+/// last-resort backstop: generous enough never to touch legitimate content,
+/// safely under the provider's hard limit, and applied at serialization time
+/// so it also rescues legacy sessions on their next turn.
+const MAX_RESPONSES_STRING_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
+
+/// Clamp a string to [`MAX_RESPONSES_STRING_BYTES`], on a UTF-8 char boundary,
+/// appending a marker noting how many bytes were dropped. Returns the input
+/// unchanged (no allocation) when already within the limit.
+fn clamp_responses_string(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.len() <= MAX_RESPONSES_STRING_BYTES {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut end = MAX_RESPONSES_STRING_BYTES;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let omitted = s.len() - end;
+    std::borrow::Cow::Owned(format!(
+        "{}\n\n[... {omitted} bytes truncated: this field exceeded the provider's \
+         per-string size limit. The full content was available to the agent when \
+         it was produced.]",
+        &s[..end]
+    ))
+}
+
 impl Conversation {
     /// Create an empty conversation.
     pub fn new() -> Self {
@@ -582,7 +614,10 @@ impl Conversation {
                     for block in &msg.content {
                         match block {
                             ContentBlock::Text { text } if !text.is_empty() => {
-                                text_items.push(json!({"type": "input_text", "text": text}));
+                                text_items.push(json!({
+                                    "type": "input_text",
+                                    "text": clamp_responses_string(text)
+                                }));
                             }
                             ContentBlock::Image { media_type, data } => {
                                 text_items.push(json!({
@@ -635,7 +670,7 @@ impl Conversation {
                                 input_items.push(json!({
                                     "type": "function_call_output",
                                     "call_id": tool_use_id,
-                                    "output": output
+                                    "output": clamp_responses_string(&output)
                                 }));
                             }
                             _ => {}
@@ -655,7 +690,10 @@ impl Conversation {
                     for block in &msg.content {
                         match block {
                             ContentBlock::Text { text } if !text.is_empty() => {
-                                text_items.push(json!({"type": "output_text", "text": text}));
+                                text_items.push(json!({
+                                    "type": "output_text",
+                                    "text": clamp_responses_string(text)
+                                }));
                             }
                             ContentBlock::ToolUse { id, name, input } => {
                                 // Orphaned call (no matching result) — skip so
@@ -1343,6 +1381,67 @@ mod tests {
         assert_eq!(input[0]["call_id"], "call_ok");
         assert_eq!(input[1]["type"], "function_call_output");
         assert_eq!(input[1]["call_id"], "call_ok");
+    }
+
+    #[test]
+    fn to_openai_responses_input_clamps_oversized_tool_output() {
+        // Backstop for the `string_above_max_length` 400: a legacy/oversized
+        // tool result must be clamped under the provider's per-string limit at
+        // serialization time so it can't wedge the session on replay.
+        let huge = "z".repeat(MAX_RESPONSES_STRING_BYTES + 4096);
+        let mut conversation = Conversation::new();
+        conversation.push(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_big".into(),
+                name: "code_graph".into(),
+                input: json!({}),
+            }],
+            metadata: None,
+        });
+        conversation.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_big".into(),
+                content: vec![ContentBlock::text(huge.clone())],
+                is_error: false,
+            }],
+            metadata: None,
+        });
+
+        let (_, input) = conversation.to_openai_responses_input();
+        let output = input[1]["output"].as_str().unwrap();
+        assert!(output.len() <= MAX_RESPONSES_STRING_BYTES + 256); // clamp + marker
+        assert!(output.len() < huge.len());
+        assert!(output.contains("bytes truncated"));
+    }
+
+    #[test]
+    fn to_openai_responses_input_leaves_normal_output_untouched() {
+        // The common case must be byte-for-byte identical — the clamp only
+        // fires on pathological sizes.
+        let mut conversation = Conversation::new();
+        conversation.push(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "c".into(),
+                name: "shell".into(),
+                input: json!({}),
+            }],
+            metadata: None,
+        });
+        conversation.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "c".into(),
+                content: vec![ContentBlock::text("ordinary result")],
+                is_error: false,
+            }],
+            metadata: None,
+        });
+
+        let (_, input) = conversation.to_openai_responses_input();
+        assert_eq!(input[1]["output"], "ordinary result");
     }
 
     #[test]

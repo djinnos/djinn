@@ -1,5 +1,5 @@
 use std::convert::Infallible;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Default outer timeout for per-tool dispatch in the chat loop.
@@ -511,6 +511,17 @@ async fn run_chat_loop(
     let mut assistant_content_for_title: Vec<ContentBlock> = Vec::new();
     let mut completed_ok = false;
 
+    // Per-request stash for oversized tool results. Mirrors the worker reply
+    // loop: a result over `MAX_TOOL_RESULT_CHARS` is stashed in full and the
+    // model gets a truncated view plus an `output_view`/`output_grep` hint.
+    // This is what keeps a 12 MB `code_graph`/`pr_review_context`/MCP result
+    // from being persisted and replayed verbatim into the provider's `input`
+    // array (the `string_above_max_length` 400). Lives for the whole tool loop
+    // so `output_view`/`output_grep` resolve within the same user turn; across
+    // turns the persisted text is already truncated and the serializer clamp in
+    // `Conversation::to_openai_responses_input` is the final backstop.
+    let output_stash = Arc::new(Mutex::new(djinn_agent::output_stash::OutputStash::new()));
+
     loop {
         if loop_count >= MAX_TOOL_ITERATIONS {
             tracing::warn!(
@@ -666,6 +677,41 @@ async fn run_chat_loop(
             let args = serde_json::Value::Object(input.as_object().cloned().unwrap_or_default());
             let started_at = Instant::now();
 
+            // `output_view` / `output_grep` are served in-process against the
+            // per-request stash — they never hit tool dispatch, and their
+            // results are already size-bounded by the stash. Intercept before
+            // the extension/MCP tiers (and before the timeout wrapper, since
+            // there's nothing here that can wedge).
+            if djinn_agent::chat_tools::is_chat_stash_tool(&name) {
+                let (output, success) = match djinn_agent::output_stash::handle_stash_tool(
+                    &output_stash,
+                    &name,
+                    args.as_object(),
+                ) {
+                    Ok(text) => (text, true),
+                    Err(e) => (e, false),
+                };
+                let elapsed_ms = started_at.elapsed().as_millis() as u64;
+                tool_results.push(ContentBlock::ToolResult {
+                    tool_use_id: id.clone(),
+                    content: vec![ContentBlock::text(output.clone())],
+                    is_error: !success,
+                });
+                let _ = tx
+                    .send(sse_json_event(
+                        "tool_result",
+                        &ToolResultPayload {
+                            id,
+                            output,
+                            elapsed_ms,
+                            success,
+                            message: None,
+                        },
+                    ))
+                    .await;
+                continue;
+            }
+
             // Outer per-tool timeout. Defense-in-depth on top of the
             // op-specific timeouts inside `code_graph` dispatchers — any
             // tool that wedges (an LSP server hung on a 100k-line file,
@@ -739,7 +785,16 @@ async fn run_chat_loop(
             };
             match dispatch_result {
                 Ok(value) => {
-                    let output = value.to_string();
+                    // Truncate-and-stash oversized results so neither the
+                    // persisted history nor the next provider request can carry
+                    // an unbounded string. The model browses the full output via
+                    // `output_view` / `output_grep` against `output_stash`.
+                    let output = djinn_agent::output_stash::render_tool_result(
+                        &output_stash,
+                        &id,
+                        &name,
+                        &value,
+                    );
                     let elapsed_ms = started_at.elapsed().as_millis() as u64;
                     tool_results.push(ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
