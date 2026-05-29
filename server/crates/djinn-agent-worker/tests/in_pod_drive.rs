@@ -428,6 +428,8 @@ async fn worker_drives_real_supervisor_in_pod() {
         flow: SupervisorFlow::Planning,
         model_id_per_role: per_role,
         read_source_project_ids: Vec::new(),
+        github_owner: None,
+        github_install_token: None,
     };
     let spec_path: PathBuf = cfg_dir.path().join("spec.bin");
     write_bin(&spec_path, &spec);

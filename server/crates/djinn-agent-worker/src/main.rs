@@ -233,6 +233,62 @@ async fn run() -> Result<()> {
     }
 }
 
+/// Configure git + Go in the worker Pod so the agent's build/test commands can
+/// fetch the project org's PRIVATE transitive deps. The workspace remote points
+/// at the local `/mirror` (no github auth), so transitive `github.com/<owner>/*`
+/// fetches would otherwise hit GitHub unauthenticated. Using the per-project
+/// installation token (minted host-side, carried on the spec — never a
+/// hardcoded org), we:
+///   - write a global git `url.insteadOf` rewrite so any git fetch of
+///     `https://github.com/<owner>/…` carries the token (covers Go modules,
+///     cargo git deps with `git-fetch-with-cli`, and pnpm/npm git deps), and
+///   - set `GOPRIVATE=github.com/<owner>/*` (via `go env -w`) so `go` fetches
+///     those modules directly via git instead of the public proxy/sumdb.
+/// Best-effort: failures are logged (never the token) and never fatal — public
+/// deps still resolve. The token is short-lived (~1h) and lives only in the
+/// Pod's HOME/go env for the run.
+async fn configure_private_dep_access(spec: &TaskRunSpec) {
+    let (Some(owner), Some(token)) = (
+        spec.github_owner.as_deref(),
+        spec.github_install_token.as_deref(),
+    ) else {
+        return;
+    };
+
+    // Global git credential rewrite. NOTE: never log `key` — it embeds the token.
+    let key = format!("url.https://x-access-token:{token}@github.com/{owner}/.insteadOf");
+    let value = format!("https://github.com/{owner}/");
+    match tokio::process::Command::new("git")
+        .args(["config", "--global", &key, &value])
+        .status()
+        .await
+    {
+        Ok(s) if s.success() => {
+            info!(owner, "configure_private_dep_access: git insteadOf set for private deps")
+        }
+        Ok(s) => warn!(
+            owner,
+            code = ?s.code(),
+            "configure_private_dep_access: git config failed; private deps may be inaccessible"
+        ),
+        Err(e) => {
+            warn!(owner, error = %e, "configure_private_dep_access: git config errored")
+        }
+    }
+
+    // GOPRIVATE for Go projects (no-op when `go` isn't installed — best-effort).
+    let goprivate = format!("GOPRIVATE=github.com/{owner}/*");
+    match tokio::process::Command::new("go")
+        .args(["env", "-w", &goprivate])
+        .status()
+        .await
+    {
+        Ok(s) if s.success() => info!(owner, "configure_private_dep_access: GOPRIVATE set"),
+        // Non-Go projects: `go` absent → expected; debug, not warn.
+        _ => tracing::debug!(owner, "configure_private_dep_access: `go env -w` skipped (go absent?)"),
+    }
+}
+
 async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     info!(
         server = %args.server_addr,
@@ -251,6 +307,10 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     let spec: TaskRunSpec =
         bincode::deserialize(&spec_bytes).context("bincode deserialize TaskRunSpec")?;
     info!(task_id = %spec.task_id, flow = ?spec.flow, "received spec");
+
+    // Configure git + Go so the agent's build/test commands can fetch the
+    // org's PRIVATE transitive deps using the per-project installation token.
+    configure_private_dep_access(&spec).await;
 
     // 1b. Slurp the per-role credentials bundle off the same Secret mount
     //     (Phase 7a). Phase 7b hands these to `WorkerSupervisorServices` so

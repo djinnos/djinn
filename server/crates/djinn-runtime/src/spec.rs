@@ -138,6 +138,22 @@ pub struct TaskRunSpec {
     /// skew during a rolling deploy) deserializable.
     #[serde(default)]
     pub read_source_project_ids: Vec<String>,
+    /// The project's GitHub owner (org/user), used to scope private-dependency
+    /// fetching in the worker Pod: `GOPRIVATE=github.com/<owner>/*` plus a git
+    /// `url.insteadOf` rewrite so `go mod download` / cargo git deps / pnpm git
+    /// deps authenticate to that org's private repos with the installation
+    /// token below. Derived from `projects.github_owner` at dispatch — never a
+    /// hardcoded org. `None`/empty disables the rewrite. `#[serde(default)]` for
+    /// host/worker version skew during a rolling deploy.
+    #[serde(default)]
+    pub github_owner: Option<String>,
+    /// Short-lived GitHub App installation token for the project's owner,
+    /// minted host-side at dispatch (rotates ~hourly). Injected into the Pod's
+    /// git config (`url.insteadOf`) so the agent's build/test commands can pull
+    /// the org's PRIVATE transitive deps. Rides the per-task-run Secret like the
+    /// rest of the spec; lives only for the Pod's lifetime.
+    #[serde(default)]
+    pub github_install_token: Option<String>,
 }
 
 /// Terminal outcome of a task-run.
@@ -206,6 +222,8 @@ mod tests {
             flow: SupervisorFlow::NewTask,
             model_id_per_role: per_role,
             read_source_project_ids: vec!["proj-read-1".to_string()],
+            github_owner: None,
+            github_install_token: None,
         };
 
         let bytes = bincode::serialize(&spec).expect("serialize");

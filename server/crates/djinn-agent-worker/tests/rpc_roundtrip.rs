@@ -86,6 +86,8 @@ fn fixture_spec(task_id: &str) -> TaskRunSpec {
         flow: SupervisorFlow::Planning,
         model_id_per_role: HashMap::new(),
         read_source_project_ids: Vec::new(),
+        github_owner: None,
+        github_install_token: None,
     }
 }
 

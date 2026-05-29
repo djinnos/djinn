@@ -917,6 +917,8 @@ mod tests {
             flow: SupervisorFlow::NewTask,
             model_id_per_role: HashMap::new(),
             read_source_project_ids: Vec::new(),
+            github_owner: None,
+            github_install_token: None,
         };
         let credentials = ResolvedCredentials::default();
 

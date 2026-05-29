@@ -1823,6 +1823,8 @@ impl CoordinatorActor {
                 model_id_per_role: std::collections::HashMap::new(),
                 // PR-open-only flow: no workspace reads, so no read sources.
                 read_source_project_ids: Vec::new(),
+                github_owner: None,
+                github_install_token: None,
             };
             let callbacks = crate::supervisor_impl::SupervisorCallbackContext {
                 agent_context: app_state.clone(),

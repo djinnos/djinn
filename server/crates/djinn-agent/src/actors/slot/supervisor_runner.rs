@@ -149,6 +149,33 @@ pub(crate) async fn run_supervisor_dispatch(
     .await
     .unwrap_or_default();
 
+    // ── Private-dependency credentials for the worker Pod (best-effort) ───
+    //
+    // The project's GitHub owner + a short-lived installation token so the
+    // agent's build/test commands in the Pod can fetch the org's PRIVATE
+    // transitive deps (Go modules, cargo/pnpm git deps) — wired into the Job
+    // env as `GOPRIVATE=github.com/<owner>/*` + a git `url.insteadOf` rewrite.
+    // Derived from the project row + its installation; NO hardcoded org.
+    // Non-fatal: a missing owner/installation just disables the rewrite (public
+    // deps still resolve), so dispatch never fails on this.
+    let pd_project_repo =
+        djinn_db::ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let github_owner = pd_project_repo
+        .get_github_coords(&task.project_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|(owner, _repo)| owner);
+    let github_install_token = match pd_project_repo.get_installation_id(&task.project_id).await {
+        Ok(Some(installation_id)) => {
+            djinn_provider::github_app::installations::get_installation_token(installation_id)
+                .await
+                .map(|t| t.token)
+                .ok()
+        }
+        _ => None,
+    };
+
     let task_run_id = uuid::Uuid::now_v7().to_string();
     let spec = TaskRunSpec {
         task_run_id,
@@ -160,6 +187,8 @@ pub(crate) async fn run_supervisor_dispatch(
         flow,
         model_id_per_role,
         read_source_project_ids,
+        github_owner,
+        github_install_token,
     };
 
     // ── Resolve the task's creator for per-user credential scoping ────────
