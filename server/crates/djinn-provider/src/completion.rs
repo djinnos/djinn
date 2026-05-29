@@ -231,7 +231,24 @@ pub async fn resolve_memory_provider_config(
     settings_raw: &str,
 ) -> Result<ProviderConfig> {
     let selected = parse_memory_model_selection(settings_raw);
-    let resolved = select_memory_model(catalog, credentials, selected.as_deref())?;
+    let resolved = match select_memory_model(catalog, credentials, selected.as_deref()) {
+        Ok(resolved) => resolved,
+        Err(primary_err) => {
+            // The configured memory model couldn't be resolved against a
+            // CONNECTED provider. This is common: `resolve_memory_provider`
+            // feeds the first worker model (e.g. a codex-served `openai/gpt-5.x`
+            // id) which the static models.dev catalog doesn't list, even though
+            // dispatch runs it fine via the connected `chatgpt_codex`
+            // credential. Erroring here skips post-session knowledge extraction
+            // ENTIRELY (zero scoped notes on the whole deployment). Fall back to
+            // the cheapest connected model so extraction still runs.
+            select_memory_model(catalog, credentials, None).map_err(|fallback_err| {
+                anyhow!(
+                    "memory model unresolvable ({primary_err}); connected-model fallback also failed: {fallback_err}"
+                )
+            })?
+        }
+    };
     provider_config_for_model(&resolved, credential_repo).await
 }
 
@@ -788,5 +805,31 @@ mod tests {
                 .to_string()
                 .contains("memory.llm_model 'openai/nonexistent-model' is not available")
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resolve_memory_provider_falls_back_to_connected_when_configured_model_unresolvable() {
+        // Staging scenario: the configured (first worker) model isn't resolvable
+        // against the static catalog — e.g. a codex-served `openai/*` id that
+        // dispatch runs but `find_model` doesn't know — yet another provider IS
+        // connected. Extraction must still run on the connected model instead of
+        // being skipped, which is what left the deployment with zero scoped notes.
+        let db = Database::open_in_memory().unwrap();
+        let settings = SettingsRepository::new(db.clone(), EventBus::noop());
+        let credentials = CredentialRepository::new(db.clone(), EventBus::noop());
+        settings
+            .set("settings.raw", r#"{"models":["openai/gpt-5.5-not-in-catalog"]}"#)
+            .await
+            .unwrap();
+        // A genuinely connected builtin provider for the fallback to land on.
+        credentials
+            .set("anthropic", "ANTHROPIC_API_KEY", "test-key")
+            .await
+            .unwrap();
+
+        let provider = resolve_memory_provider(&db)
+            .await
+            .expect("should fall back to the connected provider, not error");
+        assert_eq!(provider.name(), "anthropic");
     }
 }
