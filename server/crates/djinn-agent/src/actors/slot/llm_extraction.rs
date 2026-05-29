@@ -56,6 +56,85 @@ const DUPLICATE_CONFIDENCE_SIGNAL: f64 = 0.65;
 const EXTRACTION_SYSTEM_PROMPT: &str = SYSTEM_PROMPT;
 const NOVELTY_SYSTEM_PROMPT: &str = "You are a semantic novelty judge for extracted knowledge notes. Compare a proposed note summary against an existing note summary. Respond with valid JSON only.";
 
+/// Max characters of session transcript fed to the extraction LLM.
+const TRANSCRIPT_EXCERPT_CHARS: usize = 12_000;
+
+/// Render a compact transcript excerpt for the extraction prompt: assistant
+/// reasoning, tool actions, and (truncated) tool results, capped to `max_chars`
+/// and tail-biased so the session's outcome/conclusions are retained. The
+/// taxonomy only carries event COUNTS; without the actual content here the LLM
+/// has nothing to distill into case/pattern/pitfall notes (and returns empty
+/// arrays every time).
+fn build_transcript_excerpt(messages: &[djinn_core::message::Message], max_chars: usize) -> String {
+    use djinn_core::message::{ContentBlock, Role};
+
+    fn take_chars(s: &str, n: usize) -> String {
+        if s.chars().count() > n {
+            let mut t: String = s.chars().take(n).collect();
+            t.push('…');
+            t
+        } else {
+            s.to_string()
+        }
+    }
+    fn blocks_text(blocks: &[ContentBlock]) -> String {
+        blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.trim()),
+                _ => None,
+            })
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    for msg in messages {
+        let role = match msg.role {
+            Role::System => continue,
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        };
+        for block in &msg.content {
+            match block {
+                ContentBlock::Text { text } => {
+                    let t = text.trim();
+                    if !t.is_empty() {
+                        lines.push(format!("{role}: {t}"));
+                    }
+                }
+                ContentBlock::ToolUse { name, input, .. } => {
+                    lines.push(format!("{role} → {name}({})", take_chars(&input.to_string(), 200)));
+                }
+                ContentBlock::ToolResult {
+                    content, is_error, ..
+                } => {
+                    let body = take_chars(&blocks_text(content), 600);
+                    if !body.is_empty() {
+                        let tag = if *is_error { "tool error" } else { "tool result" };
+                        lines.push(format!("{tag}: {body}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let full = lines.join("\n");
+    if full.len() <= max_chars {
+        return full;
+    }
+    // Tail-biased: keep the most recent content, aligned to a char boundary.
+    let target = full.len() - max_chars;
+    let start = full
+        .char_indices()
+        .find(|(i, _)| *i >= target)
+        .map(|(i, _)| i)
+        .unwrap_or(full.len());
+    format!("…(earlier turns omitted)…\n{}", &full[start..])
+}
+
 const MIN_DURABLE_WORDS: usize = 16;
 
 const PATTERN_REQUIRED_SECTIONS: &[&str] = &[
@@ -495,6 +574,26 @@ async fn run_llm_extraction_inner(
 
     // ── Build prompt ───────────────────────────────────────────────────────
     let taxonomy_json = serde_json::to_string(&taxonomy).unwrap_or_else(|_| "{}".to_string());
+    // Load the actual conversation so the LLM has real content to distill —
+    // the taxonomy is only event counts. Best-effort: an empty excerpt just
+    // means the LLM falls back to counts (the prior behaviour).
+    let transcript = {
+        let msg_repo = djinn_db::SessionMessageRepository::new(
+            app_state.db.clone(),
+            app_state.event_bus.clone(),
+        );
+        match msg_repo.load_conversation(&session_id).await {
+            Ok(conv) => build_transcript_excerpt(&conv.messages, TRANSCRIPT_EXCERPT_CHARS),
+            Err(e) => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    error = %e,
+                    "llm_extraction: could not load transcript for prompt; using counts only"
+                );
+                String::new()
+            }
+        }
+    };
     let project_path_buf =
         djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
     let project_path = project_path_buf.to_string_lossy();
@@ -508,6 +607,8 @@ async fn run_llm_extraction_inner(
         "Task: {title}\n\
          Description: {description}\n\n\
          Session event counts: {taxonomy_json}\n\n\
+         Session transcript (excerpt — assistant reasoning, tool actions, and results; \
+         this is the actual work to distill knowledge from):\n{transcript}\n\n\
          Files touched were in these areas: {scope_json}\n\
          Include a \"scope_paths\" array per note with relevant path prefixes from the list above.\n\n\
          Extract knowledge from this session. Return JSON:\n\
@@ -1348,6 +1449,61 @@ mod tests {
     use super::*;
     use crate::actors::slot::session_extraction::ExtractionQuality;
     use crate::test_helpers::{agent_context_from_db, create_test_db, test_path};
+
+    #[test]
+    fn transcript_excerpt_renders_text_tools_and_results_and_skips_system() {
+        use djinn_core::message::{ContentBlock, Message, Role};
+        let messages = vec![
+            Message {
+                role: Role::System,
+                content: vec![ContentBlock::text("you are a worker")],
+                metadata: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::text("I'll fix the migrations path"),
+                    ContentBlock::ToolUse {
+                        id: "t1".into(),
+                        name: "edit".into(),
+                        input: serde_json::json!({"file": "migrations.rs"}),
+                    },
+                ],
+                metadata: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: vec![ContentBlock::text("No such file or directory")],
+                    is_error: true,
+                }],
+                metadata: None,
+            },
+        ];
+        let out = build_transcript_excerpt(&messages, 12_000);
+        assert!(!out.contains("you are a worker"), "system prompt must be skipped");
+        assert!(out.contains("assistant: I'll fix the migrations path"));
+        assert!(out.contains("assistant → edit("));
+        assert!(out.contains("tool error: No such file or directory"));
+    }
+
+    #[test]
+    fn transcript_excerpt_tail_biased_truncation() {
+        use djinn_core::message::{ContentBlock, Message, Role};
+        let messages: Vec<Message> = (0..200)
+            .map(|i| Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::text(format!("line {i}"))],
+                metadata: None,
+            })
+            .collect();
+        let out = build_transcript_excerpt(&messages, 200);
+        assert!(out.len() <= 240, "should be capped near max_chars: {}", out.len());
+        assert!(out.contains("earlier turns omitted"));
+        assert!(out.contains("line 199"), "tail (latest) content must be kept");
+        assert!(!out.contains("line 0:"), "head should be dropped");
+    }
 
     #[test]
     fn parse_extraction_response_valid_json() {
