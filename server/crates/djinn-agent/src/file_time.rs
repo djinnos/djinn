@@ -35,6 +35,25 @@ impl FileTime {
         Ok(())
     }
 
+    /// Forget any recorded read for `path` in this session, so the next
+    /// `assert` falls into the "must be read before modification" path and
+    /// forces the model to re-read before editing again.
+    ///
+    /// Called after a successful modify (write/edit/apply_patch): the model's
+    /// in-context view of the file is now stale relative to what's on disk, so
+    /// any further edit MUST re-read first. We invalidate explicitly rather
+    /// than relying on the post-write mtime advancing past the recorded mtime,
+    /// because coarse mtime granularity (or a same-tick write) could otherwise
+    /// leave `current_mtime == read_mtime` and silently let a stale chained
+    /// edit through.
+    pub async fn invalidate(&self, session_id: &str, path: &Path) {
+        let normalized = normalize(path);
+        let mut guard = self.inner.write().await;
+        if let Some(by_path) = guard.get_mut(session_id) {
+            by_path.remove(&normalized);
+        }
+    }
+
     pub async fn get(&self, session_id: &str, path: &Path) -> Option<SystemTime> {
         let normalized = normalize(path);
         let guard = self.inner.read().await;

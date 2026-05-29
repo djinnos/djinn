@@ -172,10 +172,15 @@ pub(crate) async fn call_write(
                 .await
                 .map_err(|e| format!("write failed: {e}"))?;
 
+            // Invalidate the read record: the model's in-context view of this
+            // file is now stale relative to disk. A subsequent edit must
+            // re-read first (forced via the "modified since last read" /
+            // "must be read before modification" guard in `assert`), so it
+            // patches against current content rather than its stale view.
             state
                 .file_time
-                .read(&worktree_path.display().to_string(), &path)
-                .await?;
+                .invalidate(&worktree_path.display().to_string(), &path)
+                .await;
 
             state.lsp.touch_file(worktree_path, &path, true).await;
             let diag_xml = format_diagnostics_xml(state.lsp.diagnostics(worktree_path).await);
@@ -197,7 +202,7 @@ pub(crate) async fn call_write(
         .await
 }
 
-pub(super) async fn call_edit(
+pub(crate) async fn call_edit(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
@@ -246,10 +251,14 @@ pub(super) async fn call_edit(
                 .await
                 .map_err(|e| format!("write failed: {e}"))?;
 
+            // Invalidate the read record so a subsequent edit must re-read
+            // first — see the matching note in `call_write`. Prevents the
+            // apply_patch/edit "context mismatch" loop where the model patches
+            // against its pre-edit view of the file.
             state
                 .file_time
-                .read(&worktree_path.display().to_string(), &path)
-                .await?;
+                .invalidate(&worktree_path.display().to_string(), &path)
+                .await;
 
             state.lsp.touch_file(worktree_path, &path, true).await;
             let diag_xml = format_diagnostics_xml(state.lsp.diagnostics(worktree_path).await);
@@ -273,7 +282,7 @@ pub(super) async fn call_edit(
         .await
 }
 
-pub(super) async fn call_apply_patch(
+pub(crate) async fn call_apply_patch(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
@@ -331,7 +340,12 @@ pub(super) async fn call_apply_patch(
     let mut affected = Vec::new();
     for (file_path, action) in &results {
         if *action != "deleted" {
-            state.file_time.read(&worktree_key, file_path).await?;
+            // Invalidate rather than re-record: the patch changed this file,
+            // so the model's in-context view is now stale. Forcing a re-read
+            // before the next patch fixes the apply_patch "context mismatch"
+            // loop (model keeps patching against its pre-patch view). See the
+            // note in `call_write`.
+            state.file_time.invalidate(&worktree_key, file_path).await;
             state.lsp.touch_file(worktree_path, file_path, true).await;
         }
         affected.push(serde_json::json!({

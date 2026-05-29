@@ -454,7 +454,10 @@ fn apply_single_chunk(
                 let actual = &lines[actual_idx];
                 if !lines_match(actual, text) {
                     return Err(format!(
-                        "context mismatch at line {}: expected '{}', found '{}'",
+                        "context mismatch at line {}: expected '{}', found '{}'. \
+                         The file on disk does not match your patch context — \
+                         it may have changed since you last read it. Read the \
+                         file again and rebuild the patch from its current content.",
                         actual_idx + 1,
                         text,
                         actual
