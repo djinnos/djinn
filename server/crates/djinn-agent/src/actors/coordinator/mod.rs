@@ -1056,4 +1056,177 @@ mod tests {
                 .any(|payload| payload["reopen_count"] == 2)
         );
     }
+
+    // ── Planner intervention for stuck tasks (trigger A) ──────────────────────
+
+    /// Create an `open` worker-eligible task and drive its `reopen_count` to
+    /// `target` via closed→open cycles (each reopen increments the count).
+    async fn make_task_with_reopen_count(
+        db: &Database,
+        tx: &broadcast::Sender<DjinnEventEnvelope>,
+        target: i64,
+    ) -> djinn_core::models::Task {
+        let project = test_helpers::create_test_project(db).await;
+        let epic = EpicRepository::new(db.clone(), crate::events::event_bus_for(tx))
+            .create_for_project(
+                &project.id,
+                djinn_db::EpicCreateInput {
+                    title: "Epic",
+                    description: "",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                    status: None,
+                    auto_breakdown: None,
+                    originating_adr_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(tx));
+        let task = repo
+            .create_in_project(
+                &project.id,
+                Some(&epic.id),
+                "Stuck task",
+                "implements handlers but never registers the service",
+                "",
+                "task",
+                0,
+                "",
+                Some("open"),
+                None,
+            )
+            .await
+            .unwrap();
+        for _ in 0..target {
+            repo.set_status(&task.id, "closed").await.unwrap();
+            repo.set_status(&task.id, "open").await.unwrap();
+        }
+        let task = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(task.reopen_count, target, "test fixture reopen_count");
+        task
+    }
+
+    async fn planner_intervention_markers(
+        repo: &TaskRepository,
+        task_id: &str,
+    ) -> Vec<serde_json::Value> {
+        repo.query_activity(ActivityQuery {
+            task_id: Some(task_id.to_owned()),
+            event_type: Some(PLANNER_INTERVENTION_MARKER.to_string()),
+            actor_role: Some("system".to_string()),
+            project_id: None,
+            from_time: None,
+            to_time: None,
+            limit: 100,
+            offset: 0,
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| serde_json::from_str::<serde_json::Value>(&e.payload).unwrap())
+        .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn below_threshold_does_not_intervene() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let mut actor = coordinator_actor_for_tests(&db, &tx);
+        let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD - 1).await;
+
+        let intervened = actor.maybe_intervene_on_stuck_task(&task).await;
+        assert!(!intervened, "below threshold must not intervene");
+
+        let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        assert!(
+            planner_intervention_markers(&repo, &task.id).await.is_empty(),
+            "no intervention marker should be written below threshold"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn at_threshold_routes_to_planner_intervention() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let mut actor = coordinator_actor_for_tests(&db, &tx);
+        let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
+
+        let intervened = actor.maybe_intervene_on_stuck_task(&task).await;
+        assert!(intervened, "at threshold must route to planner intervention");
+
+        let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+        // Exactly one intervention marker, keyed to the current reopen count.
+        let markers = planner_intervention_markers(&repo, &task.id).await;
+        assert_eq!(markers.len(), 1, "exactly one intervention marker");
+        assert_eq!(markers[0]["reopen_count"], REOPEN_INTERVENTION_THRESHOLD);
+
+        // A Planner review task was created in the same project.
+        let reviews = repo.list_by_status("open").await.unwrap();
+        assert!(
+            reviews
+                .iter()
+                .any(|t| t.issue_type == "review" && t.project_id == task.project_id),
+            "a review (planner intervention) task must be created"
+        );
+
+        // The source task carries a PLANNER_ESCALATION comment linking it.
+        let comments = repo
+            .query_activity(ActivityQuery {
+                task_id: Some(task.id.clone()),
+                event_type: Some("comment".to_string()),
+                actor_role: None,
+                project_id: None,
+                from_time: None,
+                to_time: None,
+                limit: 100,
+                offset: 0,
+            })
+            .await
+            .unwrap();
+        assert!(
+            comments.iter().any(|c| c.payload.contains("PLANNER_ESCALATION")),
+            "source task must record a PLANNER_ESCALATION comment"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn intervention_is_idempotent_per_reopen_count() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let mut actor = coordinator_actor_for_tests(&db, &tx);
+        let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
+        let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+        // First pass intervenes; subsequent passes at the SAME reopen count are
+        // suppressed by the marker — no Planner storm while one is in flight.
+        assert!(actor.maybe_intervene_on_stuck_task(&task).await);
+        assert!(!actor.maybe_intervene_on_stuck_task(&task).await);
+        assert!(!actor.maybe_intervene_on_stuck_task(&task).await);
+
+        assert_eq!(
+            planner_intervention_markers(&repo, &task.id).await.len(),
+            1,
+            "idempotent: a single marker for one reopen-count value"
+        );
+
+        // A genuine new reopen (count bumps past threshold again) re-arms one
+        // fresh intervention.
+        repo.set_status(&task.id, "closed").await.unwrap();
+        let bumped = repo.set_status(&task.id, "open").await.unwrap();
+        assert_eq!(bumped.reopen_count, REOPEN_INTERVENTION_THRESHOLD + 1);
+
+        assert!(
+            actor.maybe_intervene_on_stuck_task(&bumped).await,
+            "a higher reopen count must re-arm intervention"
+        );
+        assert_eq!(
+            planner_intervention_markers(&repo, &task.id).await.len(),
+            2,
+            "one marker per distinct reopen-count value"
+        );
+    }
 }

@@ -429,6 +429,19 @@ impl CoordinatorActor {
             let Some(role) = self.role_registry.dispatch_role_for_task(&task, &ctx) else {
                 continue;
             };
+            // Planner intervention for a stuck worker task (trigger A): if a
+            // worker task is about to be re-dispatched for the Nth time
+            // (`reopen_count >= REOPEN_INTERVENTION_THRESHOLD` — e.g. the
+            // internal reviewer keeps rejecting the SAME acceptance criterion),
+            // route it to a Planner intervention pass instead of burning
+            // another worker session. The Planner decides how to unstick it
+            // (decompose, rescope, close, or apply-as-feedback) via the
+            // existing intervention machinery (planner Workflow C). This is a
+            // no-op (returns false) for non-worker roles, tasks under the
+            // threshold, or tasks already routed at this reopen count.
+            if role == "worker" && self.maybe_intervene_on_stuck_task(&task).await {
+                continue;
+            }
             // A task that is dispatch-ready again (no active session — guarded
             // above) after a recent dispatch to the SAME role means the prior
             // run failed. A different role means the previous stage succeeded
@@ -1249,6 +1262,159 @@ impl CoordinatorActor {
 
             resolved
         }
+    }
+
+    /// Trigger A: route a stuck worker task to a Planner intervention pass.
+    ///
+    /// A task whose `reopen_count >= REOPEN_INTERVENTION_THRESHOLD` and is about
+    /// to be re-dispatched to the worker again is, by definition, not converging
+    /// on its own — most commonly because the internal reviewer keeps rejecting
+    /// the SAME acceptance criterion every round (the p4bb "Shadow gRPC service
+    /// never registered" loop). Re-dispatching the worker a fourth time will not
+    /// help, so we hand the task to the Planner, which can DECIDE how to unstick
+    /// it (decompose into focused subtasks, rescope the AC, close as
+    /// moot/duplicate, or apply the feedback) using the existing intervention
+    /// machinery — the planner Workflow C path that `dispatch_planner_escalation`
+    /// already drives.
+    ///
+    /// Returns `true` when the task was routed to a Planner (caller skips the
+    /// worker dispatch this pass), `false` otherwise.
+    ///
+    /// Idempotency: a `planner_intervention` activity marker is written per
+    /// `reopen_count` value. While the task stays at the same reopen count — or
+    /// while the Planner intervention is in flight — the marker suppresses
+    /// re-dispatching a Planner on every tick. The marker is keyed by the
+    /// CURRENT reopen count, so a later genuine reopen (count bumps again past
+    /// the threshold) re-arms one fresh intervention.
+    pub(super) async fn maybe_intervene_on_stuck_task(
+        &mut self,
+        task: &djinn_core::models::Task,
+    ) -> bool {
+        if task.reopen_count < REOPEN_INTERVENTION_THRESHOLD {
+            return false;
+        }
+
+        // Idempotency guard: have we already routed a Planner for THIS reopen
+        // count? If so, leave it to the in-flight (or already-dispatched)
+        // Planner — do not stack interventions.
+        match self
+            .planner_intervention_marker_exists(task, task.reopen_count)
+            .await
+        {
+            Ok(true) => return false,
+            Ok(false) => {}
+            Err(e) => {
+                // Fail safe: on a DB read error, do NOT intervene (the normal
+                // dispatch + escalating cooldown still bounds the loop). Better
+                // to under-trigger than to spam Planners on a transient error.
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "CoordinatorActor: planner-intervention marker check failed; skipping intervention this pass"
+                );
+                return false;
+            }
+        }
+
+        // Record the marker BEFORE dispatching so a concurrent tick (or a
+        // dispatch failure) cannot double-fire for the same reopen count.
+        if let Err(e) = self
+            .record_planner_intervention_marker(task, task.reopen_count)
+            .await
+        {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "CoordinatorActor: failed to record planner-intervention marker; skipping intervention this pass"
+            );
+            return false;
+        }
+
+        let reason = format!(
+            "Internal review loop exceeded {REOPEN_INTERVENTION_THRESHOLD} rounds without \
+             convergence (reopen_count={}). The worker keeps re-attempting but the same \
+             acceptance criteria remain unmet. Decide how to unstick this: DECOMPOSE into \
+             focused subtasks (carve out the specific unmet criterion), RESCOPE/clarify the \
+             acceptance criteria and re-dispatch, or CLOSE if the work is moot/duplicate/\
+             already-done.",
+            task.reopen_count
+        );
+
+        tracing::warn!(
+            task_id = %task.short_id,
+            reopen_count = task.reopen_count,
+            threshold = REOPEN_INTERVENTION_THRESHOLD,
+            "CoordinatorActor: stuck worker task — routing to Planner intervention"
+        );
+
+        // Clear the escalating-cooldown backoff state so the Planner-created
+        // review task (and any follow-up the Planner makes) isn't shadowed by a
+        // stale failure streak attributed to the original task.
+        self.dispatch_failure_streak.remove(&task.id);
+        self.dispatch_cooldowns.remove(&task.id);
+
+        self.dispatch_planner_escalation(&task.id, &reason, &task.project_id)
+            .await;
+        true
+    }
+
+    /// Returns `true` if a `planner_intervention` marker already exists for
+    /// `task` at the given `reopen_count`.
+    async fn planner_intervention_marker_exists(
+        &self,
+        task: &djinn_core::models::Task,
+        reopen_count: i64,
+    ) -> djinn_db::Result<bool> {
+        let task_repo = self.task_repo();
+        let entries = task_repo
+            .query_activity(ActivityQuery {
+                task_id: Some(task.id.clone()),
+                event_type: Some(PLANNER_INTERVENTION_MARKER.to_string()),
+                actor_role: Some("system".to_string()),
+                project_id: None,
+                from_time: None,
+                to_time: None,
+                limit: 100,
+                offset: 0,
+            })
+            .await?;
+
+        Ok(entries.iter().any(|entry| {
+            serde_json::from_str::<serde_json::Value>(&entry.payload)
+                .ok()
+                .and_then(|payload| {
+                    payload
+                        .get("reopen_count")
+                        .and_then(serde_json::Value::as_i64)
+                        .filter(|value| *value == reopen_count)
+                        .map(|_| ())
+                })
+                .is_some()
+        }))
+    }
+
+    /// Record a `planner_intervention` marker for `task` at `reopen_count`.
+    async fn record_planner_intervention_marker(
+        &self,
+        task: &djinn_core::models::Task,
+        reopen_count: i64,
+    ) -> djinn_db::Result<()> {
+        let payload = serde_json::json!({
+            "reopen_count": reopen_count,
+        })
+        .to_string();
+
+        self.task_repo()
+            .log_activity(
+                Some(&task.id),
+                "coordinator",
+                "system",
+                PLANNER_INTERVENTION_MARKER,
+                &payload,
+            )
+            .await?;
+
+        Ok(())
     }
 
     /// Dispatch a Planner escalation: create a review task, add a comment linking it
