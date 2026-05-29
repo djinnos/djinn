@@ -124,7 +124,18 @@ async fn materialize_read_sources(
             }
         };
         let slug = format!("{}/{}", project.github_owner, project.github_repo);
-        let mirror = djinn_workspace::mirror_path_for(pid);
+        // Resolve the read-source mirror against DJINN_MIRROR_ROOT (the mirror
+        // PVC, mounted at /mirror on the K8s worker — same root the worker uses
+        // for the PRIMARY workspace via MirrorManager) when set, falling back to
+        // the DJINN_HOME-based default for host/in-process layouts. The bare
+        // `mirror_path_for` only consults DJINN_HOME/$HOME (~/.djinn/mirrors),
+        // which is absent in the worker Pod (DJINN_HOME unset, mirrors at
+        // /mirror) — so it ALWAYS missed and every read source silently fell
+        // back to "slug only", leaving the agent without the read-source code on
+        // disk. Matches `MirrorManager::mirror_path` (`<root>/<pid>.git`).
+        let mirror = std::env::var_os("DJINN_MIRROR_ROOT")
+            .map(|root| std::path::PathBuf::from(root).join(format!("{pid}.git")))
+            .unwrap_or_else(|| djinn_workspace::mirror_path_for(pid));
         let mut path = None;
         if mirror.exists() {
             let dest = dest_root.join(pid);
