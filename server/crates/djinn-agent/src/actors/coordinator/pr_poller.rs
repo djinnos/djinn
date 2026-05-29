@@ -2,7 +2,7 @@ use djinn_core::models::TransitionAction;
 use djinn_db::{ActivityQuery, SessionAuthRepository, UserSettingsRepository};
 use djinn_provider::github_api::{
     CheckRun, DbBackedRefresher, GitHubApiClient, MergeMethod, PrReviewFeedback, PrState,
-    UserTokenExpired,
+    PullRequest, UserTokenExpired,
 };
 use djinn_provider::oauth::github_app_user;
 
@@ -35,6 +35,19 @@ pub const PR_REVIEW_FEEDBACK_EVENT: &str = "pr_review_feedback";
 
 /// Activity log event type for per-cycle markers (used to count rounds).
 const PR_REVIEW_CYCLE_EVENT: &str = "pr_review_cycle";
+
+/// Activity log event type for per-cycle markers on the CI-failure rework path
+/// (the analogue of `PR_REVIEW_CYCLE_EVENT` for the CI loop). Used to count how
+/// many times a task has been kicked back for CI failures so the loop can
+/// escalate instead of redispatching forever.
+const PR_CI_CYCLE_EVENT: &str = "pr_ci_cycle";
+
+/// Maximum CI-failure rework cycles before escalating to the Planner and
+/// force-closing the task. Beyond this the worker is demonstrably unable to
+/// turn the required checks green (commonly because the *real* failures are
+/// non-required preview/deploy infra the diff can't touch), so looping is
+/// pointless.
+const PR_CI_FAILURE_THRESHOLD: u32 = 3;
 
 impl CoordinatorActor {
     /// Poll GitHub for PR status on all tasks in `pr_draft` and `pr_review` states.
@@ -153,8 +166,6 @@ impl CoordinatorActor {
                 }
             };
 
-            let current_sha = pr.head.sha.clone();
-
             // ── Merged? ───────────────────────────────────────────────────────
             if pr.merged == Some(true) {
                 tracing::info!(
@@ -214,32 +225,32 @@ impl CoordinatorActor {
                     })
                     .collect();
                 if !failed_checks.is_empty() {
-                    tracing::info!(
-                        task_id = %task.short_id,
-                        pr = pull_number,
-                        sha = %current_sha,
-                        failed_count = failed_checks.len(),
-                        "PR poller: CI check failed on draft PR → reopening task for rework"
-                    );
-                    self.apply_pr_transition(
-                        &task.id,
-                        TransitionAction::PrCiFailed,
-                        Some("CI checks failed on PR"),
-                    )
-                    .await;
-                    self.log_ci_failure_comment(
-                        &task.id,
-                        &failed_checks,
-                        pr_url,
-                        &current_sha,
-                        gh_client,
-                        &owner,
-                        &repo,
-                    )
-                    .await;
-                    self.pr_status_cache.remove(&task.id);
-                    self.pr_draft_first_seen.remove(&task.id);
-                    continue;
+                    // Route through the shared CI-failure handler: it filters
+                    // to *blocking* (required) checks, short-circuits the
+                    // diff-empty re-emit, and caps the rework loop with
+                    // escalation. Returns `true` when it consumed the event
+                    // (reworked or force-closed); `false` when every failure
+                    // was non-blocking and we should fall through as if CI
+                    // passed.
+                    let handled = self
+                        .handle_ci_failure(
+                            gh_client,
+                            &task,
+                            &pr,
+                            &failed_checks,
+                            pr_url,
+                            &owner,
+                            &repo,
+                            pull_number,
+                        )
+                        .await;
+                    if handled {
+                        self.pr_status_cache.remove(&task.id);
+                        self.pr_draft_first_seen.remove(&task.id);
+                        continue;
+                    }
+                    // else: only advisory checks failed — fall through to the
+                    // undraft path below as if CI is green.
                 }
             }
 
@@ -501,33 +512,31 @@ impl CoordinatorActor {
                     .collect();
 
                 if !failed_checks.is_empty() {
-                    tracing::info!(
-                        task_id = %task.short_id,
-                        pr = pull_number,
-                        sha = %current_sha,
-                        failed_count = failed_checks.len(),
-                        "PR poller: CI check failed on review PR → reopening task for rework"
-                    );
-                    self.apply_pr_transition(
-                        &task.id,
-                        TransitionAction::PrCiFailed,
-                        Some("CI checks failed on PR"),
-                    )
-                    .await;
-                    self.log_ci_failure_comment(
-                        &task.id,
-                        &failed_checks,
-                        pr_url,
-                        &current_sha,
-                        gh_client,
-                        &owner,
-                        &repo,
-                    )
-                    .await;
-                    self.pr_status_cache.remove(&task.id);
-                    self.merge_fail_count.remove(&task.id);
-                    self.delegated_to_github.remove(&task.id);
-                    continue;
+                    // Shared CI-failure handler (blocking-only filter +
+                    // diff-empty short-circuit + capped, escalating rework).
+                    // Returns `true` when it consumed the event; `false` when
+                    // only advisory/preview checks failed, in which case we
+                    // fall through as if CI is green.
+                    let handled = self
+                        .handle_ci_failure(
+                            gh_client,
+                            &task,
+                            &pr,
+                            &failed_checks,
+                            pr_url,
+                            &owner,
+                            &repo,
+                            pull_number,
+                        )
+                        .await;
+                    if handled {
+                        self.pr_status_cache.remove(&task.id);
+                        self.merge_fail_count.remove(&task.id);
+                        self.delegated_to_github.remove(&task.id);
+                        continue;
+                    }
+                    // else: only advisory checks failed — treat as green and
+                    // fall through to the merge-eligibility path below.
                 }
 
                 // Only cache SHA once all checks have completed successfully.
@@ -1145,6 +1154,269 @@ impl CoordinatorActor {
         self.pr_status_cache.remove(task_id);
         self.merge_fail_count.remove(task_id);
         self.delegated_to_github.remove(task_id);
+    }
+
+    /// Shared handler for a "CI checks failed on PR" event, used by both the
+    /// `pr_draft` and `pr_review` polling paths.
+    ///
+    /// Fixes the infinite CI-failure rework loop by gating the rework on three
+    /// things, in order:
+    ///
+    /// 1. **Blocking-only filter.** The failed check-runs are intersected with
+    ///    the branch's *required* status-check contexts (read from branch
+    ///    protection — the source of truth). Advisory/preview checks (Vercel
+    ///    deploys, preview-env provisioning, etc.) are dropped: a code diff
+    ///    cannot fix that infra, so reworking on it loops forever. When branch
+    ///    protection is unreadable we fall back to a conservative name-pattern
+    ///    heuristic. If nothing blocking remains, we do **not** reopen — the
+    ///    required checks are green and the PR is fine to proceed.
+    ///
+    /// 2. **Diff-empty short-circuit.** If the PR head has no commits ahead of
+    ///    base on GitHub (`ahead_by == 0`), the previous worker iteration
+    ///    produced no new diff — re-dispatching cannot change anything. We
+    ///    escalate to the Planner and force-close instead of looping.
+    ///
+    /// 3. **Cycle cap.** Each CI-failure rework records a `pr_ci_cycle` marker.
+    ///    Past `PR_CI_FAILURE_THRESHOLD` we escalate to the Planner and
+    ///    force-close rather than redispatch. Escalation is terminal — the
+    ///    counter is never reset on the reopen that re-arms the loop.
+    ///
+    /// Returns `true` when the event was *consumed* (the task was transitioned
+    /// — either reworked or force-closed) and the caller should run its
+    /// post-transition cache cleanup and `continue`. Returns `false` when the
+    /// failures were all non-blocking and the caller should fall through to its
+    /// normal (CI-passed) handling.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_ci_failure(
+        &mut self,
+        gh_client: &GitHubApiClient,
+        task: &djinn_core::models::Task,
+        pr: &PullRequest,
+        failed_checks: &[&CheckRun],
+        pr_url: &str,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+    ) -> bool {
+        let task_id = &task.id;
+        let task_short_id = &task.short_id;
+        let current_sha = &pr.head.sha;
+        let base_ref = &pr.base.ref_name;
+
+        // ── 1. Filter to blocking (required) failures ─────────────────────────
+        // Read the branch's required status checks from branch protection (the
+        // source of truth). On any read failure we pass `None` and fall back to
+        // the name-pattern heuristic.
+        let required_contexts: Option<Vec<String>> = match gh_client
+            .list_required_status_checks(owner, repo, base_ref)
+            .await
+        {
+            Ok(contexts) => contexts,
+            Err(e) => {
+                tracing::info!(
+                    task_id = %task_short_id,
+                    pr = pull_number,
+                    base = %base_ref,
+                    error = %e,
+                    "PR poller: could not read required status checks (no admin perm or no protection); \
+                     falling back to advisory-name heuristic for blocking-check filter"
+                );
+                None
+            }
+        };
+
+        let blocking = blocking_failed_checks(failed_checks, required_contexts.as_deref());
+
+        if blocking.is_empty() {
+            tracing::info!(
+                task_id = %task_short_id,
+                pr = pull_number,
+                sha = %current_sha,
+                failed_count = failed_checks.len(),
+                "PR poller: all failed checks are non-blocking (advisory/preview); \
+                 required checks are green — not reopening for rework"
+            );
+            return false;
+        }
+
+        // ── 2. Diff-empty short-circuit ───────────────────────────────────────
+        // If the head has no commits ahead of base, the last worker iteration
+        // produced no new diff. Re-dispatching cannot change the outcome, so
+        // escalate + force-close instead of looping on the same SHA.
+        match gh_client
+            .compare_commits_ahead_by(owner, repo, base_ref, current_sha)
+            .await
+        {
+            Ok(0) => {
+                let blocking_names: Vec<&str> = blocking.iter().map(|cr| cr.name.as_str()).collect();
+                let reason = format!(
+                    "PR #{pull_number} stuck: required checks keep failing ({}) but the task branch \
+                     has no commits ahead of `{base_ref}` (head `{sha}`) — the worker produced no new \
+                     diff, so re-running cannot fix it. Escalating for human attention.",
+                    blocking_names.join(", "),
+                    sha = &current_sha[..current_sha.len().min(12)],
+                );
+                tracing::warn!(
+                    task_id = %task_short_id,
+                    pr = pull_number,
+                    sha = %current_sha,
+                    "PR poller: CI failed but branch is diff-empty vs base — escalating + force-closing"
+                );
+                self.escalate_ci_failure_and_close(task, pr_url, &reason).await;
+                return true;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                // Don't block the rework on a compare-API failure — fall
+                // through to the cycle-cap path, which still bounds the loop.
+                tracing::info!(
+                    task_id = %task_short_id,
+                    pr = pull_number,
+                    error = %e,
+                    "PR poller: compare-commits precheck failed; proceeding with cycle-cap path"
+                );
+            }
+        }
+
+        // ── 3. Cycle cap ──────────────────────────────────────────────────────
+        let task_repo = self.task_repo();
+        let prior_cycles = match task_repo
+            .query_activity(ActivityQuery {
+                task_id: Some(task_id.to_owned()),
+                event_type: Some(PR_CI_CYCLE_EVENT.to_string()),
+                actor_role: Some("system".to_string()),
+                project_id: None,
+                from_time: None,
+                to_time: None,
+                limit: 100,
+                offset: 0,
+            })
+            .await
+        {
+            Ok(entries) => entries.len() as u32,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_short_id,
+                    error = %e,
+                    "PR poller: failed to count CI-failure cycles; assuming 0"
+                );
+                0
+            }
+        };
+        let round = prior_cycles + 1;
+
+        if round > PR_CI_FAILURE_THRESHOLD {
+            let blocking_names: Vec<&str> = blocking.iter().map(|cr| cr.name.as_str()).collect();
+            let reason = format!(
+                "PR #{pull_number} stuck: required checks ({}) have failed across {prior} CI-failure \
+                 rework rounds (threshold {PR_CI_FAILURE_THRESHOLD}) without going green. The worker \
+                 cannot resolve this on its own — escalating for human attention.",
+                blocking_names.join(", "),
+                prior = prior_cycles,
+            );
+            tracing::warn!(
+                task_id = %task_short_id,
+                pr = pull_number,
+                round,
+                threshold = PR_CI_FAILURE_THRESHOLD,
+                "PR poller: CI-failure rework threshold exceeded — escalating + force-closing"
+            );
+            self.escalate_ci_failure_and_close(task, pr_url, &reason).await;
+            return true;
+        }
+
+        // Below threshold: record the cycle marker, surface CI feedback, and
+        // reopen for a fresh worker iteration.
+        let cycle_payload = serde_json::json!({ "round": round }).to_string();
+        if let Err(e) = task_repo
+            .log_activity(
+                Some(task_id),
+                "coordinator",
+                "system",
+                PR_CI_CYCLE_EVENT,
+                &cycle_payload,
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id = %task_short_id,
+                error = %e,
+                "PR poller: failed to store pr_ci_cycle marker"
+            );
+        }
+
+        tracing::info!(
+            task_id = %task_short_id,
+            pr = pull_number,
+            sha = %current_sha,
+            round,
+            threshold = PR_CI_FAILURE_THRESHOLD,
+            blocking_count = blocking.len(),
+            "PR poller: required CI check failed on PR → reopening task for rework (round {}/{})",
+            round,
+            PR_CI_FAILURE_THRESHOLD,
+        );
+        self.apply_pr_transition(
+            task_id,
+            TransitionAction::PrCiFailed,
+            Some("CI checks failed on PR"),
+        )
+        .await;
+        self.log_ci_failure_comment(
+            task_id,
+            &blocking,
+            pr_url,
+            current_sha,
+            gh_client,
+            owner,
+            repo,
+        )
+        .await;
+        true
+    }
+
+    /// Terminal escalation for a CI-failure loop the worker can't resolve
+    /// (diff-empty re-emit, or cycle cap exceeded). Logs a visibility comment,
+    /// dispatches a Planner escalation, then `ForceClose`s the task so it
+    /// leaves the rework loop. Never resets the CI-cycle counter.
+    async fn escalate_ci_failure_and_close(
+        &mut self,
+        task: &djinn_core::models::Task,
+        pr_url: &str,
+        reason: &str,
+    ) {
+        let task_repo = self.task_repo();
+
+        let comment_body = format!("**PR CI Escalation**: {reason}\n\nPR: {pr_url}");
+        let comment_payload = serde_json::json!({ "body": comment_body }).to_string();
+        if let Err(e) = task_repo
+            .log_activity(
+                Some(&task.id),
+                "coordinator",
+                "system",
+                "comment",
+                &comment_payload,
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "PR poller: failed to log CI escalation comment"
+            );
+        }
+
+        // Escalate to the Planner (ADR-051 §8 escalation ceiling) before
+        // force-closing, so a human / Planner sees why the task gave up.
+        self.dispatch_planner_escalation(&task.id, reason, &task.project_id)
+            .await;
+
+        self.apply_pr_transition(&task.id, TransitionAction::ForceClose, Some(reason))
+            .await;
+        self.pr_status_cache.remove(&task.id);
+        self.pr_draft_first_seen.remove(&task.id);
+        self.merge_fail_count.remove(&task.id);
+        self.delegated_to_github.remove(&task.id);
     }
 
     /// Attach PR review feedback to the task activity log, increment the
@@ -2007,6 +2279,63 @@ async fn enable_auto_merge_best_effort(
     }
 }
 
+/// Heuristic: is this check-run name an *advisory* (non-merge-gating) check?
+///
+/// Used only as a fallback when we couldn't read the branch's required-status-
+/// check contexts from branch protection (no protection configured, or the
+/// installation lacks the permission). Matches the common preview/deploy
+/// integrations whose failures cannot be fixed by a code diff (Vercel/Netlify
+/// deploy previews, preview-environment provisioning, etc.).
+///
+/// Matching is case-insensitive and substring-based so it catches the various
+/// per-app context names GitHub emits (e.g. `Vercel – acme-portal`,
+/// `PR Preview Environment Setup / setup-preview`).
+fn is_advisory_check_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    const ADVISORY_MARKERS: &[&str] = &[
+        "vercel",
+        "netlify",
+        "preview",
+        "deploy-preview",
+        "deployment",
+        "deploy /",
+        "cloudflare pages",
+        "render.com",
+        "surge",
+        "amplify",
+    ];
+    ADVISORY_MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// From the set of failed check-runs, return only those that are *blocking*
+/// (merge-gating).
+///
+/// - When `required_contexts` is `Some` (we read the branch's required status
+///   checks from branch protection — the source of truth), keep only failed
+///   checks whose name matches a required context. Anything not required is
+///   advisory and must not trigger a rework.
+/// - When `required_contexts` is `None` (branch protection unreadable), fall
+///   back to the name-pattern heuristic: keep failed checks that are *not*
+///   recognised as advisory. This is intentionally conservative — an unknown
+///   check is treated as blocking so we never silently swallow a real failure.
+fn blocking_failed_checks<'a>(
+    failed: &[&'a CheckRun],
+    required_contexts: Option<&[String]>,
+) -> Vec<&'a CheckRun> {
+    match required_contexts {
+        Some(required) => failed
+            .iter()
+            .filter(|cr| required.iter().any(|ctx| ctx == &cr.name))
+            .copied()
+            .collect(),
+        None => failed
+            .iter()
+            .filter(|cr| !is_advisory_check_name(&cr.name))
+            .copied()
+            .collect(),
+    }
+}
+
 /// Parse a GitHub PR URL into `(owner, repo, pull_number)`.
 ///
 /// Handles URLs of the form `https://github.com/{owner}/{repo}/pull/{number}`.
@@ -2028,7 +2357,99 @@ pub(crate) fn parse_pr_url(url: &str) -> Option<(String, String, u64)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{dequeue_reason_is_failure, is_merge_queue_405, parse_pr_url};
+    use super::{
+        blocking_failed_checks, dequeue_reason_is_failure, is_advisory_check_name,
+        is_merge_queue_405, parse_pr_url,
+    };
+    use djinn_provider::github_api::CheckRun;
+
+    fn check(name: &str) -> CheckRun {
+        CheckRun {
+            id: 1,
+            name: name.to_string(),
+            status: "completed".to_string(),
+            conclusion: Some("failure".to_string()),
+            html_url: "https://github.com/o/r/runs/1".to_string(),
+        }
+    }
+
+    #[test]
+    fn advisory_check_names_classified() {
+        // The real 1ck3 offenders.
+        assert!(is_advisory_check_name("PR Preview Environment Setup / setup-preview"));
+        assert!(is_advisory_check_name("Vercel – acme-portal"));
+        assert!(is_advisory_check_name("Vercel – admin-portal"));
+        assert!(is_advisory_check_name("Netlify deploy"));
+        assert!(is_advisory_check_name("Cloudflare Pages"));
+        assert!(is_advisory_check_name("Deployment to staging"));
+
+        // Required checks must NOT be classified as advisory.
+        assert!(!is_advisory_check_name("Sentinel"));
+        assert!(!is_advisory_check_name("unit tests"));
+        assert!(!is_advisory_check_name("ci / build"));
+        assert!(!is_advisory_check_name("lint"));
+    }
+
+    #[test]
+    fn blocking_filter_uses_required_contexts_when_present() {
+        let preview = check("Vercel – acme-portal");
+        let unit = check("unit tests");
+        let failed = vec![&preview, &unit];
+        // Branch protection lists only "unit tests" + "Sentinel" as required.
+        let required = vec!["unit tests".to_string(), "Sentinel".to_string()];
+
+        let blocking = blocking_failed_checks(&failed, Some(&required));
+        assert_eq!(blocking.len(), 1);
+        assert_eq!(blocking[0].name, "unit tests");
+    }
+
+    #[test]
+    fn blocking_filter_empty_when_only_non_required_fail() {
+        // The exact 1ck3 shape: required checks (unit tests / Sentinel) are
+        // GREEN — only preview/Vercel checks failed, so none of the *failed*
+        // checks are in the required set.
+        let preview = check("PR Preview Environment Setup / setup-preview");
+        let vercel = check("Vercel – acme-portal");
+        let failed = vec![&preview, &vercel];
+        let required = vec!["unit tests".to_string(), "Sentinel".to_string()];
+
+        let blocking = blocking_failed_checks(&failed, Some(&required));
+        assert!(
+            blocking.is_empty(),
+            "no required check failed → nothing should trigger rework"
+        );
+    }
+
+    #[test]
+    fn blocking_filter_falls_back_to_heuristic_without_contexts() {
+        let preview = check("Vercel – acme-portal");
+        let unit = check("unit tests");
+        let failed = vec![&preview, &unit];
+
+        // No branch-protection contexts available → name-pattern heuristic.
+        let blocking = blocking_failed_checks(&failed, None);
+        assert_eq!(blocking.len(), 1);
+        assert_eq!(blocking[0].name, "unit tests");
+    }
+
+    #[test]
+    fn blocking_filter_heuristic_keeps_unknown_checks_as_blocking() {
+        // Conservative fallback: an unrecognised check is treated as blocking
+        // so we never silently swallow a real failure.
+        let mystery = check("some-custom-gate");
+        let failed = vec![&mystery];
+        let blocking = blocking_failed_checks(&failed, None);
+        assert_eq!(blocking.len(), 1, "unknown checks must be treated as blocking");
+    }
+
+    #[test]
+    fn blocking_filter_heuristic_drops_only_advisory() {
+        let preview = check("Deploy Preview");
+        let vercel = check("Vercel – portal");
+        let failed = vec![&preview, &vercel];
+        let blocking = blocking_failed_checks(&failed, None);
+        assert!(blocking.is_empty());
+    }
 
     #[test]
     fn is_merge_queue_405_matches_real_payload() {

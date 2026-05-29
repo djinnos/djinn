@@ -600,3 +600,98 @@ async fn get_pr_merge_queue_state_handles_missing_pr() {
         .expect_err("missing PR should error");
     assert!(format!("{err}").contains("pullRequest not found"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_required_status_checks_returns_contexts() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("GET"))
+        .and(path(
+            "/repos/getalternative/alt-front-end/branches/main/protection/required_status_checks",
+        ))
+        .and(header("Authorization", "Bearer ghs_test_install"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "strict": true,
+            "contexts": ["unit tests", "Sentinel"],
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let contexts = client
+        .list_required_status_checks("getalternative", "alt-front-end", "main")
+        .await
+        .unwrap();
+    assert_eq!(
+        contexts,
+        Some(vec!["unit tests".to_string(), "Sentinel".to_string()])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_required_status_checks_404_is_none() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"/repos/.+/branches/.+/protection/required_status_checks"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            "message": "Branch not protected"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let contexts = client
+        .list_required_status_checks("o", "r", "main")
+        .await
+        .unwrap();
+    assert_eq!(contexts, None, "404 (no protection) maps to None for fallback");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_required_status_checks_403_errors() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"/repos/.+/branches/.+/protection/required_status_checks"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+            "message": "Resource not accessible by integration"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    // 403 (no admin perm) must Err so the caller falls back to the heuristic,
+    // not silently treat every check as non-blocking.
+    let err = client
+        .list_required_status_checks("o", "r", "main")
+        .await
+        .expect_err("403 must surface as an error");
+    assert!(format!("{err}").contains("403"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compare_commits_ahead_by_parses_count() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("GET"))
+        .and(path("/repos/o/r/compare/main...58f2d2b75e6d"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "ahead_by": 0,
+            "behind_by": 3,
+            "status": "behind",
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let ahead = client
+        .compare_commits_ahead_by("o", "r", "main", "58f2d2b75e6d")
+        .await
+        .unwrap();
+    assert_eq!(ahead, 0, "diff-empty branch reports ahead_by == 0");
+}

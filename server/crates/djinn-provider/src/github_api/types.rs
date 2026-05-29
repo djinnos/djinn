@@ -142,6 +142,23 @@ pub struct PullRequest {
     pub draft: Option<bool>,
 }
 
+/// Response from `GET /branches/{branch}/protection/required_status_checks`.
+///
+/// `contexts` is the list of required status-check context names (the
+/// merge-gating checks). Advisory checks are not present here.
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct RequiredStatusChecksResponse {
+    #[serde(default)]
+    pub(super) contexts: Vec<String>,
+}
+
+/// Subset of the `GET /compare/{base}...{head}` response we care about:
+/// how many commits the head is ahead of the base.
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct CompareResponse {
+    pub(super) ahead_by: u64,
+}
+
 /// A branch/commit reference embedded in a PR.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrRef {
