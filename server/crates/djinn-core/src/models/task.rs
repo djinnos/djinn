@@ -679,8 +679,12 @@ pub fn compute_transition(
         }
 
         TransitionAction::PrCiFailed => {
-            if *from != TaskStatus::PrDraft {
-                return bad("pr_ci_failed is only valid from pr_draft");
+            // Valid both while the PR is still a draft (pre-undraft CI) and
+            // after it's been undrafted into review — the merge queue can
+            // reject an undrafted PR with `failed_checks`, and the poller's
+            // `handle_queue_failure` reopens it via this action.
+            if !matches!(from, TaskStatus::PrDraft | TaskStatus::PrReview) {
+                return bad("pr_ci_failed is only valid from pr_draft or pr_review");
             }
             TransitionApply {
                 to_status: Some(TaskStatus::Open),
@@ -904,7 +908,10 @@ mod tests {
             }
             (TransitionAction::PrCreated, TaskStatus::Approved) => Some(TaskStatus::PrDraft),
             (TransitionAction::PrUndraft, TaskStatus::PrDraft) => Some(TaskStatus::PrReview),
-            (TransitionAction::PrCiFailed, TaskStatus::PrDraft) => Some(TaskStatus::Open),
+            (
+                TransitionAction::PrCiFailed,
+                TaskStatus::PrDraft | TaskStatus::PrReview,
+            ) => Some(TaskStatus::Open),
             (
                 TransitionAction::PrConflict,
                 TaskStatus::Approved | TaskStatus::PrDraft | TaskStatus::PrReview,
