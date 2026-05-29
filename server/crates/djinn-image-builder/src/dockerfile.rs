@@ -411,10 +411,15 @@ const DOTNET_SCIP_INDEXER: &str = "scip-dotnet";
 //     upstream tag is `scip-ruby-v0.4.7` but the gem ships as `0.4.7`.
 //   - scip-dotnet: NuGet version for `dotnet tool install --version`,
 //     BARE number (no leading `v`).
-//   - scip-python: PyPI version, BARE number (no leading `v`).
+//   - scip-python: npm version (@sourcegraph/scip-python), BARE number
+//     (no leading `v`). NOT on PyPI — it is published only to npm, so the
+//     python image installs it via npm (see install-python.sh).
 //   - scip-typescript: npm version, BARE number (no leading `v`).
 const SCIP_GO_VERSION: &str = "v0.2.6";
-const SCIP_PYTHON_VERSION: &str = "latest";
+// Pinned to a known-good npm release rather than `latest`: `@latest` was the
+// indirect cause of the prior breakage (the old PyPI path 404'd on every
+// build). Bump deliberately when rolling the indexer forward.
+const SCIP_PYTHON_VERSION: &str = "0.6.6";
 const SCIP_TYPESCRIPT_VERSION: &str = "latest";
 const SCIP_JAVA_VERSION: &str = "v0.12.3";
 const SCIP_CLANG_VERSION: &str = "v0.4.0";
