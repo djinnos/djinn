@@ -26,8 +26,16 @@ const DEFAULT_MIRROR_PVC: &str = "djinn-mirrors";
 /// `deploy/helm/djinn/templates/serviceaccount-controller.yaml`. If left
 /// unset, K8s falls back to `default` (no IRSA → 401 Unauthorized on push).
 const DEFAULT_BUILD_SERVICE_ACCOUNT: &str = "djinn-controller";
-/// Default concurrency cap — matches the Helm values default.
-const DEFAULT_MAX_CONCURRENT: usize = 3;
+/// Default concurrency cap — the maximum number of build Jobs the
+/// controller keeps in flight against the single shared buildkitd at
+/// once. Matches the Helm values default
+/// (`imagePipeline.controller.maxConcurrentBuilds`). 4 is a deliberate
+/// balance: low enough that a herd of rebuilds (e.g. a worker-ref bump
+/// invalidating every project's image hash) can't starve buildkitd's CPU
+/// into a liveness-probe-kill crash loop, high enough to keep throughput
+/// reasonable. Enforced cluster-wide by counting live build Jobs each
+/// reconcile pass — see [`crate::ImageController::enqueue`].
+const DEFAULT_MAX_CONCURRENT: usize = 4;
 
 /// Environment-variable names consumed by [`ImageControllerConfig::from_env`].
 pub mod env {
@@ -71,8 +79,13 @@ pub struct ImageControllerConfig {
     /// Name of the PVC (ReadWriteMany) holding per-project bare mirrors.
     pub mirror_pvc: String,
     /// Maximum number of concurrent build Jobs the controller will admit.
-    /// Enforced via a tokio [`tokio::sync::Semaphore`] — in-flight guards
-    /// prevent duplicate enqueues for the same project.
+    /// Enforced cluster-wide: each reconcile pass counts the live
+    /// (pending + running) build Jobs the controller owns and skips
+    /// enqueueing once that count reaches this cap, so a mass-rebuild
+    /// herd can't starve the single shared buildkitd. Deferred projects
+    /// are not lost — they're re-evaluated on a later reconcile tick as
+    /// slots free. A per-project in-flight guard additionally coalesces
+    /// duplicate enqueues for the same project.
     pub max_concurrent: usize,
     /// ServiceAccount the build Pod runs under. Has to carry the cluster's
     /// IRSA / Workload-Identity annotation so the docker credential helper

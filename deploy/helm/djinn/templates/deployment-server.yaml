@@ -156,6 +156,15 @@ spec:
               value: {{ include "djinn.imagePipeline.registryAuthSecretName" . | quote }}
             - name: DJINN_IMAGE_MIRROR_PVC
               value: {{ include "djinn.pvcName.mirrors" . | quote }}
+            # Cluster-wide cap on concurrent project-image build Jobs. The
+            # controller counts live build Jobs each reconcile pass and
+            # defers new ones once this many are in flight, so a mass
+            # rebuild (e.g. a worker-ref bump invalidating every project's
+            # image hash) can't starve the single shared buildkitd into a
+            # liveness-kill crash loop. Deferred projects are picked up on a
+            # later tick as slots free.
+            - name: DJINN_IMAGE_MAX_CONCURRENT
+              value: {{ .Values.imagePipeline.controller.maxConcurrentBuilds | quote }}
             # djinn-k8s runtime (task-run + warm-job dispatcher) — same
             # pattern as the image pipeline above: everything is derived
             # from the release fullname + namespace so no hardcoded

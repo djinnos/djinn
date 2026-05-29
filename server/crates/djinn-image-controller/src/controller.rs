@@ -17,8 +17,11 @@
 //!    change the resulting image invalidates the hash.
 //! 3. Compare against `projects.image_hash`. Skip if unchanged and the
 //!    previous build reached `ready`.
-//! 4. Acquire the in-flight guard + semaphore permit, upsert the
-//!    per-build ConfigMap carrying the generated Dockerfile + scripts,
+//! 4. Take the per-project in-flight guard, then check the cluster-wide
+//!    concurrency cap: count the live (pending + running) build Jobs the
+//!    controller owns and defer this project to a later reconcile tick if
+//!    the count is already at `max_concurrent`. Otherwise upsert the
+//!    per-build ConfigMap carrying the generated Dockerfile + scripts and
 //!    create the build Job.
 //! 5. Write `projects.image_status = building` + `image_hash = <new>`.
 //!
@@ -37,13 +40,13 @@ use djinn_image_builder::{
 use djinn_stack::environment::EnvironmentConfig;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::ConfigMap;
-use kube::api::{Api, DeleteParams, Patch, PatchParams, PostParams};
-use tokio::sync::{Mutex, Semaphore};
+use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
+use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::build_job::{
     build_context_config_map_name, build_image_build_context_config_map, build_image_build_job,
-    build_job_owner_reference, sanitize_id,
+    build_job_owner_reference, sanitize_id, LABEL_BUILD,
 };
 use crate::config::ImageControllerConfig;
 
@@ -81,18 +84,20 @@ pub struct ImageController {
     client: kube::Client,
     config: ImageControllerConfig,
     db: Database,
-    semaphore: Arc<Semaphore>,
+    /// Per-project coalescing guard. Prevents two overlapping `enqueue`
+    /// calls for the *same* project (e.g. a mirror-fetch tick racing the
+    /// watcher-driven re-reconcile) from both creating a Job. This is an
+    /// in-process dedupe, NOT the concurrency cap — that's enforced
+    /// cluster-wide by [`ImageController::count_active_build_jobs`].
     in_flight: Arc<Mutex<HashSet<String>>>,
 }
 
 impl ImageController {
     pub fn new(client: kube::Client, config: ImageControllerConfig, db: Database) -> Self {
-        let cap = config.max_concurrent.max(1);
         Self {
             client,
             config,
             db,
-            semaphore: Arc::new(Semaphore::new(cap)),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -180,12 +185,67 @@ impl ImageController {
             }
         }
 
+        // Cluster-wide concurrency cap. Count the build Jobs we own that
+        // are still running/pending (label-selected, terminal Jobs
+        // excluded) — *excluding* this project's own Jobs so re-reconciling
+        // an already-dispatched project (status flips, Failed-Job cleanup)
+        // is never starved. If we're already at the cap, DEFER: skip
+        // creating a new Job and leave the project's image state untouched
+        // so the next reconcile tick re-evaluates it once a slot frees.
+        // This is the real guard against the mass-rebuild herd that can
+        // starve the single shared buildkitd into a liveness-kill crash
+        // loop. The previous Job already exists / already terminal paths
+        // inside `submit_build_job` stay reachable because we exclude this
+        // project from the count.
+        let cap = self.config.max_concurrent;
+        let active = self
+            .count_active_build_jobs(Some(&sanitize_id(project_id)))
+            .await
+            .unwrap_or_else(|e| {
+                // A failed list shouldn't wedge the whole pipeline; log and
+                // treat as "no other builds active" so we don't deadlock on
+                // a transient API error. The per-project in-flight guard +
+                // hash check still prevent duplicate work.
+                warn!(
+                    project_id,
+                    error = %e,
+                    "image_controller: failed to count active build Jobs — proceeding without cap this tick"
+                );
+                0
+            });
+        if build_slots_available(cap, active) == 0 {
+            debug!(
+                project_id,
+                active,
+                cap = cap.max(1),
+                "image_controller: at max concurrent builds — deferring to a later reconcile tick"
+            );
+            self.in_flight.lock().await.remove(project_id);
+            return Ok(());
+        }
+
         let outcome = self
             .submit_build_job(&repo, project_id, &cfg, &new_hash, current.as_ref())
             .await;
 
         self.in_flight.lock().await.remove(project_id);
         outcome
+    }
+
+    /// Count build Jobs the controller owns that are still in flight
+    /// (running or pending — i.e. not yet Succeeded or Failed) in the
+    /// controller's namespace.
+    ///
+    /// Selected by the [`LABEL_BUILD`] label every build Job carries.
+    /// When `exclude_project` is `Some`, Jobs whose
+    /// `djinn.app/project-id` label matches are NOT counted — the caller
+    /// uses this to avoid counting the project it's about to (re)reconcile
+    /// against its own cap.
+    async fn count_active_build_jobs(&self, exclude_project: Option<&str>) -> Result<usize> {
+        let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.config.namespace);
+        let lp = ListParams::default().labels(&format!("{LABEL_BUILD}=true"));
+        let list = jobs.list(&lp).await?;
+        Ok(count_active_jobs(&list.items, exclude_project))
     }
 
     async fn submit_build_job(
@@ -196,17 +256,6 @@ impl ImageController {
         new_hash: &str,
         previous: Option<&ProjectImage>,
     ) -> Result<()> {
-        let permit = match self.semaphore.clone().acquire_owned().await {
-            Ok(p) => p,
-            Err(_) => {
-                warn!(
-                    project_id,
-                    "image_controller: semaphore closed — dropping enqueue"
-                );
-                return Ok(());
-            }
-        };
-
         let hash_prefix = &new_hash[..HASH_TAG_PREFIX_LEN.min(new_hash.len())];
         let image_tag = format_image_tag(&self.config.registry_host, project_id, hash_prefix);
 
@@ -307,7 +356,6 @@ impl ImageController {
                         last_error: None,
                     };
                     repo.set_project_image(project_id, &image).await?;
-                    drop(permit);
                     return Ok(());
                 }
                 info!(
@@ -337,8 +385,6 @@ impl ImageController {
             self.set_context_cm_owner(project_id, hash_prefix, owner)
                 .await?;
         }
-
-        drop(permit);
 
         let image = ProjectImage {
             tag: previous.and_then(|p| p.tag.clone()),
@@ -528,6 +574,47 @@ fn is_job_succeeded(job: &Job) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether a build Job is still in flight — neither Succeeded nor
+/// Failed. Used by [`ImageController::count_active_build_jobs`] to size
+/// the concurrency cap against the *real* cluster state (pending +
+/// running Jobs), not the rate of Job creation. A Job with no status yet
+/// (just created, controller hasn't populated `.status`) counts as
+/// active.
+fn is_job_active(job: &Job) -> bool {
+    !is_job_succeeded(job) && !is_job_failed(job)
+}
+
+/// Count the active (in-flight) build Jobs in `jobs`, optionally
+/// excluding any whose `djinn.app/project-id` label equals
+/// `exclude_project`. Pure so the cap arithmetic is unit-testable
+/// without a live API server.
+fn count_active_jobs(jobs: &[Job], exclude_project: Option<&str>) -> usize {
+    jobs.iter()
+        .filter(|job| {
+            if let Some(exclude) = exclude_project {
+                let proj = job
+                    .metadata
+                    .labels
+                    .as_ref()
+                    .and_then(|l| l.get(crate::build_job::LABEL_PROJECT_ID));
+                if proj.map(String::as_str) == Some(exclude) {
+                    return false;
+                }
+            }
+            is_job_active(job)
+        })
+        .count()
+}
+
+/// How many *new* build Jobs may be created this reconcile pass given a
+/// cap and the count of Jobs already in flight: `max(0, cap - in_flight)`.
+/// The cap is clamped to ≥1 so a misconfigured `0` never wedges the
+/// pipeline entirely. Deferred projects are not lost — they're picked up
+/// on a later tick as slots free.
+fn build_slots_available(cap: usize, in_flight: usize) -> usize {
+    cap.max(1).saturating_sub(in_flight)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -613,6 +700,110 @@ mod tests {
             ..Default::default()
         };
         assert!(is_job_failed(&job));
+    }
+
+    use std::collections::BTreeMap;
+
+    use k8s_openapi::api::batch::v1::JobStatus;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+
+    /// Build a Job carrying the build label + a project-id label, with an
+    /// optional terminal status (`Some(true)` = succeeded, `Some(false)`
+    /// = failed, `None` = still active).
+    fn build_job_with(project: &str, terminal: Option<bool>) -> Job {
+        let mut labels = BTreeMap::new();
+        labels.insert(LABEL_BUILD.to_string(), "true".to_string());
+        labels.insert(
+            crate::build_job::LABEL_PROJECT_ID.to_string(),
+            project.to_string(),
+        );
+        let status = terminal.map(|ok| {
+            if ok {
+                JobStatus {
+                    succeeded: Some(1),
+                    ..Default::default()
+                }
+            } else {
+                JobStatus {
+                    failed: Some(1),
+                    ..Default::default()
+                }
+            }
+        });
+        Job {
+            metadata: ObjectMeta {
+                name: Some(format!("djinn-build-{project}-abc")),
+                labels: Some(labels),
+                ..Default::default()
+            },
+            status,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn is_job_active_true_when_no_status() {
+        // A freshly-created Job has no `.status` populated yet — it must
+        // count toward the cap so a burst of just-created Jobs doesn't slip
+        // past the gate before the kubelet fills in status.
+        assert!(is_job_active(&Job::default()));
+    }
+
+    #[test]
+    fn is_job_active_false_for_terminal_jobs() {
+        assert!(!is_job_active(&build_job_with("p", Some(true))));
+        assert!(!is_job_active(&build_job_with("p", Some(false))));
+    }
+
+    #[test]
+    fn count_active_jobs_ignores_terminal_and_excluded() {
+        let jobs = vec![
+            build_job_with("a", None),       // active, other project
+            build_job_with("b", None),       // active, other project
+            build_job_with("c", Some(true)), // succeeded — not active
+            build_job_with("d", Some(false)),// failed — not active
+            build_job_with("me", None),      // active, but excluded
+        ];
+        // Exclude "me": two genuinely-active other-project builds remain.
+        assert_eq!(count_active_jobs(&jobs, Some("me")), 2);
+        // Without exclusion the current project's active Job counts too.
+        assert_eq!(count_active_jobs(&jobs, None), 3);
+    }
+
+    #[test]
+    fn build_slots_available_is_cap_minus_in_flight() {
+        // Given a cap of 4 and 1 in-flight, 3 new Jobs may be created.
+        assert_eq!(build_slots_available(4, 1), 3);
+        // At the cap, zero new Jobs — deferred projects wait for a later tick.
+        assert_eq!(build_slots_available(4, 4), 0);
+        // Over the cap (e.g. a hotfix lowered it below current load) clamps
+        // to zero rather than underflowing.
+        assert_eq!(build_slots_available(4, 9), 0);
+        // No in-flight builds → full cap available.
+        assert_eq!(build_slots_available(4, 0), 4);
+    }
+
+    #[test]
+    fn build_slots_available_clamps_zero_cap_to_one() {
+        // A misconfigured cap of 0 must not wedge the pipeline forever; it
+        // is treated as 1 so at least one build can always proceed.
+        assert_eq!(build_slots_available(0, 0), 1);
+        assert_eq!(build_slots_available(0, 1), 0);
+    }
+
+    #[test]
+    fn cap_admits_only_remaining_slots_across_a_burst() {
+        // Model the herd: N projects all need a build, M already in flight.
+        // Only max(0, cap - M) of them should be admitted this pass; the
+        // rest defer (and remain eligible next tick — the controller never
+        // marks a deferred project failed).
+        let cap = 4;
+        let m_in_flight = 1;
+        let n_projects = 17;
+        let admitted = build_slots_available(cap, m_in_flight).min(n_projects);
+        assert_eq!(admitted, 3);
+        let deferred = n_projects - admitted;
+        assert_eq!(deferred, 14);
     }
 
     #[test]

@@ -395,13 +395,42 @@ imagePipeline:
     # in the djinn-buildkitd image; cloud identity (IRSA, Workload Identity,
     # etc.) flows in via the SA annotations above.
     credHelpers: {}
+    # Health-probe tuning for the single shared buildkitd. The probe is a
+    # `buildctl debug workers` gRPC round-trip; a busy daemon (e.g. mid-build
+    # under a concurrent-rebuild herd) can be slow to answer it even while
+    # perfectly healthy. The k8s defaults (timeoutSeconds 1, failureThreshold
+    # 3) once had the kubelet liveness-kill a merely-busy buildkitd, dropping
+    # every in-flight build with `GOAWAY graceful_stop`. These generous
+    # defaults stop that; tune per cluster if needed.
+    probes:
+      # Seconds the kubelet waits for `buildctl debug workers` to answer
+      # before counting the probe as failed. Default k8s is 1s — far too
+      # tight for a loaded daemon.
+      timeoutSeconds: 10
+      # Consecutive readiness/liveness failures tolerated before the pod is
+      # marked unready / restarted. Default k8s is 3.
+      failureThreshold: 6
+      # How often readiness + startup probes run.
+      periodSeconds: 30
+      # Liveness probes less aggressively than readiness so transient load
+      # spikes pull the pod out of the Service (readiness) long before they
+      # can trigger a restart (liveness).
+      livenessPeriodSeconds: 60
+      # Startup probe failures tolerated before liveness takes over. With
+      # periodSeconds 30 this is a generous ~10min window for a cold daemon
+      # (warming the OCI worker, restoring cache) to come up.
+      startupFailureThreshold: 20
+    # buildkitd is the single shared build engine; a concurrent-build herd
+    # is CPU- and memory-hungry. These defaults are sized to survive a burst
+    # without the kubelet OOM/CPU-starving the daemon into a probe-kill loop.
+    # The image controller's maxConcurrentBuilds cap keeps the herd bounded.
     resources:
       requests:
-        cpu: "500m"
-        memory: "1Gi"
-      limits:
         cpu: "2"
-        memory: "8Gi"
+        memory: "2Gi"
+      limits:
+        cpu: "6"
+        memory: "10Gi"
   zot:
     # In-cluster Zot OCI registry. Off by default — most cloud deployments
     # use a managed registry (ECR/GCR/ACR) via `buildkitd.credHelpers`.
@@ -442,7 +471,14 @@ imagePipeline:
     # Deployment renders as a busybox sleep stub so the rest of the chart can
     # be installed + iterated on.
     image: "busybox:1.36"
-    maxConcurrentBuilds: 3
+    # Cluster-wide cap on concurrent project-image build Jobs, wired to the
+    # server via DJINN_IMAGE_MAX_CONCURRENT. The image controller counts
+    # live build Jobs each reconcile pass and defers new builds once this
+    # many are in flight, so a mass rebuild can't starve the single shared
+    # buildkitd into a liveness-probe-kill crash loop. Deferred projects are
+    # re-evaluated on later reconcile ticks as slots free. Keep this low
+    # relative to buildkitd's CPU limit.
+    maxConcurrentBuilds: 4
     resources:
       requests:
         cpu: "100m"

@@ -25,7 +25,8 @@
 //!           ├─ skip if '{}' (un-seeded — boot reseed hook handles)
 //!           ├─ compute_environment_hash(cfg, agent_worker_ref)
 //!           ├─ compare to projects.image_hash
-//!           ├─ if changed: acquire semaphore + in-flight guard
+//!           ├─ if changed: take in-flight guard + check the cluster-wide
+//!           │    concurrency cap (count live build Jobs; defer if at cap)
 //!           │    ├─ generate_dockerfile(cfg, agent_worker)
 //!           │    ├─ upsert per-build ConfigMap (Dockerfile + scripts)
 //!           │    └─ create build Job (buildctl)

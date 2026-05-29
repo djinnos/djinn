@@ -86,16 +86,36 @@ spec:
               type: Unconfined
             appArmorProfile:
               type: Unconfined
+          {{- $probes := .Values.imagePipeline.buildkitd.probes }}
+          # `buildctl debug workers` is a gRPC round-trip to the daemon. A
+          # busy buildkitd — e.g. mid-build under a concurrent-rebuild herd —
+          # can be slow to answer it even though it's perfectly healthy. With
+          # the k8s-default 1s timeoutSeconds + failureThreshold 3, three
+          # slow answers in a row had the kubelet kill buildkitd, taking
+          # every in-flight build down with `GOAWAY graceful_stop`. The
+          # generous timeoutSeconds + failureThreshold below (values-driven)
+          # keep a merely-busy daemon alive; the startupProbe gives a cold
+          # daemon room to come up before liveness starts counting.
+          startupProbe:
+            exec:
+              command: ["buildctl", "debug", "workers"]
+            periodSeconds: {{ $probes.periodSeconds }}
+            timeoutSeconds: {{ $probes.timeoutSeconds }}
+            failureThreshold: {{ $probes.startupFailureThreshold }}
           readinessProbe:
             exec:
               command: ["buildctl", "debug", "workers"]
             initialDelaySeconds: 5
-            periodSeconds: 30
+            periodSeconds: {{ $probes.periodSeconds }}
+            timeoutSeconds: {{ $probes.timeoutSeconds }}
+            failureThreshold: {{ $probes.failureThreshold }}
           livenessProbe:
             exec:
               command: ["buildctl", "debug", "workers"]
             initialDelaySeconds: 30
-            periodSeconds: 60
+            periodSeconds: {{ $probes.livenessPeriodSeconds }}
+            timeoutSeconds: {{ $probes.timeoutSeconds }}
+            failureThreshold: {{ $probes.failureThreshold }}
           ports:
             - name: grpc
               containerPort: {{ .Values.imagePipeline.buildkitd.port }}
