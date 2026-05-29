@@ -1673,17 +1673,24 @@ impl CoordinatorActor {
     /// Resolve a user identity + live GitHub session that can act as an
     /// auto-approver for the given task's PR.
     ///
-    /// Tried in order:
-    ///   1. The task's `created_by_user_id` (when set) — the most natural
-    ///      "approve as the person who asked for this work" path.
-    ///   2. Any user with `auto_approve_prs = true` and a non-expired
-    ///      session, most-recently-updated first. Needed for background-
-    ///      agent-spawned tasks (Planner / Architect / auto-breakdown
-    ///      output) whose `created_by_user_id` is NULL — without this
-    ///      fallback those PRs would sit in `pr_review` forever.
+    /// Resolution rule:
+    ///   * If the task HAS a `created_by_user_id` (a human owns it), the
+    ///     approval is governed **solely** by that owner's setting. We use
+    ///     them only if they have `auto_approve_prs = true` and a live
+    ///     session; otherwise we return `None` and the PR waits for a
+    ///     manual approval. We do NOT fall back to another user — approving
+    ///     someone else's task with your own toggle is exactly the
+    ///     multi-user leak this guards against (an admin with auto-approve
+    ///     on must not silently approve other devs' PRs).
+    ///   * Only when `created_by_user_id` is NULL (background-agent-spawned
+    ///     tasks — Planner / Architect / auto-breakdown output that no human
+    ///     owns) do we fall back to any user with `auto_approve_prs = true`
+    ///     and a non-expired session, most-recently-updated first, so those
+    ///     PRs don't sit in `pr_review` forever.
     ///
-    /// Returns `None` when nobody opted in, or when every opted-in user's
-    /// session has expired. Logs the outcome at debug for visibility.
+    /// Returns `None` when the resolved owner hasn't opted in / has no live
+    /// session, or (for unattributed tasks) when nobody opted in. Logs the
+    /// outcome at debug for visibility.
     async fn find_auto_approver_session(
         &self,
         task_id: &str,
@@ -1692,7 +1699,8 @@ impl CoordinatorActor {
         let us_repo = UserSettingsRepository::new(self.db.clone());
         let sa_repo = SessionAuthRepository::new(self.db.clone());
 
-        // Try the task's creator first.
+        // If the task has a human owner, the decision is governed *solely*
+        // by that owner's setting — never fall back to another user.
         if let Some(user_id) = self.task_created_by_user_id(task_id).await {
             let toggle = match us_repo.get_or_default(&user_id).await {
                 Ok(s) => s.auto_approve_prs,
@@ -1701,34 +1709,42 @@ impl CoordinatorActor {
                         task_id = %task_short_id,
                         user_id = %user_id,
                         error = %e,
-                        "PR poller: user_settings read failed; will try fallback approver"
+                        "PR poller: user_settings read failed for task owner; leaving PR for manual approval"
                     );
-                    false
+                    return None;
                 }
             };
-            if toggle {
-                match sa_repo.latest_token_for_user(&user_id).await {
-                    Ok(Some(session)) => return Some((user_id, session)),
-                    Ok(None) => {
-                        tracing::debug!(
-                            task_id = %task_short_id,
-                            user_id = %user_id,
-                            "PR poller: task creator has no live session; trying fallback approver"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            task_id = %task_short_id,
-                            user_id = %user_id,
-                            error = %e,
-                            "PR poller: session lookup failed for task creator; trying fallback approver"
-                        );
-                    }
+            if !toggle {
+                tracing::debug!(
+                    task_id = %task_short_id,
+                    user_id = %user_id,
+                    "PR poller: task owner has not opted into auto-approval; leaving PR for manual approval"
+                );
+                return None;
+            }
+            match sa_repo.latest_token_for_user(&user_id).await {
+                Ok(Some(session)) => return Some((user_id, session)),
+                Ok(None) => {
+                    tracing::debug!(
+                        task_id = %task_short_id,
+                        user_id = %user_id,
+                        "PR poller: task owner opted in but has no live session; leaving PR for manual approval"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task_short_id,
+                        user_id = %user_id,
+                        error = %e,
+                        "PR poller: session lookup failed for task owner; leaving PR for manual approval"
+                    );
                 }
             }
+            return None;
         }
 
-        // Fallback: any opted-in user with a live session.
+        // Unattributed task (created_by_user_id IS NULL — background-agent
+        // output). Fall back to any opted-in user with a live session.
         let candidates = match us_repo.list_users_with_auto_approve().await {
             Ok(ids) => ids,
             Err(e) => {
