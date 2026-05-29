@@ -176,6 +176,13 @@ const IMAGE_PATH: &str =
 
 fn emit_path(df: &mut String) {
     writeln!(df, "ENV PATH={IMAGE_PATH}").unwrap();
+    // HOME must be an explicit image ENV: the Pod runs as runAsUser=10001 with
+    // no logged-in shell, so without this the agent's spawned subprocesses
+    // inherit HOME="/" (root-owned) and every $HOME-relative path fails with
+    // EACCES — the Landlock scratch dir (~/.cache/djinn), the LSP auto-install
+    // dir (~/.local/share/djinn/bin), Go's default GOCACHE. base-debian.sh
+    // creates the matching djinn user + writable /home/djinn.
+    writeln!(df, "ENV HOME=/home/djinn").unwrap();
     // Keep RUSTUP_HOME at the baked-in /usr/local/rustup so the
     // build-time install-rust.sh writes there (the rustup install is in
     // the image layer, not a PVC mount — /cache IS a PVC mount at

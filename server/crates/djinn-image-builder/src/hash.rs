@@ -77,7 +77,15 @@ pub fn compute_environment_hash(
     // it) failed with "cannot write /go/pkg/mod". Those ENV lines are hardcoded
     // in dockerfile.rs (not in config_json/script_sha), so the salt bump is what
     // rebuilds every cached project image with the new Go cache paths.
-    hasher.update(b"env-config/v5\0");
+    //
+    // v5→v6: set `HOME=/home/djinn` (emit_path) + create that user/home in
+    // base-debian.sh + bake gopls into /go/bin (install-go.sh). Pods run as
+    // runAsUser=10001 with no home, so HOME was "/" → the agent's scratch dir,
+    // the LSP install dir, and Go's GOCACHE all hit EACCES under root-owned /.
+    // The two script edits already move script_sha, but the HOME ENV line is a
+    // hardcoded const here too, so bump the salt to document + guarantee the
+    // rebuild.
+    hasher.update(b"env-config/v6\0");
     hasher.update(config_json.as_bytes());
     hasher.update([0u8]);
     hasher.update(script_sha.as_bytes());

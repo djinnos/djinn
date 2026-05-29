@@ -60,9 +60,21 @@ EOF
 chmod 0644 /etc/profile.d/40-go.sh
 mkdir -p /go/bin
 
+export PATH="/usr/local/go/bin:${PATH}"
+
 if [ "${SCIP_INDEXER:-}" = "scip-go" ]; then
-    export PATH="/usr/local/go/bin:${PATH}"
     # scip-go moved from github.com/sourcegraph/scip-go to github.com/scip-code/scip-go;
     # fetching via the old path fails because v0.2.3's go.mod declares the new one.
     GOPATH=/go go install "github.com/scip-code/scip-go/cmd/scip-go@${SCIP_GO_VERSION:-latest}"
+fi
+
+# gopls — the Go language server the agent's LSP manager drives. Bake it into
+# /go/bin (on the image PATH) so resolve_binary() finds it on PATH and skips
+# the session-time `go install` (which needs network + a writable $HOME). This
+# is best-effort: a gopls/Go-toolchain version mismatch must NOT fail the whole
+# image build — the LSP manager self-installs at runtime as a fallback (now
+# that $HOME is writable). Pin via GOPLS_VERSION when @latest regresses against
+# the project's Go version.
+if ! GOPATH=/go GOBIN=/go/bin go install "golang.org/x/tools/gopls@${GOPLS_VERSION:-latest}"; then
+    echo "[install-go] gopls install failed (non-fatal); LSP will self-install at runtime" >&2
 fi

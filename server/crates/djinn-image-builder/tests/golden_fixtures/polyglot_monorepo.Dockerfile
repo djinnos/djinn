@@ -6,6 +6,7 @@ COPY scripts/ /tmp/djinn-scripts/
 RUN chmod -R 0755 /tmp/djinn-scripts
 RUN /tmp/djinn-scripts/base-debian.sh
 ENV PATH=/opt/djinn/bin:/usr/local/cargo/bin:/opt/node/bin:/usr/local/go/bin:/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ENV HOME=/home/djinn
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
 ENV GOPATH=/go GOROOT=/usr/local/go
 ENV GOMODCACHE=/cache/go/mod GOCACHE=/cache/go/build
