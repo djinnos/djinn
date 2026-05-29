@@ -430,6 +430,8 @@ async fn worker_drives_real_supervisor_in_pod() {
         read_source_project_ids: Vec::new(),
         github_owner: None,
         github_install_token: None,
+        commit_author_name: None,
+        commit_author_email: None,
     };
     let spec_path: PathBuf = cfg_dir.path().join("spec.bin");
     write_bin(&spec_path, &spec);

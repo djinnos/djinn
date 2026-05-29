@@ -154,6 +154,24 @@ pub struct TaskRunSpec {
     /// rest of the spec; lives only for the Pod's lifetime.
     #[serde(default)]
     pub github_install_token: Option<String>,
+    /// Git author `name` for commits the supervisor creates on the task
+    /// branch. Resolved host-side at dispatch from the task's
+    /// `created_by_user_id` (the human who triggered the task). `None` for
+    /// system/patrol tasks with no human creator, or for host/worker version
+    /// skew during a rolling deploy — the supervisor falls back to the bot
+    /// identity. `#[serde(default)]` keeps older specs deserializable.
+    #[serde(default)]
+    pub commit_author_name: Option<String>,
+    /// Git author `email` paired with [`Self::commit_author_name`]. Set to the
+    /// GitHub per-user no-reply form
+    /// `<github_id>+<github_login>@users.noreply.github.com`, which links the
+    /// commit to that GitHub account so it's attributed to the human AND
+    /// Vercel's commit-author authorization (which rejects commits whose
+    /// author email matches no GitHub account) lets the deployment through.
+    /// The PR itself is still opened by the App (`djinn-bot[bot]`), so the
+    /// creator can review/approve their own commits.
+    #[serde(default)]
+    pub commit_author_email: Option<String>,
 }
 
 /// Terminal outcome of a task-run.
@@ -224,6 +242,8 @@ mod tests {
             read_source_project_ids: vec!["proj-read-1".to_string()],
             github_owner: None,
             github_install_token: None,
+            commit_author_name: Some("Ada Lovelace".to_string()),
+            commit_author_email: Some("1+ada@users.noreply.github.com".to_string()),
         };
 
         let bytes = bincode::serialize(&spec).expect("serialize");
@@ -238,6 +258,8 @@ mod tests {
         assert_eq!(back.read_source_project_ids, spec.read_source_project_ids);
         assert_eq!(back.flow, spec.flow);
         assert_eq!(back.model_id_per_role, spec.model_id_per_role);
+        assert_eq!(back.commit_author_name, spec.commit_author_name);
+        assert_eq!(back.commit_author_email, spec.commit_author_email);
     }
 
     #[test]

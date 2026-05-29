@@ -176,6 +176,59 @@ pub(crate) async fn run_supervisor_dispatch(
         _ => None,
     };
 
+    // ── Resolve the task's creator ────────────────────────────────────────
+    //
+    // Used for two things below: (1) per-user provider credential scoping via
+    // the `SESSION_USER_ID` task-local (migration 28) — a task uses ITS
+    // CREATOR's credential, falling back to the org-shared one when the column
+    // is NULL (background / pre-multiuser tasks); and (2) the commit-author
+    // identity. The `Task` model doesn't surface this column, so read it
+    // directly. A lookup error or missing column is non-fatal: we just resolve
+    // org-shared / fall back to the bot identity, preserving historical
+    // behaviour.
+    let created_by_user_id: Option<String> = sqlx::query_scalar!(
+        "SELECT created_by_user_id FROM tasks WHERE id = $1",
+        task.id
+    )
+    .fetch_optional(app_state.db.pool())
+    .await
+    .ok()
+    .flatten()
+    .flatten();
+
+    // ── Resolve the commit-author identity (Vercel-friendly attribution) ──
+    //
+    // Commits the supervisor creates on the task branch are authored as the
+    // task's CREATOR, not an anonymous bot. GitHub's per-user no-reply email
+    // `<github_id>+<github_login>@users.noreply.github.com` links the commit
+    // to that account, so it shows under the human's name AND Vercel's
+    // deployment-author check (which rejects commits whose author email
+    // matches no GitHub account) authorizes the build. The PR is still OPENED
+    // by the App (`djinn-bot[bot]`), so the creator can review/approve their
+    // own commits. A NULL creator (system/patrol tasks) — or a user row we
+    // can't read — leaves these None; the supervisor then falls back to the
+    // bot identity (those PRs don't clear Vercel's author check anyway).
+    let (commit_author_name, commit_author_email) = match created_by_user_id.as_deref() {
+        Some(uid) => match djinn_db::UserRepository::new(app_state.db.clone())
+            .get_by_id(uid)
+            .await
+        {
+            Ok(Some(user)) => (
+                Some(
+                    user.github_name
+                        .clone()
+                        .unwrap_or_else(|| user.github_login.clone()),
+                ),
+                Some(format!(
+                    "{}+{}@users.noreply.github.com",
+                    user.github_id, user.github_login
+                )),
+            ),
+            _ => (None, None),
+        },
+        None => (None, None),
+    };
+
     let task_run_id = uuid::Uuid::now_v7().to_string();
     let spec = TaskRunSpec {
         task_run_id,
@@ -189,27 +242,9 @@ pub(crate) async fn run_supervisor_dispatch(
         read_source_project_ids,
         github_owner,
         github_install_token,
+        commit_author_name,
+        commit_author_email,
     };
-
-    // ── Resolve the task's creator for per-user credential scoping ────────
-    //
-    // Per-user provider credentials (migration 28) resolve against the acting
-    // user via the `SESSION_USER_ID` task-local. The worker dispatch path has
-    // no inbound HTTP request to inherit that from, so we explicitly set it to
-    // the task's `created_by_user_id` — a task uses ITS CREATOR's credential,
-    // falling back to the org-shared one when the column is NULL (background /
-    // pre-multiuser tasks). The `Task` model doesn't surface this column, so
-    // read it directly. A lookup error or missing column is non-fatal: we just
-    // resolve org-shared, preserving historical behaviour.
-    let created_by_user_id: Option<String> = sqlx::query_scalar!(
-        "SELECT created_by_user_id FROM tasks WHERE id = $1",
-        task.id
-    )
-    .fetch_optional(app_state.db.pool())
-    .await
-    .ok()
-    .flatten()
-    .flatten();
 
     // ── Resolve per-role provider credentials (Phase 7a) ──────────────────
     //

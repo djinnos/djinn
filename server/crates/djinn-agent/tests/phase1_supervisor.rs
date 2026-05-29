@@ -243,6 +243,8 @@ async fn supervisor_clones_from_mirror_without_worktrees() {
         read_source_project_ids: Vec::new(),
         github_owner: None,
         github_install_token: None,
+        commit_author_name: None,
+        commit_author_email: None,
     };
 
     // 6. Drive the run.  In this infrastructure-slice test we do NOT stub the
@@ -495,6 +497,8 @@ async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
         read_source_project_ids: Vec::new(),
         github_owner: None,
         github_install_token: None,
+        commit_author_name: None,
+        commit_author_email: None,
     };
 
     // 4. Drive the run — with the provider stubbed, the architect stage

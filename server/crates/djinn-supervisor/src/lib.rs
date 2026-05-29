@@ -407,9 +407,18 @@ impl TaskRunSupervisor {
                         // before advancing so the verifier sees real changes
                         // and `push_to_origin` has something to push. Empty
                         // diffs are a no-op (workspace.commit returns false).
+                        // Author as the task's creator (resolved host-side at
+                        // dispatch) so the commit is attributed to the human and
+                        // Vercel's commit-author check authorizes the build. The
+                        // PR is still opened by the App, so the creator can
+                        // review/approve their own commits. Falls back to the bot
+                        // identity for system/patrol tasks with no human creator.
                         let identity = GitIdentity {
-                            name: "djinn-bot",
-                            email: "bot@djinn.local",
+                            name: spec.commit_author_name.as_deref().unwrap_or("djinn-bot"),
+                            email: spec
+                                .commit_author_email
+                                .as_deref()
+                                .unwrap_or("bot@djinn.local"),
                         };
                         let message = format!(
                             "{}: {}",
