@@ -815,6 +815,29 @@ impl ProjectRepository {
         .await?;
         Ok(())
     }
+
+    /// Stamp `projects.graph_warmed_at = now()` for a project.
+    ///
+    /// The normal warm path stamps this as a side-effect of
+    /// `RepoGraphCacheRepository::upsert`. This standalone setter exists for
+    /// the *code-less* skip path: a docs / memory-only repo (no detected
+    /// language) has nothing to index, so the warm pipeline is correctly
+    /// skipped — but without a stamp the UI badge derives to "Warming"
+    /// forever. Stamping it here means "nothing to warm = considered warmed",
+    /// resolving the badge to "ready". Uses the same RFC3339 string format as
+    /// the cache-upsert stamp (matching the schema's timestamp convention).
+    pub async fn mark_graph_warmed(&self, project_id: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            r#"UPDATE projects
+               SET graph_warmed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $1"#,
+            project_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
 }
 
 /// One row the boot reseed hook walks. All columns come back as raw
@@ -954,6 +977,37 @@ mod tests {
             move |ev| captured.lock().unwrap().push(ev)
         });
         (bus, captured)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mark_graph_warmed_stamps_graph_warmed_at() {
+        // BUG: a code-less project's warm is skipped, so nothing ever stamped
+        // `graph_warmed_at` and the UI badge stuck on "Warming". The coordinator
+        // tick now calls this setter on the code-less skip path.
+        let repo = ProjectRepository::new(test_db(), EventBus::noop());
+        let project = repo.create("docs", "acme", "docs").await.unwrap();
+
+        let before = repo
+            .get_dispatch_readiness(&project.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            before.graph_warmed_at.is_none(),
+            "graph_warmed_at should be unset before marking"
+        );
+
+        repo.mark_graph_warmed(&project.id).await.unwrap();
+
+        let after = repo
+            .get_dispatch_readiness(&project.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            after.graph_warmed_at.is_some(),
+            "graph_warmed_at must be stamped after mark_graph_warmed"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

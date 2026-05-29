@@ -188,9 +188,37 @@ pub(crate) async fn run_indexers(
 
     let results = futures::future::join_all(futures).await;
 
-    let mut commands = Vec::with_capacity(results.len());
-    let mut failure_count = 0usize;
+    let commands = tally_indexer_results(results)?;
+
+    let artifacts = collect_scip_artifacts(&output_root, &commands)?;
+
+    Ok(IndexingRun {
+        project_root,
+        output_root,
+        commands,
+        artifacts,
+    })
+}
+
+/// Aggregate the per-target indexer results into the set of successful
+/// [`ExecutedIndexerCommand`]s, applying the partial-success policy.
+///
+/// **Policy:** the warm succeeds as long as ≥1 indexer target produced an
+/// index. Monorepos routinely contain workspaces that can't be indexed (no
+/// usable `tsconfig`, generated package, …); failing the whole warm on those
+/// would leave the project stuck "Warming" forever and burn compute re-trying
+/// every few minutes. Only a *total* wipe-out — every planned target failed —
+/// is treated as a hard error. Per-target failures are `warn`-logged (no
+/// silent truncation) and a summary line records the succeeded/failed split.
+///
+/// An empty input (`total == 0`, e.g. a code-less repo) is `Ok` with no
+/// commands — there was nothing to index, which is not a failure.
+fn tally_indexer_results(
+    results: Vec<(PlannedIndexerCommand, std::io::Result<std::process::Output>)>,
+) -> Result<Vec<ExecutedIndexerCommand>> {
     let total = results.len();
+    let mut commands = Vec::with_capacity(total);
+    let mut failure_count = 0usize;
 
     for (plan, result) in results {
         match result {
@@ -206,6 +234,7 @@ pub(crate) async fn run_indexers(
                 failure_count += 1;
                 tracing::warn!(
                     indexer = plan.indexer.binary_name(),
+                    workspace = %plan.workspace_root.display(),
                     exit_code = ?output.status.code(),
                     stderr = %String::from_utf8_lossy(&output.stderr),
                     "SCIP indexer failed"
@@ -215,6 +244,7 @@ pub(crate) async fn run_indexers(
                 failure_count += 1;
                 tracing::warn!(
                     indexer = plan.indexer.binary_name(),
+                    workspace = %plan.workspace_root.display(),
                     error = %err,
                     "SCIP indexer error"
                 );
@@ -222,18 +252,23 @@ pub(crate) async fn run_indexers(
         }
     }
 
-    if total > 0 && failure_count == total {
-        return Err(anyhow!("all {} SCIP indexers failed", total));
+    if total > 0 {
+        tracing::info!(
+            total,
+            succeeded = commands.len(),
+            failed = failure_count,
+            "SCIP indexer run complete"
+        );
     }
 
-    let artifacts = collect_scip_artifacts(&output_root, &commands)?;
+    if total > 0 && failure_count == total {
+        return Err(anyhow!(
+            "all {} SCIP indexers failed (no index produced)",
+            total
+        ));
+    }
 
-    Ok(IndexingRun {
-        project_root,
-        output_root,
-        commands,
-        artifacts,
-    })
+    Ok(commands)
 }
 
 pub(crate) fn collect_scip_artifacts(
@@ -427,6 +462,10 @@ mod tests {
             "{\"private\": true, \"workspaces\": [\"apps/*\"]}\n",
         )
         .expect("write website package.json");
+        // scip-typescript needs a tsconfig in the working dir, so a workspace
+        // root must carry one to be a target.
+        fs::write(project_root.join("website/tsconfig.json"), "{}\n")
+            .expect("write website tsconfig");
 
         let available = vec![
             IndexerAvailability {
@@ -719,6 +758,80 @@ mod tests {
         let result = run_indexers_already_locked(&project_root, &output_root, None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         assert!(std::env::var_os("CARGO_TARGET_DIR").is_none());
+    }
+
+    /// Build a `PlannedIndexerCommand` skeleton for the tally tests — only
+    /// the fields the tally reads (`indexer`, `workspace_root`) matter.
+    fn fake_plan(indexer: SupportedIndexer, workspace: &str) -> PlannedIndexerCommand {
+        PlannedIndexerCommand {
+            indexer,
+            binary_path: PathBuf::from("/tool/bin"),
+            args: vec!["index".to_string()],
+            working_directory: PathBuf::from(workspace),
+            workspace_root: PathBuf::from(workspace),
+            output_path: PathBuf::from(workspace).join("out.scip"),
+        }
+    }
+
+    /// Real `std::process::Output` with a genuine `ExitStatus` — built by
+    /// running `true`/`false` so the test stays portable (no `ExitStatusExt`).
+    fn output_for(success: bool) -> std::io::Result<std::process::Output> {
+        std::process::Command::new(if success { "true" } else { "false" }).output()
+    }
+
+    #[test]
+    fn tally_partial_failure_succeeds_when_at_least_one_indexer_succeeds() {
+        // 2 failed targets + 1 success → overall Ok, only the success kept.
+        let results = vec![
+            (
+                fake_plan(SupportedIndexer::TypeScript, "packages/lib"),
+                output_for(false),
+            ),
+            (
+                fake_plan(SupportedIndexer::TypeScript, "packages/utils"),
+                output_for(false),
+            ),
+            (
+                fake_plan(SupportedIndexer::TypeScript, "packages/acqua"),
+                output_for(true),
+            ),
+        ];
+        let commands = tally_indexer_results(results).expect("partial success must be Ok");
+        assert_eq!(
+            commands.len(),
+            1,
+            "only the succeeding target should be retained"
+        );
+        assert_eq!(
+            commands[0].plan.workspace_root,
+            PathBuf::from("packages/acqua")
+        );
+    }
+
+    #[test]
+    fn tally_total_failure_errors() {
+        let results = vec![
+            (
+                fake_plan(SupportedIndexer::TypeScript, "packages/lib"),
+                output_for(false),
+            ),
+            (
+                fake_plan(SupportedIndexer::TypeScript, "packages/utils"),
+                output_for(false),
+            ),
+        ];
+        let err = tally_indexer_results(results).expect_err("total failure must error");
+        assert!(
+            err.to_string().contains("all 2 SCIP indexers failed"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn tally_empty_input_is_ok() {
+        // A code-less repo plans zero indexers — that's not a failure.
+        let commands = tally_indexer_results(Vec::new()).expect("empty is Ok");
+        assert!(commands.is_empty());
     }
 
     #[test]

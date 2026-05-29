@@ -761,6 +761,18 @@ impl CoordinatorActor {
                     project_id = %project.id,
                     "CoordinatorActor: graph refresh tick — project has no indexable code stack; skipping warm"
                 );
+                // Stamp the project as warmed so the UI badge resolves to
+                // "ready" instead of being stuck on "Warming" forever: a
+                // code-less repo has nothing to index, so "nothing to warm =
+                // considered warmed". Best-effort; a stamp failure just means
+                // we re-attempt the stamp on the next tick.
+                if let Err(e) = project_repo.mark_graph_warmed(&project.id).await {
+                    tracing::warn!(
+                        project_id = %project.id,
+                        error = %e,
+                        "CoordinatorActor: graph refresh tick — failed to stamp graph_warmed_at for code-less project"
+                    );
+                }
                 continue;
             }
             warmer.trigger(&project.id).await;
