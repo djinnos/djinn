@@ -1052,61 +1052,85 @@ impl CoordinatorActor {
         // Enrich the feedback with the merge-group run's ACTUAL failing
         // checks. The PR head's own checks pass (the `ci` workflow runs its
         // unit/integration stages only on `merge_group`), so the real failure
-        // lives on the merge-queue ref — without this the worker only sees
-        // GitHub's generic dequeue reason ("checks failed") and re-runs
-        // blindly, looping on the same bug. This logs a `comment`/`verification`
-        // activity entry (surfaced to the worker via `recent_feedback`) naming
-        // the failed workflow/job/step plus `ci_job_log` hints the worker can
-        // call to read the actual log. Best-effort: the ephemeral merge-queue
-        // branch may already be deleted, in which case we keep the generic
-        // reason logged above.
-        if let Some(merge_group_ref) = dequeue.and_then(|d| d.merge_group_ref.as_deref()) {
-            let ref_name = merge_group_ref.strip_prefix("refs/").unwrap_or(merge_group_ref);
-            match gh_client.get_ref(owner, repo, ref_name).await {
-                Ok(Some(sha)) => match gh_client.list_check_runs_for_ref(owner, repo, &sha).await {
-                    Ok(checks) => {
-                        let failed: Vec<&CheckRun> = checks
-                            .check_runs
-                            .iter()
-                            .filter(|cr| {
-                                matches!(
-                                    cr.conclusion.as_deref(),
-                                    Some("failure") | Some("timed_out") | Some("cancelled")
+        // lives in the merge-group run — without this the worker only sees
+        // GitHub's generic dequeue reason ("failed_checks") and re-runs
+        // blindly, looping on the same bug. The dequeue event carries no
+        // merge-group ref and the merge-queue branch is ephemeral, but the
+        // `merge_group` Actions run PERSISTS with
+        // `head_branch = gh-readonly-queue/.../pr-<number>-<sha>` and a
+        // `head_sha` whose check runs also persist — so we look it up there.
+        // Reuses `log_ci_failure_comment`, which logs a `comment`/`verification`
+        // entry surfaced to the worker via `recent_feedback`, naming the failed
+        // workflow/job/step plus `ci_job_log` hints to read the real log.
+        let pr_marker = format!("pr-{pull_number}-");
+        match gh_client
+            .list_workflow_runs_for_event(owner, repo, "merge_group", 50)
+            .await
+        {
+            Ok(runs) => {
+                // Runs are newest-first; take the most recent FAILED merge-group
+                // run whose branch belongs to this PR.
+                let failing_run = runs.into_iter().find(|r| {
+                    r.conclusion.as_deref() == Some("failure")
+                        && r.head_branch
+                            .as_deref()
+                            .is_some_and(|b| b.contains(&pr_marker))
+                });
+                if let Some(run) = failing_run {
+                    match gh_client
+                        .list_check_runs_for_ref(owner, repo, &run.head_sha)
+                        .await
+                    {
+                        Ok(checks) => {
+                            let failed: Vec<&CheckRun> = checks
+                                .check_runs
+                                .iter()
+                                .filter(|cr| {
+                                    matches!(
+                                        cr.conclusion.as_deref(),
+                                        Some("failure") | Some("timed_out") | Some("cancelled")
+                                    )
+                                })
+                                .collect();
+                            if failed.is_empty() {
+                                tracing::info!(
+                                    task_id = %task_short_id,
+                                    run_id = run.id,
+                                    "PR poller: merge-group run had no failing check runs to surface; feedback stays generic"
+                                );
+                            } else {
+                                self.log_ci_failure_comment(
+                                    task_id,
+                                    &failed,
+                                    pr_url,
+                                    &run.head_sha,
+                                    gh_client,
+                                    owner,
+                                    repo,
                                 )
-                            })
-                            .collect();
-                        if failed.is_empty() {
-                            tracing::info!(
-                                task_id = %task_short_id,
-                                merge_group_ref,
-                                "PR poller: merge-group ref had no failing check runs to surface; feedback stays generic"
-                            );
-                        } else {
-                            self.log_ci_failure_comment(
-                                task_id, &failed, pr_url, &sha, gh_client, owner, repo,
-                            )
-                            .await;
+                                .await;
+                            }
                         }
+                        Err(e) => tracing::warn!(
+                            task_id = %task_short_id,
+                            run_id = run.id,
+                            error = %e,
+                            "PR poller: failed to fetch merge-group check runs for feedback enrichment"
+                        ),
                     }
-                    Err(e) => tracing::warn!(
+                } else {
+                    tracing::info!(
                         task_id = %task_short_id,
-                        merge_group_ref,
-                        error = %e,
-                        "PR poller: failed to fetch merge-group check runs for feedback enrichment"
-                    ),
-                },
-                Ok(None) => tracing::info!(
-                    task_id = %task_short_id,
-                    merge_group_ref,
-                    "PR poller: merge-group ref already deleted; cannot enrich feedback (generic reason kept)"
-                ),
-                Err(e) => tracing::warn!(
-                    task_id = %task_short_id,
-                    merge_group_ref,
-                    error = %e,
-                    "PR poller: failed to resolve merge-group ref for feedback enrichment"
-                ),
+                        pr = pull_number,
+                        "PR poller: no failing merge_group run found for PR; feedback stays generic"
+                    );
+                }
             }
+            Err(e) => tracing::warn!(
+                task_id = %task_short_id,
+                error = %e,
+                "PR poller: failed to list merge_group runs for feedback enrichment"
+            ),
         }
 
         let transition_reason = format!(

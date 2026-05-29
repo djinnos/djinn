@@ -76,6 +76,30 @@ pub(super) struct ActionsJobsResponse {
     pub(super) jobs: Vec<ActionsJob>,
 }
 
+/// A GitHub Actions workflow run (subset). Used to locate the `merge_group`
+/// run that rejected a PR — the merge-queue branch is ephemeral and the
+/// dequeue event carries no ref, but the run persists with
+/// `head_branch = gh-readonly-queue/.../pr-<number>-<sha>` and a `head_sha`
+/// whose check runs also persist.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkflowRun {
+    pub id: u64,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub head_branch: Option<String>,
+    pub head_sha: String,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub conclusion: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct WorkflowRunsResponse {
+    pub(super) workflow_runs: Vec<WorkflowRun>,
+}
+
 /// A single annotation attached to a check run (error/warning/notice).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckAnnotation {
