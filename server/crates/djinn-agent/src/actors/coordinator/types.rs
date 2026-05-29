@@ -117,6 +117,30 @@ pub(super) const TASK_OUTCOME_CONFIDENCE_SIGNAL: f64 = 0.1;
 pub(super) const TASK_OUTCOME_REOPEN_COUNT: &str = "reopen_count";
 pub(super) const TASK_OUTCOME_FAILED_CLOSE: &str = "failed_closed";
 
+/// Activity-log event type recording that the coordinator routed a stuck task
+/// to a Planner intervention pass (decompose / rescope / close / apply). One
+/// marker is written per `reopen_count` value, which both documents the
+/// intervention in the timeline AND serves as the idempotency guard so the
+/// coordinator doesn't re-dispatch a Planner every tick while the task sits at
+/// the same reopen count (or while the Planner intervention is in flight).
+pub(super) const PLANNER_INTERVENTION_MARKER: &str = "planner_intervention";
+
+/// Number of consecutive worker re-attempts (internal review rejections /
+/// reopens) after which the coordinator stops re-dispatching the worker and
+/// instead routes the task to a Planner intervention pass that DECIDES how to
+/// unstick it (decompose into focused subtasks, rescope the acceptance
+/// criteria, close as moot/duplicate, or re-spec and re-dispatch).
+///
+/// Rationale for `3`: a worker gets the original attempt plus two genuine
+/// rework rounds against the same reviewer feedback. If the third re-dispatch
+/// is about to happen the loop is demonstrably not converging on its own — the
+/// same acceptance criterion keeps failing (the p4bb "Shadow gRPC registration"
+/// case) — so a planner must reshape the work rather than burn another worker
+/// session on it. This mirrors `PR_REVIEW_ROUND_THRESHOLD = 3` on the
+/// PR/human-review side so internal and external review loops escalate at the
+/// same depth.
+pub(super) const REOPEN_INTERVENTION_THRESHOLD: i64 = 3;
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct DispatchMarker {
     pub(super) instant: StdInstant,
