@@ -19,8 +19,10 @@ use super::{Sandbox, djinn_cache_dir, git_dir, git_metadata_dir};
 ///
 /// Restricts the agent child process to read-everywhere, write only to the
 /// task worktree, its git metadata directory, `/var/tmp`, a dedicated djinn
-/// agent scratch dir (`$XDG_CACHE_HOME/djinn` or `$HOME/.cache/djinn`), and
-/// the usual `/dev/{null,zero,urandom}` nodes. `/tmp` is intentionally not
+/// agent scratch dir (`$XDG_CACHE_HOME/djinn` or `$HOME/.cache/djinn`), the
+/// shared cross-task cache PVC (`/cache`, where toolchain caches like
+/// `GOMODCACHE`/`GOCACHE`/sccache live), and the usual `/dev/{null,zero,urandom}`
+/// nodes. `/tmp` is intentionally not
 /// writable: on typical Linux it's tmpfs, and allowing writes there caused a
 /// 3.8 GB cargo-artifact leak into RAM-backed storage.
 pub struct LandlockSandbox;
@@ -133,6 +135,18 @@ fn apply_policy(
     if let Some(dir) = cache_dir
         && let Ok(fd) = PathFd::new(dir)
     {
+        ruleset = ruleset.add_rule(PathBeneath::new(fd, full_access))?;
+    }
+
+    // Shared cross-task cache PVC (`/cache`). The base runtime image points
+    // every toolchain's cache here — CARGO_HOME=/cache/cargo,
+    // RUSTUP_HOME=/cache/rustup, SCCACHE_DIR=/cache/sccache, PNPM_STORE_DIR,
+    // PIP_CACHE_DIR, and GOPATH/GOMODCACHE=/cache/go — so build/test commands
+    // need write access to populate them (`go mod download` → /cache/go/mod,
+    // cargo registry → /cache/cargo, etc.). Only present in the K8s task-run
+    // Pod (the PVC mount); a no-op elsewhere since the open fails. Guarded:
+    // if the dir is absent we silently skip, same as the scratch dir above.
+    if let Ok(fd) = PathFd::new("/cache") {
         ruleset = ruleset.add_rule(PathBeneath::new(fd, full_access))?;
     }
 

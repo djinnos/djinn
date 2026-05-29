@@ -8,6 +8,7 @@ RUN /tmp/djinn-scripts/base-debian.sh
 ENV PATH=/opt/djinn/bin:/usr/local/cargo/bin:/opt/node/bin:/usr/local/go/bin:/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
 ENV GOPATH=/go GOROOT=/usr/local/go
+ENV GOMODCACHE=/cache/go/mod GOCACHE=/cache/go/build
 COPY --from=djinn/agent-worker:sha256-golden /usr/local/bin/djinn-agent-worker /opt/djinn/bin/djinn-agent-worker
 RUN /tmp/djinn-scripts/install-agent-worker.sh
 RUN TOOLCHAINS="1.84.0" DEFAULT_TOOLCHAIN="1.84.0" COMPONENTS="rust-analyzer clippy rustfmt" /tmp/djinn-scripts/install-rust.sh

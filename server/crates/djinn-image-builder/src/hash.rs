@@ -69,7 +69,15 @@ pub fn compute_environment_hash(
     // ("cannot write to /usr/local/rustup/tmp"). RUST_COMPONENTS is a hardcoded
     // const (not part of `config_json`/`script_sha`), so this salt bump is what
     // forces every cached project image to rebuild with the new components.
-    hasher.update(b"env-config/v4\0");
+    //
+    // v4→v5: route Go's caches to the /cache PVC (`GOMODCACHE=/cache/go/mod`,
+    // `GOCACHE=/cache/go/build` in emit_path) so `go mod download`/`go test`
+    // under the Landlock sandbox can write them — the old defaults (/go/pkg/mod
+    // root-owned + not in the sandbox allowlist; $HOME/.cache/go-build outside
+    // it) failed with "cannot write /go/pkg/mod". Those ENV lines are hardcoded
+    // in dockerfile.rs (not in config_json/script_sha), so the salt bump is what
+    // rebuilds every cached project image with the new Go cache paths.
+    hasher.update(b"env-config/v5\0");
     hasher.update(config_json.as_bytes());
     hasher.update([0u8]);
     hasher.update(script_sha.as_bytes());

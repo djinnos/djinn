@@ -189,7 +189,26 @@ fn emit_path(df: &mut String) {
     // the non-root djinn user `rustup install <pinned>` at session
     // time without falling back to spilling .rustup/ into the workspace.
     writeln!(df, "ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo").unwrap();
+    // GOPATH stays /go (image layer): install-go.sh `go install`s scip-go to
+    // /go/bin at build time and IMAGE_PATH lists /go/bin, so the indexer must
+    // not be hidden behind the empty /cache PVC overlay — same constraint as
+    // RUSTUP_HOME above.
+    //
+    // But Go's caches must be WRITABLE at runtime, and the agent runs build/
+    // test via the Landlock-sandboxed `shell` tool. /go is root-owned and not
+    // in the Landlock allowlist, so leaving the module cache at its default
+    // ($GOPATH/pkg/mod = /go/pkg/mod) fails with "cannot write /go/pkg/mod";
+    // likewise GOCACHE's default ($HOME/.cache/go-build) is unix-writable but
+    // outside the sandbox allowlist. Point both at the /cache PVC, which is
+    // djinn-owned (EFS access point uid 10001), persistent across task-runs,
+    // and explicitly write-allowed in the sandbox (see djinn-agent
+    // sandbox/linux.rs). go creates these dirs at runtime on the writable PVC.
     writeln!(df, "ENV GOPATH=/go GOROOT=/usr/local/go").unwrap();
+    writeln!(
+        df,
+        "ENV GOMODCACHE=/cache/go/mod GOCACHE=/cache/go/build"
+    )
+    .unwrap();
 }
 
 fn emit_system_packages(df: &mut String, config: &EnvironmentConfig) {
