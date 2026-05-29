@@ -931,6 +931,9 @@ impl CoordinatorActor {
                 }
                 S::Unmergeable => {
                     self.handle_queue_failure(
+                        gh_client,
+                        owner,
+                        repo,
                         task_id,
                         task_short_id,
                         pull_number,
@@ -967,6 +970,9 @@ impl CoordinatorActor {
             && dequeue_reason_is_failure(dequeue.reason.as_deref())
         {
             self.handle_queue_failure(
+                gh_client,
+                owner,
+                repo,
                 task_id,
                 task_short_id,
                 pull_number,
@@ -992,6 +998,9 @@ impl CoordinatorActor {
     /// it up.
     async fn handle_queue_failure(
         &mut self,
+        gh_client: &GitHubApiClient,
+        owner: &str,
+        repo: &str,
         task_id: &str,
         task_short_id: &str,
         pull_number: u64,
@@ -1038,6 +1047,66 @@ impl CoordinatorActor {
                 error = %e,
                 "PR poller: failed to log merge_queue_rejection activity"
             );
+        }
+
+        // Enrich the feedback with the merge-group run's ACTUAL failing
+        // checks. The PR head's own checks pass (the `ci` workflow runs its
+        // unit/integration stages only on `merge_group`), so the real failure
+        // lives on the merge-queue ref — without this the worker only sees
+        // GitHub's generic dequeue reason ("checks failed") and re-runs
+        // blindly, looping on the same bug. This logs a `comment`/`verification`
+        // activity entry (surfaced to the worker via `recent_feedback`) naming
+        // the failed workflow/job/step plus `ci_job_log` hints the worker can
+        // call to read the actual log. Best-effort: the ephemeral merge-queue
+        // branch may already be deleted, in which case we keep the generic
+        // reason logged above.
+        if let Some(merge_group_ref) = dequeue.and_then(|d| d.merge_group_ref.as_deref()) {
+            let ref_name = merge_group_ref.strip_prefix("refs/").unwrap_or(merge_group_ref);
+            match gh_client.get_ref(owner, repo, ref_name).await {
+                Ok(Some(sha)) => match gh_client.list_check_runs_for_ref(owner, repo, &sha).await {
+                    Ok(checks) => {
+                        let failed: Vec<&CheckRun> = checks
+                            .check_runs
+                            .iter()
+                            .filter(|cr| {
+                                matches!(
+                                    cr.conclusion.as_deref(),
+                                    Some("failure") | Some("timed_out") | Some("cancelled")
+                                )
+                            })
+                            .collect();
+                        if failed.is_empty() {
+                            tracing::info!(
+                                task_id = %task_short_id,
+                                merge_group_ref,
+                                "PR poller: merge-group ref had no failing check runs to surface; feedback stays generic"
+                            );
+                        } else {
+                            self.log_ci_failure_comment(
+                                task_id, &failed, pr_url, &sha, gh_client, owner, repo,
+                            )
+                            .await;
+                        }
+                    }
+                    Err(e) => tracing::warn!(
+                        task_id = %task_short_id,
+                        merge_group_ref,
+                        error = %e,
+                        "PR poller: failed to fetch merge-group check runs for feedback enrichment"
+                    ),
+                },
+                Ok(None) => tracing::info!(
+                    task_id = %task_short_id,
+                    merge_group_ref,
+                    "PR poller: merge-group ref already deleted; cannot enrich feedback (generic reason kept)"
+                ),
+                Err(e) => tracing::warn!(
+                    task_id = %task_short_id,
+                    merge_group_ref,
+                    error = %e,
+                    "PR poller: failed to resolve merge-group ref for feedback enrichment"
+                ),
+            }
         }
 
         let transition_reason = format!(

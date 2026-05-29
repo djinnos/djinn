@@ -92,6 +92,23 @@ pub fn build_warm_job(
 git config --global --add safe.directory "{mirror_path}"
 UPSTREAM_URL="$(git -C "{mirror_path}" config remote.origin.url)"
 git clone --depth 1 --single-branch "$UPSTREAM_URL" "{project_root}"
+# Install JS deps before indexing so scip-typescript can resolve
+# tsconfig `extends` that point at workspace packages (e.g. a shared
+# `tsconfig` package in a pnpm/turbo monorepo) — those live under
+# node_modules, so without an install every `tsconfig.json` fails to load
+# and the TS indexer reports "missing tsconfig.json". Gated on a lockfile
+# so non-JS repos are untouched; `|| true` keeps a JS-install failure from
+# aborting a warm whose Rust/Python/Go indexers would still succeed.
+cd "{project_root}"
+if [ -f pnpm-lock.yaml ]; then
+  ( corepack enable >/dev/null 2>&1 || true; \
+    corepack pnpm install --frozen-lockfile || pnpm install --frozen-lockfile || pnpm install ) || true
+elif [ -f yarn.lock ]; then
+  ( corepack enable >/dev/null 2>&1 || true; \
+    corepack yarn install --frozen-lockfile || yarn install ) || true
+elif [ -f package-lock.json ]; then
+  ( npm ci || npm install ) || true
+fi
 exec {bin} warm-graph "{project_id}"
 "#,
         mirror_path = mirror_path,
@@ -327,6 +344,10 @@ mod tests {
         assert!(cmd[2].contains("git clone"), "bash -c script: {}", cmd[2]);
         assert!(cmd[2].contains(WARM_COMMAND_BIN));
         assert!(cmd[2].contains("warm-graph \"proj-xyz\""));
+        // JS deps are installed (lockfile-gated) before warming so the TS
+        // indexer can resolve workspace-package tsconfig `extends`.
+        assert!(cmd[2].contains("pnpm-lock.yaml"), "bash -c script: {}", cmd[2]);
+        assert!(cmd[2].contains("pnpm install"));
 
         let envs: BTreeMap<&str, &str> = container
             .env
