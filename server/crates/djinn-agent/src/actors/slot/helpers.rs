@@ -925,6 +925,62 @@ pub(crate) fn build_telemetry_meta(
     }
 }
 
+/// Build an [`djinn_provider::provider::LlmProvider`] from a resolved model +
+/// credential. Single home for the OAuth-vs-API-key construction shared by the
+/// per-stage worker session ([`crate::supervisor_impl::stage`]), host-side
+/// `invoke_llm` ([`crate::direct_services`]), and post-session memory
+/// extraction ([`crate::actors::slot::llm_extraction`]). Callers differ only in
+/// the inputs threaded here — `context_window`, `telemetry`,
+/// `session_affinity_key`, and the (async-resolved) provider `base_url` — so
+/// those stay caller-supplied. `base_url` is unused for OAuth configs (they
+/// carry their own); callers can skip the lookup and pass `String::new()`.
+/// Returns `None` when no credential was resolved.
+pub(crate) fn build_provider_from_resolved(
+    resolved: crate::actors::slot::lifecycle::model_resolution::ResolvedModelCredential,
+    context_window: u32,
+    telemetry: Option<djinn_provider::provider::TelemetryMeta>,
+    session_affinity_key: Option<String>,
+    base_url: String,
+) -> Option<Box<dyn djinn_provider::provider::LlmProvider>> {
+    match resolved.provider_credential {
+        Some(ProviderCredential::OAuthConfig(mut cfg)) => {
+            cfg.model_id = resolved.model_name.clone();
+            cfg.context_window = context_window;
+            cfg.telemetry = telemetry;
+            cfg.session_affinity_key = session_affinity_key;
+            Some(djinn_provider::provider::create_provider(*cfg))
+        }
+        Some(ProviderCredential::ApiKey(_key_name, api_key)) => Some(
+            djinn_provider::provider::create_provider(djinn_provider::provider::ProviderConfig {
+                base_url,
+                auth: auth_method_for_provider(&resolved.catalog_provider_id, &api_key),
+                format_family: format_family_for_provider(
+                    &resolved.catalog_provider_id,
+                    &resolved.model_name,
+                ),
+                model_id: resolved.model_name.clone(),
+                context_window,
+                telemetry,
+                session_affinity_key,
+                provider_headers: Default::default(),
+                capabilities: capabilities_for_provider(&resolved.catalog_provider_id),
+            }),
+        ),
+        None => None,
+    }
+}
+
+/// True when a resolved credential needs an API base URL (API-key providers);
+/// OAuth configs carry their own, so callers can skip the async lookup.
+pub(crate) fn resolved_needs_base_url(
+    resolved: &crate::actors::slot::lifecycle::model_resolution::ResolvedModelCredential,
+) -> bool {
+    matches!(
+        resolved.provider_credential,
+        Some(ProviderCredential::ApiKey(..))
+    )
+}
+
 // ─── Knowledge context helpers ──────────────────────────────────────────────
 
 /// Extract crate/module path prefixes from a task's description, design, and epic context.

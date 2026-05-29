@@ -71,10 +71,8 @@ use djinn_db::ProjectRepository;
 use djinn_git::run_git_command;
 
 use crate::AgentType;
-use crate::actors::slot::helpers::ProviderCredential;
 use crate::actors::slot::helpers::{
-    auth_method_for_provider, build_telemetry_meta, capabilities_for_provider, default_base_url,
-    format_family_for_provider,
+    build_provider_from_resolved, build_telemetry_meta, default_base_url, resolved_needs_base_url,
 };
 use crate::actors::slot::helpers::conflict_context_for_dispatch;
 use crate::actors::slot::lifecycle::mcp_resolve::{McpAndSkills, resolve_mcp_and_skills};
@@ -92,7 +90,7 @@ use crate::actors::slot::lifecycle::teardown::{PostSessionParams, spawn_post_ses
 use crate::actors::slot::reply_loop::{ReplyLoopContext, run_reply_loop};
 use crate::context::AgentContext;
 use djinn_provider::message::{Conversation, Message};
-use djinn_provider::provider::{LlmProvider, ProviderConfig, create_provider};
+use djinn_provider::provider::LlmProvider;
 use crate::roles::{AgentRole, role_impl_for};
 
 use super::SupervisorCallbackContext;
@@ -404,37 +402,25 @@ pub(crate) async fn execute_stage(
         let resolved = resolved
             .expect("resolved model credential must be populated when provider_override is absent");
         let telemetry_meta = build_telemetry_meta(role_name, &task.id);
-        let built = match resolved.provider_credential {
-            Some(ProviderCredential::OAuthConfig(mut cfg)) => {
-                cfg.model_id = resolved.model_name.clone();
-                cfg.context_window = context_window.max(0) as u32;
-                cfg.telemetry = Some(telemetry_meta);
-                cfg.session_affinity_key = Some(session_id.clone());
-                create_provider(*cfg)
-            }
-            Some(ProviderCredential::ApiKey(_key_name, api_key)) => {
-                let format_family =
-                    format_family_for_provider(&resolved.catalog_provider_id, &resolved.model_name);
-                // Soft fallback: a missing catalog entry (or empty base_url)
-                // surfaces as `Err`, which we map to `default_base_url` —
-                // matches the pre-Phase-6b `.filter(|u| !u.is_empty()).unwrap_or_else(..)`
-                // behaviour.
-                let base_url = services
-                    .get_provider_base_url(resolved.catalog_provider_id.clone())
-                    .await
-                    .unwrap_or_else(|_| default_base_url(&resolved.catalog_provider_id));
-                create_provider(ProviderConfig {
-                    base_url,
-                    auth: auth_method_for_provider(&resolved.catalog_provider_id, &api_key),
-                    format_family,
-                    model_id: resolved.model_name.clone(),
-                    context_window: context_window.max(0) as u32,
-                    telemetry: Some(telemetry_meta),
-                    session_affinity_key: Some(session_id.clone()),
-                    provider_headers: Default::default(),
-                    capabilities: capabilities_for_provider(&resolved.catalog_provider_id),
-                })
-            }
+        // Look up the API base URL only for API-key providers (OAuth configs
+        // carry their own). Soft fallback to `default_base_url` on a missing
+        // catalog entry / empty URL, matching the pre-Phase-6b behaviour.
+        let base_url = if resolved_needs_base_url(&resolved) {
+            services
+                .get_provider_base_url(resolved.catalog_provider_id.clone())
+                .await
+                .unwrap_or_else(|_| default_base_url(&resolved.catalog_provider_id))
+        } else {
+            String::new()
+        };
+        let built = match build_provider_from_resolved(
+            resolved,
+            context_window.max(0) as u32,
+            Some(telemetry_meta),
+            Some(session_id.clone()),
+            base_url,
+        ) {
+            Some(provider) => provider,
             None => {
                 let _ = services
                     .update_session_status(session_id.clone(), SessionStatus::Failed, 0, 0)

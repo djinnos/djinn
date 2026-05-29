@@ -427,16 +427,69 @@ async fn run_llm_extraction_inner(
         }
         Box::new(ArcProvider(p))
     } else {
-        match resolve_memory_provider(&app_state.db).await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(
-                    session_id = %session_id,
-                    error = %e,
-                    "llm_extraction: no LLM provider available; skipping extraction"
-                );
-                return;
+        // Resolve the memory model the way DISPATCH does — act as the task's
+        // creator (the automations / owning user) so extraction uses THEIR
+        // configured model + credential, exactly like the planner patrol. The
+        // session already ran on `session.model_id` for this user, so resolving
+        // it under the creator's `SESSION_USER_ID` scope reuses the proven
+        // provider path: e.g. an `openai/*` id served via the connected
+        // `chatgpt_codex` credential (the catalog-only `resolve_memory_provider`
+        // can't resolve that and skipped extraction entirely → zero notes).
+        // Falls back to the global connected-model path if this fails.
+        let creator = task.created_by_user_id.clone();
+        let memory_model_id = session.model_id.clone();
+        let telemetry =
+            crate::actors::slot::helpers::build_telemetry_meta("memory_extraction", &task_id);
+        // One-shot completion over a small (taxonomy) prompt — no compaction —
+        // so a generous fixed context window is safe.
+        const MEMORY_CONTEXT_WINDOW: u32 = 128_000;
+        let creator_scoped = djinn_core::auth_context::SESSION_USER_ID
+            .scope(
+                creator,
+                crate::actors::slot::lifecycle::model_resolution::resolve_model_and_credential(
+                    &memory_model_id,
+                    &task_id,
+                    &app_state,
+                ),
+            )
+            .await;
+        let via_creator = match creator_scoped {
+            Ok(resolved) => {
+                let base_url = if crate::actors::slot::helpers::resolved_needs_base_url(&resolved) {
+                    crate::actors::slot::helpers::default_base_url(&resolved.catalog_provider_id)
+                } else {
+                    String::new()
+                };
+                crate::actors::slot::helpers::build_provider_from_resolved(
+                    resolved,
+                    MEMORY_CONTEXT_WINDOW,
+                    Some(telemetry),
+                    None,
+                    base_url,
+                )
             }
+            Err(e) => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    error = %e.reason,
+                    "llm_extraction: creator-scoped model resolution failed; trying global memory provider"
+                );
+                None
+            }
+        };
+        match via_creator {
+            Some(p) => p,
+            None => match resolve_memory_provider(&app_state.db).await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %e,
+                        "llm_extraction: no LLM provider available; skipping extraction"
+                    );
+                    return;
+                }
+            },
         }
     };
 

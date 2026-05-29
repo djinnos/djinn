@@ -36,8 +36,7 @@ use tokio_util::sync::CancellationToken;
 use crate::context::AgentContext;
 use djinn_provider::message::Conversation;
 use djinn_provider::provider::{
-    LlmProvider, LlmResponse, ProviderConfig, StreamEvent, TokenUsage, ToolChoice,
-    create_provider,
+    LlmProvider, LlmResponse, StreamEvent, TokenUsage, ToolChoice,
 };
 use crate::supervisor_impl::{SupervisorCallbackContext, execute_stage, supervisor_pr_open};
 use futures::StreamExt;
@@ -271,48 +270,26 @@ impl SupervisorServices for DirectServices {
             "invoke_llm",
             &synthetic_task_id,
         );
-        let provider: Box<dyn LlmProvider> = match resolved.provider_credential {
-            Some(crate::actors::slot::helpers::ProviderCredential::OAuthConfig(mut cfg)) => {
-                cfg.model_id = resolved.model_name.clone();
-                cfg.context_window = context_window;
-                cfg.telemetry = Some(telemetry_meta);
-                cfg.session_affinity_key = None;
-                create_provider(*cfg)
-            }
-            Some(crate::actors::slot::helpers::ProviderCredential::ApiKey(_, api_key)) => {
-                let format_family = crate::actors::slot::helpers::format_family_for_provider(
-                    &resolved.catalog_provider_id,
-                    &resolved.model_name,
-                );
-                let base_url = self
-                    .get_provider_base_url(resolved.catalog_provider_id.clone())
-                    .await
-                    .unwrap_or_else(|_| {
-                        crate::actors::slot::helpers::default_base_url(
-                            &resolved.catalog_provider_id,
-                        )
-                    });
-                create_provider(ProviderConfig {
-                    base_url,
-                    auth: crate::actors::slot::helpers::auth_method_for_provider(
-                        &resolved.catalog_provider_id,
-                        &api_key,
-                    ),
-                    format_family,
-                    model_id: resolved.model_name.clone(),
-                    context_window,
-                    telemetry: Some(telemetry_meta),
-                    session_affinity_key: None,
-                    provider_headers: Default::default(),
-                    capabilities: crate::actors::slot::helpers::capabilities_for_provider(
-                        &resolved.catalog_provider_id,
-                    ),
+        // Look up the API base URL only for API-key providers (OAuth configs
+        // carry their own); then build the provider via the shared helper.
+        let base_url = if crate::actors::slot::helpers::resolved_needs_base_url(&resolved) {
+            self.get_provider_base_url(resolved.catalog_provider_id.clone())
+                .await
+                .unwrap_or_else(|_| {
+                    crate::actors::slot::helpers::default_base_url(&resolved.catalog_provider_id)
                 })
-            }
-            None => {
-                return Err("no provider credential resolved for model".into());
-            }
+        } else {
+            String::new()
         };
+        let provider: Box<dyn LlmProvider> =
+            crate::actors::slot::helpers::build_provider_from_resolved(
+                resolved,
+                context_window,
+                Some(telemetry_meta),
+                None,
+                base_url,
+            )
+            .ok_or_else(|| "no provider credential resolved for model".to_string())?;
 
         // Drive the stream to completion and collect the terminal aggregate.
         let mut stream = provider
