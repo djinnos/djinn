@@ -350,6 +350,21 @@ pub struct Languages {
 }
 
 impl Languages {
+    /// True when at least one language toolchain is configured. Used to decide
+    /// whether a project has indexable code at all — a project with none (e.g.
+    /// a docs / memory-only repo) has nothing for the canonical-graph warmer
+    /// (a CODE graph) to index, so warming it is wasted work.
+    pub fn has_any(&self) -> bool {
+        self.rust.is_some()
+            || self.node.is_some()
+            || self.python.is_some()
+            || self.go.is_some()
+            || self.java.is_some()
+            || self.ruby.is_some()
+            || self.dotnet.is_some()
+            || self.clang.is_some()
+    }
+
     fn validate(&self) -> EnvResult<()> {
         if let Some(r) = &self.rust {
             r.validate()?;
@@ -922,6 +937,21 @@ fn validate_path(field: &str, value: &str) -> EnvResult<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn languages_has_any_reflects_configured_toolchains() {
+        assert!(
+            !Languages::default().has_any(),
+            "empty (docs-only) → no code"
+        );
+        let with_rust = Languages {
+            rust: Some(RustLanguage {
+                default_toolchain: "stable".into(),
+            }),
+            ..Default::default()
+        };
+        assert!(with_rust.has_any());
+    }
 
     fn valid_minimal() -> EnvironmentConfig {
         EnvironmentConfig::empty()

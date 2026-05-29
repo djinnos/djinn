@@ -742,11 +742,34 @@ impl CoordinatorActor {
         };
 
         let mut considered = 0usize;
+        let mut skipped_no_code = 0usize;
         for project in projects {
             considered += 1;
+            // Skip projects with no indexable code stack. The canonical graph
+            // is a CODE graph, so a docs / memory-only repo (no detected
+            // language) has nothing to index — warming it just churns empty
+            // Jobs. Dispatch no longer depends on the warm (see
+            // `is_ready_for_dispatch`), so skipping is purely a saving.
+            let cfg = crate::verification::environment::environment_config_for_project_id(
+                &self.db,
+                &project.id,
+            )
+            .await;
+            if !cfg.languages.has_any() {
+                skipped_no_code += 1;
+                tracing::debug!(
+                    project_id = %project.id,
+                    "CoordinatorActor: graph refresh tick — project has no indexable code stack; skipping warm"
+                );
+                continue;
+            }
             warmer.trigger(&project.id).await;
         }
-        tracing::debug!(considered, "CoordinatorActor: graph refresh tick complete");
+        tracing::debug!(
+            considered,
+            skipped_no_code,
+            "CoordinatorActor: graph refresh tick complete"
+        );
     }
 
     /// Resolve dispatch models for a given role from configured priorities,
