@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 
 use crate::github_api::transport::handle_rate_limit;
+use crate::github_api::types::{CompareResponse, RequiredStatusChecksResponse};
 use crate::github_api::{
     AutoMergeRequest, CheckRunsResponse, CreatePrParams, DequeueEvent, GitHubApiClient,
     MergeMethod, MergeQueueEntry, MergeQueueEntryState, PrMergeQueueState, PullRequest,
@@ -973,5 +974,118 @@ impl GitHubApiClient {
         }
         let body = resp.text().await.unwrap_or_default();
         Err(anyhow!("delete_ref failed ({}): {}", status, body))
+    }
+
+    /// List the **required** status-check contexts configured on a branch's
+    /// protection rules.
+    ///
+    /// Reads `GET /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks`,
+    /// which returns the contexts that branch protection (and, for queue-enabled
+    /// repos, the merge queue) treats as merge-gating. These are the only check
+    /// runs whose failure should trigger a rework — advisory checks (preview
+    /// environments, deploy previews, etc.) are absent from this list.
+    ///
+    /// Returns:
+    /// - `Ok(Some(contexts))` when branch protection with required checks exists.
+    /// - `Ok(None)` when the branch has no protection / no required checks
+    ///   (HTTP 404), so the caller knows there is no source of truth and can
+    ///   fall back to a name-pattern heuristic.
+    /// - `Err(..)` on any other failure (e.g. 403 when the installation lacks
+    ///   the `administration` permission), so the caller can likewise fall back
+    ///   rather than treating every check as non-blocking.
+    pub async fn list_required_status_checks(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+    ) -> Result<Option<Vec<String>>> {
+        let url = format!(
+            "{}/repos/{}/{}/branches/{}/protection/required_status_checks",
+            self.base_url, owner, repo, branch
+        );
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .get(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        let status = resp.status();
+        // 404 = no branch protection / no required-status-checks rule on this
+        // branch. Distinct from an access error: there genuinely is no required
+        // set, so report `None` and let the caller fall back to heuristics.
+        if status.as_u16() == 404 {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "list_required_status_checks failed ({}): {}",
+                status,
+                body
+            ));
+        }
+        let parsed: RequiredStatusChecksResponse = resp.json().await?;
+        Ok(Some(parsed.contexts))
+    }
+
+    /// Return how many commits `head` is ahead of `base` on GitHub via the
+    /// compare API (`GET /repos/{owner}/{repo}/compare/{base}...{head}`).
+    ///
+    /// Used by the CI-failure rework loop to detect the diff-empty case: when a
+    /// reworking worker re-opens a PR whose head is identical to (or contains no
+    /// new commits beyond) the base, `ahead_by == 0` and there is nothing a
+    /// fresh worker iteration can change — re-dispatching just loops.
+    pub async fn compare_commits_ahead_by(
+        &self,
+        owner: &str,
+        repo: &str,
+        base: &str,
+        head: &str,
+    ) -> Result<u64> {
+        let url = format!(
+            "{}/repos/{}/{}/compare/{}...{}",
+            self.base_url, owner, repo, base, head
+        );
+
+        let resp = self
+            .send_with_retry(|token| {
+                let url = url.clone();
+                let http = self.http.clone();
+                async move {
+                    let resp = http
+                        .get(&url)
+                        .bearer_auth(&token)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "compare_commits_ahead_by failed ({}): {}",
+                status,
+                body
+            ));
+        }
+        let parsed: CompareResponse = resp.json().await?;
+        Ok(parsed.ahead_by)
     }
 }
