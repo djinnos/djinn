@@ -129,11 +129,13 @@ pub(super) struct CoordinatorActor {
     ///   * SHA change (a new push invalidated GitHub's queue entry)
     ///   * Merge-queue rejection (`PrCiFailed` reopens the task)
     pub(super) delegated_to_github: HashMap<String, String>,
-    /// Task IDs for which a stall-kill has already been issued.  Prevents
+    /// SESSION IDs for which a stall-kill has already been issued.  Prevents
     /// repeated kill + activity-log spam while the async lifecycle cleanup
     /// is still in progress (the DB session record stays `running` until
     /// the lifecycle finishes).  Entries are removed when the session
-    /// disappears from `list_active()`.
+    /// disappears from `list_active()`.  Keyed by session id (not task id) so
+    /// a redispatched successor session for the same task is never masked by a
+    /// dead predecessor's entry — see `enforce_session_stall_timeout`.
     pub(super) stall_killed: HashSet<String>,
     /// Timestamp of the last completed idle-time consolidation sweep (ADR-048 §3A).
     pub(super) last_idle_consolidation: Option<StdInstant>,
@@ -271,6 +273,7 @@ impl CoordinatorActor {
                 //    tasks surviving a server restart).
                 _ = self.tick.tick() => {
                     self.enforce_session_stall_timeout().await;
+                    self.reap_zombie_sessions().await;
                     self.reap_idle_chat_sessions().await;
                     self.detect_and_recover_stuck_filtered(None).await;
 

@@ -155,6 +155,12 @@ impl SlotPool {
             } => {
                 let _ = respond_to.send(self.kill_session(&task_id).await);
             }
+            PoolMessage::EvictSession {
+                task_id,
+                respond_to,
+            } => {
+                let _ = respond_to.send(self.evict_session(&task_id).await);
+            }
             PoolMessage::PauseSession {
                 task_id,
                 respond_to,
@@ -292,6 +298,41 @@ impl SlotPool {
                     task_id: task_id.to_string(),
                 })?;
         self.slot(slot_id)?.kill().await?;
+        Ok(())
+    }
+
+    /// Forcibly reclaim a leaked task→slot mapping. The normal lifecycle frees a
+    /// slot only when the worker emits `SlotEvent::Free`/`Killed`; a pod that
+    /// dies without that event (eviction, OOM, stuck RPC stream) leaves
+    /// `task_to_slot` populated forever, so `has_session` lies `true` and the
+    /// task can never redispatch (`dispatch` rejects with `SessionAlreadyActive`).
+    /// This synthesizes the `Killed` cleanup that never arrived: it nudges the
+    /// slot to die (best-effort — the pod is presumed unresponsive) and then
+    /// removes the mapping and returns the slot to the free pool regardless.
+    /// Idempotent: a task with no mapping is a no-op.
+    async fn evict_session(&mut self, task_id: &str) -> Result<(), PoolError> {
+        let Some(slot_id) = self.task_to_slot.get(task_id).copied() else {
+            return Ok(());
+        };
+        // Best-effort terminate; ignore errors — the point of eviction is that
+        // this slot is unresponsive and its normal teardown never completed.
+        if let Ok(slot) = self.slot(slot_id) {
+            let _ = slot.kill().await;
+        }
+        let model_id = self.slot_models.get(&slot_id).cloned();
+        self.task_to_slot.remove(task_id);
+        self.task_started.remove(task_id);
+        self.task_projects.remove(task_id);
+        if self.draining_slots.remove(&slot_id) {
+            self.retired_slots.insert(slot_id);
+            self.slot_states.insert(slot_id, SlotState::Draining);
+        } else {
+            self.slot_states.insert(slot_id, SlotState::Free);
+            if let Some(model_id) = model_id {
+                self.free_slots.entry(model_id).or_default().push(slot_id);
+            }
+        }
+        self.trigger_redispatch().await;
         Ok(())
     }
 

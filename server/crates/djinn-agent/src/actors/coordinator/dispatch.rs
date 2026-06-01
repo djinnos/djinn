@@ -747,11 +747,17 @@ impl CoordinatorActor {
         /// reviews are similarly read-heavy and don't need a shorter clock.
         const ARCHITECT_STALL_TIMEOUT_SECS: u64 = 30 * 60;
 
-        // Collect active task IDs so we can prune stall_killed entries for
-        // sessions that have finished cleaning up.
-        let active_task_ids: HashSet<String> =
-            active.iter().filter_map(|s| s.task_id.clone()).collect();
-        self.stall_killed.retain(|id| active_task_ids.contains(id));
+        // Prune `stall_killed` entries for sessions that have finished cleaning
+        // up. This set is keyed by SESSION id, not task id: keying by task id
+        // let a stale entry from a just-killed session permanently mask the
+        // task's NEXT session, because the kill→finalize→redispatch sequence
+        // can complete within a single tick (orphan recovery + dispatch run
+        // back-to-back) so there is never a tick where the task has zero
+        // running sessions for the task-keyed prune to observe. Per-session
+        // keying means a brand-new session row is always re-evaluated.
+        let active_session_ids: HashSet<String> =
+            active.iter().map(|s| s.id.clone()).collect();
+        self.stall_killed.retain(|id| active_session_ids.contains(id));
 
         /// Zero-token short-circuit: a session that has not produced or
         /// consumed a single token after this many seconds has its very
@@ -765,9 +771,11 @@ impl CoordinatorActor {
                 continue;
             };
 
-            // Skip sessions we've already killed — the DB record stays
-            // `running` until the async lifecycle cleanup finishes.
-            if self.stall_killed.contains(task_id) {
+            // Skip this exact session if we've already killed it — its DB
+            // record stays `running` until the async lifecycle cleanup
+            // finishes. Keyed by session id so a redispatched successor for
+            // the same task is never masked.
+            if self.stall_killed.contains(&session.id) {
                 continue;
             }
 
@@ -818,8 +826,9 @@ impl CoordinatorActor {
                 continue;
             }
 
-            // Mark as killed so we don't re-kill and re-log on subsequent ticks.
-            self.stall_killed.insert(task_id.to_owned());
+            // Mark this session as killed so we don't re-kill and re-log on
+            // subsequent ticks while its DB row drains.
+            self.stall_killed.insert(session.id.clone());
 
             // Feed the model circuit-breaker so dispatch fails over to the next
             // model in the creator's ordered list on redispatch. A zero-token
@@ -867,6 +876,141 @@ impl CoordinatorActor {
                 zero_tokens,
                 "CoordinatorActor: killed stalled session"
             );
+        }
+    }
+
+    /// DB-truth backstop beneath the in-memory stall breaker and orphan
+    /// reconciler. Both of those gate on in-memory coordinator state that can
+    /// silently drift from the source of truth (the session DB row): the stall
+    /// breaker on `stall_killed`, the orphan reconciler on `pool.has_session`
+    /// (the in-memory `task_to_slot` map). When that state drifts — a leaked
+    /// slot whose `Killed` event never arrived, a pod evicted/OOM-killed before
+    /// it produced a token, a server restart between session create and slot
+    /// registration — a session can sit `running` with zero tokens forever and
+    /// be reaped by *neither* mechanism, wedging its task in an execution state
+    /// indefinitely.
+    ///
+    /// This sweep ignores all in-memory state and acts on DB truth alone: any
+    /// non-chat session that has been `running` with zero token progress for
+    /// longer than every fast-path threshold is finalized, its (likely leaked)
+    /// slot forcibly reclaimed, and its task released for redispatch. The hard
+    /// cap sits well above the 180s zero-token stall threshold so the fast path
+    /// always wins in the normal case; this only fires for genuine drift.
+    pub(super) async fn reap_zombie_sessions(&mut self) {
+        /// A `running`, zero-token session older than this has slipped past the
+        /// 180s fast-path stall breaker — its in-memory tracking has drifted.
+        /// Reap it on DB truth alone.
+        const ZOMBIE_HARD_CAP_SECS: u64 = 10 * 60;
+
+        let session_repo = djinn_db::SessionRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let active = match session_repo.list_active().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "CoordinatorActor: failed to list active sessions for zombie reap");
+                return;
+            }
+        };
+        let task_repo = self.task_repo();
+
+        for session in active {
+            let Some(task_id) = session.task_id.as_deref() else {
+                continue;
+            };
+            // Chat sessions have their own idle reaper and legitimately sit at
+            // zero tokens between turns.
+            if session.agent_type == "chat" {
+                continue;
+            }
+            if session.tokens_in != 0 || session.tokens_out != 0 {
+                continue;
+            }
+            let Some(age) = parse_iso_elapsed(&session.started_at) else {
+                continue;
+            };
+            if age <= ZOMBIE_HARD_CAP_SECS {
+                continue;
+            }
+
+            tracing::warn!(
+                task_id = %task_id,
+                session_id = %session.id,
+                agent_type = %session.agent_type,
+                age_seconds = age,
+                model_id = %session.model_id,
+                "CoordinatorActor: reaping zombie session (running, zero tokens, past hard cap, no live worker)"
+            );
+
+            let payload = serde_json::json!({
+                "message": format!(
+                    "Coordinator zombie-session backstop: {} session was `running` with zero tokens for {}s (hard cap {}s) with no live worker. Session finalized and task released for redispatch.",
+                    session.agent_type, age, ZOMBIE_HARD_CAP_SECS
+                )
+            })
+            .to_string();
+            let _ = task_repo
+                .log_activity(Some(task_id), "coordinator", "system", "comment", &payload)
+                .await;
+
+            // A zombie that outran the fast-path breaker is still a strong
+            // "this backend is bad right now" signal — trip the model breaker
+            // so redispatch fails over rather than re-hanging on the same model.
+            self.health.record_stall(&session.model_id);
+
+            // Forcibly reclaim the (likely leaked) slot so the reopened task is
+            // not rejected with `SessionAlreadyActive` on redispatch.
+            if let Err(e) = self.pool.evict_session(task_id).await {
+                tracing::warn!(task_id = %task_id, error = %e, "CoordinatorActor: failed to evict slot for zombie session");
+            }
+            // Drop the stale stall guard for this finalized session.
+            self.stall_killed.remove(&session.id);
+
+            // Finalize the orphaned `running` row so it stops being listed.
+            if let Err(e) = session_repo.interrupt_running_for_task(task_id).await {
+                tracing::warn!(task_id = %task_id, error = %e, "CoordinatorActor: failed to finalize zombie session row");
+            }
+
+            // Release the task from its execution status so dispatch can pick
+            // it up again. Mirrors the orphan reconciler's status→action map,
+            // but does not depend on `has_session` (which is exactly the gate
+            // that drifted).
+            match task_repo.get(task_id).await {
+                Ok(Some(task)) => {
+                    let release = match task.status.as_str() {
+                        "in_progress" => Some((TransitionAction::Release, "open")),
+                        "in_task_review" => {
+                            Some((TransitionAction::ReleaseTaskReview, "needs_task_review"))
+                        }
+                        "in_lead_intervention" => Some((
+                            TransitionAction::LeadInterventionRelease,
+                            "needs_lead_intervention",
+                        )),
+                        _ => None,
+                    };
+                    if let Some((action, release_to)) = release
+                        && let Err(e) = task_repo
+                            .transition(
+                                &task.id,
+                                action,
+                                "coordinator",
+                                "system",
+                                Some(
+                                    "Recovered by coordinator: zombie session reaped (running, zero tokens, no live worker)",
+                                ),
+                                None,
+                            )
+                            .await
+                    {
+                        tracing::warn!(task_id = %task_id, to = release_to, error = %e, "CoordinatorActor: failed to release task after zombie reap");
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(task_id = %task_id, error = %e, "CoordinatorActor: failed to load task for zombie reap")
+                }
+            }
         }
     }
 

@@ -79,6 +79,18 @@ impl SlotPoolHandle {
         .await
     }
 
+    /// Forcibly evict a leaked task→slot mapping whose `Killed`/`Free` event
+    /// never arrived (dead/evicted/OOM-killed pod, stuck RPC stream). Unlike
+    /// [`kill_session`], this does not depend on the pod responding — it
+    /// reclaims the in-memory slot regardless so the task can redispatch.
+    pub async fn evict_session(&self, task_id: &str) -> Result<(), PoolError> {
+        self.request(|tx| PoolMessage::EvictSession {
+            task_id: task_id.to_owned(),
+            respond_to: tx,
+        })
+        .await
+    }
+
     pub async fn pause_session(&self, task_id: &str) -> Result<(), PoolError> {
         self.request(|tx| PoolMessage::PauseSession {
             task_id: task_id.to_owned(),

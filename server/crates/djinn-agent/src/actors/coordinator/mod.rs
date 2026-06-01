@@ -421,6 +421,153 @@ mod tests {
         assert!(matches!(outcome, DispatchOutcome::Dispatched));
     }
 
+    // ── Zombie-session DB-truth backstop ─────────────────────────────────────
+
+    /// Regression for the xh6f wedge: a session stuck `running` with zero
+    /// tokens past the hard cap is reaped purely on DB truth — the row is
+    /// finalized and the task released for redispatch — even when the
+    /// in-memory fast-path reapers (`stall_killed`, `pool.has_session`) would
+    /// skip it. Models a worker that came up, wrote its session row, then died
+    /// before producing a token without the slot's `Killed` event ever firing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn zombie_zero_token_session_is_reaped_on_db_truth() {
+        use djinn_db::{CreateSessionParams, SessionRepository};
+
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let (task, _note) = create_task_with_note(&db, &tx, "zombie-reap").await;
+
+        // Put the task in an execution state, as if dispatched.
+        sqlx::query("UPDATE tasks SET status = 'in_progress' WHERE id = $1")
+            .bind(&task.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let session = session_repo
+            .create(CreateSessionParams {
+                project_id: &task.project_id,
+                task_id: Some(&task.id),
+                model: "openai/gpt-5.5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+            })
+            .await
+            .unwrap();
+        // Backdate well past the 10-minute hard cap, leaving tokens at 0/0.
+        // Match the column's stored format (VARCHAR `YYYY-MM-DDThh:mm:ss.msZ`)
+        // so `parse_iso_elapsed` reads it.
+        sqlx::query(
+            "UPDATE sessions SET started_at = to_char(now() AT TIME ZONE 'utc' - interval '20 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
+        )
+            .bind(&session.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        assert!(
+            session_repo
+                .list_active()
+                .await
+                .unwrap()
+                .iter()
+                .any(|s| s.id == session.id),
+            "precondition: zombie session should be listed as running"
+        );
+
+        let mut actor = coordinator_actor_for_tests(&db, &tx);
+        actor.reap_zombie_sessions().await;
+
+        assert!(
+            !session_repo
+                .list_active()
+                .await
+                .unwrap()
+                .iter()
+                .any(|s| s.id == session.id),
+            "zombie session row must be finalized by the backstop"
+        );
+        let updated = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+            .get(&task.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated.status, "open",
+            "task must be released for redispatch after the zombie is reaped"
+        );
+        assert!(
+            !actor.health.is_available("openai/gpt-5.5"),
+            "reaping a zombie must trip the model breaker so redispatch fails over"
+        );
+    }
+
+    /// A young zero-token session (still inside the fast-path window) is left
+    /// alone by the backstop — the 180s stall breaker owns that case.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn young_zero_token_session_is_not_reaped() {
+        use djinn_db::{CreateSessionParams, SessionRepository};
+
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let (task, _note) = create_task_with_note(&db, &tx, "young-session").await;
+        sqlx::query("UPDATE tasks SET status = 'in_progress' WHERE id = $1")
+            .bind(&task.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let session = session_repo
+            .create(CreateSessionParams {
+                project_id: &task.project_id,
+                task_id: Some(&task.id),
+                model: "openai/gpt-5.5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+            })
+            .await
+            .unwrap();
+
+        let mut actor = coordinator_actor_for_tests(&db, &tx);
+        actor.reap_zombie_sessions().await;
+
+        assert!(
+            session_repo
+                .list_active()
+                .await
+                .unwrap()
+                .iter()
+                .any(|s| s.id == session.id),
+            "a session inside the hard-cap window must not be reaped by the backstop"
+        );
+    }
+
+    /// `stall_killed` is keyed by session id and pruned against `list_active()`:
+    /// a leftover entry for a session that is no longer running is dropped, so
+    /// it can never linger to mask a redispatched successor session for the
+    /// same task (the proximate cause of the xh6f permanent wedge).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stall_killed_prunes_sessions_absent_from_active() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let mut actor = coordinator_actor_for_tests(&db, &tx);
+
+        actor
+            .stall_killed
+            .insert("019e764f-dead-session".to_string());
+        // No sessions are running, so the prune (retain by active session id)
+        // must clear the stale entry.
+        actor.enforce_session_stall_timeout().await;
+        assert!(
+            actor.stall_killed.is_empty(),
+            "stall_killed entries for sessions absent from list_active() must be pruned"
+        );
+    }
+
     async fn create_simple_task(
         db: &Database,
         tx: &broadcast::Sender<DjinnEventEnvelope>,
