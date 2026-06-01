@@ -1282,6 +1282,11 @@ expression: signatures
         "created_at": {
           "type": "string"
         },
+        "created_by_user_id": {
+          "description": "Real user FK of the epic's creator (NULL for system/unowned epics).\nSurfaced so the board can scope epics to the owner filter, mirroring\n`TaskModel::created_by_user_id`.",
+          "nullable": true,
+          "type": "string"
+        },
         "description": {
           "type": "string"
         },
@@ -1477,6 +1482,11 @@ expression: signatures
         "created_at": {
           "type": "string"
         },
+        "created_by_user_id": {
+          "description": "Real user FK of the epic's creator (NULL for system/unowned epics).\nSurfaced so the board can scope epics to the owner filter, mirroring\n`TaskModel::created_by_user_id`.",
+          "nullable": true,
+          "type": "string"
+        },
         "description": {
           "type": "string"
         },
@@ -1619,6 +1629,11 @@ expression: signatures
               "type": "string"
             },
             "created_at": {
+              "type": "string"
+            },
+            "created_by_user_id": {
+              "description": "Real user FK of the epic's creator (NULL for system/unowned epics).\nSurfaced so the board can scope epics to the owner filter, mirroring\n`TaskModel::created_by_user_id`.",
+              "nullable": true,
               "type": "string"
             },
             "description": {
@@ -1838,6 +1853,11 @@ expression: signatures
         "created_at": {
           "type": "string"
         },
+        "created_by_user_id": {
+          "description": "Real user FK of the epic's creator (NULL for system/unowned epics).\nSurfaced so the board can scope epics to the owner filter, mirroring\n`TaskModel::created_by_user_id`.",
+          "nullable": true,
+          "type": "string"
+        },
         "description": {
           "type": "string"
         },
@@ -1922,6 +1942,11 @@ expression: signatures
           "type": "string"
         },
         "created_at": {
+          "type": "string"
+        },
+        "created_by_user_id": {
+          "description": "Real user FK of the epic's creator (NULL for system/unowned epics).\nSurfaced so the board can scope epics to the owner filter, mirroring\n`TaskModel::created_by_user_id`.",
+          "nullable": true,
           "type": "string"
         },
         "description": {
@@ -2263,6 +2288,11 @@ expression: signatures
           "type": "string"
         },
         "created_at": {
+          "type": "string"
+        },
+        "created_by_user_id": {
+          "description": "Real user FK of the epic's creator (NULL for system/unowned epics).\nSurfaced so the board can scope epics to the owner filter, mirroring\n`TaskModel::created_by_user_id`.",
+          "nullable": true,
           "type": "string"
         },
         "description": {
@@ -5674,6 +5704,11 @@ expression: signatures
               "type": "string"
             },
             "created_at": {
+              "type": "string"
+            },
+            "created_by_user_id": {
+              "description": "Real user FK of the epic's creator (NULL for system/unowned epics).\nSurfaced so the board can scope epics to the owner filter, mirroring\n`TaskModel::created_by_user_id`.",
+              "nullable": true,
               "type": "string"
             },
             "description": {

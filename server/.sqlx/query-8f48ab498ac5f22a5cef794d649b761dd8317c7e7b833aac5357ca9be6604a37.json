@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, project_id, short_id, title, description, emoji, color,\n                    status AS \"status!\", owner, created_at, updated_at, closed_at,\n                    memory_refs::text AS \"memory_refs!\", auto_breakdown AS \"auto_breakdown!: bool\",\n                    originating_adr_id\n             FROM epics WHERE id = $1 OR short_id = $2",
+  "query": "SELECT id, project_id, short_id, title, description, emoji, color,\n                    status AS \"status!\", owner, created_at, updated_at, closed_at,\n                    memory_refs::text AS \"memory_refs!\", auto_breakdown AS \"auto_breakdown!: bool\",\n                    originating_adr_id, created_by_user_id\n             FROM epics ORDER BY created_at",
   "describe": {
     "columns": [
       {
@@ -77,13 +77,15 @@
         "ordinal": 14,
         "name": "originating_adr_id",
         "type_info": "Varchar"
+      },
+      {
+        "ordinal": 15,
+        "name": "created_by_user_id",
+        "type_info": "Varchar"
       }
     ],
     "parameters": {
-      "Left": [
-        "Text",
-        "Text"
-      ]
+      "Left": []
     },
     "nullable": [
       false,
@@ -100,8 +102,9 @@
       true,
       null,
       false,
+      true,
       true
     ]
   },
-  "hash": "d596e3e4dd18608edd8ed8516ffdf6ca293a75d84638f1b137f4847840e7bf2e"
+  "hash": "8f48ab498ac5f22a5cef794d649b761dd8317c7e7b833aac5357ca9be6604a37"
 }

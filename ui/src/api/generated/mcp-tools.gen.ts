@@ -721,6 +721,12 @@ export namespace EpicCloseOutputSchema {
   closed_at?: string
   color?: string
   created_at?: string
+  /**
+   * Real user FK of the epic's creator (NULL for system/unowned epics).
+   * Surfaced so the board can scope epics to the owner filter, mirroring
+   * `TaskModel::created_by_user_id`.
+   */
+  created_by_user_id?: string
   description?: string
   emoji?: string
   error?: string
@@ -826,6 +832,12 @@ export namespace EpicCreateOutputSchema {
   closed_at?: string
   color?: string
   created_at?: string
+  /**
+   * Real user FK of the epic's creator (NULL for system/unowned epics).
+   * Surfaced so the board can scope epics to the owner filter, mirroring
+   * `TaskModel::created_by_user_id`.
+   */
+  created_by_user_id?: string
   description?: string
   emoji?: string
   error?: string
@@ -910,6 +922,12 @@ export namespace EpicListOutputSchema {
   closed_at?: string
   color: string
   created_at: string
+  /**
+   * Real user FK of the epic's creator (NULL for system/unowned epics).
+   * Surfaced so the board can scope epics to the owner filter, mirroring
+   * `TaskModel::created_by_user_id`.
+   */
+  created_by_user_id?: string
   description: string
   emoji: string
   id: string
@@ -1017,6 +1035,12 @@ export namespace EpicReopenOutputSchema {
   closed_at?: string
   color?: string
   created_at?: string
+  /**
+   * Real user FK of the epic's creator (NULL for system/unowned epics).
+   * Surfaced so the board can scope epics to the owner filter, mirroring
+   * `TaskModel::created_by_user_id`.
+   */
+  created_by_user_id?: string
   description?: string
   emoji?: string
   error?: string
@@ -1061,6 +1085,12 @@ export namespace EpicShowOutputSchema {
   closed_count?: number
   color?: string
   created_at?: string
+  /**
+   * Real user FK of the epic's creator (NULL for system/unowned epics).
+   * Surfaced so the board can scope epics to the owner filter, mirroring
+   * `TaskModel::created_by_user_id`.
+   */
+  created_by_user_id?: string
   description?: string
   emoji?: string
   error?: string
@@ -1191,6 +1221,12 @@ export namespace EpicUpdateOutputSchema {
   closed_at?: string
   color?: string
   created_at?: string
+  /**
+   * Real user FK of the epic's creator (NULL for system/unowned epics).
+   * Surfaced so the board can scope epics to the owner filter, mirroring
+   * `TaskModel::created_by_user_id`.
+   */
+  created_by_user_id?: string
   description?: string
   emoji?: string
   error?: string
@@ -2450,6 +2486,12 @@ export namespace ModelHealthOutputSchema {
   cooldown_seconds_remaining?: number
   disable_ttl_trips: number
   model_id: string
+  /**
+   * Owning user the breaker bucket is scoped to; `null` = shared/system
+   * bucket (org-shared credential). Health is tracked per `(scope, model)`,
+   * so the same model can appear once per user that has used it.
+   */
+  scope?: string
   total_failures: number
   total_successes: number
   [k: string]: any
@@ -2944,6 +2986,12 @@ export namespace ProposeAdrAcceptOutputSchema {
   closed_at?: string
   color: string
   created_at: string
+  /**
+   * Real user FK of the epic's creator (NULL for system/unowned epics).
+   * Surfaced so the board can scope epics to the owner filter, mirroring
+   * `TaskModel::created_by_user_id`.
+   */
+  created_by_user_id?: string
   description: string
   emoji: string
   id: string
@@ -4127,6 +4175,10 @@ export namespace TaskListOutputSchema {
   [k: string]: any
   }
   owner: string
+  /**
+   * URL of the associated pull request, once one has been opened.
+   */
+  pr_url?: string
   priority: number
   reopen_count: number
   /**

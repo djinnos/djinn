@@ -23,4 +23,8 @@ pub struct Epic {
     /// ADR-051 Epic C — slug of the accepted ADR that spawned this epic.
     /// Threaded into the breakdown Planner's session context.
     pub originating_adr_id: Option<String>,
+    /// Real user FK of the epic's creator (NULL for system/unowned epics).
+    /// Tasks broken down from this epic inherit it; the board uses it to
+    /// scope epics to the owner filter, mirroring `Task::created_by_user_id`.
+    pub created_by_user_id: Option<String>,
 }

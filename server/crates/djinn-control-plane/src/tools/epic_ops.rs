@@ -39,6 +39,11 @@ pub struct EpicModel {
     /// ADR-051 Epic C — mirrors `Epic::originating_adr_id`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub originating_adr_id: Option<String>,
+    /// Real user FK of the epic's creator (NULL for system/unowned epics).
+    /// Surfaced so the board can scope epics to the owner filter, mirroring
+    /// `TaskModel::created_by_user_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by_user_id: Option<String>,
 }
 
 impl From<&Epic> for EpicModel {
@@ -58,6 +63,7 @@ impl From<&Epic> for EpicModel {
             memory_refs: parse_string_array(&e.memory_refs),
             auto_breakdown: e.auto_breakdown,
             originating_adr_id: e.originating_adr_id.clone(),
+            created_by_user_id: e.created_by_user_id.clone(),
         }
     }
 }

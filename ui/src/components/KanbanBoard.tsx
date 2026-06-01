@@ -546,10 +546,15 @@ export function KanbanBoard({
     for (const task of tasks) {
       owners.add(task.created_by_user_id ?? UNASSIGNED_OWNER);
     }
+    // Empty epic shells have no tasks, so fold their owners in too — otherwise
+    // an owner who only has un-broken-down epics never appears in the filter.
+    for (const epic of epics.values()) {
+      owners.add(epic.created_by_user_id ?? UNASSIGNED_OWNER);
+    }
     return Array.from(owners).sort((a, b) =>
       ownerLabel(a).localeCompare(ownerLabel(b)),
     );
-  }, [tasks, ownerLabel]);
+  }, [tasks, epics, ownerLabel]);
 
   const filteredTasks = useMemo(() => {
     const q = textFilter.trim().toLowerCase();
@@ -625,12 +630,20 @@ export function KanbanBoard({
         if (epic.status !== "open" && epic.status !== "drafting") continue;
         if (epicIdsWithTasks.has(epicId)) continue;
         if (visibleEpicIds && !visibleEpicIds.has(epicId)) continue;
+        // Scope empty epic shells to the owner filter the same way tasks are:
+        // an epic is "owned" by its `created_by_user_id` (which its tasks
+        // inherit), so a shell only shows when its owner is selected.
+        if (
+          ownerFilters.length > 0 &&
+          !ownerFilters.includes(epic.created_by_user_id ?? UNASSIGNED_OWNER)
+        )
+          continue;
         openColumn.set(epicId, []);
       }
     }
 
     return byColumn;
-  }, [filteredTasks, epics, epicFilters]);
+  }, [filteredTasks, epics, epicFilters, ownerFilters]);
 
   const toggleEpic = (columnKey: ColumnKey, epicKey: string) => {
     const collapseKey = `${columnKey}:${epicKey}`;
