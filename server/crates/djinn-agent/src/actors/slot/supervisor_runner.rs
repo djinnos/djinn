@@ -365,6 +365,13 @@ pub(crate) async fn run_supervisor_dispatch(
     // host-minted id that matched no persisted row — silently disabling
     // post-session extraction. See `~/.claude/plans/memory-extraction-fix.md`.)
     let bistream_result = runtime.attach_stdio(&handle).await;
+    // D2: distinguish a worker that never completed its startup handshake (Pod
+    // failed to start) from a generic attach failure, so we can feed the breaker
+    // and fail over below.
+    let handshake_timed_out = matches!(
+        &bistream_result,
+        Err(djinn_runtime::RuntimeError::HandshakeTimeout(_))
+    );
     let report_result: anyhow::Result<Option<TaskRunReport>> = match bistream_result {
         Ok(bistream) => await_report_from_stream(bistream, &kill).await,
         Err(e) => Err(anyhow::anyhow!("runtime.attach_stdio failed: {e}")),
@@ -389,6 +396,46 @@ pub(crate) async fn run_supervisor_dispatch(
         .map(report_to_terminal_status)
         .unwrap_or(TaskRunStatus::Interrupted);
     reap_orphan_task_run(&app_state, &task.id, reap_status).await;
+
+    // D2: a worker that never completed its startup handshake (image-pull
+    // failure, unschedulable, crash-loop) was torn down above. Treat it as an
+    // infra stall: trip the breaker so dispatch fails over off this model, and
+    // mark the task's failure as a throttle so the coordinator spares it from the
+    // terminal MAX_DISPATCH_FAILURES streak (A3) and redispatches with backoff
+    // rather than immediately re-hanging on the same model.
+    if handshake_timed_out {
+        app_state
+            .health_tracker
+            .record_stall(creator_scope.as_deref(), &model_id);
+        app_state.health_tracker.note_task_provider_failure(
+            &task.id,
+            djinn_provider::catalog::health::TaskFailureSignal {
+                throttle: true,
+                retry_after_ms: None,
+            },
+        );
+        let _ = task_repo
+            .log_activity(
+                Some(&task.id),
+                "system",
+                "system",
+                "comment",
+                &serde_json::json!({
+                    "body": format!(
+                        "Worker Pod failed to complete its startup handshake within the \
+                         deadline (image pull, unschedulable, or crash-loop). Tore down the \
+                         Job and failed over off model {model_id}."
+                    )
+                })
+                .to_string(),
+            )
+            .await;
+        tracing::warn!(
+            task_id = %task.short_id,
+            %model_id,
+            "supervisor dispatch: worker handshake timed out; recorded stall + failover"
+        );
+    }
 
     match (report_result, teardown) {
         (Ok(streamed), Ok(teardown_report)) => {

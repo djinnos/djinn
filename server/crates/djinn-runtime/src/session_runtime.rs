@@ -38,6 +38,13 @@ pub enum RuntimeError {
     /// handshake timeout or a container that died before accept.
     #[error("attach_stdio failed: {0}")]
     Attach(String),
+    /// The worker never completed its startup handshake within the deadline —
+    /// the Pod failed to start (image pull, unschedulable, crash-loop). Distinct
+    /// from `Attach` so the dispatch layer can treat it as an infra stall
+    /// (teardown + breaker failover) rather than a generic attach failure. The
+    /// string is the task_run_id. Surfaced by the Kubernetes `attach_stdio`.
+    #[error("worker handshake timed out: {0}")]
+    HandshakeTimeout(String),
     /// `cancel` could not deliver the termination signal to the run.
     #[error("cancel failed: {0}")]
     Cancel(String),

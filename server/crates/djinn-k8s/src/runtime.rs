@@ -75,6 +75,14 @@ const PENDING_CONNECTION_BUFFER: usize = 64;
 /// Job-status poll quickly.
 const TEARDOWN_EVENTS_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// D2: deadline on the worker startup handshake — how long `attach_stdio` waits
+/// for the Pod to dial back and complete `AuthHello` before declaring it dead.
+/// Generous enough to cover image pull + scheduling + container start on a cold
+/// node (Karpenter scale-up can take minutes), but bounded so a Pod that never
+/// starts (image-pull error, unschedulable, crash-loop) can't hang host dispatch
+/// indefinitely. On expiry `attach_stdio` returns [`RuntimeError::HandshakeTimeout`].
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// Grace period observed while polling `teardown` for job completion.
 ///
 /// Per the Phase 2 K8s plan, we bound this at five minutes: worker tasks
@@ -732,16 +740,24 @@ pub(crate) async fn bridge_pending_to_bistream(
     // deregisters explicitly from `teardown`.
     let mut parts = pending.into_parts();
 
-    // Wait for the worker to complete the handshake so the outbound
-    // sender is live before we spawn the translator.  No hard timeout
-    // here — the upstream supervisor runner wraps `attach_stdio` with
-    // its own cancel-token gating, and the kube Job's activeDeadline
-    // bounds total run time server-side.
-    parts.wait_for_connection().await.map_err(|e| {
-        RuntimeError::Attach(format!(
-            "wait_for_connection for task_run_id={task_run_id}: {e}"
-        ))
-    })?;
+    // Wait for the worker to complete the handshake so the outbound sender is
+    // live before we spawn the translator. D2: bound this wait — it used to be
+    // unbounded, so a Pod that never dialled back (image-pull failure,
+    // unschedulable, crash-loop) hung the host dispatch forever. The kube Job's
+    // `activeDeadlineSeconds` only bounds the *container*, not this host-side
+    // await. On timeout we surface a typed `HandshakeTimeout` the dispatch layer
+    // turns into a teardown + breaker failover.
+    match tokio::time::timeout(HANDSHAKE_TIMEOUT, parts.wait_for_connection()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            return Err(RuntimeError::Attach(format!(
+                "wait_for_connection for task_run_id={task_run_id}: {e}"
+            )));
+        }
+        Err(_elapsed) => {
+            return Err(RuntimeError::HandshakeTimeout(task_run_id.to_string()));
+        }
+    }
 
     let outbound_tx = parts.outbound_sender().await.ok_or_else(|| {
         RuntimeError::Attach(format!(
@@ -867,6 +883,40 @@ mod tests {
         assert!(TEARDOWN_POLL_TIMEOUT >= Duration::from_secs(600));
         assert!(TEARDOWN_POLL_TIMEOUT <= Duration::from_secs(7200));
         assert!(TEARDOWN_POLL_INTERVAL < TEARDOWN_POLL_TIMEOUT);
+    }
+
+    /// D2: the startup-handshake deadline must be long enough to cover a cold
+    /// node (image pull + Karpenter scale-up can take minutes) yet bounded so a
+    /// Pod that never starts can't hang host dispatch indefinitely.
+    #[test]
+    fn handshake_timeout_is_bounded() {
+        assert!(HANDSHAKE_TIMEOUT >= Duration::from_secs(120));
+        assert!(HANDSHAKE_TIMEOUT <= Duration::from_secs(900));
+    }
+
+    /// D2: a worker that never dials back makes `bridge_pending_to_bistream`
+    /// return `HandshakeTimeout` (not hang) once the deadline elapses. Uses
+    /// paused time so the test is instant and deterministic.
+    #[tokio::test(start_paused = true)]
+    async fn bridge_times_out_when_worker_never_connects() {
+        let registry = std::sync::Arc::new(ConnectionRegistry::new());
+        let task_run_id = "tr-never-connects";
+        // Reserve a pending connection but never `attach` (no worker dials).
+        let pending = registry
+            .register_pending(task_run_id, PENDING_CONNECTION_BUFFER)
+            .await
+            .expect("register pending");
+
+        let handle = tokio::spawn(bridge_pending_to_bistream(task_run_id, pending));
+
+        // Advance past the deadline; the unbounded wait now resolves to a timeout.
+        tokio::time::advance(HANDSHAKE_TIMEOUT + Duration::from_secs(1)).await;
+
+        match handle.await.expect("bridge task joins") {
+            Err(RuntimeError::HandshakeTimeout(id)) => assert_eq!(id, task_run_id),
+            Ok(_) => panic!("expected HandshakeTimeout, got Ok(BiStream)"),
+            Err(other) => panic!("expected HandshakeTimeout, got {other:?}"),
+        }
     }
 
     /// Smoke-check that our terminal-state enum covers the cases the caller
