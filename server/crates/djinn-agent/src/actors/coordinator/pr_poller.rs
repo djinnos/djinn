@@ -1005,6 +1005,9 @@ impl CoordinatorActor {
     /// signals. Attaches structured feedback to the task activity log,
     /// then transitions with `PrCiFailed` so a fresh worker iteration picks
     /// it up.
+    // Failure handling threads through several distinct CI/PR signals; each arg
+    // is its own piece of context, so a bag struct adds no clarity.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_queue_failure(
         &mut self,
         gh_client: &GitHubApiClient,

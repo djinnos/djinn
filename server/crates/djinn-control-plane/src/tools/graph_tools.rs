@@ -1328,8 +1328,8 @@ impl DjinnMcpServer {
             // NotFound instead of failing inside the graph backend.
             "context",
         ];
-        if single_key_ops.contains(&params.operation.as_str()) {
-            if let Some(key) = params.key.as_deref().filter(|k| !k.is_empty()) {
+        if single_key_ops.contains(&params.operation.as_str())
+            && let Some(key) = params.key.as_deref().filter(|k| !k.is_empty()) {
                 let kind_hint = params.kind_hint.as_deref();
                 match graph.resolve(ctx, key, kind_hint).await? {
                     ResolveOutcome::Found(uid) => {
@@ -1354,7 +1354,6 @@ impl DjinnMcpServer {
                     }
                 }
             }
-        }
 
         // `path` takes two keys; resolve both.
         if params.operation == "path" {
@@ -3683,7 +3682,7 @@ mod tests {
             confidence: 0.95,
             reason: None,
         });
-        let json = serde_json::to_value(&CodeGraphResponse::Snapshot(response))
+        let json = serde_json::to_value(CodeGraphResponse::Snapshot(response))
             .expect("serialize");
         let snapshot = json
             .get("snapshot")

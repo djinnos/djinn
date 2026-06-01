@@ -267,11 +267,10 @@ fn render_status_line(status: Option<&djinn_control_plane::bridge::GraphStatus>)
         if let Some(last_warm) = &status.last_warm_at {
             parts.push(format!("warmed at {last_warm}"));
         }
-        if let Some(commits_since) = status.commits_since_pin {
-            if commits_since > 0 {
+        if let Some(commits_since) = status.commits_since_pin
+            && commits_since > 0 {
                 parts.push(format!("{commits_since} commit(s) ahead"));
             }
-        }
     } else {
         parts.push("graph not yet warmed".to_string());
     }

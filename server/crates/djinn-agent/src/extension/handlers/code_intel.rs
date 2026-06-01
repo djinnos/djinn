@@ -17,8 +17,8 @@ async fn pre_resolve_chat_key(
     params: &mut CodeGraphParams,
 ) -> Result<Option<serde_json::Value>, String> {
     let single_key_ops = ["neighbors", "impact", "implementations", "describe", "context"];
-    if single_key_ops.contains(&params.operation.as_str()) {
-        if let Some(key) = params.key.as_deref().filter(|k| !k.is_empty()) {
+    if single_key_ops.contains(&params.operation.as_str())
+        && let Some(key) = params.key.as_deref().filter(|k| !k.is_empty()) {
             let kind_hint = params.kind_hint.as_deref();
             match graph.resolve(ctx, key, kind_hint).await? {
                 ResolveOutcome::Found(uid) => {
@@ -37,7 +37,6 @@ async fn pre_resolve_chat_key(
                 }
             }
         }
-    }
 
     if params.operation == "path" {
         // Validate required args BEFORE the resolve loop so a missing
@@ -335,7 +334,7 @@ async fn call_code_graph_inner(
                 .ok_or("'key' is required for 'neighbors'")?;
             let neighbors = graph_ops
                 .neighbors(
-                    &ctx,
+                    ctx,
                     key,
                     p.direction.as_deref(),
                     p.group_by.as_deref(),
@@ -348,7 +347,7 @@ async fn call_code_graph_inner(
             let limit = p.limit.unwrap_or(20);
             let ranked = graph_ops
                 .ranked(
-                    &ctx,
+                    ctx,
                     p.kind_filter.as_deref(),
                     p.sort_by.as_deref(),
                     limit,
@@ -362,7 +361,7 @@ async fn call_code_graph_inner(
                 .as_deref()
                 .filter(|k| !k.is_empty())
                 .ok_or("'key' is required for 'implementations'")?;
-            let impls = graph_ops.implementations(&ctx, key).await?;
+            let impls = graph_ops.implementations(ctx, key).await?;
             serde_json::to_value(&impls).map_err(|e| format!("serialize error: {e}"))?
         }
         "impact" => {
@@ -391,7 +390,7 @@ async fn call_code_graph_inner(
             }
             let impact = graph_ops
                 .impact(
-                    &ctx,
+                    ctx,
                     key,
                     depth,
                     p.group_by.as_deref(),
@@ -418,12 +417,12 @@ async fn call_code_graph_inner(
             let hits = match mode.as_str() {
                 "name" => {
                     graph_ops
-                        .search(&ctx, query, p.kind_filter.as_deref(), limit)
+                        .search(ctx, query, p.kind_filter.as_deref(), limit)
                         .await?
                 }
                 "hybrid" => {
                     graph_ops
-                        .hybrid_search(&ctx, query, p.kind_filter.as_deref(), limit)
+                        .hybrid_search(ctx, query, p.kind_filter.as_deref(), limit)
                         .await?
                 }
                 other => {
@@ -460,7 +459,7 @@ async fn call_code_graph_inner(
             // for the mixed view.
             let kind_filter = p.kind_filter.as_deref().or(Some("symbol"));
             let cycles = graph_ops
-                .cycles(&ctx, kind_filter, min_size)
+                .cycles(ctx, kind_filter, min_size)
                 .await?;
             serde_json::to_value(&cycles).map_err(|e| format!("serialize error: {e}"))?
         }
@@ -468,7 +467,7 @@ async fn call_code_graph_inner(
             let limit = p.limit.unwrap_or(50);
             let orphans = graph_ops
                 .orphans(
-                    &ctx,
+                    ctx,
                     p.kind_filter.as_deref(),
                     p.visibility.as_deref(),
                     limit,
@@ -487,7 +486,7 @@ async fn call_code_graph_inner(
                     .filter(|s| !s.is_empty())
                     .ok_or("'to' is required for 'path'")?;
             let path = graph_ops
-                .path(&ctx, from, to, p.max_depth)
+                .path(ctx, from, to, p.max_depth)
                 .await?;
             serde_json::to_value(&path).map_err(|e| format!("serialize error: {e}"))?
         }
@@ -505,7 +504,7 @@ async fn call_code_graph_inner(
             let limit = p.limit.unwrap_or(100);
             let edges = graph_ops
                 .edges(
-                    &ctx,
+                    ctx,
                     from_glob,
                     to_glob,
                     p.edge_kind.as_deref(),
@@ -520,7 +519,7 @@ async fn call_code_graph_inner(
                 .as_deref()
                 .filter(|k| !k.is_empty())
                 .ok_or("'key' is required for 'describe'")?;
-            let description = graph_ops.describe(&ctx, key).await?;
+            let description = graph_ops.describe(ctx, key).await?;
             serde_json::to_value(&description).map_err(|e| format!("serialize error: {e}"))?
         }
         "context" => {
@@ -533,7 +532,7 @@ async fn call_code_graph_inner(
                 .filter(|k| !k.is_empty())
                 .ok_or("'key' is required for 'context'")?;
             let include_content = p.include_content.unwrap_or(false);
-            match graph_ops.context(&ctx, key, include_content).await? {
+            match graph_ops.context(ctx, key, include_content).await? {
                 Some(symbol_context) => {
                     // Wrap in the same `symbol_context` discriminator the
                     // MCP dispatcher emits so downstream parsers stay
@@ -548,7 +547,7 @@ async fn call_code_graph_inner(
         "status" => {
             // v8: peek at the persisted canonical-graph cache. Cheap;
             // never warms.
-            let result = graph_ops.status(&ctx).await?;
+            let result = graph_ops.status(ctx).await?;
             serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
         }
         "snapshot" => {
@@ -557,7 +556,7 @@ async fn call_code_graph_inner(
             // higher values.
             let node_cap = p.node_cap.or(p.limit).unwrap_or(2000);
             let exclusions = djinn_control_plane::tools::graph_exclusions::GraphExclusions::empty();
-            let result = graph_ops.snapshot(&ctx, node_cap, &exclusions).await?;
+            let result = graph_ops.snapshot(ctx, node_cap, &exclusions).await?;
             serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
         }
         "symbols_at" => {
@@ -581,7 +580,7 @@ async fn call_code_graph_inner(
                 .or_else(|| p.min_size.map(|n| n as u32))
                 .ok_or("'start_line' (or legacy 'min_size') is required for 'symbols_at'")?;
             let result = graph_ops
-                .symbols_at(&ctx, &file_owned, start_line, p.end_line)
+                .symbols_at(ctx, &file_owned, start_line, p.end_line)
                 .await?;
             serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
         }
@@ -606,7 +605,7 @@ async fn call_code_graph_inner(
                     end_line: r.end_line.map(|n| n as i64),
                 })
                 .collect();
-            let result = graph_ops.diff_touches(&ctx, &bridge_ranges).await?;
+            let result = graph_ops.diff_touches(ctx, &bridge_ranges).await?;
             serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
         }
         "detect_changes" => {
@@ -625,7 +624,7 @@ async fn call_code_graph_inner(
                 );
             }
             let result = graph_ops
-                .detect_changes(&ctx, from_sha, to_sha, &changed)
+                .detect_changes(ctx, from_sha, to_sha, &changed)
                 .await?;
             serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
         }
@@ -636,7 +635,7 @@ async fn call_code_graph_inner(
             let limit = p.limit.unwrap_or(50);
             let result = graph_ops
                 .api_surface(
-                    &ctx,
+                    ctx,
                     p.from_glob.as_deref(),
                     p.visibility.as_deref(),
                     limit,
@@ -649,7 +648,7 @@ async fn call_code_graph_inner(
             // god-object floor, orphan count, public-API and
             // documentation coverage. Cheap enough to call any time;
             // no graph load if cached.
-            let result = graph_ops.metrics_at(&ctx).await?;
+            let result = graph_ops.metrics_at(ctx).await?;
             serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
         }
         "dead_symbols" => {
@@ -666,7 +665,7 @@ async fn call_code_graph_inner(
                 .or(p.kind_filter.as_deref())
                 .unwrap_or("high");
             let limit = p.limit.unwrap_or(50);
-            let result = graph_ops.dead_symbols(&ctx, confidence, limit).await?;
+            let result = graph_ops.dead_symbols(ctx, confidence, limit).await?;
             serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
         }
         "deprecated_callers" => {
@@ -674,7 +673,7 @@ async fn call_code_graph_inner(
             // carries `#[deprecated]` / `@deprecated`, plus their
             // callers — actionable removal target list.
             let limit = p.limit.unwrap_or(50);
-            let result = graph_ops.deprecated_callers(&ctx, limit).await?;
+            let result = graph_ops.deprecated_callers(ctx, limit).await?;
             serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
         }
         "touches_hot_path" => {
@@ -705,7 +704,7 @@ async fn call_code_graph_inner(
                 );
             }
             let result = graph_ops
-                .touches_hot_path(&ctx, &entries, &sinks, &queried)
+                .touches_hot_path(ctx, &entries, &sinks, &queried)
                 .await?;
             serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
         }
@@ -719,7 +718,7 @@ async fn call_code_graph_inner(
             let since_days = p
                 .since_days
                 .or_else(|| p.query.as_deref().and_then(|s| s.parse::<u32>().ok()));
-            let result = graph_ops.coupling_hubs(&ctx, limit, since_days, 15).await?;
+            let result = graph_ops.coupling_hubs(ctx, limit, since_days, 15).await?;
             serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
         }
         "capabilities" => {
@@ -740,14 +739,14 @@ async fn call_code_graph_inner(
             let limit = p.limit.unwrap_or(20);
             if let Some(key) = p.key.as_deref().filter(|k| !k.is_empty()) {
                 let file_path = key.trim_start_matches("file:");
-                let coupled = graph_ops.coupling(&ctx, file_path, limit).await?;
+                let coupled = graph_ops.coupling(ctx, file_path, limit).await?;
                 serde_json::json!({
                     "target": file_path,
                     "coupled": coupled,
                 })
             } else {
                 let pairs = graph_ops
-                    .coupling_hotspots(&ctx, limit, None, 15)
+                    .coupling_hotspots(ctx, limit, None, 15)
                     .await?;
                 serde_json::json!({ "pairs": pairs })
             }
@@ -761,7 +760,7 @@ async fn call_code_graph_inner(
             let since_days = p
                 .since_days
                 .or_else(|| p.query.as_deref().and_then(|s| s.parse::<u32>().ok()));
-            let rows = graph_ops.churn(&ctx, limit, since_days).await?;
+            let rows = graph_ops.churn(ctx, limit, since_days).await?;
             serde_json::json!({
                 "since_days": since_days,
                 "files": rows,
@@ -779,7 +778,7 @@ async fn call_code_graph_inner(
                 .or_else(|| p.query.as_deref().and_then(|s| s.parse::<u32>().ok()))
                 .unwrap_or(90);
             let hotspots = graph_ops
-                .hotspots(&ctx, window_days, p.file_glob.as_deref(), limit)
+                .hotspots(ctx, window_days, p.file_glob.as_deref(), limit)
                 .await?;
             serde_json::json!({
                 "window_days": window_days,
@@ -823,7 +822,7 @@ async fn call_code_graph_inner(
                     origin.push((rule_i, forbid.clone()));
                 }
             }
-            let violations = graph_ops.boundary_check(&ctx, &flat).await?;
+            let violations = graph_ops.boundary_check(ctx, &flat).await?;
             // Regroup violations by original user rule.
             const PER_RULE_LIMIT: usize = 100;
             let mut by_user_rule: Vec<(usize, bool, Vec<serde_json::Value>)> =
@@ -886,7 +885,7 @@ async fn call_code_graph_inner(
             let sort_by = p.sort_by.as_deref().unwrap_or("cognitive");
             let limit = p.limit.unwrap_or(30);
             let result = graph_ops
-                .complexity(&ctx, target, sort_by, p.file_glob.as_deref(), limit)
+                .complexity(ctx, target, sort_by, p.file_glob.as_deref(), limit)
                 .await?;
             // The bridge return is an untagged enum — serde just emits
             // either a `[FunctionComplexityEntry]` array or a
@@ -905,7 +904,7 @@ async fn call_code_graph_inner(
             // returns the top function-level targets.
             let limit = p.limit.unwrap_or(30);
             let candidates = graph_ops
-                .refactor_candidates(&ctx, p.since_days, p.file_glob.as_deref(), limit)
+                .refactor_candidates(ctx, p.since_days, p.file_glob.as_deref(), limit)
                 .await?;
             serde_json::json!({
                 "since_days": p.since_days,
@@ -929,8 +928,8 @@ async fn call_code_graph_inner(
             let depth = p.max_depth.unwrap_or(2);
 
             let (direct_result, transitive_result) = tokio::join!(
-                graph_ops.neighbors(&ctx, key, Some("incoming"), Some("file"), None),
-                graph_ops.impact(&ctx, key, depth, Some("file"), None),
+                graph_ops.neighbors(ctx, key, Some("incoming"), Some("file"), None),
+                graph_ops.impact(ctx, key, depth, Some("file"), None),
             );
             let direct_groups = match direct_result? {
                 djinn_control_plane::bridge::NeighborsResult::Grouped(g) => g,

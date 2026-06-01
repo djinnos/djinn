@@ -93,6 +93,10 @@ fn incoming_to_content_blocks(content: ChatContent) -> Vec<ContentBlock> {
     }
 }
 
+// Deliberate signature: the Ok side carries (turns, last-user-content) and the
+// Err side is an axum (status, message) pair — naming each would obscure more
+// than it clarifies for a single private helper.
+#[allow(clippy::type_complexity)]
 fn latest_user_turn_from_incoming(
     incoming: Vec<super::ChatMessage>,
 ) -> Result<(Vec<Message>, Option<Vec<ContentBlock>>), (axum::http::StatusCode, String)> {

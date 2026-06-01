@@ -630,6 +630,9 @@ impl TaskRepository {
 /// Returns `("1=1", [])` when no filters are supplied. Placeholders are
 /// numbered Postgres-style starting at `${param_offset + 1}` so the caller can
 /// safely append additional binds (e.g. LIMIT/OFFSET) after this clause.
+// Each arg is an independent, optional SQL filter; folding them into a struct
+// would just shift the same fields around for no clarity gain.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_where(
     project_id: &Option<String>,
     status: &Option<String>,

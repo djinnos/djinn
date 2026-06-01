@@ -312,8 +312,8 @@ impl CredentialRepository {
         user_id: Option<&str>,
     ) -> Result<Option<String>> {
         // Try the user's own credential first.
-        if let Some(uid) = user_id {
-            if let Some(id) = sqlx::query_scalar!(
+        if let Some(uid) = user_id
+            && let Some(id) = sqlx::query_scalar!(
                 "SELECT id FROM credentials WHERE key_name = $1 AND owner_user_id = $2",
                 key_name,
                 uid
@@ -323,7 +323,6 @@ impl CredentialRepository {
             {
                 return Ok(Some(id));
             }
-        }
         // Fall back to the org-shared row.
         let id = sqlx::query_scalar!(
             "SELECT id FROM credentials WHERE key_name = $1 AND owner_user_id IS NULL",

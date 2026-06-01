@@ -1686,6 +1686,11 @@ pub(crate) async fn build_planner_patrol_context(
 }
 
 #[cfg(test)]
+// Tests hold `AUTO_CODE_CONTEXT_ENV_LOCK` across `.await` on purpose: the lock
+// serializes env-var mutation (set/remove) for the duration of each async test
+// so concurrent tests can't race the shared process env. Deliberate test-only
+// guard, not a production async-lock concern.
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use async_trait::async_trait;

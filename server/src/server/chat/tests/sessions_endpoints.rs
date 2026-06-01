@@ -223,9 +223,9 @@ async fn list_messages_folds_tool_results_into_preceding_assistant() {
     let tool_calls = messages[1]["tool_calls"].as_array().unwrap();
     assert_eq!(tool_calls.len(), 2);
     assert_eq!(tool_calls[0]["name"].as_str().unwrap(), "memory_search");
-    assert_eq!(tool_calls[0]["success"].as_bool().unwrap(), true);
+    assert!(tool_calls[0]["success"].as_bool().unwrap());
     assert_eq!(tool_calls[1]["name"].as_str().unwrap(), "code_graph");
-    assert_eq!(tool_calls[1]["success"].as_bool().unwrap(), false);
+    assert!(!tool_calls[1]["success"].as_bool().unwrap());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

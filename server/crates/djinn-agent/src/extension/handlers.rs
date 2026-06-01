@@ -67,6 +67,9 @@ use task_epic::{
 pub(crate) use task_epic::{call_epic_show, call_epic_tasks, call_epic_update};
 pub(crate) use workspace::{call_apply_patch, call_edit, call_read, call_shell, call_write};
 
+// Central tool-call dispatch: each arg is a distinct collaborator/context the
+// handlers need; a bag struct would only relocate the same fields.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn dispatch_tool_call<T>(
     state: &AgentContext,
     services: &dyn djinn_supervisor::SupervisorServices,

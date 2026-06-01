@@ -82,6 +82,9 @@ pub fn services_for_agent_context_with_provider_override(
 /// tracker) is best-effort on the worker side: see the Phase 7b design doc
 /// for the panic-stub strategy. Calls that hit a missing dependency surface
 /// as panics rather than silent skips so Phase 7 follow-ups can find them.
+// Stage execution wires together task, services, and several context handles;
+// each arg is a distinct dependency, so a bag struct adds no clarity.
+#[allow(clippy::too_many_arguments)]
 pub async fn worker_execute_stage(
     task: &Task,
     workspace: &Workspace,

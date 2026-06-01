@@ -611,9 +611,9 @@ fn walk(node: Node, rules: &LangRules, src: &[u8], nesting: u8, state: &mut Walk
         child_nesting = nesting.saturating_add(1);
     } else if rules.nest_only.contains(&kind) {
         child_nesting = nesting.saturating_add(1);
-    } else if rules.binary_kind == Some(kind) {
-        if let Some(op) = binary_op(node, rules, src) {
-            if rules.logical_ops.contains(&op.as_str()) {
+    } else if rules.binary_kind == Some(kind)
+        && let Some(op) = binary_op(node, rules, src)
+            && rules.logical_ops.contains(&op.as_str()) {
                 let parent_is_logical_binary = node
                     .parent()
                     .filter(|p| Some(p.kind()) == rules.binary_kind)
@@ -627,8 +627,6 @@ fn walk(node: Node, rules: &LangRules, src: &[u8], nesting: u8, state: &mut Walk
                         state.cyclomatic_decisions.saturating_add(switches);
                 }
             }
-        }
-    }
 
     let mut walker = node.walk();
     for child in node.named_children(&mut walker) {
@@ -637,22 +635,18 @@ fn walk(node: Node, rules: &LangRules, src: &[u8], nesting: u8, state: &mut Walk
 }
 
 pub(crate) fn binary_op(node: Node, rules: &LangRules, src: &[u8]) -> Option<String> {
-    if let Some(field) = rules.operator_field {
-        if let Some(op_node) = node.child_by_field_name(field) {
-            if let Ok(t) = op_node.utf8_text(src) {
+    if let Some(field) = rules.operator_field
+        && let Some(op_node) = node.child_by_field_name(field)
+            && let Ok(t) = op_node.utf8_text(src) {
                 return Some(t.to_string());
             }
-        }
-    }
     let mut walker = node.walk();
     for child in node.children(&mut walker) {
-        if !child.is_named() {
-            if let Ok(t) = child.utf8_text(src) {
-                if rules.logical_ops.contains(&t) {
+        if !child.is_named()
+            && let Ok(t) = child.utf8_text(src)
+                && rules.logical_ops.contains(&t) {
                     return Some(t.to_string());
                 }
-            }
-        }
     }
     None
 }

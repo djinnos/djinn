@@ -70,6 +70,7 @@ pub struct ScipRange {
 /// contract: NEVER regex the markdown — leave `signature_parts: None`
 /// when structured proto fields are absent.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub struct ScipSymbol {
     pub symbol: String,
     pub kind: Option<ScipSymbolKind>,
@@ -111,20 +112,6 @@ pub struct ScipSignatureParam {
     pub default_value: Option<String>,
 }
 
-impl Default for ScipSymbol {
-    fn default() -> Self {
-        ScipSymbol {
-            symbol: String::new(),
-            kind: None,
-            display_name: None,
-            signature: None,
-            documentation: Vec::new(),
-            relationships: Vec::new(),
-            visibility: None,
-            signature_parts: None,
-        }
-    }
-}
 
 /// True for SCIP `local` identifiers (descriptor prefix `local `, e.g.
 /// `local 0`, `local 42`).
@@ -791,7 +778,7 @@ pub fn prettify_scip_descriptor(raw: &str) -> String {
     // and its member (`Bar#baz()`). The visible label is the deepest leaf —
     // walk past both.
     let segments: Vec<&str> = tail
-        .split(|c| c == '/' || c == '#')
+        .split(['/', '#'])
         .filter(|s| !s.is_empty())
         .collect();
     match segments.last() {

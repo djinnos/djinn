@@ -584,15 +584,13 @@ mod tests {
     /// `source`, returning the position of its first byte. Convenient for
     /// keeping test sources small without hard-coding offsets.
     fn locate(source: &str, needle: &str, occurrence: usize) -> (u32, u32) {
-        let mut count = 0;
-        for (idx, _) in source.match_indices(needle) {
+        for (count, (idx, _)) in source.match_indices(needle).enumerate() {
             if count == occurrence {
                 let prefix = &source[..idx];
                 let line = prefix.matches('\n').count() as u32;
                 let col = prefix.rfind('\n').map(|n| idx - n - 1).unwrap_or(idx) as u32;
                 return (line, col);
             }
-            count += 1;
         }
         panic!("needle {:?} not found at occurrence {}", needle, occurrence);
     }

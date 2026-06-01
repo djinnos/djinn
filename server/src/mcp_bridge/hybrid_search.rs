@@ -391,7 +391,7 @@ mod tests {
         SearchHit {
             key: key.to_string(),
             kind: "function".to_string(),
-            display_name: key.split(['#', '/']).last().unwrap_or(key).to_string(),
+            display_name: key.split(['#', '/']).next_back().unwrap_or(key).to_string(),
             score,
             file: Some(file.to_string()),
             match_kind: Some("structural".to_string()),

@@ -40,7 +40,7 @@ fn complexity_metrics_to_wire(
 /// op's pure ranking logic is unit-testable without the canonical
 /// graph round-trip.
 fn sort_function_complexity_entries(
-    entries: &mut Vec<djinn_control_plane::bridge::FunctionComplexityEntry>,
+    entries: &mut [djinn_control_plane::bridge::FunctionComplexityEntry],
     sort_by: &str,
 ) {
     entries.sort_by(|a, b| {
@@ -4498,8 +4498,9 @@ pub(crate) mod graph_bridge_tests {
         // Confirm Extends bucket is *empty* — the fixture's relationship
         // only sets `is_implementation`, not `is_reference`.
         assert!(
-            outgoing.get(&EdgeCategory::Extends).is_none()
-                || outgoing.get(&EdgeCategory::Extends).unwrap().is_empty(),
+            outgoing
+                .get(&EdgeCategory::Extends)
+                .is_none_or(|v| v.is_empty()),
             "outgoing.extends should be empty when only is_implementation is set"
         );
     }

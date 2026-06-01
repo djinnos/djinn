@@ -314,8 +314,8 @@ fn compute_entry_point_distance(
         let next_dist = distances[&node].saturating_add(1);
         for edge in graph.edges_directed(node, Outgoing) {
             let target = edge.target();
-            if !distances.contains_key(&target) {
-                distances.insert(target, next_dist);
+            if let std::collections::hash_map::Entry::Vacant(e) = distances.entry(target) {
+                e.insert(next_dist);
                 queue.push_back(target);
             }
         }
@@ -1722,6 +1722,10 @@ fn is_function_like_symbol_kind(kind: Option<&ScipSymbolKind>) -> bool {
 /// tree-sitter `name` field can drift slightly across indexers — e.g.
 /// `Type::method` vs `method` — so a name match wins outright but its
 /// absence is not fatal).
+/// Per-function range entry collected while walking a file's symbol nodes:
+/// `(node, start_line, end_line, display_name)`.
+type FnRangeEntry = (NodeIndex, u32, u32, Option<String>);
+
 fn attach_complexity_metrics<F>(graph: &mut RepoDependencyGraph, mut load_source: F)
 where
     F: FnMut(&Path) -> Option<String>,
@@ -1730,14 +1734,14 @@ where
     // like symbol node and a non-empty `language`. The symbol_ranges
     // sidecar already keys on PathBuf and gives us 1-indexed inclusive
     // ranges per node, so we use it as the iteration root.
-    let candidates: Vec<(PathBuf, String, Vec<(NodeIndex, u32, u32, Option<String>)>)> = graph
+    let candidates: Vec<(PathBuf, String, Vec<FnRangeEntry>)> = graph
         .symbol_ranges_by_file()
         .filter_map(|(path, ranges)| {
             // Take the first function-like node we find in this file just
             // to read the language hint (every node in a file shares the
             // SCIP `Document.language`, so any one works). Skip files
             // without a function-like node — nothing to compute.
-            let mut entries: Vec<(NodeIndex, u32, u32, Option<String>)> = Vec::new();
+            let mut entries: Vec<FnRangeEntry> = Vec::new();
             let mut language: Option<String> = None;
             for range in ranges {
                 let node = graph.node(range.node);
@@ -1797,14 +1801,11 @@ where
                 if !overlaps {
                     continue;
                 }
-                if name_hit.is_none() {
-                    if let (Some(disp), Some(fn_name)) = (display_name.as_deref(), fm.name.as_deref())
-                    {
-                        if names_match(disp, fn_name) {
+                if name_hit.is_none()
+                    && let (Some(disp), Some(fn_name)) = (display_name.as_deref(), fm.name.as_deref())
+                        && names_match(disp, fn_name) {
                             name_hit = Some(i);
                         }
-                    }
-                }
                 if overlap_hit.is_none() {
                     overlap_hit = Some(i);
                 }
@@ -1831,16 +1832,14 @@ fn names_match(scip_display: &str, ts_name: &str) -> bool {
     if scip_display == ts_name {
         return true;
     }
-    if let Some((_, tail)) = scip_display.rsplit_once("::") {
-        if tail == ts_name {
+    if let Some((_, tail)) = scip_display.rsplit_once("::")
+        && tail == ts_name {
             return true;
         }
-    }
-    if let Some((_, tail)) = scip_display.rsplit_once('.') {
-        if tail == ts_name {
+    if let Some((_, tail)) = scip_display.rsplit_once('.')
+        && tail == ts_name {
             return true;
         }
-    }
     false
 }
 
