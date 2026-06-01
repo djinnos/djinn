@@ -120,7 +120,17 @@ pub enum StageOutcome {
     VerifierFailed { reason: String },
     ArchitectDone,
     Escalate { reason: String },
-    Failed { reason: String },
+    Failed {
+        reason: String,
+        /// Set when the stage failed on a typed provider error the host
+        /// circuit-breaker should act on (classified in
+        /// `djinn_agent::supervisor_impl::stage`). Rides the bincode RPC frame
+        /// so the host (`supervisor_runner.rs`) can feed the per-`(scope, model)`
+        /// breaker; `None` for non-provider stage failures. `#[serde(default)]`
+        /// keeps older frames decoding.
+        #[serde(default)]
+        provider_failure: Option<djinn_runtime::ProviderFailureClass>,
+    },
 }
 
 impl StageOutcome {
@@ -671,6 +681,7 @@ impl TaskRunSupervisor {
                         result = Some(TaskRunOutcome::Failed {
                             stage: "reviewer".into(),
                             reason: format!("review rejected: {feedback}"),
+                            provider_failure: None,
                         });
                         break;
                     }
@@ -678,10 +689,14 @@ impl TaskRunSupervisor {
                         result = Some(TaskRunOutcome::Failed {
                             stage: "verifier".into(),
                             reason,
+                            provider_failure: None,
                         });
                         break;
                     }
-                    StageOutcome::Failed { reason } => {
+                    StageOutcome::Failed {
+                        reason,
+                        provider_failure,
+                    } => {
                         // Planner patrol tasks (issue_type=review) must close
                         // even on Failed — the LLM sometimes finishes without
                         // calling submit_grooming (StageOutcome::Failed via
@@ -711,6 +726,10 @@ impl TaskRunSupervisor {
                         result = Some(TaskRunOutcome::Failed {
                             stage: role_kind.as_str().into(),
                             reason,
+                            // Carry the typed provider-error class (if any) the
+                            // reply loop produced through to the host report so
+                            // the host breaker can act on it.
+                            provider_failure,
                         });
                         break;
                     }
@@ -904,7 +923,13 @@ mod tests {
 
     #[test]
     fn stage_outcome_terminal_classifier() {
-        assert!(StageOutcome::Failed { reason: "x".into() }.is_terminal());
+        assert!(
+            StageOutcome::Failed {
+                reason: "x".into(),
+                provider_failure: None,
+            }
+            .is_terminal()
+        );
         assert!(StageOutcome::PlannerClose { reason: "x".into() }.is_terminal());
         assert!(StageOutcome::Escalate { reason: "x".into() }.is_terminal());
         assert!(StageOutcome::ReviewerRejected { feedback: "x".into() }.is_terminal());

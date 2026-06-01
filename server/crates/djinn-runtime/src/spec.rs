@@ -174,6 +174,39 @@ pub struct TaskRunSpec {
     pub commit_author_email: Option<String>,
 }
 
+/// Wire-capable classification of a stage failure that was caused by a typed
+/// provider error.
+///
+/// The typed `djinn_provider::provider::error::ProviderError` lives only inside
+/// the worker pod (the reply loop calls the provider directly there), and it is
+/// NOT serde-serializable, so it cannot ride the bincode report frame back to
+/// the host. The host owns the *persistent* model circuit-breaker
+/// (`HealthTracker`); a fast provider rejection that produces no token stall —
+/// bad credential, persistent malformed request, repeated 5xx — therefore never
+/// reached the host breaker before this field existed, and dispatch kept
+/// re-selecting a model that is structurally broken for that user.
+///
+/// `stage.rs` downcasts the reply-loop's terminal error to `ProviderError` and
+/// folds it into one of these *breaker-relevant* classes; the host
+/// (`supervisor_runner.rs`) maps the class back onto `record_failure` /
+/// `record_stall` using the task creator's scope. Only the classes the breaker
+/// actually acts on are represented — failures the breaker deliberately ignores
+/// (ContextOverflow, EmptyCompletion, Transport) and untyped/legacy errors carry
+/// `None` so they never trip it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProviderFailureClass {
+    /// Auth / persistent-invalid-request / invalid-output / 5xx provider
+    /// internal — a "quiet but broken" failure. Feeds the gentler
+    /// consecutive-failure breaker (`record_failure`): a one-off may be
+    /// transient, so it only demotes the model after it repeats.
+    Failure,
+    /// Rate-limit / quota (throttle). Feeds the immediate-failover breaker
+    /// (`record_stall`), matching the coordinator's throttle→stall intent: a
+    /// throttled credential should fail over to the next model at once with a
+    /// cooldown that outlasts the task's redispatch ladder.
+    Throttle,
+}
+
 /// Terminal outcome of a task-run.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum TaskRunOutcome {
@@ -183,7 +216,17 @@ pub enum TaskRunOutcome {
     /// Planner/architect surfaced a question that blocks automated execution
     /// (e.g. ambiguous scope, missing design decision).
     Escalated { reason: String },
-    Failed { stage: String, reason: String },
+    Failed {
+        stage: String,
+        reason: String,
+        /// Set when the failure was a typed provider error the host breaker
+        /// should act on (see [`ProviderFailureClass`]). `None` for non-LLM
+        /// failures (git push, PR open) and for provider errors the breaker
+        /// deliberately ignores. `#[serde(default)]` keeps any older frame that
+        /// predates this field decoding as `None`.
+        #[serde(default)]
+        provider_failure: Option<ProviderFailureClass>,
+    },
     Interrupted,
 }
 

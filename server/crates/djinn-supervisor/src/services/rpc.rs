@@ -428,14 +428,17 @@ impl SupervisorServices for RpcServices {
             Ok(ServiceRpcResponse::OpenPr(outcome)) => outcome,
             Ok(ServiceRpcResponse::Err(e)) => TaskRunOutcome::Failed {
                 stage: "open_pr".into(),
+                provider_failure: None,
                 reason: format!("rpc transport: {e}"),
             },
             Ok(other) => TaskRunOutcome::Failed {
                 stage: "open_pr".into(),
+                provider_failure: None,
                 reason: format!("rpc protocol: unexpected reply {other:?}"),
             },
             Err(e) => TaskRunOutcome::Failed {
                 stage: "open_pr".into(),
+                provider_failure: None,
                 reason: e,
             },
         }

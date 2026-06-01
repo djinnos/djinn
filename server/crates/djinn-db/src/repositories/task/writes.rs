@@ -1039,7 +1039,7 @@ mod created_by_tests {
                 "",
                 None,
                 None,
-                &[blocker.id.clone()],
+                std::slice::from_ref(&blocker.id),
             )
             .await
             .unwrap();
