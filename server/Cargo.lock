@@ -1235,6 +1235,7 @@ dependencies = [
  "djinn-stack",
  "futures",
  "hex",
+ "libc",
  "petgraph",
  "protobuf",
  "scip",
@@ -1257,6 +1258,7 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-typescript",
  "uuid",
+ "wait-timeout",
  "workspace-hack",
 ]
 

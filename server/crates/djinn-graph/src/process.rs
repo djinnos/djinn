@@ -7,10 +7,32 @@
 //! causing every subsequent spawn to fail with EBADF (os error 9).
 //!
 //! `std::process::Command` avoids this by not touching the reactor at all.
+//!
+//! ## Cancel-safety / leak avoidance (D5)
+//!
+//! A naive `spawn_blocking(move || cmd.output())` is *not* cancel-safe: the
+//! outer future can be dropped (timeout, task cancel, caller `select!`s away),
+//! but the inner blocking `cmd.output()` keeps running on the blocking pool with
+//! no way to abort it.  A wedged SCIP indexer or a hung `git fetch` then leaks
+//! BOTH the child process AND a blocking-pool thread forever.
+//!
+//! [`output_with_timeout`] (and the underlying [`output_with_kill`]) fix this by
+//! mirroring djinn-agent's command runner: the child is placed in its own
+//! process group, and on timeout we signal the whole group SIGTERM, wait a short
+//! grace period, then SIGKILL.  stdout/stderr are drained on background threads
+//! so the child can't deadlock on a full pipe buffer.  The timeout/kill happens
+//! *inside* the blocking closure, so the blocking thread always returns instead
+//! of leaking.
 
 use std::io;
 use std::process::{Command, Output};
 use std::time::Duration;
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
+#[cfg(unix)]
+use wait_timeout::ChildExt;
 
 /// Run a pre-configured `std::process::Command` on a blocking thread and return
 /// its output.  This is a drop-in async replacement for
@@ -23,10 +45,22 @@ pub async fn output(mut cmd: Command) -> io::Result<Output> {
 
 /// Like [`output`], but aborts if the command does not finish within `timeout`.
 /// Returns `io::ErrorKind::TimedOut` on expiry.
+///
+/// Unlike the old implementation (which wrapped [`output`] in
+/// `tokio::time::timeout` and leaked the still-running child + blocking thread
+/// on expiry), this delegates to [`output_with_kill`], which performs the
+/// timeout *inside* the blocking closure and actually reaps the child's process
+/// group before returning.
 pub async fn output_with_timeout(cmd: Command, timeout: Duration) -> io::Result<Output> {
-    tokio::time::timeout(timeout, output(cmd))
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "process timed out"))?
+    let out = output_with_kill(cmd, timeout).await?;
+    // Preserve the historical contract: a timed-out command surfaces as
+    // `TimedOut` rather than a non-zero exit status, so callers that
+    // distinguish "the tool failed" from "the tool hung" keep working.
+    #[cfg(unix)]
+    if timed_out_status(&out.status) {
+        return Err(io::Error::new(io::ErrorKind::TimedOut, "process timed out"));
+    }
+    Ok(out)
 }
 
 /// Run a pre-configured `std::process::Command` on a blocking thread and return
@@ -36,4 +70,232 @@ pub async fn status(mut cmd: Command) -> io::Result<std::process::ExitStatus> {
     tokio::task::spawn_blocking(move || cmd.status())
         .await
         .map_err(io::Error::other)?
+}
+
+/// True if `status` reflects a process killed by SIGTERM/SIGKILL (i.e. the
+/// timeout path fired) rather than a normal exit.
+#[cfg(unix)]
+fn timed_out_status(status: &std::process::ExitStatus) -> bool {
+    use std::os::unix::process::ExitStatusExt;
+    matches!(status.signal(), Some(libc::SIGTERM) | Some(libc::SIGKILL))
+}
+
+#[cfg(unix)]
+fn isolate_process_group(cmd: &mut Command) {
+    // SAFETY: pre_exec runs in the child process right before exec.
+    // setpgid(0, 0) places that child in a new process group so the whole
+    // group (the indexer/git child plus anything it forks) can be signalled
+    // with a single `kill(-pgid, …)`.
+    unsafe {
+        cmd.pre_exec(|| {
+            let rc = libc::setpgid(0, 0);
+            if rc != 0 {
+                return Err(io::Error::last_os_error());
+            }
+
+            // Nice level 10 — well below default 0, but not starved. SCIP
+            // indexers fan out into `cargo check`/`cc`; keep them from
+            // starving interactive applications.  Best-effort.
+            let _ = libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+
+            Ok(())
+        });
+    }
+}
+
+/// Join a drain thread with a wall-clock deadline.
+///
+/// If the thread doesn't finish in time (e.g. a surviving subprocess still
+/// holds the pipe open), we abandon it and return whatever bytes it collected
+/// up to that point — or an empty vec if it never finished.
+#[cfg(unix)]
+fn join_with_timeout(handle: std::thread::JoinHandle<Vec<u8>>, deadline: Duration) -> Vec<u8> {
+    // The thread sends its buffer over a channel when done so we can race it
+    // against a recv timeout without unsafe shenanigans.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let buf = handle.join().unwrap_or_default();
+        let _ = tx.send(buf);
+    });
+    rx.recv_timeout(deadline).unwrap_or_default()
+}
+
+#[cfg(unix)]
+fn signal_process_group(pgid: i32, signal: libc::c_int) -> io::Result<()> {
+    // Negative pid targets the whole process group.
+    let rc = unsafe { libc::kill(-pgid, signal) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        let err = io::Error::last_os_error();
+        match err.raw_os_error() {
+            // Already exited.
+            Some(libc::ESRCH) => Ok(()),
+            _ => Err(err),
+        }
+    }
+}
+
+/// Run `cmd` on a blocking thread, killing its entire process group if it does
+/// not finish within `timeout`.
+///
+/// The kill escalates SIGTERM → (200ms grace) → SIGKILL, and stdout/stderr are
+/// drained on background threads to avoid the classic full-pipe deadlock (the
+/// Linux pipe buffer is 64KiB; a child that writes more before we read blocks on
+/// `write()` and `wait_timeout` would never return).
+///
+/// Because the timeout and kill happen *inside* the blocking closure, the
+/// blocking-pool thread always returns rather than leaking when the caller's
+/// future is dropped.
+#[cfg(unix)]
+pub async fn output_with_kill(mut cmd: Command, timeout: Duration) -> io::Result<Output> {
+    // The caller's `Command` may not have piped stdio (e.g. SCIP indexer plans
+    // build a bare `Command`).  We take the pipes ourselves, so force them.
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    isolate_process_group(&mut cmd);
+
+    tokio::task::spawn_blocking(move || {
+        let mut child = cmd.spawn()?;
+        let pgid = child.id() as i32;
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        let stdout_handle = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut out) = stdout {
+                let _ = io::Read::read_to_end(&mut out, &mut buf);
+            }
+            buf
+        });
+        let stderr_handle = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut err) = stderr {
+                let _ = io::Read::read_to_end(&mut err, &mut buf);
+            }
+            buf
+        });
+
+        let timed_out = match child.wait_timeout(timeout)? {
+            Some(_status) => false,
+            None => {
+                let _ = signal_process_group(pgid, libc::SIGTERM);
+                std::thread::sleep(Duration::from_millis(200));
+
+                if child.try_wait()?.is_none() {
+                    let _ = signal_process_group(pgid, libc::SIGKILL);
+                }
+
+                true
+            }
+        };
+        // Reap the child so it doesn't linger as a zombie. After SIGKILL this
+        // returns promptly.
+        let status = child.wait()?;
+
+        // After a kill the drain threads may block if a subprocess survived in a
+        // different process group and still holds the pipe open. Give them a
+        // short deadline; take whatever bytes arrived before it.
+        let drain_deadline = Duration::from_secs(if timed_out { 2 } else { 60 });
+        let stdout_bytes = join_with_timeout(stdout_handle, drain_deadline);
+        let stderr_bytes = join_with_timeout(stderr_handle, drain_deadline);
+
+        Ok(Output {
+            status,
+            stdout: stdout_bytes,
+            stderr: stderr_bytes,
+        })
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+#[cfg(not(unix))]
+pub async fn output_with_kill(mut cmd: Command, _timeout: Duration) -> io::Result<Output> {
+    tokio::task::spawn_blocking(move || cmd.output())
+        .await
+        .map_err(io::Error::other)?
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// A hung child (`sleep 30`) must be terminated within the grace window and
+    /// the call must return promptly rather than hanging.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timeout_kills_hung_child_promptly() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("sleep 30");
+
+        let start = Instant::now();
+        let err = output_with_timeout(cmd, Duration::from_millis(200))
+            .await
+            .expect_err("hung child should surface as a timeout error");
+        let elapsed = start.elapsed();
+
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        // 200ms timeout + 200ms SIGTERM grace + drain deadline; comfortably
+        // under a second. If the kill path leaked, this would block ~30s.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "call should return promptly after kill, took {elapsed:?}"
+        );
+    }
+
+    /// The child runs in its own process group, and after the timeout kill the
+    /// whole group is gone (no leaked grandchildren).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timeout_reaps_whole_process_group() {
+        // The shell prints its pgid, then forks a grandchild that sleeps. If the
+        // group kill works, signalling -pgid reaches the grandchild too.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("ps -o pgid= -p $$ | tr -d ' '; sleep 30 & sleep 30");
+
+        let out = output_with_kill(cmd, Duration::from_millis(200))
+            .await
+            .expect("process should be reaped after timeout kill");
+
+        // Killed by signal => not a clean success.
+        assert!(!out.status.success());
+        assert!(timed_out_status(&out.status));
+
+        let pgid: i32 = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .parse()
+            .expect("child should have printed its pgid");
+
+        // Give the kernel a beat to tear the group down, then confirm no member
+        // of the group is still alive. kill(-pgid, 0) returning ESRCH means the
+        // group is empty.
+        std::thread::sleep(Duration::from_millis(300));
+        let rc = unsafe { libc::kill(-pgid, 0) };
+        if rc == 0 {
+            panic!("process group {pgid} survived the timeout kill — leaked");
+        }
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH),
+            "expected the killed process group to be fully gone"
+        );
+    }
+
+    /// A fast command still returns its real output and a success status.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fast_command_returns_output() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("printf hello");
+
+        let out = output_with_timeout(cmd, Duration::from_secs(10))
+            .await
+            .expect("fast command succeeds");
+        assert!(out.status.success());
+        assert_eq!(&out.stdout, b"hello");
+    }
 }
