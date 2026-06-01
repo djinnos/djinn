@@ -689,6 +689,19 @@ mod tests {
     fn test_build_request_error_tool_result() {
         let provider = test_provider();
         let mut conv = Conversation::new();
+        // A tool result must be preceded by its matching function call, or the
+        // serializer drops it as an orphan (the Responses API rejects a
+        // function_call_output with no matching call). Pair it so we exercise
+        // the is_error "Error: " prefix rendering on a real tool result.
+        conv.push(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "read".into(),
+                input: json!({}),
+            }],
+            metadata: None,
+        });
         conv.push(Message {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
@@ -701,7 +714,9 @@ mod tests {
 
         let req = provider.build_request(&conv, &[], None);
         let input = req["input"].as_array().unwrap();
-        assert_eq!(input[0]["output"], "Error: not found");
+        assert_eq!(input[0]["type"], "function_call");
+        assert_eq!(input[1]["type"], "function_call_output");
+        assert_eq!(input[1]["output"], "Error: not found");
     }
 
     #[test]

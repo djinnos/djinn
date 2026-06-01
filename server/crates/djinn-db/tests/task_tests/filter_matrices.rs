@@ -61,8 +61,9 @@ use super::*;
 #[case("approved", TransitionAction::PrCreated, "pr_draft", None)]
 // pr_undraft transitions pr_draft → pr_review
 #[case("pr_draft", TransitionAction::PrUndraft, "pr_review", None)]
-// pr_ci_failed transitions pr_draft → open
+// pr_ci_failed transitions pr_draft or pr_review → open
 #[case("pr_draft", TransitionAction::PrCiFailed, "open", None)]
+#[case("pr_review", TransitionAction::PrCiFailed, "open", None)]
 // pr_conflict transitions approved → open
 #[case("approved", TransitionAction::PrConflict, "open", None)]
 // pr_conflict transitions pr_draft → open
@@ -160,10 +161,9 @@ async fn valid_transition(
 // pr_undraft only from pr_draft
 #[case("open", TransitionAction::PrUndraft)]
 #[case("approved", TransitionAction::PrUndraft)]
-// pr_ci_failed only from pr_draft
+// pr_ci_failed only from pr_draft or pr_review
 #[case("open", TransitionAction::PrCiFailed)]
 #[case("approved", TransitionAction::PrCiFailed)]
-#[case("pr_review", TransitionAction::PrCiFailed)]
 // pr_conflict only from approved, pr_draft, or pr_review
 #[case("open", TransitionAction::PrConflict)]
 #[case("in_progress", TransitionAction::PrConflict)]
