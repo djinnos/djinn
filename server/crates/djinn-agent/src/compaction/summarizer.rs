@@ -5,7 +5,7 @@ use djinn_provider::provider::{LlmProvider, StreamEvent};
 
 use super::prompts::{
     CompactionContext, PARTIAL_COMPACTION_PROMPT, PARTIAL_COMPACTION_SUMMARISER_SYSTEM,
-    compaction_prompt, summariser_system,
+    TEMPLATE_RULES, compaction_prompt, summariser_system,
 };
 
 pub(super) async fn do_partial_compact(
@@ -17,7 +17,9 @@ pub(super) async fn do_partial_compact(
     for &pct in REMOVAL_PERCENTAGES {
         let filtered = filter_tool_responses_middle_out(tail_messages, pct);
         let formatted = format_messages_as_text(&filtered);
-        let prompt_text = PARTIAL_COMPACTION_PROMPT.replace("{messages}", &formatted);
+        let prompt_text = PARTIAL_COMPACTION_PROMPT
+            .replace("{messages}", &formatted)
+            .replace("{rules}", TEMPLATE_RULES);
 
         let mut compact_conv = Conversation::new();
         compact_conv.push(Message::system(PARTIAL_COMPACTION_SUMMARISER_SYSTEM));
@@ -63,7 +65,9 @@ pub(super) async fn do_compact(
     for &pct in REMOVAL_PERCENTAGES {
         let filtered = filter_tool_responses_middle_out(messages, pct);
         let formatted = format_messages_as_text(&filtered);
-        let prompt_text = prompt_template.replace("{messages}", &formatted);
+        let prompt_text = prompt_template
+            .replace("{messages}", &formatted)
+            .replace("{rules}", TEMPLATE_RULES);
 
         let mut compact_conv = Conversation::new();
         compact_conv.push(Message::system(system_instruction));

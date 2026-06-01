@@ -40,100 +40,87 @@ pub(crate) fn summariser_system(ctx: &CompactionContext) -> &'static str {
     }
 }
 
-pub(crate) const MID_SESSION_WORKER_PROMPT: &str = r#"## Compaction Context
-A coding agent's context window is full and needs compaction to continue working.
+// C2: verbatim summary-template discipline. Each prompt presents the desired
+// output as a fixed list of markdown section headings (the "template"), and the
+// shared rules below enforce: terse bullets, `(none)` for empty sections (so the
+// shape is stable and mergeable for C-4's incremental summaries), preserve exact
+// identifiers, output ONLY the summary (no preamble/analysis — the summariser
+// does not strip `<analysis>` tags, so requesting them leaked reasoning into the
+// inserted summary), and never mention summarisation/compaction. Plain markdown
+// headings (not nested XML the model must echo) keep this robust for smaller
+// models (Kimi/GLM/Qwen).
+pub(super) const TEMPLATE_RULES: &str = "Write the summary using EXACTLY the section headings below, in order. \
+Under each heading use terse bullet points. If a section has nothing to record, write `(none)` — \
+never omit a heading. Preserve exact file paths, function names, type names, line numbers, and \
+error messages verbatim. Output only the summary in this format — no preamble, no reasoning, no \
+closing remarks — and never mention this summary, the conversation's length, or that compaction occurred.";
 
-**Conversation History:**
+pub(crate) const MID_SESSION_WORKER_PROMPT: &str = r#"You are a coding agent continuing your own in-progress work session. Summarise the conversation below into a handoff so you can resume without re-reading files.
+
+**Conversation:**
 {messages}
 
-Wrap reasoning in `<analysis>` tags.
+{rules}
 
-### Include These Sections:
-1. **Task Goal** – What the agent is trying to accomplish
-2. **Files Changed** – Every file path read, created, or edited, with description of changes
-3. **Implementation Progress** – What's done vs. what remains
-4. **Code Decisions** – Key architectural decisions and reasoning
-5. **Errors + Fixes** – Bugs encountered and resolutions (or outstanding)
-6. **Codebase Context** – Important types, patterns, file locations discovered
-7. **Current Work** – What the agent was actively working on when compaction triggered
-8. **Next Steps** – Concrete remaining work items
+## Task Goal
+## Files Changed
+## Implementation Progress
+## Code Decisions
+## Errors + Fixes
+## Codebase Context
+## Current Work
+## Next Steps"#;
 
-> Preserve exact file paths, function names, type names, and error messages"#;
+pub(crate) const REVIEWER_PROMPT: &str = r#"You are a code review agent continuing your own review session. Summarise the conversation below into a handoff so you can resume the review without re-examining files.
 
-pub(crate) const REVIEWER_PROMPT: &str = r#"## Compaction Context
-A code review agent's session needs compaction.
-
-**Conversation History:**
+**Conversation:**
 {messages}
 
-Wrap reasoning in `<analysis>` tags.
+{rules}
 
-### Include These Sections:
-1. **Review Scope** – What task/PR is being reviewed and what the acceptance criteria are
-2. **Files Reviewed** – Every file examined with key observations
-3. **Issues Found** – All problems identified (compile errors, logic bugs, missing functionality, style)
-4. **Positive Findings** – What was implemented correctly
-5. **Assessment Progress** – Which acceptance criteria have been checked and their pass/fail status
-6. **Remaining Checks** – What still needs to be reviewed
+## Review Scope
+## Files Reviewed
+## Issues Found
+## Positive Findings
+## Assessment Progress
+## Remaining Checks"#;
 
-> Preserve exact file paths, line numbers, error messages, and acceptance criteria text"#;
+pub(crate) const GENERIC_PROMPT: &str = r#"You are an agent continuing a working session with a user. Summarise the conversation below into a handoff so the session can continue with no loss of context. Do not introduce goals or next steps the user did not confirm.
 
-pub(crate) const GENERIC_PROMPT: &str = r#"## Task Context
-- An llm context limit was reached when a user was in a working session with an agent (you)
-- Generate a version of the below messages with only the most verbose parts removed
-- Include user requests, your responses, all technical content, and as much of the original context as possible
-- This will be used to let the user continue the working session
-- Use framing and tone knowing the content will be read an agent (you) on a next exchange to allow for continuation of the session
-
-**Conversation History:**
+**Conversation:**
 {messages}
 
-Wrap reasoning in `<analysis>` tags:
-- Review conversation chronologically...
+{rules}
 
-### Include the Following Sections:
-1. **User Intent** – All goals and requests
-2. **Technical Concepts** – All discussed tools, methods
-3. **Files + Code** – Viewed/edited files, full code, change justifications
-4. **Errors + Fixes** – Bugs, resolutions, user-driven changes
-5. **Problem Solving** – Issues solved or in progress
-6. **User Messages** – All user messages including tool calls, but truncate long tool call arguments or results
-7. **Pending Tasks** – All unresolved user requests
-8. **Current Work** – Active work at summary request time: filenames, code, alignment to latest instruction
-9. **Next Step** – *Include only if* directly continues user instruction
+## User Intent
+## Technical Concepts
+## Files + Code
+## Errors + Fixes
+## Problem Solving
+## Pending Tasks
+## Current Work
+## Next Step"#;
 
-> No new ideas unless user confirmed"#;
+pub(super) const PARTIAL_COMPACTION_PROMPT: &str = r#"The earlier portion of a conversation (system prompt and initial context) is preserved verbatim and is NOT shown below — only the tail that needs summarising appears here. Your summary will be inserted immediately after the preserved prefix, so it must connect naturally to that earlier context. Do not repeat information already in the preserved earlier context.
 
-pub(super) const PARTIAL_COMPACTION_PROMPT: &str = r#"## Partial Compaction Context
-The latter portion of a conversation is being summarised while the beginning is kept intact.
-The earlier messages (system prompt and initial context) are preserved verbatim and do NOT
-appear below — only the tail of the conversation that needs compacting is shown.
-
-Your summary will be inserted immediately after the preserved prefix, so it must connect
-naturally to the earlier context that the reader already has.
-
-**Tail Messages to Summarise:**
+**Tail to summarise:**
 {messages}
 
-Wrap reasoning in `<analysis>` tags.
+{rules}
 
-### Include These Sections:
-1. **Progress Since Start** – What was accomplished in this portion of the conversation
-2. **Files Changed** – Every file path read, created, or edited, with description of changes
-3. **Code Decisions** – Key architectural decisions and reasoning
-4. **Errors + Fixes** – Bugs encountered and resolutions (or outstanding)
-5. **Current Work** – What was actively being worked on at the end of this segment
-6. **Next Steps** – Concrete remaining work items
+## Progress Since Start
+## Files Changed
+## Code Decisions
+## Errors + Fixes
+## Current Work
+## Next Steps"#;
 
-> Preserve exact file paths, function names, type names, and error messages
-> Do NOT repeat information that would already be in the preserved earlier context"#;
+pub(super) const PARTIAL_COMPACTION_SUMMARISER_SYSTEM: &str = "You summarise the tail of a coding agent's conversation. The beginning is preserved separately and the reader has it. Produce a dense, faithful, terse summary of only the provided messages, connecting naturally to the earlier context. Follow the requested section format exactly, output only the summary, and never mention summarisation or compaction.";
 
-pub(super) const PARTIAL_COMPACTION_SUMMARISER_SYSTEM: &str = "You are summarising the tail portion of a conversation. The beginning of the conversation is preserved separately and the reader will have it. Produce a dense, faithful summary of only the provided messages, connecting naturally to the earlier context the reader already has. Do not repeat early context.";
-
-pub(crate) const SUMMARISER_SYSTEM_WORKER_MID_SESSION: &str = "You are summarising a coding agent's in-progress work session. Produce a dense, faithful summary that preserves all implementation context so the agent can continue working without re-reading files.";
-pub(crate) const SUMMARISER_SYSTEM_TASK_REVIEWER: &str = "You are summarising a code review session. Produce a dense, faithful summary that preserves the review findings, issues identified, and assessment progress.";
+pub(crate) const SUMMARISER_SYSTEM_WORKER_MID_SESSION: &str = "You summarise a coding agent's in-progress work session. Produce a dense, faithful, terse summary that preserves all implementation context so the agent can continue without re-reading files. Follow the requested section format exactly, output only the summary, and never mention summarisation or compaction.";
+pub(crate) const SUMMARISER_SYSTEM_TASK_REVIEWER: &str = "You summarise a code review session. Produce a dense, faithful, terse summary that preserves the review findings, issues identified, and assessment progress. Follow the requested section format exactly, output only the summary, and never mention summarisation or compaction.";
 pub(crate) const SUMMARISER_SYSTEM_GENERIC: &str =
-    "You are a conversation summariser. Produce a dense, faithful summary.";
+    "You summarise an agent–user working session. Produce a dense, faithful, terse summary. Follow the requested section format exactly, output only the summary, and never mention summarisation or compaction.";
 
 pub(super) fn last_user_text(messages: &[Message]) -> Option<String> {
     messages
@@ -234,10 +221,25 @@ mod tests {
         let worker_mid = compaction_prompt(&CompactionContext::MidSession("worker".to_string()));
         let reviewer = compaction_prompt(&CompactionContext::MidSession("reviewer".to_string()));
 
-        assert!(worker_mid.contains("context window is full"));
-        assert!(reviewer.contains("code review"));
-        assert!(worker_mid.contains("{messages}"));
-        assert!(reviewer.contains("{messages}"));
+        assert!(worker_mid.contains("Implementation Progress"));
+        assert!(reviewer.contains("Issues Found"));
+        // C2: both carry the {messages} and {rules} placeholders the summariser
+        // substitutes; the rules enforce the verbatim-template discipline.
+        for p in [worker_mid, reviewer] {
+            assert!(p.contains("{messages}"), "{p}");
+            assert!(p.contains("{rules}"), "{p}");
+        }
+    }
+
+    #[test]
+    fn template_rules_enforce_discipline() {
+        // C2: the shared rules must request `(none)` for empty sections, terse
+        // bullets, and never mentioning compaction — the properties C-4's
+        // mergeable summaries depend on.
+        assert!(TEMPLATE_RULES.contains("(none)"));
+        assert!(TEMPLATE_RULES.to_lowercase().contains("terse"));
+        assert!(TEMPLATE_RULES.to_lowercase().contains("compaction"));
+        assert!(TEMPLATE_RULES.to_lowercase().contains("only the summary"));
     }
 
     #[test]
