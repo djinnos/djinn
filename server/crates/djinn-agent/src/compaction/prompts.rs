@@ -1,4 +1,4 @@
-use djinn_provider::message::{Message, Role};
+use djinn_provider::message::{ContentBlock, Message, Role};
 
 /// Describes *why* compaction is happening, so the prompt can be tailored.
 #[derive(Debug, Clone)]
@@ -172,6 +172,98 @@ pub(super) fn last_user_text(messages: &[Message]) -> Option<String> {
         })
 }
 
+/// C5: number of whole conversation turns to preserve verbatim after the summary
+/// in a full compaction, so the agent keeps the most recent concrete exchange
+/// (not just the final user line).
+const FULL_COMPACTION_PRESERVED_TURNS: usize = 2;
+
+/// `true` if `msg` is a `User` message carrying a `ToolResult` block. Such a
+/// message is the *continuation* of the preceding assistant's tool-call turn — it
+/// can never start a turn, because cutting before it would orphan the result from
+/// its `ToolUse`.
+fn is_tool_result_message(msg: &Message) -> bool {
+    msg.role == Role::User
+        && msg
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+}
+
+/// `true` if `msg` is an assistant message that issues a `ToolUse` which is NOT
+/// answered by a `ToolResult` for the same id anywhere in `following`. A turn
+/// ending on such a message is an *unanswered tool call* — re-inserting it after
+/// the summary would leave the model owing a tool result it can never produce
+/// (compaction often fires on exactly this message, before dispatch ran), so the
+/// preserved tail must never end here.
+fn has_unanswered_tool_use(msg: &Message, following: &[Message]) -> bool {
+    if msg.role != Role::Assistant {
+        return false;
+    }
+    msg.content.iter().any(|b| {
+        if let ContentBlock::ToolUse { id, .. } = b {
+            !following.iter().any(|f| {
+                f.content.iter().any(|fb| {
+                    matches!(fb, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id)
+                })
+            })
+        } else {
+            false
+        }
+    })
+}
+
+/// C5: the `[start, end)` slice of `messages` to preserve verbatim after the
+/// summary — the last `max_turns` whole, fully-resolved turns at/after `floor`
+/// (`None` when there is nothing safe to preserve).
+///
+/// A turn boundary is the start of either an assistant message or a fresh user
+/// prompt; a `User` message carrying a `ToolResult` is NOT a boundary (it belongs
+/// to the preceding assistant's tool-call turn, so cutting before it would orphan
+/// the result from its `ToolUse` — the same invariant `find_orphaned_tool_result`
+/// guards). `start` is therefore guaranteed never to land on a tool-result
+/// message, keeping every `ToolUse`/`ToolResult` pair intact.
+///
+/// The conversation often ends on a bare assistant `ToolUse` (compaction fires
+/// before the tool ran), so `end` first excludes any trailing
+/// unanswered-tool-call turn; only the resolved prefix is then preserved.
+///
+/// Only messages at/after `floor` are considered, so the system message (passed
+/// as the floor when present) is never pulled into the preserved tail.
+fn preserved_tail_range(
+    messages: &[Message],
+    floor: usize,
+    max_turns: usize,
+) -> Option<(usize, usize)> {
+    if max_turns == 0 || floor >= messages.len() {
+        return None;
+    }
+
+    let mut end = messages.len();
+    while end > floor && has_unanswered_tool_use(&messages[end - 1], &messages[end..]) {
+        end -= 1;
+    }
+    if end <= floor {
+        return None;
+    }
+
+    let mut turns_seen = 0usize;
+    let mut start: Option<usize> = None;
+    for i in (floor..end).rev() {
+        if !is_tool_result_message(&messages[i]) {
+            turns_seen += 1;
+            start = Some(i);
+            if turns_seen == max_turns {
+                break;
+            }
+        }
+    }
+
+    match start {
+        Some(idx) if !is_tool_result_message(&messages[idx]) => Some((idx, end)),
+        _ => None,
+    }
+}
+
 pub(super) fn rebuild_full_compaction_messages(
     original_messages: &[Message],
     summary: String,
@@ -195,14 +287,38 @@ pub(super) fn rebuild_full_compaction_messages(
     if matches!(
         ctx,
         CompactionContext::MidSession(_) | CompactionContext::ChatSession
-    ) && let Some(last_user) = last_user_text
-    {
-        let already_appended = new_messages
-            .last()
-            .map(|m| m.role == Role::User && m.text_content() == last_user)
-            .unwrap_or(false);
-        if !already_appended {
-            new_messages.push(Message::user(last_user));
+    ) {
+        // C5: preserve the last 1-2 WHOLE turns verbatim after the summary so the
+        // agent keeps the most recent concrete exchange. The floor sits just
+        // after the system message (if any) so the system prompt is never pulled
+        // into the preserved tail; with no system message the floor is 0 so the
+        // very first turn is still eligible.
+        let floor = original_messages
+            .iter()
+            .position(|m| m.role == Role::System)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+
+        if let Some((start, end)) =
+            preserved_tail_range(original_messages, floor, FULL_COMPACTION_PRESERVED_TURNS)
+        {
+            for msg in &original_messages[start..end] {
+                new_messages.push(msg.clone());
+            }
+        }
+
+        // Re-append the last user text only if the preserved tail did not already
+        // end with it (avoids a double-appended last-user line). When no tail was
+        // preserved, fall back to the prior behaviour of re-appending it so the
+        // model still sees the question it must answer.
+        if let Some(last_user) = last_user_text {
+            let already_present = new_messages
+                .last()
+                .map(|m| m.role == Role::User && m.text_content() == last_user)
+                .unwrap_or(false);
+            if !already_present {
+                new_messages.push(Message::user(last_user));
+            }
         }
     }
 
@@ -478,5 +594,337 @@ mod tests {
     fn last_user_text_returns_none_when_absent() {
         let conversation = Conversation::new();
         assert_eq!(last_user_text(&conversation.messages), None);
+    }
+
+    // ─── C5: preserve last whole turns after the summary ─────────────────────
+
+    use djinn_provider::message::ContentBlock as CB;
+
+    fn tool_use(id: &str, name: &str) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: vec![CB::ToolUse {
+                id: id.into(),
+                name: name.into(),
+                input: serde_json::json!({"k": "v"}),
+            }],
+            metadata: None,
+        }
+    }
+
+    fn tool_result(id: &str, text: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![CB::ToolResult {
+                tool_use_id: id.into(),
+                content: vec![CB::text(text)],
+                is_error: false,
+            }],
+            metadata: None,
+        }
+    }
+
+    /// C5: the last 1-2 WHOLE turns are re-appended verbatim after the
+    /// summary+continuation, so the model keeps the most recent concrete
+    /// exchange — not just the final user line.
+    #[test]
+    fn full_compaction_preserves_last_whole_turns_verbatim() {
+        let original = vec![
+            Message::system("sys"),
+            Message::user("very old"),
+            Message::assistant("old reply"),
+            Message::user("recent question"),
+            Message::assistant("recent answer to it"),
+        ];
+
+        let rebuilt = rebuild_full_compaction_messages(
+            &original,
+            "summary".to_string(),
+            &CompactionContext::MidSession("worker".to_string()),
+        );
+
+        // system, summary, continuation, then the preserved tail verbatim.
+        assert_eq!(rebuilt[0].role, Role::System);
+        assert_eq!(rebuilt[1].text_content(), "summary");
+        assert_eq!(rebuilt[2].text_content(), FULL_COMPACTION_CONTINUATION);
+
+        // The last two whole turns (the recent user + recent assistant) appear
+        // verbatim, in order, after the continuation.
+        assert_eq!(rebuilt[3].text_content(), "recent question");
+        assert_eq!(rebuilt[3].role, Role::User);
+        assert_eq!(rebuilt[4].text_content(), "recent answer to it");
+        assert_eq!(rebuilt[4].role, Role::Assistant);
+
+        // The much older turn is NOT carried over verbatim (only summarised).
+        assert!(!rebuilt.iter().any(|m| m.text_content() == "very old"));
+    }
+
+    /// C5 CRITICAL: a tool-call/tool-result pair in the preserved tail must stay
+    /// together — never orphaned. Asserted via the existing orphan invariant.
+    #[test]
+    fn full_compaction_preserved_tail_keeps_tool_pair_intact() {
+        let original = vec![
+            Message::system("sys"),
+            Message::user("kick off"),
+            Message::assistant("older reply"),
+            // Last whole turn: assistant ToolUse + its User ToolResult.
+            tool_use("call_42", "bash"),
+            tool_result("call_42", "command output"),
+        ];
+
+        let rebuilt = rebuild_full_compaction_messages(
+            &original,
+            "summary".to_string(),
+            &CompactionContext::MidSession("worker".to_string()),
+        );
+
+        // No orphaned tool result anywhere in the rebuilt conversation.
+        assert!(
+            crate::compaction::policy::find_orphaned_tool_result(&rebuilt).is_none(),
+            "preserved tail orphaned a tool result"
+        );
+
+        // The pair survived verbatim and adjacent: the ToolUse is immediately
+        // followed by its ToolResult.
+        let use_idx = rebuilt
+            .iter()
+            .position(|m| {
+                m.content
+                    .iter()
+                    .any(|b| matches!(b, CB::ToolUse { id, .. } if id == "call_42"))
+            })
+            .expect("ToolUse preserved");
+        assert!(matches!(
+            &rebuilt[use_idx + 1].content[0],
+            CB::ToolResult { tool_use_id, .. } if tool_use_id == "call_42"
+        ));
+    }
+
+    /// C5 CRITICAL: the preserved tail must START on a turn boundary, never on a
+    /// bare tool-result message (which would orphan it). Here only the last turn
+    /// fits within the 2-turn budget but is itself a tool-call turn — the cut
+    /// must land on the assistant ToolUse, not between it and its result.
+    #[test]
+    fn full_compaction_never_starts_tail_on_orphan_tool_result() {
+        let original = vec![
+            Message::system("sys"),
+            Message::assistant("turn one reply"),
+            tool_use("call_a", "read"),
+            tool_result("call_a", "file a"),
+            tool_use("call_b", "read"),
+            tool_result("call_b", "file b"),
+        ];
+
+        let rebuilt = rebuild_full_compaction_messages(
+            &original,
+            "summary".to_string(),
+            &CompactionContext::MidSession("worker".to_string()),
+        );
+
+        assert!(
+            crate::compaction::policy::find_orphaned_tool_result(&rebuilt).is_none(),
+            "tail started mid-pair and orphaned a tool result"
+        );
+
+        // First preserved message after the continuation marker must be an
+        // assistant ToolUse (a boundary), not a bare User ToolResult.
+        let continuation_idx = rebuilt
+            .iter()
+            .position(|m| m.text_content() == FULL_COMPACTION_CONTINUATION)
+            .unwrap();
+        let first_preserved = &rebuilt[continuation_idx + 1];
+        assert!(!is_tool_result_message(first_preserved));
+        assert_eq!(first_preserved.role, Role::Assistant);
+    }
+
+    /// C5 CRITICAL: when compaction fires on a bare assistant ToolUse (before the
+    /// tool ran, so no ToolResult exists), that dangling-tool-call turn must NOT be
+    /// preserved — it would leave the model owing a result it can never produce.
+    #[test]
+    fn full_compaction_trims_trailing_unanswered_tool_call() {
+        let original = vec![
+            Message::system("sys"),
+            Message::user("Do the task."),
+            // Compaction fired here: a tool call with no result yet.
+            tool_use("t1", "nonexistent_tool"),
+        ];
+
+        let rebuilt = rebuild_full_compaction_messages(
+            &original,
+            "summary".to_string(),
+            &CompactionContext::MidSession("worker".to_string()),
+        );
+
+        // No ToolUse without a matching result should survive into the rebuilt
+        // conversation.
+        let dangling = rebuilt.iter().any(|m| {
+            m.content.iter().any(|b| {
+                matches!(b, CB::ToolUse { id, .. } if id == "t1")
+            })
+        });
+        assert!(!dangling, "dangling tool call was preserved after the summary");
+        assert!(crate::compaction::policy::find_orphaned_tool_result(&rebuilt).is_none());
+
+        // The user line is still preserved/re-appended so the model has the task.
+        assert_eq!(rebuilt.last().unwrap().text_content(), "Do the task.");
+        // And it is not double-appended.
+        let occ = rebuilt
+            .iter()
+            .filter(|m| m.role == Role::User && m.text_content() == "Do the task.")
+            .count();
+        assert_eq!(occ, 1);
+    }
+
+    /// C5: do NOT double-append the last user text when the preserved tail
+    /// already ends with it.
+    #[test]
+    fn full_compaction_does_not_double_append_last_user() {
+        let original = vec![
+            Message::system("sys"),
+            Message::user("old"),
+            Message::assistant("reply"),
+            Message::user("the final user line"),
+        ];
+
+        let rebuilt = rebuild_full_compaction_messages(
+            &original,
+            "summary".to_string(),
+            &CompactionContext::ChatSession,
+        );
+
+        let occurrences = rebuilt
+            .iter()
+            .filter(|m| m.role == Role::User && m.text_content() == "the final user line")
+            .count();
+        assert_eq!(
+            occurrences, 1,
+            "last user line must appear exactly once, not double-appended"
+        );
+        assert_eq!(rebuilt.last().unwrap().text_content(), "the final user line");
+    }
+
+    /// C5: re-append the last user line when the preserved tail ends on an
+    /// assistant turn (so the model still sees the question), but only once.
+    #[test]
+    fn full_compaction_reappends_last_user_when_tail_ends_on_assistant() {
+        let original = vec![
+            Message::system("sys"),
+            Message::user("older"),
+            Message::user("the question"),
+            Message::assistant("a partial answer"),
+        ];
+
+        let rebuilt = rebuild_full_compaction_messages(
+            &original,
+            "summary".to_string(),
+            &CompactionContext::MidSession("worker".to_string()),
+        );
+
+        // Tail ends on an assistant message, so the last user line is re-appended
+        // at the very end so the model still sees the question it must answer.
+        assert_eq!(rebuilt.last().unwrap().role, Role::User);
+        assert_eq!(rebuilt.last().unwrap().text_content(), "the question");
+        // It appears within the preserved tail AND re-appended at the end (the
+        // double-append guard only suppresses when the tail already ENDS with it).
+        let occurrences = rebuilt
+            .iter()
+            .filter(|m| m.role == Role::User && m.text_content() == "the question")
+            .count();
+        assert_eq!(occurrences, 2);
+    }
+
+    /// C5: short conversation — only the system + summary scaffolding exists, so
+    /// preservation is a graceful no-op (nothing to carry over verbatim).
+    #[test]
+    fn full_compaction_short_conversation_no_op() {
+        // System + a single user line is too short for a whole prior turn beyond
+        // it; tail_turn_start must still behave and we must not panic or orphan.
+        let original = vec![Message::system("sys"), Message::user("only line")];
+
+        let rebuilt = rebuild_full_compaction_messages(
+            &original,
+            "summary".to_string(),
+            &CompactionContext::MidSession("worker".to_string()),
+        );
+
+        assert!(crate::compaction::policy::find_orphaned_tool_result(&rebuilt).is_none());
+        // No system-only / summary-only message gets preserved as a "turn"; the
+        // last user line is still re-appended once for the model to answer.
+        assert_eq!(rebuilt[0].role, Role::System);
+        assert_eq!(rebuilt[1].text_content(), "summary");
+        assert_eq!(rebuilt[2].text_content(), FULL_COMPACTION_CONTINUATION);
+        assert_eq!(rebuilt.last().unwrap().text_content(), "only line");
+    }
+
+    /// C5: the system message itself is never pulled into the preserved tail.
+    #[test]
+    fn full_compaction_preserved_tail_excludes_system() {
+        let original = vec![
+            Message::system("SYSTEM PROMPT"),
+            Message::user("q"),
+            Message::assistant("a"),
+        ];
+
+        let rebuilt = rebuild_full_compaction_messages(
+            &original,
+            "summary".to_string(),
+            &CompactionContext::MidSession("worker".to_string()),
+        );
+
+        // Exactly one System message (the rebuilt header), never duplicated in
+        // the preserved tail.
+        let system_count = rebuilt.iter().filter(|m| m.role == Role::System).count();
+        assert_eq!(system_count, 1);
+    }
+
+    /// C5: with no system message present, the very first turn is still eligible
+    /// for preservation (floor = 0).
+    #[test]
+    fn full_compaction_no_system_preserves_from_start() {
+        let original = vec![
+            Message::user("first question"),
+            Message::assistant("first answer"),
+        ];
+
+        let rebuilt = rebuild_full_compaction_messages(
+            &original,
+            "summary".to_string(),
+            &CompactionContext::MidSession("worker".to_string()),
+        );
+
+        // summary, continuation, then both original turns verbatim.
+        assert_eq!(rebuilt[0].text_content(), "summary");
+        assert_eq!(rebuilt[1].text_content(), FULL_COMPACTION_CONTINUATION);
+        assert_eq!(rebuilt[2].text_content(), "first question");
+        assert_eq!(rebuilt[3].text_content(), "first answer");
+        // Tail ended on assistant → last user re-appended once.
+        assert_eq!(rebuilt.last().unwrap().text_content(), "first question");
+    }
+
+    /// C5 (regression): the C-4 continuation marker still round-trips through
+    /// `extract_prior_summary` even though a verbatim tail now follows it.
+    #[test]
+    fn full_compaction_with_preserved_tail_still_detectable_by_c4() {
+        let original = vec![
+            Message::system("sys"),
+            Message::user("old work"),
+            Message::assistant("did stuff"),
+            Message::user("latest"),
+            Message::assistant("latest reply"),
+        ];
+        let rebuilt = rebuild_full_compaction_messages(
+            &original,
+            "SUMMARY TEXT".to_string(),
+            &CompactionContext::MidSession("worker".to_string()),
+        );
+
+        let (text, summary_idx, continuation_idx) =
+            extract_prior_summary(&rebuilt).expect("prior summary still detected");
+        assert_eq!(text, "SUMMARY TEXT");
+        assert_eq!(rebuilt[summary_idx].text_content(), "SUMMARY TEXT");
+        assert_eq!(
+            rebuilt[continuation_idx].text_content(),
+            FULL_COMPACTION_CONTINUATION
+        );
     }
 }
