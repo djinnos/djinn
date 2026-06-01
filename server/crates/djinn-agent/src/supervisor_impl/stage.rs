@@ -137,8 +137,20 @@ async fn materialize_read_sources(
             .map(|root| std::path::PathBuf::from(root).join(format!("{pid}.git")))
             .unwrap_or_else(|| djinn_workspace::mirror_path_for(pid));
         let mut path = None;
-        if mirror.exists() {
-            let dest = dest_root.join(pid);
+        let dest = dest_root.join(pid);
+        if dest.join(".git").exists() {
+            // A prior stage in this same run already materialized the
+            // read-source into the shared worktree. The supervisor drives every
+            // role (worker → reviewer → …) against ONE worktree and calls this
+            // per stage; a plain re-clone 128s on the non-empty dest and drops
+            // the source to "slug only" for every stage after the first (the
+            // reviewer/PR stages then lose the read-source code on disk). The
+            // mirror is immutable for the run, so reuse the existing clone.
+            path = Some(dest.display().to_string());
+        } else if mirror.exists() {
+            // Clear any partial leftover (a clone that died mid-copy leaves a
+            // non-empty, `.git`-less dir that would also 128) before cloning.
+            let _ = tokio::fs::remove_dir_all(&dest).await;
             match run_git_command(
                 worktree_path.to_path_buf(),
                 vec![
