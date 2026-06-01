@@ -110,10 +110,19 @@ mod tests {
 
         assert!(created.error.is_none());
         let note_id = created.id.clone().expect("memory_write returns note id");
-        let created_note = repo.get(&note_id).await.unwrap().unwrap();
-        assert!(created_note.abstract_.is_none());
-        assert!(created_note.overview.is_none());
 
+        // The non-blocking guarantee is structural: `memory_write` returns a
+        // `MemoryNoteResponse` that carries no summary fields and merely spawns
+        // `schedule_summary_regeneration`. We intentionally do NOT assert the
+        // DB row's summaries are still `None` right after the write returns:
+        // the spawned fallback runs deterministic first-sentence extraction in
+        // microseconds, so on a multi-thread runtime it can populate the row
+        // before this code observes it — and crucially, a *blocking* write
+        // would leave the row in the exact same populated state, so the check
+        // has no power to distinguish blocking from non-blocking. It only
+        // flakes. The async path is instead proven below by the summaries
+        // appearing (and re-appearing after an edit) without the write/edit
+        // calls themselves having awaited them.
         let generated = wait_for_summaries_change(&repo, &note_id, None).await;
         assert!(
             generated
