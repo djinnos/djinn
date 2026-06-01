@@ -42,6 +42,28 @@ impl GitHubApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
+            // Idempotent recovery: GitHub returns 422 "A pull request already
+            // exists for <owner>:<head>" when a PR for this head branch is
+            // already open (a retried dispatch, or a prior run that opened the
+            // PR but didn't persist its URL). Adopt the existing PR instead of
+            // failing the whole flow — otherwise the caller loops
+            // reopen→create→422 forever. Mirrors create_ref's
+            // "422 already exists → success" idempotency.
+            if status.as_u16() == 422 && body.contains("already exists") {
+                let head_filter = format!("{owner}:{}", params.head);
+                if let Ok(prs) = self.list_pulls_by_head(owner, repo, &head_filter).await
+                    && let Some(pr) = prs.into_iter().next()
+                {
+                    tracing::info!(
+                        owner,
+                        repo,
+                        head = %params.head,
+                        pr = pr.number,
+                        "create_pull_request: PR already exists for head — adopting existing"
+                    );
+                    return Ok(pr);
+                }
+            }
             return Err(anyhow!("create_pull_request failed ({}): {}", status, body));
         }
         Ok(resp.json().await?)
