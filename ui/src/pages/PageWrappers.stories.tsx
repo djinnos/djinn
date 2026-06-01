@@ -234,7 +234,6 @@ export const KanbanPagePopulated = {
         <KanbanBoard
           tasks={tasksFixture}
           epics={new Map(epicsFixture.map((epic) => [epic.id, epic]))}
-          disableSearchParamSync
         />
       </div>
     </MemoryRouter>
@@ -245,7 +244,7 @@ export const KanbanPageEmpty = {
   render: () => (
     <MemoryRouter initialEntries={["/"]}>
       <div className="h-screen p-4">
-        <KanbanBoard tasks={[]} epics={new Map()} disableSearchParamSync />
+        <KanbanBoard tasks={[]} epics={new Map()} />
       </div>
     </MemoryRouter>
   ),

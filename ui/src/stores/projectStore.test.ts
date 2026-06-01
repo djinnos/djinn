@@ -64,8 +64,8 @@ describe("projectStore", () => {
     expect(projectStore.getState().getSelectedProject()).toBeUndefined();
   });
 
-  it("getLastView defaults to kanban", () => {
-    expect(projectStore.getState().getLastView(mockProjectA.id)).toBe("kanban");
+  it("getLastView defaults to tasks", () => {
+    expect(projectStore.getState().getLastView(mockProjectA.id)).toBe("tasks");
   });
 
   it("setLastView stores and returns project view", () => {

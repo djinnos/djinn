@@ -2,7 +2,8 @@ import { useServerHealth } from "@/hooks/useServerHealth";
 import { useEventSource } from "@/hooks/useEventSource";
 import { Sidebar } from "@/components/Sidebar";
 import { KanbanPage } from "@/pages/KanbanPage";
-import { RoadmapPage } from "@/pages/RoadmapPage";
+import { DependenciesPage } from "@/pages/DependenciesPage";
+import { BoardLayout } from "@/components/board/BoardLayout";
 import { AgentsPage } from "@/pages/AgentsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { TaskSessionPage } from "@/pages/TaskSessionPage";
@@ -34,9 +35,18 @@ function MainLayout() {
         <div className="flex min-h-0 flex-1 flex-col">
           <ConnectionBanner />
           <Routes>
-            {/* Views — project selection lives in the projectStore, not the URL */}
-            <Route path="/kanban" element={<KanbanPage />} />
-            <Route path="/roadmap" element={<RoadmapPage />} />
+            {/* Views — project selection lives in the projectStore, not the URL.
+                Tasks + Dependencies share the BoardLayout (filter header + view
+                toggle); the old /kanban and /roadmap paths redirect in. */}
+            <Route element={<BoardLayout />}>
+              <Route path="/tasks" element={<KanbanPage />} />
+              <Route path="/dependencies" element={<DependenciesPage />} />
+            </Route>
+            <Route path="/kanban" element={<Navigate to="/tasks" replace />} />
+            <Route
+              path="/roadmap"
+              element={<Navigate to="/dependencies" replace />}
+            />
             <Route path="/chat" element={<ChatPage />} />
             <Route path="/chat/:sessionId" element={<ChatPage />} />
             <Route path="/agents" element={<AgentsPage />} />
@@ -58,7 +68,7 @@ function MainLayout() {
             {/* Users — admin-only roster; non-admins are bounced to the board */}
             <Route
               path="/users"
-              element={isAdmin ? <UsersPage /> : <Navigate to="/kanban" replace />}
+              element={isAdmin ? <UsersPage /> : <Navigate to="/tasks" replace />}
             />
 
             {/* Settings */}
@@ -66,7 +76,7 @@ function MainLayout() {
             <Route path="/settings/*" element={<SettingsPage />} />
 
             {/* Default redirect */}
-            <Route path="*" element={<Navigate to="/kanban" replace />} />
+            <Route path="*" element={<Navigate to="/tasks" replace />} />
           </Routes>
         </div>
       </div>

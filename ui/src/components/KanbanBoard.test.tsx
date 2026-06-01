@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, userEvent, waitFor, within } from "@/test/test-utils";
+import { render, screen, waitFor, within } from "@/test/test-utils";
 import { KanbanBoard } from "@/components/KanbanBoard";
 import type { Epic, Task } from "@/api/types";
 
@@ -97,7 +97,6 @@ describe("KanbanBoard", () => {
             [epicB.id, epicB],
           ])
         }
-        disableSearchParamSync
       />,
     );
 
@@ -124,8 +123,10 @@ describe("KanbanBoard", () => {
     ).toBeInTheDocument();
   });
 
-  it("filters by epic and text search", async () => {
-    const user = userEvent.setup();
+  it("applies the text search from the shared filter URL param", async () => {
+    // The search box now lives in the shared BoardFilterHeader, which writes
+    // the query to the `q` URL param; the board reads it back. Drive filtering
+    // by seeding that param directly.
     const tasks: Task[] = [
       makeTask({
         id: "t-a-1",
@@ -159,17 +160,9 @@ describe("KanbanBoard", () => {
             [epicB.id, epicB],
           ])
         }
-        disableSearchParamSync
       />,
+      { wrapperOptions: { routerProps: { initialEntries: ["/tasks?q=target"] } } },
     );
-
-    // All tasks visible before filtering
-    expect(screen.getByText("Alpha target task")).toBeInTheDocument();
-    expect(screen.getByText("Alpha other")).toBeInTheDocument();
-    expect(screen.getByText("Beta target task")).toBeInTheDocument();
-
-    // Text search narrows results
-    await user.type(screen.getByPlaceholderText("Search tasks..."), "target");
 
     await waitFor(() => {
       expect(screen.getByText("Alpha target task")).toBeInTheDocument();
@@ -207,7 +200,6 @@ describe("KanbanBoard", () => {
       <KanbanBoard
         tasks={tasks}
         epics={new Map([[epicA.id, epicA]])}
-        disableSearchParamSync
       />,
     );
 
@@ -219,7 +211,7 @@ describe("KanbanBoard", () => {
   });
 
   it("shows empty board state when no tasks", () => {
-    render(<KanbanBoard tasks={[]} epics={new Map()} disableSearchParamSync />);
+    render(<KanbanBoard tasks={[]} epics={new Map()} />);
 
     expect(screen.getAllByText("No tasks")).toHaveLength(4);
   });
@@ -234,7 +226,6 @@ describe("KanbanBoard", () => {
             [draftEpic.id, draftEpic],
           ])
         }
-        disableSearchParamSync
       />,
     );
 

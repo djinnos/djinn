@@ -10,7 +10,6 @@ import {
   ChatIcon,
   LogoutSquare01Icon,
   Settings01Icon,
-  WorkflowSquare06Icon,
   Brain01Icon,
   Idea01Icon,
   ConnectIcon,
@@ -129,8 +128,6 @@ export function Sidebar() {
   useEffect(() => {
     if (location.pathname.includes('/chat')) {
       setActiveSection('chat');
-    } else if (location.pathname.includes('/roadmap')) {
-      setActiveSection('roadmap');
     } else if (location.pathname.includes('/agents') || location.pathname.includes('/metrics')) {
       setActiveSection('agents');
     } else if (location.pathname.includes('/memory')) {
@@ -146,7 +143,7 @@ export function Sidebar() {
     } else if (location.pathname.startsWith('/settings')) {
       setActiveSection('settings');
     } else {
-      setActiveSection('kanban');
+      setActiveSection('tasks');
     }
   }, [location.pathname, setActiveSection]);
 
@@ -187,15 +184,9 @@ export function Sidebar() {
         />
         <NavItem
           icon={<HugeiconsIcon icon={KanbanIcon} className="h-4 w-4" />}
-          label="Kanban"
-          isActive={activeSection === 'kanban'}
-          onClick={() => navigateToView('kanban')}
-        />
-        <NavItem
-          icon={<HugeiconsIcon icon={WorkflowSquare06Icon} className="h-4 w-4" />}
-          label="Roadmap"
-          isActive={activeSection === 'roadmap'}
-          onClick={() => navigateToView('roadmap')}
+          label="Tasks"
+          isActive={activeSection === 'tasks'}
+          onClick={() => navigateToView('tasks')}
         />
         <NavItem
           icon={<HugeiconsIcon icon={ConnectIcon} className="h-4 w-4" />}

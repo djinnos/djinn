@@ -2,7 +2,7 @@ import { useSidebarStore } from "./sidebarStore";
 
 function resetStore() {
   useSidebarStore.setState({
-    activeSection: "kanban",
+    activeSection: "tasks",
     projectsExpanded: true,
   });
 }
@@ -13,8 +13,8 @@ describe("sidebarStore", () => {
   });
 
   describe("initial state", () => {
-    it("starts on kanban section", () => {
-      expect(useSidebarStore.getState().activeSection).toBe("kanban");
+    it("starts on tasks section", () => {
+      expect(useSidebarStore.getState().activeSection).toBe("tasks");
     });
 
     it("starts with projects expanded", () => {
@@ -33,10 +33,10 @@ describe("sidebarStore", () => {
       expect(useSidebarStore.getState().activeSection).toBe("settings");
     });
 
-    it("sets active section back to kanban", () => {
+    it("sets active section back to tasks", () => {
       useSidebarStore.getState().setActiveSection("settings");
-      useSidebarStore.getState().setActiveSection("kanban");
-      expect(useSidebarStore.getState().activeSection).toBe("kanban");
+      useSidebarStore.getState().setActiveSection("tasks");
+      expect(useSidebarStore.getState().activeSection).toBe("tasks");
     });
   });
 

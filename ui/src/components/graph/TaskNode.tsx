@@ -2,6 +2,8 @@ import type { Task } from "@/api/types";
 import { Handle, type NodeProps, Position } from "@xyflow/react";
 import { memo } from "react";
 import { TaskCard } from "@/components/TaskCard";
+import { cn } from "@/lib/utils";
+import { useGraphHighlight } from "./highlightContext";
 
 interface TaskNodeData {
   task: Task;
@@ -26,8 +28,19 @@ const TaskNode = memo(({ data }: NodeProps) => {
   const targetHandles = d.targetHandles ?? [];
   const sourceHandles = d.sourceHandles ?? [];
 
+  const { highlightTaskIds, dimTaskIds } = useGraphHighlight();
+  const highlighted = highlightTaskIds.has(d.task.id);
+  const dimmed = !highlighted && dimTaskIds.has(d.task.id);
+
   return (
-    <div className="relative w-[260px]">
+    <div
+      className={cn(
+        "relative w-[260px] rounded-xl transition-opacity",
+        highlighted &&
+          "ring-2 ring-primary ring-offset-2 ring-offset-background",
+        dimmed && "opacity-35",
+      )}
+    >
       {/* Target handles (left side) */}
       {targetHandles.length > 0 ? (
         targetHandles.map((handleId, index) => (

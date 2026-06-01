@@ -651,7 +651,7 @@ function ProposalDetailPanel({
                     {actionResult.epic ? (
                       <div className="flex flex-wrap items-center gap-2 pt-1">
                         <Badge variant="secondary">Epic {actionResult.epic.short_id || actionResult.epic.id}</Badge>
-                        <Button size="sm" variant="outline" onClick={() => navigate("/kanban")}>
+                        <Button size="sm" variant="outline" onClick={() => navigate("/tasks")}>
                           Open board
                         </Button>
                       </div>

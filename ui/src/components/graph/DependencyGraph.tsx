@@ -18,6 +18,10 @@ import "@xyflow/react/dist/style.css";
 import { detectStructuralChanges, fingerprintEpics } from "./change-detection";
 import EpicGroupNode from "./EpicGroupNode";
 import { buildGraphElements, layoutWithElk } from "./elkLayout";
+import {
+  GraphHighlightContext,
+  type GraphHighlight,
+} from "./highlightContext";
 import TaskNode from "./TaskNode";
 import type { EpicData } from "./types";
 
@@ -57,10 +61,24 @@ const nodeTypes = {
 
 interface DependencyGraphProps {
   epics: EpicData[];
+  /** Tasks matching the active search — drawn with a ring. */
+  highlightTaskIds?: Set<string>;
+  /** Out-of-scope / non-matching tasks — drawn faded for context. */
+  dimTaskIds?: Set<string>;
 }
 
-const DependencyGraph = ({ epics }: DependencyGraphProps) => {
+const EMPTY_IDS = new Set<string>();
+
+const DependencyGraph = ({
+  epics,
+  highlightTaskIds = EMPTY_IDS,
+  dimTaskIds = EMPTY_IDS,
+}: DependencyGraphProps) => {
   const navigate = useNavigate();
+  const highlight = useMemo<GraphHighlight>(
+    () => ({ highlightTaskIds, dimTaskIds }),
+    [highlightTaskIds, dimTaskIds],
+  );
   const [graphState, dispatch] = useReducer(graphReducer, {
     nodes: [],
     edges: [],
@@ -196,10 +214,11 @@ const DependencyGraph = ({ epics }: DependencyGraphProps) => {
   }
 
   return (
-    <div className="h-full w-full">
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
+    <GraphHighlightContext.Provider value={highlight}>
+      <div className="h-full w-full">
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onNodeClick={onNodeClick}
@@ -231,8 +250,9 @@ const DependencyGraph = ({ epics }: DependencyGraphProps) => {
           }}
           maskColor="rgba(0, 0, 0, 0.7)"
         />
-      </ReactFlow>
-    </div>
+        </ReactFlow>
+      </div>
+    </GraphHighlightContext.Provider>
   );
 };
 

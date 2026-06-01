@@ -19,7 +19,7 @@ const withRouter = (Story: any) => (
   </MemoryRouter>
 );
 
-const SidebarState = ({ section = 'kanban' }: { section?: 'kanban' | 'chat' | 'settings' }) => {
+const SidebarState = ({ section = 'tasks' }: { section?: 'tasks' | 'chat' | 'settings' }) => {
   const setActiveSection = useSidebarStore((s) => s.setActiveSection);
 
   useEffect(() => {
@@ -132,7 +132,7 @@ export const InlineErrorRetrying = {
 export const SidebarKanban = {
   name: 'Sidebar / Kanban',
   decorators: [withRouter],
-  render: () => <SidebarState section="kanban" />,
+  render: () => <SidebarState section="tasks" />,
 };
 
 export const SidebarSettings = {

@@ -4,6 +4,10 @@ import { useTaskStore } from "@/stores/useTaskStore";
 import { useEpicStore } from "@/stores/useEpicStore";
 import { useProjects } from "@/stores/useProjectStore";
 import { callMcpTool } from "@/api/mcpClient";
+import {
+  matchesStructuredFilters,
+  useBoardFilters,
+} from "@/components/board/boardFilters";
 import { toGraphData, type BlockerItem } from "@/components/graph/graph-adapter";
 import DependencyGraph from "@/components/graph/DependencyGraph";
 
@@ -45,10 +49,17 @@ async function fetchAllBlockers(
   return result;
 }
 
-export function RoadmapPage() {
+export function DependenciesPage() {
   const tasks = useTaskStore((state) => Array.from(state.tasks.values()));
   const epics = useEpicStore((state) => state.epics);
   const projects = useProjects();
+  const {
+    projectFilters,
+    epicFilters,
+    ownerFilters,
+    issueTypeFilters,
+    search,
+  } = useBoardFilters();
 
   // Map project_id → slug so we can route each task's blocker fetch to the
   // right project. (task_blockers_list still requires a project parameter.)
@@ -85,38 +96,109 @@ export function RoadmapPage() {
     placeholderData: (prev) => prev,
   });
 
-  const graphData = useMemo(
-    () => toGraphData(tasks, epics, blockersByTask ?? new Map()),
-    [tasks, epics, blockersByTask],
+  const blockers = useMemo(
+    () => blockersByTask ?? new Map<string, BlockerItem[]>(),
+    [blockersByTask],
   );
+
+  // Apply the structured filters, but keep dependency chains intact: tasks
+  // that match the filters are "in scope", and any (transitive) blocker of an
+  // in-scope task is pulled in too — rendered faded so out-of-scope context
+  // isn't lost. The free-text search HIGHLIGHTS rather than hides.
+  const { graphData, dimTaskIds, highlightTaskIds } = useMemo(() => {
+    const structured = {
+      projectFilters,
+      epicFilters,
+      ownerFilters,
+      issueTypeFilters,
+    };
+    const hasStructured =
+      projectFilters.length > 0 ||
+      epicFilters.length > 0 ||
+      ownerFilters.length > 0 ||
+      issueTypeFilters.length > 0;
+
+    const inScope = new Set<string>();
+    for (const t of tasks) {
+      if (t.issue_type === "epic") continue;
+      if (matchesStructuredFilters(t, structured)) inScope.add(t.id);
+    }
+
+    // Walk blockers upstream to keep chains whole; mark pulled-in (out-of-
+    // scope) tasks for fading.
+    const included = new Set(inScope);
+    const dim = new Set<string>();
+    const queue = [...inScope];
+    while (queue.length > 0) {
+      const id = queue.pop()!;
+      for (const b of blockers.get(id) ?? []) {
+        const bid = b.blocking_task_id;
+        if (!bid || included.has(bid)) continue;
+        included.add(bid);
+        if (!inScope.has(bid)) dim.add(bid);
+        queue.push(bid);
+      }
+    }
+
+    const scopedTasks = hasStructured
+      ? tasks.filter((t) => included.has(t.id))
+      : tasks;
+
+    // Search → highlight matches, fade everything else for contrast.
+    const q = search.trim().toLowerCase();
+    const highlight = new Set<string>();
+    if (q) {
+      for (const t of scopedTasks) {
+        if (t.issue_type === "epic") continue;
+        if (t.title.toLowerCase().includes(q)) highlight.add(t.id);
+        else dim.add(t.id);
+      }
+    }
+
+    return {
+      graphData: toGraphData(scopedTasks, epics, blockers),
+      dimTaskIds: dim,
+      highlightTaskIds: highlight,
+    };
+  }, [
+    tasks,
+    epics,
+    blockers,
+    projectFilters,
+    epicFilters,
+    ownerFilters,
+    issueTypeFilters,
+    search,
+  ]);
 
   const hasData = graphData.some((g) => g.tasks.length > 0);
 
   if (blockersLoading) {
     return (
       <div className="flex h-full items-center justify-center">
-        <div className="text-center">
-          <p className="text-sm text-muted-foreground">Loading roadmap…</p>
-        </div>
+        <p className="text-sm text-muted-foreground">Loading dependencies…</p>
       </div>
     );
   }
 
   if (!hasData) {
     return (
-      <div className="flex h-full items-center justify-center">
-        <div className="text-center">
-          <p className="text-sm text-muted-foreground">
-            No tasks to display. Create tasks with dependencies to see the roadmap.
-          </p>
-        </div>
+      <div className="flex h-full items-center justify-center px-6 text-center">
+        <p className="text-sm text-muted-foreground">
+          No tasks match the current filters. Clear a filter or create tasks
+          with dependencies to see the graph.
+        </p>
       </div>
     );
   }
 
   return (
     <div className="h-full w-full">
-      <DependencyGraph epics={graphData} />
+      <DependencyGraph
+        epics={graphData}
+        dimTaskIds={dimTaskIds}
+        highlightTaskIds={highlightTaskIds}
+      />
     </div>
   );
 }

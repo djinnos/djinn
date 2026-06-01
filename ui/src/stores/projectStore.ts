@@ -5,7 +5,13 @@ import type { Project } from "@/api/types";
 const STORAGE_KEY = "djinnos-selected-project-id";
 const LAST_VIEW_KEY = "djinnos-last-view-per-project";
 
-export type ProjectView = "kanban" | "roadmap" | "chat" | "agents" | "metrics" | "memory" | "code-graph" | "proposals";
+export type ProjectView = "tasks" | "dependencies" | "chat" | "agents" | "metrics" | "memory" | "code-graph" | "proposals";
+
+/** Migrate legacy persisted view keys (renamed in the Tasks/Dependencies cut-over). */
+const LEGACY_VIEW_ALIASES: Record<string, ProjectView> = {
+  kanban: "tasks",
+  roadmap: "dependencies",
+};
 
 /** Sentinel value meaning "all projects" — no project filter applied. */
 export const ALL_PROJECTS = "__all__" as const;
@@ -20,7 +26,7 @@ export interface ProjectState {
   getSelectedProject: () => Project | undefined;
   /** True when the user has chosen the "All Projects" scope. */
   isAllProjects: () => boolean;
-  /** Get the last-used view for a project (defaults to "kanban"). */
+  /** Get the last-used view for a project (defaults to "tasks"). */
   getLastView: (projectId: string) => ProjectView;
   /** Record the current view for a project. */
   setLastView: (projectId: string, view: ProjectView) => void;
@@ -37,7 +43,13 @@ function getInitialSelectedProjectId(): string | null {
 function getInitialLastViews(): Record<string, ProjectView> {
   try {
     const raw = localStorage.getItem(LAST_VIEW_KEY);
-    return raw ? JSON.parse(raw) : {};
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    const migrated: Record<string, ProjectView> = {};
+    for (const [projectId, view] of Object.entries(parsed)) {
+      migrated[projectId] = LEGACY_VIEW_ALIASES[view] ?? (view as ProjectView);
+    }
+    return migrated;
   } catch {
     return {};
   }
@@ -82,7 +94,7 @@ export const projectStore = createStore<ProjectState>()(
     },
 
     getLastView: (projectId: string) => {
-      return get().lastViewPerProject[projectId] ?? "kanban";
+      return get().lastViewPerProject[projectId] ?? "tasks";
     },
 
     setLastView: (projectId: string, view: ProjectView) => {

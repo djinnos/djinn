@@ -27,7 +27,7 @@ describe('Sidebar component', () => {
     });
 
     useSidebarStore.setState({
-      activeSection: 'kanban',
+      activeSection: 'tasks',
       projectsExpanded: true,
     });
 
@@ -60,9 +60,9 @@ describe('Sidebar component', () => {
     await user.click(chatButton);
     expect(useSidebarStore.getState().activeSection).toBe('chat');
 
-    const kanbanButton = screen.getByRole('button', { name: /Kanban/ });
-    await user.click(kanbanButton);
-    expect(useSidebarStore.getState().activeSection).toBe('kanban');
+    const tasksButton = screen.getByRole('button', { name: /Tasks/ });
+    await user.click(tasksButton);
+    expect(useSidebarStore.getState().activeSection).toBe('tasks');
   });
 
   it('renders sidebar with fixed width and all nav items', () => {
@@ -72,7 +72,7 @@ describe('Sidebar component', () => {
     expect(sidebar?.className).toContain('w-64');
 
     expect(screen.getByRole('button', { name: /Chat/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Kanban/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Tasks/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Agents/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Memory/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Repositories/ })).toBeInTheDocument();

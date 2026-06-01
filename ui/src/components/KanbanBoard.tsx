@@ -1,13 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { usersQueryOptions } from "@/api/queryOptions";
-import { type OrgUser, userDisplayName } from "@/api/users";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useTaskStore } from "@/stores/useTaskStore";
 import { useEpicStore } from "@/stores/useEpicStore";
 import { useProjects } from "@/stores/useProjectStore";
 import { taskStore } from "@/stores/taskStore";
-import type { Epic, Project, Task } from "@/api/types";
+import type { Epic, Task } from "@/api/types";
 import { TaskCard, DoneTaskRow } from "@/components/TaskCard";
 import { TaskDetailPanel } from "@/components/TaskDetailPanel";
 import { BoardHealthBanner } from "@/components/BoardHealthBanner";
@@ -20,82 +17,19 @@ import {
   GitPullRequestIcon,
   Loading02Icon,
   Progress02Icon,
-  Robot01Icon,
   type UnavailableIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { cn } from "@/lib/utils";
-import {
-  Combobox,
-  ComboboxContent,
-  ComboboxInput,
-  ComboboxItem,
-  ComboboxList,
-  ComboboxEmpty,
-} from "@/components/ui/combobox";
-import {
-  ModelSelector as SelectorRoot,
-  ModelSelectorContent,
-  ModelSelectorEmpty,
-  ModelSelectorInput,
-  ModelSelectorItem,
-  ModelSelectorList,
-  ModelSelectorName,
-  ModelSelectorTrigger,
-} from "@/components/ai-elements/model-selector";
-import { Tick02Icon } from "@hugeicons/core-free-icons";
 import { Card, CardContent } from "@/components/ui/card";
 import {
-  InputGroup,
-  InputGroupAddon,
-  InputGroupInput,
-} from "@/components/ui/input-group";
-import { Refresh01Icon, Search01Icon } from "@hugeicons/core-free-icons";
-import { fetchKanbanSnapshot } from "@/api/server";
-import { epicStore } from "@/stores/epicStore";
-import { projectStore } from "@/stores/projectStore";
+  epicMatchesOwnerFilter,
+  getEpicEmoji,
+  matchesStructuredFilters,
+  useBoardFilters,
+} from "@/components/board/boardFilters";
 
 type ColumnKey = "open" | "in_progress" | "pr_ready" | "done";
-
-/** Owner-filter sentinel for tasks with no human creator (background agents). */
-const UNASSIGNED_OWNER = "__none__";
-const UNASSIGNED_OWNER_LABEL = "Unassigned";
-
-/** Small round avatar for an owner-filter option; falls back to a bot glyph
- *  for the unassigned/agent sentinel and an initial when no avatar URL. */
-function OwnerAvatar({ user }: { user?: OrgUser }) {
-  if (!user) {
-    return (
-      <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
-        <HugeiconsIcon icon={Robot01Icon} className="size-3" />
-      </span>
-    );
-  }
-  if (user.github_avatar_url) {
-    return (
-      <img
-        src={user.github_avatar_url}
-        alt=""
-        className="size-5 shrink-0 rounded-full"
-      />
-    );
-  }
-  return (
-    <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-medium text-foreground">
-      {userDisplayName(user).charAt(0).toUpperCase()}
-    </span>
-  );
-}
-
-const ISSUE_TYPES = [
-  { value: "task", label: "Task" },
-  { value: "feature", label: "Feature" },
-  { value: "bug", label: "Bug" },
-  { value: "spike", label: "Spike" },
-  { value: "research", label: "Research" },
-  { value: "decomposition", label: "Breakdown" },
-  { value: "review", label: "Review" },
-] as const;
 
 const STATUS_COLUMNS: Array<{
   key: ColumnKey;
@@ -154,10 +88,6 @@ function taskToColumnKey(task: Task): ColumnKey {
   return "open";
 }
 
-function getEpicEmoji(epic: Epic | undefined): string {
-  return epic?.emoji ?? "📌";
-}
-
 function getEpicTitle(
   epic: Epic | undefined,
   epicId: string | undefined,
@@ -166,230 +96,28 @@ function getEpicTitle(
   return epic?.title ?? "Unknown Epic";
 }
 
-const EPIC_STATUS_GROUPS: Array<{ key: string; label: string }> = [
-  { key: "open", label: "Open" },
-  { key: "drafting", label: "Drafting" },
-  { key: "closed", label: "Closed" },
-];
-
-function ProjectFilter({
-  projects,
-  selected,
-  onChange,
-}: {
-  projects: Project[];
-  selected: string[];
-  onChange: (ids: string[]) => void;
-}) {
-  const [open, setOpen] = useState(false);
-
-  const sorted = useMemo(
-    () =>
-      [...projects].sort((a, b) =>
-        (a.name ?? "").localeCompare(b.name ?? ""),
-      ),
-    [projects],
-  );
-
-  const toggle = (id: string) => {
-    onChange(
-      selected.includes(id)
-        ? selected.filter((s) => s !== id)
-        : [...selected, id],
-    );
-  };
-
-  const label =
-    selected.length > 0
-      ? `${selected.length} project${selected.length > 1 ? "s" : ""}`
-      : "All projects";
-
-  return (
-    <SelectorRoot open={open} onOpenChange={setOpen}>
-      <ModelSelectorTrigger
-        className={cn(
-          "flex h-8 items-center gap-1.5 rounded-lg border border-input px-3 text-sm transition-colors dark:bg-input/30",
-          selected.length > 0 ? "text-foreground" : "text-muted-foreground",
-        )}
-      >
-        {label}
-        <HugeiconsIcon
-          icon={ArrowDown01Icon}
-          size={12}
-          className="shrink-0 text-muted-foreground"
-        />
-      </ModelSelectorTrigger>
-
-      <ModelSelectorContent title="Filter by project">
-        <ModelSelectorInput placeholder="Search projects…" />
-        <ModelSelectorList>
-          <ModelSelectorEmpty>No projects found.</ModelSelectorEmpty>
-          {sorted.map((project) => (
-            <ModelSelectorItem
-              key={project.id}
-              searchValue={`${project.name} ${project.github_owner}/${project.github_repo}`}
-              onSelect={() => toggle(project.id)}
-            >
-              <ModelSelectorName>{project.name}</ModelSelectorName>
-              <span className="shrink-0 text-xs text-muted-foreground">
-                {project.github_owner}/{project.github_repo}
-              </span>
-              {selected.includes(project.id) && (
-                <HugeiconsIcon
-                  icon={Tick02Icon}
-                  size={14}
-                  className="shrink-0 text-primary"
-                />
-              )}
-            </ModelSelectorItem>
-          ))}
-        </ModelSelectorList>
-      </ModelSelectorContent>
-    </SelectorRoot>
-  );
-}
-
-function EpicFilter({
-  epics,
-  selected,
-  onChange,
-}: {
-  epics: Epic[];
-  selected: string[];
-  onChange: (ids: string[]) => void;
-}) {
-  const [open, setOpen] = useState(false);
-
-  const grouped = useMemo(() => {
-    const map = new Map<string, Epic[]>();
-    for (const epic of epics) {
-      const status = epic.status ?? "open";
-      const list = map.get(status) ?? [];
-      list.push(epic);
-      map.set(status, list);
-    }
-    return EPIC_STATUS_GROUPS.filter((g) => map.has(g.key)).map((g) => ({
-      ...g,
-      items: map.get(g.key)!,
-    }));
-  }, [epics]);
-
-  const toggle = (id: string) => {
-    onChange(
-      selected.includes(id)
-        ? selected.filter((s) => s !== id)
-        : [...selected, id],
-    );
-  };
-
-  const label =
-    selected.length > 0
-      ? `${selected.length} epic${selected.length > 1 ? "s" : ""}`
-      : "All epics";
-
-  return (
-    <SelectorRoot open={open} onOpenChange={setOpen}>
-      <ModelSelectorTrigger
-        className={cn(
-          "flex h-8 items-center gap-1.5 rounded-lg border border-input px-3 text-sm transition-colors dark:bg-input/30",
-          selected.length > 0 ? "text-foreground" : "text-muted-foreground",
-        )}
-      >
-        {label}
-        <HugeiconsIcon
-          icon={ArrowDown01Icon}
-          size={12}
-          className="shrink-0 text-muted-foreground"
-        />
-      </ModelSelectorTrigger>
-
-      <ModelSelectorContent title="Filter by epic">
-        <ModelSelectorInput placeholder="Search epics…" />
-        <ModelSelectorList>
-          <ModelSelectorEmpty>No epics found.</ModelSelectorEmpty>
-          {grouped.map((group) => (
-            <div
-              key={group.key}
-              data-slot="command-group"
-              className="text-foreground overflow-hidden p-1"
-            >
-              <div
-                data-slot="command-group-heading"
-                className="px-2 py-1.5 text-xs font-medium text-muted-foreground"
-              >
-                {group.label}
-              </div>
-              <div data-slot="command-group-items">
-                {group.items.map((epic) => (
-                  <ModelSelectorItem
-                    key={epic.id}
-                    searchValue={epic.title ?? ""}
-                    onSelect={() => toggle(epic.id)}
-                  >
-                    <span className="shrink-0 text-xs leading-none">
-                      {getEpicEmoji(epic)}
-                    </span>
-                    <ModelSelectorName>{epic.title}</ModelSelectorName>
-                    {selected.includes(epic.id) && (
-                      <HugeiconsIcon
-                        icon={Tick02Icon}
-                        size={14}
-                        className="shrink-0 text-primary"
-                      />
-                    )}
-                  </ModelSelectorItem>
-                ))}
-              </div>
-            </div>
-          ))}
-        </ModelSelectorList>
-      </ModelSelectorContent>
-    </SelectorRoot>
-  );
-}
-
 type KanbanBoardProps = {
   tasks?: Task[];
   epics?: Map<string, Epic>;
   initialCollapsedEpics?: string[];
-  disableSearchParamSync?: boolean;
 };
 
 export function KanbanBoard({
   tasks: tasksProp,
   epics: epicsProp,
   initialCollapsedEpics,
-  disableSearchParamSync,
 }: KanbanBoardProps = {}) {
   const navigate = useNavigate();
   const storeTasks = useTaskStore((state) => Array.from(state.tasks.values()));
   const storeEpics = useEpicStore((state) => state.epics);
   const projects = useProjects();
 
-  // Org roster, used to resolve a task's `created_by_user_id` to a name for
-  // the owner filter. Empty until loaded; ids fall back to themselves.
-  const { data: users = [] } = useQuery(usersQueryOptions());
-  const userById = useMemo(() => {
-    const map = new Map<string, OrgUser>();
-    for (const user of users) map.set(user.id, user);
-    return map;
-  }, [users]);
-  const userLabelById = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const user of users) map.set(user.id, userDisplayName(user));
-    return map;
-  }, [users]);
-  const ownerLabel = useCallback(
-    (ownerId: string) =>
-      ownerId === UNASSIGNED_OWNER
-        ? UNASSIGNED_OWNER_LABEL
-        : (userLabelById.get(ownerId) ?? ownerId),
-    [userLabelById],
-  );
+  // Filter values come from the shared header via the URL search params.
+  const { projectFilters, epicFilters, ownerFilters, issueTypeFilters, search } =
+    useBoardFilters();
 
   const tasks = tasksProp ?? storeTasks;
   const epics = epicsProp ?? storeEpics;
-  const [searchParams, setSearchParams] = useSearchParams();
   const [collapsedEpics, setCollapsedEpics] = useState<Record<string, boolean>>(
     () => {
       const next: Record<string, boolean> = {};
@@ -444,94 +172,11 @@ export function KanbanBoard({
     return unsubscribe;
   }, [tasksProp]);
 
-  const [projectFilters, setProjectFilters] = useState<string[]>(
-    (searchParams.get("project") ?? "").split(",").filter(Boolean),
-  );
-  const [epicFilters, setEpicFilters] = useState<string[]>(
-    (searchParams.get("epic") ?? "").split(",").filter(Boolean),
-  );
-  const [ownerFilters, setOwnerFilters] = useState<string[]>(
-    (searchParams.get("owner") ?? "").split(",").filter(Boolean),
-  );
-  const [issueTypeFilters, setIssueTypeFilters] = useState<string[]>(
-    (searchParams.get("type") ?? "").split(",").filter(Boolean),
-  );
-  const [searchInput, setSearchInput] = useState<string>(
-    searchParams.get("q") ?? "",
-  );
-  const [textFilter, setTextFilter] = useState<string>(
-    searchParams.get("q") ?? "",
-  );
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
 
   const handleTaskClick = (task: Task) => {
     navigate(`/task/${task.id}`);
   };
-
-  const handleRefresh = useCallback(async () => {
-    if (refreshing) return;
-    setRefreshing(true);
-    try {
-      const allSlugs = projectStore
-        .getState()
-        .projects.map((p) => `${p.github_owner}/${p.github_repo}`);
-      const snapshot = await fetchKanbanSnapshot(null, allSlugs);
-      taskStore.getState().setTasks(snapshot.tasks);
-      epicStore.getState().setEpics(snapshot.epics);
-    } catch (error) {
-      console.error("Failed to refresh board:", error);
-    } finally {
-      setRefreshing(false);
-    }
-  }, [refreshing]);
-
-  useEffect(() => {
-    const timeout = setTimeout(() => setTextFilter(searchInput), 250);
-    return () => clearTimeout(timeout);
-  }, [searchInput]);
-
-  useEffect(() => {
-    if (disableSearchParamSync) return;
-
-    const next = new URLSearchParams(searchParams);
-
-    if (projectFilters.length > 0)
-      next.set("project", projectFilters.join(","));
-    else next.delete("project");
-
-    if (epicFilters.length > 0) next.set("epic", epicFilters.join(","));
-    else next.delete("epic");
-
-    if (ownerFilters.length > 0) next.set("owner", ownerFilters.join(","));
-    else next.delete("owner");
-
-    if (issueTypeFilters.length > 0)
-      next.set("type", issueTypeFilters.join(","));
-    else next.delete("type");
-
-    if (textFilter.trim()) next.set("q", textFilter.trim());
-    else next.delete("q");
-
-    setSearchParams(next, { replace: true });
-  }, [
-    projectFilters,
-    epicFilters,
-    ownerFilters,
-    issueTypeFilters,
-    textFilter,
-    searchParams,
-    setSearchParams,
-    disableSearchParamSync,
-  ]);
-
-  const epicOptions = useMemo(
-    () =>
-      Array.from(epics.values()).sort((a, b) =>
-        (a.title ?? "").localeCompare(b.title ?? ""),
-      ),
-    [epics],
-  );
 
   const bannerSlugs = useMemo(() => {
     const source =
@@ -541,42 +186,16 @@ export function KanbanBoard({
     return source.map((p) => `${p.github_owner}/${p.github_repo}`);
   }, [projects, projectFilters]);
 
-  const ownerOptions = useMemo(() => {
-    const owners = new Set<string>();
-    for (const task of tasks) {
-      owners.add(task.created_by_user_id ?? UNASSIGNED_OWNER);
-    }
-    // Empty epic shells have no tasks, so fold their owners in too — otherwise
-    // an owner who only has un-broken-down epics never appears in the filter.
-    for (const epic of epics.values()) {
-      owners.add(epic.created_by_user_id ?? UNASSIGNED_OWNER);
-    }
-    return Array.from(owners).sort((a, b) =>
-      ownerLabel(a).localeCompare(ownerLabel(b)),
-    );
-  }, [tasks, epics, ownerLabel]);
-
   const filteredTasks = useMemo(() => {
-    const q = textFilter.trim().toLowerCase();
-
+    const q = search.trim().toLowerCase();
+    const filters = {
+      projectFilters,
+      epicFilters,
+      ownerFilters,
+      issueTypeFilters,
+    };
     return tasks.filter((task) => {
-      if (
-        projectFilters.length > 0 &&
-        !projectFilters.includes(task.project_id ?? "")
-      )
-        return false;
-      if (epicFilters.length > 0 && !epicFilters.includes(task.epic_id ?? ""))
-        return false;
-      if (
-        ownerFilters.length > 0 &&
-        !ownerFilters.includes(task.created_by_user_id ?? UNASSIGNED_OWNER)
-      )
-        return false;
-      if (
-        issueTypeFilters.length > 0 &&
-        !issueTypeFilters.includes(task.issue_type ?? "task")
-      )
-        return false;
+      if (!matchesStructuredFilters(task, filters)) return false;
       if (q && !task.title.toLowerCase().includes(q)) return false;
       return true;
     });
@@ -586,7 +205,7 @@ export function KanbanBoard({
     epicFilters,
     ownerFilters,
     issueTypeFilters,
-    textFilter,
+    search,
   ]);
 
   const groupedByStatusThenEpic = useMemo(() => {
@@ -633,11 +252,7 @@ export function KanbanBoard({
         // Scope empty epic shells to the owner filter the same way tasks are:
         // an epic is "owned" by its `created_by_user_id` (which its tasks
         // inherit), so a shell only shows when its owner is selected.
-        if (
-          ownerFilters.length > 0 &&
-          !ownerFilters.includes(epic.created_by_user_id ?? UNASSIGNED_OWNER)
-        )
-          continue;
+        if (!epicMatchesOwnerFilter(epic, ownerFilters)) continue;
         openColumn.set(epicId, []);
       }
     }
@@ -654,107 +269,7 @@ export function KanbanBoard({
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-5 overflow-hidden px-4 pt-5 pb-2">
-      <div className="flex flex-wrap items-center gap-3 border-b border-white/[0.04] px-4 pb-5">
-        <ProjectFilter
-          projects={projects}
-          selected={projectFilters}
-          onChange={setProjectFilters}
-        />
-
-        <EpicFilter
-          epics={epicOptions}
-          selected={epicFilters}
-          onChange={setEpicFilters}
-        />
-
-        <Combobox
-          multiple
-          value={issueTypeFilters}
-          onValueChange={(v) => setIssueTypeFilters(v ?? [])}
-          itemToStringLabel={(val) =>
-            ISSUE_TYPES.find((t) => t.value === val)?.label ?? val
-          }
-        >
-          <ComboboxInput
-            placeholder={
-              issueTypeFilters.length > 0
-                ? `${issueTypeFilters.length} type${issueTypeFilters.length > 1 ? "s" : ""}`
-                : "All types"
-            }
-            className="w-28"
-          />
-          <ComboboxContent>
-            <ComboboxList>
-              <ComboboxEmpty>No types found</ComboboxEmpty>
-              {ISSUE_TYPES.map((type) => (
-                <ComboboxItem key={type.value} value={type.value}>
-                  {type.label}
-                </ComboboxItem>
-              ))}
-            </ComboboxList>
-          </ComboboxContent>
-        </Combobox>
-
-        <Combobox
-          multiple
-          value={ownerFilters}
-          onValueChange={(v) => setOwnerFilters(v ?? [])}
-          itemToStringLabel={ownerLabel}
-        >
-          <ComboboxInput
-            placeholder={
-              ownerFilters.length > 0
-                ? `${ownerFilters.length} owner${ownerFilters.length > 1 ? "s" : ""}`
-                : "All owners"
-            }
-            className="w-44"
-          />
-          <ComboboxContent className="min-w-60">
-            <ComboboxList>
-              <ComboboxEmpty>No owners found</ComboboxEmpty>
-              {ownerOptions.map((owner) => (
-                <ComboboxItem key={owner} value={owner}>
-                  <OwnerAvatar
-                    user={
-                      owner === UNASSIGNED_OWNER
-                        ? undefined
-                        : userById.get(owner)
-                    }
-                  />
-                  <span className="truncate">{ownerLabel(owner)}</span>
-                </ComboboxItem>
-              ))}
-            </ComboboxList>
-          </ComboboxContent>
-        </Combobox>
-
-        <div className="ml-auto flex items-center gap-1.5">
-          <InputGroup className="w-56">
-            <InputGroupAddon>
-              <HugeiconsIcon icon={Search01Icon} className="size-3.5" />
-            </InputGroupAddon>
-            <InputGroupInput
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              placeholder="Search tasks..."
-            />
-          </InputGroup>
-          <button
-            type="button"
-            onClick={handleRefresh}
-            disabled={refreshing}
-            className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
-            title="Refresh board"
-          >
-            <HugeiconsIcon
-              icon={Refresh01Icon}
-              className={cn("size-3.5", refreshing && "animate-spin")}
-            />
-          </button>
-        </div>
-      </div>
-
+    <div className="flex h-full min-h-0 flex-col gap-5 overflow-hidden px-4 pt-4 pb-2">
       <BoardHealthBanner projectSlugs={bannerSlugs} />
 
       <GitHubAppBanner projectSlugs={bannerSlugs} />
