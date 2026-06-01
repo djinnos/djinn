@@ -21,7 +21,11 @@ export type SSEEventType =
   | "session_ended"
   | "sync_completed"
   | "verification_step"
-  | "lifecycle_step";
+  | "lifecycle_step"
+  | "credential_created"
+  | "credential_updated"
+  | "credential_deleted"
+  | "credential_revoked";
 
 export type ConnectionStatus = "connected" | "reconnecting" | "error";
 

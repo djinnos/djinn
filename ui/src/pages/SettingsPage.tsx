@@ -33,9 +33,11 @@ function ModelsTab() {
   // Codex OAuth is folded into the `openai` provider via builtin merge
   // (chatgpt_codex.merge_into = "openai"), and openai itself has no native
   // OAuth — so `oauth` in openai's connection_methods means Codex is signed in.
-  const codexConnected = configuredProviders.some(
-    (p) => p.id === 'openai' && p.connection_methods.includes('oauth'),
-  );
+  const openaiProvider = configuredProviders.find((p) => p.id === 'openai');
+  const codexConnected = openaiProvider?.connection_methods.includes('oauth') ?? false;
+  // When the codex credential was revoked (a 401 during a run) the server reports
+  // openai disconnected + carries the reason; surface it so the user reconnects.
+  const codexRevokedReason = openaiProvider?.revoked_reason;
 
   return (
     <div className="flex flex-col gap-6 flex-1 min-h-0">
@@ -59,6 +61,7 @@ function ModelsTab() {
             no way to disconnect from this tab. */}
         <CodexSignInCard
           alreadyConnected={codexConnected}
+          revokedReason={codexRevokedReason}
           onConnected={() => void loadData()}
         />
 

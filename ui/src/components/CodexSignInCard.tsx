@@ -34,12 +34,23 @@ interface Props {
    * sign-in CTA.
    */
   alreadyConnected?: boolean;
+  /**
+   * Set when the codex credential was rejected (a 401 during a run) and marked
+   * revoked server-side. Renders a "Disconnected — <reason>" banner above the
+   * reconnect CTA. Persisted server-side, so it shows on a fresh page load too.
+   */
+  revokedReason?: string;
   /** Invoked after a successful sign-in so the parent can refresh state. */
   onConnected?: () => void;
   className?: string;
 }
 
-export function CodexSignInCard({ alreadyConnected, onConnected, className }: Props) {
+export function CodexSignInCard({
+  alreadyConnected,
+  revokedReason,
+  onConnected,
+  className,
+}: Props) {
   const [phase, setPhase] = useState<CardPhase>({ kind: 'idle' });
   const [removing, setRemoving] = useState(false);
   // Show the green "connected" panel when either the parent told us we're
@@ -131,6 +142,15 @@ export function CodexSignInCard({ alreadyConnected, onConnected, className }: Pr
           <p className="text-xs text-muted-foreground">Sign in with a device code</p>
         </div>
       </div>
+
+      {revokedReason && phase.kind === 'idle' && !showConnected && (
+        <div className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <HugeiconsIcon icon={AlertCircleIcon} size={14} className="shrink-0 mt-0.5" />
+          <span>
+            <span className="font-semibold">Disconnected.</span> {revokedReason}
+          </span>
+        </div>
+      )}
 
       {phase.kind === 'idle' && !showConnected && (
         <>

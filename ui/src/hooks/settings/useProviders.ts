@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSettingsStore } from '@/stores/settingsStore';
+import { sseStore } from '@/stores/sseStore';
 import {
   removeProviderFull,
   fetchCredentialList,
@@ -60,6 +61,24 @@ export function useProviders() {
 
   useEffect(() => {
     void loadData();
+  }, [loadData]);
+
+  // Live-refresh provider connection state when a credential changes server-side:
+  // a token revoked by a 401 (flips a provider to "Disconnected — <reason>"), or
+  // a (re)connect / removal. The catalog row is the F5-safe source of truth; this
+  // just avoids a manual reload when the event arrives.
+  useEffect(() => {
+    const { subscribe } = sseStore.getState();
+    const reload = () => {
+      void loadData();
+    };
+    const unsubs = [
+      subscribe('credential_revoked', reload),
+      subscribe('credential_created', reload),
+      subscribe('credential_updated', reload),
+      subscribe('credential_deleted', reload),
+    ];
+    return () => unsubs.forEach((u) => u());
   }, [loadData]);
 
   const credentialByProvider = useMemo(

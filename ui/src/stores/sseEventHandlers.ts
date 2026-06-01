@@ -16,6 +16,7 @@ import {
 } from "@/lib/queryClient";
 import { fetchProjects } from "@/api/server";
 import { verificationStore, type StepEntry } from "./verificationStore";
+import { showToast } from "@/lib/toast";
 import type { Task, Epic } from "@/api/types";
 
 /**
@@ -380,8 +381,25 @@ export function initSSEEventHandlers(): () => void {
     });
   });
 
+  // A stored credential was rejected (401) and marked revoked server-side —
+  // surface an app-wide heads-up so the owner reconnects, even if they aren't on
+  // the Settings page. The Settings card also reflects it (persisted, F5-safe).
+  const credentialRevokedUnsub = subscribe("credential_revoked", (event: SSEEvent) => {
+    const payload = unwrapPayload(event.data) as {
+      provider_id?: string;
+      reason?: string;
+    };
+    showToast.error("Provider disconnected", {
+      description:
+        payload.reason ??
+        `${payload.provider_id ?? "A provider"} was disconnected. Reconnect it in Settings.`,
+      duration: 10000,
+    });
+  });
+
   // Return cleanup function
   return () => {
+    credentialRevokedUnsub?.();
     taskCreatedUnsub?.();
     taskUpdatedUnsub?.();
     taskDeletedUnsub?.();

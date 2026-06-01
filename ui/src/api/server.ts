@@ -43,6 +43,13 @@ export interface Provider {
   requires_api_key: boolean;
   oauth_supported: boolean;
   connection_methods: string[];
+  /**
+   * Set when the provider's stored credential was rejected (a 401 during a run)
+   * and marked revoked server-side. The provider is reported disconnected and
+   * this reason is shown so the user reconnects. Persisted, so it survives a
+   * page reload (not just a live SSE event).
+   */
+  revoked_reason?: string;
 }
 
 export interface ProviderCredential {
@@ -64,6 +71,8 @@ export async function fetchProviderCatalog(): Promise<Provider[]> {
     requires_api_key: provider.env_vars.length > 0,
     oauth_supported: provider.oauth_supported,
     connection_methods: provider.connection_methods,
+    revoked_reason:
+      (provider as unknown as { revoked_reason?: string | null }).revoked_reason ?? undefined,
   }));
 }
 
