@@ -17,6 +17,7 @@ use error_handling::{
     MAX_COMPACTION_RETRIES, empty_turn_backoff, is_context_length_error,
     is_orphaned_tool_call_error, next_nudge_message, should_retry_after_tool_call_compaction,
     should_retry_empty_assistant_turn, should_retry_empty_stream, tool_choice_for_turn,
+    wind_down_message,
 };
 use streaming::{StreamLoopContext, consume_provider_stream};
 #[cfg(test)]
@@ -24,6 +25,21 @@ use crate::output_stash::extract_stash_content;
 use tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_concurrency_safety};
 
 const MAX_TURNS: u32 = 1000;
+
+/// Resolve the effective step cap for this reply loop.
+///
+/// Defaults to [`MAX_TURNS`]. Overridable via `DJINN_REPLY_LOOP_MAX_TURNS` so
+/// the graceful wind-down path (G9) can be exercised with a small cap in tests
+/// without driving a thousand mock turns. Values `<= 1` are clamped to `2`
+/// because the wind-down consumes one of the permitted turns — a cap of 1 would
+/// leave no room to do any real work before winding down.
+fn effective_max_turns() -> u32 {
+    std::env::var("DJINN_REPLY_LOOP_MAX_TURNS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .map(|v| v.max(2))
+        .unwrap_or(MAX_TURNS)
+}
 
 /// Persist a single conversation message to `session_messages`, best-effort.
 ///
@@ -275,13 +291,45 @@ pub(crate) async fn run_reply_loop(
         let mut last_assistant_text = String::new();
 
         let mut turns: u32 = 0;
+        let max_turns = effective_max_turns();
+        // G9: graceful step-cap wind-down. When the loop reaches the final
+        // permitted turn we inject a one-shot directive asking the agent to
+        // summarize work done + what remains, then allow EXACTLY ONE more turn
+        // to capture that hand-off (instead of hard-erroring with no context).
+        // `wind_down_injected` makes the extension strictly one turn: once the
+        // wind-down turn runs, the next cap check falls through to the hard
+        // error if the agent still hasn't reached a terminal action.
+        let mut wind_down_injected = false;
 
         loop {
-            if turns >= MAX_TURNS {
-                return Err(anyhow::anyhow!(
-                    "max turns ({}) exceeded without text-only response",
-                    MAX_TURNS
-                ));
+            if turns >= max_turns {
+                if !wind_down_injected {
+                    // One turn before the hard cap: inject the wind-down
+                    // directive and grant a single extra turn for the summary.
+                    wind_down_injected = true;
+                    tracing::warn!(
+                        task_id = %task_id,
+                        agent_type = %role_name,
+                        turns,
+                        max_turns,
+                        "ReplyLoop: step cap reached — injecting wind-down summary directive \
+                         (one final turn before hard stop)"
+                    );
+                    let msg = wind_down_message();
+                    persist_session_message(&msg_repo, session_id, task_id, &msg).await;
+                    conversation.push(msg);
+                    // Do NOT increment `turns`: the wind-down turn below is the
+                    // single granted extension. The next iteration re-enters
+                    // this branch with `wind_down_injected == true` and hard-errors.
+                } else {
+                    // The agent ignored the wind-down (or produced no terminal
+                    // action) — fall back to the existing hard-error behavior.
+                    return Err(anyhow::anyhow!(
+                        "max turns ({}) exceeded without text-only response (wind-down summary \
+                         directive was injected but the agent did not terminate)",
+                        max_turns
+                    ));
+                }
             }
             turns += 1;
 
@@ -672,6 +720,25 @@ pub(crate) async fn run_reply_loop(
                 } else {
                     None
                 });
+
+            // ── G9 wind-down: capture the one-shot summary and end gracefully ─
+            // If the wind-down directive was injected, THIS is the single
+            // granted final turn. A text-only response IS the hand-off summary:
+            // it was captured into `last_assistant_text` / `final_assistant_text`
+            // and persisted above, so end the session now instead of nudging.
+            // If the agent instead kept calling tools (no terminal text and no
+            // finalize), fall through to dispatch — the next cap check then
+            // hard-errors, so the extension stays exactly one turn.
+            if wind_down_injected && turn_tool_calls.is_empty() {
+                tracing::info!(
+                    task_id = %task_id,
+                    agent_type = %role_name,
+                    turns,
+                    assistant_message_count,
+                    "ReplyLoop: wind-down summary captured — session complete (graceful step-cap stop)"
+                );
+                break;
+            }
 
             // ── Nudge loop: text-only without finalize ────────────────────────
             if let Some((next_nudge_count, nudge_message)) = next_nudge_message(
@@ -1793,5 +1860,189 @@ mod tests {
         assert!(supports_tool_choice_required("openai/gpt-5.4"));
         assert!(supports_tool_choice_required("anthropic/claude-sonnet-4-5"));
         assert!(supports_tool_choice_required("chatgpt_codex/codex-mini"));
+    }
+
+    // ── G9: graceful MAX_STEPS wind-down ──────────────────────────────────────
+
+    /// Concatenate every text block across all messages with the given role.
+    fn role_text(conv: &Conversation, role: djinn_provider::message::Role) -> String {
+        conv.messages
+            .iter()
+            .filter(|m| m.role == role)
+            .flat_map(|m| m.content.iter().filter_map(|b| b.as_text()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Hitting the step cap injects the wind-down directive (NOT an immediate
+    /// hard error) and grants exactly one final turn for the summary, which is
+    /// captured before the loop ends gracefully (Ok).
+    #[tokio::test]
+    async fn max_step_cap_injects_wind_down_and_ends_gracefully() {
+        // Cap the loop at 3 turns so we don't drive 1000 mock turns.
+        unsafe { std::env::set_var("DJINN_REPLY_LOOP_MAX_TURNS", "3") };
+
+        let tools = vec![dummy_tool_schema("submit_work")];
+
+        // Turns 1..=3: tool calls keep the loop running up to the cap.
+        // Turn 4 (the single granted wind-down turn): text-only summary → ends.
+        let provider = MockProvider::new(vec![
+            MockResponse::tool_call("t1", "nonexistent_tool", 100),
+            MockResponse::tool_call("t2", "nonexistent_tool", 110),
+            MockResponse::tool_call("t3", "nonexistent_tool", 120),
+            MockResponse::text_only(
+                "Summary: (1) completed steps A and B. (2) C remains. \
+                 (3) next: finish C.",
+                130,
+            ),
+        ]);
+
+        let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+        let test_services = test_helpers::test_services();
+        let worktree_path = std::path::PathBuf::from("/tmp");
+        let mut conv = Conversation::new();
+        conv.push(Message::system("You are a worker."));
+        conv.push(Message::user("Do the task."));
+
+        let (result, _output, _tokens_in, _tokens_out) = run_reply_loop(
+            ReplyLoopContext {
+                provider: &provider,
+                tools: &tools,
+                task_id: &task_id,
+                task_short_id: "t1",
+                session_id: &session_id,
+                project_path: &project_path,
+                worktree_path: &worktree_path,
+                role_name: "worker",
+                finalize_tool_names: &["submit_work", "request_lead"],
+                context_window: 10_000,
+                model_id: "test/mock-model",
+                cancel: &cancel,
+                global_cancel: &cancel,
+                app_state: &app_state,
+                services: &test_services,
+                mcp_registry: None,
+                active_skill_names: &[],
+                active_mcp_server_names: &[],
+            },
+            &mut conv,
+            false,
+        )
+        .await;
+
+        unsafe { std::env::remove_var("DJINN_REPLY_LOOP_MAX_TURNS") };
+
+        assert!(
+            result.is_ok(),
+            "step cap should wind down gracefully, got: {:?}",
+            result
+        );
+        // The wind-down turn consumed the 4th mock response → all consumed.
+        assert_eq!(
+            provider.remaining(),
+            0,
+            "the single wind-down turn should run (4th response consumed)"
+        );
+
+        // Exactly ONE wind-down directive was injected (one extra turn, not a loop).
+        let injected = conv
+            .messages
+            .iter()
+            .filter(|m| {
+                m.role == Role::User
+                    && m.content
+                        .iter()
+                        .filter_map(|b| b.as_text())
+                        .any(|t| t.contains("You are out of steps"))
+            })
+            .count();
+        assert_eq!(injected, 1, "wind-down directive injected exactly once");
+
+        // The agent's hand-off summary was captured (persisted into the conversation).
+        let assistant_text = role_text(&conv, Role::Assistant);
+        assert!(
+            assistant_text.contains("Summary:") && assistant_text.contains("next:"),
+            "wind-down summary should be captured, got: {assistant_text:?}"
+        );
+    }
+
+    /// If the agent ignores the wind-down directive and keeps calling tools
+    /// (never reaching a terminal text-only/finalize action), the loop falls
+    /// back to the existing hard-error behavior after exactly one extra turn.
+    #[tokio::test]
+    async fn max_step_wind_down_ignored_falls_back_to_hard_error() {
+        unsafe { std::env::set_var("DJINN_REPLY_LOOP_MAX_TURNS", "3") };
+
+        let tools = vec![dummy_tool_schema("submit_work")];
+
+        // Turns 1..=3 fill the cap; turn 4 (wind-down) is ALSO a tool call →
+        // not terminal → next cap check hard-errors. The MockProvider's
+        // text-only fallback is never reached because we error first.
+        let provider = MockProvider::new(vec![
+            MockResponse::tool_call("t1", "nonexistent_tool", 100),
+            MockResponse::tool_call("t2", "nonexistent_tool", 110),
+            MockResponse::tool_call("t3", "nonexistent_tool", 120),
+            MockResponse::tool_call("t4", "nonexistent_tool", 130),
+        ]);
+
+        let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+        let test_services = test_helpers::test_services();
+        let worktree_path = std::path::PathBuf::from("/tmp");
+        let mut conv = Conversation::new();
+        conv.push(Message::system("You are a worker."));
+        conv.push(Message::user("Do the task."));
+
+        let (result, _output, _tokens_in, _tokens_out) = run_reply_loop(
+            ReplyLoopContext {
+                provider: &provider,
+                tools: &tools,
+                task_id: &task_id,
+                task_short_id: "t1",
+                session_id: &session_id,
+                project_path: &project_path,
+                worktree_path: &worktree_path,
+                role_name: "worker",
+                finalize_tool_names: &["submit_work", "request_lead"],
+                context_window: 10_000,
+                model_id: "test/mock-model",
+                cancel: &cancel,
+                global_cancel: &cancel,
+                app_state: &app_state,
+                services: &test_services,
+                mcp_registry: None,
+                active_skill_names: &[],
+                active_mcp_server_names: &[],
+            },
+            &mut conv,
+            false,
+        )
+        .await;
+
+        unsafe { std::env::remove_var("DJINN_REPLY_LOOP_MAX_TURNS") };
+
+        assert!(
+            result.is_err(),
+            "ignoring the wind-down should fall back to the hard error"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("max turns") && err.contains("wind-down"),
+            "error should mention the hard cap and the attempted wind-down, got: {err}"
+        );
+
+        // Wind-down was injected exactly once even though it was ignored —
+        // the extension is strictly one turn, never an unbounded loop.
+        let injected = conv
+            .messages
+            .iter()
+            .filter(|m| {
+                m.role == Role::User
+                    && m.content
+                        .iter()
+                        .filter_map(|b| b.as_text())
+                        .any(|t| t.contains("You are out of steps"))
+            })
+            .count();
+        assert_eq!(injected, 1, "wind-down injected exactly once, then hard-errors");
     }
 }
