@@ -1,4 +1,4 @@
-use djinn_core::models::TransitionAction;
+use djinn_core::models::{Task, TransitionAction};
 use djinn_db::{ActivityQuery, SessionAuthRepository, UserSettingsRepository};
 use djinn_provider::github_api::{
     CheckRun, DbBackedRefresher, GitHubApiClient, MergeMethod, PrReviewFeedback, PrState,
@@ -270,6 +270,10 @@ impl CoordinatorActor {
                     Some(&reason),
                 )
                 .await;
+                // Reactive auto-blocker: if exactly one racing same-epic sibling
+                // is landing on main, make this task WAIT for it (beside the
+                // reopen above) instead of looping on the moving main.
+                self.add_conflict_blocker_for_sibling(&task).await;
                 self.pr_status_cache.remove(&task.id);
                 self.pr_draft_first_seen.remove(&task.id);
                 continue;
@@ -615,6 +619,10 @@ impl CoordinatorActor {
                     Some(&reason),
                 )
                 .await;
+                // Reactive auto-blocker: if exactly one racing same-epic sibling
+                // is landing on main, make this task WAIT for it (beside the
+                // reopen above) instead of looping on the moving main.
+                self.add_conflict_blocker_for_sibling(&task).await;
                 self.pr_status_cache.remove(&task.id);
                 self.merge_fail_count.remove(&task.id);
                 self.delegated_to_github.remove(&task.id);
@@ -1904,6 +1912,91 @@ impl CoordinatorActor {
         }
     }
 
+    /// Reactive conflict auto-blocker: when `task`'s PR is flagged
+    /// `mergeable == false`, try to make it WAIT for the racing same-epic
+    /// sibling that is landing on main, instead of re-dispatching it straight
+    /// back into the moving-main loop.
+    ///
+    /// This runs ALONGSIDE the `PrConflict` reopen (it does not replace it).
+    /// The reopen already moves the task to `open`; this just adds a blocker
+    /// edge so the readiness gate holds it until the sibling merges
+    /// (`PrMerge` → `closed`), at which point re-dispatch branches from a main
+    /// that already contains the sibling's work.
+    ///
+    /// Conservative + graceful-degrading. An edge is added ONLY when attribution
+    /// is unambiguous (exactly one racing same-epic sibling). It falls back to
+    /// today's behaviour — no edge — when there are zero racing siblings (the
+    /// conflict is against already-merged main, nothing to wait on), more than
+    /// one candidate (ambiguous), the task has no epic, or adding the edge would
+    /// create a cycle (rejected by `update_blockers_atomic`'s cycle detection,
+    /// caught here and skipped). It never blocks on a closed/merged sibling and
+    /// never deadlocks.
+    async fn add_conflict_blocker_for_sibling(&self, task: &Task) {
+        let Some(epic_id) = task.epic_id.as_deref() else {
+            // No epic → no siblings to attribute the conflict to.
+            return;
+        };
+
+        let task_repo = self.task_repo();
+        let siblings = match task_repo.list_by_epic(epic_id).await {
+            Ok(siblings) => siblings,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    epic_id,
+                    error = %e,
+                    "PR poller: conflict auto-blocker: failed to list epic siblings; skipping (plain reopen only)"
+                );
+                return;
+            }
+        };
+
+        let Some(sibling_id) = pick_conflict_blocker_sibling(&task.id, &siblings) else {
+            // Zero or >1 racing siblings → ambiguous / nothing to wait on.
+            // Fall back to plain reopen (no edge).
+            let racing = siblings
+                .iter()
+                .filter(|s| s.id != task.id && is_racing_unmerged_status(&s.status))
+                .count();
+            tracing::info!(
+                task_id = %task.short_id,
+                epic_id,
+                racing_sibling_count = racing,
+                "PR poller: conflict auto-blocker: not exactly one racing same-epic sibling → plain reopen, no blocker added"
+            );
+            return;
+        };
+
+        match task_repo
+            .update_blockers_atomic(&task.id, std::slice::from_ref(&sibling_id), &[])
+            .await
+        {
+            Ok(()) => {
+                let blocked_on_short = siblings
+                    .iter()
+                    .find(|s| s.id == sibling_id)
+                    .map(|s| s.short_id.as_str())
+                    .unwrap_or("?");
+                tracing::info!(
+                    task_id = %task.short_id,
+                    epic_id,
+                    blocked_on = blocked_on_short,
+                    "PR poller: conflict auto-blocker: added blocker on racing same-epic sibling; task will wait for it to merge before re-dispatch"
+                );
+            }
+            Err(e) => {
+                // Cycle (or any other DB error) → graceful degradation: the
+                // task already reopened via PrConflict; we simply skip the edge.
+                tracing::info!(
+                    task_id = %task.short_id,
+                    epic_id,
+                    error = %e,
+                    "PR poller: conflict auto-blocker: could not add edge (likely a cycle) → plain reopen, no blocker added"
+                );
+            }
+        }
+    }
+
     /// Log a comment on the task with details about which CI checks failed,
     /// including the actual job logs from GitHub so the worker can fix them.
     ///
@@ -2407,13 +2500,133 @@ pub(crate) fn parse_pr_url(url: &str) -> Option<(String, String, u64)> {
     Some((owner.to_string(), repo.to_string(), number))
 }
 
+/// True when `status` is a post-implementation, UNMERGED, racing PR state — the
+/// shape of an epic sibling whose work is landing on main and can cause a
+/// conflict. A merged/closed sibling is `closed`, which is deliberately
+/// excluded (nothing to wait on; blocking on it would never release).
+fn is_racing_unmerged_status(status: &str) -> bool {
+    matches!(status, "approved" | "pr_draft" | "pr_review")
+}
+
+/// Pick the single racing same-epic sibling to block `this_task_id` on, if
+/// attribution is unambiguous.
+///
+/// Returns `Some(sibling_id)` ONLY when exactly one sibling (other than
+/// `this_task_id`) is in a racing-unmerged state (see
+/// [`is_racing_unmerged_status`]). Returns `None` for zero candidates (conflict
+/// is against already-merged main — nothing to wait on) or more than one
+/// (ambiguous — don't guess). Conservative by design: correctness over coverage.
+fn pick_conflict_blocker_sibling(this_task_id: &str, siblings: &[Task]) -> Option<String> {
+    let mut candidates = siblings
+        .iter()
+        .filter(|s| s.id != this_task_id && is_racing_unmerged_status(&s.status));
+    let first = candidates.next()?;
+    // More than one racing sibling → ambiguous attribution → fall back.
+    if candidates.next().is_some() {
+        return None;
+    }
+    Some(first.id.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        blocking_failed_checks, dequeue_reason_is_failure, is_advisory_check_name,
-        is_merge_queue_405, parse_pr_url,
+        Task, blocking_failed_checks, dequeue_reason_is_failure, is_advisory_check_name,
+        is_merge_queue_405, is_racing_unmerged_status, parse_pr_url,
+        pick_conflict_blocker_sibling,
     };
     use djinn_provider::github_api::CheckRun;
+
+    /// Minimal `Task` builder for the sibling-attribution heuristic tests.
+    /// Only `id` and `status` are load-bearing; everything else is filler.
+    fn task(id: &str, status: &str) -> Task {
+        Task {
+            id: id.to_string(),
+            project_id: "p".to_string(),
+            short_id: id.to_string(),
+            epic_id: Some("ep".to_string()),
+            title: String::new(),
+            description: String::new(),
+            design: String::new(),
+            issue_type: "task".to_string(),
+            status: status.to_string(),
+            priority: 0,
+            owner: String::new(),
+            labels: "[]".to_string(),
+            acceptance_criteria: "[]".to_string(),
+            reopen_count: 0,
+            continuation_count: 0,
+            verification_failure_count: 0,
+            total_reopen_count: 0,
+            total_verification_failure_count: 0,
+            intervention_count: 0,
+            last_intervention_at: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            closed_at: None,
+            close_reason: None,
+            merge_commit_sha: None,
+            pr_url: None,
+            merge_conflict_metadata: None,
+            memory_refs: "[]".to_string(),
+            agent_type: None,
+            created_by_user_id: None,
+            unresolved_blocker_count: 0,
+        }
+    }
+
+    #[test]
+    fn racing_status_classification() {
+        // Post-implementation, unmerged → racing.
+        assert!(is_racing_unmerged_status("approved"));
+        assert!(is_racing_unmerged_status("pr_draft"));
+        assert!(is_racing_unmerged_status("pr_review"));
+        // Pre-implementation / terminal → NOT racing (nothing to wait on, or
+        // would never release the block).
+        assert!(!is_racing_unmerged_status("open"));
+        assert!(!is_racing_unmerged_status("in_progress"));
+        assert!(!is_racing_unmerged_status("closed"));
+    }
+
+    #[test]
+    fn picks_single_racing_sibling() {
+        // Exactly one racing same-epic sibling → unambiguous → block on it.
+        let siblings = vec![
+            task("self", "open"),
+            task("peer", "pr_review"),
+            task("done", "closed"),
+        ];
+        assert_eq!(
+            pick_conflict_blocker_sibling("self", &siblings),
+            Some("peer".to_string())
+        );
+    }
+
+    #[test]
+    fn no_block_when_zero_racing_siblings() {
+        // Conflict is against already-merged main (sibling closed) → nothing to
+        // wait on → fall back to plain reopen.
+        let siblings = vec![task("self", "open"), task("done", "closed")];
+        assert_eq!(pick_conflict_blocker_sibling("self", &siblings), None);
+    }
+
+    #[test]
+    fn no_block_when_multiple_racing_siblings() {
+        // Two racing siblings → ambiguous attribution → don't guess.
+        let siblings = vec![
+            task("self", "open"),
+            task("peer1", "pr_review"),
+            task("peer2", "approved"),
+        ];
+        assert_eq!(pick_conflict_blocker_sibling("self", &siblings), None);
+    }
+
+    #[test]
+    fn never_blocks_on_self() {
+        // The task itself, even in a racing state, is never a candidate.
+        let siblings = vec![task("self", "pr_review")];
+        assert_eq!(pick_conflict_blocker_sibling("self", &siblings), None);
+    }
 
     fn check(name: &str) -> CheckRun {
         CheckRun {
