@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Base layer for Debian-derived images. Installs the essentials every
 # downstream script assumes are available: bash, curl, git, tini,
-# ca-certificates, gnupg (for third-party repo keys). apt-cache is left
-# dirty on purpose — install-system.sh cleans up after its own pass.
+# ca-certificates, gnupg (for third-party repo keys). It also bakes in the
+# common native build deps (libpq-dev, cmake, pkg-config) so project
+# build/test commands can link the ubiquitous `-sys` crates by default —
+# see the second install pass below. apt-cache is left dirty on purpose —
+# install-system.sh cleans up after its own pass.
 set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
@@ -16,6 +19,20 @@ apt-get install -y --no-install-recommends \
     tini \
     unzip \
     xz-utils
+# Native build deps baked in by default so a project's test/build can link
+# common `-sys` crates without each project having to list them in
+# `system_packages`:
+#   - libpq-dev   : link Postgres-client test binaries (sqlx/diesel `-lpq`).
+#                   `postgresql-client` only ships the runtime libpq5, not
+#                   the `.so` symlink + `libpq-fe.h` the linker needs.
+#   - cmake       : build script for crates like aws-lc-sys (rustls backend),
+#                   which fails its cc fallback without it.
+#   - pkg-config  : how openssl-sys / libpq-sys / many `-sys` crates locate
+#                   their system libs at build time.
+apt-get install -y --no-install-recommends \
+    cmake \
+    libpq-dev \
+    pkg-config
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 
