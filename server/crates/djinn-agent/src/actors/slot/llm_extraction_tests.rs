@@ -521,6 +521,142 @@ async fn llm_extraction_graceful_degradation_failing_provider_no_notes_written()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn llm_extraction_distinguishes_empty_success_from_failed_call() {
+    // EMPTY-but-successful: the LLM returned valid JSON with empty arrays. The
+    // extraction is persisted with `extracted: 0` (normal, nothing to record).
+    let empty_fixture = make_fixture().await;
+    let empty_ctx =
+        agent_context_from_db(empty_fixture.db.clone(), empty_fixture.cancel.clone());
+    let empty_provider = Arc::new(FakeProvider::text(
+        r#"{"cases":[],"patterns":[],"pitfalls":[]}"#,
+    ));
+    run_llm_extraction_with_provider(
+        empty_fixture.session_id.clone(),
+        SessionTaxonomy::default(),
+        empty_ctx,
+        empty_provider,
+    )
+    .await;
+
+    let empty_note_repo =
+        NoteRepository::new(empty_fixture.db.clone(), djinn_core::events::EventBus::noop());
+    assert!(
+        empty_note_repo
+            .list(&empty_fixture.project.id, None)
+            .await
+            .expect("list notes")
+            .is_empty(),
+        "empty extraction writes no notes"
+    );
+    let empty_taxonomy_json =
+        SessionRepository::new(empty_fixture.db.clone(), djinn_core::events::EventBus::noop())
+            .get_event_taxonomy_json(&empty_fixture.session_id)
+            .await
+            .expect("query event_taxonomy after empty success");
+    // Empty-success PERSISTS the taxonomy (extracted = 0) — it is a recorded
+    // outcome, not an error.
+    let empty_taxonomy: SessionTaxonomy =
+        serde_json::from_str(empty_taxonomy_json.as_deref().expect("taxonomy persisted"))
+            .expect("deserialize taxonomy after empty success");
+    assert_eq!(empty_taxonomy.extraction_quality.extracted, 0);
+
+    // FAILED: the LLM call itself errored. Nothing is persisted — the failure
+    // path returns before persisting the extraction taxonomy.
+    let failed_fixture = make_fixture().await;
+    let failed_ctx =
+        agent_context_from_db(failed_fixture.db.clone(), failed_fixture.cancel.clone());
+    let failed_provider = Arc::new(FailingProvider::new("injected extraction-call failure"));
+    run_llm_extraction_with_provider(
+        failed_fixture.session_id.clone(),
+        SessionTaxonomy::default(),
+        failed_ctx,
+        failed_provider,
+    )
+    .await;
+
+    let failed_note_repo =
+        NoteRepository::new(failed_fixture.db.clone(), djinn_core::events::EventBus::noop());
+    assert!(
+        failed_note_repo
+            .list(&failed_fixture.project.id, None)
+            .await
+            .expect("list notes")
+            .is_empty(),
+        "failed extraction writes no notes"
+    );
+    let failed_taxonomy_json =
+        SessionRepository::new(failed_fixture.db.clone(), djinn_core::events::EventBus::noop())
+            .get_event_taxonomy_json(&failed_fixture.session_id)
+            .await
+            .expect("query event_taxonomy after failed call");
+    assert!(
+        failed_taxonomy_json.is_none(),
+        "failed extraction must NOT persist an extraction taxonomy — it is an error, \
+         distinct from an empty-but-successful extraction"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn llm_extraction_intra_batch_dedup_collapses_duplicate_notes() {
+    // The model emits the same case twice (identical title modulo case) in one
+    // extraction. Intra-batch dedup must collapse them to a single written note
+    // and record the dropped duplicate in `dedup_skipped`.
+    let fixture = make_fixture().await;
+    let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
+
+    let dup_body = "## Situation\nA flaky extraction pipeline emitted the same case twice in one batch under a deterministic constraint.\n## Constraint\nThe durable note must be written once even when the model repeats it across the response.\n## Approach taken\nNormalize the title and note type and drop the second occurrence before any DB work happens.\n## Result\nOnly one durable case was created and the duplicate was counted as skipped.\n## Why it worked / failed\nThe normalized key collapsed the repeat without losing the reusable lesson.\n## Reusable lesson\nDeduplicate generated notes by a normalized title and type before creating them to avoid duplicate durable writes.\n## Related\n- intra-batch dedup\n- extraction quality gates";
+    let json = serde_json::json!({
+        "cases": [
+            { "title": "Duplicate Case", "content": dup_body },
+            { "title": "  duplicate case ", "content": dup_body }
+        ],
+        "patterns": [],
+        "pitfalls": []
+    })
+    .to_string();
+    let provider = Arc::new(FakeProvider::text(&json));
+
+    run_llm_extraction_with_provider(
+        fixture.session_id.clone(),
+        SessionTaxonomy::default(),
+        ctx,
+        provider,
+    )
+    .await;
+
+    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let cases: Vec<_> = note_repo
+        .list(&fixture.project.id, None)
+        .await
+        .expect("list notes")
+        .into_iter()
+        .filter(|n| n.note_type == "case")
+        .collect();
+    assert_eq!(
+        cases.len(),
+        1,
+        "two notes with the same normalized title+type collapse to one"
+    );
+
+    let stored_json =
+        SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
+            .get_event_taxonomy_json(&fixture.session_id)
+            .await
+            .expect("query event_taxonomy after intra-batch dedup");
+    let stored_taxonomy: SessionTaxonomy =
+        serde_json::from_str(stored_json.as_deref().expect("taxonomy persisted"))
+            .expect("deserialize taxonomy after intra-batch dedup");
+    assert_eq!(
+        stored_taxonomy.extraction_quality.extracted, 1,
+        "only the unique note counts as extracted"
+    );
+    assert_eq!(
+        stored_taxonomy.extraction_quality.dedup_skipped, 1,
+        "the intra-batch duplicate is recorded as dedup_skipped"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn llm_extraction_graceful_degradation_no_provider_configured() {
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
