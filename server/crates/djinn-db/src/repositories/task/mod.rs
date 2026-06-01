@@ -482,6 +482,140 @@ mod tests {
             .unwrap();
         assert_eq!(started.status, TaskStatus::InProgress.as_str());
     }
+
+    // ── Reactive conflict auto-blocker (feat/reactive-conflict-blocker) ────────
+    //
+    // These cover the DB invariants the pr_poller conflict auto-blocker relies
+    // on: idempotent add, cycle rejection (caught + skipped, no edge), and the
+    // readiness gate holding a freshly-conflict-blocked task until its blocker
+    // reaches `closed`.
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conflict_blocker_auto_add_is_idempotent() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
+        let sibling = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac2"}]"#)).await;
+
+        // Add the same conflict-blocker edge twice (mirrors two poller ticks
+        // both seeing the same unresolved conflict). The second must be a no-op,
+        // not an error, and must not duplicate the edge.
+        repo.update_blockers_atomic(&task.id, std::slice::from_ref(&sibling.id), &[])
+            .await
+            .unwrap();
+        repo.update_blockers_atomic(&task.id, std::slice::from_ref(&sibling.id), &[])
+            .await
+            .unwrap();
+
+        let blockers = repo.list_blockers(&task.id).await.unwrap();
+        assert_eq!(
+            blockers.len(),
+            1,
+            "duplicate auto-add must be idempotent (exactly one blocker edge)"
+        );
+        assert_eq!(blockers[0].task_id, sibling.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conflict_blocker_cycle_is_skipped() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+
+        let task_a = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
+        let task_b = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac2"}]"#)).await;
+
+        // task_b is already blocked by task_a.
+        repo.update_blockers_atomic(&task_b.id, std::slice::from_ref(&task_a.id), &[])
+            .await
+            .unwrap();
+
+        // Now try to also block task_a on task_b — that would close a cycle.
+        // The pr_poller catches this and skips; here we assert the repo rejects
+        // it (so the caller's catch-and-skip path is exercised) and that NO edge
+        // was added.
+        let err = repo
+            .update_blockers_atomic(&task_a.id, std::slice::from_ref(&task_b.id), &[])
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("circular"),
+            "cycle add must be rejected as circular, got: {err}"
+        );
+
+        let a_blockers = repo.list_blockers(&task_a.id).await.unwrap();
+        assert!(
+            a_blockers.is_empty(),
+            "a would-be cycle must add no edge (graceful skip)"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conflict_blocker_holds_task_out_of_ready_until_blocker_closed() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+
+        // `task` is the conflicting one (reopened → open). `sibling` is the
+        // racing peer it now waits on.
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
+        let sibling = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac2"}]"#)).await;
+
+        // Both start `open` → both ready.
+        let ready = repo
+            .list_ready(ReadyQuery {
+                project_id: Some(project.id.clone()),
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            ready.iter().any(|t| t.id == task.id),
+            "task is ready before the conflict-blocker is added"
+        );
+
+        // Add the conflict-blocker edge (task waits on the unmerged sibling).
+        repo.update_blockers_atomic(&task.id, std::slice::from_ref(&sibling.id), &[])
+            .await
+            .unwrap();
+
+        let ready = repo
+            .list_ready(ReadyQuery {
+                project_id: Some(project.id.clone()),
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            !ready.iter().any(|t| t.id == task.id),
+            "a task with a fresh conflict-blocker must drop out of list_ready"
+        );
+
+        // Once the sibling reaches `closed` (merged), the gate releases.
+        repo.set_status(&sibling.id, "closed").await.unwrap();
+        let ready = repo
+            .list_ready(ReadyQuery {
+                project_id: Some(project.id.clone()),
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            ready.iter().any(|t| t.id == task.id),
+            "task becomes ready again once its conflict-blocker is closed"
+        );
+    }
 }
 
 pub struct CreateTaskParams<'a> {

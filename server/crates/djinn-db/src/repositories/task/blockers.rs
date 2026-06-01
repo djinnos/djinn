@@ -53,11 +53,11 @@ impl TaskRepository {
                     .await;
                     match result {
                         Ok(_) => {}
-                        Err(sqlx::Error::Database(ref e))
-                            if e.message().contains("UNIQUE constraint failed") =>
-                        {
-                            // Duplicate blocker — idempotent, silently skip.
-                        }
+                        // Duplicate blocker — idempotent, silently skip. Postgres
+                        // phrases this as `duplicate key value violates unique
+                        // constraint`; use sqlx's portable `is_unique_violation`
+                        // rather than matching the (SQLite-only) message text.
+                        Err(sqlx::Error::Database(ref e)) if e.is_unique_violation() => {}
                         Err(e) => {
                             return Err(Error::Internal(format!(
                                 "failed to add blocker {blocking_id} → {task_id}: {e}"
@@ -186,11 +186,11 @@ impl TaskRepository {
                         .await;
                         match result {
                             Ok(_) => {}
-                            Err(sqlx::Error::Database(ref e))
-                                if e.message().contains("UNIQUE constraint failed") =>
-                            {
-                                // Duplicate blocker — idempotent, silently skip.
-                            }
+                            // Duplicate blocker — idempotent, silently skip.
+                            // Postgres phrases this as `duplicate key value
+                            // violates unique constraint`; use sqlx's portable
+                            // `is_unique_violation` rather than the SQLite text.
+                            Err(sqlx::Error::Database(ref e)) if e.is_unique_violation() => {}
                             Err(e) => {
                                 return Err(Error::Internal(format!(
                                     "failed to add blocker {blocking_id} → {task_id}: {e}"
