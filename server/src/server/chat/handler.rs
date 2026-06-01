@@ -298,6 +298,7 @@ pub(super) async fn completions_handler_impl(
                 session_affinity_key: Some(session_id.clone()),
                 provider_headers: Default::default(),
                 capabilities: capabilities_for_provider(&provider_id),
+                reasoning_effort: None,
             }
         }
     };
@@ -996,6 +997,7 @@ async fn generate_chat_title(
                 session_affinity_key: Some(format!("{session_id}:title")),
                 provider_headers: Default::default(),
                 capabilities: capabilities_for_provider(&provider_id),
+                reasoning_effort: None,
             }
         }
     };

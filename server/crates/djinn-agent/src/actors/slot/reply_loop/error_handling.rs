@@ -1,5 +1,6 @@
 use djinn_provider::message::Message;
 use djinn_provider::provider::ToolChoice;
+use djinn_provider::provider::error::ProviderError;
 
 /// Maximum retries for empty assistant turns before treating as a hard failure.
 pub(super) const MAX_EMPTY_TURN_RETRIES: u32 = 2;
@@ -10,6 +11,12 @@ pub(super) const MAX_NUDGE_ATTEMPTS: u32 = 3;
 pub(super) const MAX_COMPACTION_RETRIES: u32 = 2;
 
 pub(super) fn is_context_length_error(e: &anyhow::Error) -> bool {
+    // Prefer the typed provider taxonomy when present (set at the
+    // provider-crate boundary), then fall back to substring matching for
+    // resilience against untyped/legacy error paths.
+    if let Some(ProviderError::ContextOverflow) = e.downcast_ref::<ProviderError>() {
+        return true;
+    }
     let msg = e.to_string().to_lowercase();
     msg.contains("context_length")
         || msg.contains("context limit")
@@ -152,6 +159,26 @@ mod tests {
         // Negative cases.
         assert!(!is_orphaned_tool_call_error_str("rate limited"));
         assert!(!is_orphaned_tool_call_error_str("context length exceeded"));
+    }
+
+    #[test]
+    fn context_length_error_prefers_typed_then_substring() {
+        // Typed source via downcast — no context-length substring present.
+        let typed = anyhow::Error::new(ProviderError::ContextOverflow)
+            .context("provider API error 413: too big");
+        assert!(is_context_length_error(&typed));
+
+        // A typed RateLimit is NOT a context-length error.
+        let rate = anyhow::Error::new(ProviderError::RateLimit { retry_after_ms: None })
+            .context("provider API error 429");
+        assert!(!is_context_length_error(&rate));
+
+        // Substring fallback for untyped/legacy errors.
+        let untyped = anyhow::anyhow!("This model's maximum context length is 128000 tokens");
+        assert!(is_context_length_error(&untyped));
+
+        let unrelated = anyhow::anyhow!("connection reset by peer");
+        assert!(!is_context_length_error(&unrelated));
     }
 
     #[test]

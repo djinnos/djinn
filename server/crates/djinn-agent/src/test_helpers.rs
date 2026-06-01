@@ -368,6 +368,7 @@ mod tests {
                 StreamEvent::Usage(djinn_provider::provider::TokenUsage {
                     input: 3,
                     output: 5,
+                    ..Default::default()
                 }),
                 StreamEvent::Done,
             ],

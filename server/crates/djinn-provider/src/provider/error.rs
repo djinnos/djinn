@@ -1,0 +1,371 @@
+//! Typed provider-error taxonomy + secret redaction.
+//!
+//! Every provider HTTP failure used to be flattened into an
+//! `anyhow::Error` carrying `format!("provider API error {status}: {body}")`,
+//! forcing every downstream consumer to re-classify the failure by
+//! substring-matching the message. [`ProviderError`] structures the failure
+//! once, at the provider-crate boundary, so callers can
+//! `downcast_ref::<ProviderError>()` and branch on the typed variant while a
+//! readable (and redacted) message rides along as the `anyhow` context.
+//!
+//! Raw response bodies — which a misbehaving gateway may echo the api-key into
+//! — are scrubbed via [`redact_secrets`] before they reach any error message
+//! or `tracing` field.
+
+/// Structured classification of a provider failure.
+///
+/// The variant set is intentionally small: it captures the distinctions
+/// downstream retry/breaker logic needs, nothing more.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ProviderError {
+    /// Rate-limited / over quota (429, 529, 408, 425). `retry_after_ms` is the
+    /// server-supplied Retry-After in milliseconds when known.
+    #[error("rate limited{}", match .retry_after_ms {
+        Some(ms) => format!(" (retry after {ms}ms)"),
+        None => String::new(),
+    })]
+    RateLimit { retry_after_ms: Option<u64> },
+    /// Request exceeded the model's context window (413 or body says so).
+    #[error("context overflow")]
+    ContextOverflow,
+    /// Auth failure (401/403) — bad/expired/insufficient credentials.
+    #[error("authentication failed")]
+    Authentication,
+    /// Other 4xx — malformed request the provider rejected.
+    #[error("invalid request")]
+    InvalidRequest,
+    /// 5xx — provider-side internal error.
+    #[error("provider internal error (status {status})")]
+    ProviderInternal { status: u16 },
+    /// Network/transport failure (connect, timeout, broken stream).
+    #[error("transport error")]
+    Transport,
+    /// Provider returned a 200 but no usable completion (empty turn / refusal).
+    #[error("empty completion")]
+    EmptyCompletion,
+    /// Provider returned output that could not be parsed into our shape.
+    #[error("invalid output")]
+    InvalidOutput,
+}
+
+impl ProviderError {
+    /// Whether this failure class is worth retrying.
+    ///
+    /// RateLimit / ProviderInternal{5xx} / Transport / EmptyCompletion are
+    /// transient; Authentication / InvalidRequest / ContextOverflow /
+    /// InvalidOutput are terminal for the request as sent.
+    pub fn retryable(&self) -> bool {
+        match self {
+            ProviderError::RateLimit { .. }
+            | ProviderError::Transport
+            | ProviderError::EmptyCompletion => true,
+            ProviderError::ProviderInternal { status } => (500..600).contains(status),
+            ProviderError::Authentication
+            | ProviderError::InvalidRequest
+            | ProviderError::ContextOverflow
+            | ProviderError::InvalidOutput => false,
+        }
+    }
+
+    /// Server-supplied Retry-After in milliseconds, if this is a RateLimit
+    /// that carried one.
+    pub fn retry_after_ms(&self) -> Option<u64> {
+        match self {
+            ProviderError::RateLimit { retry_after_ms } => *retry_after_ms,
+            _ => None,
+        }
+    }
+
+    /// Classify an HTTP status + response body into a [`ProviderError`].
+    ///
+    /// Mirrors the spirit of opencode's `statusReason`. `retry_after_ms` is
+    /// left `None` here for rate-limit statuses; the HTTP client supplies the
+    /// parsed Retry-After via [`ProviderError::with_retry_after`].
+    pub fn from_status(status: u16, body: &str) -> Self {
+        match status {
+            401 | 403 => ProviderError::Authentication,
+            408 | 425 | 429 | 529 => ProviderError::RateLimit {
+                retry_after_ms: None,
+            },
+            413 => ProviderError::ContextOverflow,
+            _ if (500..600).contains(&status) => ProviderError::ProviderInternal { status },
+            _ if (400..500).contains(&status) => {
+                if body_indicates_context_overflow(body) {
+                    ProviderError::ContextOverflow
+                } else {
+                    ProviderError::InvalidRequest
+                }
+            }
+            // Anything else (incl. unexpected non-error codes) — treat as a
+            // provider-internal failure carrying the raw status.
+            _ => ProviderError::ProviderInternal { status },
+        }
+    }
+
+    /// Attach a parsed Retry-After (ms) to a RateLimit variant. No-op for
+    /// other variants.
+    pub fn with_retry_after(self, retry_after_ms: Option<u64>) -> Self {
+        match self {
+            ProviderError::RateLimit { .. } => ProviderError::RateLimit { retry_after_ms },
+            other => other,
+        }
+    }
+}
+
+/// Heuristic: does this 4xx body describe a context-length / prompt-too-long
+/// failure? Providers vary wildly in how they phrase it, so we match the same
+/// vocabulary the downstream substring classifier looks for.
+fn body_indicates_context_overflow(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("context_length")
+        || lower.contains("context length")
+        || lower.contains("context limit")
+        || lower.contains("too many tokens")
+        || lower.contains("maximum context")
+        || lower.contains("context window")
+        || lower.contains("prompt is too long")
+        || lower.contains("token limit")
+}
+
+// ─── Secret redaction (A5) ─────────────────────────────────────────────────
+
+const REDACTED: &str = "***REDACTED***";
+
+/// Scrub secrets out of a provider response body before it reaches an error
+/// message or a `tracing` field.
+///
+/// Two passes:
+/// 1. Structural: redact the *value* of any JSON-ish field whose key matches
+///    `(?i)authorization|api[-_]?key|access[-_]?token|secret|bearer`.
+///    Implemented as a non-regex scan (the crate has no `regex` dep).
+/// 2. Literal: replace every non-empty entry in `sent_secrets` (and, for any
+///    `Bearer <token>` entry, the bare token after the prefix) with the
+///    redaction marker — catches a gateway echoing the credential we sent.
+pub fn redact_secrets(body: &str, sent_secrets: &[&str]) -> String {
+    let mut out = redact_sensitive_fields(body);
+
+    for secret in sent_secrets {
+        if secret.is_empty() {
+            continue;
+        }
+        out = out.replace(secret, REDACTED);
+        // If the caller passed a full `Bearer <token>` header value, also
+        // redact the bare token in case the body echoed it without the prefix.
+        if let Some(bare) = secret.strip_prefix("Bearer ") {
+            let bare = bare.trim();
+            if !bare.is_empty() {
+                out = out.replace(bare, REDACTED);
+            }
+        }
+    }
+
+    out
+}
+
+/// Sensitive JSON key fragments. We match a key if its lowercased form
+/// contains any of these (modulo `-`/`_` separators normalising to the
+/// `api_key` / `access_token` forms below).
+fn key_is_sensitive(key: &str) -> bool {
+    let normalized: String = key
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c == '-' { '_' } else { c })
+        .collect();
+    normalized.contains("authorization")
+        || normalized.contains("apikey")
+        || normalized.contains("api_key")
+        || normalized.contains("access_token")
+        || normalized.contains("accesstoken")
+        || normalized.contains("secret")
+        || normalized.contains("bearer")
+}
+
+/// Pass 1: walk the text looking for `"<key>" : "<value>"` / `"<key>": <value>`
+/// JSON pairs and replace the value when the key is sensitive. Operates on the
+/// raw string (not a parsed `serde_json::Value`) so it survives non-JSON and
+/// malformed bodies without throwing them away.
+fn redact_sensitive_fields(body: &str) -> String {
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        // Look for the start of a quoted key.
+        if bytes[i] == b'"' {
+            // Find the end of this string literal (respecting escapes).
+            if let Some(key_end) = find_string_end(bytes, i + 1) {
+                let key = &body[i + 1..key_end];
+                // Tentatively emit the key string verbatim.
+                let after_key = key_end + 1; // index past closing quote
+                // Scan past whitespace + a single ':' to see if this is a key.
+                let mut j = after_key;
+                while j < bytes.len() && (bytes[j] as char).is_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b':' && key_is_sensitive(key) {
+                    j += 1;
+                    while j < bytes.len() && (bytes[j] as char).is_whitespace() {
+                        j += 1;
+                    }
+                    if j < bytes.len() && bytes[j] == b'"' {
+                        // String value — redact its contents.
+                        if let Some(val_end) = find_string_end(bytes, j + 1) {
+                            out.push_str(&body[i..after_key]); // "key"
+                            out.push_str(&body[after_key..j]); // ws + : + ws
+                            out.push('"');
+                            out.push_str(REDACTED);
+                            out.push('"');
+                            i = val_end + 1;
+                            continue;
+                        }
+                    }
+                }
+                // Not a sensitive key/value pair — emit the key literal as-is
+                // and continue scanning after it.
+                out.push_str(&body[i..after_key]);
+                i = after_key;
+                continue;
+            }
+        }
+        // Default: copy the byte through. `body` is valid UTF-8 so we can index
+        // char-by-char via the char_indices boundary the loop maintains.
+        let ch = body[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+
+    out
+}
+
+/// Given the index just past an opening `"`, return the index of the matching
+/// closing `"`, honouring backslash escapes. `None` if unterminated.
+fn find_string_end(bytes: &[u8], mut i: usize) -> Option<usize> {
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2, // skip the escaped char
+            b'"' => return Some(i),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_status_maps_auth() {
+        assert_eq!(ProviderError::from_status(401, ""), ProviderError::Authentication);
+        assert_eq!(ProviderError::from_status(403, ""), ProviderError::Authentication);
+    }
+
+    #[test]
+    fn from_status_maps_rate_limit() {
+        for code in [408, 425, 429, 529] {
+            assert_eq!(
+                ProviderError::from_status(code, ""),
+                ProviderError::RateLimit { retry_after_ms: None },
+                "status {code} should be RateLimit"
+            );
+        }
+    }
+
+    #[test]
+    fn from_status_maps_context_overflow() {
+        assert_eq!(ProviderError::from_status(413, ""), ProviderError::ContextOverflow);
+        // 400 with a context-length body also classifies as overflow.
+        let body = r#"{"error":{"message":"This model's maximum context length is 128000 tokens"}}"#;
+        assert_eq!(ProviderError::from_status(400, body), ProviderError::ContextOverflow);
+    }
+
+    #[test]
+    fn from_status_maps_invalid_request_and_internal() {
+        assert_eq!(
+            ProviderError::from_status(400, "bad json"),
+            ProviderError::InvalidRequest
+        );
+        assert_eq!(ProviderError::from_status(404, ""), ProviderError::InvalidRequest);
+        assert_eq!(
+            ProviderError::from_status(500, ""),
+            ProviderError::ProviderInternal { status: 500 }
+        );
+        assert_eq!(
+            ProviderError::from_status(503, ""),
+            ProviderError::ProviderInternal { status: 503 }
+        );
+    }
+
+    #[test]
+    fn retryable_classification() {
+        assert!(ProviderError::RateLimit { retry_after_ms: None }.retryable());
+        assert!(ProviderError::RateLimit { retry_after_ms: Some(5) }.retryable());
+        assert!(ProviderError::Transport.retryable());
+        assert!(ProviderError::EmptyCompletion.retryable());
+        assert!(ProviderError::ProviderInternal { status: 500 }.retryable());
+        assert!(ProviderError::ProviderInternal { status: 599 }.retryable());
+
+        assert!(!ProviderError::Authentication.retryable());
+        assert!(!ProviderError::InvalidRequest.retryable());
+        assert!(!ProviderError::ContextOverflow.retryable());
+        assert!(!ProviderError::InvalidOutput.retryable());
+    }
+
+    #[test]
+    fn retry_after_roundtrip() {
+        let e = ProviderError::from_status(429, "").with_retry_after(Some(1234));
+        assert_eq!(e.retry_after_ms(), Some(1234));
+        assert_eq!(e, ProviderError::RateLimit { retry_after_ms: Some(1234) });
+        // with_retry_after is a no-op on non-rate-limit variants.
+        let e2 = ProviderError::Authentication.with_retry_after(Some(99));
+        assert_eq!(e2.retry_after_ms(), None);
+        assert_eq!(e2, ProviderError::Authentication);
+    }
+
+    #[test]
+    fn redact_pass1_structural_fields() {
+        let body = r#"{"authorization":"Bearer sk-abc123","model":"gpt-5","api_key":"k-9","note":"ok"}"#;
+        let out = redact_secrets(body, &[]);
+        assert!(out.contains(r#""authorization":"***REDACTED***""#), "{out}");
+        assert!(out.contains(r#""api_key":"***REDACTED***""#), "{out}");
+        // Non-sensitive fields preserved.
+        assert!(out.contains(r#""model":"gpt-5""#), "{out}");
+        assert!(out.contains(r#""note":"ok""#), "{out}");
+        // The literal secret value no longer appears.
+        assert!(!out.contains("sk-abc123"), "{out}");
+        assert!(!out.contains("k-9"), "{out}");
+    }
+
+    #[test]
+    fn redact_pass1_case_and_separator_insensitive() {
+        let body = r#"{"X-Api-Key":"secret1","AccessToken":"secret2","SECRET":"secret3"}"#;
+        let out = redact_secrets(body, &[]);
+        assert!(!out.contains("secret1"), "{out}");
+        assert!(!out.contains("secret2"), "{out}");
+        assert!(!out.contains("secret3"), "{out}");
+    }
+
+    #[test]
+    fn redact_pass2_literal_secrets() {
+        let body = "upstream said: invalid key sk-LIVE-9999 for project";
+        let out = redact_secrets(body, &["sk-LIVE-9999"]);
+        assert!(!out.contains("sk-LIVE-9999"), "{out}");
+        assert!(out.contains("***REDACTED***"), "{out}");
+        // Empty entries are skipped (no spurious replacement).
+        let out2 = redact_secrets("hello", &[""]);
+        assert_eq!(out2, "hello");
+    }
+
+    #[test]
+    fn redact_pass2_strips_bearer_prefix() {
+        let body = "echoed token: tok-7777 (full header: Bearer tok-7777)";
+        let out = redact_secrets(body, &["Bearer tok-7777"]);
+        assert!(!out.contains("tok-7777"), "{out}");
+    }
+
+    #[test]
+    fn redact_preserves_non_json_text() {
+        let body = "plain text error with no secrets";
+        assert_eq!(redact_secrets(body, &[]), body);
+    }
+}

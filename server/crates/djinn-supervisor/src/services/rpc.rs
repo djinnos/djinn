@@ -1661,7 +1661,11 @@ mod tests {
                     let resp = LlmResponse {
                         content: vec![ContentBlock::text("pong")],
                         thinking: String::new(),
-                        usage: TokenUsage { input: 5, output: 4 },
+                        usage: TokenUsage {
+                            input: 5,
+                            output: 4,
+                            ..Default::default()
+                        },
                     };
                     let payload_str =
                         serde_json::to_string(&resp).expect("encode resp");

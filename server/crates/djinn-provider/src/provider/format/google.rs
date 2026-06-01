@@ -37,6 +37,17 @@ impl GoogleProvider {
             });
         }
 
+        // Thinking config. `None` => no `thinkingConfig` (pre-B5 behavior).
+        // `Some(tier)` => request a per-tier `thinkingBudget` under
+        // `generationConfig`.
+        if let Some(tier) = self.config.reasoning_effort {
+            body["generationConfig"] = json!({
+                "thinkingConfig": {
+                    "thinkingBudget": tier.thinking_budget()
+                }
+            });
+        }
+
         if !tools.is_empty() {
             body["tools"] = json!([{"functionDeclarations": tools}]);
 
@@ -90,8 +101,18 @@ pub fn parse_google_line(line: &str) -> Vec<StreamEvent> {
             .get("candidatesTokenCount")
             .and_then(|x| x.as_u64())
             .unwrap_or(0) as u32;
+        // Gemini reports cache hits via `cachedContentTokenCount`.
+        let cache_read = usage
+            .get("cachedContentTokenCount")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0) as u32;
         if input > 0 || output > 0 {
-            events.push(StreamEvent::Usage(TokenUsage { input, output }));
+            events.push(StreamEvent::Usage(TokenUsage {
+                input,
+                output,
+                cache_read,
+                ..Default::default()
+            }));
         }
     }
 
@@ -263,6 +284,7 @@ mod tests {
             session_affinity_key: None,
             provider_headers: Default::default(),
             capabilities: ProviderCapabilities::default(),
+            reasoning_effort: None,
         }
     }
 
@@ -390,6 +412,36 @@ mod tests {
         assert!(req.get("toolConfig").is_none());
     }
 
+    // ─── B5: reasoning-effort -> thinkingConfig ─────────────────────────────
+
+    #[test]
+    fn test_reasoning_effort_none_omits_thinking_config() {
+        // None must preserve pre-B5 behavior: no generationConfig/thinkingConfig.
+        let provider = GoogleProvider::new(test_google_config());
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+        let req = provider.build_request(&conv, &[], None);
+        assert!(
+            req.get("generationConfig").is_none(),
+            "generationConfig must be absent when reasoning_effort is None"
+        );
+    }
+
+    #[test]
+    fn test_reasoning_effort_high_sets_thinking_budget() {
+        use crate::provider::ReasoningEffort;
+        let mut config = test_google_config();
+        config.reasoning_effort = Some(ReasoningEffort::High);
+        let provider = GoogleProvider::new(config);
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+        let req = provider.build_request(&conv, &[], None);
+        assert_eq!(
+            req["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            24_000
+        );
+    }
+
     #[tokio::test]
     async fn test_stream_uses_data_lines_and_ignores_event_metadata() {
         let seen_auth = Arc::new(Mutex::new(None));
@@ -422,7 +474,8 @@ mod tests {
             &events[1],
             StreamEvent::Usage(TokenUsage {
                 input: 7,
-                output: 9
+                output: 9,
+                ..
             })
         ));
         assert!(matches!(&events[2], StreamEvent::Done));

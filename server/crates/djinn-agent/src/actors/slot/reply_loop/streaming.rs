@@ -27,6 +27,11 @@ pub(super) struct StreamTurnState {
     pub turn_tool_calls: Vec<ContentBlock>,
     pub turn_tokens_in: u32,
     pub turn_tokens_out: u32,
+    /// Cache-read / cache-write / reasoning token counts for this turn's last
+    /// usage report (prompt-cache accounting, ADR-043).
+    pub turn_cache_read: u32,
+    pub turn_cache_write: u32,
+    pub turn_reasoning_out: u32,
     pub interrupted: Option<&'static str>,
     pub saw_round_event: bool,
     pub needs_reactive_compaction: bool,
@@ -43,6 +48,9 @@ impl StreamTurnState {
             turn_tool_calls: Vec::new(),
             turn_tokens_in: 0,
             turn_tokens_out: 0,
+            turn_cache_read: 0,
+            turn_cache_write: 0,
+            turn_reasoning_out: 0,
             interrupted: None,
             saw_round_event: false,
             needs_reactive_compaction: false,
@@ -88,6 +96,11 @@ pub(super) struct StreamLoopContext<'a> {
     pub current_context_tokens: &'a mut u32,
     pub total_tokens_in: &'a mut u32,
     pub total_tokens_out: &'a mut u32,
+    /// Cumulative cache-read / cache-write / reasoning token aggregates
+    /// (prompt-cache accounting, ADR-043) summed across all turns.
+    pub total_cache_read: &'a mut u32,
+    pub total_cache_write: &'a mut u32,
+    pub total_reasoning_out: &'a mut u32,
 }
 
 /// Throttle interval for the worker→host activity-touch RPC in the
@@ -216,9 +229,18 @@ pub(super) async fn consume_provider_stream(
                     StreamEvent::Usage(usage) => {
                         state.turn_tokens_in = usage.input;
                         state.turn_tokens_out = usage.output;
+                        state.turn_cache_read = usage.cache_read;
+                        state.turn_cache_write = usage.cache_write;
+                        state.turn_reasoning_out = usage.reasoning_output;
                         *ctx.current_context_tokens = usage.input;
                         *ctx.total_tokens_in = ctx.total_tokens_in.saturating_add(usage.input);
                         *ctx.total_tokens_out = ctx.total_tokens_out.saturating_add(usage.output);
+                        *ctx.total_cache_read =
+                            ctx.total_cache_read.saturating_add(usage.cache_read);
+                        *ctx.total_cache_write =
+                            ctx.total_cache_write.saturating_add(usage.cache_write);
+                        *ctx.total_reasoning_out =
+                            ctx.total_reasoning_out.saturating_add(usage.reasoning_output);
 
                         let usage_pct = if ctx.context_window > 0 {
                             *ctx.current_context_tokens as f64 / ctx.context_window as f64
@@ -232,6 +254,9 @@ pub(super) async fn consume_provider_stream(
                             *ctx.total_tokens_out as i64,
                             ctx.context_window,
                             usage_pct,
+                            usage.cache_read as i64,
+                            usage.cache_write as i64,
+                            usage.reasoning_output as i64,
                         ));
                     }
                     StreamEvent::Done => break,

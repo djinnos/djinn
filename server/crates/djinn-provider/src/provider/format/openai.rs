@@ -256,6 +256,32 @@ struct Choice {
 struct UsageChunk {
     prompt_tokens: Option<u32>,
     completion_tokens: Option<u32>,
+    #[serde(default)]
+    prompt_tokens_details: Option<TokenDetails>,
+    #[serde(default)]
+    completion_tokens_details: Option<TokenDetails>,
+}
+
+/// Chat-completions token-detail breakdown. Providers spell the cache field
+/// differently (`cached_tokens` vs `cached_input_tokens`); reasoning models
+/// expose `reasoning_tokens`. All optional — default missing fields to 0.
+#[derive(Deserialize, Default)]
+struct TokenDetails {
+    #[serde(default)]
+    cached_tokens: Option<u32>,
+    #[serde(default)]
+    cached_input_tokens: Option<u32>,
+    #[serde(default)]
+    reasoning_tokens: Option<u32>,
+}
+
+impl TokenDetails {
+    fn cached(&self) -> u32 {
+        self.cached_tokens.or(self.cached_input_tokens).unwrap_or(0)
+    }
+    fn reasoning(&self) -> u32 {
+        self.reasoning_tokens.unwrap_or(0)
+    }
 }
 
 #[derive(Deserialize)]
@@ -279,9 +305,22 @@ pub fn parse_openai_line(
 
     // Usage field (appears in final chunk when stream_options.include_usage=true)
     if let Some(usage) = chunk.usage {
+        let cache_read = usage
+            .prompt_tokens_details
+            .as_ref()
+            .map(|d| d.cached())
+            .unwrap_or(0);
+        let reasoning_output = usage
+            .completion_tokens_details
+            .as_ref()
+            .map(|d| d.reasoning())
+            .unwrap_or(0);
         events.push(StreamEvent::Usage(TokenUsage {
             input: usage.prompt_tokens.unwrap_or(0),
             output: usage.completion_tokens.unwrap_or(0),
+            cache_read,
+            cache_write: 0,
+            reasoning_output,
         }));
     }
 
@@ -391,7 +430,28 @@ pub fn parse_openai_response(body: &str) -> Vec<StreamEvent> {
             .get("completion_tokens")
             .and_then(|x| x.as_u64())
             .unwrap_or(0) as u32;
-        events.push(StreamEvent::Usage(TokenUsage { input, output }));
+        // Tolerant multi-spelling fallback: providers differ on the cache key
+        // (`cached_tokens` vs `cached_input_tokens`); missing → 0.
+        let cache_read = usage
+            .get("prompt_tokens_details")
+            .and_then(|d| {
+                d.get("cached_tokens")
+                    .or_else(|| d.get("cached_input_tokens"))
+            })
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0) as u32;
+        let reasoning_output = usage
+            .get("completion_tokens_details")
+            .and_then(|d| d.get("reasoning_tokens"))
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0) as u32;
+        events.push(StreamEvent::Usage(TokenUsage {
+            input,
+            output,
+            cache_read,
+            cache_write: 0,
+            reasoning_output,
+        }));
     }
 
     // choices[0].message
@@ -510,6 +570,7 @@ mod tests {
             session_affinity_key: None,
             provider_headers: std::collections::HashMap::new(),
             capabilities: ProviderCapabilities::default(),
+            reasoning_effort: None,
         }
     }
 
@@ -525,6 +586,7 @@ mod tests {
             session_affinity_key: Some("session-123".to_string()),
             provider_headers: Default::default(),
             capabilities: ProviderCapabilities::default(),
+            reasoning_effort: None,
         });
         let mut conv = Conversation::new();
         conv.push(Message::user("Hello"));
@@ -545,6 +607,7 @@ mod tests {
             session_affinity_key: Some("session-123".to_string()),
             provider_headers: Default::default(),
             capabilities: ProviderCapabilities::default(),
+            reasoning_effort: None,
         });
 
         let headers = provider.extra_headers();

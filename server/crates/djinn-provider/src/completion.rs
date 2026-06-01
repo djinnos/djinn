@@ -393,6 +393,7 @@ async fn api_key_provider_config(
         session_affinity_key: None,
         provider_headers: Default::default(),
         capabilities: provider_capabilities(provider_id),
+        reasoning_effort: None,
     })
 }
 
@@ -449,6 +450,11 @@ fn provider_capabilities(provider_id: &str) -> ProviderCapabilities {
 }
 
 fn is_transient_error(error: &anyhow::Error) -> bool {
+    // Prefer the typed provider taxonomy attached at the provider-crate
+    // boundary; fall back to substring matching for untyped/legacy errors.
+    if let Some(pe) = error.downcast_ref::<crate::provider::error::ProviderError>() {
+        return pe.retryable();
+    }
     error.chain().any(|cause| {
         let message = cause.to_string().to_ascii_lowercase();
         message.contains("429")
@@ -474,6 +480,28 @@ mod tests {
 
     use super::*;
     use crate::provider::ToolChoice;
+    use crate::provider::error::ProviderError;
+
+    #[test]
+    fn transient_error_prefers_typed_then_substring() {
+        // Typed retryable variants short-circuit to true.
+        assert!(is_transient_error(
+            &anyhow::Error::new(ProviderError::RateLimit { retry_after_ms: None })
+                .context("provider API error 429")
+        ));
+        assert!(is_transient_error(
+            &anyhow::Error::new(ProviderError::Transport).context("SSE read error")
+        ));
+        // Typed terminal variants short-circuit to false even if the message
+        // would otherwise match a substring.
+        assert!(!is_transient_error(
+            &anyhow::Error::new(ProviderError::Authentication)
+                .context("provider API error 401: timeout while authing")
+        ));
+        // Untyped errors fall back to substring matching.
+        assert!(is_transient_error(&anyhow!("connection reset by peer")));
+        assert!(!is_transient_error(&anyhow!("bad request: missing field")));
+    }
 
     fn setup_catalog() -> CatalogService {
         let catalog = CatalogService::new();
@@ -701,6 +729,7 @@ mod tests {
             Ok(StreamEvent::Usage(TokenUsage {
                 input: 11,
                 output: 7,
+                ..Default::default()
             })),
             Ok(StreamEvent::Delta(ContentBlock::text("ok"))),
             Ok(StreamEvent::Done),

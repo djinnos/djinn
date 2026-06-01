@@ -193,6 +193,11 @@ pub(crate) async fn run_reply_loop(
     // so they survive the borrow and can be used for telemetry/return values.
     let mut total_tokens_in: u32 = 0;
     let mut total_tokens_out: u32 = 0;
+    // Prompt-cache accounting (ADR-043): cumulative cache-read / cache-write /
+    // reasoning token aggregates summed across all turns, for telemetry.
+    let mut total_cache_read: u32 = 0;
+    let mut total_cache_write: u32 = 0;
+    let mut total_reasoning_out: u32 = 0;
     // Tracks the actual context-window fill for the most recent generation.
     // Each generation sends the entire conversation, so `usage.input` IS the
     // current context size — it overwrites the previous value rather than
@@ -387,6 +392,9 @@ pub(crate) async fn run_reply_loop(
                 current_context_tokens: &mut current_context_tokens,
                 total_tokens_in: &mut total_tokens_in,
                 total_tokens_out: &mut total_tokens_out,
+                total_cache_read: &mut total_cache_read,
+                total_cache_write: &mut total_cache_write,
+                total_reasoning_out: &mut total_reasoning_out,
             })
             .await?;
 
@@ -397,6 +405,9 @@ pub(crate) async fn run_reply_loop(
                 turn_tool_calls,
                 turn_tokens_in,
                 turn_tokens_out,
+                turn_cache_read,
+                turn_cache_write,
+                turn_reasoning_out,
                 interrupted,
                 saw_round_event,
                 needs_reactive_compaction,
@@ -411,6 +422,11 @@ pub(crate) async fn run_reply_loop(
                     llm.end_error("interrupted");
                 } else {
                     llm.record_usage(turn_tokens_in, turn_tokens_out);
+                    llm.record_cache_usage(
+                        turn_cache_read,
+                        turn_cache_write,
+                        turn_reasoning_out,
+                    );
                     // Record assistant output text (current turn, not stale).
                     if !turn_text.is_empty() {
                         llm.record_output(&turn_text);
@@ -784,6 +800,7 @@ pub(crate) async fn run_reply_loop(
     // ── End session-level OTel span ──────────────────────────────────────────
     if let Some(session) = otel_session {
         session.record_usage(total_tokens_in, total_tokens_out);
+        session.record_cache_usage(total_cache_read, total_cache_write, total_reasoning_out);
         // Record the last assistant text as the trace-level output
         // (shows in the Langfuse trace list Output column).
         if !final_assistant_text.is_empty() {
@@ -918,6 +935,7 @@ mod tests {
                 events.push(Ok(StreamEvent::Usage(TokenUsage {
                     input: resp.input_tokens,
                     output: resp.output_tokens,
+                    ..Default::default()
                 })));
                 events.push(Ok(StreamEvent::Done));
 

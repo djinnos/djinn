@@ -22,6 +22,7 @@ fn openai_config(base_url: String, auth: AuthMethod) -> ProviderConfig {
         session_affinity_key: None,
         provider_headers: Default::default(),
         capabilities: ProviderCapabilities::default(),
+        reasoning_effort: None,
     }
 }
 
@@ -39,6 +40,7 @@ fn anthropic_config(base_url: String, auth: AuthMethod) -> ProviderConfig {
             streaming: true,
             max_tokens_default: Some(64_000),
         },
+        reasoning_effort: None,
     }
 }
 

@@ -8,7 +8,32 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_util::io::StreamReader;
 
 use super::AuthMethod;
+use super::error::{ProviderError, redact_secrets};
 use crate::rate_limit::{activate_suppression_window, clear_suppression_window};
+
+/// Collect the secret values an `AuthMethod` puts on the wire so a misbehaving
+/// gateway echoing them back in the response body gets them redacted.
+fn auth_secrets(auth: &AuthMethod) -> Vec<String> {
+    match auth {
+        AuthMethod::BearerToken(token) => vec![token.clone()],
+        AuthMethod::ApiKeyHeader { key, .. } => vec![key.clone()],
+        AuthMethod::NoAuth => Vec::new(),
+    }
+}
+
+/// Build the boundary `anyhow::Error` for a non-success HTTP status: a typed
+/// [`ProviderError`] source (so callers can `downcast_ref`) plus a readable,
+/// secret-redacted context message.
+fn provider_status_error(
+    status: reqwest::StatusCode,
+    body: &str,
+    retry_after_ms: Option<u64>,
+    secrets: &[&str],
+) -> anyhow::Error {
+    let redacted = redact_secrets(body, secrets);
+    let typed = ProviderError::from_status(status.as_u16(), &redacted).with_retry_after(retry_after_ms);
+    anyhow::Error::new(typed).context(format!("provider API error {status}: {redacted}"))
+}
 
 // ─── Retry configuration ────────────────────────────────────────────────────
 
@@ -65,8 +90,10 @@ impl ApiClient {
         let client = self.inner.clone();
         let url = url.to_string();
         let auth = auth.clone();
+        let secrets = auth_secrets(&auth);
 
         Box::pin(stream! {
+            let secret_refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
             // Retry loop for the initial HTTP request.
             let response = 'retry: {
                 let mut attempt = 0u32;
@@ -115,14 +142,15 @@ impl ApiClient {
                                     delay_ms,
                                     "SSE request failed with retryable status; retrying"
                                 );
-                                tracing::debug!(body = %body_text, "retryable error body");
+                                tracing::debug!(body = %redact_secrets(&body_text, &secret_refs), "retryable error body");
                                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                                 continue;
                             }
 
                             // Non-retryable or exhausted retries.
+                            let retry_after_ms = retry_after_ms(resp.headers());
                             let body_text = resp.text().await.unwrap_or_default();
-                            yield Err(anyhow!("provider API error {}: {}", status, body_text));
+                            yield Err(provider_status_error(status, &body_text, retry_after_ms, &secret_refs));
                             return;
                         }
                         Err(e) => {
@@ -143,7 +171,8 @@ impl ApiClient {
                                 continue;
                             }
 
-                            yield Err(anyhow!("failed to send SSE request after {} attempts: {}", attempt + 1, e));
+                            yield Err(anyhow::Error::new(ProviderError::Transport)
+                                .context(format!("failed to send SSE request after {} attempts: {}", attempt + 1, e)));
                             return;
                         }
                     }
@@ -172,14 +201,15 @@ impl ApiClient {
                     }
                     Ok(Ok(None)) => break, // end of stream
                     Ok(Err(e)) => {
-                        yield Err(anyhow!("SSE read error: {}", e));
+                        yield Err(anyhow::Error::new(ProviderError::Transport)
+                            .context(format!("SSE read error: {}", e)));
                         break;
                     }
                     Err(_) => {
-                        yield Err(anyhow!(
+                        yield Err(anyhow::Error::new(ProviderError::Transport).context(format!(
                             "SSE stream timed out: no data received for {}s",
                             STREAM_CHUNK_TIMEOUT.as_secs()
-                        ));
+                        )));
                         break;
                     }
                 }
@@ -198,6 +228,8 @@ impl ApiClient {
         auth: &AuthMethod,
         extra_headers: HeaderMap,
     ) -> anyhow::Result<String> {
+        let secrets = auth_secrets(auth);
+        let secret_refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
         let mut attempt = 0u32;
         loop {
             let mut req = self.inner.post(url).json(&body);
@@ -238,13 +270,14 @@ impl ApiClient {
                             activate_suppression_window(Duration::from_millis(delay_ms));
                         }
                         tracing::warn!(attempt, status = %status, delay_ms, "POST request failed; retrying");
-                        tracing::debug!(body = %body_text, "retryable error body");
+                        tracing::debug!(body = %redact_secrets(&body_text, &secret_refs), "retryable error body");
                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                         continue;
                     }
 
+                    let retry_after_ms = retry_after_ms(resp.headers());
                     let body_text = resp.text().await.unwrap_or_default();
-                    return Err(anyhow!("provider API error {}: {}", status, body_text));
+                    return Err(provider_status_error(status, &body_text, retry_after_ms, &secret_refs));
                 }
                 Err(e) => {
                     let is_retryable = e.is_connect() || e.is_timeout() || e.is_request();
@@ -255,11 +288,11 @@ impl ApiClient {
                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                         continue;
                     }
-                    return Err(anyhow!(
+                    return Err(anyhow::Error::new(ProviderError::Transport).context(format!(
                         "failed to send POST after {} attempts: {}",
                         attempt + 1,
                         e
-                    ));
+                    )));
                 }
             }
         }
