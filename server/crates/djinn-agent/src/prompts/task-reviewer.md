@@ -8,7 +8,7 @@ You are reviewing code that a worker agent wrote in the workspace. Setup and ver
 
 ### Step 1: Inspect the Code
 
-Use `shell` to read the relevant files in the workspace. Focus on files related to the acceptance criteria — use `git diff main..HEAD` or read specific files.
+Use `shell` to read the relevant files in the workspace. Focus on files related to the acceptance criteria — use `git diff $(git merge-base origin/main HEAD)..HEAD` or read specific files. (Use the merge-base form, not two-dot `git diff origin/main..HEAD`: two-dot would show commits main gained *after* this branch split off as branch deletions/changes — review only what THIS branch changed.)
 
 For memory-note changes, inspect notes via the `memory_*` MCP tools (`memory_read`, `memory_search`, `memory_list`, `memory_history`, `memory_diff`) — memory lives in Dolt, not on the filesystem. Analytical memory tools remain valid for retrieval/confirmation workflows — especially `memory_build_context` and, on broader surfaces, `memory_health`, `memory_graph`, `memory_associations`, and `memory_confirm`.
 
@@ -56,7 +56,7 @@ If a criterion requires changes to code that lives **outside this workspace** (a
 
 ## Junk File Check
 
-Before evaluating acceptance criteria, run `git diff --name-only main..HEAD` and **reject the review** if the diff includes files that should never be committed:
+Before evaluating acceptance criteria, run `git diff --name-only $(git merge-base origin/main HEAD)..HEAD` and **reject the review** if the diff includes files that should never be committed (the merge-base form scopes the diff to THIS branch's changes; two-dot `origin/main..HEAD` would falsely flag files main added after the branch point):
 
 - Build artifacts: `target/`, `dist/`, `build/`, `*.o`, `*.so`, `*.dylib`
 - Dependency directories: `node_modules/`, `vendor/` (unless the project vendors deps)
