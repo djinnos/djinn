@@ -110,10 +110,10 @@ const CANDIDATE_CAP: usize = 8;
 /// resolver to emit `NotFound` rather than `Ambiguous`.
 fn ambiguity_enabled() -> bool {
     match std::env::var("DJINN_CODE_GRAPH_AMBIGUITY") {
-        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "false" | "0" | "off" | "no" => false,
-            _ => true,
-        },
+        Ok(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "false" | "0" | "off" | "no"
+        ),
         Err(_) => true,
     }
 }

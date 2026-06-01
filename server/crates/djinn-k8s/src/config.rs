@@ -273,8 +273,8 @@ impl KubernetesConfig {
         if let Ok(v) = std::env::var("DJINN_K8S_WARM_MEMORY_LIMIT") {
             cfg.warm_memory_limit = v;
         }
-        if let Ok(v) = std::env::var("DJINN_K8S_NODE_SELECTOR") {
-            if !v.is_empty() {
+        if let Ok(v) = std::env::var("DJINN_K8S_NODE_SELECTOR")
+            && !v.is_empty() {
                 match serde_json::from_str::<BTreeMap<String, String>>(&v) {
                     Ok(map) => cfg.node_selector = map,
                     Err(e) => tracing::warn!(
@@ -284,9 +284,8 @@ impl KubernetesConfig {
                     ),
                 }
             }
-        }
-        if let Ok(v) = std::env::var("DJINN_K8S_TOLERATIONS") {
-            if !v.is_empty() {
+        if let Ok(v) = std::env::var("DJINN_K8S_TOLERATIONS")
+            && !v.is_empty() {
                 match serde_json::from_str::<Vec<Toleration>>(&v) {
                     Ok(t) => cfg.tolerations = t,
                     Err(e) => tracing::warn!(
@@ -296,7 +295,6 @@ impl KubernetesConfig {
                     ),
                 }
             }
-        }
         cfg
     }
 }

@@ -244,6 +244,7 @@ async fn run() -> Result<()> {
 ///     cargo git deps with `git-fetch-with-cli`, and pnpm/npm git deps), and
 ///   - set `GOPRIVATE=github.com/<owner>/*` (via `go env -w`) so `go` fetches
 ///     those modules directly via git instead of the public proxy/sumdb.
+///
 /// Best-effort: failures are logged (never the token) and never fatal — public
 /// deps still resolve. The token is short-lived (~1h) and lives only in the
 /// Pod's HOME/go env for the run.

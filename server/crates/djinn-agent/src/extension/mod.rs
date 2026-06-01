@@ -28,6 +28,9 @@ pub(crate) use tool_defs::{
 ///     _ => None,
 /// };
 /// ```
+// Public tool-call entrypoint mirroring `dispatch_tool_call`; each arg is a
+// distinct collaborator/context, so a bag struct adds no clarity.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn call_tool(
     state: &AgentContext,
     services: &dyn djinn_supervisor::SupervisorServices,

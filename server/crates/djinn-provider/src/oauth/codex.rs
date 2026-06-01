@@ -157,8 +157,8 @@ impl CodexTokens {
             }
             tracing::warn!("Codex: corrupt token JSON in DB, ignoring");
         }
-        if owner.is_none() {
-            if let Some(tokens) = Self::load_cached() {
+        if owner.is_none()
+            && let Some(tokens) = Self::load_cached() {
                 tracing::info!("Codex: migrating tokens from filesystem to DB");
                 if let Err(e) = tokens.save_to_db(repo).await {
                     tracing::warn!("Codex: migration save failed: {e}");
@@ -166,7 +166,6 @@ impl CodexTokens {
                 let _ = std::fs::remove_file(Self::cache_path());
                 return Some(tokens);
             }
-        }
         None
     }
 
