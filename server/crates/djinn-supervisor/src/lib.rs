@@ -288,6 +288,154 @@ impl TaskRunSupervisor {
             );
         }
 
+        // Proactive dispatch-time sync.  The task branch is REUSED across
+        // cycles (clone_ephemeral + ensure_branch above never recreate it), so
+        // without re-anchoring it onto the moving target it drifts behind
+        // `base_branch` and the task loops: every cycle re-reviews stale code,
+        // the PR carries phantom diffs against the advanced target, and the
+        // merge-queue keeps bouncing it.  We fix that by running the SAME merge
+        // the ConflictRetry path uses (`origin/<base>` → task branch) at EVERY
+        // dispatch, gated by a cheap no-op guard.
+        //
+        // Skipped for ConflictRetry, which already merges below with its own
+        // (DB-sourced) conflict context.
+        //
+        // No-op guard: if `origin/<base>` is already an ancestor of HEAD the
+        // branch is current — no merge, no commit, no churn.  This is the
+        // first-cycle case (ensure_branch just cut the branch from
+        // `origin/<base>`), and the steady state once a cycle has merged.
+        //
+        // Clean merge: `try_merge` stages the result with `--no-commit`.  The
+        // downstream `WorkerDone` auto-commit would pick it up (MERGE_HEAD is
+        // set), but we commit it HERE, explicitly, so the merge lands even when
+        // the worker session makes NO further edits — a behind-base re-review
+        // must still record the merge commit, otherwise the guard never trips
+        // and the next cycle re-merges forever.  `git commit` with MERGE_HEAD
+        // set produces a proper merge commit; it clears MERGE_HEAD, so the
+        // worker's own later commit is an ordinary one on top.
+        //
+        // Conflicting merge: leave the markers on disk and fall through into
+        // the worker stage exactly like ConflictRetry — the worker resolves the
+        // conflict in-session via its editing tools, and the staged result is
+        // committed by the post-worker auto-commit.  (The worker-prompt file
+        // list is sourced independently from the task's DB
+        // `merge_conflict_metadata` in `execute_stage`; the on-disk merge state
+        // is what makes the conflict visible to the worker's tools.)
+        //
+        // All failures are logged-and-skipped: a fetch/merge hiccup must not
+        // abort the run — the worker still runs against the (un-synced) branch,
+        // preserving prior behavior.
+        if spec.trigger != TaskRunTrigger::ConflictRetry {
+            match workspace.is_up_to_date_with(&spec.base_branch).await {
+                Ok(true) => {
+                    debug!(
+                        task_run_id = %run_id,
+                        task_id = %spec.task_id,
+                        target = %spec.base_branch,
+                        "supervisor: task branch already current with target; skipping proactive sync"
+                    );
+                }
+                Ok(false) => match workspace.try_merge(&spec.base_branch).await {
+                    Ok(MergeOutcome::Clean) => {
+                        // Commit the staged merge now so it lands even with no
+                        // worker edits. Author as the task creator (resolved
+                        // host-side), mirroring the post-worker commit path;
+                        // falls back to the bot identity for system tasks.
+                        let identity = GitIdentity {
+                            name: spec.commit_author_name.as_deref().unwrap_or("djinn-bot"),
+                            email: spec
+                                .commit_author_email
+                                .as_deref()
+                                .unwrap_or("bot@djinn.local"),
+                        };
+                        let message =
+                            format!("Merge {} into {}", spec.base_branch, spec.task_branch);
+                        match workspace.commit(&message, identity).await {
+                            Ok(true) => {
+                                info!(
+                                    task_run_id = %run_id,
+                                    task_id = %spec.task_id,
+                                    target = %spec.base_branch,
+                                    "supervisor: proactive sync merged target into task branch and committed the merge"
+                                );
+                                // Push the merge commit to the mirror EAGERLY.
+                                // The post-worker auto-commit only pushes when
+                                // it produced a commit (worker edits present);
+                                // a behind-base re-review where the worker makes
+                                // NO edits would otherwise leave this merge
+                                // commit stranded in the ephemeral clone and the
+                                // mirror's task_branch never advances — so the
+                                // next cycle re-merges forever. Idempotent
+                                // (task_branch:task_branch); best-effort — a
+                                // failure here just means open_pr / the worker
+                                // push retries.
+                                if let Err(e) =
+                                    workspace.push_to_origin(&spec.task_branch).await
+                                {
+                                    tracing::warn!(
+                                        task_run_id = %run_id,
+                                        task_id = %spec.task_id,
+                                        branch = %spec.task_branch,
+                                        error = %e,
+                                        "supervisor: proactive sync eager push failed (worker/open_pr push will retry)"
+                                    );
+                                }
+                            }
+                            Ok(false) => {
+                                // try_merge staged a non-empty diff (we were
+                                // behind), so this should not happen; if it
+                                // does the merge produced no tree change and
+                                // nothing needs committing.
+                                debug!(
+                                    task_run_id = %run_id,
+                                    task_id = %spec.task_id,
+                                    target = %spec.base_branch,
+                                    "supervisor: proactive sync merge staged no tree change; nothing to commit"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    task_run_id = %run_id,
+                                    task_id = %spec.task_id,
+                                    target = %spec.base_branch,
+                                    error = %e,
+                                    "supervisor: proactive sync merge commit failed; worker runs with merge staged but uncommitted"
+                                );
+                            }
+                        }
+                    }
+                    Ok(MergeOutcome::Conflicts { files }) => {
+                        info!(
+                            task_run_id = %run_id,
+                            task_id = %spec.task_id,
+                            target = %spec.base_branch,
+                            conflict_count = files.len(),
+                            conflicting_files = ?files,
+                            "supervisor: proactive sync left conflicts on disk; worker will resolve them in-session"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            task_run_id = %run_id,
+                            task_id = %spec.task_id,
+                            target = %spec.base_branch,
+                            error = %e,
+                            "supervisor: proactive sync merge failed; worker will run without merge state on disk"
+                        );
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        task_run_id = %run_id,
+                        task_id = %spec.task_id,
+                        target = %spec.base_branch,
+                        error = %e,
+                        "supervisor: proactive sync up-to-date check failed; skipping sync"
+                    );
+                }
+            }
+        }
+
         // ConflictRetry pre-merge.  Without this the K8s worker pod sees a
         // clean checkout of task_branch and gets a list of conflicting file
         // paths in its prompt but no on-disk merge state — and dutifully
