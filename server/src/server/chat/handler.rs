@@ -42,6 +42,9 @@ use djinn_provider::message::{ContentBlock, Conversation, Message, Role};
 use djinn_provider::provider::{LlmProvider, StreamEvent, TelemetryMeta, create_provider};
 
 const MAX_TOOL_ITERATIONS: usize = 20;
+/// Reactive compact-and-retry attempts on a context-overflow stream failure in
+/// the chat loop (C3). Matches the worker reply loop's `MAX_COMPACTION_RETRIES`.
+const MAX_CHAT_COMPACTION_RETRIES: u32 = 2;
 
 /// The initial title stamped on a freshly-upserted chat session.  The
 /// server-side auto-title path in [`run_chat_loop`] only fires when it
@@ -482,6 +485,7 @@ pub(super) async fn completions_handler_impl(
                         needs_title,
                         user_turn_for_title,
                         model_for_title,
+                        context_window,
                     ),
                 ),
             )
@@ -504,9 +508,13 @@ async fn run_chat_loop(
     needs_title: bool,
     user_turn_for_title: Option<Vec<ContentBlock>>,
     model_id: String,
+    context_window: i64,
 ) {
     let agent_ctx = state.agent_context();
     let mut loop_count = 0usize;
+    // C3: bound the reactive compact-and-retry on a context-overflow stream
+    // failure, mirroring the worker reply loop's MAX_COMPACTION_RETRIES.
+    let mut compaction_attempts = 0u32;
     // Assistant content accumulated across every provider turn of the tool
     // loop, kept in memory only to seed the auto-title pass. Persistence is
     // incremental (see below): each assistant turn and its paired
@@ -544,6 +552,27 @@ async fn run_chat_loop(
             break;
         }
 
+        // C3: proactively compact before streaming. Chat reloads the full
+        // persisted history every request, so a long conversation would
+        // otherwise 400 on cumulative input. Reuses the worker reply loop's
+        // compaction machinery (same 80%-of-window trigger). After a compaction
+        // the in-memory estimate falls back below threshold, so this no-ops on
+        // subsequent iterations within the same request.
+        if djinn_agent::compaction::needs_compaction(
+            conversation.token_estimate() as u32,
+            context_window,
+        ) {
+            djinn_agent::compaction::compact_conversation(
+                provider.as_ref(),
+                &mut conversation,
+                &session_id,
+                "",
+                djinn_agent::compaction::CompactionContext::ChatSession,
+                context_window,
+            )
+            .await;
+        }
+
         let stream = match provider
             .stream(
                 &conversation,
@@ -554,6 +583,31 @@ async fn run_chat_loop(
         {
             Ok(s) => s,
             Err(e) => {
+                // C3 reactive net: a context-overflow (or orphaned-tool) failure
+                // on stream init is recoverable — summarise and retry rather than
+                // dropping the turn. Bounded by MAX_CHAT_COMPACTION_RETRIES.
+                if djinn_agent::compaction::is_compaction_recoverable_error(&e)
+                    && compaction_attempts < MAX_CHAT_COMPACTION_RETRIES
+                {
+                    compaction_attempts += 1;
+                    tracing::warn!(
+                        error = %e,
+                        attempt = compaction_attempts,
+                        "chat: recoverable stream-init failure; compacting and retrying"
+                    );
+                    if djinn_agent::compaction::compact_conversation(
+                        provider.as_ref(),
+                        &mut conversation,
+                        &session_id,
+                        "",
+                        djinn_agent::compaction::CompactionContext::ChatSession,
+                        context_window,
+                    )
+                    .await
+                    {
+                        continue;
+                    }
+                }
                 tracing::warn!(error=%e, "provider stream init failed");
                 let _ = tx
                     .send(sse_json_event(
