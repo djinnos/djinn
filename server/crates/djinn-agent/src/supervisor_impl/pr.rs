@@ -42,6 +42,7 @@ pub(crate) async fn supervisor_pr_open(
     if github_app_id().is_err() {
         return TaskRunOutcome::Failed {
             stage: "pr_open".into(),
+            provider_failure: None,
             reason: "GitHub App is not configured on this deployment — \
                      supervisor PR-open requires the App"
                 .into(),
@@ -54,6 +55,7 @@ pub(crate) async fn supervisor_pr_open(
         None => {
             return TaskRunOutcome::Failed {
                 stage: "pr_open".into(),
+                provider_failure: None,
                 reason: "supervisor PR-open requires MirrorManager but AgentContext has none"
                     .into(),
             };
@@ -67,6 +69,7 @@ pub(crate) async fn supervisor_pr_open(
         Ok(None) => {
             return TaskRunOutcome::Failed {
                 stage: "pr_open".into(),
+                provider_failure: None,
                 reason: format!(
                     "project {} has no github_owner/github_repo persisted",
                     spec.project_id
@@ -76,6 +79,7 @@ pub(crate) async fn supervisor_pr_open(
         Err(e) => {
             return TaskRunOutcome::Failed {
                 stage: "pr_open".into(),
+                provider_failure: None,
                 reason: format!(
                     "failed to read github coords for project {}: {e}",
                     spec.project_id
@@ -89,6 +93,7 @@ pub(crate) async fn supervisor_pr_open(
         Ok(None) => {
             return TaskRunOutcome::Failed {
                 stage: "pr_open".into(),
+                provider_failure: None,
                 reason: format!(
                     "project {} ({}/{}) has no cached installation_id",
                     spec.project_id, owner, repo_name
@@ -98,6 +103,7 @@ pub(crate) async fn supervisor_pr_open(
         Err(e) => {
             return TaskRunOutcome::Failed {
                 stage: "pr_open".into(),
+                provider_failure: None,
                 reason: format!(
                     "failed to read installation_id for project {}: {e}",
                     spec.project_id
@@ -111,6 +117,7 @@ pub(crate) async fn supervisor_pr_open(
         Err(e) => {
             return TaskRunOutcome::Failed {
                 stage: "pr_open".into(),
+                provider_failure: None,
                 reason: format!("could not mint installation token: {e}"),
             };
         }
@@ -206,6 +213,7 @@ pub(crate) async fn supervisor_pr_open(
         Err(e) => {
             return TaskRunOutcome::Failed {
                 stage: "pr_open".into(),
+                provider_failure: None,
                 reason: format!("push task_branch to GitHub failed: {e}"),
             };
         }
@@ -273,6 +281,7 @@ pub(crate) async fn supervisor_pr_open(
                         Err(e) => {
                             return TaskRunOutcome::Failed {
                                 stage: "pr_open".into(),
+                                provider_failure: None,
                                 reason: format!("GitHub PR creation failed: {e}"),
                             };
                         }
@@ -300,6 +309,7 @@ pub(crate) async fn supervisor_pr_open(
             Err(e) => {
                 return TaskRunOutcome::Failed {
                     stage: "pr_open".into(),
+                    provider_failure: None,
                     reason: format!("GitHub PR creation failed: {e}"),
                 };
             }

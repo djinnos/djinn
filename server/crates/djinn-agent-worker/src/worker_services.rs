@@ -274,6 +274,7 @@ impl SupervisorServices for WorkerSupervisorServices {
                         );
                         return TaskRunOutcome::Failed {
                             stage: "pr_open".into(),
+                            provider_failure: None,
                             reason: format!(
                                 "worker failed to push task_branch '{}' to mirror: {e}",
                                 spec.task_branch
@@ -290,6 +291,7 @@ impl SupervisorServices for WorkerSupervisorServices {
                     );
                     return TaskRunOutcome::Failed {
                         stage: "pr_open".into(),
+                        provider_failure: None,
                         reason: format!(
                             "worker failed to attach workspace at {} for task_branch '{}' push: {e}",
                             path.display(),

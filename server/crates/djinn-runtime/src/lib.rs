@@ -35,7 +35,8 @@ pub use handle::RunHandle;
 pub use session_runtime::{RuntimeError, SessionRuntime};
 pub use warmer::{GraphWarmerService, WarmerError};
 pub use spec::{
-    RoleKind, SupervisorFlow, TaskRunOutcome, TaskRunReport, TaskRunSpec, role_sequence,
+    ProviderFailureClass, RoleKind, SupervisorFlow, TaskRunOutcome, TaskRunReport, TaskRunSpec,
+    role_sequence,
 };
 pub use stream::{BiStream, StreamEvent, StreamFrame};
 pub use wire::{ControlMsg, MAX_FRAME_BYTES, WorkerEvent, WorkspaceRef, read_frame, write_frame};

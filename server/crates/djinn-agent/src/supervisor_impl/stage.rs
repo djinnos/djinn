@@ -91,9 +91,53 @@ use crate::actors::slot::reply_loop::{ReplyLoopContext, run_reply_loop};
 use crate::context::AgentContext;
 use djinn_provider::message::{Conversation, Message};
 use djinn_provider::provider::LlmProvider;
+use djinn_provider::provider::error::ProviderError;
+use djinn_runtime::ProviderFailureClass;
 use crate::roles::{AgentRole, role_impl_for};
 
 use super::SupervisorCallbackContext;
+
+/// Classify a reply-loop terminal error into the breaker-relevant
+/// [`ProviderFailureClass`] the host should act on, or `None` when the host
+/// circuit-breaker should stay out of it.
+///
+/// The typed [`ProviderError`] only exists here, in-pod, where the reply loop
+/// drives the provider directly; it is not serde-serializable and cannot ride
+/// the report frame, so we fold it into the small serde class that does. The
+/// host (`supervisor_runner.rs`) then maps the class back onto
+/// `record_failure` / `record_stall` for the task creator's `(scope, model)`
+/// bucket.
+///
+/// Mapping (mirrors the coordinator's throttle→stall / quiet-failure→failure
+/// intent):
+/// - `Authentication` | `InvalidRequest` | `InvalidOutput` |
+///   `ProviderInternal{5xx}` → [`ProviderFailureClass::Failure`]. These are
+///   "quiet but broken" — a bad/expired credential, a request the provider
+///   keeps rejecting, or a flapping backend. Fed to the gentler
+///   consecutive-failure breaker so a single transient blip doesn't demote the
+///   user's preferred model; only repeats trip it.
+/// - `RateLimit` → [`ProviderFailureClass::Throttle`]. A throttle/quota signal;
+///   fed to the immediate-failover breaker so dispatch moves to the next model
+///   at once with a cooldown that outlasts the task's redispatch ladder.
+/// - `ContextOverflow` | `EmptyCompletion` | `Transport` → `None`. Excluded by
+///   design: ContextOverflow is handled by reactive compaction (not a model
+///   health problem); EmptyCompletion has its own empty-turn backoff breaker in
+///   the reply loop; Transport is a one-off network blip. Tripping the breaker
+///   on these would needlessly demote a healthy model.
+/// - An untyped/legacy error (no `ProviderError` source) → `None`, so non-
+///   provider failures (git, tools, finalize-tool misuse) never trip it.
+fn classify_provider_failure(err: &anyhow::Error) -> Option<ProviderFailureClass> {
+    match err.downcast_ref::<ProviderError>()? {
+        ProviderError::Authentication
+        | ProviderError::InvalidRequest
+        | ProviderError::InvalidOutput
+        | ProviderError::ProviderInternal { .. } => Some(ProviderFailureClass::Failure),
+        ProviderError::RateLimit { .. } => Some(ProviderFailureClass::Throttle),
+        ProviderError::ContextOverflow
+        | ProviderError::EmptyCompletion
+        | ProviderError::Transport => None,
+    }
+}
 
 /// Read-only multi-repo: clone each of the epic's read-source projects
 /// read-only into a gitignored dir inside the worktree and resolve their
@@ -523,6 +567,9 @@ pub(crate) async fn execute_stage(
     let stage_outcome = match reply_result {
         Err(e) => StageOutcome::Failed {
             reason: format!("reply loop error: {e}"),
+            // Classify the typed provider error (if any) so the host breaker
+            // can fail over off a structurally-broken model/credential.
+            provider_failure: classify_provider_failure(&e),
         },
         Ok(()) => {
             let finalize_name = final_output.finalize_tool_name.as_deref().unwrap_or("");
@@ -536,6 +583,7 @@ pub(crate) async fn execute_stage(
                     "" => StageOutcome::WorkerDone,
                     other => StageOutcome::Failed {
                         reason: format!("worker finalized via unexpected tool '{other}'"),
+                        provider_failure: None,
                     },
                 },
                 RoleKind::Planner => match finalize_name {
@@ -562,11 +610,13 @@ pub(crate) async fn execute_stage(
                             },
                             other => StageOutcome::Failed {
                                 reason: format!("planner submitted unknown decision '{other}'"),
+                                provider_failure: None,
                             },
                         }
                     }
                     other => StageOutcome::Failed {
                         reason: format!("planner finalized via unexpected tool '{other}'"),
+                        provider_failure: None,
                     },
                 },
                 RoleKind::Reviewer => match finalize_name {
@@ -595,6 +645,7 @@ pub(crate) async fn execute_stage(
                             },
                             other => StageOutcome::Failed {
                                 reason: format!("reviewer submitted unknown verdict '{other}'"),
+                                provider_failure: None,
                             },
                         }
                     }
@@ -622,15 +673,18 @@ pub(crate) async fn execute_stage(
                     },
                     other => StageOutcome::Failed {
                         reason: format!("reviewer finalized via unexpected tool '{other}'"),
+                        provider_failure: None,
                     },
                 },
                 RoleKind::Verifier => StageOutcome::Failed {
                     reason: "verifier stage not yet wired in supervisor".into(),
+                    provider_failure: None,
                 },
                 RoleKind::Architect => match finalize_name {
                     "submit_work" => StageOutcome::ArchitectDone,
                     other => StageOutcome::Failed {
                         reason: format!("architect finalized via unexpected tool '{other}'"),
+                        provider_failure: None,
                     },
                 },
             }
@@ -679,4 +733,75 @@ fn extract_reason(payload: &Option<serde_json::Value>) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Wrap a `ProviderError` the way the reply loop surfaces it: as the source
+    /// of an `anyhow::Error` carrying a readable context line.
+    fn typed(e: ProviderError) -> anyhow::Error {
+        anyhow::Error::new(e).context("provider stream event failed")
+    }
+
+    #[test]
+    fn quiet_failures_map_to_failure_class() {
+        // Auth / invalid-request / invalid-output / 5xx are "quiet but broken"
+        // → gentle consecutive-failure breaker.
+        for e in [
+            ProviderError::Authentication,
+            ProviderError::InvalidRequest,
+            ProviderError::InvalidOutput,
+            ProviderError::ProviderInternal { status: 500 },
+            ProviderError::ProviderInternal { status: 503 },
+        ] {
+            assert_eq!(
+                classify_provider_failure(&typed(e.clone())),
+                Some(ProviderFailureClass::Failure),
+                "{e:?} should map to Failure",
+            );
+        }
+    }
+
+    #[test]
+    fn rate_limit_maps_to_throttle_class() {
+        assert_eq!(
+            classify_provider_failure(&typed(ProviderError::RateLimit {
+                retry_after_ms: None
+            })),
+            Some(ProviderFailureClass::Throttle),
+        );
+        assert_eq!(
+            classify_provider_failure(&typed(ProviderError::RateLimit {
+                retry_after_ms: Some(60_000)
+            })),
+            Some(ProviderFailureClass::Throttle),
+        );
+    }
+
+    #[test]
+    fn breaker_excluded_variants_map_to_none() {
+        // ContextOverflow → reactive compaction; EmptyCompletion → empty-turn
+        // backoff breaker; Transport → one-off blip. None must feed the breaker.
+        for e in [
+            ProviderError::ContextOverflow,
+            ProviderError::EmptyCompletion,
+            ProviderError::Transport,
+        ] {
+            assert_eq!(
+                classify_provider_failure(&typed(e.clone())),
+                None,
+                "{e:?} must not feed the breaker",
+            );
+        }
+    }
+
+    #[test]
+    fn untyped_error_maps_to_none() {
+        // A non-provider failure (git push, tool error, finalize misuse) carries
+        // no `ProviderError` source → must never trip the breaker.
+        let untyped = anyhow::anyhow!("worker failed to push task_branch to mirror");
+        assert_eq!(classify_provider_failure(&untyped), None);
+    }
 }

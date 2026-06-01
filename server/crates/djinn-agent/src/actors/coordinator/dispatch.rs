@@ -2271,7 +2271,7 @@ impl CoordinatorActor {
                         "CoordinatorActor: approved task had no commits to PR — closed as completed"
                     );
                 }
-                djinn_runtime::TaskRunOutcome::Failed { stage, reason } => {
+                djinn_runtime::TaskRunOutcome::Failed { stage, reason, .. } => {
                     // Race-tolerant pr_errors gate. The coordinator's tick
                     // path and the supervisor body's own open_pr can fire
                     // concurrently for the same task. When the race-loser

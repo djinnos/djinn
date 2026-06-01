@@ -423,6 +423,42 @@ pub(crate) async fn run_supervisor_dispatch(
                     .health_tracker
                     .record_success(creator_scope.as_deref(), &model_id);
             }
+            // Symmetric to `record_success`: feed the breaker when a stage
+            // failed FAST on a typed provider error that produced no token
+            // stall. The coordinator's stall detector only catches sessions that
+            // hang; a fast rejection (bad/expired credential, a request the
+            // provider keeps rejecting, repeated 5xx, a throttle answered with a
+            // 4xx instead of a hang) exits cleanly and was previously invisible
+            // to the breaker — so dispatch kept re-selecting a model that is
+            // structurally broken for this user. `stage.rs` classified the
+            // typed `ProviderError` (which lives only in-pod and can't ride the
+            // report frame) into a `ProviderFailureClass`; map it back here onto
+            // the SAME knobs the coordinator's stall path uses, keyed on the
+            // SAME `creator_scope` as `record_success` so the trip is scoped to
+            // this task's creator, not global:
+            //   - Throttle  → `record_stall`   (rate-limit: immediate failover,
+            //     cooldown outlasts the task's redispatch ladder; mirrors the
+            //     coordinator's throttle→stall intent).
+            //   - Failure   → `record_failure` (auth/invalid/5xx/invalid-output:
+            //     gentler, trips only after repeats — a one-off may be transient).
+            // ContextOverflow / EmptyCompletion / Transport and untyped errors
+            // classified to `None` in `stage.rs` and are deliberately NOT fed
+            // (reactive compaction / empty-turn backoff / one-off blip handle
+            // those; non-provider errors must not over-trip the breaker).
+            if let TaskRunOutcome::Failed {
+                provider_failure: Some(class),
+                ..
+            } = &report.outcome
+            {
+                match class {
+                    djinn_runtime::ProviderFailureClass::Throttle => app_state
+                        .health_tracker
+                        .record_stall(creator_scope.as_deref(), &model_id),
+                    djinn_runtime::ProviderFailureClass::Failure => app_state
+                        .health_tracker
+                        .record_failure(creator_scope.as_deref(), &model_id),
+                }
+            }
             // Phase 2.2: post-session knowledge extraction. Fire-and-forget on
             // the long-lived server (it owns the embedding model + Qdrant, so
             // notes created here get embedded; worker pods are ephemeral and
