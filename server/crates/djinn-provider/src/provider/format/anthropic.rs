@@ -220,6 +220,24 @@ impl AnthropicProvider {
             body["system"] = system_value;
         }
 
+        // Extended thinking. `None` => no `thinking` block (pre-B5 behavior).
+        // `Some(tier)` => enable extended thinking with a per-tier budget,
+        // clamped strictly below the request's `max_tokens` (Anthropic requires
+        // budget_tokens < max_tokens). When thinking is enabled Anthropic also
+        // requires `temperature` to be unset/1, so we never set temperature on
+        // this path (we don't today), and the tool_choice block below skips
+        // emitting a forcing `tool_choice` while thinking is on.
+        if let Some(tier) = self.config.reasoning_effort {
+            let budget = tier
+                .thinking_budget()
+                .min(max_tokens.saturating_sub(1))
+                .max(1);
+            body["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": budget
+            });
+        }
+
         if let Some(serialized_tools) = Self::serialize_tools_for_request(conversation, tools) {
             body["tools"] = serialized_tools;
 
@@ -279,18 +297,34 @@ pub(crate) fn parse_anthropic_event(
     data: &str,
     tool_acc: &mut Option<ToolAcc>,
     input_tokens: &mut u32,
+    cache_read: &mut u32,
+    cache_write: &mut u32,
 ) -> Vec<StreamEvent> {
     let mut events = vec![];
 
     match event_type {
         "message_start" => {
-            // {"type":"message_start","message":{"usage":{"input_tokens":N,...}}}
-            if let Ok(v) = serde_json::from_str::<Value>(data)
-                && let Some(n) = v
+            // {"type":"message_start","message":{"usage":{"input_tokens":N,
+            //  "cache_read_input_tokens":N,"cache_creation_input_tokens":N,...}}}
+            if let Ok(v) = serde_json::from_str::<Value>(data) {
+                if let Some(n) = v
                     .pointer("/message/usage/input_tokens")
                     .and_then(|x| x.as_u64())
-            {
-                *input_tokens = n as u32;
+                {
+                    *input_tokens = n as u32;
+                }
+                if let Some(n) = v
+                    .pointer("/message/usage/cache_read_input_tokens")
+                    .and_then(|x| x.as_u64())
+                {
+                    *cache_read = n as u32;
+                }
+                if let Some(n) = v
+                    .pointer("/message/usage/cache_creation_input_tokens")
+                    .and_then(|x| x.as_u64())
+                {
+                    *cache_write = n as u32;
+                }
             }
         }
 
@@ -382,13 +416,30 @@ pub(crate) fn parse_anthropic_event(
         }
 
         "message_delta" => {
-            // {"type":"message_delta","usage":{"output_tokens":N}}
+            // {"type":"message_delta","usage":{"output_tokens":N,
+            //  "cache_read_input_tokens":N,"cache_creation_input_tokens":N}}
+            // Anthropic may also restate cache counts here — fold them in if present.
             if let Ok(v) = serde_json::from_str::<Value>(data)
                 && let Some(n) = v.pointer("/usage/output_tokens").and_then(|x| x.as_u64())
             {
+                if let Some(c) = v
+                    .pointer("/usage/cache_read_input_tokens")
+                    .and_then(|x| x.as_u64())
+                {
+                    *cache_read = c as u32;
+                }
+                if let Some(c) = v
+                    .pointer("/usage/cache_creation_input_tokens")
+                    .and_then(|x| x.as_u64())
+                {
+                    *cache_write = c as u32;
+                }
                 events.push(StreamEvent::Usage(TokenUsage {
                     input: *input_tokens,
                     output: n as u32,
+                    cache_read: *cache_read,
+                    cache_write: *cache_write,
+                    reasoning_output: 0,
                 }));
             }
         }
@@ -438,6 +489,8 @@ impl LlmProvider for AnthropicProvider {
                 Box::pin(stream! {
                     let mut tool_acc: Option<ToolAcc> = None;
                     let mut input_tokens: u32 = 0;
+                    let mut cache_read: u32 = 0;
+                    let mut cache_write: u32 = 0;
 
                     // Anthropic SSE uses event: / data: pairs
                     // Our client currently yields only data: lines.
@@ -452,7 +505,7 @@ impl LlmProvider for AnthropicProvider {
                                 // Anthropic data lines contain the event type in the JSON
                                 if let Ok(v) = serde_json::from_str::<Value>(&line) {
                                     let event_type = v["type"].as_str().unwrap_or("").to_string();
-                                    for event in parse_anthropic_event(&event_type, &line, &mut tool_acc, &mut input_tokens) {
+                                    for event in parse_anthropic_event(&event_type, &line, &mut tool_acc, &mut input_tokens, &mut cache_read, &mut cache_write) {
                                         yield Ok(event);
                                     }
                                 }
@@ -516,6 +569,7 @@ mod tests {
                 streaming: true,
                 max_tokens_default: Some(64_000),
             },
+            reasoning_effort: None,
         }
     }
 
@@ -528,9 +582,38 @@ mod tests {
         let data = r#"{"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"claude-3-5-sonnet","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":25,"output_tokens":1}}}"#;
         let mut acc = None;
         let mut input_tokens = 0u32;
-        let events = parse_anthropic_event("message_start", data, &mut acc, &mut input_tokens);
+        let mut cache_read = 0u32;
+        let mut cache_write = 0u32;
+        let events = parse_anthropic_event(
+            "message_start",
+            data,
+            &mut acc,
+            &mut input_tokens,
+            &mut cache_read,
+            &mut cache_write,
+        );
         assert!(events.is_empty());
         assert_eq!(input_tokens, 25);
+    }
+
+    #[test]
+    fn test_message_start_extracts_cache_tokens() {
+        let data = r#"{"type":"message_start","message":{"usage":{"input_tokens":25,"cache_read_input_tokens":1000,"cache_creation_input_tokens":40}}}"#;
+        let mut acc = None;
+        let mut input_tokens = 0u32;
+        let mut cache_read = 0u32;
+        let mut cache_write = 0u32;
+        parse_anthropic_event(
+            "message_start",
+            data,
+            &mut acc,
+            &mut input_tokens,
+            &mut cache_read,
+            &mut cache_write,
+        );
+        assert_eq!(input_tokens, 25);
+        assert_eq!(cache_read, 1000);
+        assert_eq!(cache_write, 40);
     }
 
     #[test]
@@ -538,8 +621,16 @@ mod tests {
         let data = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
         let mut acc = None;
         let mut input_tokens = 0u32;
-        let events =
-            parse_anthropic_event("content_block_delta", data, &mut acc, &mut input_tokens);
+        let mut cache_read = 0u32;
+        let mut cache_write = 0u32;
+        let events = parse_anthropic_event(
+            "content_block_delta",
+            data,
+            &mut acc,
+            &mut input_tokens,
+            &mut cache_read,
+            &mut cache_write,
+        );
         assert_eq!(events.len(), 1);
         match &events[0] {
             StreamEvent::Delta(ContentBlock::Text { text }) => assert_eq!(text, "Hello"),
@@ -551,20 +642,50 @@ mod tests {
     fn test_tool_use_accumulation() {
         let mut acc = None;
         let mut input_tokens = 0u32;
+        let mut cache_read = 0u32;
+        let mut cache_write = 0u32;
 
         let start = r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"shell"}}"#;
-        let e1 = parse_anthropic_event("content_block_start", start, &mut acc, &mut input_tokens);
+        let e1 = parse_anthropic_event(
+            "content_block_start",
+            start,
+            &mut acc,
+            &mut input_tokens,
+            &mut cache_read,
+            &mut cache_write,
+        );
         assert!(e1.is_empty());
         assert!(acc.is_some());
 
         let frag1 = r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":\"l"}}"#;
-        parse_anthropic_event("content_block_delta", frag1, &mut acc, &mut input_tokens);
+        parse_anthropic_event(
+            "content_block_delta",
+            frag1,
+            &mut acc,
+            &mut input_tokens,
+            &mut cache_read,
+            &mut cache_write,
+        );
 
         let frag2 = r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"s\",\"dir\":\"/tmp\"}"}}"#;
-        parse_anthropic_event("content_block_delta", frag2, &mut acc, &mut input_tokens);
+        parse_anthropic_event(
+            "content_block_delta",
+            frag2,
+            &mut acc,
+            &mut input_tokens,
+            &mut cache_read,
+            &mut cache_write,
+        );
 
         let stop = r#"{"type":"content_block_stop","index":0}"#;
-        let events = parse_anthropic_event("content_block_stop", stop, &mut acc, &mut input_tokens);
+        let events = parse_anthropic_event(
+            "content_block_stop",
+            stop,
+            &mut acc,
+            &mut input_tokens,
+            &mut cache_read,
+            &mut cache_write,
+        );
         assert_eq!(events.len(), 1);
         match &events[0] {
             StreamEvent::Delta(ContentBlock::ToolUse { id, name, input }) => {
@@ -583,12 +704,24 @@ mod tests {
         let data = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}"#;
         let mut acc = None;
         let mut input_tokens = 10u32;
-        let events = parse_anthropic_event("message_delta", data, &mut acc, &mut input_tokens);
+        let mut cache_read = 3u32;
+        let mut cache_write = 7u32;
+        let events = parse_anthropic_event(
+            "message_delta",
+            data,
+            &mut acc,
+            &mut input_tokens,
+            &mut cache_read,
+            &mut cache_write,
+        );
         assert_eq!(events.len(), 1);
         match &events[0] {
             StreamEvent::Usage(u) => {
                 assert_eq!(u.input, 10);
                 assert_eq!(u.output, 42);
+                // Cache counts carried from message_start are folded into usage.
+                assert_eq!(u.cache_read, 3);
+                assert_eq!(u.cache_write, 7);
             }
             _ => panic!("expected usage"),
         }
@@ -599,7 +732,16 @@ mod tests {
         let data = r#"{"type":"message_stop"}"#;
         let mut acc = None;
         let mut input_tokens = 0u32;
-        let events = parse_anthropic_event("message_stop", data, &mut acc, &mut input_tokens);
+        let mut cache_read = 0u32;
+        let mut cache_write = 0u32;
+        let events = parse_anthropic_event(
+            "message_stop",
+            data,
+            &mut acc,
+            &mut input_tokens,
+            &mut cache_read,
+            &mut cache_write,
+        );
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], StreamEvent::Done));
     }
@@ -712,8 +854,16 @@ mod tests {
         let data = r#"{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{}"}}"#;
         let mut acc = None;
         let mut input_tokens = 0u32;
-        let events =
-            parse_anthropic_event("content_block_delta", data, &mut acc, &mut input_tokens);
+        let mut cache_read = 0u32;
+        let mut cache_write = 0u32;
+        let events = parse_anthropic_event(
+            "content_block_delta",
+            data,
+            &mut acc,
+            &mut input_tokens,
+            &mut cache_read,
+            &mut cache_write,
+        );
         assert!(events.is_empty());
         assert!(acc.is_none());
     }
@@ -909,6 +1059,76 @@ mod tests {
             req.get("system").is_none(),
             "system field should be absent when all system content blocks are empty"
         );
+    }
+
+    // ─── B5: reasoning-effort -> thinking block ─────────────────────────────
+
+    #[test]
+    fn test_reasoning_effort_none_omits_thinking_block() {
+        // None must preserve pre-B5 behavior: no `thinking` block at all.
+        let provider = test_provider();
+        let mut conv = Conversation::default();
+        conv.push(crate::message::Message::user("hello"));
+        let req = provider.build_request(&conv, &[], None);
+        assert!(
+            req.get("thinking").is_none(),
+            "thinking block must be absent when reasoning_effort is None"
+        );
+    }
+
+    #[test]
+    fn test_reasoning_effort_high_enables_thinking() {
+        use crate::provider::ReasoningEffort;
+        let mut config = test_anthropic_config();
+        config.reasoning_effort = Some(ReasoningEffort::High);
+        let provider = AnthropicProvider::new(config);
+        let mut conv = Conversation::default();
+        conv.push(crate::message::Message::user("hello"));
+        let req = provider.build_request(&conv, &[], None);
+        assert_eq!(req["thinking"]["type"], "enabled");
+        // High budget (24000) is below max_tokens (64000), so it passes through.
+        assert_eq!(req["thinking"]["budget_tokens"], 24_000);
+    }
+
+    #[test]
+    fn test_reasoning_effort_budget_clamped_below_max_tokens() {
+        use crate::provider::{ProviderCapabilities, ReasoningEffort};
+        let mut config = test_anthropic_config();
+        // Force a tiny output limit so the tier budget must be clamped.
+        config.capabilities = ProviderCapabilities {
+            streaming: true,
+            max_tokens_default: Some(2_000),
+        };
+        config.reasoning_effort = Some(ReasoningEffort::High);
+        let provider = AnthropicProvider::new(config);
+        let mut conv = Conversation::default();
+        conv.push(crate::message::Message::user("hello"));
+        let req = provider.build_request(&conv, &[], None);
+        assert_eq!(req["thinking"]["type"], "enabled");
+        // Clamped to max_tokens - 1.
+        assert_eq!(req["thinking"]["budget_tokens"], 1_999);
+    }
+
+    #[test]
+    fn test_reasoning_effort_enabled_skips_forced_tool_choice() {
+        use crate::provider::ReasoningEffort;
+        let mut config = test_anthropic_config();
+        config.reasoning_effort = Some(ReasoningEffort::Medium);
+        let provider = AnthropicProvider::new(config);
+        let mut conv = Conversation::default();
+        conv.push(crate::message::Message::user("hello"));
+        let tools = vec![json!({
+            "name": "do_thing",
+            "description": "does a thing",
+            "input_schema": {"type": "object", "properties": {}}
+        })];
+        let req = provider.build_request(&conv, &tools, Some(ToolChoice::Required));
+        // With thinking enabled, the forcing tool_choice must NOT be emitted.
+        assert!(
+            req.get("tool_choice").is_none(),
+            "tool_choice must be omitted when thinking is enabled"
+        );
+        assert_eq!(req["thinking"]["type"], "enabled");
     }
 
     #[test]

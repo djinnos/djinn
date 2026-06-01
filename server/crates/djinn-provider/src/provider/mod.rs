@@ -1,6 +1,9 @@
 pub mod client;
+pub mod error;
 pub mod format;
 pub mod telemetry;
+
+pub use error::ProviderError;
 
 use std::pin::Pin;
 
@@ -16,6 +19,19 @@ use crate::message::{ContentBlock, Conversation};
 pub struct TokenUsage {
     pub input: u32,
     pub output: u32,
+    /// Input tokens served from the provider's prompt cache (cache hit).
+    /// All cache/reasoning fields ride the worker-RPC `LlmResponse` wire path,
+    /// so they are `#[serde(default)]` to stay backward-compatible with older
+    /// serialized rows that predate cache-token accounting.
+    #[serde(default)]
+    pub cache_read: u32,
+    /// Input tokens written to the provider's prompt cache (cache creation).
+    #[serde(default)]
+    pub cache_write: u32,
+    /// Reasoning/chain-of-thought tokens billed as output (when the provider
+    /// reports them separately, e.g. OpenAI `reasoning_tokens`).
+    #[serde(default)]
+    pub reasoning_output: u32,
 }
 
 // ─── Stream events ────────────────────────────────────────────────────────────
@@ -85,6 +101,51 @@ impl Default for ProviderCapabilities {
     }
 }
 
+// ─── Reasoning effort ─────────────────────────────────────────────────────────
+
+/// Normalized reasoning-effort tier, translated per wire format at request time.
+///
+/// This is the provider-neutral knob; each format builder maps it to its own
+/// representation (OpenAI Responses `reasoning.effort`, Anthropic
+/// `thinking.budget_tokens`, Google `thinkingConfig.thinkingBudget`).
+///
+/// IMPORTANT: this field is `Option<ReasoningEffort>` on [`ProviderConfig`] and
+/// every existing call site leaves it `None`. When `None`, each format MUST
+/// emit byte-identical requests to its pre-B5 behavior (see the per-format
+/// `build_request` impls). The tiers below only take effect when a caller
+/// explicitly opts in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    Minimal,
+    Low,
+    Medium,
+    High,
+}
+
+impl ReasoningEffort {
+    /// OpenAI Responses `reasoning.effort` token for this tier.
+    pub fn openai_effort(self) -> &'static str {
+        match self {
+            ReasoningEffort::Minimal => "minimal",
+            ReasoningEffort::Low => "low",
+            ReasoningEffort::Medium => "medium",
+            ReasoningEffort::High => "high",
+        }
+    }
+
+    /// Suggested thinking-token budget for this tier (Anthropic / Google).
+    /// The caller is responsible for clamping below the model's output limit.
+    pub fn thinking_budget(self) -> u32 {
+        match self {
+            ReasoningEffort::Minimal => 1024,
+            ReasoningEffort::Low => 4096,
+            ReasoningEffort::Medium => 12_000,
+            ReasoningEffort::High => 24_000,
+        }
+    }
+}
+
 // ─── Provider configuration ───────────────────────────────────────────────────
 
 /// Configuration for a single provider instance.
@@ -108,6 +169,11 @@ pub struct ProviderConfig {
     pub provider_headers: std::collections::HashMap<String, String>,
     /// Provider-level capabilities.
     pub capabilities: ProviderCapabilities,
+    /// Normalized reasoning-effort tier. `None` preserves the pre-B5 default
+    /// behavior for every format (OpenAI Responses `effort:"medium"`, no
+    /// Anthropic `thinking` block, no Google `thinkingConfig`). `Some(tier)`
+    /// opts the request into per-format reasoning control.
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 /// Metadata attached to each provider call for OTel tracing.

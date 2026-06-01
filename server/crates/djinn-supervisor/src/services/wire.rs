@@ -1136,6 +1136,7 @@ mod tests {
             usage: TokenUsage {
                 input: 12,
                 output: 7,
+                ..Default::default()
             },
         };
         let payload_str = serde_json::to_string(&llm_resp).unwrap();

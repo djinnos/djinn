@@ -48,8 +48,16 @@ impl OpenAIResponsesProvider {
         // GPT-5.x defaults to effort=none; we raise it and request summaries
         // so the thinking content is captured and persisted.
         if is_reasoning_capable_model(&self.config.model_id) {
+            // `None` preserves the pre-B5 default (effort=medium); `Some(tier)`
+            // maps the normalized effort onto the Responses `reasoning.effort`
+            // token. `summary:"detailed"` is unconditional either way.
+            let effort = self
+                .config
+                .reasoning_effort
+                .map(|tier| tier.openai_effort())
+                .unwrap_or("medium");
             body["reasoning"] = json!({
-                "effort": "medium",
+                "effort": effort,
                 "summary": "detailed"
             });
         }
@@ -156,6 +164,22 @@ struct ResponseMetadata {
 struct ResponseUsage {
     input_tokens: u32,
     output_tokens: u32,
+    #[serde(default)]
+    input_tokens_details: Option<InputTokensDetails>,
+    #[serde(default)]
+    output_tokens_details: Option<OutputTokensDetails>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct InputTokensDetails {
+    #[serde(default)]
+    cached_tokens: u32,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct OutputTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: u32,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -362,9 +386,22 @@ fn parse_responses_line(line: &str, accumulated_items: &mut Vec<OutputItemInfo>)
 
             // Emit usage
             if let Some(usage) = response.usage {
+                let cache_read = usage
+                    .input_tokens_details
+                    .as_ref()
+                    .map(|d| d.cached_tokens)
+                    .unwrap_or(0);
+                let reasoning_output = usage
+                    .output_tokens_details
+                    .as_ref()
+                    .map(|d| d.reasoning_tokens)
+                    .unwrap_or(0);
                 events.push(StreamEvent::Usage(TokenUsage {
                     input: usage.input_tokens,
                     output: usage.output_tokens,
+                    cache_read,
+                    cache_write: 0,
+                    reasoning_output,
                 }));
             }
 
@@ -526,6 +563,7 @@ mod tests {
             session_affinity_key: None,
             provider_headers: Default::default(),
             capabilities: ProviderCapabilities::default(),
+            reasoning_effort: None,
         })
     }
 
@@ -970,7 +1008,8 @@ mod tests {
             &events[2],
             StreamEvent::Usage(TokenUsage {
                 input: 11,
-                output: 13
+                output: 13,
+                ..
             })
         ));
         assert!(matches!(&events[3], StreamEvent::Done));
@@ -1108,6 +1147,51 @@ mod tests {
         conv.push(Message::user("Hello"));
         let req = provider.build_request(&conv, &[], None);
         assert!(req.get("reasoning").is_none());
+    }
+
+    // ─── B5: reasoning-effort tier mapping ──────────────────────────────────
+
+    #[test]
+    fn test_reasoning_effort_none_is_medium_default() {
+        // None must be byte-identical to the pre-B5 default.
+        let mut config = test_provider().config.clone();
+        config.model_id = "gpt-5.4".to_string();
+        config.reasoning_effort = None;
+        let provider = OpenAIResponsesProvider::new(config);
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+        let req = provider.build_request(&conv, &[], None);
+        assert_eq!(req["reasoning"]["effort"], "medium");
+        assert_eq!(req["reasoning"]["summary"], "detailed");
+    }
+
+    #[test]
+    fn test_reasoning_effort_high_maps_effort() {
+        use crate::provider::ReasoningEffort;
+        let mut config = test_provider().config.clone();
+        config.model_id = "gpt-5.4".to_string();
+        config.reasoning_effort = Some(ReasoningEffort::High);
+        let provider = OpenAIResponsesProvider::new(config);
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+        let req = provider.build_request(&conv, &[], None);
+        assert_eq!(req["reasoning"]["effort"], "high");
+        // summary stays "detailed" regardless of tier.
+        assert_eq!(req["reasoning"]["summary"], "detailed");
+    }
+
+    #[test]
+    fn test_reasoning_effort_minimal_maps_effort() {
+        use crate::provider::ReasoningEffort;
+        let mut config = test_provider().config.clone();
+        config.model_id = "gpt-5.4".to_string();
+        config.reasoning_effort = Some(ReasoningEffort::Minimal);
+        let provider = OpenAIResponsesProvider::new(config);
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+        let req = provider.build_request(&conv, &[], None);
+        assert_eq!(req["reasoning"]["effort"], "minimal");
+        assert_eq!(req["reasoning"]["summary"], "detailed");
     }
 
     #[tokio::test]

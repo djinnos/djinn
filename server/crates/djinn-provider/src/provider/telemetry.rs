@@ -280,6 +280,24 @@ impl SessionSpan {
         ));
     }
 
+    /// Record cache + reasoning token usage on the session trace so prompt
+    /// caching (ADR-043) is observable in Langfuse.
+    pub fn record_cache_usage(&self, cache_read: u32, cache_write: u32, reasoning_output: u32) {
+        let span = self.cx.span();
+        span.set_attribute(KeyValue::new(
+            "gen_ai.usage.cache_read_input_tokens",
+            cache_read as i64,
+        ));
+        span.set_attribute(KeyValue::new(
+            "gen_ai.usage.cache_creation_input_tokens",
+            cache_write as i64,
+        ));
+        span.set_attribute(KeyValue::new(
+            "gen_ai.usage.reasoning_tokens",
+            reasoning_output as i64,
+        ));
+    }
+
     /// Get the context for creating child spans.
     pub fn context(&self) -> &Context {
         &self.cx
@@ -359,6 +377,24 @@ impl LlmSpan {
         span.set_attribute(KeyValue::new(
             "gen_ai.usage.total_tokens",
             (input_tokens + output_tokens) as i64,
+        ));
+    }
+
+    /// Record cache + reasoning token usage on the generation observation so
+    /// prompt caching (ADR-043) is observable in Langfuse.
+    pub fn record_cache_usage(&self, cache_read: u32, cache_write: u32, reasoning_output: u32) {
+        let span = self.cx.span();
+        span.set_attribute(KeyValue::new(
+            "gen_ai.usage.cache_read_input_tokens",
+            cache_read as i64,
+        ));
+        span.set_attribute(KeyValue::new(
+            "gen_ai.usage.cache_creation_input_tokens",
+            cache_write as i64,
+        ));
+        span.set_attribute(KeyValue::new(
+            "gen_ai.usage.reasoning_tokens",
+            reasoning_output as i64,
         ));
     }
 

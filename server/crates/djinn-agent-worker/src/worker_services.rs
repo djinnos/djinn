@@ -138,6 +138,7 @@ pub(crate) fn build_provider_from_serializable(
                 session_affinity_key: None,
                 provider_headers: Default::default(),
                 capabilities: capabilities_for_provider(&provider_id),
+                reasoning_effort: None,
             });
             Ok(Arc::from(provider))
         }

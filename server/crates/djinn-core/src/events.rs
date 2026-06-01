@@ -238,6 +238,7 @@ impl DjinnEventEnvelope {
     ) -> Self {
         Self { entity_type: "session", action: "dispatched", payload: serde_json::to_value(serde_json::json!({"project_id": project_id, "task_id": task_id, "model_id": model_id, "agent_type": agent_type})).unwrap(), id: None, project_id: Some(project_id.to_string()), from_sync: false }
     }
+    #[allow(clippy::too_many_arguments)]
     pub fn session_token_update(
         session_id: &str,
         task_id: &str,
@@ -245,8 +246,11 @@ impl DjinnEventEnvelope {
         tokens_out: i64,
         context_window: i64,
         usage_pct: f64,
+        cache_read: i64,
+        cache_write: i64,
+        reasoning_out: i64,
     ) -> Self {
-        Self { entity_type: "session", action: "token_update", payload: serde_json::to_value(serde_json::json!({"session_id": session_id, "task_id": task_id, "tokens_in": tokens_in, "tokens_out": tokens_out, "context_window": context_window, "usage_pct": usage_pct})).unwrap(), id: None, project_id: None, from_sync: false }
+        Self { entity_type: "session", action: "token_update", payload: serde_json::to_value(serde_json::json!({"session_id": session_id, "task_id": task_id, "tokens_in": tokens_in, "tokens_out": tokens_out, "context_window": context_window, "usage_pct": usage_pct, "cache_read": cache_read, "cache_write": cache_write, "reasoning_out": reasoning_out})).unwrap(), id: None, project_id: None, from_sync: false }
     }
     pub fn session_message(
         session_id: &str,

@@ -42,6 +42,7 @@ pub fn codex_provider_config(tokens: &codex::CodexTokens) -> ProviderConfig {
         session_affinity_key: None,
         provider_headers,
         capabilities: ProviderCapabilities::default(),
+        reasoning_effort: None,
     }
 }
 
@@ -57,5 +58,6 @@ pub fn copilot_provider_config(tokens: &copilot::CopilotTokens) -> ProviderConfi
         session_affinity_key: None,
         provider_headers: Default::default(),
         capabilities: ProviderCapabilities::default(),
+        reasoning_effort: None,
     }
 }

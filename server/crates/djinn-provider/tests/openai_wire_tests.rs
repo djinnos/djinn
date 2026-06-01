@@ -20,6 +20,7 @@ fn provider_config(base_url: &str) -> ProviderConfig {
         session_affinity_key: None,
         provider_headers: Default::default(),
         capabilities: ProviderCapabilities::default(),
+        reasoning_effort: None,
     }
 }
 
