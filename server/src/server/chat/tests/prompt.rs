@@ -473,8 +473,13 @@ async fn codebase_header_builder_renders_status_hotspots_and_tree() {
     assert!(combined.contains("auth::verify_token"));
     assert!(combined.contains("- src/"));
     assert!(combined.contains("be brief"));
-    // Budget — header itself stays under 2KB even with all three signals.
-    assert!(header.len() <= 2_000);
+    // G7 — the codebase header is wrapped in `<system-reminder>` tags so
+    // Claude-family models treat it as override-strength guidance.
+    assert!(header.starts_with("<system-reminder>"));
+    assert!(header.trim_end().ends_with("</system-reminder>"));
+    // Budget — inner content stays under 2KB even with all three
+    // signals; the wrapper tags add a small fixed overhead on top.
+    assert!(header.len() <= 2_000 + "<system-reminder>\n\n</system-reminder>".len());
 }
 
 #[test]
