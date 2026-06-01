@@ -201,13 +201,7 @@ fn file_path_substring_match(node: &RepoGraphNode, query: &str) -> f64 {
 /// signal.
 fn kind_hint_match(node: &RepoGraphNode, kind_hint: Option<&str>) -> f64 {
     match kind_hint {
-        Some(hint) if !hint.is_empty() => {
-            if kind_label(node).eq_ignore_ascii_case(hint) {
-                1.0
-            } else {
-                0.0
-            }
-        }
+        Some(hint) if !hint.is_empty() && kind_label(node).eq_ignore_ascii_case(hint) => 1.0,
         _ => 0.0,
     }
 }
