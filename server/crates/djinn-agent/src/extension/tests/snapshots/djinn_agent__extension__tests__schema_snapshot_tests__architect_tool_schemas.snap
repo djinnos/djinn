@@ -388,6 +388,15 @@ expression: tool_schemas_architect()
           ],
           "description": "Target tier for complexity (default functions). 'files' aggregates by file_path."
         },
+        "tests": {
+          "type": "string",
+          "enum": [
+            "include",
+            "exclude",
+            "only"
+          ],
+          "description": "Test-file filter for snapshot: include (default, whole graph), exclude (drop test files/symbols), only (test nodes only). Uses the canonical is_test classification (file-path convention OR SCIP Test role)."
+        },
         "group_by": {
           "type": "string",
           "enum": [

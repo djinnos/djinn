@@ -977,6 +977,12 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "tests": {
+          "default": null,
+          "description": "v10: test-file filter. `\"include\"` (default for `snapshot` —\nreturns the whole graph), `\"exclude\"` (drop every node the graph\nbuilder marked `is_test`), or `\"only\"` (keep only test nodes).\nTest classification is the canonical `RepoGraphNode::is_test`\nflag (file-path convention OR SCIP `Test` role). Currently\nhonoured by the `snapshot` op; other ops keep their existing\ntest-handling.",
+          "nullable": true,
+          "type": "string"
+        },
         "to": {
           "default": null,
           "description": "Destination node for `path`.",
@@ -2800,7 +2806,7 @@ expression: signatures
     "output_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": true,
-      "title": "ErrorOrGithubFetchFileResponse",
+      "title": "ToolOutcomeGithubFetchFileResponse",
       "type": "object"
     }
   },
@@ -2925,7 +2931,7 @@ expression: signatures
     "output_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": true,
-      "title": "ErrorOrGithubSearchResponse",
+      "title": "ToolOutcomeGithubSearchResponse",
       "type": "object"
     }
   },
@@ -6104,6 +6110,11 @@ expression: signatures
             },
             "oauth_supported": {
               "type": "boolean"
+            },
+            "revoked_reason": {
+              "description": "When set, the stored credential for this provider was rejected by the\nprovider (a 401 during a run) and marked revoked. The provider is\nreported disconnected (`connected = false`, no `connection_methods`) and\nthis human-readable reason is carried so the UI can show\n\"Disconnected — <reason>\" persistently (survives reload — it comes from\nthe persisted `credentials.revoked_at/reason`, not a transient event).\nReconnecting the provider clears it.",
+              "nullable": true,
+              "type": "string"
             }
           },
           "required": [
@@ -6211,6 +6222,11 @@ expression: signatures
             },
             "oauth_supported": {
               "type": "boolean"
+            },
+            "revoked_reason": {
+              "description": "When set, the stored credential for this provider was rejected by the\nprovider (a 401 during a run) and marked revoked. The provider is\nreported disconnected (`connected = false`, no `connection_methods`) and\nthis human-readable reason is carried so the UI can show\n\"Disconnected — <reason>\" persistently (survives reload — it comes from\nthe persisted `credentials.revoked_at/reason`, not a transient event).\nReconnecting the provider clears it.",
+              "nullable": true,
+              "type": "string"
             }
           },
           "required": [
@@ -6341,10 +6357,60 @@ expression: signatures
             "pricing"
           ],
           "type": "object"
+        },
+        "ToolError": {
+          "description": "Structured error envelope returned to the agent in place of (or alongside) a\nflat error string. Serializes to a JSON object; absent fields are omitted so\nthe wire shape stays compact.",
+          "properties": {
+            "body": {
+              "description": "Raw upstream detail (response body, provider message) when available.",
+              "nullable": true,
+              "type": "string"
+            },
+            "error": {
+              "description": "Human-readable message describing what went wrong. Always present.",
+              "type": "string"
+            },
+            "hint": {
+              "description": "Actionable next step the agent can take to recover or disambiguate.",
+              "nullable": true,
+              "type": "string"
+            },
+            "method": {
+              "description": "The logical operation that failed — typically the MCP tool name (e.g.\n\"provider_model_lookup\") or the upstream method (\"GET /search/code\").",
+              "nullable": true,
+              "type": "string"
+            },
+            "path": {
+              "description": "The resource the call targeted — a model id, repo path, PR ref, URL, etc.",
+              "nullable": true,
+              "type": "string"
+            },
+            "status": {
+              "description": "Status as a numeric HTTP code (e.g. \"404\", \"422\") or a coarse category\n(e.g. \"not_found\", \"rate_limited\", \"network\"). Stored as a string so a\nnumeric HTTP status and a symbolic category share one field.",
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          "required": [
+            "error"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolError"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ],
+          "description": "G3 structured-error envelope, populated on a 404-style miss (the model id\nis not in the catalog). Lets the agent branch on `status == \"404\"` and\nfollow the `hint` instead of re-guessing the same bad id. Absent on a hit."
+        },
         "found": {
           "type": "boolean"
         },
