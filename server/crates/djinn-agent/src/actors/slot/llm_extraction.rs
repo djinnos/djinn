@@ -59,6 +59,16 @@ const NOVELTY_SYSTEM_PROMPT: &str = "You are a semantic novelty judge for extrac
 /// Max characters of session transcript fed to the extraction LLM.
 const TRANSCRIPT_EXCERPT_CHARS: usize = 12_000;
 
+/// Max output tokens for the extraction completion.
+///
+/// The extraction returns up to three structured note types in one JSON object
+/// (up to 3 cases + 3 patterns + 2 pitfalls), and each durable note must carry
+/// its full set of required ADR-054 markdown sections. The previous 1024-token
+/// cap routinely truncated the JSON mid-array, which then failed to parse and
+/// silently dropped every note. 4096 gives enough headroom for the full
+/// structured payload while staying well within the model's context window.
+const EXTRACTION_MAX_TOKENS: u32 = 4096;
+
 /// Render a compact transcript excerpt for the extraction prompt: assistant
 /// reasoning, tool actions, and (truncated) tool results, capped to `max_chars`
 /// and tail-biased so the session's outcome/conclusions are retained. The
@@ -169,12 +179,47 @@ const CASE_REQUIRED_SECTIONS: &[&str] = &[
 
 // ── JSON response shape ───────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, Clone)]
 struct ExtractedNote {
     title: String,
     content: String,
     #[serde(default)]
     scope_paths: Vec<String>,
+}
+
+/// Normalized dedup key for an extracted note: lowercase+trimmed title paired
+/// with its note_type. Two notes with the same key carry the same knowledge as
+/// far as this batch is concerned.
+fn note_dedup_key(note_type: &str, note: &ExtractedNote) -> (String, String) {
+    (
+        note.title.trim().to_lowercase(),
+        note_type.trim().to_lowercase(),
+    )
+}
+
+/// Collapse notes that are duplicated WITHIN a single extraction by their
+/// normalized (title, note_type) key, preserving first-seen order. Returns the
+/// deduplicated `(note_type, note)` list and the number of duplicates dropped.
+fn dedup_extracted_notes(extracted: &ExtractionResponse) -> (Vec<(&'static str, ExtractedNote)>, usize) {
+    let candidates: [(&'static str, &[ExtractedNote]); 3] = [
+        ("case", extracted.cases.as_slice()),
+        ("pattern", extracted.patterns.as_slice()),
+        ("pitfall", extracted.pitfalls.as_slice()),
+    ];
+
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut out: Vec<(&'static str, ExtractedNote)> = Vec::new();
+    let mut dupes = 0usize;
+    for (note_type, notes) in candidates {
+        for note in notes {
+            if seen.insert(note_dedup_key(note_type, note)) {
+                out.push((note_type, note.clone()));
+            } else {
+                dupes += 1;
+            }
+        }
+    }
+    (out, dupes)
 }
 
 impl ExtractionContext<'_> {
@@ -641,7 +686,7 @@ async fn run_llm_extraction_inner(
         CompletionRequest {
             system: EXTRACTION_SYSTEM_PROMPT.to_string(),
             prompt,
-            max_tokens: 1024,
+            max_tokens: EXTRACTION_MAX_TOKENS,
         },
     )
     .await
@@ -658,6 +703,10 @@ async fn run_llm_extraction_inner(
     };
 
     // ── Parse JSON response ────────────────────────────────────────────────
+    // FAILURE case: the call returned text but it could not be parsed as the
+    // expected JSON shape. This is an error (the model misbehaved, the output
+    // was truncated, etc.) and must be logged at warn — it is NOT the same as a
+    // legitimately-empty extraction (handled below at debug).
     let extracted = match parse_extraction_response(&response.text) {
         Ok(e) => e,
         Err(e) => {
@@ -665,19 +714,32 @@ async fn run_llm_extraction_inner(
                 session_id = %session_id,
                 error = %e,
                 raw_response = %response.text,
-                "llm_extraction: failed to parse LLM response; skipping"
+                "llm_extraction: LLM response parse FAILED; skipping (extraction error, not empty)"
             );
             return;
         }
     };
 
-    let total = extracted.cases.len() + extracted.patterns.len() + extracted.pitfalls.len();
+    // ── Intra-batch dedup ──────────────────────────────────────────────────
+    // The model can emit the same note more than once within a single
+    // extraction (e.g. a case and a pitfall with an identical title, or two
+    // copies of the same case). Collapse them by a normalized key
+    // (lowercase+trimmed title + note_type) BEFORE any DB work so the same
+    // note isn't created twice from one extraction. The cross-session /
+    // semantic dedup against existing notes still happens later per-note.
+    let (deduped_notes, intra_batch_dupes) = dedup_extracted_notes(&extracted);
+    taxonomy.extraction_quality.dedup_skipped += intra_batch_dupes as u32;
+
+    let total = deduped_notes.len();
     taxonomy.extraction_quality.extracted = total as u32;
+    // EMPTY (success) case: the call + parse succeeded, but after dedup there is
+    // nothing novel to record. This is normal — log at debug, not warn.
     if total == 0 {
         persist_extraction_quality(&session_repo, &session_id, &taxonomy).await;
         tracing::debug!(
             session_id = %session_id,
-            "llm_extraction: no notes extracted"
+            intra_batch_dupes,
+            "llm_extraction: extraction succeeded but found nothing to record (empty, not a failure)"
         );
         return;
     }
@@ -687,6 +749,8 @@ async fn run_llm_extraction_inner(
         cases = extracted.cases.len(),
         patterns = extracted.patterns.len(),
         pitfalls = extracted.pitfalls.len(),
+        intra_batch_dupes,
+        unique = total,
         "llm_extraction: writing extracted notes"
     );
 
@@ -725,12 +789,6 @@ async fn run_llm_extraction_inner(
         "\n\n---\n*Extracted from session {session_id}. Confidence: 0.5 (session-extracted).*"
     );
 
-    let note_pairs: Vec<(&str, &[ExtractedNote])> = vec![
-        ("case", extracted.cases.as_slice()),
-        ("pattern", extracted.patterns.as_slice()),
-        ("pitfall", extracted.pitfalls.as_slice()),
-    ];
-
     let mut extraction_quality = taxonomy.extraction_quality.clone();
     let extraction_context = ExtractionContext {
         note_repo: &note_repo,
@@ -750,16 +808,14 @@ async fn run_llm_extraction_inner(
             .unwrap_or_else(CandidateLookup::production),
     };
 
-    for (note_type, notes) in note_pairs {
-        for note in notes {
-            process_extracted_note(
-                &extraction_context,
-                note_type,
-                note,
-                &mut extraction_quality,
-            )
-            .await;
-        }
+    for (note_type, note) in &deduped_notes {
+        process_extracted_note(
+            &extraction_context,
+            note_type,
+            note,
+            &mut extraction_quality,
+        )
+        .await;
     }
 
     taxonomy.extraction_quality = extraction_quality;
@@ -1547,6 +1603,59 @@ mod tests {
     #[test]
     fn extraction_quality_defaults_to_zero() {
         assert_eq!(ExtractionQuality::default().novelty_skipped, 0);
+    }
+
+    #[test]
+    fn extraction_max_tokens_is_raised_value() {
+        // Guards against a regression back to the truncating 1024 cap.
+        assert_eq!(EXTRACTION_MAX_TOKENS, 4096);
+    }
+
+    #[test]
+    fn dedup_extracted_notes_collapses_same_normalized_title_and_type() {
+        // Two cases with the same title modulo case/whitespace must collapse to one.
+        let extracted = ExtractionResponse {
+            cases: vec![
+                ExtractedNote {
+                    title: "Flaky Extraction".to_string(),
+                    content: "first body".to_string(),
+                    scope_paths: vec![],
+                },
+                ExtractedNote {
+                    title: "  flaky extraction ".to_string(),
+                    content: "second body (duplicate)".to_string(),
+                    scope_paths: vec![],
+                },
+            ],
+            patterns: vec![],
+            pitfalls: vec![],
+        };
+        let (deduped, dupes) = dedup_extracted_notes(&extracted);
+        assert_eq!(dupes, 1, "one intra-batch duplicate should be dropped");
+        assert_eq!(deduped.len(), 1, "only the first-seen note is kept");
+        assert_eq!(deduped[0].0, "case");
+        assert_eq!(deduped[0].1.content, "first body");
+    }
+
+    #[test]
+    fn dedup_extracted_notes_keeps_same_title_across_different_types() {
+        // Same title but different note_type are NOT duplicates (key includes type).
+        let extracted = ExtractionResponse {
+            cases: vec![ExtractedNote {
+                title: "Shared Title".to_string(),
+                content: "case body".to_string(),
+                scope_paths: vec![],
+            }],
+            patterns: vec![],
+            pitfalls: vec![ExtractedNote {
+                title: "shared title".to_string(),
+                content: "pitfall body".to_string(),
+                scope_paths: vec![],
+            }],
+        };
+        let (deduped, dupes) = dedup_extracted_notes(&extracted);
+        assert_eq!(dupes, 0);
+        assert_eq!(deduped.len(), 2);
     }
 
     #[tokio::test]
