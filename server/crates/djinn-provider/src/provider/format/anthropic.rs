@@ -12,6 +12,13 @@ const ANTHROPIC_CACHE_BREAKPOINT_KEY: &str = "anthropic_cache_breakpoint";
 #[cfg(test)]
 const ANTHROPIC_STABLE_PREFIX_KIND: &str = "stable_prefix";
 
+/// Anthropic's API accepts at most this many `cache_control` breakpoint markers
+/// per request; exceeding it returns a 400. djinn distributes markers across
+/// tool definitions, system blocks, and the trailing message breakpoint, none of
+/// which individually knows the global count — so we enforce a hard cap over the
+/// fully-assembled request body just before it ships.
+const MAX_CACHE_CONTROL_MARKERS: usize = 4;
+
 #[derive(Debug, Clone, PartialEq)]
 struct AnthropicSystemBlock {
     text: String,
@@ -189,6 +196,88 @@ impl AnthropicProvider {
         }
     }
 
+    /// Visit every `cache_control` marker in the assembled request body in
+    /// descending cache-value priority order, invoking `visit` once per marker.
+    ///
+    /// Priority order (most cache-valuable first):
+    ///   1. tool definitions   (largest, most stable prefix — highest reuse)
+    ///   2. system blocks       (base prompt / project context, earliest first)
+    ///   3. trailing message breakpoint (conversation-prefix boundary)
+    ///
+    /// `visit` receives a mutable reference to the JSON object that carries a
+    /// `cache_control` key; it may remove that key to drop the marker.
+    fn for_each_cache_marker(
+        body: &mut Value,
+        mut visit: impl FnMut(&mut serde_json::Map<String, Value>),
+    ) {
+        // 1. tools
+        if let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) {
+            for tool in tools.iter_mut() {
+                if let Some(obj) = tool.as_object_mut()
+                    && obj.contains_key("cache_control")
+                {
+                    visit(obj);
+                }
+            }
+        }
+        // 2. system blocks (only when serialized as an array of typed blocks)
+        if let Some(system) = body.get_mut("system").and_then(Value::as_array_mut) {
+            for block in system.iter_mut() {
+                if let Some(obj) = block.as_object_mut()
+                    && obj.contains_key("cache_control")
+                {
+                    visit(obj);
+                }
+            }
+        }
+        // 3. message content blocks (the trailing breakpoint lives on the last
+        //    block of the last message, but scan all for robustness)
+        if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+            for message in messages.iter_mut() {
+                if let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) {
+                    for block in content.iter_mut() {
+                        if let Some(obj) = block.as_object_mut()
+                            && obj.contains_key("cache_control")
+                        {
+                            visit(obj);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Enforce Anthropic's hard limit of `MAX_CACHE_CONTROL_MARKERS` cache_control
+    /// breakpoints per request. Markers are kept in cache-value priority order
+    /// (tools -> system prefix -> trailing message breakpoint); any beyond the
+    /// cap are dropped so the request never 400s on excess breakpoints.
+    ///
+    /// No-op for the common case (<= cap markers), so behavior is identical when
+    /// the request is already within bounds.
+    fn enforce_cache_control_cap(body: &mut Value) {
+        let mut total = 0usize;
+        Self::for_each_cache_marker(body, |_| total += 1);
+        if total <= MAX_CACHE_CONTROL_MARKERS {
+            return;
+        }
+
+        let mut seen = 0usize;
+        Self::for_each_cache_marker(body, |obj| {
+            seen += 1;
+            if seen > MAX_CACHE_CONTROL_MARKERS {
+                obj.remove("cache_control");
+            }
+        });
+
+        tracing::warn!(
+            requested = total,
+            kept = MAX_CACHE_CONTROL_MARKERS,
+            dropped = total - MAX_CACHE_CONTROL_MARKERS,
+            "anthropic: capped cache_control breakpoints to {MAX_CACHE_CONTROL_MARKERS} \
+             (requested {total}); dropped lowest-priority markers to avoid a 400"
+        );
+    }
+
     fn build_request(
         &self,
         conversation: &Conversation,
@@ -259,6 +348,11 @@ impl AnthropicProvider {
         if self.config.capabilities.streaming {
             body["stream"] = json!(true);
         }
+
+        // Defensive: Anthropic rejects requests with more than
+        // MAX_CACHE_CONTROL_MARKERS cache_control breakpoints with a 400. Drop
+        // any excess, keeping the most cache-valuable segments.
+        Self::enforce_cache_control_cap(&mut body);
 
         body
     }
@@ -1316,12 +1410,8 @@ mod tests {
         let project_context = "## Project Context\nworkspace: demo";
         let client = "Be concise.";
 
-        let sys_msg = build_system_message_for_test(
-            base,
-            Some(project_context),
-            Some(client),
-            true,
-        );
+        let sys_msg =
+            build_system_message_for_test(base, Some(project_context), Some(client), true);
 
         let mut conv = Conversation::new();
         conv.push(sys_msg);
@@ -1410,12 +1500,8 @@ mod tests {
         let base = "You are a helpful assistant.";
         let project_context = "## Tool Definitions\nshell(cmd: string)";
 
-        let sys_msg = build_system_message_for_test(
-            base,
-            Some(project_context),
-            Some("be brief"),
-            true,
-        );
+        let sys_msg =
+            build_system_message_for_test(base, Some(project_context), Some("be brief"), true);
 
         let mut conv = Conversation::new();
         conv.push(sys_msg);
@@ -1442,5 +1528,154 @@ mod tests {
         let req_tools = req["tools"].as_array().expect("tools array");
         assert_eq!(req_tools.len(), 1);
         assert_eq!(req_tools[0]["name"], "shell");
+    }
+
+    // ─── B2: cache_control breakpoint cap (Anthropic max 4) ───────────────────
+
+    /// Count every `cache_control` marker present across tools, system blocks,
+    /// and message content in a serialized request body.
+    fn count_cache_markers(body: &Value) -> usize {
+        let mut count = 0;
+        if let Some(tools) = body.get("tools").and_then(Value::as_array) {
+            count += tools
+                .iter()
+                .filter(|t| t.get("cache_control").is_some())
+                .count();
+        }
+        if let Some(system) = body.get("system").and_then(Value::as_array) {
+            count += system
+                .iter()
+                .filter(|b| b.get("cache_control").is_some())
+                .count();
+        }
+        if let Some(messages) = body.get("messages").and_then(Value::as_array) {
+            for message in messages {
+                if let Some(content) = message.get("content").and_then(Value::as_array) {
+                    count += content
+                        .iter()
+                        .filter(|b| b.get("cache_control").is_some())
+                        .count();
+                }
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn test_cache_control_markers_capped_at_four() {
+        let provider = test_provider();
+        let mut conv = Conversation::default();
+        // Six non-empty system text blocks with cache metadata. system_blocks
+        // marks all-but-last (5 cached), the request marks the first tool (1),
+        // and add_message_cache_breakpoint marks the last message (1): 7 raw
+        // markers, well over the cap of 4.
+        conv.push(crate::message::Message {
+            role: djinn_core::message::Role::System,
+            content: vec![
+                ContentBlock::text("base prompt"),
+                ContentBlock::text("project context"),
+                ContentBlock::text("repo map"),
+                ContentBlock::text("conventions"),
+                ContentBlock::text("more stable context"),
+                ContentBlock::text("dynamic tail"),
+            ],
+            metadata: Some(crate::message::MessageMeta {
+                input_tokens: None,
+                output_tokens: None,
+                timestamp: None,
+                provider_data: Some(json!({
+                    ANTHROPIC_CACHE_BREAKPOINT_KEY: CacheBreakpoint {
+                        kind: Some(ANTHROPIC_STABLE_PREFIX_KIND.to_string()),
+                    }
+                })),
+            }),
+        });
+        conv.push(crate::message::Message::user("hello"));
+
+        let tools = vec![json!({
+            "name": "shell",
+            "description": "Run shell",
+            "input_schema": {"type": "object"}
+        })];
+
+        let req = provider.build_request(&conv, &tools, None);
+
+        // Hard cap enforced.
+        let total = count_cache_markers(&req);
+        assert!(
+            total <= 4,
+            "expected at most 4 cache_control markers, got {total}"
+        );
+        assert_eq!(total, 4, "should keep exactly 4 markers when over the cap");
+
+        // Highest-priority segments keep their markers: the tool definition (1)
+        // and the earliest system blocks (priority after tools).
+        assert_eq!(
+            req["tools"][0]["cache_control"]["kind"], ANTHROPIC_STABLE_PREFIX_KIND,
+            "the tool definition is the highest-priority cache segment and must keep its marker"
+        );
+        let system = req["system"].as_array().expect("system array");
+        assert!(
+            system[0].get("cache_control").is_some(),
+            "earliest system block must keep its marker"
+        );
+        assert!(
+            system[1].get("cache_control").is_some(),
+            "second system block must keep its marker"
+        );
+        assert!(
+            system[2].get("cache_control").is_some(),
+            "third system block must keep its marker"
+        );
+        // Total kept = 1 (tool) + 3 (system) = 4; everything else dropped,
+        // including the trailing message breakpoint (lowest priority).
+        let messages = req["messages"].as_array().expect("messages array");
+        let last = messages.last().expect("last message");
+        let last_block = last["content"].as_array().expect("content").last().unwrap();
+        assert!(
+            last_block.get("cache_control").is_none(),
+            "lowest-priority message breakpoint must be dropped past the cap"
+        );
+    }
+
+    #[test]
+    fn test_cache_control_under_cap_is_unchanged() {
+        // <= 4 markers: enforcement is a no-op (no regression for the common case).
+        let provider = test_provider();
+        let mut conv = Conversation::default();
+        conv.push(crate::message::Message::system_with_metadata(
+            "base prompt",
+            crate::message::MessageMeta {
+                input_tokens: None,
+                output_tokens: None,
+                timestamp: None,
+                provider_data: Some(json!({
+                    ANTHROPIC_CACHE_BREAKPOINT_KEY: CacheBreakpoint {
+                        kind: Some(ANTHROPIC_STABLE_PREFIX_KIND.to_string()),
+                    }
+                })),
+            },
+        ));
+        conv.messages[0].content.push(ContentBlock::Text {
+            text: "repo map".to_string(),
+        });
+        conv.push(crate::message::Message::user("hello"));
+
+        let tools = vec![json!({
+            "name": "shell",
+            "description": "Run shell",
+            "input_schema": {"type": "object"}
+        })];
+
+        let req = provider.build_request(&conv, &tools, None);
+        // tool(1) + system stable prefix(1) + message breakpoint(1) = 3 <= 4.
+        let total = count_cache_markers(&req);
+        assert!(total <= 4, "expected <= 4 markers, got {total}");
+        // Tool and first system block markers preserved exactly.
+        assert_eq!(
+            req["tools"][0]["cache_control"]["kind"],
+            ANTHROPIC_STABLE_PREFIX_KIND
+        );
+        assert_eq!(req["system"][0]["cache_control"]["type"], "ephemeral");
     }
 }
