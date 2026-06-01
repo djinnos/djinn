@@ -660,3 +660,122 @@ async fn call_tool_dispatches_agent_ops_through_shared_agent_seam() {
         Some(0)
     );
 }
+
+/// (G2) A windowed read (`offset` + `limit`) must return exactly the right
+/// window AND must stop streaming before reaching the rest of the file. We
+/// prove the early-stop by planting a NUL byte well past the window: a
+/// whole-file read would reject the file as binary, but the windowed read
+/// stops before ever touching the NUL, so it succeeds.
+#[tokio::test]
+async fn read_window_does_not_scan_whole_file() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-read-window-");
+    let file = worktree.path().join("big.txt");
+
+    // 50 clean text lines, then a line containing a NUL byte far past the
+    // window we will request.
+    let mut contents = String::new();
+    for i in 0..50 {
+        contents.push_str(&format!("line {i}\n"));
+    }
+    let mut bytes = contents.into_bytes();
+    bytes.extend_from_slice(b"poisoned\0line\n");
+    tokio::fs::write(&file, &bytes).await.expect("seed file");
+
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    let args = Some(
+        serde_json::json!({ "file_path": "big.txt", "offset": 2, "limit": 3 })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let result = call_read(&state, &args, worktree.path())
+        .await
+        .expect("windowed read should succeed without scanning the NUL");
+
+    let content = result
+        .get("content")
+        .and_then(|v| v.as_str())
+        .expect("content");
+    assert!(content.contains("line 2"), "got: {content}");
+    assert!(content.contains("line 3"), "got: {content}");
+    assert!(content.contains("line 4"), "got: {content}");
+    assert!(!content.contains("line 5"), "window leaked extra line: {content}");
+    assert!(!content.contains("line 1\n"), "window leaked earlier line: {content}");
+    assert_eq!(result.get("offset").and_then(|v| v.as_u64()), Some(2));
+    assert_eq!(result.get("limit").and_then(|v| v.as_u64()), Some(3));
+    assert_eq!(result.get("has_more").and_then(|v| v.as_bool()), Some(true));
+}
+
+/// (G2) A file exceeding the byte budget must return a truncation signal in
+/// the content rather than reading the whole thing into memory.
+#[tokio::test]
+async fn read_truncates_file_over_byte_budget() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-read-budget-");
+    let file = worktree.path().join("huge.txt");
+
+    // Long lines (~6 KiB each) so that the requested window of 2000 lines
+    // crosses the 8 MiB budget before the line count stops the scan: the
+    // budget — not the window — must be what halts the read and emits the
+    // truncation signal.
+    let line = "x".repeat(6 * 1024 - 1); // line + '\n' = 6 KiB/line
+    let mut contents = String::with_capacity(9 * 1024 * 1024 + 1024);
+    let target = 9 * 1024 * 1024;
+    while contents.len() < target {
+        contents.push_str(&line);
+        contents.push('\n');
+    }
+    tokio::fs::write(&file, contents.as_bytes())
+        .await
+        .expect("seed file");
+
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    let args = Some(
+        serde_json::json!({ "file_path": "huge.txt", "offset": 0, "limit": 2000 })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let result = call_read(&state, &args, worktree.path())
+        .await
+        .expect("over-budget read should succeed with a truncation signal");
+
+    let content = result
+        .get("content")
+        .and_then(|v| v.as_str())
+        .expect("content");
+    assert!(
+        content.contains("file too large") && content.contains("truncated"),
+        "expected truncation signal, got tail: {}",
+        &content[content.len().saturating_sub(200)..]
+    );
+    assert_eq!(result.get("has_more").and_then(|v| v.as_bool()), Some(true));
+}
+
+/// (G2) A file containing NUL bytes within the scanned window must be
+/// detected as binary and rejected (not dumped as bytes).
+#[tokio::test]
+async fn read_detects_binary_file() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-read-binary-");
+    let file = worktree.path().join("blob.bin");
+    tokio::fs::write(&file, b"\x00\x01\x02\x03binary\xff\x00data")
+        .await
+        .expect("seed file");
+
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    let args = Some(
+        serde_json::json!({ "file_path": "blob.bin" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let err = call_read(&state, &args, worktree.path())
+        .await
+        .expect_err("binary file must be rejected");
+    assert!(err.contains("binary file"), "got: {err}");
+}
