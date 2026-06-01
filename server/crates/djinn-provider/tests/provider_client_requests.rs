@@ -191,6 +191,37 @@ async fn post_json_emits_json_post_without_auth_header() {
 }
 
 #[tokio::test]
+async fn post_json_empty_success_body_is_typed_invalid_output() {
+    use djinn_provider::provider::error::ProviderError;
+
+    // A4: a 2xx with an empty body is a structurally-broken downstream. It must
+    // surface as a typed InvalidOutput (terminal, breaker-feeding) rather than a
+    // successful empty string.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/json"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let err = ApiClient::new()
+        .post_json(
+            &format!("{}/json", server.uri()),
+            json!({"hello": "world"}),
+            &AuthMethod::NoAuth,
+            HeaderMap::new(),
+        )
+        .await
+        .expect_err("empty 2xx body should be an error");
+
+    assert_eq!(
+        err.downcast_ref::<ProviderError>(),
+        Some(&ProviderError::InvalidOutput),
+        "expected typed InvalidOutput, got: {err:?}"
+    );
+}
+
+#[tokio::test]
 async fn stream_sse_sends_bearer_auth_header() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

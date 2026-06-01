@@ -253,10 +253,22 @@ impl ApiClient {
                     let status = resp.status();
                     if status.is_success() {
                         clear_suppression_window();
-                        return resp
+                        let text = resp
                             .text()
                             .await
-                            .map_err(|e| anyhow!("failed to read response body: {e}"));
+                            .map_err(|e| anyhow!("failed to read response body: {e}"))?;
+                        // A4: a success status with an empty body is a
+                        // structurally-broken downstream, not a usable response.
+                        // Surface it as a typed InvalidOutput (terminal, breaker-
+                        // feeding Failure → failover) rather than handing an empty
+                        // string downstream where it would masquerade as a
+                        // retryable empty completion the worker hammers.
+                        if text.trim().is_empty() {
+                            return Err(anyhow::Error::new(ProviderError::InvalidOutput).context(
+                                "provider returned a success status with an empty body",
+                            ));
+                        }
+                        return Ok(text);
                     }
 
                     let is_retryable = is_retryable_status(status);
