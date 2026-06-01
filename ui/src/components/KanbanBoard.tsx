@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { usersQueryOptions } from "@/api/queryOptions";
-import { userDisplayName } from "@/api/users";
+import { type OrgUser, userDisplayName } from "@/api/users";
 import { useTaskStore } from "@/stores/useTaskStore";
 import { useEpicStore } from "@/stores/useEpicStore";
 import { useProjects } from "@/stores/useProjectStore";
@@ -20,6 +20,7 @@ import {
   GitPullRequestIcon,
   Loading02Icon,
   Progress02Icon,
+  Robot01Icon,
   type UnavailableIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -58,7 +59,33 @@ type ColumnKey = "open" | "in_progress" | "pr_ready" | "done";
 
 /** Owner-filter sentinel for tasks with no human creator (background agents). */
 const UNASSIGNED_OWNER = "__none__";
-const UNASSIGNED_OWNER_LABEL = "Agent / unassigned";
+const UNASSIGNED_OWNER_LABEL = "Unassigned";
+
+/** Small round avatar for an owner-filter option; falls back to a bot glyph
+ *  for the unassigned/agent sentinel and an initial when no avatar URL. */
+function OwnerAvatar({ user }: { user?: OrgUser }) {
+  if (!user) {
+    return (
+      <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+        <HugeiconsIcon icon={Robot01Icon} className="size-3" />
+      </span>
+    );
+  }
+  if (user.github_avatar_url) {
+    return (
+      <img
+        src={user.github_avatar_url}
+        alt=""
+        className="size-5 shrink-0 rounded-full"
+      />
+    );
+  }
+  return (
+    <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-medium text-foreground">
+      {userDisplayName(user).charAt(0).toUpperCase()}
+    </span>
+  );
+}
 
 const ISSUE_TYPES = [
   { value: "task", label: "Task" },
@@ -342,6 +369,11 @@ export function KanbanBoard({
   // Org roster, used to resolve a task's `created_by_user_id` to a name for
   // the owner filter. Empty until loaded; ids fall back to themselves.
   const { data: users = [] } = useQuery(usersQueryOptions());
+  const userById = useMemo(() => {
+    const map = new Map<string, OrgUser>();
+    for (const user of users) map.set(user.id, user);
+    return map;
+  }, [users]);
   const userLabelById = useMemo(() => {
     const map = new Map<string, string>();
     for (const user of users) map.set(user.id, userDisplayName(user));
@@ -663,14 +695,21 @@ export function KanbanBoard({
                 ? `${ownerFilters.length} owner${ownerFilters.length > 1 ? "s" : ""}`
                 : "All owners"
             }
-            className="w-36"
+            className="w-44"
           />
-          <ComboboxContent>
+          <ComboboxContent className="min-w-60">
             <ComboboxList>
               <ComboboxEmpty>No owners found</ComboboxEmpty>
               {ownerOptions.map((owner) => (
                 <ComboboxItem key={owner} value={owner}>
-                  {ownerLabel(owner)}
+                  <OwnerAvatar
+                    user={
+                      owner === UNASSIGNED_OWNER
+                        ? undefined
+                        : userById.get(owner)
+                    }
+                  />
+                  <span className="truncate">{ownerLabel(owner)}</span>
                 </ComboboxItem>
               ))}
             </ComboboxList>
