@@ -818,4 +818,38 @@ mod tests {
         let untyped = anyhow::anyhow!("worker failed to push task_branch to mirror");
         assert_eq!(classify_provider_failure(&untyped), None);
     }
+
+    #[test]
+    fn streaming_wrapped_auth_error_still_classifies() {
+        // Regression for the bug where the streaming reply loop rebuilt the error
+        // as a formatted string (`anyhow!("...display={e}...", e)`), erasing the
+        // typed `ProviderError` source so `classify_provider_failure` returned
+        // `None` and the per-(scope,model) health breaker never tripped — dispatch
+        // then re-selected a dead model forever instead of failing over.
+        //
+        // Build the error exactly as it flows in production: the provider client
+        // mints a typed `ProviderError` wrapped with a "provider API error 401"
+        // context, and the streaming loop wraps THAT again with its diagnostics.
+        let from_client = anyhow::Error::new(ProviderError::Authentication)
+            .context("provider API error 401: {\"code\":\"token_revoked\"}");
+        let from_streaming = from_client.context(
+            "provider stream event failed: display=provider API error 401 ...; fs_diag; env_diag",
+        );
+        assert_eq!(
+            classify_provider_failure(&from_streaming),
+            Some(ProviderFailureClass::Failure),
+            "a 401 wrapped through the streaming loop must still feed the breaker",
+        );
+
+        // And document the anti-pattern: formatting the error into a fresh string
+        // (what the bug did) loses the typed source and must NOT be reintroduced.
+        let inner =
+            anyhow::Error::new(ProviderError::Authentication).context("provider API error 401");
+        let stringified = anyhow::anyhow!("provider stream event failed: display={inner}");
+        assert_eq!(
+            classify_provider_failure(&stringified),
+            None,
+            "stringifying the error erases the type — this is the regression we fixed",
+        );
+    }
 }

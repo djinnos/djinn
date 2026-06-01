@@ -142,10 +142,22 @@ pub(super) async fn consume_provider_stream(
                     Err(e) => {
                         let diag = runtime_fs_diagnostics(ctx.project_path, ctx.worktree_path);
                         let env_diag = runtime_env_diagnostics(ctx.session_id, ctx.project_path, ctx.worktree_path);
-                        return Err(anyhow::anyhow!(
-                            "provider stream event failed: display={} debug={:?}; {}; {}",
-                            e, e, diag, env_diag
-                        ));
+                        // Preserve `e` as the anyhow *source* (via `.context`) rather than
+                        // formatting it into a fresh string. The original error carries a
+                        // typed `ProviderError` (e.g. `Authentication` for a 401
+                        // token_revoked) that the host's `classify_provider_failure` must be
+                        // able to `downcast_ref`; rebuilding with `anyhow!("...{e}...")` erased
+                        // that type, so every streaming provider failure surfaced as
+                        // `provider_failure: None` and the per-(scope,model) health breaker
+                        // was never fed — dispatch then re-selected a dead model forever
+                        // instead of failing over. We keep the same `display=/debug=` body in
+                        // the context message so the existing string-based detectors
+                        // (`is_orphaned_tool_call_error`, context-length substring fallback)
+                        // still match on the top-level Display.
+                        let detail = format!(
+                            "provider stream event failed: display={e} debug={e:?}; {diag}; {env_diag}"
+                        );
+                        return Err(e.context(detail));
                     }
                 };
 
