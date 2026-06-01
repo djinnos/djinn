@@ -62,10 +62,30 @@ pub(super) async fn do_compact(
     let prompt_template = compaction_prompt(ctx);
     let system_instruction = summariser_system(ctx);
 
+    // C-4: pull a prior summary out of the input and feed it back as a
+    // <previous-summary> block to update/merge/prune, rather than letting it be
+    // re-summarised verbatim (summary-of-summary drift). Exclude the prior
+    // summary + its continuation marker from the messages being summarised. The
+    // pair is plain text, so removing it cannot orphan a tool result.
+    let (previous_summary, messages): (String, Vec<Message>) =
+        match super::prompts::extract_prior_summary(messages) {
+            Some((prior, summary_idx, continuation_idx)) => {
+                let kept = messages
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != summary_idx && *i != continuation_idx)
+                    .map(|(_, m)| m.clone())
+                    .collect();
+                (super::prompts::previous_summary_block(&prior), kept)
+            }
+            None => (String::new(), messages.to_vec()),
+        };
+
     for &pct in REMOVAL_PERCENTAGES {
-        let filtered = filter_tool_responses_middle_out(messages, pct);
+        let filtered = filter_tool_responses_middle_out(&messages, pct);
         let formatted = format_messages_as_text(&filtered);
         let prompt_text = prompt_template
+            .replace("{previous_summary}", &previous_summary)
             .replace("{messages}", &formatted)
             .replace("{rules}", TEMPLATE_RULES);
 

@@ -55,9 +55,48 @@ never omit a heading. Preserve exact file paths, function names, type names, lin
 error messages verbatim. Output only the summary in this format — no preamble, no reasoning, no \
 closing remarks — and never mention this summary, the conversation's length, or that compaction occurred.";
 
+// C-4: anchored / incremental summaries. The assistant continuation message that
+// `rebuild_full_compaction_messages` inserts right after a summary is a fixed,
+// recognisable marker. On the *next* full compaction we use it to find the prior
+// summary, feed it back to the summariser as a `<previous-summary>` block to
+// UPDATE/MERGE/PRUNE (rather than re-summarising the summary verbatim, which
+// compounds summary-of-summary drift), and exclude the prior summary+marker pair
+// from the messages being summarised. Each compaction fully rebuilds, so at most
+// one such pair ever exists. Detection by content (not a persisted MessageMeta
+// tag) keeps this off the bincode worker boundary and a clean no-op when absent.
+pub(super) const FULL_COMPACTION_CONTINUATION: &str =
+    "Your context was compacted. The previous message contains a summary of the \
+     conversation so far. Continue calling tools as necessary to complete the task.";
+
+/// Find a prior full-compaction summary in `messages`: the user message
+/// immediately followed by the [`FULL_COMPACTION_CONTINUATION`] assistant marker.
+/// Returns `(summary_text, summary_idx, continuation_idx)`. At most one exists.
+pub(super) fn extract_prior_summary(messages: &[Message]) -> Option<(String, usize, usize)> {
+    for i in 1..messages.len() {
+        if messages[i].role == Role::Assistant
+            && messages[i - 1].role == Role::User
+            && messages[i].text_content() == FULL_COMPACTION_CONTINUATION
+        {
+            return Some((messages[i - 1].text_content(), i - 1, i));
+        }
+    }
+    None
+}
+
+/// Render the `<previous-summary>` block that asks the summariser to merge an
+/// earlier summary into the new one instead of re-summarising it verbatim.
+pub(super) fn previous_summary_block(prior: &str) -> String {
+    format!(
+        "A summary from an earlier point in this session is provided below. UPDATE and MERGE it \
+         with the newer messages that follow — keep what is still true, prune what is now \
+         obsolete or superseded, and fold in new progress. Do not re-summarise it verbatim or \
+         duplicate its content.\n\n<previous-summary>\n{prior}\n</previous-summary>\n"
+    )
+}
+
 pub(crate) const MID_SESSION_WORKER_PROMPT: &str = r#"You are a coding agent continuing your own in-progress work session. Summarise the conversation below into a handoff so you can resume without re-reading files.
 
-**Conversation:**
+{previous_summary}**Conversation:**
 {messages}
 
 {rules}
@@ -73,7 +112,7 @@ pub(crate) const MID_SESSION_WORKER_PROMPT: &str = r#"You are a coding agent con
 
 pub(crate) const REVIEWER_PROMPT: &str = r#"You are a code review agent continuing your own review session. Summarise the conversation below into a handoff so you can resume the review without re-examining files.
 
-**Conversation:**
+{previous_summary}**Conversation:**
 {messages}
 
 {rules}
@@ -87,7 +126,7 @@ pub(crate) const REVIEWER_PROMPT: &str = r#"You are a code review agent continui
 
 pub(crate) const GENERIC_PROMPT: &str = r#"You are an agent continuing a working session with a user. Summarise the conversation below into a handoff so the session can continue with no loss of context. Do not introduce goals or next steps the user did not confirm.
 
-**Conversation:**
+{previous_summary}**Conversation:**
 {messages}
 
 {rules}
@@ -151,10 +190,7 @@ pub(super) fn rebuild_full_compaction_messages(
 
     new_messages.push(Message::user(summary));
 
-    let continuation_msg =
-        "Your context was compacted. The previous message contains a summary of the \
-         conversation so far. Continue calling tools as necessary to complete the task.";
-    new_messages.push(Message::assistant(continuation_msg));
+    new_messages.push(Message::assistant(FULL_COMPACTION_CONTINUATION));
 
     if matches!(
         ctx,
@@ -260,6 +296,65 @@ mod tests {
     #[test]
     fn partial_compaction_prompt_has_messages_placeholder() {
         assert!(PARTIAL_COMPACTION_PROMPT.contains("{messages}"));
+    }
+
+    #[test]
+    fn extract_prior_summary_roundtrips_rebuild() {
+        // C-4: a summary produced by rebuild_full_compaction_messages must be
+        // detectable on the next compaction (via the continuation marker), even
+        // after the conversation grows with new turns.
+        let original = vec![
+            Message::system("sys"),
+            Message::user("old work"),
+            Message::assistant("did stuff"),
+            Message::user("latest"),
+        ];
+        let rebuilt = rebuild_full_compaction_messages(
+            &original,
+            "SUMMARY TEXT".to_string(),
+            &CompactionContext::MidSession("worker".to_string()),
+        );
+        let mut grown = rebuilt;
+        grown.push(Message::assistant("more"));
+        grown.push(Message::user("even more"));
+
+        let (text, summary_idx, continuation_idx) =
+            extract_prior_summary(&grown).expect("prior summary detected");
+        assert_eq!(text, "SUMMARY TEXT");
+        assert_eq!(grown[summary_idx].text_content(), "SUMMARY TEXT");
+        assert_eq!(grown[continuation_idx].text_content(), FULL_COMPACTION_CONTINUATION);
+    }
+
+    #[test]
+    fn extract_prior_summary_none_without_marker() {
+        let msgs = vec![
+            Message::system("s"),
+            Message::user("u"),
+            Message::assistant("a"),
+        ];
+        assert!(extract_prior_summary(&msgs).is_none());
+    }
+
+    #[test]
+    fn previous_summary_block_wraps_and_instructs_merge() {
+        let block = previous_summary_block("PRIOR");
+        assert!(block.contains("<previous-summary>"));
+        assert!(block.contains("PRIOR"));
+        assert!(block.to_lowercase().contains("merge"));
+    }
+
+    #[test]
+    fn full_prompts_carry_previous_summary_slot() {
+        for ctx in [
+            CompactionContext::MidSession("worker".to_string()),
+            CompactionContext::MidSession("reviewer".to_string()),
+            CompactionContext::ChatSession,
+        ] {
+            assert!(
+                compaction_prompt(&ctx).contains("{previous_summary}"),
+                "{ctx:?} prompt should carry the C-4 previous-summary slot"
+            );
+        }
     }
 
     #[test]
