@@ -10,6 +10,22 @@ pub(super) const MAX_NUDGE_ATTEMPTS: u32 = 3;
 /// Maximum reactive compaction attempts before giving up.
 pub(super) const MAX_COMPACTION_RETRIES: u32 = 2;
 
+/// Build the wind-down directive injected on the final permitted turn when the
+/// reply loop is about to hit the step cap (`MAX_TURNS`).
+///
+/// Rather than hard-erroring (which re-dispatches the task with no record of
+/// what was accomplished), we give the agent exactly ONE more turn to produce a
+/// hand-off summary so the next dispatch — or a human — has continuity. The
+/// directive explicitly forbids starting new work so the turn stays bounded.
+pub(super) fn wind_down_message() -> Message {
+    Message::user(
+        "You are out of steps for this session. Do NOT start any new work, do NOT \
+         call any tools. Reply with a concise hand-off summary covering exactly: \
+         (1) what you completed, (2) what remains, and (3) the single most important \
+         next action for whoever picks this up.",
+    )
+}
+
 pub(crate) fn is_context_length_error(e: &anyhow::Error) -> bool {
     // Prefer the typed provider taxonomy when present (set at the
     // provider-crate boundary), then fall back to substring matching for
