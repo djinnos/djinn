@@ -560,3 +560,214 @@ async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
     assert_no_worktrees(source_dir.path());
     assert_no_worktrees(mirrors_dir.path());
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Proactive dispatch-time sync: a NewTask dispatch whose task branch is BEHIND
+// a (non-conflicting) advanced base must merge the base into the task branch and
+// push the merge to the mirror — even though the stubbed worker makes no edits.
+// Observable via the mirror's task_branch (the supervisor's eager push lands the
+// merge commit there). Asserts `origin/main` is an ancestor of the task branch
+// tip after the run.
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Read `git rev-parse <rev>` in `dir`.
+async fn rev_parse(dir: &Path, rev: &str) -> String {
+    let out = Command::new("git")
+        .args(["rev-parse", rev])
+        .current_dir(dir)
+        .output()
+        .await
+        .expect("git rev-parse");
+    assert!(
+        out.status.success(),
+        "git rev-parse {rev} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// `git merge-base --is-ancestor A B` → true iff A is an ancestor of B.
+async fn is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
+    let out = Command::new("git")
+        .args(["merge-base", "--is-ancestor", a, b])
+        .current_dir(dir)
+        .output()
+        .await
+        .expect("git merge-base");
+    match out.status.code() {
+        Some(0) => true,
+        Some(1) => false,
+        other => panic!("git merge-base --is-ancestor {a} {b} exited {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proactive_sync_merges_advanced_base_into_behind_task_branch() {
+    // 1. Source repo + mirror.
+    let source_dir = TempDir::new().unwrap();
+    make_source_repo(source_dir.path()).await;
+    let source_url = format!("file://{}", source_dir.path().display());
+
+    let mirrors_dir = TempDir::new().unwrap();
+    let mirror = Arc::new(MirrorManager::new(mirrors_dir.path().to_path_buf()));
+
+    let db = Database::open_in_memory().expect("open_in_memory test db");
+    let events = EventBus::noop();
+    let project_repo = ProjectRepository::new(db.clone(), events.clone());
+    let project = project_repo
+        .create("sync-test", "test", "sync-test")
+        .await
+        .expect("create project row");
+
+    mirror
+        .ensure_mirror(&project.id, &source_url)
+        .await
+        .expect("ensure_mirror");
+    let mirror_path = mirror.mirror_path(&project.id);
+
+    // 2. Stand up the task branch in the mirror at main's CURRENT tip (the
+    //    "prior cycle" commit), then advance the mirror's main with a
+    //    non-conflicting commit so the task branch is genuinely behind base.
+    let task_branch = "djinn/sync-behind";
+    // Cut task_branch from main's tip inside the bare mirror.
+    run_git(
+        &["git", "branch", task_branch, "main"],
+        &mirror_path,
+    )
+    .await;
+
+    // Advance main via a throwaway clone touching a NEW file (no conflict), then
+    // push back to the mirror's main.
+    let pusher = TempDir::new().unwrap();
+    run_git(
+        &["git", "clone", mirror_path.to_str().unwrap(), "."],
+        pusher.path(),
+    )
+    .await;
+    run_git(&["git", "config", "user.email", "t@t"], pusher.path()).await;
+    run_git(&["git", "config", "user.name", "t"], pusher.path()).await;
+    run_git(&["git", "checkout", "main"], pusher.path()).await;
+    tokio::fs::write(pusher.path().join("base_new.txt"), "from-main\n")
+        .await
+        .unwrap();
+    run_git(&["git", "add", "-A"], pusher.path()).await;
+    run_git(&["git", "commit", "-m", "base advances"], pusher.path()).await;
+    run_git(&["git", "push", "origin", "main"], pusher.path()).await;
+
+    let main_tip = rev_parse(&mirror_path, "main").await;
+    let task_tip_before = rev_parse(&mirror_path, task_branch).await;
+    assert!(
+        !is_ancestor(&mirror_path, &main_tip, &task_tip_before).await,
+        "precondition: advanced main must NOT yet be an ancestor of the task branch"
+    );
+
+    // 3. Task row.
+    let epic_repo = EpicRepository::new(db.clone(), events.clone());
+    let epic = epic_repo
+        .create_for_project(
+            &project.id,
+            EpicCreateInput {
+                title: "sync-epic",
+                description: "sync epic",
+                emoji: "🧪",
+                color: "purple",
+                owner: "test-owner",
+                memory_refs: None,
+                status: None,
+                auto_breakdown: None,
+                originating_adr_id: None,
+            },
+        )
+        .await
+        .expect("create epic");
+    let task_repo = TaskRepository::new(db.clone(), events.clone());
+    let task = task_repo
+        .create_in_project(
+            &project.id,
+            Some(&epic.id),
+            "sync-task",
+            "sync task description",
+            "sync task design",
+            "task",
+            2,
+            "test-owner",
+            None,
+            None,
+        )
+        .await
+        .expect("create task");
+
+    // 4. Stub the worker (and reviewer) provider: the worker finalizes with NO
+    //    file edits, so the ONLY thing that can advance the task branch is the
+    //    proactive sync's merge commit + eager push.
+    let worker_turn = vec![
+        StreamEvent::Delta(ContentBlock::ToolUse {
+            id: "worker-fin-1".into(),
+            name: "submit_work".into(),
+            input: serde_json::json!({
+                "task_id": task.short_id,
+                "summary": "no edits; just sync",
+            }),
+        }),
+        StreamEvent::Done,
+    ];
+    let reviewer_turn = vec![
+        StreamEvent::Delta(ContentBlock::ToolUse {
+            id: "reviewer-fin-1".into(),
+            name: "submit_review".into(),
+            input: serde_json::json!({
+                "task_id": task.short_id,
+                "decision": "approve",
+                "summary": "lgtm",
+            }),
+        }),
+        StreamEvent::Done,
+    ];
+    let stub = Arc::new(ScriptedProvider::new(vec![worker_turn, reviewer_turn]));
+
+    let cancel = CancellationToken::new();
+    let agent_ctx = test_agent_context(db.clone());
+    let services = services_for_agent_context_with_provider_override(
+        agent_ctx,
+        cancel.clone(),
+        stub.clone() as Arc<dyn LlmProvider>,
+    );
+    let supervisor = TaskRunSupervisor::new(mirror.clone(), services);
+
+    let spec = TaskRunSpec {
+        task_run_id: uuid::Uuid::now_v7().to_string(),
+        task_id: task.id.clone(),
+        project_id: project.id.clone(),
+        trigger: TaskRunTrigger::NewTask,
+        base_branch: "main".into(),
+        task_branch: task_branch.into(),
+        flow: SupervisorFlow::NewTask,
+        model_id_per_role: Default::default(),
+        read_source_project_ids: Vec::new(),
+        github_owner: None,
+        github_install_token: None,
+        commit_author_name: None,
+        commit_author_email: None,
+    };
+
+    // 5. Drive the run. The stubbed worker/reviewer may not perfectly satisfy
+    //    every downstream assertion, but the proactive sync runs BEFORE the
+    //    worker stage regardless of how the stages resolve — so the merge must
+    //    land on the mirror's task branch either way. We tolerate any non-fatal
+    //    outcome and assert on the git topology, which is the contract.
+    let _ = supervisor.run(spec).await;
+
+    // 6. Mirror's task branch tip now has the advanced main as an ancestor.
+    let task_tip_after = rev_parse(&mirror_path, task_branch).await;
+    assert_ne!(
+        task_tip_before, task_tip_after,
+        "proactive sync should have advanced the mirror's task branch with a merge commit"
+    );
+    assert!(
+        is_ancestor(&mirror_path, &main_tip, &task_tip_after).await,
+        "after proactive sync, origin/main must be an ancestor of the task branch tip"
+    );
+
+    assert_no_worktrees(source_dir.path());
+    assert_no_worktrees(mirrors_dir.path());
+}

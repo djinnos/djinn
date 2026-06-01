@@ -171,6 +171,50 @@ impl Workspace {
         self.run_git(&["checkout", "-B", branch], &[]).await.map(|_| ())
     }
 
+    /// Whether `origin/<target_branch>` is already an ancestor of the current
+    /// `HEAD` — i.e. the checked-out branch already contains every commit on
+    /// the target, so a merge would be a no-op.
+    ///
+    /// Used by the supervisor's proactive dispatch-time sync to skip the merge
+    /// entirely when the task branch is already current with the target. This
+    /// covers the first cycle of a task, where `ensure_branch` has just created
+    /// `task/<id>` from `origin/<base>` (origin/<base> == HEAD ⇒ ancestor), so
+    /// the proactive sync produces no churn / no spurious merge commit.
+    ///
+    /// Fetches `origin/<target_branch>` first so the ancestry check is made
+    /// against the *current* remote tip, not whatever the ephemeral clone last
+    /// saw. Returns `Ok(true)` when up-to-date, `Ok(false)` when behind (a merge
+    /// would do something), and `Err(_)` on fetch / git failure (caller should
+    /// log-and-skip — falling through to the merge is safe).
+    pub async fn is_up_to_date_with(
+        &self,
+        target_branch: &str,
+    ) -> Result<bool, EphemeralWorkspaceError> {
+        self.run_git(&["fetch", "origin", target_branch], &[]).await?;
+        let merge_ref = format!("origin/{target_branch}");
+        // `git merge-base --is-ancestor A B` exits 0 when A is an ancestor of
+        // B, 1 when it is not. Other non-zero exits are real errors. We can't
+        // use `run_git` (which treats every non-zero exit as an error), so call
+        // git directly and discriminate on the exit code.
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(self.root.path())
+            .args(["merge-base", "--is-ancestor", &merge_ref, "HEAD"])
+            .output()
+            .await?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                Err(EphemeralWorkspaceError::Git(format!(
+                    "git merge-base --is-ancestor {merge_ref} HEAD: {}",
+                    stderr.trim()
+                )))
+            }
+        }
+    }
+
     /// Fetch `target_branch` from `origin` and attempt a no-fast-forward merge
     /// into the currently checked-out branch, stopping short of the commit.
     ///
@@ -291,6 +335,171 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    /// Run `git <args>` in `dir`, panicking with stderr on failure.
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn write(dir: &Path, name: &str, contents: &str) {
+        std::fs::write(dir.join(name), contents).expect("write file");
+    }
+
+    /// Build a bare `origin` with a `main` branch and a clone checked out on a
+    /// `task` branch cut from `main`'s tip. Returns `(origin_tmp, clone_ws)`.
+    /// The `Workspace` is `Attached` so it borrows the clone dir; the two
+    /// `TempDir`s keep both alive for the test.
+    fn fixture() -> (TempDir, TempDir, Workspace) {
+        let origin = TempDir::new().expect("origin tmp");
+        let op = origin.path();
+        git(op, &["init", "--bare", "-b", "main"]);
+
+        // Seed `main` via a throwaway working clone.
+        let seed = TempDir::new().expect("seed tmp");
+        let sp = seed.path();
+        git(sp, &["clone", op.to_str().unwrap(), "."]);
+        write(sp, "shared.txt", "base-v1\n");
+        git(sp, &["add", "-A"]);
+        git(sp, &["commit", "-m", "base v1"]);
+        git(sp, &["push", "origin", "main"]);
+
+        // The "task workspace": clone on main, branch off to `task`.
+        let clone = TempDir::new().expect("clone tmp");
+        let cp = clone.path();
+        git(cp, &["clone", op.to_str().unwrap(), "."]);
+        git(cp, &["checkout", "-b", "task"]);
+
+        let ws = Workspace::attach_existing(cp, "task").expect("attach");
+        (origin, clone, ws)
+    }
+
+    /// Advance `origin/main` by one commit (made in a fresh clone, then pushed).
+    /// `contents` is written to `file` so callers control conflict vs. clean.
+    fn advance_main(origin: &Path, file: &str, contents: &str, msg: &str) {
+        let pusher = TempDir::new().expect("pusher tmp");
+        let pp = pusher.path();
+        git(pp, &["clone", origin.to_str().unwrap(), "."]);
+        git(pp, &["checkout", "main"]);
+        write(pp, file, contents);
+        git(pp, &["add", "-A"]);
+        git(pp, &["commit", "-m", msg]);
+        git(pp, &["push", "origin", "main"]);
+    }
+
+    #[tokio::test]
+    async fn is_up_to_date_true_when_branch_just_cut_from_target() {
+        // task was cut from origin/main and nothing advanced main → current.
+        let (_origin, _clone, ws) = fixture();
+        assert!(
+            ws.is_up_to_date_with("main").await.expect("check"),
+            "freshly-cut task branch must report up-to-date with main"
+        );
+    }
+
+    #[tokio::test]
+    async fn behind_base_non_conflicting_merges_and_commits() {
+        let (origin, clone, ws) = fixture();
+        // Add a task-side commit touching a DIFFERENT file (no conflict).
+        let cp = clone.path();
+        write(cp, "task.txt", "task work\n");
+        git(cp, &["add", "-A"]);
+        git(cp, &["commit", "-m", "task work"]);
+
+        // main advances on a non-overlapping file.
+        advance_main(origin.path(), "newfile.txt", "from-main\n", "main v2");
+
+        // Now behind base.
+        assert!(
+            !ws.is_up_to_date_with("main").await.expect("check"),
+            "task branch must report behind after main advances"
+        );
+
+        let head_before = git(cp, &["rev-parse", "HEAD"]);
+        match ws.try_merge("main").await.expect("merge") {
+            MergeOutcome::Clean => {}
+            other => panic!("expected clean merge, got {other:?}"),
+        }
+        // Commit the staged merge (mirrors the supervisor's proactive-sync commit).
+        let committed = ws
+            .commit(
+                "Merge main into task",
+                GitIdentity {
+                    name: "t",
+                    email: "t@t",
+                },
+            )
+            .await
+            .expect("commit");
+        assert!(committed, "clean behind-base merge must produce a commit");
+
+        let head_after = git(cp, &["rev-parse", "HEAD"]);
+        assert_ne!(
+            head_before.trim(),
+            head_after.trim(),
+            "HEAD must advance after the merge commit"
+        );
+        // origin/main is now an ancestor of HEAD → idempotent (next cycle skips).
+        assert!(
+            ws.is_up_to_date_with("main").await.expect("recheck"),
+            "after merge+commit, origin/main must be an ancestor of HEAD"
+        );
+        // It's a real merge commit (two parents).
+        let parents = git(cp, &["rev-list", "--parents", "-n", "1", "HEAD"]);
+        assert_eq!(
+            parents.split_whitespace().count(),
+            3,
+            "expected a merge commit (sha + two parents): {parents}"
+        );
+        // The main-side file landed on the task branch.
+        assert!(cp.join("newfile.txt").exists(), "main's file must be merged in");
+    }
+
+    #[tokio::test]
+    async fn conflicting_base_change_leaves_markers_and_lists_files() {
+        let (origin, clone, ws) = fixture();
+        let cp = clone.path();
+        // Task edits shared.txt one way...
+        write(cp, "shared.txt", "task-edit\n");
+        git(cp, &["add", "-A"]);
+        git(cp, &["commit", "-m", "task edits shared"]);
+
+        // ...main edits the SAME file differently → conflict.
+        advance_main(origin.path(), "shared.txt", "main-edit\n", "main edits shared");
+
+        assert!(
+            !ws.is_up_to_date_with("main").await.expect("check"),
+            "conflicting divergence must report behind"
+        );
+
+        match ws.try_merge("main").await.expect("merge") {
+            MergeOutcome::Conflicts { files } => {
+                assert_eq!(files, vec!["shared.txt".to_string()]);
+            }
+            other => panic!("expected conflicts, got {other:?}"),
+        }
+        // Standard conflict markers are on disk for the worker's tools to edit.
+        let disk = std::fs::read_to_string(cp.join("shared.txt")).expect("read");
+        assert!(
+            disk.contains("<<<<<<<") && disk.contains("=======") && disk.contains(">>>>>>>"),
+            "conflict markers must be present on disk:\n{disk}"
+        );
+    }
 
     #[test]
     fn attach_existing_wraps_existing_dir_without_temp_ownership() {
