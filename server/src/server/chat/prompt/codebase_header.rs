@@ -180,8 +180,26 @@ pub(in crate::server::chat) async fn build_codebase_header(
         return None;
     }
     let truncated = truncate_to_budget(&header, HEADER_BUDGET_CHARS);
-    insert_cache(cache_key, truncated.clone());
-    Some(truncated)
+    // Wrap the ephemeral codebase header in `<system-reminder>` tags so
+    // Claude-family models treat this mid-conversation guidance with
+    // override strength (the same convention Claude Code uses). The
+    // budget is applied to the inner content above, so the tags are
+    // never truncated. The empty case is handled earlier — we never
+    // emit bare tags around an absent header.
+    let wrapped = wrap_in_system_reminder(&truncated);
+    insert_cache(cache_key, wrapped.clone());
+    Some(wrapped)
+}
+
+/// Wrap `content` in `<system-reminder>` / `</system-reminder>` tags.
+///
+/// Returns the content unchanged when it is empty/whitespace-only so we
+/// never emit bare, contentless reminder tags into the prompt.
+fn wrap_in_system_reminder(content: &str) -> String {
+    if content.trim().is_empty() {
+        return content.to_string();
+    }
+    format!("<system-reminder>\n{content}\n</system-reminder>")
 }
 
 fn lookup_cache(key: &(String, String)) -> Option<String> {
@@ -679,7 +697,11 @@ mod tests {
             .await
             .expect("header should be produced");
 
-        assert!(header.starts_with("## 📦 CURRENT CODEBASE"));
+        // The rendered header is wrapped in `<system-reminder>` tags
+        // (G7); the codebase block lives inside them.
+        assert!(header.starts_with("<system-reminder>"));
+        assert!(header.trim_end().ends_with("</system-reminder>"));
+        assert!(header.contains("## 📦 CURRENT CODEBASE"));
         assert!(header.contains("graph warmed"));
         assert!(header.contains("commit `abc12345`"));
         assert!(header.contains("Top hotspots"));
@@ -804,6 +826,45 @@ mod tests {
         let cut = truncate_to_budget(&big, 100);
         assert!(cut.len() <= 100);
         assert!(cut.ends_with('…'));
+    }
+
+    #[test]
+    fn wrap_in_system_reminder_wraps_non_empty_content() {
+        let wrapped = wrap_in_system_reminder("## 📦 CURRENT CODEBASE\n\n**Status**: graph warmed");
+        assert!(wrapped.starts_with("<system-reminder>"));
+        assert!(wrapped.ends_with("</system-reminder>"));
+        assert!(wrapped.contains("## 📦 CURRENT CODEBASE"));
+        assert!(wrapped.contains("graph warmed"));
+    }
+
+    #[test]
+    fn wrap_in_system_reminder_emits_nothing_for_empty_content() {
+        // An empty/whitespace-only header must NOT produce bare tags.
+        assert_eq!(wrap_in_system_reminder(""), "");
+        assert_eq!(wrap_in_system_reminder("   \n  "), "   \n  ");
+        assert!(!wrap_in_system_reminder("").contains("<system-reminder>"));
+    }
+
+    #[tokio::test]
+    async fn built_header_is_wrapped_in_system_reminder() {
+        clear_cache_for_tests();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+
+        let ops: Arc<dyn RepoGraphOps> = Arc::new(FakeOps {
+            status: Some(warmed_status()),
+            ranked: vec![ranked_node("verify_token", 0.87)],
+            ..Default::default()
+        });
+
+        let header = build_codebase_header(ops, "p1-uniq-wrapped", tmp.path())
+            .await
+            .expect("header should be produced");
+        assert!(header.starts_with("<system-reminder>"));
+        assert!(header.trim_end().ends_with("</system-reminder>"));
+        // The codebase block is wrapped, not replaced.
+        assert!(header.contains("## 📦 CURRENT CODEBASE"));
+        assert!(header.contains("verify_token"));
     }
 
     #[test]
