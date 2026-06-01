@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { callMcpTool } from '@/api/mcpClient';
 import {
   useProjectStore,
@@ -10,8 +10,18 @@ import {
 import { MemoryExplorer } from '@/components/memory/MemoryExplorer';
 import { MemoryNoteDetail } from '@/components/memory/MemoryNoteDetail';
 import { HugeiconsIcon } from '@hugeicons/react';
-import { Brain01Icon } from '@hugeicons/core-free-icons';
+import { Brain01Icon, ArrowDown01Icon, Tick02Icon } from '@hugeicons/core-free-icons';
 import { cn } from '@/lib/utils';
+import {
+  ModelSelector as SelectorRoot,
+  ModelSelectorContent,
+  ModelSelectorEmpty,
+  ModelSelectorInput,
+  ModelSelectorItem,
+  ModelSelectorList,
+  ModelSelectorName,
+  ModelSelectorTrigger,
+} from '@/components/ai-elements/model-selector';
 import type {
   MemoryListOutputSchema,
   MemorySearchOutputSchema,
@@ -191,6 +201,12 @@ function MemoryProjectPicker() {
   const projects = useProjects();
   const selectedProjectId = useSelectedProjectId();
   const setSelectedProjectId = useProjectStore((state) => state.setSelectedProjectId);
+  const [open, setOpen] = useState(false);
+
+  const sorted = useMemo(
+    () => [...projects].sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '')),
+    [projects],
+  );
 
   if (projects.length === 0) {
     return (
@@ -200,31 +216,47 @@ function MemoryProjectPicker() {
     );
   }
 
+  const selected = projects.find((p) => p.id === selectedProjectId);
+
   return (
-    <div className="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-border/60 bg-background/40 px-4 py-2.5">
+    <div className="flex shrink-0 items-center gap-2 border-b border-border/60 bg-background/40 px-4 py-2.5">
       <span className="shrink-0 text-xs uppercase tracking-wide text-muted-foreground/70">Project</span>
-      <div className="flex items-center gap-1.5">
-        {projects.map((project) => {
-          const isSelected = project.id === selectedProjectId;
-          return (
-            <button
-              key={project.id}
-              type="button"
-              onClick={() => setSelectedProjectId(project.id)}
-              className={cn(
-                'group flex shrink-0 items-center gap-2 rounded-full border px-3 py-1 text-sm transition-colors',
-                isSelected
-                  ? 'border-border bg-white/[0.06] text-foreground'
-                  : 'border-border/60 bg-background text-muted-foreground hover:border-border hover:bg-white/[0.03] hover:text-foreground',
-              )}
-              aria-pressed={isSelected}
-              title={project.name}
-            >
-              <span className="truncate max-w-[12rem]">{project.name}</span>
-            </button>
-          );
-        })}
-      </div>
+      <SelectorRoot open={open} onOpenChange={setOpen}>
+        <ModelSelectorTrigger
+          className={cn(
+            'flex h-8 items-center gap-1.5 rounded-lg border border-input px-3 text-sm transition-colors dark:bg-input/30',
+            selected ? 'text-foreground' : 'text-muted-foreground',
+          )}
+        >
+          <span className="max-w-[16rem] truncate">{selected?.name ?? 'Select project'}</span>
+          <HugeiconsIcon icon={ArrowDown01Icon} size={12} className="shrink-0 text-muted-foreground" />
+        </ModelSelectorTrigger>
+
+        <ModelSelectorContent title="Select project">
+          <ModelSelectorInput placeholder="Search projects…" />
+          <ModelSelectorList>
+            <ModelSelectorEmpty>No projects found.</ModelSelectorEmpty>
+            {sorted.map((project) => (
+              <ModelSelectorItem
+                key={project.id}
+                searchValue={`${project.name} ${project.github_owner}/${project.github_repo}`}
+                onSelect={() => {
+                  setSelectedProjectId(project.id);
+                  setOpen(false);
+                }}
+              >
+                <ModelSelectorName>{project.name}</ModelSelectorName>
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  {project.github_owner}/{project.github_repo}
+                </span>
+                {project.id === selectedProjectId && (
+                  <HugeiconsIcon icon={Tick02Icon} size={14} className="shrink-0 text-primary" />
+                )}
+              </ModelSelectorItem>
+            ))}
+          </ModelSelectorList>
+        </ModelSelectorContent>
+      </SelectorRoot>
     </div>
   );
 }
