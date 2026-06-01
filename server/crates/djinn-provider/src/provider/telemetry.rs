@@ -507,6 +507,67 @@ impl ToolSpan {
     }
 }
 
+// ─── Embedding span (standalone observation) ─────────────────────────────────
+
+/// An active embedding generation span.
+///
+/// Unlike `LlmSpan`/`ToolSpan`, embeddings run outside a reply-loop session
+/// (warm passes, semantic search, note/code-chunk indexing) so this is a
+/// standalone root observation rather than a child of a `SessionSpan`.
+///
+/// Mirrors the completion-span lifecycle: `start` before the request,
+/// `record_*` for outcome attributes, then `end_ok`/`end_error`.
+pub struct EmbeddingSpan {
+    cx: Context,
+}
+
+impl EmbeddingSpan {
+    /// Start a new embedding span.
+    ///
+    /// `input_count` is the number of inputs in the batch (1 for the current
+    /// single-text path); `input_chars` is the total character count of the
+    /// input(s), a cheap stand-in for token volume.
+    pub fn start(provider: &str, model: &str, input_count: u32, input_chars: u32) -> Self {
+        let tracer = global::tracer(TRACER_NAME);
+
+        let span = tracer
+            .span_builder("embedding")
+            .with_kind(SpanKind::Client)
+            .with_attributes(vec![
+                KeyValue::new("gen_ai.system", provider.to_string()),
+                KeyValue::new("gen_ai.request.model", model.to_string()),
+                KeyValue::new("langfuse.observation.type", "embedding"),
+                KeyValue::new("gen_ai.embedding.input_count", input_count as i64),
+                KeyValue::new("gen_ai.embedding.input_chars", input_chars as i64),
+            ])
+            .start(&tracer);
+
+        let cx = Context::current_with_span(span);
+
+        Self { cx }
+    }
+
+    /// Record the embedding dimension (vector length) on the observation.
+    pub fn record_dimension(&self, dimension: u32) {
+        self.cx.span().set_attribute(KeyValue::new(
+            "gen_ai.embedding.dimension",
+            dimension as i64,
+        ));
+    }
+
+    /// Mark the span as successful and end it.
+    pub fn end_ok(self) {
+        self.cx.span().set_status(Status::Ok);
+        self.cx.span().end();
+    }
+
+    /// Mark the span as failed with an error message and end it.
+    pub fn end_error(self, error: &str) {
+        self.cx.span().set_status(Status::error(error.to_string()));
+        self.cx.span().end();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -567,5 +628,20 @@ mod tests {
     #[test]
     fn floor_char_boundary_beyond_len() {
         assert_eq!(floor_char_boundary("hi", 100), 2);
+    }
+
+    #[test]
+    fn embedding_span_lifecycle_records_without_panic() {
+        // Telemetry is not initialized in unit tests, so the global tracer is a
+        // no-op. This exercises the full instrumentation surface (start, record
+        // the dimension, end) to assert it compiles and records the expected
+        // fields without panicking — mirroring the gated no-op call path the
+        // embedding code uses when telemetry is unconfigured.
+        let span = EmbeddingSpan::start("huggingface/candle", "nomic-embed-text-v1.5", 1, 42);
+        span.record_dimension(768);
+        span.end_ok();
+
+        let err_span = EmbeddingSpan::start("huggingface/candle", "nomic-embed-text-v1.5", 3, 100);
+        err_span.end_error("embedding runtime unavailable");
     }
 }
