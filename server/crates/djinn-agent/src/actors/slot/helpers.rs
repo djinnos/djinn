@@ -522,11 +522,71 @@ pub(crate) fn parse_conflict_metadata(reason: &str) -> Option<MergeConflictMetad
     serde_json::from_str(raw).ok()
 }
 
-/// Per-section char budget when the worker's initial directive combines
-/// reviewer "changes requested" feedback AND failing-CI feedback. Splitting the
-/// budget keeps one source from starving the other (and keeps the combined
-/// payload bounded). Mirrors `MAX_VERIFICATION_CHARS` magnitude.
+/// Per-section char budget for a SINGLE-source initial directive (reviewer-only
+/// or CI-only). Mirrors `MAX_VERIFICATION_CHARS` magnitude.
 const MAX_COMBINED_SECTION_CHARS: usize = 3000;
+
+/// Total char budget shared by the two sections (reviewer feedback + CI
+/// feedback) of the COMBINED rework brief. Sized so a worker turn carries
+/// actionable detail from both sources without an unbounded payload.
+pub(crate) const COMBINED_BRIEF_TOTAL_CHARS: usize = 14_000;
+
+/// Guaranteed floor each section keeps when BOTH are present in the combined
+/// brief, so a huge blob in one source can never fully starve the other. The
+/// budget above the two floors is shared; whatever a small section doesn't use
+/// is lent to the large one (up to the full total).
+pub(crate) const COMBINED_BRIEF_SECTION_FLOOR_CHARS: usize = 3000;
+
+/// Fairly split `COMBINED_BRIEF_TOTAL_CHARS` between the reviewer section and
+/// the CI section, then `smart_truncate` each to its allotment.
+///
+/// Budgeting rules:
+/// - Each section is guaranteed at least `COMBINED_BRIEF_SECTION_FLOOR_CHARS`.
+/// - Whatever a section doesn't need (it's shorter than its fair share) is lent
+///   to the other section — a small reviewer blob frees room for a large CI log
+///   and vice versa, up to the full total.
+/// - Neither section is starved by an oversized peer; when both overflow the
+///   shared pool it is split evenly.
+///
+/// Returns `(reviewer_out, ci_out)`, each already truncated with a clear
+/// `[truncated …]` marker (via `smart_truncate`) when it exceeded its budget.
+pub(crate) fn budget_combined_sections(reviewer: &str, ci: &str) -> (String, String) {
+    let total = COMBINED_BRIEF_TOTAL_CHARS;
+    let floor = COMBINED_BRIEF_SECTION_FLOOR_CHARS.min(total / 2);
+
+    // Shared pool available above the two guaranteed floors.
+    let shared = total.saturating_sub(2 * floor);
+
+    // How much each section wants ABOVE its floor.
+    let rev_extra_want = reviewer.len().saturating_sub(floor);
+    let ci_extra_want = ci.len().saturating_sub(floor);
+
+    let (rev_extra, ci_extra) = if rev_extra_want + ci_extra_want <= shared {
+        // Both fit within the shared pool — give each exactly what it wants.
+        (rev_extra_want, ci_extra_want)
+    } else if rev_extra_want == 0 {
+        // Reviewer fits in its floor; lend the whole shared pool to CI.
+        (0, shared)
+    } else if ci_extra_want == 0 {
+        (shared, 0)
+    } else {
+        // Both want more than the shared pool can satisfy → split it evenly,
+        // but never hand a section more than it can use (lend the surplus back).
+        let half = shared / 2;
+        if rev_extra_want <= half {
+            (rev_extra_want, shared - rev_extra_want)
+        } else if ci_extra_want <= half {
+            (shared - ci_extra_want, ci_extra_want)
+        } else {
+            (half, shared - half)
+        }
+    };
+
+    (
+        truncate_feedback(reviewer, floor + rev_extra),
+        truncate_feedback(ci, floor + ci_extra),
+    )
+}
 
 /// Find the most recent CI-failure / verification feedback that belongs to the
 /// CURRENT rework cycle — i.e. logged at or after the latest PR-review-feedback
@@ -534,9 +594,13 @@ const MAX_COMBINED_SECTION_CHARS: usize = 3000;
 /// reviewer changes-requested and failing CI). This guards against surfacing a
 /// stale CI comment from an earlier head SHA.
 ///
-/// Returns the formatted `**Verification failure:** …`-style section (already
-/// truncated), or `None` when there's no in-cycle CI/verification comment.
-pub(crate) fn latest_ci_feedback_in_cycle(
+/// Find the RAW (untruncated) CI/verification body for the CURRENT rework cycle.
+/// The combined-brief path applies its own fair per-section budget downstream
+/// (`budget_combined_sections`), so no pre-clipping happens here.
+///
+/// Returns the comment body, or `None` when there's no in-cycle CI/verification
+/// comment.
+pub(crate) fn raw_ci_feedback_in_cycle(
     activity: &[djinn_core::models::ActivityEntry],
     not_before: Option<&str>,
 ) -> Option<String> {
@@ -552,11 +616,11 @@ pub(crate) fn latest_ci_feedback_in_cycle(
         })?;
 
     let payload = serde_json::from_str::<serde_json::Value>(&entry.payload).ok()?;
-    let body = payload
+    payload
         .get("body")
         .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())?;
-    Some(truncate_feedback(body, MAX_COMBINED_SECTION_CHARS))
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
 }
 
 /// Build an initial user message for a fresh worker session. If the activity
@@ -588,13 +652,15 @@ pub(crate) async fn initial_user_message_for_task(
             })
             .map(|e| e.created_at.clone());
 
-        let reviewer_section = truncate_feedback(&pr_feedback, MAX_COMBINED_SECTION_CHARS);
-
         // When this same cycle also produced a CI failure, compose BOTH sources
         // into one directive. Otherwise keep today's reviewer-only behavior.
-        if let Some(ci_section) =
-            latest_ci_feedback_in_cycle(&activity, review_cycle_floor.as_deref())
+        if let Some(ci_raw) =
+            raw_ci_feedback_in_cycle(&activity, review_cycle_floor.as_deref())
         {
+            // Fairly budget the two sections so neither a huge reviewer blob nor
+            // a huge CI log can starve the other (E5). Unused budget is lent.
+            let (reviewer_section, ci_section) =
+                budget_combined_sections(&pr_feedback, &ci_raw);
             return format!(
                 "This PR has TWO blocking problems. Address ALL of the following in one pass before responding:\n\n\
                 **(A) A human reviewer requested changes.** Address every reviewer comment below:\n\n\
@@ -607,6 +673,8 @@ pub(crate) async fn initial_user_message_for_task(
             );
         }
 
+        // Reviewer-only: the single section gets the full single-source budget.
+        let reviewer_section = truncate_feedback(&pr_feedback, MAX_COMBINED_SECTION_CHARS);
         return format!(
             "A human reviewer has requested changes on the PR. Address every reviewer comment below:\n\n\
             {reviewer_section}\n\n\
