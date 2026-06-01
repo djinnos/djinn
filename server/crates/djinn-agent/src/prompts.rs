@@ -449,6 +449,43 @@ fn format_labels(json: &str) -> String {
 mod tests {
     use super::*;
 
+    /// G5: with progressive disclosure OFF (the default), `apply_skills`
+    /// inlines every skill's full body — byte-identical to the pre-G5 form.
+    #[test]
+    fn apply_skills_off_inlines_full_content() {
+        if std::env::var_os("DJINN_PROGRESSIVE_SKILLS").is_some() {
+            return; // env-driven default under test; don't race an external override
+        }
+        let skills = vec![
+            crate::skills::ResolvedSkill {
+                name: "alpha".into(),
+                description: "Alpha desc".into(),
+                content: "Alpha body.".into(),
+                required: false,
+            },
+            crate::skills::ResolvedSkill {
+                name: "beta".into(),
+                description: "Beta desc".into(),
+                content: "Beta body.".into(),
+                required: true,
+            },
+        ];
+        let out = apply_skills("BASE", &skills);
+        assert_eq!(
+            out,
+            concat!(
+                "BASE\n\n",
+                "## Available Skills\n\n",
+                "**alpha**: Alpha desc\n\n",
+                "Alpha body.\n\n",
+                "**beta**: Beta desc\n\n",
+                "Beta body."
+            )
+        );
+        // No disclosure note when OFF.
+        assert!(!out.contains("skill_read"));
+    }
+
     fn make_task() -> Task {
         Task {
             id: "task-123".into(),
