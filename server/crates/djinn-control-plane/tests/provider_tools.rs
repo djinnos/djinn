@@ -118,6 +118,21 @@ async fn provider_model_lookup_returns_found_and_not_found_shapes() {
         .expect("provider_model_lookup should dispatch");
     assert!(!not_found["found"].as_bool().unwrap_or(true));
     assert!(not_found["model"].is_null());
+    // G3: a 404-style miss must carry the structured tool-error envelope so the
+    // agent can branch on status instead of re-guessing the same bad id.
+    let env = &not_found["error"];
+    assert!(env.is_object(), "expected structured error envelope: {not_found}");
+    assert_eq!(env["status"], "404");
+    assert_eq!(env["method"], "provider_model_lookup");
+    assert_eq!(env["path"], "nope/unknown-model");
+    assert!(env["error"].as_str().unwrap().contains("not found"));
+    assert!(
+        env["hint"].as_str().unwrap().contains("provider_models_connected"),
+        "hint should point at the recovery tool: {env}"
+    );
+
+    // Backward compatibility: the success path must NOT carry an error envelope.
+    assert!(found.get("error").is_none() || found["error"].is_null());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

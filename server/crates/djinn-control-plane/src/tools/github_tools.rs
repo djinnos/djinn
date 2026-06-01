@@ -8,7 +8,7 @@ use djinn_provider::github_api::GitHubApiClient;
 use djinn_provider::github_api::search::{CodeSearchHit, CodeSearchResult, FileFetchResult};
 
 use crate::server::DjinnMcpServer;
-use crate::tools::task_tools::{ErrorOr, ErrorResponse};
+use crate::tools::tool_error::{ToolError, ToolOutcome};
 
 fn parse_optional_positive_usize(value: Option<i64>, field: &str) -> Result<Option<usize>, String> {
     match value {
@@ -176,14 +176,18 @@ impl DjinnMcpServer {
     pub async fn github_search(
         &self,
         Parameters(params): Parameters<GithubSearchParams>,
-    ) -> Json<ErrorOr<GithubSearchResponse>> {
+    ) -> Json<ToolOutcome<GithubSearchResponse>> {
         let client = GitHubApiClient::for_session_user();
 
         let limit = match parse_optional_positive_usize(params.limit, "limit") {
             Ok(limit) => limit,
-            Err(error) => return Json(ErrorOr::Error(ErrorResponse { error })),
+            // Input-validation failure: a plain message is enough (no HTTP call
+            // happened) — backward-compatible flat `{ error }`.
+            Err(error) => return Json(ToolOutcome::Err(ToolError::new(error))),
         };
 
+        // `repo` is the most useful "path" hint for the agent when present.
+        let path = params.repo.clone().unwrap_or_default();
         match client
             .search_code(
                 &params.query,
@@ -194,10 +198,14 @@ impl DjinnMcpServer {
             )
             .await
         {
-            Ok(result) => Json(ErrorOr::Ok(GithubSearchResponse::from(result))),
-            Err(e) => Json(ErrorOr::Error(ErrorResponse {
-                error: e.to_string(),
-            })),
+            Ok(result) => Json(ToolOutcome::Ok(GithubSearchResponse::from(result))),
+            // Upstream HTTP failure: classify into a structured envelope so the
+            // agent can branch on `status` (404/422/429/network) and act on the hint.
+            Err(e) => Json(ToolOutcome::Err(ToolError::from_http_error(
+                "github_search",
+                &path,
+                &e.to_string(),
+            ))),
         }
     }
 
@@ -209,18 +217,20 @@ impl DjinnMcpServer {
     pub async fn github_fetch_file(
         &self,
         Parameters(params): Parameters<GithubFetchFileParams>,
-    ) -> Json<ErrorOr<GithubFetchFileResponse>> {
+    ) -> Json<ToolOutcome<GithubFetchFileResponse>> {
         let client = GitHubApiClient::for_session_user();
 
         let start_line = match parse_optional_positive_u32(params.start_line, "start_line") {
             Ok(start_line) => start_line,
-            Err(error) => return Json(ErrorOr::Error(ErrorResponse { error })),
+            Err(error) => return Json(ToolOutcome::Err(ToolError::new(error))),
         };
         let end_line = match parse_optional_positive_u32(params.end_line, "end_line") {
             Ok(end_line) => end_line,
-            Err(error) => return Json(ErrorOr::Error(ErrorResponse { error })),
+            Err(error) => return Json(ToolOutcome::Err(ToolError::new(error))),
         };
 
+        // Identify the resource as "owner/repo:path" for the envelope `path`.
+        let resource = format!("{}:{}", params.repo, params.path);
         match client
             .fetch_file(
                 &params.repo,
@@ -231,10 +241,12 @@ impl DjinnMcpServer {
             )
             .await
         {
-            Ok(result) => Json(ErrorOr::Ok(GithubFetchFileResponse::from(result))),
-            Err(e) => Json(ErrorOr::Error(ErrorResponse {
-                error: e.to_string(),
-            })),
+            Ok(result) => Json(ToolOutcome::Ok(GithubFetchFileResponse::from(result))),
+            Err(e) => Json(ToolOutcome::Err(ToolError::from_http_error(
+                "github_fetch_file",
+                &resource,
+                &e.to_string(),
+            ))),
         }
     }
 }

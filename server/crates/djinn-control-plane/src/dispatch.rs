@@ -45,6 +45,7 @@ use crate::tools::session_tools::{
     TaskTimelineParams,
 };
 use crate::tools::settings_tools::{SettingsGetParams, SettingsResetParams, SettingsSetParams};
+use crate::tools::tool_error::ToolOutcome;
 use crate::tools::user_settings_tools::{UserSettingsGetParams, UserSettingsSetParams};
 use crate::tools::task_tools::{
     BoardHealthParams, BoardReconcileParams, ErrorOr, TaskActivityListParams,
@@ -80,6 +81,19 @@ fn map_error_or<T: Serialize>(tool: &str, out: Json<ErrorOr<T>>) -> Result<Value
 fn map_json<T: Serialize>(tool: &str, out: Json<T>) -> Result<Value, String> {
     serde_json::to_value(out.0)
         .map_err(|e| format!("failed to serialize tool result for '{tool}': {e}"))
+}
+
+/// Map a G3 structured-error `ToolOutcome<T>` to the dispatch `Result`. On the
+/// error arm we serialize the full [`ToolError`] envelope to JSON so the
+/// structure (`status`/`method`/`path`/`body`/`hint`) survives the flattened
+/// `Err(String)` channel and reaches the agent — not just the human message.
+fn map_tool_outcome<T: Serialize>(tool: &str, out: Json<ToolOutcome<T>>) -> Result<Value, String> {
+    match out.0 {
+        ToolOutcome::Ok(v) => serde_json::to_value(v)
+            .map_err(|e| format!("failed to serialize tool result for '{tool}': {e}")),
+        ToolOutcome::Err(e) => Err(serde_json::to_string(&e)
+            .unwrap_or_else(|_| format!("tool '{tool}' failed: {}", e.error))),
+    }
 }
 
 impl DjinnMcpServer {
@@ -637,12 +651,12 @@ impl DjinnMcpServer {
                 )?))
                 .await,
             ),
-            "github_search" => map_error_or(
+            "github_search" => map_tool_outcome(
                 name,
                 self.github_search(Parameters(decode_args::<GithubSearchParams>(name, args)?))
                     .await,
             ),
-            "github_fetch_file" => map_error_or(
+            "github_fetch_file" => map_tool_outcome(
                 name,
                 self.github_fetch_file(Parameters(decode_args::<GithubFetchFileParams>(
                     name, args,
