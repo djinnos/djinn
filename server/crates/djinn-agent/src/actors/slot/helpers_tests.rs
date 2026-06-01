@@ -263,16 +263,16 @@ fn latest_ci_feedback_respects_cycle_floor() {
 
     // With a cycle floor at the reviewer-feedback timestamp, only the fresh CI
     // comment is surfaced — the stale one is skipped.
-    let in_cycle = latest_ci_feedback_in_cycle(&activity, Some("2026-06-01T11:00:00Z"))
+    let in_cycle = raw_ci_feedback_in_cycle(&activity, Some("2026-06-01T11:00:00Z"))
         .expect("expected in-cycle CI feedback");
     assert!(in_cycle.contains("NEW CI failure"));
     assert!(!in_cycle.contains("OLD CI failure"));
 
     // A floor newer than every CI comment yields nothing (no stale surfacing).
-    assert!(latest_ci_feedback_in_cycle(&activity, Some("2026-06-01T12:00:00Z")).is_none());
+    assert!(raw_ci_feedback_in_cycle(&activity, Some("2026-06-01T12:00:00Z")).is_none());
 
     // No floor → most recent CI comment.
-    let unbounded = latest_ci_feedback_in_cycle(&activity, None).unwrap();
+    let unbounded = raw_ci_feedback_in_cycle(&activity, None).unwrap();
     assert!(unbounded.contains("NEW CI failure"));
 }
 
@@ -370,4 +370,83 @@ async fn initial_user_message_reviewer_only_preserves_behavior() {
     assert!(msg.contains("REVIEWER wants this renamed"));
     assert!(!msg.contains("Address ALL of the following"));
     assert!(!msg.contains("(B)"));
+}
+
+// ─── E5: per-section char budgeting for the combined rework brief ─────────────
+
+/// A `smart_truncate` output always carries one of its byte-accounting markers.
+fn is_truncated(s: &str) -> bool {
+    s.contains("bytes omitted") || s.contains("bytes total")
+}
+
+#[test]
+fn combined_budget_small_sections_pass_through_untouched() {
+    let reviewer = "reviewer: rename foo to bar";
+    let ci = "ci: clippy failed on line 10";
+    let (rev_out, ci_out) = budget_combined_sections(reviewer, ci);
+    // Both well under any budget → returned verbatim, no truncation marker.
+    assert_eq!(rev_out, reviewer);
+    assert_eq!(ci_out, ci);
+    assert!(!is_truncated(&rev_out));
+    assert!(!is_truncated(&ci_out));
+}
+
+#[test]
+fn combined_budget_oversized_reviewer_does_not_starve_ci() {
+    // Huge reviewer blob, modest CI section.
+    let reviewer = "R".repeat(COMBINED_BRIEF_TOTAL_CHARS * 3);
+    let ci = "CI-DETAIL: the clippy job failed here\n".repeat(20);
+    let (rev_out, ci_out) = budget_combined_sections(&reviewer, &ci);
+
+    // Reviewer is clipped to a budget; it cannot consume the whole total.
+    assert!(is_truncated(&rev_out));
+    assert!(rev_out.len() <= COMBINED_BRIEF_TOTAL_CHARS);
+    // CI still keeps at least its floor's worth of room and survives intact.
+    assert!(ci_out.contains("CI-DETAIL"));
+    assert!(!is_truncated(&ci_out));
+    assert!(ci_out.len() <= COMBINED_BRIEF_TOTAL_CHARS);
+    // The oversized reviewer is held at/under (total - what CI used).
+    assert!(rev_out.len() <= COMBINED_BRIEF_TOTAL_CHARS - COMBINED_BRIEF_SECTION_FLOOR_CHARS + 200);
+}
+
+#[test]
+fn combined_budget_oversized_ci_does_not_starve_reviewer() {
+    let reviewer = "REVIEWER-DETAIL: rename this symbol\n".repeat(20);
+    let ci = "C".repeat(COMBINED_BRIEF_TOTAL_CHARS * 3);
+    let (rev_out, ci_out) = budget_combined_sections(&reviewer, &ci);
+
+    assert!(is_truncated(&ci_out));
+    assert!(ci_out.len() <= COMBINED_BRIEF_TOTAL_CHARS);
+    // Reviewer is not starved — it appears in full, untruncated.
+    assert!(rev_out.contains("REVIEWER-DETAIL"));
+    assert!(!is_truncated(&rev_out));
+}
+
+#[test]
+fn combined_budget_lends_unused_room_when_both_large() {
+    // Both sections far exceed their floors → shared pool split roughly evenly,
+    // and each still ends up materially larger than its bare floor.
+    let reviewer = "R".repeat(COMBINED_BRIEF_TOTAL_CHARS);
+    let ci = "C".repeat(COMBINED_BRIEF_TOTAL_CHARS);
+    let (rev_out, ci_out) = budget_combined_sections(&reviewer, &ci);
+
+    assert!(is_truncated(&rev_out));
+    assert!(is_truncated(&ci_out));
+    // Each gets more than its guaranteed floor (the shared pool is distributed).
+    assert!(rev_out.len() > COMBINED_BRIEF_SECTION_FLOOR_CHARS);
+    assert!(ci_out.len() > COMBINED_BRIEF_SECTION_FLOOR_CHARS);
+    // Combined payload stays bounded by the total (plus small marker overhead).
+    assert!(rev_out.len() + ci_out.len() <= COMBINED_BRIEF_TOTAL_CHARS + 400);
+}
+
+#[test]
+fn combined_budget_single_section_gets_more_than_floor() {
+    // When only one section has content, it should be allowed well past the
+    // per-section floor (it borrows the empty peer's whole share).
+    let reviewer = "R".repeat(COMBINED_BRIEF_TOTAL_CHARS * 2);
+    let (rev_out, ci_out) = budget_combined_sections(&reviewer, "");
+    assert!(is_truncated(&rev_out));
+    assert!(rev_out.len() > COMBINED_BRIEF_SECTION_FLOOR_CHARS * 2);
+    assert!(rev_out.len() <= COMBINED_BRIEF_TOTAL_CHARS);
+    assert_eq!(ci_out, "");
 }
