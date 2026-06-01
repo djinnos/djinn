@@ -290,6 +290,40 @@ impl CredentialRepository {
         Ok(n)
     }
 
+    /// Whether the credential for `(provider_id, owner)` is currently marked
+    /// revoked. Exact-owner (no org-shared fallback) — used by the OAuth
+    /// reconnect path to decide whether to start a fresh device flow instead of
+    /// short-circuiting on a dead token.
+    pub async fn is_revoked_for_owner(
+        &self,
+        provider_id: &str,
+        owner_user_id: Option<&str>,
+    ) -> Result<bool> {
+        ensure_db!(self.db);
+        let id: Option<String> = match owner_user_id {
+            Some(owner) => {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT id FROM credentials \
+                     WHERE provider_id = $1 AND owner_user_id = $2 AND revoked_at IS NOT NULL",
+                )
+                .bind(provider_id)
+                .bind(owner)
+                .fetch_optional(self.db.pool())
+                .await?
+            }
+            None => {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT id FROM credentials \
+                     WHERE provider_id = $1 AND owner_user_id IS NULL AND revoked_at IS NOT NULL",
+                )
+                .bind(provider_id)
+                .fetch_optional(self.db.pool())
+                .await?
+            }
+        };
+        Ok(id.is_some())
+    }
+
     /// Revoked credentials visible to `user_id` (own rows + org-shared fallback)
     /// as `(provider_id, revoked_reason)`. The provider catalog uses this to
     /// render a provider as "Disconnected — <reason>" after a 401, persistently

@@ -71,6 +71,22 @@ fn provider_connection_status(
     (!methods.is_empty(), methods)
 }
 
+/// The revoked reason for `provider_id`, if its stored credential (or its merged
+/// OAuth child, e.g. `openai` ← `chatgpt_codex`) was marked revoked. `revoked`
+/// maps credential `provider_id` → reason (from
+/// `CredentialRepository::list_revoked_for_user`).
+fn revoked_reason_for(
+    provider_id: &str,
+    revoked: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    revoked
+        .get(provider_id)
+        .or_else(|| {
+            builtin::resolve_oauth_provider(provider_id).and_then(|child| revoked.get(child))
+        })
+        .cloned()
+}
+
 fn is_provider_usable(provider: &Provider, builtin_ids: &HashSet<String>) -> bool {
     (provider.is_openai_compatible || builtin_ids.contains(&provider.id))
         && !builtin::is_auth_only_provider(&provider.id)
@@ -166,6 +182,15 @@ pub struct ProviderCatalogItem {
     pub oauth_supported: bool,
     pub oauth_keys: Vec<String>,
     pub connection_methods: Vec<String>,
+    /// When set, the stored credential for this provider was rejected by the
+    /// provider (a 401 during a run) and marked revoked. The provider is
+    /// reported disconnected (`connected = false`, no `connection_methods`) and
+    /// this human-readable reason is carried so the UI can show
+    /// "Disconnected — <reason>" persistently (survives reload — it comes from
+    /// the persisted `credentials.revoked_at/reason`, not a transient event).
+    /// Reconnecting the provider clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_reason: Option<String>,
 }
 
 // ── provider_connected ────────────────────────────────────────────────────────
@@ -472,6 +497,13 @@ impl DjinnMcpServer {
             }
         };
 
+        let revoked_map: std::collections::HashMap<String, String> = credential_repo
+            .list_revoked_for_user(effective_user.as_deref())
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
         let providers: Vec<ProviderCatalogItem> = self
             .state
             .catalog()
@@ -488,6 +520,16 @@ impl DjinnMcpServer {
                     &credential_provider_ids,
                     &credential_key_names,
                 );
+                // A revoked credential overrides "connected": report the provider
+                // disconnected (no methods) + the reason, so the UI prompts a
+                // reconnect persistently.
+                let revoked_reason = revoked_reason_for(&p.id, &revoked_map);
+                let connected = connected && revoked_reason.is_none();
+                let methods: Vec<String> = if revoked_reason.is_some() {
+                    Vec::new()
+                } else {
+                    methods.into_iter().map(str::to_string).collect()
+                };
                 ProviderCatalogItem {
                     id: p.id.clone(),
                     builtin_id: p.id.clone(),
@@ -501,7 +543,8 @@ impl DjinnMcpServer {
                     connected,
                     oauth_supported: !oauth_keys.is_empty(),
                     oauth_keys,
-                    connection_methods: methods.into_iter().map(str::to_string).collect(),
+                    connection_methods: methods,
+                    revoked_reason,
                 }
             })
             .collect();
@@ -551,6 +594,13 @@ impl DjinnMcpServer {
             }
         };
 
+        let revoked_map: std::collections::HashMap<String, String> = credential_repo
+            .list_revoked_for_user(effective_user.as_deref())
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
         let providers: Vec<ProviderCatalogItem> = self
             .state
             .catalog()
@@ -566,7 +616,9 @@ impl DjinnMcpServer {
                     &credential_provider_ids,
                     &credential_key_names,
                 );
-                if !connected {
+                // A revoked credential is NOT connected — exclude it from the
+                // connected-only list.
+                if !connected || revoked_reason_for(&p.id, &revoked_map).is_some() {
                     return None;
                 }
                 Some(ProviderCatalogItem {
@@ -583,6 +635,7 @@ impl DjinnMcpServer {
                     oauth_supported: !oauth_keys.is_empty(),
                     oauth_keys,
                     connection_methods: methods.into_iter().map(str::to_string).collect(),
+                    revoked_reason: None,
                 })
             })
             .collect();

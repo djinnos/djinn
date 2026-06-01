@@ -393,8 +393,17 @@ pub async fn start_codex_device_auth(
     //    automation user's behalf short-circuits on their *own* (or an
     //    org-shared) token and the UI flips straight to "Connected" without
     //    ever writing a credential for the target.
-    if let Some(cached) =
-        CodexTokens::load_from_db_for_owner(&repo, owner_user_id.as_deref()).await
+    // If the target owner's codex credential was marked revoked (a 401 during a
+    // run), never short-circuit on it — the token is dead and only a fresh
+    // sign-in recovers it. Fall through to the device flow; a successful sign-in
+    // re-upserts the credential, which clears the revoked mark.
+    let revoked = repo
+        .is_revoked_for_owner("chatgpt_codex", owner_user_id.as_deref())
+        .await
+        .unwrap_or(false);
+    if !revoked
+        && let Some(cached) =
+            CodexTokens::load_from_db_for_owner(&repo, owner_user_id.as_deref()).await
     {
         if !cached.is_expired() {
             tracing::debug!("Codex: device-code short-circuit — cached token still valid");
