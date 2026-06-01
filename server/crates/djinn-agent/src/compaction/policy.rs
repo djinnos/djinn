@@ -41,6 +41,38 @@ const AGGRESSIVE_MICROCOMPACT_AGE: usize = 2;
 /// Rough chars-per-token estimate. Conservative (low) so we don't overshoot.
 const CHARS_PER_TOKEN: usize = 3;
 
+/// C4: absolute upper bound on the LLM-produced compaction summary, in chars.
+/// A verbose model can return an enormous summary that itself eats the context
+/// window; we cap it before re-inserting it into the rebuilt conversation.
+const SUMMARY_CAP_MAX_CHARS: usize = 8000;
+
+/// C4: chars-per-token used to convert the context window into a char budget for
+/// the summary cap. ≈4 chars/token (a looser estimate than `CHARS_PER_TOKEN`,
+/// matching the heuristic used elsewhere for token→char conversion).
+const SUMMARY_CAP_CHARS_PER_TOKEN: usize = 4;
+
+/// C4: the summary is also capped to this fraction of the context window
+/// (expressed as chars), so the cap scales down on small windows.
+const SUMMARY_CAP_WINDOW_FRACTION: f64 = 0.15;
+
+/// C4: cap the LLM compaction `summary` to `min(SUMMARY_CAP_MAX_CHARS, 15% of
+/// context_window-as-chars)` using the shared `smart_truncate` helper (which
+/// preserves head + tail and returns the input unchanged when it already fits).
+///
+/// `context_window` is in tokens; it is converted to a char budget via
+/// `SUMMARY_CAP_CHARS_PER_TOKEN` (≈4). A non-positive window falls back to the
+/// absolute cap. A summary already within the budget passes through unchanged.
+fn cap_summary(summary: String, context_window: i64) -> String {
+    let window_chars = if context_window > 0 {
+        (context_window as f64 * SUMMARY_CAP_CHARS_PER_TOKEN as f64 * SUMMARY_CAP_WINDOW_FRACTION)
+            as usize
+    } else {
+        SUMMARY_CAP_MAX_CHARS
+    };
+    let cap = SUMMARY_CAP_MAX_CHARS.min(window_chars);
+    crate::truncate::smart_truncate(&summary, cap)
+}
+
 /// Return `true` if the accumulated input tokens have reached the compaction
 /// threshold relative to the model's context window.
 pub fn needs_compaction(total_tokens_in: u32, context_window: i64) -> bool {
@@ -226,6 +258,9 @@ pub async fn compact_conversation(
 
     match compact_result {
         Ok(summary) => {
+            // C4: cap the summary length before it is re-inserted, so a verbose
+            // model cannot blow the context window with its own summary.
+            let summary = cap_summary(summary, context_window);
             conversation.messages =
                 rebuild_full_compaction_messages(&conversation.messages, summary, &ctx);
 
@@ -442,6 +477,9 @@ async fn partial_compact(
     );
 
     let summary = do_partial_compact(provider, tail).await?;
+    // C4: cap the summary length before it is re-inserted, so a verbose model
+    // cannot blow the context window with its own summary.
+    let summary = cap_summary(summary, context_window);
     conversation.messages =
         rebuild_partial_compaction_messages(prefix, tail.len(), summary, ctx, last_user_text);
     Ok(true)
@@ -1248,6 +1286,64 @@ mod tests {
             microcompact_with_thresholds(&mut conv_aggressive, 10, AGGRESSIVE_MICROCOMPACT_AGE, 0);
 
         assert!(tokens_aggressive >= tokens_default);
+    }
+
+    #[test]
+    fn cap_summary_truncates_summary_longer_than_cap() {
+        // Large context window so the 8K absolute cap is the binding limit.
+        let context_window = 200_000;
+        let long_summary = "S".repeat(20_000);
+        let capped = cap_summary(long_summary.clone(), context_window);
+
+        assert!(capped.len() < long_summary.len(), "summary should shrink");
+        assert!(
+            capped.len() <= SUMMARY_CAP_MAX_CHARS,
+            "capped length {} exceeds absolute cap {}",
+            capped.len(),
+            SUMMARY_CAP_MAX_CHARS
+        );
+    }
+
+    #[test]
+    fn cap_summary_passes_short_summary_unchanged() {
+        let short = "A concise summary of prior work.".to_string();
+        let capped = cap_summary(short.clone(), 200_000);
+        assert_eq!(capped, short, "short summary must pass through unchanged");
+    }
+
+    #[test]
+    fn cap_summary_respects_smaller_of_8k_and_window_fraction() {
+        // Small window: 15% of (window * 4 chars/token) is the binding limit.
+        // window = 10_000 → 10_000 * 4 * 0.15 = 6_000 chars < 8_000.
+        let context_window = 10_000;
+        let expected_cap = (context_window as f64
+            * SUMMARY_CAP_CHARS_PER_TOKEN as f64
+            * SUMMARY_CAP_WINDOW_FRACTION) as usize;
+        assert!(
+            expected_cap < SUMMARY_CAP_MAX_CHARS,
+            "test precondition: window fraction must be the smaller cap"
+        );
+
+        let long_summary = "Z".repeat(20_000);
+        let capped = cap_summary(long_summary, context_window);
+        assert!(
+            capped.len() <= expected_cap,
+            "capped length {} exceeds the window-fraction cap {}",
+            capped.len(),
+            expected_cap
+        );
+        // And it must NOT have been allowed to grow up to the 8K absolute cap.
+        assert!(
+            capped.len() < SUMMARY_CAP_MAX_CHARS,
+            "the smaller window-fraction cap should bind below the absolute cap"
+        );
+    }
+
+    #[test]
+    fn cap_summary_non_positive_window_falls_back_to_absolute_cap() {
+        let long_summary = "Q".repeat(20_000);
+        let capped = cap_summary(long_summary, 0);
+        assert!(capped.len() <= SUMMARY_CAP_MAX_CHARS);
     }
 
     #[test]
