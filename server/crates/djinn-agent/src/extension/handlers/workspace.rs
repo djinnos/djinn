@@ -42,15 +42,24 @@ pub(crate) async fn call_shell(
     }))
 }
 
+/// Hard byte budget for a single `call_read` scan. We never read more than
+/// this many bytes off disk for one read, even when the requested window
+/// would imply scanning further — a multi-GB file must not OOM the worker.
+/// Matches the order of magnitude of the other tool-output truncation
+/// budgets in this crate (see `output_stash::MAX_TOTAL_BYTES`, 5 MB).
+const MAX_READ_BYTES: usize = 8 * 1024 * 1024; // 8 MiB
+
 pub(crate) async fn call_read(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
 ) -> Result<serde_json::Value, String> {
+    use tokio::io::AsyncBufReadExt;
+
     let p: ReadParams = parse_args(arguments)?;
     let path = resolve_path(&p.file_path, worktree_path);
 
-    let bytes = tokio::fs::read(&path).await.map_err(|e| {
+    let file = tokio::fs::File::open(&path).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             let parent = path.parent().unwrap_or(worktree_path);
             let suggestions = std::fs::read_dir(parent)
@@ -75,33 +84,97 @@ pub(crate) async fn call_read(
         }
     })?;
 
-    if bytes.contains(&0) {
-        return Err(format!("refusing to read binary file: {}", path.display()));
-    }
-
-    let text = String::from_utf8(bytes)
-        .map_err(|_| format!("refusing to read binary file: {}", path.display()))?;
-    let all_lines: Vec<String> = text
-        .lines()
-        .map(|line| {
-            if line.chars().count() > 2000 {
-                line.chars().take(2000).collect::<String>()
-            } else {
-                line.to_string()
-            }
-        })
-        .collect();
-
     let offset = p.offset.unwrap_or(0);
     let limit = p.limit.unwrap_or(2000).min(2000);
-    let start = offset.min(all_lines.len());
-    let end = start.saturating_add(limit).min(all_lines.len());
+
+    // We only need the window [offset, offset+limit). Stream line by line and
+    // stop once we've collected one line past the window — enough to know
+    // whether there is `has_more` content without reading the rest of a huge
+    // file. A hard byte budget caps the scan so a pathologically large file
+    // (or a binary blob with no newlines) can never balloon memory.
+    let want_lines = offset.saturating_add(limit);
+    // Read one extra line beyond the window so `has_more` is exact in the
+    // common (within-budget) case.
+    let scan_target = want_lines.saturating_add(1);
+
+    let mut reader = tokio::io::BufReader::new(file);
+    let mut all_lines: Vec<String> = Vec::new();
+    let mut scanned_bytes: usize = 0;
+    let mut has_more_beyond_window = false;
+    let mut truncated_by_budget = false;
+
+    loop {
+        // Stop reading the moment we have the window plus a single lookahead
+        // line: we never need to materialize the rest of the file.
+        if all_lines.len() >= scan_target {
+            has_more_beyond_window = true;
+            break;
+        }
+
+        let mut buf: Vec<u8> = Vec::new();
+        let n = reader
+            .read_until(b'\n', &mut buf)
+            .await
+            .map_err(|e| format!("read failed: {e}"))?;
+        if n == 0 {
+            break; // EOF — no more lines
+        }
+        scanned_bytes = scanned_bytes.saturating_add(n);
+
+        // Binary detection from the streamed chunk: a NUL byte means this is
+        // not a text file. Bail before dumping bytes into the response.
+        if buf.contains(&0) {
+            return Err(format!("refusing to read binary file: {}", path.display()));
+        }
+
+        // Decode lossily and strip the trailing newline(s), mirroring the old
+        // `str::lines()` behaviour.
+        let mut line = String::from_utf8_lossy(&buf).into_owned();
+        while line.ends_with('\n') || line.ends_with('\r') {
+            line.pop();
+        }
+        if line.chars().count() > 2000 {
+            line = line.chars().take(2000).collect::<String>();
+        }
+        all_lines.push(line);
+
+        // Byte budget: stop scanning once we've consumed the cap. If there's
+        // still content on disk, surface it as truncation rather than
+        // silently dropping the tail.
+        if scanned_bytes >= MAX_READ_BYTES {
+            use tokio::io::AsyncReadExt;
+            let mut probe = [0u8; 1];
+            let read = reader
+                .read(&mut probe)
+                .await
+                .map_err(|e| format!("read failed: {e}"))?;
+            if read > 0 {
+                truncated_by_budget = true;
+                has_more_beyond_window = true;
+            }
+            break;
+        }
+    }
+
+    let total_scanned = all_lines.len();
+    let start = offset.min(total_scanned);
+    let end = start.saturating_add(limit).min(total_scanned);
 
     let mut numbered = String::new();
     for (i, line) in all_lines[start..end].iter().enumerate() {
         let line_no = start + i + 1;
         numbered.push_str(&format!("{:>6}\t{}\n", line_no, line));
     }
+    if truncated_by_budget {
+        numbered.push_str(&format!(
+            "\n[file too large: truncated at {} MiB; remaining content not shown]\n",
+            MAX_READ_BYTES / (1024 * 1024)
+        ));
+    }
+
+    // `has_more` is true if there's content past the scanned window, or if the
+    // requested window didn't reach the end of what we scanned.
+    let has_more = has_more_beyond_window || end < total_scanned;
 
     state
         .file_time
@@ -112,8 +185,8 @@ pub(crate) async fn call_read(
         "path": path.display().to_string(),
         "offset": start,
         "limit": limit,
-        "total_lines": all_lines.len(),
-        "has_more": end < all_lines.len(),
+        "total_lines": total_scanned,
+        "has_more": has_more,
         "content": numbered,
     }))
 }
