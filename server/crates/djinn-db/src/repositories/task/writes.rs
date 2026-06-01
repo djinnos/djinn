@@ -80,7 +80,17 @@ impl TaskRepository {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn create_in_project(
+    /// Create a task together with its outgoing blocker edges in a SINGLE
+    /// transaction. The two MUST commit atomically: otherwise the task lands
+    /// `open` (dispatchable) a beat before its blockers are written, and the
+    /// coordinator's ready-poll — running on a separate connection — can claim
+    /// and run it ahead of its dependency. (Observed: a planner-spawned task
+    /// dispatched ~1s after creation, before its `blocked-by` edge existed.)
+    ///
+    /// `blocker_ids` are the tasks this new task is blocked BY (already resolved
+    /// to ids). A fresh task has no dependents, so its outgoing edges cannot
+    /// form a cycle — no cycle check is needed here.
+    pub async fn create_in_project_with_blockers(
         &self,
         project_id: &str,
         epic_id: Option<&str>,
@@ -92,14 +102,13 @@ impl TaskRepository {
         owner: &str,
         status: Option<&str>,
         acceptance_criteria: Option<&str>,
+        blocker_ids: &[String],
     ) -> Result<Task> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
         let short_id = self.generate_short_id(&id).await?;
-        let ac = parse_json_array_column(
-            "acceptance_criteria",
-            acceptance_criteria.unwrap_or("[]"),
-        )?;
+        let ac =
+            parse_json_array_column("acceptance_criteria", acceptance_criteria.unwrap_or("[]"))?;
         // Stamp `created_by_user_id` with the effective creator, in order:
         //   1. the session user (`SESSION_USER_ID`, set at the MCP dispatch
         //      root) — a human acting directly;
@@ -126,12 +135,14 @@ impl TaskRepository {
                 };
                 match from_epic {
                     Some(uid) => Some(uid),
-                    None => sqlx::query_scalar!(
-                        "SELECT id FROM users WHERE github_id = $1",
-                        djinn_core::AUTOMATION_GITHUB_ID
-                    )
-                    .fetch_optional(self.db.pool())
-                    .await?,
+                    None => {
+                        sqlx::query_scalar!(
+                            "SELECT id FROM users WHERE github_id = $1",
+                            djinn_core::AUTOMATION_GITHUB_ID
+                        )
+                        .fetch_optional(self.db.pool())
+                        .await?
+                    }
                 }
             }
         };
@@ -145,13 +156,15 @@ impl TaskRepository {
         let owner_owned = owner.to_owned();
         let status_owned = status.map(|s| s.to_owned());
 
-        // Retry on Dolt 1213: the INSERT hits the hot `tasks` table and
-        // autocommits; concurrent writers routinely trip serialization
-        // failures. The INSERT is idempotent because `id` is fixed for this
-        // call — a retry that succeeds after a prior partial commit would
-        // hit a UNIQUE violation, which `is_serialization_failure` does not
-        // match, so the original error surfaces unchanged. The follow-up
-        // SELECT is retried independently.
+        // Retry on Dolt 1213: the INSERT hits the hot `tasks` table; concurrent
+        // writers routinely trip serialization failures. Task + blocker rows go
+        // in ONE transaction so a separate-connection reader (the coordinator's
+        // dispatch poll) never sees the task as a dispatchable `open` row before
+        // its blockers exist. The whole tx is idempotent under retry: `id` is
+        // fixed, so a retry after a partial commit hits a UNIQUE violation (not
+        // a serialization failure) and the original error surfaces unchanged.
+        // The follow-up SELECT is retried independently.
+        let blocker_ids_owned: Vec<String> = blocker_ids.to_vec();
         crate::retry::retry_on_serialization_failure(
             crate::retry::DEFAULT_MAX_TX_RETRIES,
             || {
@@ -167,7 +180,9 @@ impl TaskRepository {
                 let status = status_owned.clone();
                 let ac = ac.clone();
                 let created_by_user_id = created_by_user_id.clone();
+                let blocker_ids = blocker_ids_owned.clone();
                 async move {
+                    let mut tx = self.db.pool().begin().await?;
                     sqlx::query!(
                         "INSERT INTO tasks
                             (id, project_id, short_id, epic_id, title, description, design,
@@ -188,8 +203,28 @@ impl TaskRepository {
                         ac,
                         created_by_user_id
                     )
-                    .execute(self.db.pool())
+                    .execute(&mut *tx)
                     .await?;
+                    // Outgoing blocker edges, in the same tx. `ON CONFLICT DO
+                    // NOTHING` (PK is `(task_id, blocking_task_id)`) keeps it
+                    // idempotent across retries; the task row above satisfies the
+                    // `blockers.task_id` FK within the tx.
+                    for blocking_id in &blocker_ids {
+                        if &id == blocking_id {
+                            return Err(crate::Error::Internal(
+                                "task cannot block itself".into(),
+                            ));
+                        }
+                        sqlx::query!(
+                            "INSERT INTO blockers (task_id, blocking_task_id) VALUES ($1, $2)
+                             ON CONFLICT DO NOTHING",
+                            id,
+                            blocking_id
+                        )
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                    tx.commit().await?;
                     Ok::<_, crate::Error>(())
                 }
             },
@@ -201,8 +236,7 @@ impl TaskRepository {
             || {
                 let id = id.clone();
                 async move {
-                    let task: Task =
-                        task_select_where_id!(&id).fetch_one(self.db.pool()).await?;
+                    let task: Task = task_select_where_id!(&id).fetch_one(self.db.pool()).await?;
                     Ok::<_, crate::Error>(task)
                 }
             },
@@ -216,6 +250,38 @@ impl TaskRepository {
         self.events
             .send(DjinnEventEnvelope::task_created(&task, false));
         Ok(task)
+    }
+
+    /// Create a task with no blocker edges (the common path). See
+    /// [`Self::create_in_project_with_blockers`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_in_project(
+        &self,
+        project_id: &str,
+        epic_id: Option<&str>,
+        title: &str,
+        description: &str,
+        design: &str,
+        issue_type: &str,
+        priority: i64,
+        owner: &str,
+        status: Option<&str>,
+        acceptance_criteria: Option<&str>,
+    ) -> Result<Task> {
+        self.create_in_project_with_blockers(
+            project_id,
+            epic_id,
+            title,
+            description,
+            design,
+            issue_type,
+            priority,
+            owner,
+            status,
+            acceptance_criteria,
+            &[],
+        )
+        .await
     }
 
     /// Test helper: create a task with a specific short_id.
@@ -328,18 +394,15 @@ impl TaskRepository {
         let id_owned = id.to_owned();
 
         // DELETE is idempotent; retry on Dolt 1213.
-        crate::retry::retry_on_serialization_failure(
-            crate::retry::DEFAULT_MAX_TX_RETRIES,
-            || {
-                let id = id_owned.clone();
-                async move {
-                    sqlx::query!("DELETE FROM tasks WHERE id = $1", id)
-                        .execute(self.db.pool())
-                        .await?;
-                    Ok::<_, crate::Error>(())
-                }
-            },
-        )
+        crate::retry::retry_on_serialization_failure(crate::retry::DEFAULT_MAX_TX_RETRIES, || {
+            let id = id_owned.clone();
+            async move {
+                sqlx::query!("DELETE FROM tasks WHERE id = $1", id)
+                    .execute(self.db.pool())
+                    .await?;
+                Ok::<_, crate::Error>(())
+            }
+        })
         .await?;
 
         self.events.send(DjinnEventEnvelope::task_deleted(id));
@@ -707,23 +770,20 @@ impl TaskRepository {
         let id_owned = id.to_owned();
         let updated_at_owned = updated_at.to_owned();
 
-        crate::retry::retry_on_serialization_failure(
-            crate::retry::DEFAULT_MAX_TX_RETRIES,
-            || {
-                let id = id_owned.clone();
-                let updated_at = updated_at_owned.clone();
-                async move {
-                    sqlx::query!(
-                        "UPDATE tasks SET updated_at = $1 WHERE id = $2",
-                        updated_at,
-                        id
-                    )
-                    .execute(self.db.pool())
-                    .await?;
-                    Ok::<_, crate::Error>(())
-                }
-            },
-        )
+        crate::retry::retry_on_serialization_failure(crate::retry::DEFAULT_MAX_TX_RETRIES, || {
+            let id = id_owned.clone();
+            let updated_at = updated_at_owned.clone();
+            async move {
+                sqlx::query!(
+                    "UPDATE tasks SET updated_at = $1 WHERE id = $2",
+                    updated_at,
+                    id
+                )
+                .execute(self.db.pool())
+                .await?;
+                Ok::<_, crate::Error>(())
+            }
+        })
         .await?;
         Ok(())
     }
@@ -936,6 +996,80 @@ mod created_by_tests {
             session_owned.created_by_user_id.as_deref(),
             Some(session_user.id.as_str()),
             "an in-scope SESSION_USER_ID must take precedence over the epic's creator"
+        );
+    }
+
+    /// Regression for the planner↔dispatch race: a task created with blockers
+    /// must have its blocker edge present the instant creation returns (same
+    /// transaction), so the coordinator's ready filter never sees it as a
+    /// dispatchable `open` task before it's blocked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_with_blockers_wires_edge_atomically_and_holds_from_ready() {
+        let db = Database::open_in_memory().unwrap();
+        let (project_id, epic_id) = seed_project_and_epic(&db).await;
+        let repo = TaskRepository::new(db.clone(), EventBus::noop());
+
+        // Blocking task — stays `open` (unresolved).
+        let blocker = repo
+            .create_in_project(
+                &project_id,
+                Some(&epic_id),
+                "Blocker",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // New task created together WITH its blocker, in one call.
+        let blocked = repo
+            .create_in_project_with_blockers(
+                &project_id,
+                Some(&epic_id),
+                "Blocked",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                None,
+                None,
+                &[blocker.id.clone()],
+            )
+            .await
+            .unwrap();
+
+        // The edge exists the moment creation returns — no window where the task
+        // is dispatchable-but-unblocked.
+        let edge: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "c!" FROM blockers WHERE task_id = $1 AND blocking_task_id = $2"#,
+            blocked.id,
+            blocker.id
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            edge, 1,
+            "blocker edge must be wired atomically with the task insert"
+        );
+
+        // The dispatcher's ready filter (open + no non-closed blocker) must
+        // exclude the blocked task while its blocker is unresolved, but keep the
+        // (unblocked) blocker itself.
+        let ready = repo.list_by_status_filtered("open", true).await.unwrap();
+        assert!(
+            ready.iter().any(|t| t.id == blocker.id),
+            "the unblocked blocker task is ready"
+        );
+        assert!(
+            !ready.iter().any(|t| t.id == blocked.id),
+            "the blocked task must NOT be ready until its blocker closes"
         );
     }
 }

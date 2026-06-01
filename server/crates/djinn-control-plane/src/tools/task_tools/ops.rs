@@ -144,8 +144,11 @@ pub async fn create_task(
         .filter(|criteria| !criteria.is_empty())
         .map(|criteria| serde_json::to_string(&criteria).unwrap_or_else(|_| "[]".into()));
 
+    // Create the task AND its blocker edges atomically (one transaction) so the
+    // coordinator's ready-poll never claims it as a dispatchable `open` task
+    // before its blockers are committed — the planner↔dispatch race.
     let mut task = match repo
-        .create_in_project(
+        .create_in_project_with_blockers(
             project_id,
             epic_id.as_deref(),
             &request.title,
@@ -156,6 +159,7 @@ pub async fn create_task(
             &request.owner,
             request.status.as_deref(),
             ac_json.as_deref(),
+            &resolved_blocker_ids,
         )
         .await
     {
@@ -191,13 +195,8 @@ pub async fn create_task(
         }
     }
 
-    if !resolved_blocker_ids.is_empty()
-        && let Err(e) = repo
-            .update_blockers_atomic(&task.id, &resolved_blocker_ids, &[])
-            .await
-    {
-        return Json(ErrorOr::Error(ErrorResponse::new(e.to_string())));
-    }
+    // (Blockers were wired atomically inside `create_in_project_with_blockers`
+    // above — see the planner↔dispatch race note there.)
 
     if let Some(agent_type) = request.agent_type.as_deref() {
         let at = (!agent_type.is_empty()).then_some(agent_type);
