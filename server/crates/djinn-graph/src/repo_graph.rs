@@ -3702,6 +3702,74 @@ mod tests {
         }
     }
 
+    // F6: query-planner search path. The OFF path must be identical to the
+    // baseline `search_by_name`; the ON path unions across sub-queries.
+    #[test]
+    fn search_by_name_planned_off_matches_baseline() {
+        let graph = RepoDependencyGraph::build(&[fixture_index()]);
+        let baseline = graph.search_by_name("helper", None, 10);
+
+        // No planner injected ⇒ pass-through regardless of the env flag.
+        let planned_none = graph.search_by_name_planned("helper", None, 10, None);
+        assert_eq!(
+            baseline.len(),
+            planned_none.len(),
+            "OFF path (no planner) must match baseline length"
+        );
+        for (b, p) in baseline.iter().zip(planned_none.iter()) {
+            assert_eq!(b.node_index, p.node_index);
+            assert_eq!(b.score, p.score);
+        }
+
+        // Even with a planner supplied, the gating flag is OFF by default
+        // (CI runs without DJINN_CODE_GRAPH_QUERY_PLANNER set), so the
+        // planner is never invoked and results still equal the baseline.
+        if std::env::var(crate::query_planner::QUERY_PLANNER_FLAG).is_err() {
+            let planner =
+                crate::query_planner::StaticPlanner::new(vec!["app".into(), "main".into()]);
+            let planned_with = graph.search_by_name_planned("helper", None, 10, Some(&planner));
+            assert_eq!(baseline.len(), planned_with.len());
+            for (b, p) in baseline.iter().zip(planned_with.iter()) {
+                assert_eq!(b.node_index, p.node_index);
+            }
+        }
+    }
+
+    #[test]
+    fn search_by_name_planned_on_unions_subqueries() {
+        use crate::query_planner::{StaticPlanner, union_dedup_hits};
+        let graph = RepoDependencyGraph::build(&[fixture_index()]);
+
+        // Simulate the ON path deterministically (without touching shared
+        // process env): plan -> per-sub-query search -> union+dedup, and
+        // assert the union is a superset of any single sub-query's hits.
+        let planner = StaticPlanner::new(vec!["app".into()]);
+        let plan = crate::query_planner::plan_query(&planner, "helper");
+        assert!(plan.len() >= 2, "expected the planner to expand the query");
+
+        let per_query: Vec<_> = plan
+            .iter()
+            .map(|q| graph.search_by_name(q, None, 10))
+            .collect();
+        let helper_only = graph.search_by_name("helper", None, 10);
+        let app_only = graph.search_by_name("app", None, 10);
+        let union = union_dedup_hits(per_query, 50);
+
+        // Union contains every node from each individual sub-query search.
+        for h in helper_only.iter().chain(app_only.iter()) {
+            assert!(
+                union.iter().any(|u| u.node_index == h.node_index),
+                "union must include node {:?} from a sub-query",
+                h.node_index
+            );
+        }
+        // And no duplicate node indices survive the dedup.
+        let mut seen = std::collections::HashSet::new();
+        for u in &union {
+            assert!(seen.insert(u.node_index), "duplicate node in union");
+        }
+    }
+
     #[test]
     fn cycles_finds_symbol_cycle_via_relationships() {
         // Two mutually-referencing symbols via SCIP relationships create a
