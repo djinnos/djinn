@@ -211,6 +211,7 @@ async fn get_pull_request_success() {
         .and(path_regex(
             r"/repos/djinnos/server/commits/abc123/check-runs",
         ))
+        .and(query_param("per_page", "100"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "total_count": 1,
             "check_runs": [{
@@ -233,6 +234,106 @@ async fn get_pull_request_success() {
     assert_eq!(pr.number, 42);
     assert_eq!(checks.total_count, 1);
     assert_eq!(checks.check_runs[0].conclusion.as_deref(), Some("success"));
+}
+
+/// A PR with more than one page of check runs must be fully aggregated:
+/// the client requests `per_page=100` and pages through `page=1`, `page=2`,
+/// ... until a short page signals the end — instead of silently dropping
+/// everything past GitHub's default first page.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_pull_request_paginates_check_runs() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("GET"))
+        .and(path("/repos/djinnos/server/pulls/42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "number": 42,
+            "title": "feat: add feature",
+            "state": "open",
+            "merged": false,
+            "html_url": "https://github.com/djinnos/server/pull/42",
+            "head": { "ref": "feature-branch", "sha": "abc123" },
+            "base": { "ref": "main", "sha": "def456" },
+            "auto_merge": null,
+            "node_id": "PR_abc123"
+        })))
+        .mount(&server)
+        .await;
+
+    // Page 1: a full page of 100 runs (forces a follow-up request).
+    let page1_runs: Vec<serde_json::Value> = (0..100)
+        .map(|i| {
+            serde_json::json!({
+                "id": i,
+                "name": format!("ci-{i}"),
+                "status": "completed",
+                "conclusion": "success",
+                "html_url": format!("https://github.com/checks/{i}")
+            })
+        })
+        .collect();
+
+    Mock::given(method("GET"))
+        .and(path_regex(
+            r"/repos/djinnos/server/commits/abc123/check-runs",
+        ))
+        .and(query_param("per_page", "100"))
+        .and(query_param("page", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "total_count": 142,
+            "check_runs": page1_runs,
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // Page 2: a short page of 42 runs (signals the end).
+    let page2_runs: Vec<serde_json::Value> = (100..142)
+        .map(|i| {
+            serde_json::json!({
+                "id": i,
+                "name": format!("ci-{i}"),
+                "status": "completed",
+                "conclusion": "failure",
+                "html_url": format!("https://github.com/checks/{i}")
+            })
+        })
+        .collect();
+
+    Mock::given(method("GET"))
+        .and(path_regex(
+            r"/repos/djinnos/server/commits/abc123/check-runs",
+        ))
+        .and(query_param("per_page", "100"))
+        .and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "total_count": 142,
+            "check_runs": page2_runs,
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let (_pr, checks): (_, CheckRunsResponse) = client
+        .get_pull_request("djinnos", "server", 42)
+        .await
+        .unwrap();
+
+    // All 142 runs across both pages must be aggregated, not just the first 100.
+    assert_eq!(checks.check_runs.len(), 142);
+    assert_eq!(checks.total_count, 142);
+    // Run from the second page made it through.
+    assert!(checks.check_runs.iter().any(|r| r.name == "ci-141"));
+    assert_eq!(
+        checks
+            .check_runs
+            .iter()
+            .filter(|r| r.conclusion.as_deref() == Some("failure"))
+            .count(),
+        42
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

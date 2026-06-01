@@ -3,7 +3,7 @@ use anyhow::{Result, anyhow};
 use crate::github_api::transport::handle_rate_limit;
 use crate::github_api::types::{CompareResponse, RequiredStatusChecksResponse};
 use crate::github_api::{
-    AutoMergeRequest, CheckRunsResponse, CreatePrParams, DequeueEvent, GitHubApiClient,
+    AutoMergeRequest, CheckRun, CheckRunsResponse, CreatePrParams, DequeueEvent, GitHubApiClient,
     MergeMethod, MergeQueueEntry, MergeQueueEntryState, PrMergeQueueState, PullRequest,
 };
 
@@ -596,39 +596,81 @@ impl GitHubApiClient {
         }
         let pr: PullRequest = pr_resp.json().await?;
 
-        let checks_url = format!(
-            "{}/repos/{}/{}/commits/{}/check-runs",
-            self.base_url, owner, repo, pr.head.sha
-        );
+        // GitHub paginates `/check-runs` at a default page size of 30, so a PR
+        // with >30 check runs would silently drop the rest and the merge gate
+        // would misjudge CI. Request the max page size (100) and page through
+        // every result until a short (or empty) page signals the end. Bound the
+        // loop at MAX_PAGES so a pathological PR can't make us page forever.
+        const PER_PAGE: u32 = 100;
+        const MAX_PAGES: u32 = 10; // 10 * 100 = 1000 check runs.
 
-        let checks_resp = self
-            .send_with_retry(|token| {
-                let url = checks_url.clone();
-                let http = self.http.clone();
-                async move {
-                    let resp = http
-                        .get(&url)
-                        .bearer_auth(&token)
-                        .header("Accept", "application/vnd.github+json")
-                        .header("X-GitHub-Api-Version", "2022-11-28")
-                        .send()
-                        .await?;
-                    handle_rate_limit(resp).await
-                }
-            })
-            .await?;
+        let mut all_runs: Vec<CheckRun> = Vec::new();
+        let mut total_count: u32 = 0;
+        let mut hit_cap = false;
 
-        let checks: CheckRunsResponse = if checks_resp.status().is_success() {
-            checks_resp.json().await?
-        } else {
-            tracing::warn!(
-                "GitHubApiClient: check-runs fetch failed ({}), returning empty",
-                checks_resp.status()
+        for page in 1..=MAX_PAGES {
+            let checks_url = format!(
+                "{}/repos/{}/{}/commits/{}/check-runs?per_page={}&page={}",
+                self.base_url, owner, repo, pr.head.sha, PER_PAGE, page
             );
-            CheckRunsResponse {
-                total_count: 0,
-                check_runs: vec![],
+
+            let checks_resp = self
+                .send_with_retry(|token| {
+                    let url = checks_url.clone();
+                    let http = self.http.clone();
+                    async move {
+                        let resp = http
+                            .get(&url)
+                            .bearer_auth(&token)
+                            .header("Accept", "application/vnd.github+json")
+                            .header("X-GitHub-Api-Version", "2022-11-28")
+                            .send()
+                            .await?;
+                        handle_rate_limit(resp).await
+                    }
+                })
+                .await?;
+
+            if !checks_resp.status().is_success() {
+                tracing::warn!(
+                    "GitHubApiClient: check-runs fetch failed ({}) on page {}, returning what was collected",
+                    checks_resp.status(),
+                    page
+                );
+                break;
             }
+
+            let page_body: CheckRunsResponse = checks_resp.json().await?;
+            // `total_count` reflects the full set on every page; keep the
+            // last-seen value (page 1 is sufficient, but later pages agree).
+            total_count = page_body.total_count;
+            let page_len = page_body.check_runs.len();
+            all_runs.extend(page_body.check_runs);
+
+            // A short page (fewer than PER_PAGE) means this was the last page.
+            if (page_len as u32) < PER_PAGE {
+                break;
+            }
+            if page == MAX_PAGES {
+                hit_cap = true;
+            }
+        }
+
+        if hit_cap {
+            tracing::warn!(
+                owner,
+                repo,
+                head_sha = %pr.head.sha,
+                max_pages = MAX_PAGES,
+                collected = all_runs.len(),
+                total_count,
+                "GitHubApiClient: check-runs pagination hit MAX_PAGES cap; some runs may be omitted",
+            );
+        }
+
+        let checks = CheckRunsResponse {
+            total_count,
+            check_runs: all_runs,
         };
 
         Ok((pr, checks))
