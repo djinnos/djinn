@@ -113,6 +113,82 @@ impl NoteRepository {
         )
     }
 
+    /// Record a typed `derived_from` provenance edge between two notes.
+    ///
+    /// Used when a note is created *from* another — e.g. a `pattern` note
+    /// consolidated from a cluster of `case` notes records that it was derived
+    /// from each source note. The edge is tagged `kind = 'derived_from'` so it
+    /// is distinguishable from the implicit Hebbian `co_access` edges.
+    ///
+    /// Merge semantics: when an edge between the same `(source, target)` pair is
+    /// recorded again, the **greater** of the existing and new `weight` is kept
+    /// (max-weight merge) rather than overwritten — a stronger provenance signal
+    /// is never weakened by a later, weaker one. The `kind` is promoted to
+    /// `derived_from` on conflict so an edge first seen as `co_access` is
+    /// upgraded once real provenance is known.
+    ///
+    /// The note IDs are canonicalized internally (min < max) to satisfy the
+    /// `note_a_id < note_b_id` CHECK constraint, so this records an undirected
+    /// provenance link between the two notes.
+    ///
+    /// Implemented with a runtime (non-macro) query: the `kind` column is added
+    /// by a migration not yet present in the offline `.sqlx` cache, so a
+    /// compile-checked `query!` would fail under `SQLX_OFFLINE=true`.
+    pub async fn record_derived_from(
+        &self,
+        source_note_id: &str,
+        target_note_id: &str,
+        weight: f64,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+
+        let (a_id, b_id) = canonical_pair(source_note_id, target_note_id);
+        let weight = weight.clamp(0.0, 1.0);
+
+        sqlx::query(
+            r#"INSERT INTO note_associations
+             (note_a_id, note_b_id, weight, co_access_count, last_co_access, kind)
+             VALUES ($1, $2, $3, 1, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), 'derived_from')
+             ON CONFLICT (note_a_id, note_b_id) DO UPDATE SET
+                 weight = GREATEST(note_associations.weight, EXCLUDED.weight),
+                 kind = 'derived_from',
+                 last_co_access = EXCLUDED.last_co_access"#,
+        )
+        .bind(a_id)
+        .bind(b_id)
+        .bind(weight)
+        .execute(self.db.pool())
+        .await?;
+
+        Ok(())
+    }
+
+    /// Read back the `(weight, kind)` of the association between two notes, if
+    /// any. The IDs are canonicalized internally. Primarily a provenance probe
+    /// for callers (and tests) that need to inspect a typed edge.
+    ///
+    /// Runtime (non-macro) query for the same offline-cache reason as
+    /// [`Self::record_derived_from`].
+    pub async fn get_association_kind(
+        &self,
+        note_a_id: &str,
+        note_b_id: &str,
+    ) -> Result<Option<(f64, String)>> {
+        self.db.ensure_initialized().await?;
+
+        let (a_id, b_id) = canonical_pair(note_a_id, note_b_id);
+        let row: Option<(f64, String)> = sqlx::query_as(
+            "SELECT weight, kind FROM note_associations
+             WHERE note_a_id = $1 AND note_b_id = $2",
+        )
+        .bind(a_id)
+        .bind(b_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+
+        Ok(row)
+    }
+
     /// Get all associations for a given note.
     ///
     /// Returns associations where the note is either note_a_id or note_b_id,
@@ -744,5 +820,113 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(p1_count, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn record_derived_from_persists_and_reads_back() {
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let pattern = make_note(&repo, &project, &tmp, "Pattern").await;
+        let case = make_note(&repo, &project, &tmp, "Case").await;
+
+        repo.record_derived_from(&pattern, &case, 0.7)
+            .await
+            .unwrap();
+
+        let (weight, kind) = repo
+            .get_association_kind(&pattern, &case)
+            .await
+            .unwrap()
+            .expect("derived_from edge should persist");
+        assert!((weight - 0.7).abs() < 1e-12);
+        assert_eq!(kind, "derived_from");
+
+        // Direction-agnostic: reading with swapped IDs returns the same edge.
+        let (weight_rev, kind_rev) = repo
+            .get_association_kind(&case, &pattern)
+            .await
+            .unwrap()
+            .expect("edge readable in canonical-reversed order");
+        assert!((weight_rev - 0.7).abs() < 1e-12);
+        assert_eq!(kind_rev, "derived_from");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn record_derived_from_keeps_max_weight_on_reupsert() {
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let pattern = make_note(&repo, &project, &tmp, "Pattern").await;
+        let case = make_note(&repo, &project, &tmp, "Case").await;
+
+        // First a strong edge, then a weaker re-record: MAX must win.
+        repo.record_derived_from(&pattern, &case, 0.9)
+            .await
+            .unwrap();
+        repo.record_derived_from(&pattern, &case, 0.2)
+            .await
+            .unwrap();
+
+        let (weight, _kind) = repo
+            .get_association_kind(&pattern, &case)
+            .await
+            .unwrap()
+            .expect("edge present");
+        assert!(
+            (weight - 0.9).abs() < 1e-12,
+            "re-upsert must keep the GREATER weight, got {weight}"
+        );
+
+        // A stronger re-record does raise it.
+        repo.record_derived_from(&pattern, &case, 0.95)
+            .await
+            .unwrap();
+        let (weight, _kind) = repo
+            .get_association_kind(&pattern, &case)
+            .await
+            .unwrap()
+            .expect("edge present");
+        assert!((weight - 0.95).abs() < 1e-12, "got {weight}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn record_derived_from_upgrades_co_access_edge() {
+        let tmp = crate::database::test_tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = make_project(&db, tmp.path()).await;
+        let repo = NoteRepository::new(db, event_bus_for(&tx));
+
+        let pattern = make_note(&repo, &project, &tmp, "Pattern").await;
+        let case = make_note(&repo, &project, &tmp, "Case").await;
+
+        // Pre-existing implicit co-access edge (default kind).
+        repo.upsert_association(&pattern, &case, 1).await.unwrap();
+        let (_w, kind) = repo
+            .get_association_kind(&pattern, &case)
+            .await
+            .unwrap()
+            .expect("co_access edge present");
+        assert_eq!(kind, "co_access");
+
+        // Recording provenance promotes the edge kind and keeps the max weight
+        // (0.5 > the 0.01 co-access seed).
+        repo.record_derived_from(&pattern, &case, 0.5)
+            .await
+            .unwrap();
+        let (weight, kind) = repo
+            .get_association_kind(&pattern, &case)
+            .await
+            .unwrap()
+            .expect("edge present");
+        assert_eq!(kind, "derived_from");
+        assert!((weight - 0.5).abs() < 1e-12, "got {weight}");
     }
 }
