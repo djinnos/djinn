@@ -5,6 +5,7 @@ use std::collections::HashSet;
 
 use crate::server::DjinnMcpServer;
 use crate::tools::acting_user;
+use crate::tools::tool_error::ToolError;
 use djinn_core::models::{Model, Provider};
 use djinn_provider::catalog::builtin;
 use djinn_provider::catalog::health::ModelHealth;
@@ -317,6 +318,11 @@ pub struct ProviderModelLookupResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(with = "ProviderModelOutput")]
     pub model: Option<ProviderModelOutput>,
+    /// G3 structured-error envelope, populated on a 404-style miss (the model id
+    /// is not in the catalog). Lets the agent branch on `status == "404"` and
+    /// follow the `hint` instead of re-guessing the same bad id. Absent on a hit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ToolError>,
 }
 
 // ── provider_validate ─────────────────────────────────────────────────────────
@@ -978,12 +984,27 @@ impl DjinnMcpServer {
                 model_id,
                 found: true,
                 model: Some(model_to_output(&m)),
+                error: None,
             }),
-            None => Json(ProviderModelLookupResponse {
-                model_id,
-                found: false,
-                model: None,
-            }),
+            None => {
+                // 404-style miss: surface a structured envelope so the agent can
+                // distinguish "this model id doesn't exist" from a transient
+                // failure and act on the hint instead of retrying the same id.
+                let error = ToolError::new(format!("model '{model_id}' not found in catalog"))
+                    .with_http_status(404)
+                    .with_method("provider_model_lookup")
+                    .with_path(model_id.clone())
+                    .with_hint(
+                        "Verify the id is in 'providerID/modelID' form; call \
+                         provider_models_connected to list valid, connected model ids.",
+                    );
+                Json(ProviderModelLookupResponse {
+                    model_id,
+                    found: false,
+                    model: None,
+                    error: Some(error),
+                })
+            }
         }
     }
 

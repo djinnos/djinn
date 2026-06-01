@@ -19,7 +19,9 @@ pub mod session_tools;
 pub mod settings_tools;
 pub mod system_tools;
 pub mod task_tools;
+pub mod tool_error;
 pub mod user_settings_tools;
 pub mod validation;
 
 pub use json_object::{AnyJson, ObjectJson, json_object};
+pub use tool_error::ToolError;
