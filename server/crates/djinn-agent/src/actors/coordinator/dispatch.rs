@@ -459,15 +459,34 @@ impl CoordinatorActor {
                     .get(&task.id)
                     .copied()
                     .unwrap_or(0);
+                // Read-and-clear the last-failure signal the slot runner stashed
+                // for THIS task on the shared HealthTracker (A2 side-channel).
+                // `None` when the prior run's failure wasn't a typed provider
+                // error (a structural/crash failure, a missing credential, etc.),
+                // in which case the ordinary streak/ladder logic applies
+                // unchanged.
+                let provider_failure = self.health.take_task_provider_failure(&task.id);
                 match classify_reappearing_dispatch(marker, role, current_streak) {
                     Some(ReappearingDispatch::SameRoleFailure {
                         next_streak,
                         cooldown,
                     }) => {
+                        // A3: a throttle/rate-limit reappearance is a transient
+                        // provider fault, NOT evidence the task is structurally
+                        // undispatchable — so it must not advance the terminal
+                        // `dispatch_failure_streak` toward MAX (which would close a
+                        // perfectly healthy task). The task still backs off (the
+                        // escalating cooldown below still grows with the
+                        // reappearance) and the per-(scope,model) breaker still
+                        // fails over; only the terminal-close counter is spared.
+                        let throttle = provider_failure.is_some_and(|f| f.throttle);
+
                         // After MAX consecutive same-role failures the task is
                         // structurally doomed (e.g. its run can never complete);
-                        // fail it terminally instead of looping forever.
-                        if next_streak >= MAX_DISPATCH_FAILURES {
+                        // fail it terminally instead of looping forever. Skipped
+                        // for throttles (A3): a transient quota window must never
+                        // terminally close the task.
+                        if !throttle && next_streak >= MAX_DISPATCH_FAILURES {
                             self.terminally_fail_task(
                                 &task,
                                 role,
@@ -479,17 +498,51 @@ impl CoordinatorActor {
                             self.dispatch_cooldowns.remove(&task.id);
                             continue;
                         }
-                        self.dispatch_failure_streak
-                            .insert(task.id.clone(), next_streak);
+
+                        // A3: leave the terminal streak at its current value on a
+                        // throttle (don't persist the advanced `next_streak`).
+                        let stored_streak =
+                            stored_streak_after_failure(current_streak, next_streak, throttle);
+                        if stored_streak > 0 {
+                            self.dispatch_failure_streak
+                                .insert(task.id.clone(), stored_streak);
+                        } else {
+                            self.dispatch_failure_streak.remove(&task.id);
+                        }
+
+                        // A6: honor a provider-stated reset as a redispatch floor.
+                        // `cooldown` is the escalating ladder value for this
+                        // reappearance; when the provider stated a Retry-After /
+                        // rate-limit-reset that exceeds it, redispatch no earlier
+                        // than that reset (otherwise a 5-hour quota window would be
+                        // probed every ~30 min, burning failover). The provider
+                        // reset is deliberately allowed to EXCEED the ladder's
+                        // 30-min ceiling — that's the whole point — but is clamped
+                        // to a hard safety max so a malformed value can't wedge the
+                        // task forever.
+                        let retry_after_ms = provider_failure.and_then(|f| f.retry_after_ms);
+                        let effective_cooldown =
+                            apply_provider_retry_floor(cooldown, retry_after_ms);
+                        if effective_cooldown > cooldown {
+                            tracing::info!(
+                                task_id = %task.short_id,
+                                role,
+                                ladder_cooldown_secs = cooldown.as_secs(),
+                                provider_floor_secs = effective_cooldown.as_secs(),
+                                "CoordinatorActor: applying provider-stated retry-after as redispatch floor"
+                            );
+                        }
+
                         tracing::warn!(
                             task_id = %task.short_id,
                             role,
-                            streak = next_streak,
-                            cooldown_secs = cooldown.as_secs(),
+                            streak = stored_streak,
+                            throttle,
+                            cooldown_secs = effective_cooldown.as_secs(),
                             "CoordinatorActor: repeated task failure — backing off dispatch (escalating cooldown)"
                         );
                         self.dispatch_cooldowns
-                            .insert(task.id.clone(), StdInstant::now() + cooldown);
+                            .insert(task.id.clone(), StdInstant::now() + effective_cooldown);
                         continue;
                     }
                     Some(ReappearingDispatch::RoleTransition) | None => {

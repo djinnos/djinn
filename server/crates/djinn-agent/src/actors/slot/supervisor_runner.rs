@@ -450,14 +450,38 @@ pub(crate) async fn run_supervisor_dispatch(
                 ..
             } = &report.outcome
             {
-                match class {
-                    djinn_runtime::ProviderFailureClass::Throttle => app_state
-                        .health_tracker
-                        .record_stall(creator_scope.as_deref(), &model_id),
-                    djinn_runtime::ProviderFailureClass::Failure => app_state
-                        .health_tracker
-                        .record_failure(creator_scope.as_deref(), &model_id),
-                }
+                let (is_throttle, retry_after_ms) = match class {
+                    djinn_runtime::ProviderFailureClass::Throttle { retry_after_ms } => {
+                        app_state
+                            .health_tracker
+                            .record_stall(creator_scope.as_deref(), &model_id);
+                        (true, *retry_after_ms)
+                    }
+                    djinn_runtime::ProviderFailureClass::Failure => {
+                        app_state
+                            .health_tracker
+                            .record_failure(creator_scope.as_deref(), &model_id);
+                        (false, None)
+                    }
+                };
+                // Side-channel for the coordinator's per-task redispatch logic
+                // (A3/A6). The breaker above is keyed per `(scope, model)`; the
+                // coordinator's terminal-failure streak + escalating cooldown are
+                // keyed per task and observed only via the task reappearing as
+                // dispatch-ready (it never sees this report directly). Stash the
+                // last failure class — and any provider-stated retry-after — under
+                // the task id on the SHARED `HealthTracker` (the same Arc instance
+                // the coordinator holds as `self.health`) so the streak/cooldown
+                // sites can consult it: a Throttle must not march a healthy task to
+                // terminal close (A3), and a provider reset floors the cooldown so
+                // a multi-hour quota window isn't probed on the fixed ladder (A6).
+                app_state.health_tracker.note_task_provider_failure(
+                    &task.id,
+                    djinn_provider::catalog::health::TaskFailureSignal {
+                        throttle: is_throttle,
+                        retry_after_ms,
+                    },
+                );
             }
             // Phase 2.2: post-session knowledge extraction. Fire-and-forget on
             // the long-lived server (it owns the embedding model + Qdrant, so

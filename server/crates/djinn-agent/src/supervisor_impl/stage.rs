@@ -118,7 +118,10 @@ use super::SupervisorCallbackContext;
 ///   user's preferred model; only repeats trip it.
 /// - `RateLimit` → [`ProviderFailureClass::Throttle`]. A throttle/quota signal;
 ///   fed to the immediate-failover breaker so dispatch moves to the next model
-///   at once with a cooldown that outlasts the task's redispatch ladder.
+///   at once with a cooldown that outlasts the task's redispatch ladder. The
+///   provider's `retry_after_ms` (a `Retry-After` / rate-limit-reset window, if
+///   it supplied one) rides along so the coordinator can floor the redispatch
+///   cooldown on a multi-hour reset instead of probing on the fixed ladder (A6).
 /// - `ContextOverflow` | `EmptyCompletion` | `Transport` → `None`. Excluded by
 ///   design: ContextOverflow is handled by reactive compaction (not a model
 ///   health problem); EmptyCompletion has its own empty-turn backoff breaker in
@@ -127,12 +130,15 @@ use super::SupervisorCallbackContext;
 /// - An untyped/legacy error (no `ProviderError` source) → `None`, so non-
 ///   provider failures (git, tools, finalize-tool misuse) never trip it.
 fn classify_provider_failure(err: &anyhow::Error) -> Option<ProviderFailureClass> {
-    match err.downcast_ref::<ProviderError>()? {
+    let provider_err = err.downcast_ref::<ProviderError>()?;
+    match provider_err {
         ProviderError::Authentication
         | ProviderError::InvalidRequest
         | ProviderError::InvalidOutput
         | ProviderError::ProviderInternal { .. } => Some(ProviderFailureClass::Failure),
-        ProviderError::RateLimit { .. } => Some(ProviderFailureClass::Throttle),
+        ProviderError::RateLimit { .. } => Some(ProviderFailureClass::Throttle {
+            retry_after_ms: provider_err.retry_after_ms(),
+        }),
         ProviderError::ContextOverflow
         | ProviderError::EmptyCompletion
         | ProviderError::Transport => None,
@@ -766,17 +772,25 @@ mod tests {
 
     #[test]
     fn rate_limit_maps_to_throttle_class() {
+        // No provider-stated reset → Throttle with `retry_after_ms: None`; the
+        // coordinator falls back to the ordinary escalating ladder.
         assert_eq!(
             classify_provider_failure(&typed(ProviderError::RateLimit {
                 retry_after_ms: None
             })),
-            Some(ProviderFailureClass::Throttle),
+            Some(ProviderFailureClass::Throttle {
+                retry_after_ms: None
+            }),
         );
+        // A provider-stated Retry-After is carried through verbatim so the
+        // coordinator can floor the redispatch cooldown on it (A6).
         assert_eq!(
             classify_provider_failure(&typed(ProviderError::RateLimit {
                 retry_after_ms: Some(60_000)
             })),
-            Some(ProviderFailureClass::Throttle),
+            Some(ProviderFailureClass::Throttle {
+                retry_after_ms: Some(60_000)
+            }),
         );
     }
 

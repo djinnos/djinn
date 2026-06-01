@@ -129,22 +129,76 @@ impl ModelState {
     }
 }
 
+/// A per-task record of the most recent typed provider failure on a task-run,
+/// stashed by the slot supervisor-runner for the coordinator's redispatch logic
+/// to consult.
+///
+/// This is a **side-channel**, not part of the circuit-breaker: the breaker is
+/// keyed per `(scope, model)`, but the coordinator's terminal-failure streak and
+/// escalating redispatch cooldown are keyed per *task* and the coordinator never
+/// observes the task-run report directly (it only sees the task reappear as
+/// dispatch-ready). The runner records this when it processes a
+/// `TaskRunOutcome::Failed` carrying a typed provider class; the coordinator
+/// reads-and-clears it at the reappearance/streak site (see A3/A6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TaskFailureSignal {
+    /// The failure was a rate-limit / quota throttle (not a structural failure).
+    /// A3: a throttle reappearance must NOT advance the terminal streak.
+    pub throttle: bool,
+    /// Provider-stated reset window (`Retry-After` / rate-limit-reset), if any.
+    /// A6: floors the escalating redispatch cooldown so a multi-hour quota
+    /// window isn't probed on the fixed ladder. Only meaningful for throttles.
+    pub retry_after_ms: Option<u64>,
+}
+
 /// Thread-safe in-memory model health tracker with circuit-breaker logic.
 ///
 /// Circuit breaker: after `CIRCUIT_BREAKER_THRESHOLD` consecutive failures the
 /// `(scope, model)` bucket is auto-disabled with an exponentially growing
 /// cooldown. Buckets auto re-enable once the cooldown expires. See [`HealthKey`]
 /// for why health is tracked per-scope rather than globally per model.
+///
+/// It also carries a small per-task **side-channel** ([`TaskFailureSignal`],
+/// distinct from the breaker buckets) so the coordinator's per-task redispatch
+/// logic can learn the class + retry-after of a task-run's last provider failure
+/// — which it otherwise cannot see, as it never observes the report directly.
 #[derive(Clone)]
 pub struct HealthTracker {
     inner: Arc<Mutex<HashMap<HealthKey, ModelState>>>,
+    /// Side-channel: task_id → most recent provider-failure signal. Written by
+    /// the slot supervisor-runner on a typed provider failure; read-and-cleared
+    /// by the coordinator at its redispatch streak/cooldown site. Independent of
+    /// the `(scope, model)` breaker buckets above.
+    task_failures: Arc<Mutex<HashMap<String, TaskFailureSignal>>>,
 }
 
 impl HealthTracker {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
+            task_failures: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Record the most recent typed provider failure for a task (side-channel
+    /// for the coordinator's redispatch logic; see [`TaskFailureSignal`]). The
+    /// latest failure for a task overwrites any prior one. This does NOT touch
+    /// the `(scope, model)` circuit-breaker buckets.
+    pub fn note_task_provider_failure(&self, task_id: &str, signal: TaskFailureSignal) {
+        self.task_failures
+            .lock()
+            .unwrap()
+            .insert(task_id.to_owned(), signal);
+    }
+
+    /// Read-and-clear the most recent provider-failure signal for a task. The
+    /// coordinator consults this exactly once per reappearance — when a task it
+    /// dispatched becomes dispatch-ready again — so a stale signal can't leak
+    /// into a later, unrelated redispatch decision. Returns `None` when the
+    /// task's last failure was not a typed provider error (or was already
+    /// consumed).
+    pub fn take_task_provider_failure(&self, task_id: &str) -> Option<TaskFailureSignal> {
+        self.task_failures.lock().unwrap().remove(task_id)
     }
 
     /// Record a successful invocation.  Resets consecutive failure counter;
@@ -759,6 +813,67 @@ mod tests {
         assert!(!cooled_off.auto_disabled);
         assert_eq!(cooled_off.disable_ttl_trips, 1);
         assert!(cooled_off.cooldown_seconds_remaining.is_none());
+    }
+
+    #[test]
+    fn task_failure_signal_is_read_once_and_cleared() {
+        let ht = HealthTracker::new();
+        // No signal recorded → nothing to take.
+        assert_eq!(ht.take_task_provider_failure("task-1"), None);
+
+        ht.note_task_provider_failure(
+            "task-1",
+            TaskFailureSignal {
+                throttle: true,
+                retry_after_ms: Some(5 * 60 * 60 * 1000),
+            },
+        );
+        // The side-channel is independent of the breaker buckets.
+        assert!(ht.is_available(S, TEST_MODEL));
+
+        let taken = ht
+            .take_task_provider_failure("task-1")
+            .expect("signal present");
+        assert!(taken.throttle);
+        assert_eq!(taken.retry_after_ms, Some(5 * 60 * 60 * 1000));
+
+        // Read-and-clear: a second take returns nothing (no stale leak into a
+        // later, unrelated redispatch decision).
+        assert_eq!(ht.take_task_provider_failure("task-1"), None);
+    }
+
+    #[test]
+    fn task_failure_signal_latest_wins_and_is_per_task() {
+        let ht = HealthTracker::new();
+        ht.note_task_provider_failure(
+            "task-a",
+            TaskFailureSignal {
+                throttle: false,
+                retry_after_ms: None,
+            },
+        );
+        // Latest failure for a task overwrites the prior one.
+        ht.note_task_provider_failure(
+            "task-a",
+            TaskFailureSignal {
+                throttle: true,
+                retry_after_ms: Some(1_000),
+            },
+        );
+        ht.note_task_provider_failure(
+            "task-b",
+            TaskFailureSignal {
+                throttle: false,
+                retry_after_ms: None,
+            },
+        );
+
+        let a = ht.take_task_provider_failure("task-a").unwrap();
+        assert!(a.throttle);
+        assert_eq!(a.retry_after_ms, Some(1_000));
+        // task-b is untouched by reads/writes of task-a.
+        let b = ht.take_task_provider_failure("task-b").unwrap();
+        assert!(!b.throttle);
     }
 
     #[test]

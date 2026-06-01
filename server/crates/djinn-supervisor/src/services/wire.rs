@@ -568,6 +568,40 @@ mod tests {
     }
 
     #[test]
+    fn execute_stage_reply_failed_throttle_roundtrip() {
+        // A6: the `StageOutcome::Failed { provider_failure: Some(Throttle {
+        // retry_after_ms }) }` shape must survive the bincode RPC frame so the
+        // host can floor the redispatch cooldown on a provider-stated reset.
+        let resp = ServiceRpcResponse::ExecuteStage(Ok(StageOutcome::Failed {
+            reason: "rate limited".into(),
+            provider_failure: Some(djinn_runtime::ProviderFailureClass::Throttle {
+                retry_after_ms: Some(5 * 60 * 60 * 1000),
+            }),
+        }));
+        let f = Frame {
+            correlation_id: 3,
+            payload: FramePayload::RpcReply(resp),
+        };
+        let bytes = bincode::serialize(&f).unwrap();
+        let back: Frame = bincode::deserialize(&bytes).unwrap();
+        match back.payload {
+            FramePayload::RpcReply(ServiceRpcResponse::ExecuteStage(Ok(StageOutcome::Failed {
+                reason,
+                provider_failure,
+            }))) => {
+                assert_eq!(reason, "rate limited");
+                assert_eq!(
+                    provider_failure,
+                    Some(djinn_runtime::ProviderFailureClass::Throttle {
+                        retry_after_ms: Some(5 * 60 * 60 * 1000)
+                    })
+                );
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
     fn control_cancel_roundtrip() {
         let f = Frame {
             correlation_id: 0,
