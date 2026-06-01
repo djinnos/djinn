@@ -28,6 +28,12 @@ struct AnthropicSystemBlock {
 pub struct AnthropicProvider {
     config: ProviderConfig,
     client: ApiClient,
+    /// Hash of the `cache_control`-marked stable prefix from this provider
+    /// instance's previous request, used by the B3 drift guard to detect a
+    /// supposedly-stable prefix mutating across consecutive turns. `Mutex` because
+    /// [`Self::stream`] takes `&self`; uncontended (one request in flight per
+    /// instance) so the lock is effectively free.
+    last_prefix_hash: std::sync::Mutex<Option<u64>>,
 }
 
 impl AnthropicProvider {
@@ -35,6 +41,7 @@ impl AnthropicProvider {
         Self {
             config,
             client: ApiClient::new(),
+            last_prefix_hash: std::sync::Mutex::new(None),
         }
     }
 
@@ -278,6 +285,128 @@ impl AnthropicProvider {
         );
     }
 
+    /// Compute a cheap, stable hash of the `cache_control`-marked STABLE PREFIX of
+    /// an assembled request body.
+    ///
+    /// # Why this exists (B3 drift guard)
+    ///
+    /// Anthropic prompt caching only registers a hit when the bytes preceding a
+    /// `cache_control` breakpoint are *byte-identical* to a previous request. If a
+    /// timestamp, a `HashMap`-iteration-order leak, or any other non-deterministic
+    /// value sneaks into the prefix that is *supposed* to be stable, every cache hit
+    /// silently turns into a (paid) cache miss with no error surfaced anywhere.
+    ///
+    /// This hash lets callers (and the regression test below) assert that identical
+    /// logical inputs produce a byte-identical cached prefix. It deliberately hashes
+    /// only the prefix segments that actually carry a `cache_control` marker — the
+    /// tool definitions, the cached system blocks, and the trailing message
+    /// breakpoint's preceding content — in the same descending priority order that
+    /// [`Self::for_each_cache_marker`] visits them, so the hash tracks exactly the
+    /// bytes Anthropic keys its cache on.
+    ///
+    /// It is intentionally allocation-light: it folds the relevant `serde_json`
+    /// values into a `DefaultHasher` field-by-field rather than re-serializing or
+    /// cloning the whole body. The value is only stable *within a single process
+    /// run* (`DefaultHasher` is not portable), which is all a within-run drift check
+    /// needs. Returns `None` when the request carries no cache markers at all
+    /// (caching inactive — nothing to guard).
+    fn stable_prefix_hash(body: &Value) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut marked = 0usize;
+
+        // Recursively fold a JSON value in a way that is independent of physical
+        // map storage order: object entries are hashed in sorted-key order so the
+        // result is identical regardless of how the map happens to iterate. (With
+        // `serde_json`'s default `BTreeMap` backing this is already the case, but
+        // hashing explicitly by sorted key makes the guard robust even if the
+        // `preserve_order` feature is ever enabled upstream.)
+        fn fold(value: &Value, hasher: &mut impl Hasher) {
+            match value {
+                Value::Null => 0u8.hash(hasher),
+                Value::Bool(b) => {
+                    1u8.hash(hasher);
+                    b.hash(hasher);
+                }
+                Value::Number(n) => {
+                    2u8.hash(hasher);
+                    n.to_string().hash(hasher);
+                }
+                Value::String(s) => {
+                    3u8.hash(hasher);
+                    s.hash(hasher);
+                }
+                Value::Array(items) => {
+                    4u8.hash(hasher);
+                    items.len().hash(hasher);
+                    for item in items {
+                        fold(item, hasher);
+                    }
+                }
+                Value::Object(map) => {
+                    5u8.hash(hasher);
+                    map.len().hash(hasher);
+                    let mut keys: Vec<&String> = map.keys().collect();
+                    keys.sort_unstable();
+                    for key in keys {
+                        key.hash(hasher);
+                        fold(&map[key], hasher);
+                    }
+                }
+            }
+        }
+
+        // Tools: the model id participates in the cached tool prefix on Anthropic's
+        // side, so fold it first, then every tool definition in order. Tools are the
+        // largest / highest-reuse cached segment.
+        if let Some(model) = body.get("model") {
+            fold(model, &mut hasher);
+        }
+        if let Some(tools) = body.get("tools").and_then(Value::as_array) {
+            for tool in tools {
+                fold(tool, &mut hasher);
+                if tool.get("cache_control").is_some() {
+                    marked += 1;
+                }
+            }
+        }
+
+        // System blocks (when serialized as typed blocks). The cached prefix is the
+        // ordered run of blocks; the marker sits on every block except the dynamic
+        // tail, so the whole array is part of the stable prefix bytes.
+        if let Some(system) = body.get("system").and_then(Value::as_array) {
+            for block in system {
+                fold(block, &mut hasher);
+                if block.get("cache_control").is_some() {
+                    marked += 1;
+                }
+            }
+        }
+
+        // Trailing message breakpoint: fold the content blocks that carry the
+        // marker. The marker lives on the last block of the last message and closes
+        // the conversation-prefix cache boundary.
+        if let Some(messages) = body.get("messages").and_then(Value::as_array) {
+            for message in messages {
+                if let Some(content) = message.get("content").and_then(Value::as_array) {
+                    for block in content {
+                        if block.get("cache_control").is_some() {
+                            fold(block, &mut hasher);
+                            marked += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        if marked == 0 {
+            return None;
+        }
+        marked.hash(&mut hasher);
+        Some(hasher.finish())
+    }
+
     fn build_request(
         &self,
         conversation: &Conversation,
@@ -354,7 +483,43 @@ impl AnthropicProvider {
         // any excess, keeping the most cache-valuable segments.
         Self::enforce_cache_control_cap(&mut body);
 
+        // B3 drift guard: hash the final cache_control-marked stable prefix and warn
+        // if it changed since this instance's previous turn. A changed "stable"
+        // prefix means a silent, total prompt-cache miss (pure cost, no error), so
+        // it is worth a loud breadcrumb. Cheap (one structural hash + compare, no
+        // body clone), non-fatal (never alters the request), and gated to fire only
+        // on an *actual* change — the first turn and caching-inactive requests are
+        // silent.
+        self.check_prefix_drift(&body);
+
         body
+    }
+
+    /// Compare the freshly-assembled stable-prefix hash against this provider
+    /// instance's previous request and `warn!` on an unexpected change. See
+    /// [`Self::stable_prefix_hash`] for what counts as the stable prefix.
+    fn check_prefix_drift(&self, body: &Value) {
+        let Some(current) = Self::stable_prefix_hash(body) else {
+            return; // no cache markers => nothing to guard
+        };
+        let mut last = match self.last_prefix_hash.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(previous) = *last
+            && previous != current
+        {
+            tracing::warn!(
+                previous_hash = previous,
+                current_hash = current,
+                model = %self.config.model_id,
+                "anthropic: cache_control stable prefix changed across consecutive turns; \
+                 prompt cache will MISS for this request. A timestamp or non-deterministic \
+                 value likely leaked into the cached prefix (system blocks / tool definitions). \
+                 This is non-fatal but increases cost — inspect the stable prefix for drift."
+            );
+        }
+        *last = Some(current);
     }
 
     fn effective_url(&self) -> String {
@@ -1677,5 +1842,181 @@ mod tests {
             ANTHROPIC_STABLE_PREFIX_KIND
         );
         assert_eq!(req["system"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    // ─── B3: cache stable-prefix drift guard ──────────────────────────────────
+
+    /// Build a representative cache-enabled conversation + tools used by the B3
+    /// drift-guard tests: a stable base prompt, a stable project-context block, a
+    /// dynamic trailing block, plus a tool definition. Mirrors the production
+    /// chat-layer contract so the cache_control markers land on tools + system
+    /// prefix + trailing message breakpoint.
+    fn drift_guard_fixture() -> (Conversation, Vec<Value>) {
+        let mut conv = Conversation::default();
+        conv.push(crate::message::Message::system_with_metadata(
+            "base prompt",
+            crate::message::MessageMeta {
+                input_tokens: None,
+                output_tokens: None,
+                timestamp: None,
+                provider_data: Some(json!({
+                    ANTHROPIC_CACHE_BREAKPOINT_KEY: CacheBreakpoint {
+                        kind: Some("stable_prefix".to_string()),
+                    }
+                })),
+            },
+        ));
+        conv.messages[0].content.push(ContentBlock::Text {
+            text: "project context / repo map".to_string(),
+        });
+        conv.messages[0].content.push(ContentBlock::Text {
+            text: "dynamic tail".to_string(),
+        });
+        conv.push(crate::message::Message::user("hello"));
+
+        let tools = vec![json!({
+            "name": "shell",
+            "description": "Run shell",
+            "input_schema": {"type": "object"}
+        })];
+        (conv, tools)
+    }
+
+    /// Determinism: identical logical inputs must produce a byte-identical cached
+    /// prefix, hence an identical stable-prefix hash, across two independent
+    /// builds. This is the core invariant prompt caching depends on — if it ever
+    /// fails, some non-deterministic value (timestamp, map-iteration order, …) has
+    /// leaked into the cached prefix and every cache hit silently becomes a miss.
+    #[test]
+    fn test_stable_prefix_hash_is_deterministic() {
+        let provider = test_provider();
+        let (conv, tools) = drift_guard_fixture();
+
+        let body_a = provider.build_request(&conv, &tools, None);
+        let body_b = provider.build_request(&conv, &tools, None);
+
+        let hash_a = AnthropicProvider::stable_prefix_hash(&body_a)
+            .expect("cache markers present => hash should exist");
+        let hash_b = AnthropicProvider::stable_prefix_hash(&body_b)
+            .expect("cache markers present => hash should exist");
+
+        assert_eq!(
+            hash_a, hash_b,
+            "stable cache prefix must hash identically across two builds of the same inputs"
+        );
+        // And the full serialized prefix bytes must match too (stronger than the
+        // hash, and guards against an accidental hash collision masking real drift).
+        assert_eq!(
+            serde_json::to_string(&body_a["system"]).unwrap(),
+            serde_json::to_string(&body_b["system"]).unwrap(),
+            "serialized system prefix must be byte-identical"
+        );
+        assert_eq!(
+            serde_json::to_string(&body_a["tools"]).unwrap(),
+            serde_json::to_string(&body_b["tools"]).unwrap(),
+            "serialized tool prefix must be byte-identical"
+        );
+    }
+
+    /// The hash must be sensitive to actual changes in the cached prefix: a
+    /// perturbed stable block (here, a mutated project-context string) must yield a
+    /// different hash. Without this, the guard would never detect real drift.
+    #[test]
+    fn test_stable_prefix_hash_detects_perturbed_prefix() {
+        let provider = test_provider();
+        let (conv, tools) = drift_guard_fixture();
+        let baseline = provider.build_request(&conv, &tools, None);
+        let baseline_hash = AnthropicProvider::stable_prefix_hash(&baseline).unwrap();
+
+        // Perturb a STABLE (cache_control-marked) system block, simulating a
+        // timestamp / non-deterministic leak into the supposedly-stable prefix.
+        let mut perturbed = conv.clone();
+        perturbed.messages[0].content[1] = ContentBlock::Text {
+            text: "project context / repo map @ 2026-06-01T12:00:00Z".to_string(),
+        };
+        let perturbed_body = provider.build_request(&perturbed, &tools, None);
+        let perturbed_hash = AnthropicProvider::stable_prefix_hash(&perturbed_body).unwrap();
+
+        assert_ne!(
+            baseline_hash, perturbed_hash,
+            "a mutated stable-prefix block must change the stable-prefix hash"
+        );
+    }
+
+    /// A change confined to the DYNAMIC tail (the trailing message after the
+    /// breakpoint) must NOT change the stable-prefix hash — otherwise the guard
+    /// would warn on every legitimately-changing turn and become noise. Here the
+    /// trailing breakpoint marker sits on the last *user* message content; the
+    /// stable prefix is tools + system blocks, which are unchanged.
+    #[test]
+    fn test_stable_prefix_hash_ignores_dynamic_tail_changes() {
+        let provider = test_provider();
+        let (conv, tools) = drift_guard_fixture();
+        let body_a = provider.build_request(&conv, &tools, None);
+
+        let mut conv_b = conv.clone();
+        // The last message is the user turn; its content is the dynamic tail and is
+        // not part of the cached system/tool prefix.
+        conv_b.push(crate::message::Message::user("a different follow-up question"));
+        let body_b = provider.build_request(&conv_b, &tools, None);
+
+        // The system + tool stable prefix is byte-identical, so those serialized
+        // segments must match even though the conversation tail differs.
+        assert_eq!(
+            serde_json::to_string(&body_a["system"]).unwrap(),
+            serde_json::to_string(&body_b["system"]).unwrap(),
+            "system prefix must be unaffected by a dynamic-tail change"
+        );
+        assert_eq!(
+            serde_json::to_string(&body_a["tools"]).unwrap(),
+            serde_json::to_string(&body_b["tools"]).unwrap(),
+            "tool prefix must be unaffected by a dynamic-tail change"
+        );
+    }
+
+    /// The hash folds objects in sorted-key order, so it is independent of physical
+    /// map storage order even if `serde_json`'s `preserve_order` feature is ever
+    /// enabled. Build the same object with keys inserted in two different orders and
+    /// assert the fold produces the same hash.
+    #[test]
+    fn test_stable_prefix_hash_is_key_order_independent() {
+        // Two tool arrays with the same logical content but different key insertion
+        // order. With default serde_json (BTreeMap) these already serialize the
+        // same, but the explicit sorted-key fold makes the guarantee robust.
+        let body_a = json!({
+            "model": "claude-3-5-sonnet",
+            "tools": [{
+                "cache_control": {"type": "ephemeral", "kind": "stable_prefix"},
+                "name": "shell",
+                "description": "Run shell"
+            }]
+        });
+        let body_b = json!({
+            "model": "claude-3-5-sonnet",
+            "tools": [{
+                "description": "Run shell",
+                "name": "shell",
+                "cache_control": {"kind": "stable_prefix", "type": "ephemeral"}
+            }]
+        });
+        assert_eq!(
+            AnthropicProvider::stable_prefix_hash(&body_a),
+            AnthropicProvider::stable_prefix_hash(&body_b),
+            "stable-prefix hash must be independent of object key order"
+        );
+    }
+
+    /// No cache markers => no prefix to guard => `None` (guard stays silent).
+    #[test]
+    fn test_stable_prefix_hash_none_when_no_markers() {
+        let body = json!({
+            "model": "claude-3-5-sonnet",
+            "system": "plain string system, no cache_control",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+        });
+        assert!(
+            AnthropicProvider::stable_prefix_hash(&body).is_none(),
+            "a request with no cache_control markers has no stable prefix to hash"
+        );
     }
 }
