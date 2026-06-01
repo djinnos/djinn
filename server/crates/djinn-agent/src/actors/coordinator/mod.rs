@@ -368,15 +368,15 @@ mod tests {
         let model_ids = vec![bad.clone(), good.clone()];
 
         // Trip the preferred model on a zero-token stall.
-        actor.health.record_stall(&bad);
-        assert!(!actor.health.is_available(&bad));
-        assert!(actor.health.is_available(&good));
+        actor.health.record_stall(None, &bad);
+        assert!(!actor.health.is_available(None, &bad));
+        assert!(actor.health.is_available(None, &good));
 
         // Record which model the dispatch closure is actually invoked with.
         let attempted: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let attempted_cl = attempted.clone();
         let outcome = actor
-            .try_dispatch_to_pool("failover-test", &model_ids, |_pool, model_id| {
+            .try_dispatch_to_pool("failover-test", None, &model_ids, |_pool, model_id| {
                 let attempted = attempted_cl.clone();
                 let model_id = model_id.to_owned();
                 async move {
@@ -404,19 +404,22 @@ mod tests {
         let actor = coordinator_actor_for_tests(&db, &tx);
 
         let bad = "openai/gpt-5.5".to_string();
-        actor.health.record_stall(&bad);
-        assert!(!actor.health.is_available(&bad));
+        actor.health.record_stall(None, &bad);
+        assert!(!actor.health.is_available(None, &bad));
 
         // Simulate cooldown expiry, then a successful run resets the breaker.
-        actor.health.enable(&bad);
-        actor.health.record_success(&bad);
-        assert!(actor.health.is_available(&bad));
+        actor.health.enable(None, &bad);
+        actor.health.record_success(None, &bad);
+        assert!(actor.health.is_available(None, &bad));
 
         let model_ids = vec![bad.clone()];
         let outcome = actor
-            .try_dispatch_to_pool("recover-test", &model_ids, |_pool, _model_id| async move {
-                Ok::<(), PoolError>(())
-            })
+            .try_dispatch_to_pool(
+                "recover-test",
+                None,
+                &model_ids,
+                |_pool, _model_id| async move { Ok::<(), PoolError>(()) },
+            )
             .await;
         assert!(matches!(outcome, DispatchOutcome::Dispatched));
     }
@@ -499,7 +502,7 @@ mod tests {
             "task must be released for redispatch after the zombie is reaped"
         );
         assert!(
-            !actor.health.is_available("openai/gpt-5.5"),
+            !actor.health.is_available(None, "openai/gpt-5.5"),
             "reaping a zombie must trip the model breaker so redispatch fails over"
         );
     }
@@ -1362,7 +1365,9 @@ mod tests {
 
         let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
         assert!(
-            planner_intervention_markers(&repo, &task.id).await.is_empty(),
+            planner_intervention_markers(&repo, &task.id)
+                .await
+                .is_empty(),
             "no intervention marker should be written below threshold"
         );
     }
@@ -1375,7 +1380,10 @@ mod tests {
         let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
 
         let intervened = actor.maybe_intervene_on_stuck_task(&task).await;
-        assert!(intervened, "at threshold must route to planner intervention");
+        assert!(
+            intervened,
+            "at threshold must route to planner intervention"
+        );
 
         let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
 
@@ -1408,7 +1416,9 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            comments.iter().any(|c| c.payload.contains("PLANNER_ESCALATION")),
+            comments
+                .iter()
+                .any(|c| c.payload.contains("PLANNER_ESCALATION")),
             "source task must record a PLANNER_ESCALATION comment"
         );
     }

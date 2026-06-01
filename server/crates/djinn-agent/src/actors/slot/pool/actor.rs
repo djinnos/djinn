@@ -271,6 +271,13 @@ impl SlotPool {
                 self.task_to_slot.remove(&task_id);
                 self.task_started.remove(&task_id);
                 self.task_projects.remove(&task_id);
+                // Drop the host activity entry. `touch_activity` upserts one for
+                // remote workers (the host never `register_activity`s them), and
+                // nothing else removes it — so without this the map leaks an
+                // entry per completed task and, worse, a redispatched session
+                // reusing this task_id would inherit the stale "has shown
+                // activity" state and skip the first-call stall guard.
+                self.app_state.deregister_activity(&task_id);
 
                 if self.draining_slots.remove(&slot_id) {
                     self.retired_slots.insert(slot_id);
@@ -323,6 +330,7 @@ impl SlotPool {
         self.task_to_slot.remove(task_id);
         self.task_started.remove(task_id);
         self.task_projects.remove(task_id);
+        self.app_state.deregister_activity(task_id);
         if self.draining_slots.remove(&slot_id) {
             self.retired_slots.insert(slot_id);
             self.slot_states.insert(slot_id, SlotState::Draining);
@@ -388,10 +396,8 @@ impl SlotPool {
                 let duration_seconds = started.elapsed().as_secs();
                 // If activity tracker has no entry (reply loop not started yet),
                 // the session has been idle since slot assignment.
-                let idle_seconds = self
-                    .app_state
-                    .idle_seconds(task_id)
-                    .unwrap_or(duration_seconds);
+                let tracked_idle = self.app_state.idle_seconds(task_id);
+                let idle_seconds = tracked_idle.unwrap_or(duration_seconds);
                 let project_id = self.task_projects.get(task_id).cloned();
                 Some(super::types::RunningTaskInfo {
                     task_id: task_id.clone(),
@@ -399,6 +405,7 @@ impl SlotPool {
                     slot_id: *slot_id,
                     duration_seconds,
                     idle_seconds,
+                    activity_tracked: tracked_idle.is_some(),
                     project_id,
                 })
             })
@@ -425,10 +432,8 @@ impl SlotPool {
             .unwrap_or(0);
         // If activity tracker has no entry (reply loop not started yet),
         // the session has been idle since slot assignment.
-        let idle_seconds = self
-            .app_state
-            .idle_seconds(task_id)
-            .unwrap_or(duration_seconds);
+        let tracked_idle = self.app_state.idle_seconds(task_id);
+        let idle_seconds = tracked_idle.unwrap_or(duration_seconds);
         let project_id = self.task_projects.get(task_id).cloned();
         Some(super::types::RunningTaskInfo {
             task_id: task_id.to_string(),
@@ -436,6 +441,7 @@ impl SlotPool {
             slot_id: *slot_id,
             duration_seconds,
             idle_seconds,
+            activity_tracked: tracked_idle.is_some(),
             project_id,
         })
     }

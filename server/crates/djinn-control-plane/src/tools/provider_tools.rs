@@ -102,6 +102,10 @@ pub struct ModelHealthResponse {
 #[derive(Serialize, JsonSchema)]
 pub struct ModelHealthOutput {
     pub model_id: String,
+    /// Owning user the breaker bucket is scoped to; `null` = shared/system
+    /// bucket (org-shared credential). Health is tracked per `(scope, model)`,
+    /// so the same model can appear once per user that has used it.
+    pub scope: Option<String>,
     pub auto_disabled: bool,
     #[schemars(with = "i64")]
     pub consecutive_failures: u32,
@@ -119,6 +123,7 @@ impl From<ModelHealth> for ModelHealthOutput {
     fn from(value: ModelHealth) -> Self {
         Self {
             model_id: value.model_id,
+            scope: value.scope,
             auto_disabled: value.auto_disabled,
             consecutive_failures: value.consecutive_failures,
             total_failures: value.total_failures,
@@ -359,12 +364,15 @@ impl DjinnMcpServer {
             }
             "reset" => {
                 if let Some(model_id) = &input.model {
-                    tracker.reset(model_id);
+                    // Wipe the breaker state for this model across every user
+                    // scope ("reset gpt-5.5 for everyone").
+                    tracker.reset_model_all_scopes(model_id);
                     self.state.persist_model_health_state().await;
-                    let h = tracker.model_health(model_id);
                     Json(ModelHealthResponse {
                         action: "reset".into(),
-                        models: vec![ModelHealthOutput::from(h)],
+                        models: vec![ModelHealthOutput::from(
+                            tracker.model_health(None, model_id),
+                        )],
                         error: None,
                     })
                 } else {
@@ -386,12 +394,20 @@ impl DjinnMcpServer {
             }
             "enable" => {
                 if let Some(model_id) = &input.model {
-                    tracker.enable(model_id);
+                    // Re-enable this model for every user scope that has it
+                    // disabled ("let everyone use gpt-5.5 again now"), keeping
+                    // failure counters intact.
+                    tracker.enable_model_all_scopes(model_id);
                     self.state.persist_model_health_state().await;
-                    let h = tracker.model_health(model_id);
+                    let models: Vec<ModelHealthOutput> = tracker
+                        .all_health()
+                        .into_iter()
+                        .filter(|h| &h.model_id == model_id)
+                        .map(ModelHealthOutput::from)
+                        .collect();
                     Json(ModelHealthResponse {
                         action: "enable".into(),
-                        models: vec![ModelHealthOutput::from(h)],
+                        models,
                         error: None,
                     })
                 } else {
@@ -816,8 +832,7 @@ impl DjinnMcpServer {
                 // polling task. The UI displays the user_code and waits for
                 // the `credential.updated` SSE event to confirm sign-in.
                 let events = self.state.event_bus();
-                match codex::start_codex_device_auth(credential_repo, &events, effective_user)
-                    .await
+                match codex::start_codex_device_auth(credential_repo, &events, effective_user).await
                 {
                     Ok(None) => Json(ProviderOauthStartResponse {
                         // Already connected (cached token valid or silently refreshed).
@@ -1093,7 +1108,11 @@ mod tests {
         // not be mistaken for an already-qualified id and have its leading
         // segment treated as the provider.
         assert_eq!(
-            model_to_output(&model("accounts/fireworks/models/kimi-k2p6", "fireworks-ai")).id,
+            model_to_output(&model(
+                "accounts/fireworks/models/kimi-k2p6",
+                "fireworks-ai"
+            ))
+            .id,
             "fireworks-ai/accounts/fireworks/models/kimi-k2p6"
         );
         // The recovered "provider/model" split must round-trip back to the

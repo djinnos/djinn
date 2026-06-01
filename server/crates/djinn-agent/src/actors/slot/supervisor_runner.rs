@@ -94,10 +94,8 @@ pub(crate) async fn run_supervisor_dispatch(
     // ── Resolve dispatch context (conflict / review-response) ─────────────
     let conflict_ctx = conflict_context_for_dispatch(&task.id, &app_state).await;
     let has_conflict = conflict_ctx.is_some();
-    let has_review_response = matches!(
-        task.status.as_str(),
-        "needs_task_review" | "in_task_review"
-    );
+    let has_review_response =
+        matches!(task.status.as_str(), "needs_task_review" | "in_task_review");
 
     // ── Pick the supervisor flow ──────────────────────────────────────────
     let flow = crate::roles::flow_for_task_dispatch(&task, has_conflict, has_review_response);
@@ -118,10 +116,9 @@ pub(crate) async fn run_supervisor_dispatch(
     // ── Resolve per-role model ids ────────────────────────────────────────
     let mut model_id_per_role: HashMap<RoleKind, String> = HashMap::new();
     for role in flow.role_sequence() {
-        let resolved =
-            resolve_role_model_preference(&task.project_id, role.as_str(), &app_state)
-                .await
-                .unwrap_or_else(|| model_id.clone());
+        let resolved = resolve_role_model_preference(&task.project_id, role.as_str(), &app_state)
+            .await
+            .unwrap_or_else(|| model_id.clone());
         model_id_per_role.insert(*role, resolved);
     }
 
@@ -141,13 +138,11 @@ pub(crate) async fn run_supervisor_dispatch(
     // alongside the primary workspace and the prompt advertises them.
     // Non-fatal: an error just yields no read sources (feature degrades to
     // plain single-repo).
-    let read_source_project_ids = djinn_db::EpicRepository::new(
-        app_state.db.clone(),
-        app_state.event_bus.clone(),
-    )
-    .read_sources_for_task(task.epic_id.as_deref())
-    .await
-    .unwrap_or_default();
+    let read_source_project_ids =
+        djinn_db::EpicRepository::new(app_state.db.clone(), app_state.event_bus.clone())
+            .read_sources_for_task(task.epic_id.as_deref())
+            .await
+            .unwrap_or_default();
 
     // ── Private-dependency credentials for the worker Pod (best-effort) ───
     //
@@ -286,6 +281,9 @@ pub(crate) async fn run_supervisor_dispatch(
         }
         Ok::<(), anyhow::Error>(())
     };
+    // Keep a copy for the post-run breaker scope below: `.scope(..)` consumes
+    // `created_by_user_id`, but `record_success` must key on the same owner.
+    let creator_scope = created_by_user_id.clone();
     djinn_core::auth_context::SESSION_USER_ID
         .scope(created_by_user_id, resolve_creds)
         .await?;
@@ -317,12 +315,8 @@ pub(crate) async fn run_supervisor_dispatch(
                     );
                 }
             };
-            match djinn_k8s::KubernetesRuntime::with_db(
-                config,
-                registry,
-                app_state.db.clone(),
-            )
-            .await
+            match djinn_k8s::KubernetesRuntime::with_db(config, registry, app_state.db.clone())
+                .await
             {
                 Ok(rt) => Arc::new(rt),
                 Err(e) => {
@@ -425,7 +419,9 @@ pub(crate) async fn run_supervisor_dispatch(
             if !report.stages_completed.is_empty()
                 && matches!(report_to_terminal_status(&report), TaskRunStatus::Completed)
             {
-                app_state.health_tracker.record_success(&model_id);
+                app_state
+                    .health_tracker
+                    .record_success(creator_scope.as_deref(), &model_id);
             }
             // Phase 2.2: post-session knowledge extraction. Fire-and-forget on
             // the long-lived server (it owns the embedding model + Qdrant, so
@@ -699,4 +695,3 @@ mod tests {
         assert!(got.is_none());
     }
 }
-

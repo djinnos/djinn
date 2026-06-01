@@ -5,9 +5,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use djinn_git::{GitActorHandle, GitError};
-use djinn_runtime::GraphWarmerService;
-use djinn_workspace::MirrorManager;
 use djinn_control_plane::{
     McpState, bridge,
     bridge::{
@@ -18,6 +15,9 @@ use djinn_control_plane::{
     },
     tools::task_tools::ErrorResponse,
 };
+use djinn_git::{GitActorHandle, GitError};
+use djinn_runtime::GraphWarmerService;
+use djinn_workspace::MirrorManager;
 use tokio::sync::Mutex;
 
 use crate::actors::coordinator::{CoordinatorHandle, VerificationTracker};
@@ -224,9 +224,11 @@ impl bridge::RuntimeOps for AgentRuntimeOps {
         // ImageController — only the server-side AppState impl does.
         // If this path ever fires from in-agent MCP invocation, surface
         // a clear error so the caller knows they're wired up wrong.
-        Err("apply_environment_config is unavailable on the agent-internal runtime — \
+        Err(
+            "apply_environment_config is unavailable on the agent-internal runtime — \
              route project_environment_config_set through djinn-server's MCP endpoint"
-            .into())
+                .into(),
+        )
     }
 
     async fn trigger_mirror_refresh(&self, _project_id: &str) {
@@ -326,11 +328,7 @@ impl RepoGraphOps for StubRepoGraphOps {
     ) -> Result<Vec<EdgeEntry>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
-    async fn describe(
-        &self,
-        _: &ProjectCtx,
-        _: &str,
-    ) -> Result<Option<SymbolDescription>, String> {
+    async fn describe(&self, _: &ProjectCtx, _: &str) -> Result<Option<SymbolDescription>, String> {
         Err("code_graph not available in agent bridge — use MCP server".into())
     }
     async fn context(
@@ -609,10 +607,8 @@ impl AgentContext {
                         // (/workspace/.tmpXXX) won't reverse-parse into
                         // owner/repo, but the pod is single-project so the
                         // spec.project_id default applies.
-                        if let Some(default_id) = self
-                            .default_project_id
-                            .as_deref()
-                            .filter(|s| !s.is_empty())
+                        if let Some(default_id) =
+                            self.default_project_id.as_deref().filter(|s| !s.is_empty())
                         {
                             return Ok(default_id.to_string());
                         }
@@ -668,14 +664,34 @@ impl AgentContext {
         ts
     }
 
-    /// Update the activity timestamp for a task to now.
+    /// Update the activity timestamp for a task to now, **creating** the entry
+    /// if it does not exist yet (upsert).
+    ///
+    /// The upsert is load-bearing for remote (K8s) workers. A worker runs its
+    /// `reply_loop` — and therefore `register_activity` — inside its OWN process
+    /// against its OWN `AgentContext`; the host never registers the worker's
+    /// task. The worker bridges liveness to the host by calling the
+    /// `touch_activity` RPC on every stream event / tool call. If this method
+    /// only updated pre-existing entries, that RPC would be a no-op on the host,
+    /// `idle_seconds` would always return `None`, and the coordinator's stall
+    /// poller would fall back to wall-clock-since-`started_at` — killing every
+    /// productive worker at the zero-token threshold mid-flow. Upserting makes
+    /// the first touch register the task, so the host tracks true idle from the
+    /// worker's first sign of life. The presence of an entry also doubles as the
+    /// "this session has shown activity (is past its first LLM call)" signal the
+    /// stall poller uses to grant the full role budget instead of the aggressive
+    /// first-call cap.
     pub fn touch_activity(&self, task_id: &str) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        if let Some(ts) = self.active_tasks.lock().expect("poisoned").get(task_id) {
-            ts.store(now, Ordering::Relaxed);
+        let mut guard = self.active_tasks.lock().expect("poisoned");
+        match guard.get(task_id) {
+            Some(ts) => ts.store(now, Ordering::Relaxed),
+            None => {
+                guard.insert(task_id.to_string(), Arc::new(AtomicU64::new(now)));
+            }
         }
     }
 

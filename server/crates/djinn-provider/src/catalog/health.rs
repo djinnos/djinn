@@ -24,10 +24,48 @@ const MAX_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 /// self-heals; repeated stalls escalate via the normal ladder and pin at the cap.
 const STALL_MIN_COOLDOWN: Duration = MAX_COOLDOWN;
 
-/// Wire-format health state for a single model.
+/// Identifies a single circuit-breaker bucket.
+///
+/// Health is tracked **per `(scope, model_id)`**, not globally per model. The
+/// throttling/outage the breaker reacts to is almost always *credential-scoped*
+/// — most acutely the ChatGPT Codex OAuth backend, which rate-limits per
+/// **account**: it answers an over-quota account with empty `response.completed`
+/// turns (HTTP 200, zero tokens) that the coordinator sees as a zero-token
+/// stall. A *global* key let one throttled user's stalls disable a model for
+/// **every** user's task dispatch (the model would read `auto_disabled` for
+/// everyone, even though their own credential is healthy). Keying by the owning
+/// user isolates that blast radius.
+///
+/// `scope` is the owning user id (`tasks.created_by_user_id`); `None` is the
+/// shared bucket for system / unowned work that runs on the org-shared
+/// credential. An org-shared credential that is genuinely down therefore trips
+/// once per distinct user that hits it (rather than once globally) — slightly
+/// slower to converge, but each bucket still self-heals on cooldown, and a
+/// truly-bad model is demoted independently for everyone who touches it.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct HealthKey {
+    pub scope: Option<String>,
+    pub model_id: String,
+}
+
+impl HealthKey {
+    pub fn new(scope: Option<&str>, model_id: &str) -> Self {
+        Self {
+            scope: scope.map(str::to_owned),
+            model_id: model_id.to_owned(),
+        }
+    }
+}
+
+/// Wire-format health state for a single `(scope, model)` bucket.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelHealth {
     pub model_id: String,
+    /// Owning user id this bucket is scoped to; `None` = shared/system bucket.
+    /// `#[serde(default)]` keeps older persisted snapshots (which had no scope)
+    /// loading as the shared bucket.
+    #[serde(default)]
+    pub scope: Option<String>,
     pub auto_disabled: bool,
     pub consecutive_failures: u32,
     pub total_failures: u32,
@@ -66,9 +104,10 @@ impl ModelState {
         }
     }
 
-    fn to_health(&self, model_id: &str) -> ModelHealth {
+    fn to_health(&self, key: &HealthKey) -> ModelHealth {
         ModelHealth {
-            model_id: model_id.to_owned(),
+            model_id: key.model_id.clone(),
+            scope: key.scope.clone(),
             // Report as disabled only when cooldown has not yet expired.
             auto_disabled: self.auto_disabled && !self.is_available(),
             consecutive_failures: self.consecutive_failures,
@@ -93,11 +132,12 @@ impl ModelState {
 /// Thread-safe in-memory model health tracker with circuit-breaker logic.
 ///
 /// Circuit breaker: after `CIRCUIT_BREAKER_THRESHOLD` consecutive failures the
-/// model is auto-disabled with an exponentially growing cooldown.  Models
-/// auto re-enable once the cooldown expires.
+/// `(scope, model)` bucket is auto-disabled with an exponentially growing
+/// cooldown. Buckets auto re-enable once the cooldown expires. See [`HealthKey`]
+/// for why health is tracked per-scope rather than globally per model.
 #[derive(Clone)]
 pub struct HealthTracker {
-    inner: Arc<Mutex<HashMap<String, ModelState>>>,
+    inner: Arc<Mutex<HashMap<HealthKey, ModelState>>>,
 }
 
 impl HealthTracker {
@@ -109,9 +149,9 @@ impl HealthTracker {
 
     /// Record a successful invocation.  Resets consecutive failure counter;
     /// clears auto-disable state if the cooldown has expired.
-    pub fn record_success(&self, model_id: &str) {
+    pub fn record_success(&self, scope: Option<&str>, model_id: &str) {
         let mut map = self.inner.lock().unwrap();
-        let state = map.entry(model_id.to_owned()).or_default();
+        let state = map.entry(HealthKey::new(scope, model_id)).or_default();
         state.consecutive_failures = 0;
         state.total_successes += 1;
         if state.auto_disabled && state.is_available() {
@@ -122,9 +162,10 @@ impl HealthTracker {
 
     /// Record a failed invocation.  Trips the circuit breaker when the
     /// consecutive failure threshold is reached.
-    pub fn record_failure(&self, model_id: &str) {
+    pub fn record_failure(&self, scope: Option<&str>, model_id: &str) {
         let mut map = self.inner.lock().unwrap();
-        let state = map.entry(model_id.to_owned()).or_default();
+        let key = HealthKey::new(scope, model_id);
+        let state = map.entry(key.clone()).or_default();
         state.consecutive_failures += 1;
         state.total_failures += 1;
 
@@ -140,7 +181,8 @@ impl HealthTracker {
             state.cooldown_until = Some(Instant::now() + cooldown);
             state.disable_ttl_trips += 1;
             tracing::warn!(
-                model_id,
+                model_id = %key.model_id,
+                scope = ?key.scope,
                 consecutive_failures = state.consecutive_failures,
                 cooldown_secs = cooldown.as_secs(),
                 "model circuit-breaker tripped"
@@ -148,9 +190,9 @@ impl HealthTracker {
         }
     }
 
-    /// Record a **stall** — a session that produced/consumed zero tokens and
-    /// had its first LLM call hung (the coordinator's zero-token kill). This is
-    /// a strong "this model/backend is bad right now" signal, so unlike
+    /// Record a **stall** — a session whose first LLM call hung (the
+    /// coordinator's zero-token / no-activity kill). This is a strong "this
+    /// model/backend is bad right now for this account" signal, so unlike
     /// [`record_failure`] it trips the breaker **immediately** (no
     /// consecutive-failure threshold) and with a cooldown floored at
     /// [`STALL_MIN_COOLDOWN`].
@@ -162,9 +204,10 @@ impl HealthTracker {
     /// model in the creator's ordered list instead of re-selecting the bad one.
     /// The cooldown still auto-expires (self-heal), and repeated stalls escalate
     /// `disable_ttl_trips` so a persistently-bad model stays demoted at the cap.
-    pub fn record_stall(&self, model_id: &str) {
+    pub fn record_stall(&self, scope: Option<&str>, model_id: &str) {
         let mut map = self.inner.lock().unwrap();
-        let state = map.entry(model_id.to_owned()).or_default();
+        let key = HealthKey::new(scope, model_id);
+        let state = map.entry(key.clone()).or_default();
         state.consecutive_failures += 1;
         state.total_failures += 1;
 
@@ -187,29 +230,35 @@ impl HealthTracker {
         state.cooldown_until = Some(Instant::now() + cooldown);
         state.disable_ttl_trips += 1;
         tracing::warn!(
-            model_id,
+            model_id = %key.model_id,
+            scope = ?key.scope,
             consecutive_failures = state.consecutive_failures,
             cooldown_secs = cooldown.as_secs(),
             "model circuit-breaker tripped on stall (failing over to next model)"
         );
     }
 
-    /// Returns `true` when the model is not circuit-breaker disabled
-    /// (or when its cooldown has expired).
-    pub fn is_available(&self, model_id: &str) -> bool {
+    /// Returns `true` when the `(scope, model)` bucket is not circuit-breaker
+    /// disabled (or when its cooldown has expired).
+    pub fn is_available(&self, scope: Option<&str>, model_id: &str) -> bool {
         let map = self.inner.lock().unwrap();
-        map.get(model_id).is_none_or(|s| s.is_available())
+        map.get(&HealthKey::new(scope, model_id))
+            .is_none_or(|s| s.is_available())
     }
 
-    /// Return health state for all tracked models, sorted by model ID.
+    /// Return health state for all tracked buckets, sorted by `(scope, model)`.
     pub fn all_health(&self) -> Vec<ModelHealth> {
         let map = self.inner.lock().unwrap();
-        let mut health: Vec<_> = map.iter().map(|(id, s)| s.to_health(id)).collect();
-        health.sort_by(|a, b| a.model_id.cmp(&b.model_id));
+        let mut health: Vec<_> = map.iter().map(|(key, s)| s.to_health(key)).collect();
+        health.sort_by(|a, b| {
+            a.scope
+                .cmp(&b.scope)
+                .then_with(|| a.model_id.cmp(&b.model_id))
+        });
         health
     }
 
-    /// Replace all tracked model health state with a persisted snapshot.
+    /// Replace all tracked health state with a persisted snapshot.
     pub fn restore_all(&self, snapshot: Vec<ModelHealth>) {
         let mut map = self.inner.lock().unwrap();
         map.clear();
@@ -235,17 +284,23 @@ impl HealthTracker {
                 }
             }
 
-            map.insert(health.model_id, state);
+            map.insert(
+                HealthKey::new(health.scope.as_deref(), &health.model_id),
+                state,
+            );
         }
     }
 
-    /// Return health state for a single model (returns zero state if untracked).
-    pub fn model_health(&self, model_id: &str) -> ModelHealth {
+    /// Return health state for a single `(scope, model)` bucket (returns zero
+    /// state if untracked).
+    pub fn model_health(&self, scope: Option<&str>, model_id: &str) -> ModelHealth {
+        let key = HealthKey::new(scope, model_id);
         let map = self.inner.lock().unwrap();
-        map.get(model_id)
-            .map(|s| s.to_health(model_id))
-            .unwrap_or_else(|| ModelHealth {
+        map.get(&key)
+            .map(|s| s.to_health(&key))
+            .unwrap_or(ModelHealth {
                 model_id: model_id.to_owned(),
+                scope: scope.map(str::to_owned),
                 auto_disabled: false,
                 consecutive_failures: 0,
                 total_failures: 0,
@@ -255,24 +310,55 @@ impl HealthTracker {
             })
     }
 
-    /// Reset failure/success counters and re-enable a model.
-    pub fn reset(&self, model_id: &str) {
+    /// Reset failure/success counters and re-enable a single bucket.
+    pub fn reset(&self, scope: Option<&str>, model_id: &str) {
         let mut map = self.inner.lock().unwrap();
-        map.insert(model_id.to_owned(), ModelState::default());
+        map.insert(HealthKey::new(scope, model_id), ModelState::default());
     }
 
-    /// Reset all tracked models.
+    /// Reset all tracked buckets.
     pub fn reset_all(&self) {
         let mut map = self.inner.lock().unwrap();
         map.clear();
     }
 
-    /// Re-enable an auto-disabled model without clearing counters.
-    pub fn enable(&self, model_id: &str) {
+    /// Reset every scope's bucket for `model_id` (ops convenience: "wipe this
+    /// model's breaker state for everyone"). Returns the number of buckets hit.
+    pub fn reset_model_all_scopes(&self, model_id: &str) -> usize {
         let mut map = self.inner.lock().unwrap();
-        let state = map.entry(model_id.to_owned()).or_default();
+        let keys: Vec<HealthKey> = map
+            .keys()
+            .filter(|k| k.model_id == model_id)
+            .cloned()
+            .collect();
+        for k in &keys {
+            map.remove(k);
+        }
+        keys.len()
+    }
+
+    /// Re-enable an auto-disabled bucket without clearing counters.
+    pub fn enable(&self, scope: Option<&str>, model_id: &str) {
+        let mut map = self.inner.lock().unwrap();
+        let state = map.entry(HealthKey::new(scope, model_id)).or_default();
         state.auto_disabled = false;
         state.cooldown_until = None;
+    }
+
+    /// Re-enable every scope's bucket for `model_id` without clearing counters
+    /// (ops convenience: "let everyone use this model again now"). Returns the
+    /// number of buckets re-enabled.
+    pub fn enable_model_all_scopes(&self, model_id: &str) -> usize {
+        let mut map = self.inner.lock().unwrap();
+        let mut n = 0;
+        for (key, state) in map.iter_mut() {
+            if key.model_id == model_id {
+                state.auto_disabled = false;
+                state.cooldown_until = None;
+                n += 1;
+            }
+        }
+        n
     }
 }
 
@@ -287,24 +373,27 @@ mod tests {
     use super::*;
 
     const TEST_MODEL: &str = "model";
+    // Most tests exercise the shared (None) bucket; per-scope isolation has its
+    // own dedicated tests below.
+    const S: Option<&str> = None;
 
-    fn expire_cooldown(ht: &HealthTracker, model_id: &str) {
+    fn expire_cooldown(ht: &HealthTracker, scope: Option<&str>, model_id: &str) {
         let mut map = ht.inner.lock().unwrap();
-        let state = map.get_mut(model_id).unwrap();
+        let state = map.get_mut(&HealthKey::new(scope, model_id)).unwrap();
         state.cooldown_until = Some(Instant::now() - Duration::from_millis(1));
     }
 
     fn trip_breaker(ht: &HealthTracker, model_id: &str) -> ModelHealth {
         for _ in 0..CIRCUIT_BREAKER_THRESHOLD {
-            ht.record_failure(model_id);
+            ht.record_failure(S, model_id);
         }
-        ht.model_health(model_id)
+        ht.model_health(S, model_id)
     }
 
     #[test]
     fn healthy_model_is_available() {
         let ht = HealthTracker::new();
-        assert!(ht.is_available("gpt-4o"));
+        assert!(ht.is_available(S, "gpt-4o"));
     }
 
     #[test]
@@ -313,21 +402,21 @@ mod tests {
         let pre_threshold = CIRCUIT_BREAKER_THRESHOLD - 1;
 
         for _ in 0..pre_threshold {
-            ht.record_failure("bad-model");
+            ht.record_failure(S, "bad-model");
         }
 
-        let before_trip = ht.model_health("bad-model");
-        assert!(ht.is_available("bad-model"));
+        let before_trip = ht.model_health(S, "bad-model");
+        assert!(ht.is_available(S, "bad-model"));
         assert!(!before_trip.auto_disabled);
         assert_eq!(before_trip.consecutive_failures, pre_threshold);
         assert_eq!(before_trip.total_failures, pre_threshold);
         assert_eq!(before_trip.disable_ttl_trips, 0);
         assert!(before_trip.cooldown_seconds_remaining.is_none());
 
-        ht.record_failure("bad-model");
+        ht.record_failure(S, "bad-model");
 
-        assert!(!ht.is_available("bad-model"));
-        let h = ht.model_health("bad-model");
+        assert!(!ht.is_available(S, "bad-model"));
+        let h = ht.model_health(S, "bad-model");
         assert!(h.auto_disabled);
         assert_eq!(h.consecutive_failures, CIRCUIT_BREAKER_THRESHOLD);
         assert_eq!(h.total_failures, CIRCUIT_BREAKER_THRESHOLD);
@@ -341,30 +430,30 @@ mod tests {
     fn success_resets_consecutive_counter() {
         let ht = HealthTracker::new();
         for _ in 0..(CIRCUIT_BREAKER_THRESHOLD - 1) {
-            ht.record_failure(TEST_MODEL);
+            ht.record_failure(S, TEST_MODEL);
         }
-        ht.record_success(TEST_MODEL);
+        ht.record_success(S, TEST_MODEL);
         for _ in 0..(CIRCUIT_BREAKER_THRESHOLD - 1) {
-            ht.record_failure(TEST_MODEL);
+            ht.record_failure(S, TEST_MODEL);
         }
-        let h = ht.model_health(TEST_MODEL);
+        let h = ht.model_health(S, TEST_MODEL);
         assert_eq!(h.consecutive_failures, CIRCUIT_BREAKER_THRESHOLD - 1);
         assert!(!h.auto_disabled);
         assert_eq!(h.total_failures, 2 * (CIRCUIT_BREAKER_THRESHOLD - 1));
         assert_eq!(h.total_successes, 1);
         assert_eq!(h.disable_ttl_trips, 0);
-        assert!(ht.is_available(TEST_MODEL));
+        assert!(ht.is_available(S, TEST_MODEL));
     }
 
     #[test]
     fn reset_clears_state() {
         let ht = HealthTracker::new();
         for _ in 0..CIRCUIT_BREAKER_THRESHOLD {
-            ht.record_failure(TEST_MODEL);
+            ht.record_failure(S, TEST_MODEL);
         }
-        ht.reset(TEST_MODEL);
-        assert!(ht.is_available(TEST_MODEL));
-        let h = ht.model_health(TEST_MODEL);
+        ht.reset(S, TEST_MODEL);
+        assert!(ht.is_available(S, TEST_MODEL));
+        let h = ht.model_health(S, TEST_MODEL);
         assert_eq!(h.total_failures, 0);
     }
 
@@ -372,11 +461,11 @@ mod tests {
     fn enable_re_enables_without_clearing_counters() {
         let ht = HealthTracker::new();
         for _ in 0..CIRCUIT_BREAKER_THRESHOLD {
-            ht.record_failure(TEST_MODEL);
+            ht.record_failure(S, TEST_MODEL);
         }
-        ht.enable(TEST_MODEL);
-        assert!(ht.is_available(TEST_MODEL));
-        let h = ht.model_health(TEST_MODEL);
+        ht.enable(S, TEST_MODEL);
+        assert!(ht.is_available(S, TEST_MODEL));
+        let h = ht.model_health(S, TEST_MODEL);
         assert_eq!(h.total_failures, CIRCUIT_BREAKER_THRESHOLD);
     }
 
@@ -413,21 +502,21 @@ mod tests {
             let remaining = health.cooldown_seconds_remaining.unwrap();
             assert!(remaining <= expected_secs);
             assert!(remaining >= expected_secs.saturating_sub(1));
-            assert!(!ht.is_available(TEST_MODEL));
+            assert!(!ht.is_available(S, TEST_MODEL));
 
-            expire_cooldown(&ht, TEST_MODEL);
-            let expired = ht.model_health(TEST_MODEL);
+            expire_cooldown(&ht, S, TEST_MODEL);
+            let expired = ht.model_health(S, TEST_MODEL);
             assert!(!expired.auto_disabled);
             assert!(expired.cooldown_seconds_remaining.is_none());
-            assert!(ht.is_available(TEST_MODEL));
+            assert!(ht.is_available(S, TEST_MODEL));
         }
 
-        let expired = ht.model_health(TEST_MODEL);
+        let expired = ht.model_health(S, TEST_MODEL);
         assert_eq!(expired.disable_ttl_trips, 3);
         assert_eq!(expired.consecutive_failures, CIRCUIT_BREAKER_THRESHOLD * 3);
 
-        ht.record_success(TEST_MODEL);
-        let reenabled = ht.model_health(TEST_MODEL);
+        ht.record_success(S, TEST_MODEL);
+        let reenabled = ht.model_health(S, TEST_MODEL);
         assert!(!reenabled.auto_disabled);
         assert_eq!(reenabled.consecutive_failures, 0);
     }
@@ -449,21 +538,21 @@ mod tests {
                 assert!(remaining >= MAX_COOLDOWN.as_secs().saturating_sub(1));
             }
 
-            expire_cooldown(&ht, TEST_MODEL);
+            expire_cooldown(&ht, S, TEST_MODEL);
         }
 
-        let health = ht.model_health(TEST_MODEL);
+        let health = ht.model_health(S, TEST_MODEL);
         assert_eq!(health.disable_ttl_trips, 6);
-        assert!(ht.is_available(TEST_MODEL));
+        assert!(ht.is_available(S, TEST_MODEL));
     }
 
     #[test]
     fn stall_trips_immediately_without_consecutive_threshold() {
         let ht = HealthTracker::new();
         // A single stall (well below CIRCUIT_BREAKER_THRESHOLD) disables the model.
-        ht.record_stall(TEST_MODEL);
-        assert!(!ht.is_available(TEST_MODEL));
-        let h = ht.model_health(TEST_MODEL);
+        ht.record_stall(S, TEST_MODEL);
+        assert!(!ht.is_available(S, TEST_MODEL));
+        let h = ht.model_health(S, TEST_MODEL);
         assert!(h.auto_disabled);
         assert_eq!(h.consecutive_failures, 1);
         assert_eq!(h.total_failures, 1);
@@ -479,9 +568,9 @@ mod tests {
         const MAX_TASK_REDISPATCH_COOLDOWN_SECS: u64 = 240;
 
         let ht = HealthTracker::new();
-        ht.record_stall(TEST_MODEL);
+        ht.record_stall(S, TEST_MODEL);
         let remaining = ht
-            .model_health(TEST_MODEL)
+            .model_health(S, TEST_MODEL)
             .cooldown_seconds_remaining
             .expect("stalled model must be cooling down");
         assert!(
@@ -496,53 +585,105 @@ mod tests {
     #[test]
     fn stall_self_heals_after_cooldown_then_success_resets() {
         let ht = HealthTracker::new();
-        ht.record_stall(TEST_MODEL);
-        assert!(!ht.is_available(TEST_MODEL));
+        ht.record_stall(S, TEST_MODEL);
+        assert!(!ht.is_available(S, TEST_MODEL));
 
         // Cooldown expires → model auto-re-enables (one-off stall self-heals).
-        expire_cooldown(&ht, TEST_MODEL);
-        assert!(ht.is_available(TEST_MODEL));
-        assert!(!ht.model_health(TEST_MODEL).auto_disabled);
+        expire_cooldown(&ht, S, TEST_MODEL);
+        assert!(ht.is_available(S, TEST_MODEL));
+        assert!(!ht.model_health(S, TEST_MODEL).auto_disabled);
 
         // A successful turn resets the consecutive-failure counter.
-        ht.record_success(TEST_MODEL);
-        let h = ht.model_health(TEST_MODEL);
+        ht.record_success(S, TEST_MODEL);
+        let h = ht.model_health(S, TEST_MODEL);
         assert_eq!(h.consecutive_failures, 0);
         assert_eq!(h.total_successes, 1);
-        assert!(ht.is_available(TEST_MODEL));
+        assert!(ht.is_available(S, TEST_MODEL));
     }
 
     #[test]
     fn repeated_stalls_escalate_trips_and_stay_capped() {
         let ht = HealthTracker::new();
         for expected_trip in 1..=4 {
-            ht.record_stall(TEST_MODEL);
-            let h = ht.model_health(TEST_MODEL);
+            ht.record_stall(S, TEST_MODEL);
+            let h = ht.model_health(S, TEST_MODEL);
             assert_eq!(h.disable_ttl_trips, expected_trip);
             assert!(h.auto_disabled);
             // Every stall cooldown is floored at the cap.
             let remaining = h.cooldown_seconds_remaining.unwrap();
             assert!(remaining <= MAX_COOLDOWN.as_secs());
             assert!(remaining >= MAX_COOLDOWN.as_secs().saturating_sub(1));
-            assert!(!ht.is_available(TEST_MODEL));
-            expire_cooldown(&ht, TEST_MODEL);
+            assert!(!ht.is_available(S, TEST_MODEL));
+            expire_cooldown(&ht, S, TEST_MODEL);
         }
     }
 
     #[test]
     fn stall_while_cooling_down_does_not_shorten_cooldown() {
         let ht = HealthTracker::new();
-        ht.record_stall(TEST_MODEL);
-        let first = ht.model_health(TEST_MODEL);
+        ht.record_stall(S, TEST_MODEL);
+        let first = ht.model_health(S, TEST_MODEL);
         assert_eq!(first.disable_ttl_trips, 1);
 
         // A second stall arriving while still cooling down is a no-op for the
         // cooldown window (no re-trip, no reset) — it only bumps failure counts.
-        ht.record_stall(TEST_MODEL);
-        let second = ht.model_health(TEST_MODEL);
+        ht.record_stall(S, TEST_MODEL);
+        let second = ht.model_health(S, TEST_MODEL);
         assert_eq!(second.disable_ttl_trips, 1, "no re-trip while cooling down");
         assert_eq!(second.consecutive_failures, 2);
-        assert!(!ht.is_available(TEST_MODEL));
+        assert!(!ht.is_available(S, TEST_MODEL));
+    }
+
+    #[test]
+    fn scope_isolates_breaker_state_between_users() {
+        // The core of the per-user fix: user A stalling a model must NOT disable
+        // it for user B, nor for the shared/system bucket.
+        let ht = HealthTracker::new();
+        let a = Some("user-a");
+        let b = Some("user-b");
+
+        ht.record_stall(a, TEST_MODEL);
+
+        assert!(!ht.is_available(a, TEST_MODEL), "A's bucket is disabled");
+        assert!(ht.is_available(b, TEST_MODEL), "B's bucket is untouched");
+        assert!(
+            ht.is_available(None, TEST_MODEL),
+            "shared/system bucket is untouched"
+        );
+
+        // B failing independently does not affect A's already-tripped state.
+        ht.record_failure(b, TEST_MODEL);
+        assert_eq!(ht.model_health(a, TEST_MODEL).disable_ttl_trips, 1);
+        assert_eq!(ht.model_health(b, TEST_MODEL).consecutive_failures, 1);
+    }
+
+    #[test]
+    fn enable_and_reset_all_scopes_hit_every_bucket() {
+        let ht = HealthTracker::new();
+        ht.record_stall(Some("user-a"), TEST_MODEL);
+        ht.record_stall(Some("user-b"), TEST_MODEL);
+        ht.record_stall(None, TEST_MODEL);
+        // A different model must be left alone.
+        ht.record_stall(Some("user-a"), "other-model");
+
+        let re_enabled = ht.enable_model_all_scopes(TEST_MODEL);
+        assert_eq!(re_enabled, 3);
+        assert!(ht.is_available(Some("user-a"), TEST_MODEL));
+        assert!(ht.is_available(Some("user-b"), TEST_MODEL));
+        assert!(ht.is_available(None, TEST_MODEL));
+        assert!(!ht.is_available(Some("user-a"), "other-model"));
+
+        // enable keeps counters; reset wipes them.
+        assert_eq!(
+            ht.model_health(Some("user-a"), TEST_MODEL).total_failures,
+            1
+        );
+        let wiped = ht.reset_model_all_scopes(TEST_MODEL);
+        assert_eq!(wiped, 3);
+        assert_eq!(
+            ht.model_health(Some("user-a"), TEST_MODEL).total_failures,
+            0
+        );
     }
 
     #[test]
@@ -550,6 +691,7 @@ mod tests {
         let ht = HealthTracker::new();
         ht.restore_all(vec![ModelHealth {
             model_id: "a/model".to_string(),
+            scope: Some("user-a".to_string()),
             auto_disabled: true,
             consecutive_failures: CIRCUIT_BREAKER_THRESHOLD,
             total_failures: 10,
@@ -558,45 +700,49 @@ mod tests {
             cooldown_seconds_remaining: Some(4),
         }]);
 
-        let h = ht.model_health("a/model");
+        let scope = Some("user-a");
+        let h = ht.model_health(scope, "a/model");
         assert!(h.auto_disabled);
-        assert!(!ht.is_available("a/model"));
+        assert!(!ht.is_available(scope, "a/model"));
         assert_eq!(h.consecutive_failures, CIRCUIT_BREAKER_THRESHOLD);
         assert_eq!(h.total_failures, 10);
         assert_eq!(h.total_successes, 2);
         assert_eq!(h.disable_ttl_trips, 1);
+        // The same model under a different scope is unaffected by the snapshot.
+        assert!(ht.is_available(None, "a/model"));
         let remaining = h.cooldown_seconds_remaining.unwrap();
         assert!(remaining <= 4);
         assert!(remaining >= 3);
 
-        ht.enable("a/model");
-        let enabled = ht.model_health("a/model");
-        assert!(ht.is_available("a/model"));
+        ht.enable(scope, "a/model");
+        let enabled = ht.model_health(scope, "a/model");
+        assert!(ht.is_available(scope, "a/model"));
         assert!(!enabled.auto_disabled);
         assert_eq!(enabled.disable_ttl_trips, 1);
         assert_eq!(enabled.consecutive_failures, CIRCUIT_BREAKER_THRESHOLD);
 
-        ht.record_success("a/model");
-        let restored = ht.model_health("a/model");
-        assert!(ht.is_available("a/model"));
+        ht.record_success(scope, "a/model");
+        let restored = ht.model_health(scope, "a/model");
+        assert!(ht.is_available(scope, "a/model"));
         assert!(!restored.auto_disabled);
         assert_eq!(restored.disable_ttl_trips, 1);
         assert_eq!(restored.consecutive_failures, 0);
 
         for failures in 1..CIRCUIT_BREAKER_THRESHOLD {
-            ht.record_failure("a/model");
-            let health = ht.model_health("a/model");
-            assert!(ht.is_available("a/model"));
+            ht.record_failure(scope, "a/model");
+            let health = ht.model_health(scope, "a/model");
+            assert!(ht.is_available(scope, "a/model"));
             assert!(!health.auto_disabled);
             assert_eq!(health.disable_ttl_trips, 1);
             assert_eq!(health.consecutive_failures, failures);
         }
 
-        let before_expiry = ht.model_health("a/model");
+        let before_expiry = ht.model_health(scope, "a/model");
         assert_eq!(before_expiry.disable_ttl_trips, 1);
 
         ht.restore_all(vec![ModelHealth {
             model_id: "a/model".to_string(),
+            scope: Some("user-a".to_string()),
             auto_disabled: true,
             consecutive_failures: CIRCUIT_BREAKER_THRESHOLD,
             total_failures: 10,
@@ -604,14 +750,34 @@ mod tests {
             disable_ttl_trips: 1,
             cooldown_seconds_remaining: Some(2),
         }]);
-        assert!(!ht.is_available("a/model"));
-        assert_eq!(ht.model_health("a/model").disable_ttl_trips, 1);
+        assert!(!ht.is_available(scope, "a/model"));
+        assert_eq!(ht.model_health(scope, "a/model").disable_ttl_trips, 1);
 
-        expire_cooldown(&ht, "a/model");
-        let cooled_off = ht.model_health("a/model");
-        assert!(ht.is_available("a/model"));
+        expire_cooldown(&ht, scope, "a/model");
+        let cooled_off = ht.model_health(scope, "a/model");
+        assert!(ht.is_available(scope, "a/model"));
         assert!(!cooled_off.auto_disabled);
         assert_eq!(cooled_off.disable_ttl_trips, 1);
         assert!(cooled_off.cooldown_seconds_remaining.is_none());
+    }
+
+    #[test]
+    fn legacy_snapshot_without_scope_loads_as_shared_bucket() {
+        // Snapshots persisted before the per-scope change have no `scope` field;
+        // serde defaults it to None → the shared bucket.
+        let ht = HealthTracker::new();
+        let legacy = serde_json::json!([{
+            "model_id": "openai/gpt-5.5",
+            "auto_disabled": true,
+            "consecutive_failures": 3,
+            "total_failures": 3,
+            "total_successes": 0,
+            "disable_ttl_trips": 1,
+            "cooldown_seconds_remaining": 30
+        }]);
+        let snapshot: Vec<ModelHealth> = serde_json::from_value(legacy).unwrap();
+        ht.restore_all(snapshot);
+        assert!(!ht.is_available(None, "openai/gpt-5.5"));
+        assert_eq!(ht.model_health(None, "openai/gpt-5.5").scope, None);
     }
 }

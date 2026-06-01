@@ -3,5 +3,5 @@ pub mod health;
 pub mod service;
 pub mod validate;
 
-pub use health::HealthTracker;
+pub use health::{HealthKey, HealthTracker, ModelHealth};
 pub use service::CatalogService;
