@@ -27,6 +27,10 @@ tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["process", "sync", "fs", "macros", "rt", "rt-multi-thread", "time", "io-util"] }
 tracing = "0.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+wait-timeout = "0.2"
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
 tree-sitter-go = "0.25"
