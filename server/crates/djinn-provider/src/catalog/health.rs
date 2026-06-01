@@ -376,6 +376,20 @@ impl HealthTracker {
         map.clear();
     }
 
+    /// Reset every bucket owned by `scope`. Used for auto-resume: when a user
+    /// reconnects a revoked credential, give all of their models another chance
+    /// immediately instead of waiting out the breaker cooldown. Returns the
+    /// number of buckets hit.
+    pub fn reset_scope(&self, scope: Option<&str>) -> usize {
+        let mut map = self.inner.lock().unwrap();
+        let target = scope.map(|s| s.to_string());
+        let keys: Vec<HealthKey> = map.keys().filter(|k| k.scope == target).cloned().collect();
+        for k in &keys {
+            map.remove(k);
+        }
+        keys.len()
+    }
+
     /// Reset every scope's bucket for `model_id` (ops convenience: "wipe this
     /// model's breaker state for everyone"). Returns the number of buckets hit.
     pub fn reset_model_all_scopes(&self, model_id: &str) -> usize {

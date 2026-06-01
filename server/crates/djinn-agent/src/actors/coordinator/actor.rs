@@ -556,6 +556,29 @@ impl CoordinatorActor {
                     self.dispatch_ready_tasks(Some(&task.project_id)).await;
                 }
             }
+            // A credential was (re)connected or replaced — typically the owner
+            // reconnecting a provider we marked revoked (set_with_owner clears the
+            // revoked mark and emits this). Clear that owner's breaker buckets so
+            // tasks that parked / failed over on a dead credential retry the
+            // recovered model immediately instead of waiting out the stall
+            // cooldown, then nudge a dispatch pass.
+            ("credential", "created" | "updated") => {
+                let owner = envelope
+                    .payload
+                    .as_object()
+                    .and_then(|m| m.get("owner_user_id"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let cleared = self.health.reset_scope(owner.as_deref());
+                if cleared > 0 {
+                    tracing::info!(
+                        owner = ?owner,
+                        cleared,
+                        "CoordinatorActor: credential (re)connected — cleared breaker buckets, re-dispatching"
+                    );
+                    self.dispatch_ready_tasks(None).await;
+                }
+            }
             _ => {}
         }
     }
