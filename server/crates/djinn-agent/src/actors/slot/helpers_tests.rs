@@ -216,3 +216,158 @@ async fn initial_user_message_default_and_feedback() {
     assert!(feedback_msg.contains("important feedback"));
     assert!(feedback_msg.contains("please fix tests"));
 }
+
+fn activity_entry(
+    actor_role: &str,
+    event_type: &str,
+    body: &str,
+    created_at: &str,
+) -> djinn_core::models::ActivityEntry {
+    djinn_core::models::ActivityEntry {
+        id: format!("evt-{created_at}"),
+        task_id: Some("t".to_string()),
+        actor_id: "sys".to_string(),
+        actor_role: actor_role.to_string(),
+        event_type: event_type.to_string(),
+        payload: serde_json::json!({ "body": body }).to_string(),
+        created_at: created_at.to_string(),
+    }
+}
+
+#[test]
+fn latest_ci_feedback_respects_cycle_floor() {
+    // Activity is chronological (oldest first), matching `list_activity`.
+    let activity = vec![
+        // Stale CI comment from an earlier head SHA.
+        activity_entry(
+            "verification",
+            "comment",
+            "OLD CI failure",
+            "2026-06-01T10:00:00Z",
+        ),
+        // Reviewer feedback marks the start of the current cycle.
+        activity_entry(
+            "system",
+            "pr_review_feedback",
+            "ignored",
+            "2026-06-01T11:00:00Z",
+        ),
+        // Fresh CI comment from the current cycle.
+        activity_entry(
+            "verification",
+            "comment",
+            "NEW CI failure",
+            "2026-06-01T11:00:01Z",
+        ),
+    ];
+
+    // With a cycle floor at the reviewer-feedback timestamp, only the fresh CI
+    // comment is surfaced — the stale one is skipped.
+    let in_cycle = latest_ci_feedback_in_cycle(&activity, Some("2026-06-01T11:00:00Z"))
+        .expect("expected in-cycle CI feedback");
+    assert!(in_cycle.contains("NEW CI failure"));
+    assert!(!in_cycle.contains("OLD CI failure"));
+
+    // A floor newer than every CI comment yields nothing (no stale surfacing).
+    assert!(latest_ci_feedback_in_cycle(&activity, Some("2026-06-01T12:00:00Z")).is_none());
+
+    // No floor → most recent CI comment.
+    let unbounded = latest_ci_feedback_in_cycle(&activity, None).unwrap();
+    assert!(unbounded.contains("NEW CI failure"));
+}
+
+#[tokio::test]
+async fn initial_user_message_combines_reviewer_and_ci_feedback() {
+    let db = create_test_db();
+    let state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let task = create_test_task(&db, &project.id, &epic.id).await;
+    let repo = TaskRepository::new(db.clone(), crate::test_helpers::test_events());
+
+    // PR review feedback (system / pr_review_feedback) with at least one inline
+    // comment so `pr_review_feedback_context` returns Some(..).
+    let feedback_payload = serde_json::json!({
+        "pull_number": 7,
+        "pr_url": "https://github.com/o/r/pull/7",
+        "round": 1,
+        "change_request_reviews": [],
+        "inline_comments": [{
+            "reviewer": "alice",
+            "body": "REVIEWER wants this renamed",
+            "path": "src/lib.rs",
+            "line": 10,
+            "html_url": "https://github.com/o/r/pull/7#c1",
+        }],
+    })
+    .to_string();
+    repo.log_activity(
+        Some(&task.id),
+        "system",
+        "system",
+        "pr_review_feedback",
+        &feedback_payload,
+    )
+    .await
+    .unwrap();
+
+    // CI failure comment logged in the same cycle (verification role).
+    repo.log_activity(
+        Some(&task.id),
+        "pr_poller",
+        "verification",
+        "comment",
+        r#"{"body":"**CI checks failed on PR** clippy job FAILED here"}"#,
+    )
+    .await
+    .unwrap();
+
+    let msg = initial_user_message_for_task(&task.id, &state).await;
+    // Both sources present in ONE directive.
+    assert!(msg.contains("Address ALL of the following"));
+    assert!(msg.contains("REVIEWER wants this renamed"));
+    assert!(msg.contains("CI checks failed on PR"));
+    assert!(msg.contains("(A)"));
+    assert!(msg.contains("(B)"));
+}
+
+#[tokio::test]
+async fn initial_user_message_reviewer_only_preserves_behavior() {
+    let db = create_test_db();
+    let state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let task = create_test_task(&db, &project.id, &epic.id).await;
+    let repo = TaskRepository::new(db.clone(), crate::test_helpers::test_events());
+
+    let feedback_payload = serde_json::json!({
+        "pull_number": 7,
+        "pr_url": "https://github.com/o/r/pull/7",
+        "round": 1,
+        "change_request_reviews": [],
+        "inline_comments": [{
+            "reviewer": "alice",
+            "body": "REVIEWER wants this renamed",
+            "path": "src/lib.rs",
+            "line": 10,
+            "html_url": "https://github.com/o/r/pull/7#c1",
+        }],
+    })
+    .to_string();
+    repo.log_activity(
+        Some(&task.id),
+        "system",
+        "system",
+        "pr_review_feedback",
+        &feedback_payload,
+    )
+    .await
+    .unwrap();
+
+    // No CI/verification comment → reviewer-only message (today's behavior).
+    let msg = initial_user_message_for_task(&task.id, &state).await;
+    assert!(msg.contains("A human reviewer has requested changes"));
+    assert!(msg.contains("REVIEWER wants this renamed"));
+    assert!(!msg.contains("Address ALL of the following"));
+    assert!(!msg.contains("(B)"));
+}
