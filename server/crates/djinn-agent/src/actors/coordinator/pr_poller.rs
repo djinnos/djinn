@@ -1,7 +1,7 @@
 use djinn_core::models::{Task, TransitionAction};
 use djinn_db::{ActivityQuery, SessionAuthRepository, UserSettingsRepository};
 use djinn_provider::github_api::{
-    CheckRun, DbBackedRefresher, GitHubApiClient, MergeMethod, PrReviewFeedback, PrState,
+    CheckRun, DbBackedRefresher, GitHubApiClient, MergeMethod, PrReview, PrReviewFeedback, PrState,
     PullRequest, UserTokenExpired,
 };
 use djinn_provider::oauth::github_app_user;
@@ -441,9 +441,18 @@ impl CoordinatorActor {
                 }
             };
 
-            let changes_requested = reviews
-                .iter()
-                .any(|r| r.state.as_str() == "CHANGES_REQUESTED");
+            // Collapse the full review history into the EFFECTIVE gating
+            // decision (latest standing review per reviewer), mirroring
+            // GitHub's own `reviewDecision`. GitHub keeps every review ever
+            // submitted in this list and never flips a `CHANGES_REQUESTED`
+            // review's `state` when later commits or approvals land — so a
+            // stale CHANGES_REQUESTED that the same reviewer subsequently
+            // dismissed or turned into APPROVED would otherwise match forever
+            // and bounce the task back to the worker every cycle (task 2sq6:
+            // PR approved + mergeable on GitHub, yet looped for hours). We
+            // compute `has_approved` here too so both signals come from the
+            // same deduped view.
+            let (changes_requested, has_approved) = effective_review_decision(&reviews);
 
             if changes_requested {
                 tracing::info!(
@@ -629,12 +638,13 @@ impl CoordinatorActor {
                 continue;
             }
 
-            let has_approved = reviews.iter().any(|r| r.state.as_str() == "APPROVED");
-            // Only count reviews that are merge-gating (APPROVED or CHANGES_REQUESTED).
-            // COMMENTED reviews are informational and should not block auto-merge.
-            let has_reviews = reviews
-                .iter()
-                .any(|r| matches!(r.state.as_str(), "APPROVED" | "CHANGES_REQUESTED"));
+            // `has_approved` was already computed (effective, latest-per-reviewer)
+            // alongside `changes_requested` above. A merge-gating review exists
+            // when some reviewer's latest standing review is APPROVED or
+            // CHANGES_REQUESTED; since CHANGES_REQUESTED is handled and `continue`d
+            // above, by this point that reduces to `has_approved`. COMMENTED /
+            // DISMISSED / PENDING carry no standing and never block auto-merge.
+            let has_reviews = changes_requested || has_approved;
 
             if has_reviews && !has_approved {
                 // Merge-gating reviews exist but none APPROVED (and no CHANGES_REQUESTED
@@ -2528,14 +2538,155 @@ fn pick_conflict_blocker_sibling(this_task_id: &str, siblings: &[Task]) -> Optio
     Some(first.id.clone())
 }
 
+/// Collapse a PR's full review history into the *effective* merge-gating
+/// decision, mirroring GitHub's own `reviewDecision`.
+///
+/// `GET /pulls/{n}/reviews` returns every review a reviewer ever submitted, and
+/// a `CHANGES_REQUESTED` review's `state` stays `CHANGES_REQUESTED` forever —
+/// pushing new commits, dismissing it, or even approving afterwards does NOT
+/// rewrite that historical entry. The merge-gating decision therefore depends
+/// only on each reviewer's *latest* standing review, never on whether any
+/// historical review was CHANGES_REQUESTED.
+///
+/// Per author we take the most-recent review (by `submitted_at`, which is
+/// RFC-3339 UTC so lexical ordering is chronological) whose state is one of
+/// `APPROVED` / `CHANGES_REQUESTED` / `DISMISSED`. `COMMENTED` and `PENDING`
+/// carry no standing and are ignored; `DISMISSED` clears a reviewer's prior
+/// standing without adding a new one. Then:
+///   - `changes_requested` is true iff some author's latest standing review is
+///     `CHANGES_REQUESTED`.
+///   - `has_approved` is true iff some author's latest standing review is
+///     `APPROVED`.
+///
+/// Reviews with no author or no `submitted_at` are skipped (can't attribute or
+/// order them). Returns `(changes_requested, has_approved)`.
+fn effective_review_decision(reviews: &[PrReview]) -> (bool, bool) {
+    use std::collections::HashMap;
+    // author login -> (submitted_at, state) of their latest standing review.
+    let mut latest: HashMap<&str, (&str, &str)> = HashMap::new();
+    for r in reviews {
+        let state = r.state.as_str();
+        if !matches!(state, "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED") {
+            continue; // COMMENTED / PENDING carry no merge-gating standing.
+        }
+        let Some(login) = r.user.as_ref().map(|u| u.login.as_str()) else {
+            continue;
+        };
+        let Some(submitted) = r.submitted_at.as_deref() else {
+            continue;
+        };
+        latest
+            .entry(login)
+            .and_modify(|cur| {
+                if submitted > cur.0 {
+                    *cur = (submitted, state);
+                }
+            })
+            .or_insert((submitted, state));
+    }
+    let changes_requested = latest.values().any(|(_, s)| *s == "CHANGES_REQUESTED");
+    let has_approved = latest.values().any(|(_, s)| *s == "APPROVED");
+    (changes_requested, has_approved)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Task, blocking_failed_checks, dequeue_reason_is_failure, is_advisory_check_name,
-        is_merge_queue_405, is_racing_unmerged_status, parse_pr_url,
+        Task, blocking_failed_checks, dequeue_reason_is_failure, effective_review_decision,
+        is_advisory_check_name, is_merge_queue_405, is_racing_unmerged_status, parse_pr_url,
         pick_conflict_blocker_sibling,
     };
-    use djinn_provider::github_api::CheckRun;
+    use djinn_provider::github_api::{CheckRun, GitHubUser, PrReview};
+
+    /// Minimal `PrReview` builder for the effective-decision tests.
+    fn review(author: &str, state: &str, submitted_at: &str) -> PrReview {
+        PrReview {
+            id: 1,
+            user: Some(GitHubUser {
+                login: author.to_string(),
+                id: 1,
+            }),
+            state: state.to_string(),
+            submitted_at: Some(submitted_at.to_string()),
+            html_url: String::new(),
+            body: String::new(),
+        }
+    }
+
+    #[test]
+    fn effective_decision_latest_approval_supersedes_stale_changes_requested() {
+        // Exact task-2sq6 shape: the same reviewer left COMMENTED twice, then
+        // CHANGES_REQUESTED, then dismissed it three times, then APPROVED on the
+        // current head. GitHub's reviewDecision is APPROVED — ours must agree,
+        // NOT keep matching the stale 17:35:01 CHANGES_REQUESTED entry.
+        let reviews = vec![
+            review("claude", "COMMENTED", "2026-06-01T17:34:53Z"),
+            review("claude", "COMMENTED", "2026-06-01T17:34:57Z"),
+            review("claude", "CHANGES_REQUESTED", "2026-06-01T17:35:01Z"),
+            review("claude", "DISMISSED", "2026-06-01T19:03:50Z"),
+            review("claude", "DISMISSED", "2026-06-01T19:17:56Z"),
+            review("claude", "DISMISSED", "2026-06-01T19:34:10Z"),
+            review("claude", "APPROVED", "2026-06-01T20:11:37Z"),
+        ];
+        let (changes_requested, has_approved) = effective_review_decision(&reviews);
+        assert!(
+            !changes_requested,
+            "a superseded CHANGES_REQUESTED must not force rework once the same reviewer approves"
+        );
+        assert!(has_approved, "latest standing review is APPROVED");
+    }
+
+    #[test]
+    fn effective_decision_standing_changes_requested_still_blocks() {
+        // Reviewer requested changes and hasn't approved since → still blocks.
+        let reviews = vec![
+            review("claude", "COMMENTED", "2026-06-01T17:34:53Z"),
+            review("claude", "APPROVED", "2026-06-01T18:00:00Z"),
+            review("claude", "CHANGES_REQUESTED", "2026-06-01T19:00:00Z"),
+        ];
+        let (changes_requested, has_approved) = effective_review_decision(&reviews);
+        assert!(
+            changes_requested,
+            "latest standing review is CHANGES_REQUESTED"
+        );
+        assert!(!has_approved);
+    }
+
+    #[test]
+    fn effective_decision_is_per_reviewer() {
+        // One reviewer approved on the current head; another still has an
+        // outstanding change request → the PR is blocked (any blocker blocks).
+        let reviews = vec![
+            review("alice", "APPROVED", "2026-06-01T20:00:00Z"),
+            review("bob", "CHANGES_REQUESTED", "2026-06-01T19:00:00Z"),
+        ];
+        let (changes_requested, has_approved) = effective_review_decision(&reviews);
+        assert!(changes_requested, "bob's outstanding change request blocks");
+        assert!(has_approved, "alice approved");
+    }
+
+    #[test]
+    fn effective_decision_dismissed_clears_standing() {
+        // A lone CHANGES_REQUESTED later DISMISSED leaves no standing → neither
+        // blocks nor approves (falls through to the merge-eligibility path).
+        let reviews = vec![
+            review("claude", "CHANGES_REQUESTED", "2026-06-01T17:00:00Z"),
+            review("claude", "DISMISSED", "2026-06-01T18:00:00Z"),
+        ];
+        let (changes_requested, has_approved) = effective_review_decision(&reviews);
+        assert!(!changes_requested);
+        assert!(!has_approved);
+    }
+
+    #[test]
+    fn effective_decision_ignores_commented_only() {
+        // COMMENTED reviews are informational — never gating.
+        let reviews = vec![
+            review("claude", "COMMENTED", "2026-06-01T17:00:00Z"),
+            review("claude", "COMMENTED", "2026-06-01T18:00:00Z"),
+        ];
+        assert_eq!(effective_review_decision(&reviews), (false, false));
+    }
 
     /// Minimal `Task` builder for the sibling-attribution heuristic tests.
     /// Only `id` and `status` are load-bearing; everything else is filler.
