@@ -21,6 +21,8 @@ use djinn_db::{
     CodeChunkEmbeddingProvider, EmbeddedCodeChunk, EmbeddedNote, NoteEmbeddingProvider,
 };
 
+use crate::provider::telemetry;
+
 const DEFAULT_MODEL_ID: &str = "nomic-ai/nomic-embed-text-v1.5";
 const DEFAULT_MODEL_REVISION: &str = "main";
 pub const DEFAULT_EMBEDDING_DIMENSION: usize = 768;
@@ -194,17 +196,41 @@ impl EmbeddingService {
             Err(reason) => return self.degraded(reason),
         };
 
+        // ── Start OTel embedding span (no-op when telemetry is unconfigured) ──
+        let otel_span = if telemetry::is_active() {
+            Some(telemetry::EmbeddingSpan::start(
+                self.inner.model.provider,
+                &self.inner.model.model_id,
+                1,
+                text.chars().count() as u32,
+            ))
+        } else {
+            None
+        };
+
         match runtime.embed(kind.clone(), text).await {
-            Ok(values) => EmbeddingOutcome::Ready(EmbeddingVector {
-                values,
-                model: self.inner.model.clone(),
-                input_kind: kind,
-            }),
-            Err(error) => EmbeddingOutcome::Degraded(EmbeddingDegraded {
-                model: self.inner.model.clone(),
-                fallback: "fts-only",
-                reason: format!("embedding runtime unavailable: {error:#}"),
-            }),
+            Ok(values) => {
+                if let Some(span) = otel_span {
+                    span.record_dimension(values.len() as u32);
+                    span.end_ok();
+                }
+                EmbeddingOutcome::Ready(EmbeddingVector {
+                    values,
+                    model: self.inner.model.clone(),
+                    input_kind: kind,
+                })
+            }
+            Err(error) => {
+                let reason = format!("embedding runtime unavailable: {error:#}");
+                if let Some(span) = otel_span {
+                    span.end_error(&reason);
+                }
+                EmbeddingOutcome::Degraded(EmbeddingDegraded {
+                    model: self.inner.model.clone(),
+                    fallback: "fts-only",
+                    reason,
+                })
+            }
         }
     }
 
