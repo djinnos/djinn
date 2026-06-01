@@ -218,6 +218,15 @@ pub enum ProviderFailureClass {
         #[serde(default)]
         retry_after_ms: Option<u64>,
     },
+    /// Auth / credential failure (401/403 — e.g. a revoked or invalid OAuth
+    /// token). Deterministic, not transient: a retry with the same dead
+    /// credential always fails. The host trips the breaker IMMEDIATELY (like a
+    /// throttle, via `record_stall`) so dispatch fails over to the user's next
+    /// model at once instead of probing the dead one three times, AND drives
+    /// credential-revocation surfacing (mark the credential revoked + notify the
+    /// owner to reconnect). Added last to preserve the bincode discriminants of
+    /// `Failure`/`Throttle` on the worker→host report wire.
+    AuthInvalid,
 }
 
 /// Terminal outcome of a task-run.

@@ -230,6 +230,27 @@ impl DjinnEventEnvelope {
             from_sync: false,
         }
     }
+    /// A stored credential was rejected by the provider as revoked/invalid (a
+    /// 401 during a task/chat run) and marked revoked. The UI surfaces this as a
+    /// "reconnect <provider>" prompt; `user_id` scopes it to the owner (`None`
+    /// for an org-shared credential). The persisted `revoked_at`/`revoked_reason`
+    /// on the row is the F5-safe source of truth — this event is just the live
+    /// nudge.
+    pub fn credential_revoked(user_id: Option<&str>, provider_id: &str, reason: &str) -> Self {
+        Self {
+            entity_type: "credential",
+            action: "revoked",
+            payload: serde_json::to_value(serde_json::json!({
+                "user_id": user_id,
+                "provider_id": provider_id,
+                "reason": reason,
+            }))
+            .unwrap(),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        }
+    }
     pub fn session_dispatched(
         project_id: &str,
         task_id: &str,

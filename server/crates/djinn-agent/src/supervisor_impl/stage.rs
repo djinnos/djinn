@@ -132,8 +132,12 @@ use super::SupervisorCallbackContext;
 fn classify_provider_failure(err: &anyhow::Error) -> Option<ProviderFailureClass> {
     let provider_err = err.downcast_ref::<ProviderError>()?;
     match provider_err {
-        ProviderError::Authentication
-        | ProviderError::InvalidRequest
+        // Auth (401/403) is deterministic — a revoked/invalid credential won't
+        // recover on retry. Classify it distinctly so the host trips the breaker
+        // immediately (failover at once) and surfaces the revocation, rather than
+        // probing the dead model three times like a "quiet but broken" failure.
+        ProviderError::Authentication => Some(ProviderFailureClass::AuthInvalid),
+        ProviderError::InvalidRequest
         | ProviderError::InvalidOutput
         | ProviderError::ProviderInternal { .. } => Some(ProviderFailureClass::Failure),
         ProviderError::RateLimit { .. } => Some(ProviderFailureClass::Throttle {
@@ -753,10 +757,9 @@ mod tests {
 
     #[test]
     fn quiet_failures_map_to_failure_class() {
-        // Auth / invalid-request / invalid-output / 5xx are "quiet but broken"
+        // Invalid-request / invalid-output / 5xx are "quiet but broken"
         // → gentle consecutive-failure breaker.
         for e in [
-            ProviderError::Authentication,
             ProviderError::InvalidRequest,
             ProviderError::InvalidOutput,
             ProviderError::ProviderInternal { status: 500 },
@@ -768,6 +771,16 @@ mod tests {
                 "{e:?} should map to Failure",
             );
         }
+    }
+
+    #[test]
+    fn auth_maps_to_auth_invalid_class() {
+        // A 401/403 is deterministic — it feeds the immediate-failover breaker
+        // (AuthInvalid), NOT the gentle 3-strike Failure path.
+        assert_eq!(
+            classify_provider_failure(&typed(ProviderError::Authentication)),
+            Some(ProviderFailureClass::AuthInvalid),
+        );
     }
 
     #[test]
@@ -837,7 +850,7 @@ mod tests {
         );
         assert_eq!(
             classify_provider_failure(&from_streaming),
-            Some(ProviderFailureClass::Failure),
+            Some(ProviderFailureClass::AuthInvalid),
             "a 401 wrapped through the streaming loop must still feed the breaker",
         );
 

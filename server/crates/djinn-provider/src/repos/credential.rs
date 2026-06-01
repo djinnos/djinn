@@ -111,6 +111,17 @@ impl CredentialRepository {
             }
         }
 
+        // Reconnecting/replacing a credential clears any prior revoked mark so
+        // the provider flips back to "connected" and parked tasks resume.
+        // Non-macro (the macro upsert above is unchanged) so the offline sqlx
+        // cache doesn't need regenerating for the new columns.
+        let _ = sqlx::query(
+            "UPDATE credentials SET revoked_at = NULL, revoked_reason = NULL WHERE id = $1",
+        )
+        .bind(&id)
+        .execute(self.db.pool())
+        .await;
+
         let cred = sqlx::query_as!(
             Credential,
             r#"SELECT id, provider_id, key_name, owner_user_id, created_at, updated_at
@@ -227,6 +238,87 @@ impl CredentialRepository {
         } else {
             Ok(false)
         }
+    }
+
+    /// Mark the credential(s) for `(provider_id, owner)` as revoked with a
+    /// human-readable `reason` — called when the provider rejected the
+    /// credential with a 401 during a run. Persists `revoked_at`/`revoked_reason`
+    /// (the F5-safe source of truth the provider catalog reads) and, when a row
+    /// actually transitions to revoked, emits a `credential_revoked` event so the
+    /// UI can prompt a reconnect live. Idempotent: the `revoked_at IS NULL` guard
+    /// means re-revoking an already-revoked credential is a no-op (no event
+    /// storm while a 401 loop drains). Non-macro on purpose — the new columns are
+    /// not in the offline sqlx cache.
+    ///
+    /// Returns the number of rows newly marked revoked.
+    pub async fn mark_revoked(
+        &self,
+        provider_id: &str,
+        owner_user_id: Option<&str>,
+        reason: &str,
+    ) -> Result<u64> {
+        ensure_db!(self.db);
+        const SET: &str = "UPDATE credentials SET \
+             revoked_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), \
+             revoked_reason = $1 \
+             WHERE provider_id = $2 AND revoked_at IS NULL AND ";
+        let result = match owner_user_id {
+            Some(owner) => {
+                sqlx::query(&format!("{SET}owner_user_id = $3"))
+                    .bind(reason)
+                    .bind(provider_id)
+                    .bind(owner)
+                    .execute(self.db.pool())
+                    .await?
+            }
+            None => {
+                sqlx::query(&format!("{SET}owner_user_id IS NULL"))
+                    .bind(reason)
+                    .bind(provider_id)
+                    .execute(self.db.pool())
+                    .await?
+            }
+        };
+        let n = result.rows_affected();
+        if n > 0 {
+            self.events.send(DjinnEventEnvelope::credential_revoked(
+                owner_user_id,
+                provider_id,
+                reason,
+            ));
+        }
+        Ok(n)
+    }
+
+    /// Revoked credentials visible to `user_id` (own rows + org-shared fallback)
+    /// as `(provider_id, revoked_reason)`. The provider catalog uses this to
+    /// render a provider as "Disconnected — <reason>" after a 401, persistently
+    /// (survives a page reload, unlike the live `credential_revoked` event).
+    pub async fn list_revoked_for_user(
+        &self,
+        user_id: Option<&str>,
+    ) -> Result<Vec<(String, String)>> {
+        ensure_db!(self.db);
+        let rows = match user_id {
+            Some(uid) => {
+                sqlx::query_as::<_, (String, String)>(
+                    "SELECT provider_id, COALESCE(revoked_reason, '') FROM credentials \
+                     WHERE revoked_at IS NOT NULL AND (owner_user_id = $1 OR owner_user_id IS NULL)",
+                )
+                .bind(uid)
+                .fetch_all(self.db.pool())
+                .await?
+            }
+            None => {
+                sqlx::query_as::<_, (String, String)>(
+                    "SELECT provider_id, COALESCE(revoked_reason, '') FROM credentials \
+                     WHERE revoked_at IS NOT NULL AND owner_user_id IS NULL",
+                )
+                .fetch_all(self.db.pool())
+                .await?
+            }
+        };
+        Ok(rows)
     }
 
     /// Delete the *acting user's* credentials for a given `provider_id` (the

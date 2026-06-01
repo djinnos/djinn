@@ -48,6 +48,50 @@ use super::helpers::{
     conflict_context_for_dispatch, default_target_branch, load_provider_credential, parse_model_id,
 };
 
+/// Persist and surface a credential revocation after a run hit a 401.
+///
+/// Marks the stored credential for the run's provider revoked (the F5-safe
+/// source of truth the provider catalog reads) and emits a `credential_revoked`
+/// event so the UI can prompt a reconnect live. Best-effort: any failure here is
+/// logged, never propagated (the run already failed). `owner` is the task
+/// creator's user id (`None` for org-shared credentials).
+async fn surface_credential_revocation(
+    app_state: &AgentContext,
+    owner: Option<&str>,
+    model_id: &str,
+) {
+    let Ok((provider_id, _model_name)) = parse_model_id(model_id) else {
+        return;
+    };
+    // The stored credential's provider id for an OAuth provider is the merged
+    // child (e.g. "openai" → "chatgpt_codex"); for API-key providers it is the
+    // provider id itself.
+    let cred_provider = djinn_provider::catalog::builtin::resolve_oauth_provider(&provider_id)
+        .map(|s| s.to_string())
+        .unwrap_or(provider_id);
+    let reason = format!(
+        "{cred_provider} rejected the credential (HTTP 401 — token revoked or invalid). \
+         Reconnect this provider to resume."
+    );
+    let repo = djinn_provider::repos::CredentialRepository::new(
+        app_state.db.clone(),
+        app_state.event_bus.clone(),
+    );
+    match repo.mark_revoked(&cred_provider, owner, &reason).await {
+        Ok(n) if n > 0 => tracing::warn!(
+            provider = %cred_provider,
+            owner = ?owner,
+            "supervisor: marked credential revoked after 401 — owner must reconnect"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(
+            provider = %cred_provider,
+            error = %e,
+            "supervisor: failed to mark credential revoked after 401"
+        ),
+    }
+}
+
 /// Default slot-dispatch runner.
 ///
 /// Resolves `(task, flow, base_branch, task_branch, trigger)` from the task
@@ -509,6 +553,29 @@ pub(crate) async fn run_supervisor_dispatch(
                             .health_tracker
                             .record_failure(creator_scope.as_deref(), &model_id);
                         (false, None)
+                    }
+                    djinn_runtime::ProviderFailureClass::AuthInvalid => {
+                        // A 401/revoked credential is deterministic — trip the
+                        // breaker IMMEDIATELY (like a throttle) so dispatch fails
+                        // over to the user's next model at once, and persist +
+                        // surface the revocation so the owner is told to
+                        // reconnect (F5-safe row + live event).
+                        app_state
+                            .health_tracker
+                            .record_stall(creator_scope.as_deref(), &model_id);
+                        surface_credential_revocation(
+                            &app_state,
+                            creator_scope.as_deref(),
+                            &model_id,
+                        )
+                        .await;
+                        // Throttle-like for the per-task redispatch ladder: a dead
+                        // credential must never march the task to terminal
+                        // force-close. With a healthy fallback the breaker hold
+                        // makes dispatch fail over; with none the task parks until
+                        // the owner reconnects (which clears the breaker via the
+                        // credential-updated event).
+                        (true, None)
                     }
                 };
                 // Side-channel for the coordinator's per-task redispatch logic
