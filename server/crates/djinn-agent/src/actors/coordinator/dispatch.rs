@@ -181,6 +181,11 @@ impl CoordinatorActor {
     pub(super) async fn try_dispatch_to_pool<F, Fut>(
         &self,
         label: &str,
+        // Owning user the breaker is keyed on (`tasks.created_by_user_id`);
+        // `None` = system/unowned work on the org-shared credential. Health is
+        // per-`(scope, model)` so one user's throttled account can't disable a
+        // model for everyone — see [`djinn_provider::catalog::HealthKey`].
+        scope: Option<&str>,
         model_ids: &[String],
         dispatch_fn: F,
     ) -> DispatchOutcome
@@ -191,9 +196,10 @@ impl CoordinatorActor {
         let mut any_at_capacity = false;
 
         for model_id in model_ids {
-            if !self.health.is_available(model_id) {
+            if !self.health.is_available(scope, model_id) {
                 tracing::debug!(
                     model_id = %model_id,
+                    scope = ?scope,
                     label,
                     "CoordinatorActor: model unavailable by health tracker"
                 );
@@ -650,13 +656,18 @@ impl CoordinatorActor {
             let task_id = task.id.clone();
             let project_path_owned = project_path.clone();
             let outcome = self
-                .try_dispatch_to_pool(&task.short_id, model_ids, |pool, model_id| {
-                    let pool = pool.clone();
-                    let tid = task_id.clone();
-                    let pp = project_path_owned.clone();
-                    let mid = model_id.to_owned();
-                    async move { pool.dispatch(&tid, &pp, &mid).await }
-                })
+                .try_dispatch_to_pool(
+                    &task.short_id,
+                    creator.as_deref(),
+                    model_ids,
+                    |pool, model_id| {
+                        let pool = pool.clone();
+                        let tid = task_id.clone();
+                        let pp = project_path_owned.clone();
+                        let mid = model_id.to_owned();
+                        async move { pool.dispatch(&tid, &pp, &mid).await }
+                    },
+                )
                 .await;
 
             match outcome {
@@ -684,7 +695,9 @@ impl CoordinatorActor {
                     // accepts it), so further same-creator+model tasks in THIS
                     // pass respect the cap before the session row is visible.
                     if let Some(c) = creator.as_deref()
-                        && let Some(used) = model_ids.iter().find(|m| self.health.is_available(m))
+                        && let Some(used) = model_ids
+                            .iter()
+                            .find(|m| self.health.is_available(Some(c), m))
                     {
                         *running_by_user_model
                             .entry((c.to_string(), used.clone()))
@@ -755,16 +768,23 @@ impl CoordinatorActor {
         // back-to-back) so there is never a tick where the task has zero
         // running sessions for the task-keyed prune to observe. Per-session
         // keying means a brand-new session row is always re-evaluated.
-        let active_session_ids: HashSet<String> =
-            active.iter().map(|s| s.id.clone()).collect();
-        self.stall_killed.retain(|id| active_session_ids.contains(id));
+        let active_session_ids: HashSet<String> = active.iter().map(|s| s.id.clone()).collect();
+        self.stall_killed
+            .retain(|id| active_session_ids.contains(id));
 
-        /// Zero-token short-circuit: a session that has not produced or
-        /// consumed a single token after this many seconds has its very
-        /// first LLM call hung — no plausible legitimate work is in
-        /// flight. Applied to every role, ahead of the general
+        /// First-call short-circuit: a session that has never shown a sign of
+        /// life (the host's `ActivityTracker` has no entry — see
+        /// `RunningTaskInfo::activity_tracked`) after this many seconds has its
+        /// very first LLM call hung. Applied to every role, ahead of the general
         /// idle-based threshold which protects long worker turns.
-        const ZERO_TOKEN_STALL_SECS: u64 = 180;
+        ///
+        /// Sized to clear a *reasoning* model's first turn on a large context:
+        /// the ChatGPT Codex / OpenAI responses backend can stream nothing for a
+        /// minute-plus while it reasons before the first output token, and that
+        /// is NOT a hang. 180s was too tight and false-killed those first turns
+        /// (then tripped the breaker → failover storm); 300s clears them while
+        /// still catching a genuine hang well under the 10-minute zombie cap.
+        const FIRST_CALL_STALL_SECS: u64 = 300;
 
         for session in active {
             let Some(task_id) = session.task_id.as_deref() else {
@@ -789,8 +809,8 @@ impl CoordinatorActor {
             // Query the activity tracker for idle time.  If the task has no
             // activity entry (e.g. session predates this feature, or reply loop
             // never started) fall back to wall-clock elapsed from started_at.
-            let idle = match self.pool.session_for_task(task_id).await {
-                Ok(Some(info)) => info.idle_seconds,
+            let (idle, activity_tracked) = match self.pool.session_for_task(task_id).await {
+                Ok(Some(info)) => (info.idle_seconds, info.activity_tracked),
                 _ => {
                     // Fallback: parse ISO-8601 started_at from the DB and compute
                     // elapsed seconds.  The column stores datetime strings like
@@ -803,16 +823,27 @@ impl CoordinatorActor {
                         );
                         continue;
                     };
-                    elapsed
+                    // No host activity entry → still on the first LLM call.
+                    (elapsed, false)
                 }
             };
 
-            // Pick the threshold that fires first. A session at 0/0 tokens
-            // is wedged-on-first-call at 3 min regardless of role; one
-            // that has produced tokens falls under the role's idle budget.
-            let zero_tokens = session.tokens_in == 0 && session.tokens_out == 0;
-            let applied_threshold = if zero_tokens {
-                stall_threshold.min(ZERO_TOKEN_STALL_SECS)
+            // Pick the threshold that fires first. A session that has never
+            // shown a sign of life (no host ActivityTracker entry) is
+            // wedged-on-first-call and gets the aggressive cap regardless of
+            // role; one that has shown activity at least once falls under the
+            // role's full idle budget — covering long quiet stretches (a
+            // multi-minute build, a long reasoning turn between tool calls)
+            // that legitimately don't touch activity until they finish.
+            //
+            // NOTE: this MUST come from in-memory liveness, not the session row.
+            // `sessions.tokens_in/out` are written only at session *end*, so a
+            // running row reads `0/0` for its whole life — keying the cap on it
+            // (the old `zero_tokens` check) put EVERY in-flight session on the
+            // aggressive cap and killed productive workers mid-flow.
+            let never_active = !activity_tracked;
+            let applied_threshold = if never_active {
+                stall_threshold.min(FIRST_CALL_STALL_SECS)
             } else {
                 stall_threshold
             };
@@ -830,36 +861,50 @@ impl CoordinatorActor {
             // subsequent ticks while its DB row drains.
             self.stall_killed.insert(session.id.clone());
 
+            // Resolve the breaker scope: health is keyed per owning user so this
+            // trip only demotes the model for THIS task's creator, not globally.
+            // The throttle that produces first-call hangs is per-credential
+            // (most acutely the per-account ChatGPT Codex backend), so a global
+            // trip would disable the model for everyone on one user's bad luck.
+            let task_repo = self.task_repo();
+            let scope = task_repo
+                .get(task_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|t| t.created_by_user_id);
+
             // Feed the model circuit-breaker so dispatch fails over to the next
-            // model in the creator's ordered list on redispatch. A zero-token
-            // stall (first LLM call hung) is a strong "this model/backend is bad
-            // right now" signal → trip immediately with a long cooldown that
+            // model in the creator's ordered list on redispatch. A first-call
+            // hang (no sign of life at all) is a strong "this model/backend is
+            // bad right now" signal → trip immediately with a long cooldown that
             // outlasts the task's escalating redispatch cooldown (`record_stall`).
-            // A plain idle stall is a weaker signal (could be a genuinely long
-            // worker turn that went quiet), so we feed the gentler consecutive-
-            // failure breaker (`record_failure`) which only trips after repeats —
-            // this avoids needlessly demoting the user's preferred model on a
-            // single idle blip. Either way the cooldown auto-expires (self-heal)
-            // and a recovered model is reset by `record_success` on a real run.
+            // A plain idle stall is a weaker signal (a genuinely long worker turn
+            // that went quiet), so we feed the gentler consecutive-failure
+            // breaker (`record_failure`) which only trips after repeats — this
+            // avoids needlessly demoting the user's preferred model on a single
+            // idle blip. Either way the cooldown auto-expires (self-heal) and a
+            // recovered model is reset by `record_success` on a real run.
             // `self.health` is the same HealthTracker instance the dispatch
             // `is_available` gate consults (cloned into slots), so this trip is
             // visible to the very next dispatch pass.
-            if zero_tokens {
-                self.health.record_stall(&session.model_id);
+            if never_active {
+                self.health
+                    .record_stall(scope.as_deref(), &session.model_id);
             } else {
-                self.health.record_failure(&session.model_id);
+                self.health
+                    .record_failure(scope.as_deref(), &session.model_id);
             }
 
-            let reason = if zero_tokens {
-                "zero-token (first LLM call hung)"
+            let reason = if never_active {
+                "first-call hung (no activity)"
             } else {
                 "idle"
             };
-            let task_repo = self.task_repo();
             let payload = serde_json::json!({
                 "message": format!(
                     "Coordinator stall timeout: {} session {} for {}s (threshold {}s, {}). Session was cancelled for redispatch.",
-                    session.agent_type, if zero_tokens { "stuck" } else { "idle" }, idle, applied_threshold, reason
+                    session.agent_type, if never_active { "stuck" } else { "idle" }, idle, applied_threshold, reason
                 )
             })
             .to_string();
@@ -873,7 +918,8 @@ impl CoordinatorActor {
                 agent_type = %session.agent_type,
                 idle_seconds = idle,
                 threshold_secs = applied_threshold,
-                zero_tokens,
+                never_active,
+                scope = ?scope,
                 "CoordinatorActor: killed stalled session"
             );
         }
@@ -934,6 +980,23 @@ impl CoordinatorActor {
                 continue;
             }
 
+            // Liveness gate (leak-safe): a worker that has touched activity
+            // within the hard cap is alive and productive — its DB row reads
+            // `0/0` only because `sessions.tokens_in/out` are flushed at session
+            // *end*, not per turn. Without this gate the token check above is
+            // inert (every running row is `0/0`) and the reaper kills EVERY
+            // non-chat session that simply runs longer than 10 minutes. We read
+            // idle from the host `ActivityTracker` (bridged from the worker's
+            // `touch_activity` RPC), which keeps climbing once a pod dies even if
+            // its slot mapping leaks — so reaping still fires for a genuine
+            // zombie, but a long, productive run is left alone.
+            if let Ok(Some(info)) = self.pool.session_for_task(task_id).await
+                && info.activity_tracked
+                && info.idle_seconds <= ZOMBIE_HARD_CAP_SECS
+            {
+                continue;
+            }
+
             tracing::warn!(
                 task_id = %task_id,
                 session_id = %session.id,
@@ -957,7 +1020,16 @@ impl CoordinatorActor {
             // A zombie that outran the fast-path breaker is still a strong
             // "this backend is bad right now" signal — trip the model breaker
             // so redispatch fails over rather than re-hanging on the same model.
-            self.health.record_stall(&session.model_id);
+            // Keyed to the task's creator (see the stall path) so the trip is
+            // scoped to the affected account, not global.
+            let scope = task_repo
+                .get(task_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|t| t.created_by_user_id);
+            self.health
+                .record_stall(scope.as_deref(), &session.model_id);
 
             // Forcibly reclaim the (likely leaked) slot so the reopened task is
             // not rejected with `SessionAlreadyActive` on redispatch.
@@ -1684,13 +1756,18 @@ impl CoordinatorActor {
         let task_id = review_task.id.clone();
         let project_path_owned = project_path.clone();
         let outcome = self
-            .try_dispatch_to_pool(&review_task.short_id, &model_ids, |pool, model_id| {
-                let pool = pool.clone();
-                let tid = task_id.clone();
-                let pp = project_path_owned.clone();
-                let mid = model_id.to_owned();
-                async move { pool.dispatch(&tid, &pp, &mid).await }
-            })
+            .try_dispatch_to_pool(
+                &review_task.short_id,
+                review_task.created_by_user_id.as_deref(),
+                &model_ids,
+                |pool, model_id| {
+                    let pool = pool.clone();
+                    let tid = task_id.clone();
+                    let pp = project_path_owned.clone();
+                    let mid = model_id.to_owned();
+                    async move { pool.dispatch(&tid, &pp, &mid).await }
+                },
+            )
             .await;
 
         match outcome {
@@ -1978,13 +2055,18 @@ impl CoordinatorActor {
         let task_id = review_task.id.clone();
         let project_path_owned = project_path.clone();
         let outcome = self
-            .try_dispatch_to_pool(&review_task.short_id, &model_ids, |pool, model_id| {
-                let pool = pool.clone();
-                let tid = task_id.clone();
-                let pp = project_path_owned.clone();
-                let mid = model_id.to_owned();
-                async move { pool.dispatch(&tid, &pp, &mid).await }
-            })
+            .try_dispatch_to_pool(
+                &review_task.short_id,
+                review_task.created_by_user_id.as_deref(),
+                &model_ids,
+                |pool, model_id| {
+                    let pool = pool.clone();
+                    let tid = task_id.clone();
+                    let pp = project_path_owned.clone();
+                    let mid = model_id.to_owned();
+                    async move { pool.dispatch(&tid, &pp, &mid).await }
+                },
+            )
             .await;
 
         match outcome {

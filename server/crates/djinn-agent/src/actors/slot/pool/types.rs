@@ -54,6 +54,14 @@ pub struct RunningTaskInfo {
     /// Seconds since the session last produced a stream event or completed a
     /// tool call.  Used by stall detection to kill idle sessions.
     pub idle_seconds: u64,
+    /// Whether the host's `ActivityTracker` actually has an entry for this task
+    /// (i.e. the session has shown at least one sign of life — registered
+    /// in-process, or bridged its first `touch_activity` from a remote worker).
+    /// `false` means `idle_seconds` is a wall-clock-since-start *fallback*, not a
+    /// real idle measurement: the session is still on its very first LLM call.
+    /// Stall detection uses this to tell a genuinely-hung first call (aggressive
+    /// cap) from a productive session that merely went quiet (full role budget).
+    pub activity_tracked: bool,
     /// Project UUID the task belongs to, tracked in the pool so project-scoped
     /// queries can filter running tasks without depending on a DB session row
     /// (which does not exist during pre-session lifecycle stages).
