@@ -4778,6 +4778,11 @@ expression: signatures
             "model_id": {
               "type": "string"
             },
+            "scope": {
+              "description": "Owning user the breaker bucket is scoped to; `null` = shared/system\nbucket (org-shared credential). Health is tracked per `(scope, model)`,\nso the same model can appear once per user that has used it.",
+              "nullable": true,
+              "type": "string"
+            },
             "total_failures": {
               "format": "int64",
               "type": "integer"
@@ -7968,6 +7973,11 @@ expression: signatures
               "type": "object"
             },
             "owner": {
+              "type": "string"
+            },
+            "pr_url": {
+              "description": "URL of the associated pull request, once one has been opened.",
+              "nullable": true,
               "type": "string"
             },
             "priority": {
