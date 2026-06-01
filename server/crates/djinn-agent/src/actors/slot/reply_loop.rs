@@ -10,7 +10,7 @@ use djinn_provider::provider::LlmProvider;
 use djinn_provider::provider::telemetry;
 
 use super::*;
-pub(super) mod error_handling;
+pub(crate) mod error_handling;
 mod streaming;
 mod tool_dispatch;
 use error_handling::{

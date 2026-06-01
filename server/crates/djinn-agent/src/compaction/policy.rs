@@ -43,7 +43,7 @@ const CHARS_PER_TOKEN: usize = 3;
 
 /// Return `true` if the accumulated input tokens have reached the compaction
 /// threshold relative to the model's context window.
-pub(crate) fn needs_compaction(total_tokens_in: u32, context_window: i64) -> bool {
+pub fn needs_compaction(total_tokens_in: u32, context_window: i64) -> bool {
     if context_window <= 0 {
         return false;
     }
@@ -137,7 +137,7 @@ fn microcompact_with_thresholds(
 
 /// Compact `conversation` in-place using LLM summarisation, with a
 /// deterministic truncation fallback if summarisation fails.
-pub(crate) async fn compact_conversation(
+pub async fn compact_conversation(
     provider: &dyn LlmProvider,
     conversation: &mut Conversation,
     session_id: &str,

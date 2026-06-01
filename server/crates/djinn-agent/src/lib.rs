@@ -12,7 +12,7 @@ pub(crate) mod process;
 
 // ─── Agent module (was src/agent/) ───────────────────────────────────────────
 
-pub(crate) mod compaction;
+pub mod compaction;
 pub mod context;
 // Extension tools: `pub(crate)` internals, `chat_tools` re-exports the chat-safe subset.
 pub mod chat_tools;

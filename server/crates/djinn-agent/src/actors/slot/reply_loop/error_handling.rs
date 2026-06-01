@@ -10,7 +10,7 @@ pub(super) const MAX_NUDGE_ATTEMPTS: u32 = 3;
 /// Maximum reactive compaction attempts before giving up.
 pub(super) const MAX_COMPACTION_RETRIES: u32 = 2;
 
-pub(super) fn is_context_length_error(e: &anyhow::Error) -> bool {
+pub(crate) fn is_context_length_error(e: &anyhow::Error) -> bool {
     // Prefer the typed provider taxonomy when present (set at the
     // provider-crate boundary), then fall back to substring matching for
     // resilience against untyped/legacy error paths.
@@ -42,7 +42,7 @@ pub(crate) fn is_orphaned_tool_call_error_str(msg: &str) -> bool {
         || msg.contains("no function call found")
 }
 
-pub(super) fn is_orphaned_tool_call_error(e: &anyhow::Error) -> bool {
+pub(crate) fn is_orphaned_tool_call_error(e: &anyhow::Error) -> bool {
     is_orphaned_tool_call_error_str(&e.to_string())
 }
 

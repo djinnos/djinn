@@ -2,9 +2,14 @@ use djinn_provider::message::{Message, Role};
 
 /// Describes *why* compaction is happening, so the prompt can be tailored.
 #[derive(Debug, Clone)]
-pub(crate) enum CompactionContext {
+pub enum CompactionContext {
     /// Mid-session compaction: context window threshold reached while working.
     MidSession(String),
+    /// Chat-session compaction: the interactive chat conversation grew past the
+    /// model's window. Uses the generic summary prompt and, like `MidSession`,
+    /// re-appends the user's latest turn after the summary so the model still
+    /// sees the question it must answer.
+    ChatSession,
 }
 
 /// Build the compaction prompt based on context.
@@ -164,8 +169,10 @@ pub(super) fn rebuild_full_compaction_messages(
          conversation so far. Continue calling tools as necessary to complete the task.";
     new_messages.push(Message::assistant(continuation_msg));
 
-    if matches!(ctx, CompactionContext::MidSession(_))
-        && let Some(last_user) = last_user_text
+    if matches!(
+        ctx,
+        CompactionContext::MidSession(_) | CompactionContext::ChatSession
+    ) && let Some(last_user) = last_user_text
     {
         let already_appended = new_messages
             .last()
@@ -200,8 +207,10 @@ pub(super) fn rebuild_partial_compaction_messages(
          calling tools as necessary to complete the task.";
     new_messages.push(Message::assistant(continuation_msg));
 
-    if matches!(ctx, CompactionContext::MidSession(_))
-        && let Some(last_user) = last_user_text
+    if matches!(
+        ctx,
+        CompactionContext::MidSession(_) | CompactionContext::ChatSession
+    ) && let Some(last_user) = last_user_text
     {
         let already_appended = new_messages
             .last()
@@ -249,6 +258,42 @@ mod tests {
     #[test]
     fn partial_compaction_prompt_has_messages_placeholder() {
         assert!(PARTIAL_COMPACTION_PROMPT.contains("{messages}"));
+    }
+
+    #[test]
+    fn chat_session_uses_generic_prompt_and_system() {
+        // C3: chat compaction routes to the generic prompt/system (it is neither
+        // the worker nor reviewer flow).
+        let prompt = compaction_prompt(&CompactionContext::ChatSession);
+        let system = summariser_system(&CompactionContext::ChatSession);
+        assert_eq!(prompt, GENERIC_PROMPT);
+        assert_eq!(system, SUMMARISER_SYSTEM_GENERIC);
+        assert!(prompt.contains("{messages}"));
+    }
+
+    #[test]
+    fn rebuild_full_compaction_reappends_last_user_for_chat_session() {
+        // C3: a compacted chat conversation must still end with the user's
+        // latest turn so the model sees the question it has to answer.
+        let original = vec![
+            Message::system("sys"),
+            Message::user("old"),
+            Message::assistant("mid"),
+            Message::user("what is the latest answer"),
+        ];
+
+        let rebuilt = rebuild_full_compaction_messages(
+            &original,
+            "summary".to_string(),
+            &CompactionContext::ChatSession,
+        );
+
+        assert_eq!(rebuilt[0].role, Role::System);
+        assert_eq!(rebuilt[1].text_content(), "summary");
+        assert_eq!(
+            rebuilt.last().unwrap().text_content(),
+            "what is the latest answer"
+        );
     }
 
     #[test]
