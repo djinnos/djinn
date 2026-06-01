@@ -18,7 +18,11 @@ use super::environment::verification_for_path;
 /// 1. If `role_verification_override` is `Some(cmd)` → return `vec![cmd]`.
 /// 2. Fetch `environment_config.verification` from Dolt for the project that
 ///    owns `worktree_path` (fuzzy prefix match).
-/// 3. Run `git diff --name-only <target_branch>..HEAD` to get changed files.
+/// 3. Run `git diff --name-only <merge_base>..HEAD` (where `<merge_base>` is
+///    `git merge-base <target_branch> HEAD`) to get the files THIS branch
+///    changed. Using the merge-base (three-dot semantics) rather than two-dot
+///    `<target_branch>..HEAD` avoids over-firing rules on files the target
+///    branch gained *after* this branch split off.
 /// 4. Match each changed file against `verification.rules` glob patterns
 ///    (in config order). Collect + deduplicate commands from all matching
 ///    rules.
@@ -94,11 +98,52 @@ fn resolve_scoped_commands_from_config(
     matched
 }
 
-/// Run `git diff --name-only <target_branch>..HEAD` in `worktree_path` and
-/// return the list of changed file paths.  Returns an empty `Vec` on any error
-/// (e.g. the target branch doesn't exist yet).
+/// Return the list of files THIS branch changed relative to `target_branch`,
+/// by diffing `<merge_base>..HEAD` where `<merge_base>` is
+/// `git merge-base <target_branch> HEAD`. This is equivalent to three-dot
+/// `git diff <target_branch>...HEAD` and avoids the two-dot pitfall where
+/// commits the target branch gained *after* this branch split off would show
+/// up as branch deletions/changes.
+///
+/// Best-effort: if `git merge-base` fails (e.g. unrelated histories), falls
+/// back to the two-dot `<target_branch>..HEAD` range. Returns an empty `Vec`
+/// on any diff error (e.g. the target branch doesn't exist yet).
 fn git_diff_changed_files(worktree_path: &Path, target_branch: &str) -> Vec<String> {
-    let range = format!("{}..HEAD", target_branch);
+    // Resolve the merge-base so the diff is scoped to this branch's own
+    // changes. Fall back to the raw target ref if merge-base can't be
+    // computed.
+    let base_ref = match std::process::Command::new("git")
+        .args(["merge-base", target_branch, "HEAD"])
+        .current_dir(worktree_path)
+        .output()
+    {
+        Ok(o) if o.status.success() => {
+            let sha = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if sha.is_empty() {
+                target_branch.to_string()
+            } else {
+                sha
+            }
+        }
+        Ok(o) => {
+            tracing::warn!(
+                target_branch = %target_branch,
+                stderr = %String::from_utf8_lossy(&o.stderr),
+                "resolve_scoped_commands: git merge-base failed; falling back to two-dot range"
+            );
+            target_branch.to_string()
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                target_branch = %target_branch,
+                "resolve_scoped_commands: git merge-base errored; falling back to two-dot range"
+            );
+            target_branch.to_string()
+        }
+    };
+
+    let range = format!("{}..HEAD", base_ref);
     let output = match std::process::Command::new("git")
         .args(["diff", "--name-only", &range])
         .current_dir(worktree_path)
@@ -185,7 +230,7 @@ mod tests {
 
     /// Initialise a git repo in `dir` with one commit on `base_branch`, then
     /// check out a new `task_branch` so that subsequent commits appear in
-    /// `git diff --name-only <base_branch>..HEAD`.
+    /// `git diff --name-only <merge_base(base_branch, HEAD)>..HEAD`.
     ///
     /// Returns the base branch name to use as `target_branch` in assertions.
     fn init_git_repo_with_task_branch(dir: &Path, base_branch: &str, task_branch: &str) -> String {
@@ -370,6 +415,63 @@ mod tests {
 
         let result = resolve_scoped_commands_from_config(&verification, dir.path(), &base);
         assert!(result.is_empty());
+    }
+
+    /// Regression: a file added on the *base* branch AFTER the task branch
+    /// split off must NOT be reported as a change of the task branch.
+    ///
+    /// Two-dot `git diff <base>..HEAD` would list the base-only file (because
+    /// it's present on `base` but not on `HEAD`'s merge-base view), falsely
+    /// firing its verification rule. The merge-base range
+    /// (`git diff <merge-base>..HEAD`) only includes what the task branch
+    /// itself changed, so the base-only file is excluded. This test passes
+    /// only with the merge-base implementation and fails on the old two-dot
+    /// code.
+    #[test]
+    fn base_branch_post_split_file_not_reported_as_changed() {
+        let dir = tempdir_in_tmp();
+        let base = init_git_repo_with_task_branch(dir.path(), "main", "task/test");
+
+        // The task branch makes its own change.
+        git_commit_file(dir.path(), "crates/djinn-core/src/lib.rs", "// task change");
+
+        // Meanwhile, the base branch gains a NEW file after the split.
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .expect("git command");
+        };
+        run(&["checkout", "main"]);
+        git_commit_file(
+            dir.path(),
+            "crates/djinn-control-plane/src/lib.rs",
+            "// added on main after branch point",
+        );
+        run(&["checkout", "task/test"]);
+
+        let verification = make_verification(vec![
+            VerificationRule {
+                match_pattern: "crates/djinn-control-plane/**".into(),
+                commands: vec!["cargo test -p djinn-control-plane".into()],
+            },
+            VerificationRule {
+                match_pattern: "crates/djinn-core/**".into(),
+                commands: vec!["cargo test -p djinn-core".into()],
+            },
+        ]);
+
+        let result = resolve_scoped_commands_from_config(&verification, dir.path(), &base);
+
+        // Only the task branch's own change (djinn-core) should fire its rule.
+        // The base-only djinn-control-plane file must NOT appear, so its
+        // command must NOT be present.
+        assert_eq!(result, vec!["cargo test -p djinn-core"]);
+        assert!(
+            !result.contains(&"cargo test -p djinn-control-plane".to_string()),
+            "base-only file added after branch point must not fire its rule (two-dot bug)"
+        );
     }
 
     // ── full DB-backed flow ─────────────────────────────────────────────
