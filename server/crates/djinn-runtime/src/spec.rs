@@ -204,7 +204,20 @@ pub enum ProviderFailureClass {
     /// (`record_stall`), matching the coordinator's throttle→stall intent: a
     /// throttled credential should fail over to the next model at once with a
     /// cooldown that outlasts the task's redispatch ladder.
-    Throttle,
+    ///
+    /// `retry_after_ms` carries the provider-stated reset window (parsed from a
+    /// `Retry-After` header / rate-limit-reset, see
+    /// `ProviderError::retry_after_ms()`) when the provider supplied one. The
+    /// coordinator uses it as a *floor* under the escalating redispatch cooldown
+    /// (A6): a multi-hour quota window must not be probed on the fixed ~30-min
+    /// ladder. `None` when the provider stated no reset, in which case the
+    /// ordinary ladder applies. `#[serde(default)]` keeps it additive over the
+    /// bincode wire (positional, non-self-describing): a version-matched worker
+    /// is required for the field to decode, exactly as documented on the enum.
+    Throttle {
+        #[serde(default)]
+        retry_after_ms: Option<u64>,
+    },
 }
 
 /// Terminal outcome of a task-run.
@@ -326,6 +339,77 @@ mod tests {
                 assert_eq!(url, "https://github.com/o/r/pull/1");
                 assert_eq!(sha, "deadbeef");
             }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn failed_outcome_throttle_with_retry_after_bincode_roundtrip() {
+        // A6: the `Throttle { retry_after_ms }` shape must survive the bincode
+        // wire so the host coordinator can floor the redispatch cooldown on a
+        // provider-stated reset.
+        let report = TaskRunReport {
+            task_run_id: "run-2".to_string(),
+            outcome: TaskRunOutcome::Failed {
+                stage: "worker".to_string(),
+                reason: "rate limited".to_string(),
+                provider_failure: Some(ProviderFailureClass::Throttle {
+                    retry_after_ms: Some(5 * 60 * 60 * 1000),
+                }),
+            },
+            stages_completed: vec![RoleKind::Worker],
+        };
+
+        let bytes = bincode::serialize(&report).expect("serialize");
+        let back: TaskRunReport = bincode::deserialize(&bytes).expect("deserialize");
+
+        match back.outcome {
+            TaskRunOutcome::Failed {
+                stage,
+                reason,
+                provider_failure,
+            } => {
+                assert_eq!(stage, "worker");
+                assert_eq!(reason, "rate limited");
+                assert_eq!(
+                    provider_failure,
+                    Some(ProviderFailureClass::Throttle {
+                        retry_after_ms: Some(5 * 60 * 60 * 1000)
+                    })
+                );
+            }
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn failed_outcome_throttle_without_retry_after_bincode_roundtrip() {
+        // The provider may state no reset; the field is then `None` and the
+        // ordinary escalating ladder applies.
+        let report = TaskRunReport {
+            task_run_id: "run-3".to_string(),
+            outcome: TaskRunOutcome::Failed {
+                stage: "worker".to_string(),
+                reason: "rate limited".to_string(),
+                provider_failure: Some(ProviderFailureClass::Throttle {
+                    retry_after_ms: None,
+                }),
+            },
+            stages_completed: vec![RoleKind::Worker],
+        };
+
+        let bytes = bincode::serialize(&report).expect("serialize");
+        let back: TaskRunReport = bincode::deserialize(&bytes).expect("deserialize");
+
+        match back.outcome {
+            TaskRunOutcome::Failed {
+                provider_failure, ..
+            } => assert_eq!(
+                provider_failure,
+                Some(ProviderFailureClass::Throttle {
+                    retry_after_ms: None
+                })
+            ),
             other => panic!("unexpected outcome: {other:?}"),
         }
     }

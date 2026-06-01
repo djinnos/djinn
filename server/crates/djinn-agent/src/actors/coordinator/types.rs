@@ -165,6 +165,15 @@ pub(super) const DISPATCH_COOLDOWN: Duration = Duration::from_secs(60);
 /// Upper bound on the escalating per-task dispatch cooldown.
 pub(super) const MAX_DISPATCH_COOLDOWN: Duration = Duration::from_secs(30 * 60);
 
+/// Hard safety cap on a provider-stated retry-after used as a redispatch floor
+/// (A6). A provider's reset window is deliberately allowed to EXCEED the
+/// escalating ladder's [`MAX_DISPATCH_COOLDOWN`] ceiling — a genuine multi-hour
+/// quota window should not be probed on the fixed ~30-min ladder — but is
+/// clamped here so a malformed / absurd `Retry-After` can't wedge a task in
+/// cooldown effectively forever. 6h comfortably covers real provider reset
+/// windows (e.g. a 5-hour Codex quota cycle) while bounding the blast radius.
+pub(super) const PROVIDER_RETRY_AFTER_MAX: Duration = Duration::from_secs(6 * 60 * 60);
+
 /// Consecutive failed dispatch attempts (same role) — whether the run failed or
 /// the task's owner has no model that resolves a credential — after which the
 /// task is failed **terminally** instead of looping forever. Combined with the
@@ -193,6 +202,44 @@ pub(super) fn escalating_dispatch_cooldown(streak: u32) -> Duration {
         .saturating_mul(1u64 << shift)
         .min(MAX_DISPATCH_COOLDOWN.as_secs());
     Duration::from_secs(secs)
+}
+
+/// A3: the terminal `dispatch_failure_streak` value to STORE after a same-role
+/// failed reappearance.
+///
+/// A structural failure advances the streak toward [`MAX_DISPATCH_FAILURES`]
+/// (the task may be undispatchable). A `throttle` (rate-limit) reappearance is a
+/// transient provider fault, not a fault of the task — so it must NOT advance
+/// the terminal counter (else a healthy task whose only problem was a quota blip
+/// gets terminally closed). The task still backs off via the escalating cooldown
+/// and the breaker still fails over; only the terminal-close counter is spared.
+pub(super) fn stored_streak_after_failure(
+    current_streak: u32,
+    next_streak: u32,
+    throttle: bool,
+) -> u32 {
+    if throttle { current_streak } else { next_streak }
+}
+
+/// A6: floor an escalating-ladder cooldown by a provider-stated retry-after.
+///
+/// When the provider supplied a `Retry-After` / rate-limit-reset that exceeds
+/// the ladder value, redispatch no earlier than that reset — a multi-hour quota
+/// window must not be probed on the fixed ~30-min ladder. The provider reset is
+/// deliberately allowed to EXCEED the ladder's [`MAX_DISPATCH_COOLDOWN`] ceiling
+/// (that's the whole point of A6) but is clamped to [`PROVIDER_RETRY_AFTER_MAX`]
+/// so a malformed value can't wedge a task in cooldown forever.
+pub(super) fn apply_provider_retry_floor(
+    ladder: Duration,
+    retry_after_ms: Option<u64>,
+) -> Duration {
+    match retry_after_ms {
+        Some(ms) => {
+            let floor = Duration::from_millis(ms).min(PROVIDER_RETRY_AFTER_MAX);
+            ladder.max(floor)
+        }
+        None => ladder,
+    }
 }
 
 pub(super) fn classify_reappearing_dispatch(
@@ -257,6 +304,76 @@ mod cooldown_tests {
         assert_eq!(
             classify_reappearing_dispatch(marker, "reviewer", 4),
             Some(ReappearingDispatch::RoleTransition)
+        );
+    }
+
+    #[test]
+    fn a3_throttle_does_not_advance_terminal_streak_but_failure_does() {
+        // A3: a structural Failure advances the terminal streak toward the cap;
+        // a Throttle leaves it where it was (so a transient quota blip can never
+        // march a healthy task to terminal close).
+        let current = 4;
+        let next = 5;
+        assert_eq!(
+            stored_streak_after_failure(current, next, false),
+            next,
+            "a non-throttle failure advances the terminal streak"
+        );
+        assert_eq!(
+            stored_streak_after_failure(current, next, true),
+            current,
+            "a throttle must NOT advance the terminal streak"
+        );
+
+        // At the cap boundary: a throttle keeps the stored streak below MAX even
+        // when `next_streak` would have hit it, so the terminal-close branch
+        // (gated on `!throttle && next_streak >= MAX`) never fires.
+        let just_below = MAX_DISPATCH_FAILURES - 1;
+        assert_eq!(
+            stored_streak_after_failure(just_below, MAX_DISPATCH_FAILURES, true),
+            just_below
+        );
+    }
+
+    #[test]
+    fn a6_cooldown_is_max_of_ladder_and_provider_retry_after() {
+        // No provider reset → ladder unchanged.
+        let ladder = escalating_dispatch_cooldown(2); // 120s
+        assert_eq!(apply_provider_retry_floor(ladder, None), ladder);
+
+        // Provider reset BELOW the ladder → ladder wins (max).
+        assert_eq!(
+            apply_provider_retry_floor(ladder, Some(30_000)),
+            ladder,
+            "a sub-ladder retry-after never shortens the cooldown"
+        );
+
+        // Provider reset ABOVE the ladder → reset floors it.
+        let five_min_ms = 5 * 60 * 1000;
+        assert_eq!(
+            apply_provider_retry_floor(ladder, Some(five_min_ms)),
+            Duration::from_millis(five_min_ms)
+        );
+
+        // Provider reset EXCEEDING the ladder's 30-min ceiling is honored (the
+        // whole point of A6): a 5-hour quota window is not probed on the ladder.
+        let five_hours_ms: u64 = 5 * 60 * 60 * 1000;
+        let five_hours = Duration::from_millis(five_hours_ms);
+        let capped_ladder = escalating_dispatch_cooldown(1_000); // MAX_DISPATCH_COOLDOWN (30m)
+        assert_eq!(capped_ladder, MAX_DISPATCH_COOLDOWN);
+        assert_eq!(
+            apply_provider_retry_floor(capped_ladder, Some(five_hours_ms)),
+            five_hours,
+            "provider reset is allowed to exceed the 30-min ladder ceiling"
+        );
+        assert!(five_hours > MAX_DISPATCH_COOLDOWN);
+
+        // A malformed / absurd retry-after is clamped to the hard safety max so
+        // it can't wedge the task forever.
+        let absurd_ms = 100 * 24 * 60 * 60 * 1000; // 100 days
+        assert_eq!(
+            apply_provider_retry_floor(ladder, Some(absurd_ms)),
+            PROVIDER_RETRY_AFTER_MAX
         );
     }
 }
