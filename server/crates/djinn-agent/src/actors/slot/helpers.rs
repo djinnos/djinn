@@ -522,27 +522,97 @@ pub(crate) fn parse_conflict_metadata(reason: &str) -> Option<MergeConflictMetad
     serde_json::from_str(raw).ok()
 }
 
+/// Per-section char budget when the worker's initial directive combines
+/// reviewer "changes requested" feedback AND failing-CI feedback. Splitting the
+/// budget keeps one source from starving the other (and keeps the combined
+/// payload bounded). Mirrors `MAX_VERIFICATION_CHARS` magnitude.
+const MAX_COMBINED_SECTION_CHARS: usize = 3000;
+
+/// Find the most recent CI-failure / verification feedback that belongs to the
+/// CURRENT rework cycle — i.e. logged at or after the latest PR-review-feedback
+/// entry (the two are written in the same poller tick when a PR has both
+/// reviewer changes-requested and failing CI). This guards against surfacing a
+/// stale CI comment from an earlier head SHA.
+///
+/// Returns the formatted `**Verification failure:** …`-style section (already
+/// truncated), or `None` when there's no in-cycle CI/verification comment.
+pub(crate) fn latest_ci_feedback_in_cycle(
+    activity: &[djinn_core::models::ActivityEntry],
+    not_before: Option<&str>,
+) -> Option<String> {
+    let entry = activity
+        .iter()
+        .rev()
+        .filter(|e| e.event_type == "comment" && e.actor_role == "verification")
+        .find(|e| match not_before {
+            // `created_at` is an ISO-8601 string → lexicographic compare is
+            // chronological. Only accept feedback from this cycle onward.
+            Some(floor) => e.created_at.as_str() >= floor,
+            None => true,
+        })?;
+
+    let payload = serde_json::from_str::<serde_json::Value>(&entry.payload).ok()?;
+    let body = payload
+        .get("body")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())?;
+    Some(truncate_feedback(body, MAX_COMBINED_SECTION_CHARS))
+}
+
 /// Build an initial user message for a fresh worker session. If the activity
 /// log contains lead or reviewer feedback, include it prominently so the worker
 /// acts on it immediately rather than discovering it buried in the system prompt.
 ///
 /// PR review feedback (from GitHub reviewer inline comments) is surfaced first
-/// when present — this is the most specific, actionable signal available.
+/// when present — this is the most specific, actionable signal available. When
+/// the same rework cycle ALSO carries failing-CI feedback (reviewer requested
+/// changes AND required checks are red), both are combined into a single
+/// "address all of the following in one pass" directive so the worker fixes
+/// everything at once instead of one source per rework cycle.
 pub(crate) async fn initial_user_message_for_task(
     task_id: &str,
     app_state: &AgentContext,
 ) -> String {
+    let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let activity = repo.list_activity(task_id).await.ok().unwrap_or_default();
+
     // PR review feedback takes priority over generic activity log comments.
     if let Some(pr_feedback) = pr_review_feedback_context(task_id, app_state).await {
+        // Find when the current reviewer-feedback cycle was logged so we only
+        // pull CI feedback from the same cycle (not a stale earlier-head comment).
+        let review_cycle_floor = activity
+            .iter()
+            .rev()
+            .find(|e| {
+                e.event_type == PR_REVIEW_FEEDBACK_EVENT && e.actor_role == "system"
+            })
+            .map(|e| e.created_at.clone());
+
+        let reviewer_section = truncate_feedback(&pr_feedback, MAX_COMBINED_SECTION_CHARS);
+
+        // When this same cycle also produced a CI failure, compose BOTH sources
+        // into one directive. Otherwise keep today's reviewer-only behavior.
+        if let Some(ci_section) =
+            latest_ci_feedback_in_cycle(&activity, review_cycle_floor.as_deref())
+        {
+            return format!(
+                "This PR has TWO blocking problems. Address ALL of the following in one pass before responding:\n\n\
+                **(A) A human reviewer requested changes.** Address every reviewer comment below:\n\n\
+                {reviewer_section}\n\n\
+                ---\n\n\
+                **(B) Required CI checks are failing.** Fix every failure below:\n\n\
+                {ci_section}\n\n\
+                ---\n\n\
+                Resolve (A) and (B) together, then push fixup commits to the same branch. Do not open a new PR."
+            );
+        }
+
         return format!(
             "A human reviewer has requested changes on the PR. Address every reviewer comment below:\n\n\
-            {pr_feedback}\n\n\
+            {reviewer_section}\n\n\
             Push fixup commits to the same branch. Do not open a new PR."
         );
     }
-
-    let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let activity = repo.list_activity(task_id).await.ok().unwrap_or_default();
 
     let sections = recent_feedback(&activity, 3);
 

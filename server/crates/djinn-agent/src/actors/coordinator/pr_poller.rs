@@ -473,6 +473,55 @@ impl CoordinatorActor {
                 self.attach_pr_review_feedback(&task.id, &task.short_id, feedback)
                     .await;
 
+                // Evaluate CI in the SAME tick so a PR that has BOTH reviewer
+                // "changes requested" AND failing required checks surfaces both
+                // problems to the worker in one rework cycle (instead of
+                // reviewer-this-tick / CI-next-tick, which trickled the two
+                // signals across many dispatches). We log the CI-failure comment
+                // here too, but deliberately do NOT emit a second reopen — the
+                // single `PrChangesRequested` transition below carries both
+                // feedback artifacts. We use `log_ci_failure_comment` directly
+                // (not `handle_ci_failure`) to avoid double-transitioning and to
+                // skip the CI-specific cycle-cap/diff-empty escalation: the
+                // reviewer's request is the primary driver of this reopen.
+                let blocking_failed: Vec<&CheckRun> = checks
+                    .check_runs
+                    .iter()
+                    .filter(|cr| {
+                        matches!(
+                            cr.conclusion.as_deref(),
+                            Some("failure") | Some("timed_out") | Some("cancelled")
+                        )
+                    })
+                    .collect();
+                if !blocking_failed.is_empty() {
+                    let required_contexts: Option<Vec<String>> = gh_client
+                        .list_required_status_checks(&owner, &repo, &pr.base.ref_name)
+                        .await
+                        .ok()
+                        .flatten();
+                    let blocking =
+                        blocking_failed_checks(&blocking_failed, required_contexts.as_deref());
+                    if !blocking.is_empty() {
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            pr = pull_number,
+                            blocking_count = blocking.len(),
+                            "PR poller: changes requested AND required CI failing in same tick → logging both feedbacks before single reopen"
+                        );
+                        self.log_ci_failure_comment(
+                            &task.id,
+                            &blocking,
+                            pr_url,
+                            &current_sha,
+                            gh_client,
+                            &owner,
+                            &repo,
+                        )
+                        .await;
+                    }
+                }
+
                 self.apply_pr_transition(
                     &task.id,
                     TransitionAction::PrChangesRequested,
