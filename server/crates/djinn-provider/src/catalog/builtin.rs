@@ -7,6 +7,63 @@
 
 use std::collections::HashSet;
 
+use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities};
+
+/// How a builtin provider's API-key auth header is shaped.
+///
+/// Const-friendly descriptor; the concrete [`AuthMethod`] (which carries the
+/// runtime key/token) is built from this via [`AuthShape::to_auth_method`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AuthShape {
+    /// Standard `Authorization: Bearer <token>` header.
+    Bearer,
+    /// Custom API-key header with the given name (e.g. Anthropic `x-api-key`).
+    Header(&'static str),
+}
+
+impl AuthShape {
+    /// Build the concrete [`AuthMethod`] for this shape with the given key.
+    pub fn to_auth_method(self, api_key: String) -> AuthMethod {
+        match self {
+            AuthShape::Bearer => AuthMethod::BearerToken(api_key),
+            AuthShape::Header(header) => AuthMethod::ApiKeyHeader {
+                header: header.to_string(),
+                key: api_key,
+            },
+        }
+    }
+}
+
+/// How a builtin provider's wire [`FormatFamily`] is resolved.
+///
+/// Most providers use a fixed family; `openai` is special-cased to switch to
+/// the Responses API for models that support it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FormatRule {
+    /// Always use this format family, regardless of the model.
+    Fixed(FormatFamily),
+    /// Use [`FormatFamily::OpenAIResponses`] when the model is a Responses-API
+    /// model (per [`is_openai_responses_model`]), otherwise
+    /// [`FormatFamily::OpenAI`].
+    OpenAiResponsesByModel,
+}
+
+impl FormatRule {
+    /// Resolve the concrete [`FormatFamily`] for the given model id.
+    pub fn resolve(self, model_id: &str) -> FormatFamily {
+        match self {
+            FormatRule::Fixed(family) => family,
+            FormatRule::OpenAiResponsesByModel => {
+                if is_openai_responses_model(model_id) {
+                    FormatFamily::OpenAIResponses
+                } else {
+                    FormatFamily::OpenAI
+                }
+            }
+        }
+    }
+}
+
 /// Metadata for a built-in provider that Djinn can drive natively.
 pub struct BuiltinProvider {
     /// Provider slug (e.g. `"anthropic"`, `"chatgpt_codex"`).
@@ -28,6 +85,63 @@ pub struct BuiltinProvider {
     /// If true, this provider is used for authentication only (not model
     /// dispatch) and should be excluded from the model provider catalog.
     pub auth_only: bool,
+    /// Wire-format-family resolution rule for this provider.
+    pub format_rule: FormatRule,
+    /// API-key auth header shape for this provider.
+    pub auth_shape: AuthShape,
+    /// Whether the provider supports SSE streaming.
+    pub streaming: bool,
+    /// Default `max_tokens` to send in requests (Anthropic requires one).
+    pub max_tokens_default: Option<u32>,
+}
+
+impl BuiltinProvider {
+    /// Resolve this provider's wire [`FormatFamily`] for the given model id.
+    pub fn format_family(&self, model_id: &str) -> FormatFamily {
+        self.format_rule.resolve(model_id)
+    }
+
+    /// Build this provider's [`AuthMethod`] from the given API key.
+    pub fn auth_method(&self, api_key: String) -> AuthMethod {
+        self.auth_shape.to_auth_method(api_key)
+    }
+
+    /// Build this provider's [`ProviderCapabilities`].
+    pub fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            streaming: self.streaming,
+            max_tokens_default: self.max_tokens_default,
+        }
+    }
+}
+
+/// Returns true for OpenAI models that support the Responses API.
+pub fn is_openai_responses_model(model_id: &str) -> bool {
+    let lower = model_id.to_lowercase();
+    lower.starts_with("gpt-5")
+        || lower.starts_with("o1")
+        || lower.starts_with("o3")
+        || lower.starts_with("o4")
+}
+
+/// Default wire-format-family rule for unknown / custom providers.
+///
+/// Reproduces the historical `_ =>` arm in `completion::provider_format_family`
+/// (`FormatFamily::OpenAI`).
+pub const DEFAULT_FORMAT_RULE: FormatRule = FormatRule::Fixed(FormatFamily::OpenAI);
+
+/// Default API-key auth shape for unknown / custom providers.
+///
+/// Reproduces the historical `_ =>` arm in `completion::provider_auth`
+/// (`AuthMethod::BearerToken`).
+pub const DEFAULT_AUTH_SHAPE: AuthShape = AuthShape::Bearer;
+
+/// Default provider capabilities for unknown / custom providers.
+///
+/// Reproduces the historical `_ =>` arm in `completion::provider_capabilities`
+/// (`ProviderCapabilities::default()`): streaming on, no default max_tokens.
+pub fn default_capabilities() -> ProviderCapabilities {
+    ProviderCapabilities::default()
 }
 
 /// All providers Djinn can use out of the box.
@@ -45,6 +159,10 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         docs_url: "https://docs.anthropic.com",
         merge_into: None,
         auth_only: false,
+        format_rule: FormatRule::Fixed(FormatFamily::Anthropic),
+        auth_shape: AuthShape::Header("x-api-key"),
+        streaming: true,
+        max_tokens_default: Some(64_000),
     },
     BuiltinProvider {
         id: "openai",
@@ -54,6 +172,10 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         docs_url: "https://platform.openai.com/docs",
         merge_into: None,
         auth_only: false,
+        format_rule: FormatRule::OpenAiResponsesByModel,
+        auth_shape: AuthShape::Bearer,
+        streaming: true,
+        max_tokens_default: None,
     },
     BuiltinProvider {
         id: "google",
@@ -63,6 +185,10 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         docs_url: "https://ai.google.dev/docs",
         merge_into: None,
         auth_only: false,
+        format_rule: FormatRule::Fixed(FormatFamily::Google),
+        auth_shape: AuthShape::Header("x-goog-api-key"),
+        streaming: true,
+        max_tokens_default: None,
     },
     // OpenAI-compatible. Already present in models.dev (`fireworks-ai`) with the
     // right `api` base_url + model list; listed here only so the env-var
@@ -76,6 +202,10 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         docs_url: "https://fireworks.ai/docs/",
         merge_into: None,
         auth_only: false,
+        format_rule: FormatRule::Fixed(FormatFamily::OpenAI),
+        auth_shape: AuthShape::Bearer,
+        streaming: true,
+        max_tokens_default: None,
     },
     // OAuth-only provider whose capabilities are folded into "openai" in the
     // catalog.  Internally still a distinct provider for dispatch & models.
@@ -87,6 +217,10 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         docs_url: "https://platform.openai.com/docs",
         merge_into: Some("openai"),
         auth_only: false,
+        format_rule: FormatRule::Fixed(FormatFamily::OpenAIResponses),
+        auth_shape: AuthShape::Bearer,
+        streaming: true,
+        max_tokens_default: None,
     },
     BuiltinProvider {
         id: "githubcopilot",
@@ -96,6 +230,10 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         docs_url: "https://docs.github.com/en/copilot",
         merge_into: None,
         auth_only: false,
+        format_rule: FormatRule::Fixed(FormatFamily::OpenAI),
+        auth_shape: AuthShape::Bearer,
+        streaming: true,
+        max_tokens_default: None,
     },
     BuiltinProvider {
         id: "github_app",
@@ -105,6 +243,10 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         docs_url: "https://docs.github.com/en/apps",
         merge_into: None,
         auth_only: true,
+        format_rule: FormatRule::Fixed(FormatFamily::OpenAI),
+        auth_shape: AuthShape::Bearer,
+        streaming: true,
+        max_tokens_default: None,
     },
     BuiltinProvider {
         id: "gcp_vertex_ai",
@@ -114,6 +256,10 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         docs_url: "https://cloud.google.com/vertex-ai/docs",
         merge_into: None,
         auth_only: false,
+        format_rule: FormatRule::Fixed(FormatFamily::OpenAI),
+        auth_shape: AuthShape::Bearer,
+        streaming: true,
+        max_tokens_default: None,
     },
     BuiltinProvider {
         id: "aws_bedrock",
@@ -123,6 +269,10 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         docs_url: "https://docs.aws.amazon.com/bedrock/",
         merge_into: None,
         auth_only: false,
+        format_rule: FormatRule::Fixed(FormatFamily::OpenAI),
+        auth_shape: AuthShape::Bearer,
+        streaming: true,
+        max_tokens_default: None,
     },
     BuiltinProvider {
         id: "azure_openai",
@@ -132,6 +282,10 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         docs_url: "https://learn.microsoft.com/en-us/azure/ai-services/openai/",
         merge_into: None,
         auth_only: false,
+        format_rule: FormatRule::Fixed(FormatFamily::OpenAI),
+        auth_shape: AuthShape::Bearer,
+        streaming: true,
+        max_tokens_default: None,
     },
 ];
 

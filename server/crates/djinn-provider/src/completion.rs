@@ -9,8 +9,7 @@ use tokio::time::{Duration, timeout};
 use crate::catalog::{CatalogService, builtin};
 use crate::oauth::{self, codex::CodexTokens, copilot::CopilotTokens};
 use crate::provider::{
-    AuthMethod, FormatFamily, LlmProvider, ProviderCapabilities, ProviderConfig, StreamEvent,
-    TokenUsage, create_provider,
+    LlmProvider, ProviderConfig, StreamEvent, TokenUsage, create_provider,
 };
 use crate::repos::CredentialRepository;
 
@@ -383,16 +382,20 @@ async fn api_key_provider_config(
             )
         })?;
 
+    // G8: format_family / auth shape / capabilities are now carried on the
+    // `BuiltinProvider` row (see `catalog::builtin`) instead of three separate
+    // per-provider `match` arms keyed on the provider id. The row was already
+    // resolved above as `builtin_provider`, so these are direct lookups.
     Ok(ProviderConfig {
         base_url: provider_base_url(provider_id),
-        auth: provider_auth(provider_id, api_key),
-        format_family: provider_format_family(provider_id, &model.id),
+        auth: builtin_provider.auth_method(api_key),
+        format_family: builtin_provider.format_family(&model.id),
         model_id: model.id.clone(),
         context_window: model.context_window.max(0) as u32,
         telemetry: None,
         session_affinity_key: None,
         provider_headers: Default::default(),
-        capabilities: provider_capabilities(provider_id),
+        capabilities: builtin_provider.capabilities(),
         reasoning_effort: None,
     })
 }
@@ -403,49 +406,6 @@ fn provider_base_url(provider_id: &str) -> String {
         "openai" => "https://api.openai.com".to_string(),
         "google" => "https://generativelanguage.googleapis.com".to_string(),
         _ => "https://api.openai.com".to_string(),
-    }
-}
-
-fn provider_auth(provider_id: &str, api_key: String) -> AuthMethod {
-    match provider_id {
-        "anthropic" => AuthMethod::ApiKeyHeader {
-            header: "x-api-key".to_string(),
-            key: api_key,
-        },
-        "google" => AuthMethod::ApiKeyHeader {
-            header: "x-goog-api-key".to_string(),
-            key: api_key,
-        },
-        _ => AuthMethod::BearerToken(api_key),
-    }
-}
-
-fn provider_format_family(provider_id: &str, model_id: &str) -> FormatFamily {
-    match provider_id {
-        "anthropic" => FormatFamily::Anthropic,
-        "google" => FormatFamily::Google,
-        "chatgpt_codex" => FormatFamily::OpenAIResponses,
-        "openai" if is_openai_responses_model(model_id) => FormatFamily::OpenAIResponses,
-        _ => FormatFamily::OpenAI,
-    }
-}
-
-/// Returns true for OpenAI models that support the Responses API.
-fn is_openai_responses_model(model_id: &str) -> bool {
-    let lower = model_id.to_lowercase();
-    lower.starts_with("gpt-5")
-        || lower.starts_with("o1")
-        || lower.starts_with("o3")
-        || lower.starts_with("o4")
-}
-
-fn provider_capabilities(provider_id: &str) -> ProviderCapabilities {
-    match provider_id {
-        "anthropic" => ProviderCapabilities {
-            streaming: true,
-            max_tokens_default: Some(64_000),
-        },
-        _ => ProviderCapabilities::default(),
     }
 }
 
@@ -479,8 +439,9 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::provider::ToolChoice;
+    use crate::catalog::builtin::{AuthShape, FormatRule};
     use crate::provider::error::ProviderError;
+    use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ToolChoice};
 
     #[test]
     fn transient_error_prefers_typed_then_substring() {
@@ -860,5 +821,199 @@ mod tests {
             .await
             .expect("should fall back to the connected provider, not error");
         assert_eq!(provider.name(), "anthropic");
+    }
+
+    /// G8 lock-in: every builtin provider row must resolve to exactly the
+    /// (format_family, capabilities, auth shape) that the old per-provider
+    /// `match` arms produced. This is a golden table — changing any value here
+    /// is a behavior change and must be intentional.
+    #[test]
+    fn builtin_rows_lock_format_capabilities_and_auth() {
+        // (id, expected fixed format family OR None for openai's model-dependent
+        // rule, auth shape, streaming, max_tokens_default)
+        struct Expected {
+            id: &'static str,
+            // None == OpenAI's model-dependent `OpenAiResponsesByModel` rule.
+            fixed_family: Option<FormatFamily>,
+            auth_shape: AuthShape,
+            streaming: bool,
+            max_tokens_default: Option<u32>,
+        }
+
+        let expected = [
+            Expected {
+                id: "anthropic",
+                fixed_family: Some(FormatFamily::Anthropic),
+                auth_shape: AuthShape::Header("x-api-key"),
+                streaming: true,
+                max_tokens_default: Some(64_000),
+            },
+            Expected {
+                id: "openai",
+                fixed_family: None, // OpenAiResponsesByModel
+                auth_shape: AuthShape::Bearer,
+                streaming: true,
+                max_tokens_default: None,
+            },
+            Expected {
+                id: "google",
+                fixed_family: Some(FormatFamily::Google),
+                auth_shape: AuthShape::Header("x-goog-api-key"),
+                streaming: true,
+                max_tokens_default: None,
+            },
+            Expected {
+                id: "fireworks-ai",
+                fixed_family: Some(FormatFamily::OpenAI),
+                auth_shape: AuthShape::Bearer,
+                streaming: true,
+                max_tokens_default: None,
+            },
+            Expected {
+                id: "chatgpt_codex",
+                fixed_family: Some(FormatFamily::OpenAIResponses),
+                auth_shape: AuthShape::Bearer,
+                streaming: true,
+                max_tokens_default: None,
+            },
+            Expected {
+                id: "githubcopilot",
+                fixed_family: Some(FormatFamily::OpenAI),
+                auth_shape: AuthShape::Bearer,
+                streaming: true,
+                max_tokens_default: None,
+            },
+            Expected {
+                id: "github_app",
+                fixed_family: Some(FormatFamily::OpenAI),
+                auth_shape: AuthShape::Bearer,
+                streaming: true,
+                max_tokens_default: None,
+            },
+            Expected {
+                id: "gcp_vertex_ai",
+                fixed_family: Some(FormatFamily::OpenAI),
+                auth_shape: AuthShape::Bearer,
+                streaming: true,
+                max_tokens_default: None,
+            },
+            Expected {
+                id: "aws_bedrock",
+                fixed_family: Some(FormatFamily::OpenAI),
+                auth_shape: AuthShape::Bearer,
+                streaming: true,
+                max_tokens_default: None,
+            },
+            Expected {
+                id: "azure_openai",
+                fixed_family: Some(FormatFamily::OpenAI),
+                auth_shape: AuthShape::Bearer,
+                streaming: true,
+                max_tokens_default: None,
+            },
+        ];
+
+        // The expected table must cover every builtin row, no more, no less.
+        assert_eq!(
+            expected.len(),
+            builtin::BUILTIN_PROVIDERS.len(),
+            "expected table is out of sync with BUILTIN_PROVIDERS — add the new provider's golden mapping"
+        );
+
+        // A non-responses and a responses OpenAI model id to exercise the
+        // model-dependent rule.
+        const PLAIN_MODEL: &str = "gpt-4.1-mini";
+        const RESPONSES_MODEL: &str = "gpt-5.1";
+        assert!(!builtin::is_openai_responses_model(PLAIN_MODEL));
+        assert!(builtin::is_openai_responses_model(RESPONSES_MODEL));
+
+        for exp in &expected {
+            let provider = builtin::find_builtin_provider(exp.id)
+                .unwrap_or_else(|| panic!("builtin provider '{}' not found", exp.id));
+
+            // Auth shape.
+            assert_eq!(
+                provider.auth_shape, exp.auth_shape,
+                "auth shape mismatch for '{}'",
+                exp.id
+            );
+            // And the concrete AuthMethod the shape produces.
+            match exp.auth_shape {
+                AuthShape::Bearer => assert!(
+                    matches!(
+                        provider.auth_method("k".to_string()),
+                        AuthMethod::BearerToken(ref t) if t == "k"
+                    ),
+                    "auth method mismatch for '{}'",
+                    exp.id
+                ),
+                AuthShape::Header(name) => assert!(
+                    matches!(
+                        provider.auth_method("k".to_string()),
+                        AuthMethod::ApiKeyHeader { ref header, ref key }
+                            if header == name && key == "k"
+                    ),
+                    "auth method mismatch for '{}'",
+                    exp.id
+                ),
+            }
+
+            // Capabilities.
+            let caps: ProviderCapabilities = provider.capabilities();
+            assert_eq!(
+                caps.streaming, exp.streaming,
+                "streaming mismatch for '{}'",
+                exp.id
+            );
+            assert_eq!(
+                caps.max_tokens_default, exp.max_tokens_default,
+                "max_tokens_default mismatch for '{}'",
+                exp.id
+            );
+
+            // Format family.
+            match exp.fixed_family {
+                Some(family) => {
+                    assert_eq!(
+                        provider.format_rule,
+                        FormatRule::Fixed(family),
+                        "format rule mismatch for '{}'",
+                        exp.id
+                    );
+                    // Fixed families ignore the model id.
+                    assert_eq!(
+                        provider.format_family(PLAIN_MODEL),
+                        family,
+                        "format family (plain) mismatch for '{}'",
+                        exp.id
+                    );
+                    assert_eq!(
+                        provider.format_family(RESPONSES_MODEL),
+                        family,
+                        "format family (responses) mismatch for '{}'",
+                        exp.id
+                    );
+                }
+                None => {
+                    // openai: model-dependent OpenAI / OpenAIResponses.
+                    assert_eq!(
+                        provider.format_rule,
+                        FormatRule::OpenAiResponsesByModel,
+                        "format rule mismatch for '{}'",
+                        exp.id
+                    );
+                    assert_eq!(
+                        provider.format_family(PLAIN_MODEL),
+                        FormatFamily::OpenAI,
+                        "openai non-responses model should be OpenAI"
+                    );
+                    assert_eq!(
+                        provider.format_family(RESPONSES_MODEL),
+                        FormatFamily::OpenAIResponses,
+                        "openai responses model should be OpenAIResponses"
+                    );
+                }
+            }
+        }
     }
 }

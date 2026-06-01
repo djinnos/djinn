@@ -541,6 +541,10 @@ mod tests {
             docs_url: "https://example.com/docs",
             merge_into: None,
             auth_only: false,
+            format_rule: crate::catalog::builtin::DEFAULT_FORMAT_RULE,
+            auth_shape: crate::catalog::builtin::DEFAULT_AUTH_SHAPE,
+            streaming: true,
+            max_tokens_default: None,
         }];
         catalog.inject_builtin_providers(entries);
 
@@ -571,6 +575,10 @@ mod tests {
             docs_url: "",
             merge_into: None,
             auth_only: false,
+            format_rule: crate::catalog::builtin::DEFAULT_FORMAT_RULE,
+            auth_shape: crate::catalog::builtin::DEFAULT_AUTH_SHAPE,
+            streaming: true,
+            max_tokens_default: None,
         }];
         catalog.inject_builtin_providers(entries);
 
