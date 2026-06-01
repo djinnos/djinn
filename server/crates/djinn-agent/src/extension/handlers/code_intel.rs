@@ -1,5 +1,8 @@
 use super::*;
 use crate::extension::github_search;
+// v10: canonical test-path classification, shared with the graph
+// builder's `RepoGraphNode::is_test` stamping.
+use djinn_core::test_paths::is_test_path;
 use djinn_control_plane::bridge::{ProjectCtx, RepoGraphOps, ResolveOutcome};
 
 /// PR C2 mirror of the MCP-side dispatcher's pre-resolve. When the chat
@@ -1044,44 +1047,6 @@ fn categorize_blast_groups(
             "e2e_tests": e2e_tests.len(),
         },
     })
-}
-
-/// True for test files by file-naming and directory convention.
-/// Conservative — when unsure, return false so the file falls into
-/// `runtime` (which is the user's review-required bucket).
-fn is_test_path(path: &str) -> bool {
-    let basename = path.rsplit('/').next().unwrap_or(path);
-    // Basename suffixes per language convention.
-    if basename.ends_with("_test.go")
-        || basename.ends_with("_test.rs")
-        || basename.ends_with("_test.py")
-        || basename.ends_with("_test.kt")
-        || basename.ends_with("_test.scala")
-        || basename.ends_with(".test.ts")
-        || basename.ends_with(".test.tsx")
-        || basename.ends_with(".test.js")
-        || basename.ends_with(".test.jsx")
-        || basename.ends_with(".test.mjs")
-        || basename.ends_with("_spec.rb")
-        || basename.ends_with(".spec.ts")
-        || basename.ends_with(".spec.tsx")
-        || basename.ends_with(".spec.js")
-        || basename.ends_with(".spec.jsx")
-        || basename == "tests.rs"
-    {
-        return true;
-    }
-    // Conventional dir segments. Anchored on slash so a file
-    // legitimately named `protests.rs` outside such a dir passes.
-    if path.contains("/tests/")
-        || path.starts_with("tests/")
-        || path.contains("/test/")
-        || path.starts_with("test/")
-        || path.contains("/__tests__/")
-    {
-        return true;
-    }
-    false
 }
 
 /// True for tests likely to be slow / require external services. e2e

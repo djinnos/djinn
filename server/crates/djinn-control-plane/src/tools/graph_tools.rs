@@ -206,6 +206,15 @@ pub struct CodeGraphParams {
     /// shared `sort_by`, `file_glob`, and `limit` fields.
     #[serde(default)]
     pub target: Option<String>,
+    /// v10: test-file filter. `"include"` (default for `snapshot` —
+    /// returns the whole graph), `"exclude"` (drop every node the graph
+    /// builder marked `is_test`), or `"only"` (keep only test nodes).
+    /// Test classification is the canonical `RepoGraphNode::is_test`
+    /// flag (file-path convention OR SCIP `Test` role). Currently
+    /// honoured by the `snapshot` op; other ops keep their existing
+    /// test-handling.
+    #[serde(default)]
+    pub tests: Option<String>,
 }
 
 impl CodeGraphParams {
@@ -245,6 +254,39 @@ impl CodeGraphParams {
         clear(&mut self.to_sha);
         clear(&mut self.mode);
         clear(&mut self.target);
+        clear(&mut self.tests);
+    }
+}
+
+/// v10: how the `code_graph` `tests=` param filters test nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestFilter {
+    /// Keep every node regardless of test classification.
+    Include,
+    /// Drop nodes the graph builder marked `is_test`.
+    Exclude,
+    /// Keep only nodes marked `is_test`.
+    Only,
+}
+
+impl TestFilter {
+    /// Parse the `tests=` param value. Unknown / absent → `default`.
+    pub fn parse(value: Option<&str>, default: TestFilter) -> TestFilter {
+        match value.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+            Some("include") | Some("all") | Some("with") => TestFilter::Include,
+            Some("exclude") | Some("none") | Some("without") | Some("no") => TestFilter::Exclude,
+            Some("only") => TestFilter::Only,
+            _ => default,
+        }
+    }
+
+    /// True when a node with the given `is_test` flag should be kept.
+    pub fn keeps(self, is_test: bool) -> bool {
+        match self {
+            TestFilter::Include => true,
+            TestFilter::Exclude => !is_test,
+            TestFilter::Only => is_test,
+        }
     }
 }
 
@@ -650,8 +692,7 @@ pub enum CodeGraphResponse {
 
 // ── Next-step hints ─────────────────────────────────────────────────────────────
 
-const FALLBACK_NEXT_STEP: &str =
-    "Use `code_graph status` to inspect the current graph state.";
+const FALLBACK_NEXT_STEP: &str = "Use `code_graph status` to inspect the current graph state.";
 
 /// PR C3: emitted when an `impact` query lands on a HIGH or CRITICAL
 /// risk bucket. Steers the caller toward the cleanup ops they should
@@ -705,8 +746,7 @@ fn compute_next_step_hint(op: &str, response: &CodeGraphResponse) -> String {
             "Call `code_graph impact target=<symbol>` to see blast radius.".to_string()
         }
         ("ranked", CodeGraphResponse::Ranked(_)) => {
-            "Files at top of PageRank are likely entry points; explore with `context`."
-                .to_string()
+            "Files at top of PageRank are likely entry points; explore with `context`.".to_string()
         }
         ("cycles", CodeGraphResponse::Cycles(_)) => {
             "Each cycle entry is a tuple of mutually-reaching nodes; resolve with `path`."
@@ -749,17 +789,15 @@ fn compute_next_step_hint(op: &str, response: &CodeGraphResponse) -> String {
         // node. Truncation is the common case for medium repos, so the
         // hint focuses on drilling into the cap rather than expanding
         // it.
-        ("snapshot", CodeGraphResponse::Snapshot(r)) => {
-            match r.snapshot.nodes.first() {
-                Some(node) => format!(
-                    "Snapshot capped at {} of {} nodes; call `code_graph context name={}` to drill in.",
-                    r.snapshot.nodes.len(),
-                    r.snapshot.total_nodes,
-                    node.label,
-                ),
-                None => FALLBACK_NEXT_STEP.to_string(),
-            }
-        }
+        ("snapshot", CodeGraphResponse::Snapshot(r)) => match r.snapshot.nodes.first() {
+            Some(node) => format!(
+                "Snapshot capped at {} of {} nodes; call `code_graph context name={}` to drill in.",
+                r.snapshot.nodes.len(),
+                r.snapshot.total_nodes,
+                node.label,
+            ),
+            None => FALLBACK_NEXT_STEP.to_string(),
+        },
         _ => FALLBACK_NEXT_STEP.to_string(),
     }
 }
@@ -1090,7 +1128,7 @@ fn pick_next_step_target(symbols: &[crate::bridge::DetectedTouchedSymbol]) -> Op
 impl DjinnMcpServer {
     /// Query the repository dependency graph built from SCIP indexer output.
     #[tool(
-        description = "Query the repository dependency graph built from SCIP indexer output and the commit-based file-coupling index. Operations: neighbors (edges in/out of a node, with optional group_by=file rollup), ranked (top nodes; sort_by pagerank/in_degree/out_degree/total_degree), impact (transitive dependents, with optional group_by=file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup), cycles (strongly-connected components), orphans (zero-incoming-reference nodes, with visibility filter), path (shortest dependency path), edges (enumerate edges by from_glob/to_glob), symbols_at (given file+line range, return SCIP symbols whose definition range encloses those lines — diff-hunk → symbol lookup), diff_touches (given a list of changed line ranges parsed from `git diff --unified=0 base..head`, return every base-graph symbol touched, with fan-in/fan-out and file grouping; the base graph is always current main — this op does NOT build a head graph), detect_changes (given from_sha + to_sha [or a changed_files list], return touched symbols + their PageRank tier [High/Medium/Low quartile] + per-file rollup; shells out to `git diff --unified=0 from_sha..to_sha` server-side and maps hunks via symbols_enclosing — replaces the architect's manual diff inspection), describe (symbol signature/documentation without an LSP round trip), context (PR C1: 360° symbol view — categorized incoming/outgoing dicts [calls/reads/writes/extends/implements/...], plus structured method_metadata when SCIP populates it; pass include_content=true to include the symbol body. Each category list is hard-capped at 30 entries), status (peek at the persisted canonical graph cache; never warms), api_surface (list every public symbol with fan-in/fan-out and a used-outside-crate signal), boundary_check (edge-based architecture rule scanner over from_glob→to_glob pairs; returns forbidden violations), hotspots (file churn × centrality ranking over a configurable window; top_symbols per file), complexity (rank functions or files by complexity metric — target: functions|files, sort_by: cognitive|cyclomatic|nloc|max_nesting|param_count, file_glob, limit), refactor_candidates (composite refactor-priority ranking — fuses cognitive complexity × file-level churn × PageRank into a single z-score and surfaces the top function-level targets; respects since_days [default 90, clamped 1..=365], file_glob, limit [default 30, clamped 1..=200]; each entry carries the composite score, a tier label [high/medium/low], and the underlying raw + z-score signals so callers can re-rank locally), metrics_at (scalar graph snapshot: node/edge/cycle counts, god-object floor, orphans, public API and doc coverage), dead_symbols (no-incoming-edge-from-entry-points enumeration; confidence=high|med|low), deprecated_callers (symbols whose signature/documentation contains #[deprecated] or @deprecated, with caller list), touches_hot_path (given entry and sink SCIP keys, report which queried symbols sit on any entry→sink shortest path), coupling (files most frequently co-edited with `file`, sourced from the per-commit change log; returns co-edit count, last co-edit timestamp, and up to three supporting SHAs per peer), churn (top files by distinct-commit count over an optional `since_days` window; returns commit count, cumulative insertions/deletions, and last-touched timestamp), coupling_hotspots (top file PAIRS by co-edit count project-wide; returns [{file_a,file_b,co_edits,last_co_edit}]; respects `since_days` and `max_files_per_commit` [default 15] — useful for spotting implicit coupling between distant parts of the tree), coupling_hubs (top FILES by cumulative coupling across all partners; returns [{file_path,total_coupling,partner_count}] — change-propagation risk map, higher total_coupling means a touch to this file is more likely to require touching many others), snapshot (PR D2: full graph snapshot capped by PageRank tier — returns {snapshot:{project_id,git_head,generated_at,truncated,total_nodes,total_edges,node_cap,nodes,edges}}; default cap 2000 nodes [Sigma WebGL ceiling], settable via `limit` up to 10k. Drives the `/code-graph` UI's force-directed render). All coupling / churn outputs are filtered through the project's `project_graph_exclusions` glob list at query time, so tuning exclusions takes effect without re-ingesting."
+        description = "Query the repository dependency graph built from SCIP indexer output and the commit-based file-coupling index. Operations: neighbors (edges in/out of a node, with optional group_by=file rollup), ranked (top nodes; sort_by pagerank/in_degree/out_degree/total_degree), impact (transitive dependents, with optional group_by=file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup), cycles (strongly-connected components), orphans (zero-incoming-reference nodes, with visibility filter), path (shortest dependency path), edges (enumerate edges by from_glob/to_glob), symbols_at (given file+line range, return SCIP symbols whose definition range encloses those lines — diff-hunk → symbol lookup), diff_touches (given a list of changed line ranges parsed from `git diff --unified=0 base..head`, return every base-graph symbol touched, with fan-in/fan-out and file grouping; the base graph is always current main — this op does NOT build a head graph), detect_changes (given from_sha + to_sha [or a changed_files list], return touched symbols + their PageRank tier [High/Medium/Low quartile] + per-file rollup; shells out to `git diff --unified=0 from_sha..to_sha` server-side and maps hunks via symbols_enclosing — replaces the architect's manual diff inspection), describe (symbol signature/documentation without an LSP round trip), context (PR C1: 360° symbol view — categorized incoming/outgoing dicts [calls/reads/writes/extends/implements/...], plus structured method_metadata when SCIP populates it; pass include_content=true to include the symbol body. Each category list is hard-capped at 30 entries), status (peek at the persisted canonical graph cache; never warms), api_surface (list every public symbol with fan-in/fan-out and a used-outside-crate signal), boundary_check (edge-based architecture rule scanner over from_glob→to_glob pairs; returns forbidden violations), hotspots (file churn × centrality ranking over a configurable window; top_symbols per file), complexity (rank functions or files by complexity metric — target: functions|files, sort_by: cognitive|cyclomatic|nloc|max_nesting|param_count, file_glob, limit), refactor_candidates (composite refactor-priority ranking — fuses cognitive complexity × file-level churn × PageRank into a single z-score and surfaces the top function-level targets; respects since_days [default 90, clamped 1..=365], file_glob, limit [default 30, clamped 1..=200]; each entry carries the composite score, a tier label [high/medium/low], and the underlying raw + z-score signals so callers can re-rank locally), metrics_at (scalar graph snapshot: node/edge/cycle counts, god-object floor, orphans, public API and doc coverage), dead_symbols (no-incoming-edge-from-entry-points enumeration; confidence=high|med|low), deprecated_callers (symbols whose signature/documentation contains #[deprecated] or @deprecated, with caller list), touches_hot_path (given entry and sink SCIP keys, report which queried symbols sit on any entry→sink shortest path), coupling (files most frequently co-edited with `file`, sourced from the per-commit change log; returns co-edit count, last co-edit timestamp, and up to three supporting SHAs per peer), churn (top files by distinct-commit count over an optional `since_days` window; returns commit count, cumulative insertions/deletions, and last-touched timestamp), coupling_hotspots (top file PAIRS by co-edit count project-wide; returns [{file_a,file_b,co_edits,last_co_edit}]; respects `since_days` and `max_files_per_commit` [default 15] — useful for spotting implicit coupling between distant parts of the tree), coupling_hubs (top FILES by cumulative coupling across all partners; returns [{file_path,total_coupling,partner_count}] — change-propagation risk map, higher total_coupling means a touch to this file is more likely to require touching many others), snapshot (PR D2: full graph snapshot capped by PageRank tier — returns {snapshot:{project_id,git_head,generated_at,truncated,total_nodes,total_edges,node_cap,nodes,edges}}; default cap 2000 nodes [Sigma WebGL ceiling], settable via `limit` up to 10k. Drives the `/code-graph` UI's force-directed render. Pass tests=include|exclude|only to filter test files/symbols — include is the default [whole graph], exclude drops everything marked is_test, only keeps test nodes; classification is the canonical is_test flag built from the file-path convention OR the SCIP Test role). All coupling / churn outputs are filtered through the project's `project_graph_exclusions` glob list at query time, so tuning exclusions takes effect without re-ingesting."
     )]
     pub async fn code_graph(
         &self,
@@ -1122,9 +1160,10 @@ impl DjinnMcpServer {
             }
         };
         params.project_id = project.id.clone();
-        params.project_path = djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
-            .to_string_lossy()
-            .into_owned();
+        params.project_path =
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
+                .to_string_lossy()
+                .into_owned();
 
         // Build the resolved `ProjectCtx` once. Inner handlers pass it
         // straight to the `RepoGraphOps` bridge so no downstream code
@@ -1329,31 +1368,30 @@ impl DjinnMcpServer {
             "context",
         ];
         if single_key_ops.contains(&params.operation.as_str())
-            && let Some(key) = params.key.as_deref().filter(|k| !k.is_empty()) {
-                let kind_hint = params.kind_hint.as_deref();
-                match graph.resolve(ctx, key, kind_hint).await? {
-                    ResolveOutcome::Found(uid) => {
-                        params.key = Some(uid);
-                    }
-                    ResolveOutcome::Ambiguous(candidates) => {
-                        return Ok(Some(CodeGraphResponse::Ambiguous(
-                            AmbiguousResponse {
-                                candidates,
-                                next_step: None,
-                            },
-                        )));
-                    }
-                    ResolveOutcome::NotFound => {
-                        return Ok(Some(CodeGraphResponse::NotFound(NotFoundResponse {
-                            not_found: NotFoundDetail {
-                                query: key.to_string(),
-                                kind_hint: kind_hint.map(str::to_string),
-                            },
-                            next_step: None,
-                        })));
-                    }
+            && let Some(key) = params.key.as_deref().filter(|k| !k.is_empty())
+        {
+            let kind_hint = params.kind_hint.as_deref();
+            match graph.resolve(ctx, key, kind_hint).await? {
+                ResolveOutcome::Found(uid) => {
+                    params.key = Some(uid);
+                }
+                ResolveOutcome::Ambiguous(candidates) => {
+                    return Ok(Some(CodeGraphResponse::Ambiguous(AmbiguousResponse {
+                        candidates,
+                        next_step: None,
+                    })));
+                }
+                ResolveOutcome::NotFound => {
+                    return Ok(Some(CodeGraphResponse::NotFound(NotFoundResponse {
+                        not_found: NotFoundDetail {
+                            query: key.to_string(),
+                            kind_hint: kind_hint.map(str::to_string),
+                        },
+                        next_step: None,
+                    })));
                 }
             }
+        }
 
         // `path` takes two keys; resolve both.
         if params.operation == "path" {
@@ -1373,12 +1411,10 @@ impl DjinnMcpServer {
                         }
                     }
                     ResolveOutcome::Ambiguous(candidates) => {
-                        return Ok(Some(CodeGraphResponse::Ambiguous(
-                            AmbiguousResponse {
-                                candidates,
-                                next_step: None,
-                            },
-                        )));
+                        return Ok(Some(CodeGraphResponse::Ambiguous(AmbiguousResponse {
+                            candidates,
+                            next_step: None,
+                        })));
                     }
                     ResolveOutcome::NotFound => {
                         return Ok(Some(CodeGraphResponse::NotFound(NotFoundResponse {
@@ -1518,11 +1554,7 @@ impl DjinnMcpServer {
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         let key = require_key(params)?;
-        let implementations = self
-            .state
-            .repo_graph()
-            .implementations(ctx, key)
-            .await?;
+        let implementations = self.state.repo_graph().implementations(ctx, key).await?;
         Ok(CodeGraphResponse::Implementations(
             ImplementationsResponse {
                 symbol: key.to_string(),
@@ -1546,9 +1578,7 @@ impl DjinnMcpServer {
         if let Some(c) = params.min_confidence
             && !(0.0..=1.0).contains(&c)
         {
-            return Err(format!(
-                "invalid min_confidence {c}: must be in [0.0, 1.0]"
-            ));
+            return Err(format!("invalid min_confidence {c}: must be in [0.0, 1.0]"));
         }
         let result = self
             .state
@@ -1625,9 +1655,7 @@ impl DjinnMcpServer {
         let exclusions = self.load_graph_exclusions(&params.project_id).await;
         let hits: Vec<SearchHit> = hits
             .into_iter()
-            .filter(|h| {
-                !exclusions.excludes(&h.key, h.file.as_deref(), &h.display_name)
-            })
+            .filter(|h| !exclusions.excludes(&h.key, h.file.as_deref(), &h.display_name))
             .take(limit)
             .collect();
         Ok(CodeGraphResponse::Search(SearchResponse {
@@ -1652,11 +1680,7 @@ impl DjinnMcpServer {
         let cycles = self
             .state
             .repo_graph()
-            .cycles(
-                ctx,
-                params.kind_filter.as_deref(),
-                fetch_floor,
-            )
+            .cycles(ctx, params.kind_filter.as_deref(), fetch_floor)
             .await?;
         let exclusions = self.load_graph_exclusions(&params.project_id).await;
         let cycles: Vec<CycleGroup> = cycles
@@ -1705,9 +1729,7 @@ impl DjinnMcpServer {
         let exclusions = self.load_graph_exclusions(&params.project_id).await;
         let orphans: Vec<OrphanEntry> = orphans
             .into_iter()
-            .filter(|o| {
-                !exclusions.excludes_orphan(&o.key, o.file.as_deref(), &o.display_name)
-            })
+            .filter(|o| !exclusions.excludes_orphan(&o.key, o.file.as_deref(), &o.display_name))
             .take(limit)
             .collect();
         Ok(CodeGraphResponse::Orphans(OrphansResponse {
@@ -1781,11 +1803,7 @@ impl DjinnMcpServer {
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
         let key = require_key(params)?;
-        let description = self
-            .state
-            .repo_graph()
-            .describe(ctx, key)
-            .await?;
+        let description = self.state.repo_graph().describe(ctx, key).await?;
         Ok(CodeGraphResponse::Describe(DescribeResponse {
             description,
             next_step: None,
@@ -1850,7 +1868,9 @@ impl DjinnMcpServer {
             )
         })?;
         let start_line_u32 = u32::try_from(start_line.max(0)).unwrap_or(0);
-        let end_line_u32 = params.end_line.map(|n| u32::try_from(n.max(0)).unwrap_or(0));
+        let end_line_u32 = params
+            .end_line
+            .map(|n| u32::try_from(n.max(0)).unwrap_or(0));
         let hits = self
             .state
             .repo_graph()
@@ -1949,9 +1969,9 @@ impl DjinnMcpServer {
         // noise — match the diff_touches policy.
         let exclusions = self.load_graph_exclusions(&params.project_id).await;
         let mut filtered = result;
-        filtered.touched_symbols.retain(|s| {
-            !exclusions.excludes(&s.uid, Some(&s.file_path), &s.name)
-        });
+        filtered
+            .touched_symbols
+            .retain(|s| !exclusions.excludes(&s.uid, Some(&s.file_path), &s.name));
         // Rebuild `by_file` after filtering so the rollup matches.
         let mut by_file: std::collections::BTreeMap<String, Vec<_>> =
             std::collections::BTreeMap::new();
@@ -1972,10 +1992,12 @@ impl DjinnMcpServer {
             )
         });
 
-        Ok(CodeGraphResponse::DetectedChanges(DetectedChangesResponse {
-            detected_changes: filtered,
-            next_step,
-        }))
+        Ok(CodeGraphResponse::DetectedChanges(
+            DetectedChangesResponse {
+                detected_changes: filtered,
+                next_step,
+            },
+        ))
     }
 
     /// Handler for `operation = "api_surface"`.
@@ -2001,9 +2023,7 @@ impl DjinnMcpServer {
         let exclusions = self.load_graph_exclusions(&params.project_id).await;
         let symbols: Vec<ApiSurfaceEntry> = symbols
             .into_iter()
-            .filter(|e| {
-                !exclusions.excludes(&e.key, e.file.as_deref(), &e.display_name)
-            })
+            .filter(|e| !exclusions.excludes(&e.key, e.file.as_deref(), &e.display_name))
             .take(limit)
             .collect();
         Ok(CodeGraphResponse::ApiSurface(ApiSurfaceResponse {
@@ -2018,23 +2038,17 @@ impl DjinnMcpServer {
         ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
-        let rules = params.rules.as_deref().ok_or_else(|| {
-            format!(
-                "'rules' is required for operation '{}'",
-                params.operation
-            )
-        })?;
+        let rules = params
+            .rules
+            .as_deref()
+            .ok_or_else(|| format!("'rules' is required for operation '{}'", params.operation))?;
         if rules.is_empty() {
             return Err(format!(
                 "'rules' must not be empty for operation '{}'",
                 params.operation
             ));
         }
-        let violations = self
-            .state
-            .repo_graph()
-            .boundary_check(ctx, rules)
-            .await?;
+        let violations = self.state.repo_graph().boundary_check(ctx, rules).await?;
         Ok(CodeGraphResponse::BoundaryCheck(BoundaryCheckResponse {
             violations,
             next_step: None,
@@ -2054,12 +2068,7 @@ impl DjinnMcpServer {
         let hotspots = self
             .state
             .repo_graph()
-            .hotspots(
-                ctx,
-                window_u32,
-                params.file_glob.as_deref(),
-                limit,
-            )
+            .hotspots(ctx, window_u32, params.file_glob.as_deref(), limit)
             .await?;
         Ok(CodeGraphResponse::Hotspots(HotspotsResponse {
             hotspots,
@@ -2126,11 +2135,7 @@ impl DjinnMcpServer {
         ctx: &ProjectCtx,
         _params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
-        let metrics = self
-            .state
-            .repo_graph()
-            .metrics_at(ctx)
-            .await?;
+        let metrics = self.state.repo_graph().metrics_at(ctx).await?;
         Ok(CodeGraphResponse::MetricsAt(MetricsAtResponse {
             metrics,
             next_step: None,
@@ -2310,27 +2315,22 @@ impl DjinnMcpServer {
         ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
-        let seed_entries = params
-            .seed_entries
-            .as_deref()
-            .ok_or_else(|| {
-                format!(
-                    "'seed_entries' is required for operation '{}'",
-                    params.operation
-                )
-            })?;
+        let seed_entries = params.seed_entries.as_deref().ok_or_else(|| {
+            format!(
+                "'seed_entries' is required for operation '{}'",
+                params.operation
+            )
+        })?;
         let seed_sinks = params.seed_sinks.as_deref().ok_or_else(|| {
             format!(
                 "'seed_sinks' is required for operation '{}'",
                 params.operation
             )
         })?;
-        let symbols = params.symbols.as_deref().ok_or_else(|| {
-            format!(
-                "'symbols' is required for operation '{}'",
-                params.operation
-            )
-        })?;
+        let symbols = params
+            .symbols
+            .as_deref()
+            .ok_or_else(|| format!("'symbols' is required for operation '{}'", params.operation))?;
         let hits = self
             .state
             .repo_graph()
@@ -2369,11 +2369,26 @@ impl DjinnMcpServer {
             .unwrap_or(2_000)
             .clamp(1, 10_000);
         let exclusions = self.load_graph_exclusions(&params.project_id).await;
-        let snapshot = self
+        let mut snapshot = self
             .state
             .repo_graph()
             .snapshot(ctx, node_cap, &exclusions)
             .await?;
+        // v10: apply the `tests=` filter to the assembled snapshot. The
+        // UI defaults to `include` (it toggles test visibility
+        // client-side off `SnapshotNode.is_test`); agents can pass
+        // `exclude` / `only` to get a server-side-narrowed graph. Drop
+        // edges whose endpoints no longer survive so the wire shape
+        // stays internally consistent.
+        let filter = TestFilter::parse(params.tests.as_deref(), TestFilter::Include);
+        if filter != TestFilter::Include {
+            snapshot.nodes.retain(|n| filter.keeps(n.is_test));
+            let kept: std::collections::HashSet<&str> =
+                snapshot.nodes.iter().map(|n| n.id.as_str()).collect();
+            snapshot
+                .edges
+                .retain(|e| kept.contains(e.from.as_str()) && kept.contains(e.to.as_str()));
+        }
         Ok(CodeGraphResponse::Snapshot(SnapshotResponse {
             snapshot,
             next_step: None,
@@ -2418,10 +2433,7 @@ mod tests {
         unsafe {
             std::env::set_var("DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE", "hybrid");
         }
-        assert_eq!(
-            resolve_search_mode(Some("name")).unwrap(),
-            SearchMode::Name
-        );
+        assert_eq!(resolve_search_mode(Some("name")).unwrap(), SearchMode::Name);
         // Explicit `hybrid` also resolves.
         assert_eq!(
             resolve_search_mode(Some("hybrid")).unwrap(),
@@ -2509,6 +2521,41 @@ mod tests {
         assert!(validate_edge_kind_filter(Some("unknown")).is_err());
     }
 
+    #[test]
+    fn test_filter_parse_maps_aliases_and_default() {
+        assert_eq!(
+            TestFilter::parse(Some("exclude"), TestFilter::Include),
+            TestFilter::Exclude
+        );
+        assert_eq!(
+            TestFilter::parse(Some("ONLY"), TestFilter::Include),
+            TestFilter::Only
+        );
+        assert_eq!(
+            TestFilter::parse(Some(" include "), TestFilter::Exclude),
+            TestFilter::Include
+        );
+        // Unknown / absent falls back to the per-op default.
+        assert_eq!(
+            TestFilter::parse(Some("garbage"), TestFilter::Exclude),
+            TestFilter::Exclude
+        );
+        assert_eq!(
+            TestFilter::parse(None, TestFilter::Include),
+            TestFilter::Include
+        );
+    }
+
+    #[test]
+    fn test_filter_keeps_respects_mode() {
+        assert!(TestFilter::Include.keeps(true));
+        assert!(TestFilter::Include.keeps(false));
+        assert!(!TestFilter::Exclude.keeps(true));
+        assert!(TestFilter::Exclude.keeps(false));
+        assert!(TestFilter::Only.keeps(true));
+        assert!(!TestFilter::Only.keeps(false));
+    }
+
     fn test_params(op: &str) -> CodeGraphParams {
         CodeGraphParams {
             operation: op.to_string(),
@@ -2552,6 +2599,7 @@ mod tests {
             include_content: None,
             mode: None,
             target: None,
+            tests: None,
         }
     }
 
@@ -3228,7 +3276,10 @@ mod tests {
         assert!(inner.get("symbol").is_some(), "no nested symbol: {json}");
         assert!(inner.get("incoming").is_some(), "no incoming map: {json}");
         assert!(inner.get("outgoing").is_some(), "no outgoing map: {json}");
-        assert!(inner.get("processes").is_some(), "no processes list: {json}");
+        assert!(
+            inner.get("processes").is_some(),
+            "no processes list: {json}"
+        );
     }
 
     #[test]
@@ -3259,22 +3310,25 @@ mod tests {
             ("orphans", empty_orphans()),
             ("describe", empty_describe()),
             ("context", empty_context()),
-            ("metrics_at", CodeGraphResponse::MetricsAt(MetricsAtResponse {
-                metrics: MetricsAtResult {
-                    commit: "abc123".to_string(),
-                    node_count: 0,
-                    edge_count: 0,
-                    cycle_count: 0,
-                    cycle_count_symbol_only: 0,
-                    cycle_count_file_only: 0,
-                    cycles_by_size_histogram: Default::default(),
-                    god_object_count: 0,
-                    orphan_count: 0,
-                    public_api_count: 0,
-                    doc_coverage_pct: 0.0,
-                },
-                next_step: None,
-            })),
+            (
+                "metrics_at",
+                CodeGraphResponse::MetricsAt(MetricsAtResponse {
+                    metrics: MetricsAtResult {
+                        commit: "abc123".to_string(),
+                        node_count: 0,
+                        edge_count: 0,
+                        cycle_count: 0,
+                        cycle_count_symbol_only: 0,
+                        cycle_count_file_only: 0,
+                        cycles_by_size_histogram: Default::default(),
+                        god_object_count: 0,
+                        orphan_count: 0,
+                        public_api_count: 0,
+                        doc_coverage_pct: 0.0,
+                    },
+                    next_step: None,
+                }),
+            ),
         ];
         for (op, mut response) in cases {
             attach_next_step_hint(op, &mut response);
@@ -3453,10 +3507,7 @@ mod tests {
             total: 30,
             modules: 3,
         };
-        assert_eq!(
-            impact_summary(m),
-            "12 direct caller(s) across 3 module(s)"
-        );
+        assert_eq!(impact_summary(m), "12 direct caller(s) across 3 module(s)");
     }
 
     #[test]
@@ -3616,7 +3667,9 @@ mod tests {
         // doesn't collide with any other variant's discriminator.
         let response = CodeGraphResponse::Snapshot(empty_snapshot_response());
         let json = serde_json::to_value(&response).expect("serialize");
-        let obj = json.as_object().expect("snapshot variant should be an object");
+        let obj = json
+            .as_object()
+            .expect("snapshot variant should be an object");
         assert!(
             obj.contains_key("snapshot"),
             "snapshot variant must surface the `snapshot` field: {json}"
@@ -3674,6 +3727,7 @@ mod tests {
             pagerank: 0.42,
             community_id: None,
             cognitive: None,
+            is_test: false,
         });
         response.snapshot.edges.push(crate::bridge::SnapshotEdge {
             from: "file:src/main.rs".to_string(),
@@ -3682,8 +3736,7 @@ mod tests {
             confidence: 0.95,
             reason: None,
         });
-        let json = serde_json::to_value(CodeGraphResponse::Snapshot(response))
-            .expect("serialize");
+        let json = serde_json::to_value(CodeGraphResponse::Snapshot(response)).expect("serialize");
         let snapshot = json
             .get("snapshot")
             .and_then(|s| s.as_object())

@@ -8,6 +8,7 @@ pub mod message;
 pub mod models;
 pub mod paths;
 pub mod run_progress;
+pub mod test_paths;
 
 /// Sentinel `users.github_id` for the synthetic "automation" service user that
 /// owns system-initiated work (board patrols, wave-planning, escalations,

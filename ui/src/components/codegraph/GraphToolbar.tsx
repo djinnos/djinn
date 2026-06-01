@@ -78,6 +78,8 @@ export function GraphToolbar({ className }: GraphToolbarProps) {
   const toggleNodeKind = useCodeGraphStore((s) => s.toggleNodeKind);
   const symbolKindFilters = useCodeGraphStore((s) => s.symbolKindFilters);
   const toggleSymbolKind = useCodeGraphStore((s) => s.toggleSymbolKind);
+  const hideTests = useCodeGraphStore((s) => s.hideTests);
+  const setHideTests = useCodeGraphStore((s) => s.setHideTests);
   const depthFilter = useCodeGraphStore((s) => s.depthFilter);
   const setDepthFilter = useCodeGraphStore((s) => s.setDepthFilter);
   const selectionId = useCodeGraphStore((s) => s.selectionId);
@@ -149,6 +151,21 @@ export function GraphToolbar({ className }: GraphToolbarProps) {
             </Chip>
           );
         })}
+      </FilterGroup>
+
+      <FilterGroup label="Tests">
+        <Chip
+          active={hideTests}
+          onClick={() => setHideTests(!hideTests)}
+          testId="tests-hide-toggle"
+          title={
+            hideTests
+              ? "Showing production only — click to include test files & symbols"
+              : "Showing the whole graph — click to hide test files & symbols"
+          }
+        >
+          Hide tests
+        </Chip>
       </FilterGroup>
 
       <div className="ml-auto flex items-center gap-3">

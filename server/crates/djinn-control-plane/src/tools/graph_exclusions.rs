@@ -119,50 +119,14 @@ pub fn is_generated_or_mock_path(file: &str) -> bool {
 
 /// True for test files by file-naming and directory convention. Shared
 /// across the agent dispatch (`blast_radius` categorisation) and the
-/// MCP bridge (`ranked include_tests` filter, `orphans` cleanup) so
-/// callers don't drift on what counts as a test.
+/// MCP bridge (`code_graph tests=` filter, `orphans` cleanup) so callers
+/// don't drift on what counts as a test.
 ///
-/// Heuristics (file-path conventional, language-aware):
-/// - Basename suffixes: `*_test.{go,rs,py,kt,scala}`,
-///   `*.test.{ts,tsx,js,jsx,mjs}`, `*.spec.{ts,tsx,js,jsx,rb}`,
-///   `tests.rs` (Rust convention).
-/// - Dir segments: `/tests/`, `/test/`, `/__tests__/` (anchored on
-///   `/` so a file legitimately named `protests.rs` outside such a dir
-///   is unaffected).
-///
-/// Conservative: when unsure, returns false so the file falls into
-/// the user's review-required bucket.
-pub fn is_test_path(path: &str) -> bool {
-    let basename = path.rsplit('/').next().unwrap_or(path);
-    if basename.ends_with("_test.go")
-        || basename.ends_with("_test.rs")
-        || basename.ends_with("_test.py")
-        || basename.ends_with("_test.kt")
-        || basename.ends_with("_test.scala")
-        || basename.ends_with(".test.ts")
-        || basename.ends_with(".test.tsx")
-        || basename.ends_with(".test.js")
-        || basename.ends_with(".test.jsx")
-        || basename.ends_with(".test.mjs")
-        || basename.ends_with("_spec.rb")
-        || basename.ends_with(".spec.ts")
-        || basename.ends_with(".spec.tsx")
-        || basename.ends_with(".spec.js")
-        || basename.ends_with(".spec.jsx")
-        || basename == "tests.rs"
-    {
-        return true;
-    }
-    if path.contains("/tests/")
-        || path.starts_with("tests/")
-        || path.contains("/test/")
-        || path.starts_with("test/")
-        || path.contains("/__tests__/")
-    {
-        return true;
-    }
-    false
-}
+/// v10: the canonical implementation now lives in `djinn_core::test_paths`
+/// (so the graph builder stamps `RepoGraphNode::is_test` from the exact
+/// same rule); this is a re-export to keep every existing call site
+/// working without this crate taking a `djinn-graph` dependency.
+pub use djinn_core::test_paths::is_test_path;
 
 /// Compiled predicate used by the `code_graph` MCP handler to filter
 /// cycles / orphans / ranked results.
@@ -395,10 +359,7 @@ mod tests {
 
     #[test]
     fn orphan_ignore_matches_exact_file_only() {
-        let ex = GraphExclusions::build(
-            &[],
-            &["crates/test-support/src/fixtures.rs".into()],
-        );
+        let ex = GraphExclusions::build(&[], &["crates/test-support/src/fixtures.rs".into()]);
         // Exact match → ignored for orphans
         assert!(ex.excludes_orphan(
             "symbol:...",
@@ -424,10 +385,8 @@ mod tests {
         // `**/[unclosed` isn't a valid glob. The filter should still
         // build (with the bad pattern silently dropped) and the good
         // pattern should still work.
-        let ex = GraphExclusions::build(
-            &["**/[unclosed".into(), "**/workspace-hack/**".into()],
-            &[],
-        );
+        let ex =
+            GraphExclusions::build(&["**/[unclosed".into(), "**/workspace-hack/**".into()], &[]);
         assert!(ex.excludes(
             "file:workspace-hack/src/lib.rs",
             Some("workspace-hack/src/lib.rs"),
@@ -438,11 +397,7 @@ mod tests {
     #[test]
     fn empty_filter_still_applies_tier1() {
         let ex = GraphExclusions::empty();
-        assert!(ex.excludes(
-            "symbol:rust-analyzer cargo foo 0.1.0 crate/",
-            None,
-            "crate",
-        ));
+        assert!(ex.excludes("symbol:rust-analyzer cargo foo 0.1.0 crate/", None, "crate",));
         assert!(!ex.excludes(
             "file:crates/foo/src/lib.rs",
             Some("crates/foo/src/lib.rs"),
@@ -460,16 +415,24 @@ mod tests {
         assert!(is_generated_or_mock_path("api/handler.gen.go"));
         assert!(is_generated_or_mock_path("ui/src/api/client.gen.ts"));
         assert!(is_generated_or_mock_path("crates/foo/src/proto.gen.rs"));
-        assert!(is_generated_or_mock_path("internal/types/types_generated.go"));
+        assert!(is_generated_or_mock_path(
+            "internal/types/types_generated.go"
+        ));
         assert!(is_generated_or_mock_path("lib/models/user.g.dart"));
         assert!(is_generated_or_mock_path("lib/models/user.freezed.dart"));
         assert!(is_generated_or_mock_path("ui/generated/index.ts"));
         assert!(is_generated_or_mock_path("ui/src/__generated__/queries.ts"));
         assert!(is_generated_or_mock_path("__generated__/api.ts"));
         // Mocks.
-        assert!(is_generated_or_mock_path("internal/strategies/mocks/strategy_mock.go"));
-        assert!(is_generated_or_mock_path("internal/strategies/mocks/mock_strategy.go"));
-        assert!(is_generated_or_mock_path("internal/repository/sync_mocks.go"));
+        assert!(is_generated_or_mock_path(
+            "internal/strategies/mocks/strategy_mock.go"
+        ));
+        assert!(is_generated_or_mock_path(
+            "internal/strategies/mocks/mock_strategy.go"
+        ));
+        assert!(is_generated_or_mock_path(
+            "internal/repository/sync_mocks.go"
+        ));
         assert!(is_generated_or_mock_path("ui/src/services/auth.mock.ts"));
         assert!(is_generated_or_mock_path("ui/src/__mocks__/api.ts"));
         // Snapshot fixtures.
@@ -490,13 +453,17 @@ mod tests {
         // Words in the name but not the convention.
         assert!(!is_generated_or_mock_path("internal/util/mockable.go"));
         assert!(!is_generated_or_mock_path("internal/util/generator.go"));
-        assert!(!is_generated_or_mock_path("internal/util/generation_status.go"));
+        assert!(!is_generated_or_mock_path(
+            "internal/util/generation_status.go"
+        ));
         // `mock` as standalone basename without the `_mock`/`mock_` prefix.
         assert!(!is_generated_or_mock_path("internal/test_helpers/mock.go"));
         // `.proto` source files (the .pb.go is generated FROM these).
         assert!(!is_generated_or_mock_path("api/billing.proto"));
         // Tests are NOT in Tier 1.5 — that's a per-project decision.
-        assert!(!is_generated_or_mock_path("internal/worker/page_worker_test.go"));
+        assert!(!is_generated_or_mock_path(
+            "internal/worker/page_worker_test.go"
+        ));
         assert!(!is_generated_or_mock_path("crates/foo/src/tests.rs"));
     }
 

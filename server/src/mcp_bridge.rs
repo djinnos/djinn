@@ -3340,6 +3340,9 @@ fn build_snapshot_payload(
                 // nodes and unsupported languages — the UI maps null →
                 // muted gray so non-function nodes don't dominate.
                 cognitive: node.complexity.map(|c| c.cognitive),
+                // v10: canonical test flag (file-path convention OR SCIP
+                // Test role), stamped at graph-build time.
+                is_test: node.is_test,
             }
         })
         .collect();

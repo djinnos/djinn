@@ -100,6 +100,7 @@ export function useGraphReducers(
   const edgeKindFilters = useCodeGraphStore((s) => s.edgeKindFilters);
   const nodeKindFilters = useCodeGraphStore((s) => s.nodeKindFilters);
   const symbolKindFilters = useCodeGraphStore((s) => s.symbolKindFilters);
+  const hideTests = useCodeGraphStore((s) => s.hideTests);
   const depthFilter = useCodeGraphStore((s) => s.depthFilter);
   const colorMode = useCodeGraphStore((s) => s.colorMode);
 
@@ -172,6 +173,7 @@ export function useGraphReducers(
       edgeKindFilters,
       nodeKindFilters,
       symbolKindFilters,
+      hideTests,
       depthReachable,
       // Preserve the latest animated phase so we don't snap to 0
       // every time a non-pulse slice changes.
@@ -192,6 +194,7 @@ export function useGraphReducers(
     edgeKindFilters,
     nodeKindFilters,
     symbolKindFilters,
+    hideTests,
     depthReachable,
     colorMode,
     complexityThresholds,

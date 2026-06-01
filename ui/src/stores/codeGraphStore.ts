@@ -135,6 +135,11 @@ export interface CodeGraphHighlightState {
   edgeKindFilters: Record<string, boolean>;
   nodeKindFilters: Record<string, boolean>;
   symbolKindFilters: Record<string, boolean>;
+  /**
+   * v10: when true, hide test files and the symbols defined in them
+   * (canonical `is_test` classification). Default `false` (whole graph).
+   */
+  hideTests: boolean;
   depthFilter: number;
   /** Iter 30: see {@link ColorMode}. Default `"topology"`. */
   colorMode: ColorMode;
@@ -161,6 +166,8 @@ export interface CodeGraphHighlightActions {
   setEdgeKindEnabled: (kind: string, enabled: boolean) => void;
   toggleNodeKind: (kind: string) => void;
   toggleSymbolKind: (kind: string) => void;
+  /** v10: toggle hiding of test files/symbols. */
+  setHideTests: (hide: boolean) => void;
   setDepthFilter: (depth: number) => void;
   /** Iter 30: switch heatmap mode. */
   setColorMode: (mode: ColorMode) => void;
@@ -194,6 +201,7 @@ const INITIAL_STATE: CodeGraphHighlightState = {
   edgeKindFilters: defaultEdgeKindFilters(),
   nodeKindFilters: defaultNodeKindFilters(),
   symbolKindFilters: defaultSymbolKindFilters(),
+  hideTests: false,
   depthFilter: DEFAULT_DEPTH,
   colorMode: DEFAULT_COLOR_MODE,
   complexityAvailable: false,
@@ -267,6 +275,10 @@ export const useCodeGraphStore = create<
         [kind]: !(state.symbolKindFilters[kind] ?? true),
       },
     }));
+  },
+
+  setHideTests: (hide) => {
+    set({ hideTests: hide });
   },
 
   setDepthFilter: (depth) => {

@@ -49,6 +49,8 @@ export interface HighlightView {
   nodeKindFilters: Readonly<Record<string, boolean>>;
   /** Per-symbol-kind filter (function/method/class/...). */
   symbolKindFilters: Readonly<Record<string, boolean>>;
+  /** v10: when true, hide every node marked `isTest` (test files/symbols). */
+  hideTests: boolean;
   /**
    * Set of node ids reachable within `depthFilter` hops from the
    * selection. `null` means "depth filter disabled" (render every node).
@@ -100,6 +102,7 @@ export const EMPTY_HIGHLIGHT_VIEW: HighlightView = {
   edgeKindFilters: {},
   nodeKindFilters: {},
   symbolKindFilters: {},
+  hideTests: false,
   depthReachable: null,
   pulsePhase: 0,
   colorMode: "topology",
@@ -207,6 +210,13 @@ export function nodeReducer(
   attrs: Attributes,
   view: HighlightView,
 ): Attributes {
+  // v10: "hide tests" toggle. Drops every node the graph builder marked
+  // `isTest` (test files + symbols defined in them). Sits first so the
+  // gate fires regardless of any other highlight/filter state.
+  if (view.hideTests && attrs.isTest === true) {
+    return { ...attrs, hidden: true };
+  }
+
   // Node-kind filter (file/folder/symbol). Treat missing entries as
   // visible so an under-populated filter map never silently hides a
   // whole class of nodes.

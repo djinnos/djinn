@@ -36,6 +36,12 @@ export interface SnapshotNode {
    * don't dominate the eye.
    */
   cognitive?: number;
+  /**
+   * v10: true when this node is a test (File whose path matches the test
+   * convention, or a Symbol defined in such a file / SCIP `Test` role).
+   * Drives the "hide tests" toolbar toggle.
+   */
+  is_test?: boolean;
 }
 
 export interface SnapshotEdge {
@@ -104,6 +110,7 @@ export function parseSnapshotResponse(value: unknown): SnapshotPayload | null {
             typeof n.cognitive === "number" && Number.isFinite(n.cognitive)
               ? n.cognitive
               : undefined,
+          is_test: n.is_test === true,
         };
       })
       .filter((n) => n.id.length > 0),
@@ -550,6 +557,8 @@ function addNode(
      * language" — heatmap mode bins those into the gray bucket.
      */
     cognitive: node.cognitive,
+    /** v10: forwarded so the "hide tests" reducer can hide test nodes. */
+    isTest: node.is_test === true,
     /** Stash the topology color so we can restore it when toggling modes. */
     topologyColor: colorForNode(node),
   });

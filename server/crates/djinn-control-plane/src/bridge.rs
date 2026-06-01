@@ -411,6 +411,13 @@ pub struct SnapshotNode {
     /// this field's project-internal percentile.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cognitive: Option<u16>,
+    /// v10: true when this node is a test (File whose path matches the
+    /// test convention, or a Symbol defined in such a file / marked with
+    /// the SCIP `Test` role). Mirrors `RepoGraphNode::is_test`. Drives
+    /// the `/code-graph` "hide tests" toggle (client-side) and the
+    /// `code_graph tests=` server-side filter.
+    #[serde(default)]
+    pub is_test: bool,
 }
 
 /// PR D2: snapshot edge — one entry in the `snapshot.edges` array.
@@ -1073,11 +1080,7 @@ pub trait RepoGraphOps: Send + Sync {
     ) -> Result<Vec<RankedNode>, String>;
 
     /// Symbols that implement a given trait/interface symbol.
-    async fn implementations(
-        &self,
-        ctx: &ProjectCtx,
-        symbol: &str,
-    ) -> Result<Vec<String>, String>;
+    async fn implementations(&self, ctx: &ProjectCtx, symbol: &str) -> Result<Vec<String>, String>;
 
     /// Transitive impact set — nodes that depend on the queried node. When
     /// `group_by` is `Some("file")`, results are collapsed into per-file
@@ -1326,10 +1329,7 @@ pub trait RepoGraphOps: Send + Sync {
     ) -> Result<Vec<RefactorCandidate>, String>;
 
     /// Scalar graph snapshot of the currently-pinned canonical graph.
-    async fn metrics_at(
-        &self,
-        ctx: &ProjectCtx,
-    ) -> Result<MetricsAtResult, String>;
+    async fn metrics_at(&self, ctx: &ProjectCtx) -> Result<MetricsAtResult, String>;
 
     /// Symbols with zero incoming edges from the entry-point set
     /// (main + tests + crate-root re-exports), tiered by caller

@@ -68,7 +68,23 @@ const PAGE_RANK_ITERATIONS: usize = 25;
 ///   version bump still forces a re-warm so caches reflect the
 ///   freshly-computed metrics rather than running indefinitely with
 ///   `None` everywhere.
-pub const REPO_GRAPH_ARTIFACT_VERSION: u32 = 9;
+/// - v10: canonical test classification — `is_test` is now populated
+///   for File nodes and for every Symbol node via the file-path
+///   convention ([`is_test_path`]), OR-ed with the pre-existing SCIP
+///   `Test`-role signal. Previously `is_test` was symbol-only and set
+///   solely from the SCIP role (which most indexers never stamp), and
+///   File nodes hardcoded `false`. Old v9 blobs still deserialize but
+///   carry the under-populated flag; the bump forces a re-warm so the
+///   `/code-graph` "hide tests" toggle and the `code_graph tests=`
+///   filter see a complete classification.
+pub const REPO_GRAPH_ARTIFACT_VERSION: u32 = 10;
+
+/// Canonical "is this path a test file" classification — re-exported
+/// from [`djinn_core::test_paths`] (the single source of truth) so the
+/// build-time `RepoGraphNode::is_test` stamping uses the exact same rule
+/// as the control-plane `code_graph tests=` filter and the agent's
+/// blast-radius categoriser.
+pub use djinn_core::test_paths::is_test_path;
 
 // ── Edge confidence floor table (PR A2) ────────────────────────────────────
 //
@@ -362,9 +378,7 @@ fn apply_rrf_fused_rank(nodes: &mut [RankedRepoGraphNode]) {
         let da = nodes[a].entry_point_distance;
         let db = nodes[b].entry_point_distance;
         match (da, db) {
-            (Some(x), Some(y)) => x
-                .cmp(&y)
-                .then_with(|| nodes[a].key.cmp(&nodes[b].key)),
+            (Some(x), Some(y)) => x.cmp(&y).then_with(|| nodes[a].key.cmp(&nodes[b].key)),
             (Some(_), None) => std::cmp::Ordering::Less,
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => nodes[a].key.cmp(&nodes[b].key),
@@ -404,10 +418,7 @@ impl RepoDependencyGraph {
     /// SCIP output doesn't carry `ReadAccess`/`WriteAccess` role bits.
     /// Tests that don't need access classification should call
     /// [`Self::build`] (no on-disk file required).
-    pub fn build_with_source(
-        indices: &[ParsedScipIndex],
-        project_root: Option<&Path>,
-    ) -> Self {
+    pub fn build_with_source(indices: &[ParsedScipIndex], project_root: Option<&Path>) -> Self {
         let mut builder = RepoDependencyGraphBuilder {
             project_root: project_root.map(|p| p.to_path_buf()),
             ..RepoDependencyGraphBuilder::default()
@@ -456,9 +467,7 @@ impl RepoDependencyGraph {
     /// `EntryPointOf` edges after the SCIP-driven build pass. Not
     /// exposed publicly because callers outside the crate should never
     /// need to mutate edge structure directly.
-    pub(crate) fn graph_mut_unchecked(
-        &mut self,
-    ) -> &mut DiGraph<RepoGraphNode, RepoGraphEdge> {
+    pub(crate) fn graph_mut_unchecked(&mut self) -> &mut DiGraph<RepoGraphNode, RepoGraphEdge> {
         &mut self.graph
     }
 
@@ -707,12 +716,7 @@ impl RepoDependencyGraph {
             .map(|r| (r.start_line, r.end_line))
     }
 
-    pub fn symbols_enclosing(
-        &self,
-        file: &Path,
-        start_line: u32,
-        end_line: u32,
-    ) -> Vec<NodeIndex> {
+    pub fn symbols_enclosing(&self, file: &Path, start_line: u32, end_line: u32) -> Vec<NodeIndex> {
         let Some(ranges) = self.symbol_ranges.get(file) else {
             return Vec::new();
         };
@@ -1424,6 +1428,10 @@ impl RepoDependencyGraphBuilder {
         }
 
         let display_name = path.display().to_string();
+        // v10: stamp File nodes with the canonical path-convention test
+        // flag so the `/code-graph` UI toggle and `code_graph tests=`
+        // filter can hide whole test files.
+        let is_test = is_test_path(&display_name);
         let node = RepoGraphNode {
             id: key.clone(),
             kind: RepoGraphNodeKind::File,
@@ -1437,7 +1445,7 @@ impl RepoDependencyGraphBuilder {
             signature: None,
             documentation: Vec::new(),
             signature_parts: None,
-            is_test: false,
+            is_test,
             complexity: None,
         };
         let node_index = self.graph.add_node(node);
@@ -1473,7 +1481,11 @@ impl RepoDependencyGraphBuilder {
             signature: symbol.signature.clone(),
             documentation: symbol.documentation.clone(),
             signature_parts: symbol.signature_parts.clone(),
-            is_test: false,
+            // v10: a symbol defined in a test file is a test symbol. The
+            // SCIP `Test`-role signal is OR-ed in later (see `add_file`).
+            is_test: file_path
+                .map(|p| is_test_path(&p.display().to_string()))
+                .unwrap_or(false),
             complexity: None,
         };
         let node_index = self.graph.add_node(node);
@@ -1536,6 +1548,13 @@ impl RepoDependencyGraphBuilder {
         let file_path = self.symbol_file.get(symbol).cloned();
         let language = self.symbol_language.get(symbol).cloned();
         let is_external = !self.declared_symbols.contains(symbol);
+        // v10: classify placeholder symbols by their recorded definition
+        // file when known. Computed before the struct literal moves
+        // `file_path`.
+        let is_test = file_path
+            .as_ref()
+            .map(|p| is_test_path(&p.display().to_string()))
+            .unwrap_or(false);
         let node = RepoGraphNode {
             id: RepoNodeKey::Symbol(symbol.to_string()),
             kind: RepoGraphNodeKind::Symbol,
@@ -1549,7 +1568,7 @@ impl RepoDependencyGraphBuilder {
             signature: None,
             documentation: Vec::new(),
             signature_parts: None,
-            is_test: false,
+            is_test,
             complexity: None,
         };
         let key = node.id.clone();
@@ -1602,8 +1621,7 @@ impl RepoDependencyGraphBuilder {
 
     fn finish(mut self) -> RepoDependencyGraph {
         for ((source, target, kind), evidence_count) in self.edge_accumulator {
-            let (confidence, reason) =
-                derive_edge_confidence(&self.graph, source, target, kind);
+            let (confidence, reason) = derive_edge_confidence(&self.graph, source, target, kind);
             self.graph.add_edge(
                 source,
                 target,
@@ -1682,9 +1700,7 @@ fn build_name_index(
 /// from a freshly-set process list. The same node can appear in
 /// multiple processes (a shared utility called by several entry
 /// points), so the value is `Vec<usize>` rather than `Option<usize>`.
-fn build_process_lookup(
-    processes: &[crate::processes::Process],
-) -> BTreeMap<usize, Vec<usize>> {
+fn build_process_lookup(processes: &[crate::processes::Process]) -> BTreeMap<usize, Vec<usize>> {
     let mut out: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (process_pos, process) in processes.iter().enumerate() {
         for step in &process.steps {
@@ -1802,10 +1818,12 @@ where
                     continue;
                 }
                 if name_hit.is_none()
-                    && let (Some(disp), Some(fn_name)) = (display_name.as_deref(), fm.name.as_deref())
-                        && names_match(disp, fn_name) {
-                            name_hit = Some(i);
-                        }
+                    && let (Some(disp), Some(fn_name)) =
+                        (display_name.as_deref(), fm.name.as_deref())
+                    && names_match(disp, fn_name)
+                {
+                    name_hit = Some(i);
+                }
                 if overlap_hit.is_none() {
                     overlap_hit = Some(i);
                 }
@@ -1833,13 +1851,15 @@ fn names_match(scip_display: &str, ts_name: &str) -> bool {
         return true;
     }
     if let Some((_, tail)) = scip_display.rsplit_once("::")
-        && tail == ts_name {
-            return true;
-        }
+        && tail == ts_name
+    {
+        return true;
+    }
     if let Some((_, tail)) = scip_display.rsplit_once('.')
-        && tail == ts_name {
-            return true;
-        }
+        && tail == ts_name
+    {
+        return true;
+    }
     false
 }
 
@@ -1988,9 +2008,8 @@ impl RepoDependencyGraph {
         // PR F2: serialize the process sidecar. Each `Process` is keyed
         // by node positions (a `Vec<usize>`) rather than `NodeIndex`
         // values so the artifact survives a `from_artifact` rebuild.
-        let mut processes_out: Vec<RepoGraphArtifactProcess> = Vec::with_capacity(
-            self.processes.len(),
-        );
+        let mut processes_out: Vec<RepoGraphArtifactProcess> =
+            Vec::with_capacity(self.processes.len());
         for process in &self.processes {
             let Some(&entry_pos) = index_map.get(&process.entry_point_id) else {
                 continue;
@@ -2210,10 +2229,8 @@ impl RepoDependencyGraph {
             })
             .collect();
 
-        let mut surviving_symbol_ranges: BTreeMap<
-            PathBuf,
-            Vec<RepoGraphArtifactSymbolRange>,
-        > = BTreeMap::new();
+        let mut surviving_symbol_ranges: BTreeMap<PathBuf, Vec<RepoGraphArtifactSymbolRange>> =
+            BTreeMap::new();
         for (file, ranges) in &artifact.symbol_ranges {
             if changed_files.contains(file) {
                 continue;
@@ -2443,6 +2460,92 @@ mod tests {
         assert!(has_file_reference, "expected file->symbol reference edge");
     }
 
+    /// v10: the build stamps `is_test` on File nodes (and the symbols
+    /// defined in them) by the file-path convention, while leaving
+    /// production files/symbols unmarked.
+    #[test]
+    fn build_stamps_is_test_from_file_path_convention() {
+        let test_symbol_name = "scip-rust pkg tests/login_test.rs `it_logs_in`().".to_string();
+        let test_symbol = ScipSymbol {
+            symbol: test_symbol_name.clone(),
+            kind: Some(ScipSymbolKind::Function),
+            display_name: Some("it_logs_in".to_string()),
+            signature: Some("fn it_logs_in()".to_string()),
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+            signature_parts: None,
+        };
+        let prod_symbol_name = "scip-rust pkg src/login.rs `login`().".to_string();
+        let prod_symbol = ScipSymbol {
+            symbol: prod_symbol_name.clone(),
+            kind: Some(ScipSymbolKind::Function),
+            display_name: Some("login".to_string()),
+            signature: Some("fn login()".to_string()),
+            documentation: vec![],
+            relationships: vec![],
+            visibility: Some(crate::scip_parser::ScipVisibility::Public),
+            signature_parts: None,
+        };
+        let index = ParsedScipIndex {
+            metadata: ScipMetadata {
+                project_root: Some("file:///workspace/repo".to_string()),
+                tool_name: Some("rust-analyzer".to_string()),
+                tool_version: Some("1.0.0".to_string()),
+            },
+            files: vec![
+                ScipFile {
+                    language: "rust".to_string(),
+                    relative_path: PathBuf::from("tests/login_test.rs"),
+                    definitions: vec![definition_occurrence(&test_symbol_name)],
+                    references: vec![],
+                    occurrences: vec![definition_occurrence(&test_symbol_name)],
+                    symbols: vec![test_symbol],
+                },
+                ScipFile {
+                    language: "rust".to_string(),
+                    relative_path: PathBuf::from("src/login.rs"),
+                    definitions: vec![definition_occurrence(&prod_symbol_name)],
+                    references: vec![],
+                    occurrences: vec![definition_occurrence(&prod_symbol_name)],
+                    symbols: vec![prod_symbol],
+                },
+            ],
+            external_symbols: vec![],
+        };
+        let graph = RepoDependencyGraph::build(&[index]);
+
+        let test_file = graph
+            .file_node("tests/login_test.rs")
+            .expect("test file node should exist");
+        assert!(
+            graph.node(test_file).is_test,
+            "file under tests/ must be marked is_test"
+        );
+        let test_sym = graph
+            .symbol_node(&test_symbol_name)
+            .expect("test symbol node should exist");
+        assert!(
+            graph.node(test_sym).is_test,
+            "symbol defined in a test file must inherit is_test"
+        );
+
+        let prod_file = graph
+            .file_node("src/login.rs")
+            .expect("prod file node should exist");
+        assert!(
+            !graph.node(prod_file).is_test,
+            "production file must not be marked is_test"
+        );
+        let prod_sym = graph
+            .symbol_node(&prod_symbol_name)
+            .expect("prod symbol node should exist");
+        assert!(
+            !graph.node(prod_sym).is_test,
+            "production symbol must not be marked is_test"
+        );
+    }
+
     /// Regression test for the sparse PageRank replacement.  Validates
     /// the three properties the downstream ranking code depends on:
     ///
@@ -2615,7 +2718,7 @@ mod tests {
             documentation: vec!["returns a value".to_string()],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        signature_parts: None,
+            signature_parts: None,
         };
         let trait_symbol = ScipSymbol {
             symbol: "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
@@ -2625,7 +2728,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        signature_parts: None,
+            signature_parts: None,
         };
         let main_symbol = ScipSymbol {
             symbol: "scip-rust pkg src/app.rs `main`().".to_string(),
@@ -2639,7 +2742,7 @@ mod tests {
                 kinds: BTreeSet::from([ScipRelationshipKind::Implementation]),
             }],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        signature_parts: None,
+            signature_parts: None,
         };
 
         ParsedScipIndex {
@@ -3065,7 +3168,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Private),
-        signature_parts: None,
+            signature_parts: None,
         };
         let pub_sym = ScipSymbol {
             symbol: "scip-rust pkg src/main.rs `caller`().".to_string(),
@@ -3079,7 +3182,7 @@ mod tests {
                 kinds: BTreeSet::from([ScipRelationshipKind::Reference]),
             }],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        signature_parts: None,
+            signature_parts: None,
         };
         let index = ParsedScipIndex {
             metadata: ScipMetadata::default(),
@@ -3135,7 +3238,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        signature_parts: None,
+            signature_parts: None,
         };
         let value_field = ScipSymbol {
             symbol: field_symbol.clone(),
@@ -3145,7 +3248,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        signature_parts: None,
+            signature_parts: None,
         };
 
         let writer_sym = ScipSymbol {
@@ -3156,7 +3259,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        signature_parts: None,
+            signature_parts: None,
         };
         let reader_sym = ScipSymbol {
             symbol: "scip-rust pkg src/reader.rs `peek`().".to_string(),
@@ -3166,7 +3269,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        signature_parts: None,
+            signature_parts: None,
         };
 
         // Helper: build an occurrence with explicit roles, since the
@@ -3251,12 +3354,8 @@ mod tests {
         let counter_file = graph
             .file_node("src/counter.rs")
             .expect("counter file node");
-        let writer_file = graph
-            .file_node("src/writer.rs")
-            .expect("writer file node");
-        let reader_file = graph
-            .file_node("src/reader.rs")
-            .expect("reader file node");
+        let writer_file = graph.file_node("src/writer.rs").expect("writer file node");
+        let reader_file = graph.file_node("src/reader.rs").expect("reader file node");
         let field_node = graph.symbol_node(&field_symbol).expect("field node");
 
         // From the WRITE site, the field's symbol→counter_file edge should
@@ -3346,7 +3445,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        signature_parts: None,
+            signature_parts: None,
         };
         fn role_occurrence(symbol: &str, roles: BTreeSet<ScipSymbolRole>) -> ScipOccurrence {
             ScipOccurrence {
@@ -3418,9 +3517,7 @@ mod tests {
         let writes: Vec<_> = graph
             .graph()
             .edges_directed(field_node, petgraph::Direction::Outgoing)
-            .filter(|e| {
-                e.target() == counter_file && e.weight().kind == RepoGraphEdgeKind::Writes
-            })
+            .filter(|e| e.target() == counter_file && e.weight().kind == RepoGraphEdgeKind::Writes)
             .collect();
         let reads: Vec<_> = graph
             .graph()
@@ -3470,7 +3567,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        signature_parts: None,
+            signature_parts: None,
         };
         let new_index = ParsedScipIndex {
             metadata: ScipMetadata::default(),
@@ -3553,7 +3650,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        signature_parts: None,
+            signature_parts: None,
         };
         let new_index = ParsedScipIndex {
             metadata: ScipMetadata::default(),
@@ -3583,7 +3680,6 @@ mod tests {
         assert!(patched.file_node("src/app.rs").is_some());
         assert!(patched.file_node("src/helper.rs").is_some());
     }
-
 
     // ── Chunk B: search / cycles / orphans / path tests ─────────────────────
 
@@ -3622,7 +3718,7 @@ mod tests {
                 kinds: BTreeSet::from([ScipRelationshipKind::Reference]),
             }],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        signature_parts: None,
+            signature_parts: None,
         };
         let b_sym = ScipSymbol {
             symbol: "scip-rust pkg src/b.rs `b_fn`().".to_string(),
@@ -3636,7 +3732,7 @@ mod tests {
                 kinds: BTreeSet::from([ScipRelationshipKind::Reference]),
             }],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        signature_parts: None,
+            signature_parts: None,
         };
         let index = ParsedScipIndex {
             metadata: ScipMetadata::default(),
@@ -3684,7 +3780,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        signature_parts: None,
+            signature_parts: None,
         };
         let private_unused = ScipSymbol {
             symbol: "local 1".to_string(),
@@ -3694,7 +3790,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Private),
-        signature_parts: None,
+            signature_parts: None,
         };
         let index = ParsedScipIndex {
             metadata: ScipMetadata::default(),
@@ -3805,7 +3901,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        signature_parts: None,
+            signature_parts: None,
         };
         let inner_sym = ScipSymbol {
             symbol: "scip-rust pkg src/lib.rs `outer`/`Inner`#".to_string(),
@@ -3815,7 +3911,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        signature_parts: None,
+            signature_parts: None,
         };
         let method_sym = ScipSymbol {
             symbol: "scip-rust pkg src/lib.rs `outer`/`Inner`#`inner_method`().".to_string(),
@@ -3825,7 +3921,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        signature_parts: None,
+            signature_parts: None,
         };
         let sibling_sym = ScipSymbol {
             symbol: "scip-rust pkg src/lib.rs `sibling_fn`().".to_string(),
@@ -3835,7 +3931,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        signature_parts: None,
+            signature_parts: None,
         };
         let other_sym = ScipSymbol {
             symbol: "scip-rust pkg src/other.rs `other_fn`().".to_string(),
@@ -3845,7 +3941,7 @@ mod tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(crate::scip_parser::ScipVisibility::Public),
-        signature_parts: None,
+            signature_parts: None,
         };
 
         ParsedScipIndex {
@@ -4111,9 +4207,7 @@ mod tests {
         // `build` (no project_root) is the synthetic-fixture path used by
         // most unit tests in this file. The post-pass must short-circuit
         // gracefully — no panic, no metrics, just `None` everywhere.
-        let graph = RepoDependencyGraph::build(&[complexity_fixture(
-            COMPLEXITY_FIXTURE_SOURCE,
-        )]);
+        let graph = RepoDependencyGraph::build(&[complexity_fixture(COMPLEXITY_FIXTURE_SOURCE)]);
         let simple_idx = graph
             .symbol_node("scip-rust pkg src/lib.rs `simple`().")
             .expect("simple node");

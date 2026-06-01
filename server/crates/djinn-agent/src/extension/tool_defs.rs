@@ -414,6 +414,11 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
                     "enum": ["functions", "files"],
                     "description": "Target tier for complexity (default functions). 'files' aggregates by file_path."
                 },
+                "tests": {
+                    "type": "string",
+                    "enum": ["include", "exclude", "only"],
+                    "description": "Test-file filter for snapshot: include (default, whole graph), exclude (drop test files/symbols), only (test nodes only). Uses the canonical is_test classification (file-path convention OR SCIP Test role)."
+                },
                 "group_by": {
                     "type": "string",
                     "enum": ["file"],
@@ -844,10 +849,7 @@ pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
     // Phase 3: the `pr_review_context` meta-tool rides the same Architect-only
     // access contract as `code_graph` — it's a base-graph analysis surface
     // aimed at PR review.
-    tool_values.insert(
-        lsp_pos + 1,
-        serialize_tool(tool_pr_review_context(), true),
-    );
+    tool_values.insert(lsp_pos + 1, serialize_tool(tool_pr_review_context(), true));
     for value in shared_schemas::shared_lead_tool_schemas() {
         tool_values.push(value);
     }
