@@ -21,6 +21,7 @@ mod lsp_dispatch_tests;
 mod lsp_tool_boundary_tests;
 mod memory_dispatch_tests;
 mod schema_snapshot_tests;
+mod skill_read_tests;
 mod tool_dispatch_tests;
 
 /// Filesystem path a test can use in place of the removed `Project.path`

@@ -11,6 +11,7 @@ expression: names
   "memory_list",
   "shell",
   "read",
+  "skill_read",
   "lsp",
   "ci_job_log",
   "github_search",

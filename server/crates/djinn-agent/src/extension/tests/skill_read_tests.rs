@@ -1,0 +1,108 @@
+use super::*;
+use std::fs;
+
+/// `skill_read` is wired into the native tool dispatch like any other tool:
+/// it resolves the named skill from the session worktree and returns the full
+/// body, and errors cleanly for an unknown name.
+#[tokio::test]
+async fn skill_read_returns_content_for_known_skill_and_errors_for_unknown() {
+    let db = create_test_db();
+    let state = agent_context_from_db(db, CancellationToken::new());
+    let services = crate::test_helpers::test_services();
+
+    // Lay down a worktree with a `.djinn/skills/<name>.md` flat skill file.
+    let tmp = crate::test_helpers::test_tempdir("djinn-skill-read-");
+    let skills_dir = tmp.path().join(".djinn").join("skills");
+    fs::create_dir_all(&skills_dir).unwrap();
+    fs::write(
+        skills_dir.join("rust-safety.md"),
+        "---\nname: rust-safety\ndescription: Safe Rust guidelines\n---\n\nAvoid unsafe blocks.\n",
+    )
+    .unwrap();
+
+    // Known skill → full content returned.
+    let ok = call_tool(
+        &state,
+        &services,
+        "skill_read",
+        Some(
+            serde_json::json!({ "name": "rust-safety" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+        tmp.path(),
+        None,
+        Some("worker"),
+        None,
+    )
+    .await
+    .expect("skill_read should succeed for a known skill");
+
+    assert_eq!(ok.get("name").and_then(|v| v.as_str()), Some("rust-safety"));
+    assert_eq!(
+        ok.get("description").and_then(|v| v.as_str()),
+        Some("Safe Rust guidelines")
+    );
+    assert_eq!(
+        ok.get("content").and_then(|v| v.as_str()),
+        Some("Avoid unsafe blocks.")
+    );
+    assert_eq!(ok.get("required").and_then(|v| v.as_bool()), Some(false));
+
+    // Unknown skill → clean error (not a panic, not an Ok payload).
+    let err = call_tool(
+        &state,
+        &services,
+        "skill_read",
+        Some(
+            serde_json::json!({ "name": "does-not-exist" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+        tmp.path(),
+        None,
+        Some("worker"),
+        None,
+    )
+    .await
+    .expect_err("skill_read should error for an unknown skill");
+    assert!(
+        err.contains("unknown skill"),
+        "error should name the missing skill, got: {err}"
+    );
+
+    // Missing `name` arg → clean error.
+    let missing = call_tool(
+        &state,
+        &services,
+        "skill_read",
+        Some(serde_json::Map::new()),
+        tmp.path(),
+        None,
+        Some("worker"),
+        None,
+    )
+    .await
+    .expect_err("skill_read should error when `name` is absent");
+    assert!(missing.contains("name"), "got: {missing}");
+}
+
+/// `skill_read` is present in every role's tool schema (it rides the base set,
+/// like `read`).
+#[test]
+fn skill_read_is_in_every_role_schema() {
+    for schemas in [
+        tool_schemas_worker(),
+        tool_schemas_reviewer(),
+        tool_schemas_lead(),
+        tool_schemas_planner(),
+        tool_schemas_architect(),
+    ] {
+        assert!(
+            tool_names(&schemas).contains(&"skill_read"),
+            "skill_read must be in the role schema"
+        );
+    }
+}

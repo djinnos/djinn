@@ -252,6 +252,10 @@ where
             let root = state.working_root_for(worktree_path);
             call_read(state, &call.arguments, &root).await
         }
+        "skill_read" => {
+            let root = state.working_root_for(worktree_path);
+            call_skill_read(&call.arguments, &root).await
+        }
         "write" => {
             call_write(state, &call.arguments, worktree_path, project_id.as_deref()).await
         }
@@ -303,4 +307,38 @@ where
             }
         }
     }
+}
+
+/// Load the full content of an assigned skill on demand (G5 progressive
+/// disclosure). Resolves the skill from the session worktree the same way the
+/// lifecycle does (`crate::skills::load_skills`), so the body returned here is
+/// byte-identical to what the inlined form would have produced. Errors cleanly
+/// when the name does not resolve to an assigned skill.
+async fn call_skill_read(
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    worktree_root: &Path,
+) -> Result<serde_json::Value, String> {
+    let name = arguments
+        .as_ref()
+        .and_then(|m| m.get("name"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "skill_read requires a non-empty `name` argument".to_string())?;
+
+    // `load_skills` resolves the named skill file from the worktree's skill
+    // directories and returns at most one entry for a single requested name
+    // (frontmatter may override the display name, so match on the single
+    // resolved entry rather than the requested string).
+    let skill = crate::skills::load_skills(worktree_root, &[name.to_string()])
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("unknown skill `{name}`: not an assigned skill for this session"))?;
+
+    Ok(serde_json::json!({
+        "name": skill.name,
+        "description": skill.description,
+        "required": skill.required,
+        "content": skill.content,
+    }))
 }

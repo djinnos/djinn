@@ -6,18 +6,34 @@ pub struct ResolvedSkill {
     pub name: String,
     pub description: String,
     pub content: String,
+    /// When `true` this skill is always inlined in full into the system prompt,
+    /// even under progressive disclosure (G5). Weaker models won't reliably pull
+    /// content on demand, so `required: true` skills opt out of disclosure.
+    /// Sourced from the skill's `required:` frontmatter key (default `false`).
+    pub required: bool,
 }
 
 #[derive(Debug)]
 struct SkillFrontmatter {
     name: Option<String>,
     description: Option<String>,
+    required: bool,
+}
+
+/// Returns `true` when the value is a truthy frontmatter flag
+/// (`true` / `1` / `yes` / `on`, case-insensitive).
+fn parse_bool_flag(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "true" | "1" | "yes" | "on"
+    )
 }
 
 fn parse_frontmatter(frontmatter_raw: &str) -> Option<SkillFrontmatter> {
     let mut frontmatter = SkillFrontmatter {
         name: None,
         description: None,
+        required: false,
     };
     for line in frontmatter_raw.lines() {
         let line = line.trim();
@@ -37,6 +53,7 @@ fn parse_frontmatter(frontmatter_raw: &str) -> Option<SkillFrontmatter> {
         match key.trim() {
             "name" => frontmatter.name = Some(value),
             "description" => frontmatter.description = Some(value),
+            "required" => frontmatter.required = parse_bool_flag(&value),
             _ => {}
         }
     }
@@ -158,6 +175,7 @@ fn parse_skill_file(
     let frontmatter_raw = &rest[..end];
     let body = &rest[end + 5..];
     let frontmatter = parse_frontmatter(frontmatter_raw)?;
+    let required = frontmatter.required;
     let description = frontmatter.description?.trim().to_string();
     if description.is_empty() {
         return None;
@@ -188,10 +206,35 @@ fn parse_skill_file(
         name,
         description,
         content,
+        required,
     })
 }
 
+/// `true` when progressive skill disclosure (G5) is enabled via the
+/// `DJINN_PROGRESSIVE_SKILLS` env var. Default OFF — when unset (or not a
+/// truthy value) the skills section is byte-identical to the pre-G5 form
+/// (every skill fully inlined). When ON, only `required` skills are inlined;
+/// non-required skills emit name + description and a note pointing the model
+/// at the `skill_read(name)` tool to fetch the body on demand.
+pub fn progressive_disclosure_enabled() -> bool {
+    std::env::var("DJINN_PROGRESSIVE_SKILLS")
+        .map(|v| parse_bool_flag(&v))
+        .unwrap_or(false)
+}
+
 pub(crate) fn format_skills_section(skills: &[ResolvedSkill]) -> String {
+    format_skills_section_with(skills, progressive_disclosure_enabled())
+}
+
+/// Render the "## Available Skills" section.
+///
+/// When `progressive` is `false` the output is byte-identical to the legacy
+/// behaviour: every skill's name, description, and full content are inlined.
+///
+/// When `progressive` is `true`, `required` skills are still inlined in full,
+/// but non-required skills emit only their name + description followed by a
+/// note directing the model to `skill_read(name)` for the full body.
+fn format_skills_section_with(skills: &[ResolvedSkill], progressive: bool) -> String {
     if skills.is_empty() {
         return String::new();
     }
@@ -202,9 +245,20 @@ pub(crate) fn format_skills_section(skills: &[ResolvedSkill]) -> String {
             out.push_str("\n\n");
         }
         out.push_str(&format!("**{}**: {}", skill.name, skill.description));
-        if !skill.content.trim().is_empty() {
-            out.push_str("\n\n");
-            out.push_str(skill.content.trim());
+
+        // Inline the full body when disclosure is OFF, or when the skill is
+        // marked `required` (weaker models won't reliably pull it on demand).
+        let inline_body = !progressive || skill.required;
+        if inline_body {
+            if !skill.content.trim().is_empty() {
+                out.push_str("\n\n");
+                out.push_str(skill.content.trim());
+            }
+        } else if !skill.content.trim().is_empty() {
+            out.push_str(&format!(
+                "\n\n_Call `skill_read(name=\"{}\")` to load this skill's full content._",
+                skill.name
+            ));
         }
     }
     out
@@ -518,11 +572,13 @@ mod tests {
                 name: "rust-safety".to_string(),
                 description: "Safe Rust guidelines".to_string(),
                 content: "Avoid unsafe blocks.".to_string(),
+                required: false,
             },
             ResolvedSkill {
                 name: "git-workflow".to_string(),
                 description: "Git practices".to_string(),
                 content: "Commit small changes.".to_string(),
+                required: false,
             },
         ];
         let section = format_skills_section(&skills);
@@ -540,10 +596,102 @@ mod tests {
             name: "my-skill".to_string(),
             description: "My skill description".to_string(),
             content: String::new(),
+            required: false,
         }];
         let section = format_skills_section(&skills);
 
         assert!(section.contains("## Available Skills"));
         assert!(section.contains("**my-skill**: My skill description"));
+    }
+
+    fn sample_skills() -> Vec<ResolvedSkill> {
+        vec![
+            ResolvedSkill {
+                name: "rust-safety".to_string(),
+                description: "Safe Rust guidelines".to_string(),
+                content: "Avoid unsafe blocks.".to_string(),
+                required: false,
+            },
+            ResolvedSkill {
+                name: "house-rules".to_string(),
+                description: "Mandatory house rules".to_string(),
+                content: "Always run the tests.".to_string(),
+                required: true,
+            },
+        ]
+    }
+
+    #[test]
+    fn parse_skill_required_flag_defaults_false() {
+        let content = "---\ndescription: Skill\n---\n\nBody.\n";
+        let skill = parse_skill_file("fallback", content, None).expect("skill should parse");
+        assert!(!skill.required);
+    }
+
+    #[test]
+    fn parse_skill_required_flag_truthy_values() {
+        for raw in ["true", "1", "yes", "on", "TRUE", "Yes"] {
+            let content = format!("---\ndescription: Skill\nrequired: {raw}\n---\n\nBody.\n");
+            let skill = parse_skill_file("fallback", &content, None).expect("skill should parse");
+            assert!(skill.required, "expected `{raw}` to be truthy");
+        }
+        // Non-truthy stays false.
+        let content = "---\ndescription: Skill\nrequired: false\n---\n\nBody.\n";
+        let skill = parse_skill_file("fallback", content, None).expect("skill should parse");
+        assert!(!skill.required);
+    }
+
+    #[test]
+    fn format_skills_section_off_inlines_all_content_byte_identical() {
+        // With disclosure OFF, the rendered section must match the legacy form
+        // exactly: every skill's full body inlined regardless of `required`.
+        let skills = sample_skills();
+        let section = format_skills_section_with(&skills, false);
+        let expected = concat!(
+            "## Available Skills\n\n",
+            "**rust-safety**: Safe Rust guidelines\n\n",
+            "Avoid unsafe blocks.\n\n",
+            "**house-rules**: Mandatory house rules\n\n",
+            "Always run the tests."
+        );
+        assert_eq!(section, expected);
+    }
+
+    #[test]
+    fn format_skills_section_on_discloses_only_nonrequired() {
+        let skills = sample_skills();
+        let section = format_skills_section_with(&skills, true);
+
+        // Non-required skill: name + description + skill_read note, body NOT inlined.
+        assert!(section.contains("**rust-safety**: Safe Rust guidelines"));
+        assert!(section.contains("skill_read(name=\"rust-safety\")"));
+        assert!(
+            !section.contains("Avoid unsafe blocks."),
+            "non-required body must not be inlined under disclosure"
+        );
+
+        // Required skill: fully inlined, no skill_read note.
+        assert!(section.contains("**house-rules**: Mandatory house rules"));
+        assert!(section.contains("Always run the tests."));
+        assert!(!section.contains("skill_read(name=\"house-rules\")"));
+    }
+
+    #[test]
+    fn progressive_disclosure_default_is_off_without_env() {
+        // The default helper reads the env var; without it set the section
+        // renders the inlined (legacy) form. We assert the *default* path here
+        // rather than mutating process env (which would race other tests).
+        if std::env::var_os("DJINN_PROGRESSIVE_SKILLS").is_some() {
+            // Skip when the env var is externally set — this test asserts the
+            // unset-default behaviour and must not race that configuration.
+            return;
+        }
+        assert!(!progressive_disclosure_enabled());
+        let skills = sample_skills();
+        assert_eq!(
+            format_skills_section_with(&skills, false),
+            format_skills_section(&skills),
+            "default format_skills_section must equal the OFF form when env is unset"
+        );
     }
 }

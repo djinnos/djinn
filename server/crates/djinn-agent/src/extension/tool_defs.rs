@@ -89,6 +89,24 @@ pub(crate) fn tool_read() -> RmcpTool {
     )
 }
 
+pub(crate) fn tool_skill_read() -> RmcpTool {
+    RmcpTool::new(
+        "skill_read".to_string(),
+        "Load the full content of an assigned skill by name. Under progressive \
+         skill disclosure the system prompt lists each non-required skill's name \
+         and description only; call this to fetch the complete skill body on \
+         demand. Errors if the name is not an assigned skill."
+            .to_string(),
+        object!({
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": {"type": "string", "description": "Name of the skill to load (as shown in the Available Skills section)"}
+            }
+        }),
+    )
+}
+
 pub(super) fn tool_write() -> RmcpTool {
     RmcpTool::new(
         "write".to_string(),
@@ -690,6 +708,7 @@ fn base_tool_schemas() -> Vec<serde_json::Value> {
     let mut tool_values = shared_schemas::shared_base_tool_schemas();
     tool_values.push(serialize_tool(tool_shell(), false));
     tool_values.push(serialize_tool(tool_read(), true));
+    tool_values.push(serialize_tool(tool_skill_read(), true));
     tool_values.push(serialize_tool(tool_lsp(), true));
     // NOTE: `tool_code_graph()` is intentionally NOT in the base schema set.
     // Per ADR-050, the code-graph tool is exclusive to the Architect (autonomous patrol form)
