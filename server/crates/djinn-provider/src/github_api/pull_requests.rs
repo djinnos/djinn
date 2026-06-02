@@ -379,6 +379,124 @@ impl GitHubApiClient {
         Ok(())
     }
 
+    /// List the GraphQL node ids of a PR's **unresolved** review threads.
+    ///
+    /// Used by the merge automation when an approved PR is blocked solely by
+    /// the repo's "A conversation must be resolved before this pull request
+    /// can be merged" rule: an explicit approval makes the reviewer's inline
+    /// comments non-blocking, so we resolve the leftover threads ourselves and
+    /// let the merge proceed. Returns the ids where `isResolved == false`.
+    pub async fn list_unresolved_review_thread_ids(
+        &self,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+    ) -> Result<Vec<String>> {
+        let query = r#"query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved}}}}}"#;
+
+        let body = serde_json::json!({
+            "query": query,
+            "variables": { "owner": owner, "name": repo, "number": pull_number },
+        });
+
+        let base_url = self.base_url.clone();
+        let resp = self
+            .send_with_retry(|token| {
+                let body = body.clone();
+                let http = self.http.clone();
+                let base_url = base_url.clone();
+                async move {
+                    let graphql_url = format!("{}/graphql", base_url);
+                    let resp = http
+                        .post(&graphql_url)
+                        .bearer_auth(&token)
+                        .json(&body)
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "list_unresolved_review_thread_ids failed ({}): {}",
+                status,
+                body
+            ));
+        }
+
+        let json: serde_json::Value = resp.json().await?;
+        if let Some(errors) = json.get("errors") {
+            return Err(anyhow!(
+                "list_unresolved_review_thread_ids GraphQL error: {}",
+                errors
+            ));
+        }
+
+        let nodes = json["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let ids = nodes
+            .iter()
+            .filter(|n| n["isResolved"].as_bool() == Some(false))
+            .filter_map(|n| n["id"].as_str().map(|s| s.to_string()))
+            .collect();
+        Ok(ids)
+    }
+
+    /// Resolve a single review thread by its GraphQL node id.
+    ///
+    /// Companion to [`Self::list_unresolved_review_thread_ids`]. Idempotent on
+    /// GitHub's side: re-resolving an already-resolved thread is a no-op and the
+    /// thread simply won't reappear in the unresolved list on the next poll.
+    pub async fn resolve_review_thread(&self, thread_id: &str) -> Result<()> {
+        let query = r#"mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}"#;
+
+        let body = serde_json::json!({
+            "query": query,
+            "variables": { "threadId": thread_id },
+        });
+
+        let base_url = self.base_url.clone();
+        let resp = self
+            .send_with_retry(|token| {
+                let body = body.clone();
+                let http = self.http.clone();
+                let base_url = base_url.clone();
+                async move {
+                    let graphql_url = format!("{}/graphql", base_url);
+                    let resp = http
+                        .post(&graphql_url)
+                        .bearer_auth(&token)
+                        .json(&body)
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "resolve_review_thread failed ({}): {}",
+                status,
+                body
+            ));
+        }
+
+        let json: serde_json::Value = resp.json().await?;
+        if let Some(errors) = json.get("errors") {
+            return Err(anyhow!("resolve_review_thread GraphQL error: {}", errors));
+        }
+        Ok(())
+    }
+
     /// Remove a pull request from the repository merge queue.
     ///
     /// `merge_queue_entry_id` is [`MergeQueueEntry::id`] from a prior
