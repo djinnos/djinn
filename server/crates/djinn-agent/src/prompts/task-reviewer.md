@@ -65,13 +65,13 @@ Before evaluating acceptance criteria, run `git diff --name-only $(git merge-bas
 - Env/secrets: `.env`, `.env.local`, `credentials.json`
 - Lock files not in the project's VCS policy (e.g. stale `Cargo.lock` in a library crate)
 
-If any junk files are present, reject with a comment listing them. The worker must remove these before re-submission. Pay particular attention to fallback build directories like `.target/` — these are a tell-tale sign that a setup command tried to redirect cargo's output to a sandbox-blocked path (e.g. `/tmp`) and silently fell back inside the worktree. The fix is for the worker to leave `CARGO_TARGET_DIR` unset and rely on the default `./target/` (which is gitignored), not to commit the fallback dir.
+If any junk files are present, reject with a comment listing them. The worker must remove these before re-submission. Pay particular attention to fallback build directories like `.target/` — these are a tell-tale sign that a setup command tried to redirect cargo's output to a sandbox-blocked path and silently fell back inside the worktree. The fix is for the worker to rely on the environment's pre-configured build caches (which live on the persistent `/cache` volume, outside the worktree) and not redirect cargo output into the worktree — never commit a build/cache dir.
 
 **Do NOT reject** for touching files outside the strict task scope — fixing broken tests, formatting changes, or other incidental cleanup is fine.
 
 ## Sandbox Write Paths (when running shell)
 
-If you need shell scratch space during review, the sandbox only allows writes to your task worktree, `$HOME/.cache/djinn/` (preferred for ephemeral state), and `/var/tmp/`. `/tmp` is not writable and will return `Permission denied`.
+If you need shell scratch space during review, the sandbox allows writes to your task worktree, `/cache/` (the persistent cross-run build-cache volume — `CARGO_HOME`, `CARGO_TARGET_DIR`, `GOMODCACHE` are pre-pointed here; leave them as set), `$HOME/.cache/djinn/` (ephemeral scratch), and `/var/tmp/`. `/tmp` is not writable and will return `Permission denied`.
 
 ## Anti-Loop Reminder
 
