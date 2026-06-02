@@ -38,11 +38,7 @@ async fn get_json(app: axum::Router, uri: &str) -> (axum::http::StatusCode, Valu
     (status, value)
 }
 
-async fn patch_json(
-    app: axum::Router,
-    uri: &str,
-    body: Value,
-) -> axum::http::StatusCode {
+async fn patch_json(app: axum::Router, uri: &str, body: Value) -> axum::http::StatusCode {
     let req = axum::http::Request::builder()
         .method("PATCH")
         .uri(uri)
@@ -141,8 +137,7 @@ async fn list_messages_round_trips_tool_calls_with_input() {
         .unwrap();
 
     let app = test_helpers::create_test_app_with_db(db);
-    let (status, body) =
-        get_json(app, &format!("/api/chat/sessions/{chat_id}/messages")).await;
+    let (status, body) = get_json(app, &format!("/api/chat/sessions/{chat_id}/messages")).await;
     assert_eq!(status, axum::http::StatusCode::OK);
     let messages = body["messages"].as_array().unwrap();
     assert_eq!(messages.len(), 2);
@@ -196,7 +191,13 @@ async fn list_messages_folds_tool_results_into_preceding_assistant() {
         {"type": "tool_use", "id": "call-bad", "name": "code_graph", "input": {"q": "b"}}
     ]);
     message_repo
-        .insert_message(&chat_id, "", "assistant", &assistant_content.to_string(), None)
+        .insert_message(
+            &chat_id,
+            "",
+            "assistant",
+            &assistant_content.to_string(),
+            None,
+        )
         .await
         .unwrap();
 
@@ -248,7 +249,11 @@ async fn patch_updates_chat_title() {
     .await;
     assert_eq!(status, axum::http::StatusCode::NO_CONTENT);
 
-    let updated = session_repo.get_chat_session(&chat_id).await.unwrap().unwrap();
+    let updated = session_repo
+        .get_chat_session(&chat_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(updated.title.as_deref(), Some("Renamed Chat"));
 }
 
@@ -315,7 +320,13 @@ async fn delete_cascades_messages() {
     assert_eq!(status, axum::http::StatusCode::NO_CONTENT);
 
     // Session row is gone.
-    assert!(session_repo.get_chat_session(&chat_id).await.unwrap().is_none());
+    assert!(
+        session_repo
+            .get_chat_session(&chat_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
     // And the FK cascade dropped the message rows along with it.
     let conv_after = message_repo.load_conversation(&chat_id).await.unwrap();
     assert!(
@@ -514,7 +525,11 @@ async fn cannot_open_rename_or_delete_another_users_session() {
     assert_eq!(del, axum::http::StatusCode::NOT_FOUND);
 
     // And Bob's session still exists + untouched.
-    let still = session_repo.get_chat_session(&bob_sid).await.unwrap().unwrap();
+    let still = session_repo
+        .get_chat_session(&bob_sid)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(still.title.as_deref(), Some("New Chat"));
 }
 
@@ -546,7 +561,13 @@ async fn owner_can_rename_and_delete_own_session() {
     .await;
     assert_eq!(rename, axum::http::StatusCode::NO_CONTENT);
     assert_eq!(
-        session_repo.get_chat_session(&sid).await.unwrap().unwrap().title.as_deref(),
+        session_repo
+            .get_chat_session(&sid)
+            .await
+            .unwrap()
+            .unwrap()
+            .title
+            .as_deref(),
         Some("My Chat")
     );
 
@@ -594,7 +615,11 @@ async fn auto_title_path_overwrites_title_via_repo() {
         .update_chat_title(&chat_id, "DB persistence discussion")
         .await
         .unwrap();
-    let after = session_repo.get_chat_session(&chat_id).await.unwrap().unwrap();
+    let after = session_repo
+        .get_chat_session(&chat_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(after.title.as_deref(), Some("DB persistence discussion"));
 
     // needs_title gate reads `title != DEFAULT_CHAT_TITLE`, so a

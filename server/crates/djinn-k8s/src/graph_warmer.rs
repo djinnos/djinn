@@ -393,7 +393,9 @@ impl GraphWarmerService for K8sGraphWarmer {
         let job_name_owned = job_name.clone();
         let notify_owned = notify.clone();
         tokio::spawn(async move {
-            watcher.wait_terminal(&namespace_owned, &job_name_owned).await;
+            watcher
+                .wait_terminal(&namespace_owned, &job_name_owned)
+                .await;
             let mut guard = in_flight.lock().await;
             if let Some(n) = guard.remove(&project_id_owned) {
                 n.notify_waiters();
@@ -589,7 +591,9 @@ mod tests {
         // Project id label is sanitized (lowercased + disallowed-char swap)
         // so the raw UUID v7 round-trips unchanged (`[0-9a-f-]`).
         assert_eq!(
-            labels.get(crate::warm_job::LABEL_PROJECT_ID).map(String::as_str),
+            labels
+                .get(crate::warm_job::LABEL_PROJECT_ID)
+                .map(String::as_str),
             Some(project_id.as_str())
         );
         let container = &job
@@ -603,13 +607,7 @@ mod tests {
             .containers[0];
         assert_eq!(
             container.image.as_deref(),
-            Some(
-                format!(
-                    "reg.example:5000/djinn-project-{}:abc123def456",
-                    project_id
-                )
-                .as_str()
-            )
+            Some(format!("reg.example:5000/djinn-project-{}:abc123def456", project_id).as_str())
         );
     }
 

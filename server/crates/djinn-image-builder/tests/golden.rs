@@ -26,8 +26,8 @@ fn run_golden(name: &str) {
 
     let config_raw =
         fs::read_to_string(&config_path).unwrap_or_else(|e| panic!("read {config_path:?}: {e}"));
-    let config: EnvironmentConfig = serde_json::from_str(&config_raw)
-        .unwrap_or_else(|e| panic!("parse {config_path:?}: {e}"));
+    let config: EnvironmentConfig =
+        serde_json::from_str(&config_raw).unwrap_or_else(|e| panic!("parse {config_path:?}: {e}"));
 
     let rendered = generate_dockerfile(&config, &agent_worker())
         .unwrap_or_else(|e| panic!("generate {name}: {e}"));

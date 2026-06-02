@@ -86,41 +86,41 @@ fn missing_session() -> String {
 
 #[tool_router(router = user_settings_tool_router, vis = "pub")]
 impl DjinnMcpServer {
-    #[tool(description = "Get the signed-in user's settings (auto_approve_prs, …). \
+    #[tool(
+        description = "Get the signed-in user's settings (auto_approve_prs, …). \
         Returns defaults if the user has never set anything. \
-        Errors when no authenticated session is present.")]
+        Errors when no authenticated session is present."
+    )]
     pub async fn user_settings_get(
         &self,
         Parameters(p): Parameters<UserSettingsGetParams>,
     ) -> Json<UserSettingsGetResponse> {
-        let user_id = match acting_user::resolve_effective_user(
-            self.state.db(),
-            p.target_user_id.as_deref(),
-        )
-        .await
-        {
-            Ok(Some(u)) => u,
-            Ok(None) => {
-                return Json(UserSettingsGetResponse {
-                    ok: false,
-                    user_id: None,
-                    auto_approve_prs: false,
-                    models: Vec::new(),
-                    max_sessions: HashMap::new(),
-                    error: Some(missing_session()),
-                });
-            }
-            Err(e) => {
-                return Json(UserSettingsGetResponse {
-                    ok: false,
-                    user_id: None,
-                    auto_approve_prs: false,
-                    models: Vec::new(),
-                    max_sessions: HashMap::new(),
-                    error: Some(e),
-                });
-            }
-        };
+        let user_id =
+            match acting_user::resolve_effective_user(self.state.db(), p.target_user_id.as_deref())
+                .await
+            {
+                Ok(Some(u)) => u,
+                Ok(None) => {
+                    return Json(UserSettingsGetResponse {
+                        ok: false,
+                        user_id: None,
+                        auto_approve_prs: false,
+                        models: Vec::new(),
+                        max_sessions: HashMap::new(),
+                        error: Some(missing_session()),
+                    });
+                }
+                Err(e) => {
+                    return Json(UserSettingsGetResponse {
+                        ok: false,
+                        user_id: None,
+                        auto_approve_prs: false,
+                        models: Vec::new(),
+                        max_sessions: HashMap::new(),
+                        error: Some(e),
+                    });
+                }
+            };
         let repo = UserSettingsRepository::new(self.state.db().clone());
         match repo.get_or_default(&user_id).await {
             Ok(s) => Json(UserSettingsGetResponse {
@@ -142,41 +142,41 @@ impl DjinnMcpServer {
         }
     }
 
-    #[tool(description = "Patch the signed-in user's settings. Only provided fields \
+    #[tool(
+        description = "Patch the signed-in user's settings. Only provided fields \
         are updated; omitted fields keep their current values. \
-        Errors when no authenticated session is present.")]
+        Errors when no authenticated session is present."
+    )]
     pub async fn user_settings_set(
         &self,
         Parameters(p): Parameters<UserSettingsSetParams>,
     ) -> Json<UserSettingsSetResponse> {
-        let user_id = match acting_user::resolve_effective_user(
-            self.state.db(),
-            p.target_user_id.as_deref(),
-        )
-        .await
-        {
-            Ok(Some(u)) => u,
-            Ok(None) => {
-                return Json(UserSettingsSetResponse {
-                    ok: false,
-                    applied: false,
-                    auto_approve_prs: None,
-                    models: None,
-                    max_sessions: None,
-                    error: Some(missing_session()),
-                });
-            }
-            Err(e) => {
-                return Json(UserSettingsSetResponse {
-                    ok: false,
-                    applied: false,
-                    auto_approve_prs: None,
-                    models: None,
-                    max_sessions: None,
-                    error: Some(e),
-                });
-            }
-        };
+        let user_id =
+            match acting_user::resolve_effective_user(self.state.db(), p.target_user_id.as_deref())
+                .await
+            {
+                Ok(Some(u)) => u,
+                Ok(None) => {
+                    return Json(UserSettingsSetResponse {
+                        ok: false,
+                        applied: false,
+                        auto_approve_prs: None,
+                        models: None,
+                        max_sessions: None,
+                        error: Some(missing_session()),
+                    });
+                }
+                Err(e) => {
+                    return Json(UserSettingsSetResponse {
+                        ok: false,
+                        applied: false,
+                        auto_approve_prs: None,
+                        models: None,
+                        max_sessions: None,
+                        error: Some(e),
+                    });
+                }
+            };
         let repo = UserSettingsRepository::new(self.state.db().clone());
 
         let err = |msg: String| {

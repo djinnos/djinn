@@ -61,10 +61,7 @@ pub trait SupervisorServices: Send + Sync + 'static {
     /// `a6bd7e1a4`); called by [`crate::TaskRunSupervisor::run`] so the
     /// worker pod (which has no DB connection) can ship the write through
     /// the existing `SupervisorServices` channel.
-    async fn create_task_run(
-        &self,
-        params: SerializableCreateTaskRunParams,
-    ) -> Result<(), String>;
+    async fn create_task_run(&self, params: SerializableCreateTaskRunParams) -> Result<(), String>;
 
     /// Update the terminal `status` (and `ended_at`) of a `task_run` row.
     /// Implemented in Phase 4 (commit `a6bd7e1a4`); replaces the
@@ -94,10 +91,7 @@ pub trait SupervisorServices: Send + Sync + 'static {
     /// `Err("provider not found")` (or `Err("provider has empty base_url")`)
     /// when the catalog has no matching entry; callers may treat that as a
     /// signal to fall back to `actors::slot::helpers::default_base_url`.
-    async fn get_provider_base_url(
-        &self,
-        catalog_provider_id: String,
-    ) -> Result<String, String>;
+    async fn get_provider_base_url(&self, catalog_provider_id: String) -> Result<String, String>;
 
     /// Pick any available `"providerID/modelID"` from the catalog as a
     /// fallback default model.
@@ -143,10 +137,8 @@ pub trait SupervisorServices: Send + Sync + 'static {
     /// in `supervisor_impl::stage`. Returns `EnvironmentConfig::empty()`
     /// (wrapped in `Ok`) for missing-project / parse-failure paths to match
     /// the existing helper's degrade-to-empty semantics.
-    async fn get_environment_config(
-        &self,
-        project_id: String,
-    ) -> Result<EnvironmentConfig, String>;
+    async fn get_environment_config(&self, project_id: String)
+    -> Result<EnvironmentConfig, String>;
 
     /// Invoke an LLM provider once, host-side, and return the terminal
     /// aggregate of its stream as an [`djinn_provider::provider::LlmResponse`].

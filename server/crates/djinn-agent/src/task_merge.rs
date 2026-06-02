@@ -180,8 +180,7 @@ pub(crate) async fn cleanup_task_branches_post_close(
     let Some(pr_url) = task.pr_url.as_deref() else {
         return;
     };
-    let Some((owner, repo, _pull)) =
-        crate::actors::coordinator::pr_poller::parse_pr_url(pr_url)
+    let Some((owner, repo, _pull)) = crate::actors::coordinator::pr_poller::parse_pr_url(pr_url)
     else {
         return;
     };
@@ -358,10 +357,9 @@ mod tests {
 
     #[test]
     fn parse_https_with_user_prefix() {
-        let (owner, repo) = parse_github_owner_repo(
-            "https://someuser@github.com/acme/svc-accounts-payable.git",
-        )
-        .unwrap();
+        let (owner, repo) =
+            parse_github_owner_repo("https://someuser@github.com/acme/svc-accounts-payable.git")
+                .unwrap();
         assert_eq!(owner, "acme");
         assert_eq!(repo, "svc-accounts-payable");
     }

@@ -522,10 +522,7 @@ async fn handle_noop_disposition(
 /// budget-exhausted and the nudge-fallback paths share one definition, and so
 /// the close transition is awaited (preserving the original synchronous
 /// "transition then return" ordering of the no-commits guard).
-async fn close_noop(
-    task: &djinn_core::models::Task,
-    task_repo: &TaskRepository,
-) -> TaskRunOutcome {
+async fn close_noop(task: &djinn_core::models::Task, task_repo: &TaskRepository) -> TaskRunOutcome {
     let reason = "no code changes were produced, so there is nothing to open a \
                   pull request with (e.g. a memory/notes-only task); closing as completed";
     // `Close` is valid from any non-closed status — covers both the supervisor
@@ -619,11 +616,7 @@ async fn push_task_branch_to_github(
 
     // Capture local HEAD up-front so the race-recovery path can verify the
     // remote against it without a second `rev-parse`.
-    let head_out = run_git_command(
-        wt.clone(),
-        vec!["rev-parse".into(), "HEAD".into()],
-    )
-    .await?;
+    let head_out = run_git_command(wt.clone(), vec!["rev-parse".into(), "HEAD".into()]).await?;
     let local_sha = head_out.stdout.trim().to_string();
 
     // Plain `--force` (not `--force-with-lease`). The push target is a
@@ -765,9 +758,12 @@ mod commits_ahead_tests {
     use tempfile::TempDir;
 
     async fn git(dir: &Path, args: &[&str]) {
-        run_git_command(dir.to_path_buf(), args.iter().map(|s| s.to_string()).collect())
-            .await
-            .unwrap_or_else(|e| panic!("git {args:?} failed: {e}"));
+        run_git_command(
+            dir.to_path_buf(),
+            args.iter().map(|s| s.to_string()).collect(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("git {args:?} failed: {e}"));
     }
 
     /// Seed a mirror at `<root>/<pid>.git` with `main`, a `task/empty` branch
@@ -800,7 +796,10 @@ mod commits_ahead_tests {
         let n = task_branch_commits_ahead(&mgr, "proj1", "task/empty", "main")
             .await
             .unwrap();
-        assert_eq!(n, 0, "a branch identical to base must report 0 commits ahead");
+        assert_eq!(
+            n, 0,
+            "a branch identical to base must report 0 commits ahead"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

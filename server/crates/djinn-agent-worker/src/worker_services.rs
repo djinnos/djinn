@@ -205,12 +205,16 @@ impl SupervisorServices for WorkerSupervisorServices {
                 role_kind.as_str()
             ))
         })?;
-        let model_id = spec.model_id_per_role.get(&role_kind).cloned().ok_or_else(|| {
-            StageError::ModelResolution(format!(
-                "no model assigned for role {} in TaskRunSpec",
-                role_kind.as_str()
-            ))
-        })?;
+        let model_id = spec
+            .model_id_per_role
+            .get(&role_kind)
+            .cloned()
+            .ok_or_else(|| {
+                StageError::ModelResolution(format!(
+                    "no model assigned for role {} in TaskRunSpec",
+                    role_kind.as_str()
+                ))
+            })?;
         let context_window = self
             .get_model_context_window(model_id.clone())
             .await
@@ -315,10 +319,7 @@ impl SupervisorServices for WorkerSupervisorServices {
         self.rpc.open_pr(spec, task).await
     }
 
-    async fn create_task_run(
-        &self,
-        params: SerializableCreateTaskRunParams,
-    ) -> Result<(), String> {
+    async fn create_task_run(&self, params: SerializableCreateTaskRunParams) -> Result<(), String> {
         self.rpc.create_task_run(params).await
     }
 
@@ -334,10 +335,7 @@ impl SupervisorServices for WorkerSupervisorServices {
         self.rpc.get_model_context_window(model_id).await
     }
 
-    async fn get_provider_base_url(
-        &self,
-        catalog_provider_id: String,
-    ) -> Result<String, String> {
+    async fn get_provider_base_url(&self, catalog_provider_id: String) -> Result<String, String> {
         self.rpc.get_provider_base_url(catalog_provider_id).await
     }
 

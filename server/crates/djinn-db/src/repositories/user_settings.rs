@@ -121,7 +121,9 @@ impl UserSettingsRepository {
         .execute(self.db.pool())
         .await?;
         self.get(user_id).await?.ok_or_else(|| {
-            crate::Error::Internal(format!("user_settings row missing after upsert for {user_id}"))
+            crate::Error::Internal(format!(
+                "user_settings row missing after upsert for {user_id}"
+            ))
         })
     }
 
@@ -147,7 +149,9 @@ impl UserSettingsRepository {
         .execute(self.db.pool())
         .await?;
         self.get(user_id).await?.ok_or_else(|| {
-            crate::Error::Internal(format!("user_settings row missing after upsert for {user_id}"))
+            crate::Error::Internal(format!(
+                "user_settings row missing after upsert for {user_id}"
+            ))
         })
     }
 
@@ -177,7 +181,9 @@ impl UserSettingsRepository {
         .execute(self.db.pool())
         .await?;
         self.get(user_id).await?.ok_or_else(|| {
-            crate::Error::Internal(format!("user_settings row missing after upsert for {user_id}"))
+            crate::Error::Internal(format!(
+                "user_settings row missing after upsert for {user_id}"
+            ))
         })
     }
 
@@ -251,16 +257,10 @@ mod tests {
         let user_id = seed_user(&db, "upsert").await;
         let repo = UserSettingsRepository::new(db);
 
-        let created = repo
-            .upsert_auto_approve_prs(&user_id, true)
-            .await
-            .unwrap();
+        let created = repo.upsert_auto_approve_prs(&user_id, true).await.unwrap();
         assert!(created.auto_approve_prs);
 
-        let updated = repo
-            .upsert_auto_approve_prs(&user_id, false)
-            .await
-            .unwrap();
+        let updated = repo.upsert_auto_approve_prs(&user_id, false).await.unwrap();
         assert!(!updated.auto_approve_prs);
         assert_eq!(updated.user_id, user_id);
     }
@@ -273,9 +273,15 @@ mod tests {
         let user_on_b = seed_user(&db, "on-b").await;
         let repo = UserSettingsRepository::new(db);
 
-        repo.upsert_auto_approve_prs(&user_off, false).await.unwrap();
-        repo.upsert_auto_approve_prs(&user_on_a, true).await.unwrap();
-        repo.upsert_auto_approve_prs(&user_on_b, true).await.unwrap();
+        repo.upsert_auto_approve_prs(&user_off, false)
+            .await
+            .unwrap();
+        repo.upsert_auto_approve_prs(&user_on_a, true)
+            .await
+            .unwrap();
+        repo.upsert_auto_approve_prs(&user_on_b, true)
+            .await
+            .unwrap();
 
         let ids = repo.list_users_with_auto_approve().await.unwrap();
         assert_eq!(ids.len(), 2);
@@ -306,7 +312,13 @@ mod tests {
         let user_id = seed_user(&db, "models").await;
         let repo = UserSettingsRepository::new(db);
 
-        assert!(repo.get_or_default(&user_id).await.unwrap().models.is_none());
+        assert!(
+            repo.get_or_default(&user_id)
+                .await
+                .unwrap()
+                .models
+                .is_none()
+        );
 
         let models = vec![
             "openai/gpt-5.5".to_string(),
@@ -379,15 +391,27 @@ mod tests {
         let user_id = seed_user(&db, "caps").await;
         let repo = UserSettingsRepository::new(db);
 
-        assert!(repo.get_or_default(&user_id).await.unwrap().max_sessions.is_none());
+        assert!(
+            repo.get_or_default(&user_id)
+                .await
+                .unwrap()
+                .max_sessions
+                .is_none()
+        );
 
         let caps = HashMap::from([
             ("openai/gpt-5.5".to_string(), 2u32),
             ("fireworks-ai/kimi".to_string(), 3u32),
         ]);
         let row = repo.upsert_max_sessions(&user_id, &caps).await.unwrap();
-        assert_eq!(row.max_sessions.as_ref().unwrap().get("openai/gpt-5.5"), Some(&2));
-        assert_eq!(row.max_sessions.as_ref().unwrap().get("fireworks-ai/kimi"), Some(&3));
+        assert_eq!(
+            row.max_sessions.as_ref().unwrap().get("openai/gpt-5.5"),
+            Some(&2)
+        );
+        assert_eq!(
+            row.max_sessions.as_ref().unwrap().get("fireworks-ai/kimi"),
+            Some(&3)
+        );
 
         // Coexists with the model selection (independent column patch).
         repo.upsert_models(&user_id, &["openai/gpt-5.5".to_string()])
@@ -401,6 +425,13 @@ mod tests {
         repo.upsert_max_sessions(&user_id, &HashMap::from([("x/y".to_string(), 0u32)]))
             .await
             .unwrap();
-        assert!(repo.get(&user_id).await.unwrap().unwrap().max_sessions.is_none());
+        assert!(
+            repo.get(&user_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .max_sessions
+                .is_none()
+        );
     }
 }

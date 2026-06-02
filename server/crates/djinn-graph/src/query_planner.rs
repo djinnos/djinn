@@ -149,7 +149,10 @@ fn strip_list_marker(line: &str) -> &str {
     let digits = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
     if digits > 0 && digits < line.len() {
         let after = &line[digits..];
-        if let Some(rest) = after.strip_prefix(". ").or_else(|| after.strip_prefix(") ")) {
+        if let Some(rest) = after
+            .strip_prefix(". ")
+            .or_else(|| after.strip_prefix(") "))
+        {
             return rest.trim();
         }
     }
@@ -315,8 +318,13 @@ mod tests {
 
     #[test]
     fn plan_query_caps_at_max() {
-        let planner =
-            StaticPlanner::new(vec!["a".into(), "b".into(), "c".into(), "d".into(), "e".into()]);
+        let planner = StaticPlanner::new(vec![
+            "a".into(),
+            "b".into(),
+            "c".into(),
+            "d".into(),
+            "e".into(),
+        ]);
         let plan = plan_query(&planner, "q");
         assert_eq!(plan.len(), MAX_SUBQUERIES);
         assert_eq!(plan[0], "q");
@@ -378,12 +386,14 @@ mod tests {
     fn union_dedup_respects_limit() {
         use crate::repo_graph::RepoGraphSearchHit;
         use petgraph::graph::NodeIndex;
-        let per_query = vec![(0..10)
-            .map(|i| RepoGraphSearchHit {
-                node_index: NodeIndex::new(i),
-                score: i as f64,
-            })
-            .collect()];
+        let per_query = vec![
+            (0..10)
+                .map(|i| RepoGraphSearchHit {
+                    node_index: NodeIndex::new(i),
+                    score: i as f64,
+                })
+                .collect(),
+        ];
         let merged = union_dedup_hits(per_query, 3);
         assert_eq!(merged.len(), 3);
     }

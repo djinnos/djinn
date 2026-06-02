@@ -24,8 +24,8 @@ use std::time::Duration;
 
 use djinn_core::models::{SessionRecord, Task, TaskRunStatus, TaskRunTrigger};
 use djinn_runtime::{
-    ControlMsg, ResolvedCredentials, RoleKind, SerializableCredential, SupervisorFlow,
-    TaskRunSpec, WorkerEvent,
+    ControlMsg, ResolvedCredentials, RoleKind, SerializableCredential, SupervisorFlow, TaskRunSpec,
+    WorkerEvent,
 };
 use djinn_supervisor::services::SerializableCreateSessionParams;
 use djinn_supervisor::{
@@ -95,7 +95,9 @@ async fn make_source_repo(path: &Path) {
     run_git(&["git", "init", "-b", "main"], path).await;
     run_git(&["git", "config", "user.email", "test@example.com"], path).await;
     run_git(&["git", "config", "user.name", "Test"], path).await;
-    tokio::fs::write(path.join("README.md"), "hello").await.unwrap();
+    tokio::fs::write(path.join("README.md"), "hello")
+        .await
+        .unwrap();
     run_git(&["git", "add", "."], path).await;
     run_git(&["git", "commit", "-m", "init"], path).await;
 }
@@ -264,7 +266,7 @@ async fn start_fake_server(
                         }
                         ServiceRpcRequest::GetProviderBaseUrl { .. } => {
                             ServiceRpcResponse::GetProviderBaseUrl(Err(
-                                "fake server: no catalog".into(),
+                                "fake server: no catalog".into()
                             ))
                         }
                         ServiceRpcRequest::PickAnyDefaultModel => {

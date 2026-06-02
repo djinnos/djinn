@@ -63,12 +63,11 @@ pub async fn load_environment_config(path: &Path) -> Result<Option<EnvironmentCo
             return Ok(None);
         }
         Err(err) => {
-            return Err(anyhow::Error::from(err)
-                .context(format!("read {}", path.display())));
+            return Err(anyhow::Error::from(err).context(format!("read {}", path.display())));
         }
     };
-    let cfg: EnvironmentConfig = serde_json::from_str(&raw)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let cfg: EnvironmentConfig =
+        serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
     Ok(Some(cfg))
 }
 
@@ -312,16 +311,12 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let stamp = tmp.path().join("stamp");
         let commands = vec![
-            HookCommand::Shell(format!(
-                "echo first >> {}",
-                stamp.to_string_lossy()
-            )),
-            HookCommand::Shell(format!(
-                "echo second >> {}",
-                stamp.to_string_lossy()
-            )),
+            HookCommand::Shell(format!("echo first >> {}", stamp.to_string_lossy())),
+            HookCommand::Shell(format!("echo second >> {}", stamp.to_string_lossy())),
         ];
-        run_phase(tmp.path(), "pre_warm", &commands).await.expect("ok");
+        run_phase(tmp.path(), "pre_warm", &commands)
+            .await
+            .expect("ok");
         let content = std::fs::read_to_string(&stamp).unwrap();
         assert_eq!(content, "first\nsecond\n");
     }
@@ -332,7 +327,9 @@ mod tests {
         let commands = vec![HookCommand::Shell(
             "touch ${containerWorkspaceFolder}/marker".into(),
         )];
-        run_phase(tmp.path(), "pre_warm", &commands).await.expect("ok");
+        run_phase(tmp.path(), "pre_warm", &commands)
+            .await
+            .expect("ok");
         assert!(tmp.path().join("marker").exists());
     }
 
@@ -345,7 +342,9 @@ mod tests {
             "-lc".into(),
             format!("touch {}", marker.to_string_lossy()),
         ])];
-        run_phase(tmp.path(), "pre_warm", &commands).await.expect("ok");
+        run_phase(tmp.path(), "pre_warm", &commands)
+            .await
+            .expect("ok");
         assert!(marker.exists());
     }
 
@@ -363,7 +362,9 @@ mod tests {
             HookCommand::Shell("touch ${containerWorkspaceFolder}/two".into()),
         );
         let commands = vec![HookCommand::Parallel(children)];
-        run_phase(tmp.path(), "pre_warm", &commands).await.expect("ok");
+        run_phase(tmp.path(), "pre_warm", &commands)
+            .await
+            .expect("ok");
         assert!(tmp.path().join("one").exists());
         assert!(tmp.path().join("two").exists());
     }

@@ -308,7 +308,8 @@ async fn list_chat_session_messages(
         let msg_id = row.id;
         let role = row.role;
         let created_at = row.created_at;
-        let raw_content_value: Value = serde_json::from_str(&row.content_json).unwrap_or(Value::Null);
+        let raw_content_value: Value =
+            serde_json::from_str(&row.content_json).unwrap_or(Value::Null);
         let content_value = redact_provider_internal_blocks(&raw_content_value);
 
         // A user row that is purely tool_result blocks is the persisted

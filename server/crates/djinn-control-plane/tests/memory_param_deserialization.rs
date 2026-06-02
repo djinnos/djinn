@@ -44,8 +44,7 @@ fn write_and_move_params_accept_mergeable_case_and_pitfall_types() {
 #[test]
 fn read_params_deserialize() {
     let p: ReadParams =
-        serde_json::from_value(serde_json::json!({"project":"/tmp/p","identifier":"abc"}))
-            .unwrap();
+        serde_json::from_value(serde_json::json!({"project":"/tmp/p","identifier":"abc"})).unwrap();
     assert_eq!(p.project, "/tmp/p");
     assert_eq!(p.identifier, "abc");
 }
@@ -63,7 +62,10 @@ fn search_params_deserialize() {
 
 #[test]
 fn edit_params_deserialize() {
-    let p: EditParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p","identifier":"a","operation":"append","content":"x"})).unwrap();
+    let p: EditParams = serde_json::from_value(
+        serde_json::json!({"project":"/tmp/p","identifier":"a","operation":"append","content":"x"}),
+    )
+    .unwrap();
     assert_eq!(p.project, "/tmp/p");
     assert_eq!(p.identifier, "a");
     assert_eq!(p.operation, "append");
@@ -85,8 +87,7 @@ fn move_params_deserialize() {
 #[test]
 fn delete_params_deserialize() {
     let p: DeleteParams =
-        serde_json::from_value(serde_json::json!({"project":"/tmp/p","identifier":"a"}))
-            .unwrap();
+        serde_json::from_value(serde_json::json!({"project":"/tmp/p","identifier":"a"})).unwrap();
     assert_eq!(p.project, "/tmp/p");
     assert_eq!(p.identifier, "a");
 }
@@ -105,8 +106,7 @@ fn list_params_deserialize() {
 
 #[test]
 fn list_params_deserialize_minimal() {
-    let p: ListParams =
-        serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
+    let p: ListParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
     assert_eq!(p.project, "/tmp/p");
     assert!(p.folder.is_none());
     assert!(p.note_type.is_none());
@@ -115,17 +115,15 @@ fn list_params_deserialize_minimal() {
 
 #[test]
 fn graph_params_deserialize() {
-    let p: GraphParams =
-        serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
+    let p: GraphParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
     assert_eq!(p.project, "/tmp/p");
 }
 
 #[test]
 fn recent_params_deserialize() {
-    let p: RecentParams = serde_json::from_value(
-        serde_json::json!({"project":"/tmp/p","timeframe":"7d","limit":5}),
-    )
-    .unwrap();
+    let p: RecentParams =
+        serde_json::from_value(serde_json::json!({"project":"/tmp/p","timeframe":"7d","limit":5}))
+            .unwrap();
     assert_eq!(p.project, "/tmp/p");
     assert_eq!(p.timeframe.as_deref(), Some("7d"));
     assert_eq!(p.limit, Some(5));
@@ -133,22 +131,19 @@ fn recent_params_deserialize() {
 
 #[test]
 fn catalog_params_deserialize() {
-    let p: CatalogParams =
-        serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
+    let p: CatalogParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
     assert_eq!(p.project, "/tmp/p");
 }
 
 #[test]
 fn health_params_deserialize() {
-    let p: HealthParams =
-        serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
+    let p: HealthParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
     assert_eq!(p.project.as_deref(), Some("/tmp/p"));
 }
 
 #[test]
 fn orphans_params_deserialize() {
-    let p: OrphansParams =
-        serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
+    let p: OrphansParams = serde_json::from_value(serde_json::json!({"project":"/tmp/p"})).unwrap();
     assert_eq!(p.project, "/tmp/p");
 }
 
@@ -192,10 +187,9 @@ fn build_context_params_deserialize() {
 
 #[test]
 fn task_refs_params_deserialize() {
-    let p: TaskRefsParams = serde_json::from_value(
-        serde_json::json!({"project":"/tmp/p","permalink":"references/n"}),
-    )
-    .unwrap();
+    let p: TaskRefsParams =
+        serde_json::from_value(serde_json::json!({"project":"/tmp/p","permalink":"references/n"}))
+            .unwrap();
     assert_eq!(p.project, "/tmp/p");
     assert_eq!(p.permalink, "references/n");
 }

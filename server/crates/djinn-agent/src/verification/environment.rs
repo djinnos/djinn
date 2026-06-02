@@ -156,7 +156,9 @@ pub async fn verification_for_project_id(db: &Database, project_id: &str) -> Ver
 /// for the verification pipeline which only has a path to the ephemeral
 /// mirror clone, not a project id.
 pub async fn verification_for_path(db: &Database, worktree_path: &Path) -> Verification {
-    environment_config_for_path(db, worktree_path).await.verification
+    environment_config_for_path(db, worktree_path)
+        .await
+        .verification
 }
 
 /// Convert a [`djinn_stack::environment::HookCommand`] list (the canonical
@@ -205,8 +207,7 @@ pub fn hook_commands_to_specs(
                     "verification::environment: Parallel-form setup hooks run sequentially on the agent side"
                 );
                 for (child_name, child) in map {
-                    let child_specs =
-                        hook_commands_to_specs(std::slice::from_ref(child));
+                    let child_specs = hook_commands_to_specs(std::slice::from_ref(child));
                     for mut spec in child_specs {
                         spec.name = format!("{name}-{child_name}");
                         specs.push(spec);
@@ -321,10 +322,7 @@ mod tests {
 
     #[test]
     fn hook_commands_to_specs_flattens_exec_form() {
-        let hooks = vec![HookCommand::Exec(vec![
-            "echo".into(),
-            "hello world".into(),
-        ])];
+        let hooks = vec![HookCommand::Exec(vec!["echo".into(), "hello world".into()])];
         let specs = hook_commands_to_specs(&hooks);
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].command, "'echo' 'hello world'");

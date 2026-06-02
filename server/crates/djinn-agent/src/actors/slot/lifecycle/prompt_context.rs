@@ -340,8 +340,7 @@ pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> Pro
         }
     };
 
-    let planner_patrol_context =
-        build_planner_patrol_context(task, app_state, project_path).await;
+    let planner_patrol_context = build_planner_patrol_context(task, app_state, project_path).await;
 
     // PR E2: auto-include `code_graph context` for worker / reviewer roles
     // when `DJINN_AUTO_CODE_CONTEXT_ROLES` enables this role. Reuses the
@@ -414,8 +413,11 @@ pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> Pro
         },
     );
     // Apply role-level prompt extensions from DB (system_prompt_extensions + learned_prompt).
-    let system_prompt_with_extensions =
-        apply_role_extensions(&base_system_prompt, system_prompt_extensions, learned_prompt);
+    let system_prompt_with_extensions = apply_role_extensions(
+        &base_system_prompt,
+        system_prompt_extensions,
+        learned_prompt,
+    );
     // Append skills section after all other extensions.
     let system_prompt = apply_skills(&system_prompt_with_extensions, resolved_skills);
     // Read-only multi-repo: advertise the epic's read-source projects last
@@ -461,10 +463,8 @@ async fn resolve_reviewer_diff_shas(
     app_state: &AgentContext,
 ) -> (Option<String>, Option<String>) {
     let target_branch = {
-        let repo = djinn_db::ProjectRepository::new(
-            app_state.db.clone(),
-            app_state.event_bus.clone(),
-        );
+        let repo =
+            djinn_db::ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
         match repo.get_config(project_id).await {
             Ok(Some(config)) => config.target_branch,
             _ => "main".to_string(),

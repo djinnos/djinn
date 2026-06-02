@@ -1341,9 +1341,11 @@ mod tests {
         let (_, input) = conversation.to_openai_responses_input();
 
         // Assistant text survives; the dangling call is gone.
-        assert!(input.iter().any(|i| i["content"]
-            .as_array()
-            .is_some_and(|c| c.iter().any(|b| b["text"] == "Let me check."))));
+        assert!(input.iter().any(|i| {
+            i["content"]
+                .as_array()
+                .is_some_and(|c| c.iter().any(|b| b["text"] == "Let me check."))
+        }));
         assert!(
             !input.iter().any(|i| i["type"] == "function_call"),
             "orphaned function_call must be dropped"

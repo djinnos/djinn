@@ -163,10 +163,7 @@ impl TaskRunRepository {
     /// teardown reap missed for any reason). The threshold should be larger
     /// than the K8s Job `activeDeadlineSeconds` + termination grace so we
     /// never reap a still-live run.
-    pub async fn reap_stale_running(
-        &self,
-        stale_threshold_iso: &str,
-    ) -> Result<Vec<String>> {
+    pub async fn reap_stale_running(&self, stale_threshold_iso: &str) -> Result<Vec<String>> {
         self.db.ensure_initialized().await?;
 
         let ids: Vec<String> = sqlx::query_scalar!(
@@ -189,10 +186,7 @@ impl TaskRunRepository {
     /// `task_run` that belongs to the given task. Replaces the former
     /// `SessionRepository::latest_worktree_path_for_task` now that workspace
     /// lifetime is owned by `task_runs` rather than `sessions`.
-    pub async fn latest_workspace_path_for_task(
-        &self,
-        task_id: &str,
-    ) -> Result<Option<String>> {
+    pub async fn latest_workspace_path_for_task(&self, task_id: &str) -> Result<Option<String>> {
         self.db.ensure_initialized().await?;
 
         let row: Option<Option<String>> = sqlx::query_scalar!(
@@ -291,7 +285,10 @@ mod tests {
     async fn get_returns_none_for_missing_id() {
         let db = test_db();
         let repo = TaskRunRepository::new(db);
-        let missing = repo.get("00000000-0000-0000-0000-000000000000").await.unwrap();
+        let missing = repo
+            .get("00000000-0000-0000-0000-000000000000")
+            .await
+            .unwrap();
         assert!(missing.is_none());
     }
 
@@ -505,7 +502,10 @@ mod tests {
             .reap_running_for_task(&task_id, TaskRunStatus::Running)
             .await
             .unwrap();
-        assert!(reaped.is_none(), "non-terminal status must be a guard-no-op");
+        assert!(
+            reaped.is_none(),
+            "non-terminal status must be a guard-no-op"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

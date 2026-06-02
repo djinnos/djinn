@@ -65,7 +65,10 @@ pub fn parse_package_json(body: &str) -> PackageJsonInfo {
         }
     };
 
-    let package_manager = raw.package_manager.as_deref().and_then(parse_package_manager_slug);
+    let package_manager = raw
+        .package_manager
+        .as_deref()
+        .and_then(parse_package_manager_slug);
     let has_workspaces = match raw.workspaces {
         Some(WorkspacesField::Globs(v)) => !v.is_empty(),
         Some(WorkspacesField::Config { packages }) => packages.is_some_and(|p| !p.is_empty()),
@@ -110,7 +113,11 @@ fn parse_package_manager_slug(raw: &str) -> Option<String> {
 /// `">=20.10"` / `"20.x"` / `"^22"` → `"20"` / `"20"` / `"22"`.
 /// Best-effort — if no digit is found, return the string as-is.
 fn normalize_node_version(raw: String) -> String {
-    let digits: String = raw.chars().skip_while(|c| !c.is_ascii_digit()).take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = raw
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     if digits.is_empty() { raw } else { digits }
 }
 

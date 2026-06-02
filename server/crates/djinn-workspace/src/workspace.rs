@@ -168,7 +168,9 @@ impl Workspace {
     /// `push_to_origin(task_branch)` need `task_branch` to actually exist as
     /// a local ref pointing at the worker's commits.
     pub async fn ensure_branch(&self, branch: &str) -> Result<(), EphemeralWorkspaceError> {
-        self.run_git(&["checkout", "-B", branch], &[]).await.map(|_| ())
+        self.run_git(&["checkout", "-B", branch], &[])
+            .await
+            .map(|_| ())
     }
 
     /// Whether `origin/<target_branch>` is already an ancestor of the current
@@ -190,7 +192,8 @@ impl Workspace {
         &self,
         target_branch: &str,
     ) -> Result<bool, EphemeralWorkspaceError> {
-        self.run_git(&["fetch", "origin", target_branch], &[]).await?;
+        self.run_git(&["fetch", "origin", target_branch], &[])
+            .await?;
         let merge_ref = format!("origin/{target_branch}");
         // `git merge-base --is-ancestor A B` exits 0 when A is an ancestor of
         // B, 1 when it is not. Other non-zero exits are real errors. We can't
@@ -240,7 +243,8 @@ impl Workspace {
         &self,
         target_branch: &str,
     ) -> Result<MergeOutcome, EphemeralWorkspaceError> {
-        self.run_git(&["fetch", "origin", target_branch], &[]).await?;
+        self.run_git(&["fetch", "origin", target_branch], &[])
+            .await?;
 
         // `git merge` validates the committer identity at the start of the
         // operation even with `--no-commit`, so we must supply it here.  The
@@ -299,11 +303,7 @@ impl Workspace {
     pub async fn push_to_origin(&self, branch: &str) -> Result<(), djinn_git::GitError> {
         djinn_git::run_git_command(
             self.root.path().to_path_buf(),
-            vec![
-                "push".into(),
-                "origin".into(),
-                format!("{branch}:{branch}"),
-            ],
+            vec!["push".into(), "origin".into(), format!("{branch}:{branch}")],
         )
         .await
         .map(|_| ())
@@ -467,7 +467,10 @@ mod tests {
             "expected a merge commit (sha + two parents): {parents}"
         );
         // The main-side file landed on the task branch.
-        assert!(cp.join("newfile.txt").exists(), "main's file must be merged in");
+        assert!(
+            cp.join("newfile.txt").exists(),
+            "main's file must be merged in"
+        );
     }
 
     #[tokio::test]
@@ -480,7 +483,12 @@ mod tests {
         git(cp, &["commit", "-m", "task edits shared"]);
 
         // ...main edits the SAME file differently → conflict.
-        advance_main(origin.path(), "shared.txt", "main-edit\n", "main edits shared");
+        advance_main(
+            origin.path(),
+            "shared.txt",
+            "main-edit\n",
+            "main edits shared",
+        );
 
         assert!(
             !ws.is_up_to_date_with("main").await.expect("check"),

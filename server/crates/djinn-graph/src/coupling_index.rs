@@ -221,10 +221,7 @@ async fn cursor_is_reachable(project_root: &Path, sha: &str) -> bool {
 /// Run `git log` and, if the output looks like a shallow clone cut
 /// short of the cursor range, extend once via `git fetch --unshallow`
 /// and re-run. Returns `(stdout, unshallowed)`.
-async fn run_git_log(
-    project_root: &Path,
-    range: &str,
-) -> Result<(String, bool), IngestError> {
+async fn run_git_log(project_root: &Path, range: &str) -> Result<(String, bool), IngestError> {
     // Unshallow eagerly when the clone is shallow. The warm Job pod
     // does `git clone --depth 1 --single-branch` (see
     // `djinn_k8s::warm_job`) — fast for SCIP, useless for coupling: a
@@ -281,10 +278,7 @@ async fn run_git_log(
     Ok((output, unshallowed))
 }
 
-async fn run_git_log_once(
-    project_root: &Path,
-    range: &str,
-) -> Result<String, IngestError> {
+async fn run_git_log_once(project_root: &Path, range: &str) -> Result<String, IngestError> {
     // `--no-merges`: merge commits muddy the "changed together" signal.
     // `-M` / `-C`: surface renames and copies with a similarity score.
     // `--date-order`: stabilise output ordering across git versions.
@@ -368,9 +362,11 @@ fn parse_git_log(raw: &str, project_id: &str) -> Result<ParsedLog, String> {
                  current_email: &Option<String>,
                  numstat: &HashMap<String, (i64, i64)>,
                  name_status: &Vec<(String, String, Option<String>)>| {
-        let (Some(sha), Some(date), Some(email)) =
-            (current_sha.as_ref(), current_date.as_ref(), current_email.as_ref())
-        else {
+        let (Some(sha), Some(date), Some(email)) = (
+            current_sha.as_ref(),
+            current_date.as_ref(),
+            current_email.as_ref(),
+        ) else {
             return;
         };
         for (kind, path, old_path) in name_status {
@@ -533,12 +529,11 @@ mod tests {
         assert_eq!(parsed.commits_seen, 2);
         assert_eq!(parsed.rows.len(), 5);
 
-        let by_key: std::collections::HashMap<(String, String), &CommitFileChange> =
-            parsed
-                .rows
-                .iter()
-                .map(|r| ((r.commit_sha.clone(), r.file_path.clone()), r))
-                .collect();
+        let by_key: std::collections::HashMap<(String, String), &CommitFileChange> = parsed
+            .rows
+            .iter()
+            .map(|r| ((r.commit_sha.clone(), r.file_path.clone()), r))
+            .collect();
 
         let add = by_key
             .get(&("abc123".into(), "src/new_file.rs".into()))
@@ -646,7 +641,9 @@ mod tests {
         tokio::fs::write(root.join("b.txt"), "yo\n").await.unwrap();
         run(&root, &["add", "."]).await;
         run(&root, &["commit", "-q", "-m", "seed"]).await;
-        tokio::fs::write(root.join("a.txt"), "hi again\n").await.unwrap();
+        tokio::fs::write(root.join("a.txt"), "hi again\n")
+            .await
+            .unwrap();
         run(&root, &["add", "a.txt"]).await;
         run(&root, &["commit", "-q", "-m", "edit a"]).await;
 

@@ -463,8 +463,7 @@ impl DjinnMcpServer {
 
         // Collision check: refuse to overwrite an existing accepted ADR
         // with the same target permalink.
-        let target_permalink =
-            djinn_db::permalink_for("adr", &new_title);
+        let target_permalink = djinn_db::permalink_for("adr", &new_title);
         if note_repo
             .get_by_permalink(&project_id, &target_permalink)
             .await

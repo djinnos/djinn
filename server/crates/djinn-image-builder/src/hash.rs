@@ -44,10 +44,7 @@ fn compute_bundle_sha(scripts: &[ScriptFile]) -> String {
 /// responsible for threading in a reference that represents the actual
 /// worker binary that will ship in the image (e.g. the SHA-pinned tag
 /// Tilt publishes to the cluster-local registry).
-pub fn compute_environment_hash(
-    config: &EnvironmentConfig,
-    agent_worker_ref: &str,
-) -> String {
+pub fn compute_environment_hash(config: &EnvironmentConfig, agent_worker_ref: &str) -> String {
     let script_sha = compute_script_bundle_sha();
     let config_json = canonical_json(config);
 

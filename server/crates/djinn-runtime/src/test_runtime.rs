@@ -400,8 +400,8 @@ impl SessionRuntime for TestRuntime {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     use djinn_core::models::TaskRunTrigger;

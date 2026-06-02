@@ -185,8 +185,10 @@ mod tests {
         assert!(is_context_length_error(&typed));
 
         // A typed RateLimit is NOT a context-length error.
-        let rate = anyhow::Error::new(ProviderError::RateLimit { retry_after_ms: None })
-            .context("provider API error 429");
+        let rate = anyhow::Error::new(ProviderError::RateLimit {
+            retry_after_ms: None,
+        })
+        .context("provider API error 429");
         assert!(!is_context_length_error(&rate));
 
         // Substring fallback for untyped/legacy errors.

@@ -161,10 +161,7 @@ fn walk_fs(root: &Path, dir: &Path, out: &mut Vec<FileEntry>) -> Result<()> {
 }
 
 /// Read bodies for the handful of manifests we parse.
-fn read_manifest_bodies(
-    root: &Path,
-    files: &[FileEntry],
-) -> Result<HashMap<String, String>> {
+fn read_manifest_bodies(root: &Path, files: &[FileEntry]) -> Result<HashMap<String, String>> {
     let wanted: BTreeSet<&str> = MANIFEST_FILENAMES.iter().copied().collect();
     let mut out = HashMap::new();
 
@@ -191,7 +188,10 @@ fn read_manifest_bodies(
     Ok(out)
 }
 
-fn read_manifest_bodies_git(root: &Path, wanted: &BTreeSet<&str>) -> Result<HashMap<String, String>> {
+fn read_manifest_bodies_git(
+    root: &Path,
+    wanted: &BTreeSet<&str>,
+) -> Result<HashMap<String, String>> {
     let repo = git2::Repository::open(root).or_else(|_| git2::Repository::open_bare(root))?;
     let tree = repo.head()?.peel_to_tree()?;
     let mut out = HashMap::new();
@@ -203,7 +203,11 @@ fn read_manifest_bodies_git(root: &Path, wanted: &BTreeSet<&str>) -> Result<Hash
             Some(n) => n,
             None => return git2::TreeWalkResult::Ok,
         };
-        let full = if dir.is_empty() { name.to_string() } else { format!("{dir}{name}") };
+        let full = if dir.is_empty() {
+            name.to_string()
+        } else {
+            format!("{dir}{name}")
+        };
         if !is_interesting_manifest(&full, wanted) {
             return git2::TreeWalkResult::Ok;
         }
@@ -261,7 +265,9 @@ fn build_stack(files: &[FileEntry], bodies: &HashMap<String, String>) -> Stack {
             // Lockfile-based fallback when `packageManager` field is absent.
             let has_pnpm_lock = files.iter().any(|f| f.path == "pnpm-lock.yaml");
             let has_yarn_lock = files.iter().any(|f| f.path == "yarn.lock");
-            let has_bun_lock = files.iter().any(|f| f.path == "bun.lockb" || f.path == "bun.lock");
+            let has_bun_lock = files
+                .iter()
+                .any(|f| f.path == "bun.lockb" || f.path == "bun.lock");
             let has_npm_lock = files.iter().any(|f| f.path == "package-lock.json");
             if has_pnpm_lock {
                 pms.push("pnpm".into());
@@ -317,13 +323,19 @@ fn build_stack(files: &[FileEntry], bodies: &HashMap<String, String>) -> Stack {
 
     // pyproject.toml
     if signals.has_pyproject_toml {
-        let body = bodies.get("pyproject.toml").map(String::as_str).unwrap_or("");
+        let body = bodies
+            .get("pyproject.toml")
+            .map(String::as_str)
+            .unwrap_or("");
         let info = manifests::parse_pyproject(body);
         if let Some(pm) = info.package_manager {
             if !pms.contains(&pm) {
                 pms.push(pm);
             }
-        } else if !pms.iter().any(|p| matches!(p.as_str(), "uv" | "poetry" | "pdm" | "pip")) {
+        } else if !pms
+            .iter()
+            .any(|p| matches!(p.as_str(), "uv" | "poetry" | "pdm" | "pip"))
+        {
             pms.push("pip".into());
         }
         if let Some(py) = info.python_version {
@@ -391,12 +403,7 @@ fn build_stack(files: &[FileEntry], bodies: &HashMap<String, String>) -> Stack {
         }
         let combined: String = bodies
             .iter()
-            .filter(|(k, _)| {
-                matches!(
-                    k.as_str(),
-                    "pom.xml" | "build.gradle" | "build.gradle.kts"
-                )
-            })
+            .filter(|(k, _)| matches!(k.as_str(), "pom.xml" | "build.gradle" | "build.gradle.kts"))
             .map(|(_, v)| v.as_str())
             .collect::<Vec<_>>()
             .join("\n");
@@ -467,7 +474,9 @@ fn tally_languages(files: &[FileEntry]) -> (Vec<LanguageStat>, Option<String>) {
     let table = LanguageTable::global();
     let mut totals: BTreeMap<String, u64> = BTreeMap::new();
     for entry in files {
-        let Some(lang) = table.classify(&entry.path) else { continue };
+        let Some(lang) = table.classify(&entry.path) else {
+            continue;
+        };
         // Only `programming` + `markup` count toward the language
         // byte-share — data files (JSON/YAML/TOML) and prose drown out
         // the signal otherwise.
@@ -488,11 +497,7 @@ fn tally_languages(files: &[FileEntry]) -> (Vec<LanguageStat>, Option<String>) {
             pct: round2((bytes as f64) * 100.0 / (total as f64)),
         })
         .collect();
-    stats.sort_by(|a, b| {
-        b.bytes
-            .cmp(&a.bytes)
-            .then_with(|| a.name.cmp(&b.name))
-    });
+    stats.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.name.cmp(&b.name)));
     let primary = stats.first().map(|s| s.name.clone());
     (stats, primary)
 }
@@ -534,11 +539,10 @@ fn discover_workspaces_blocking(root: &Path, files: &[FileEntry]) -> Vec<StackWo
     let candidates: Vec<WorkspaceCandidate> = files
         .iter()
         .filter_map(|entry| {
-            workspace_manifest_language(&entry.path)
-                .map(|lang| WorkspaceCandidate {
-                    path: entry.path.clone(),
-                    language: lang,
-                })
+            workspace_manifest_language(&entry.path).map(|lang| WorkspaceCandidate {
+                path: entry.path.clone(),
+                language: lang,
+            })
         })
         .collect();
 
@@ -596,9 +600,9 @@ fn dedup_shallowest_per_language(
     let mut selected: Vec<WorkspaceCandidate> = Vec::new();
     for c in candidates {
         let dir = parent_dir(&c.path);
-        let suppressed = selected.iter().any(|s| {
-            s.language == c.language && is_ancestor_dir(parent_dir(&s.path), dir)
-        });
+        let suppressed = selected
+            .iter()
+            .any(|s| s.language == c.language && is_ancestor_dir(parent_dir(&s.path), dir));
         if !suppressed {
             selected.push(c);
         }
@@ -625,10 +629,7 @@ fn is_ancestor_dir(ancestor: &str, candidate: &str) -> bool {
     candidate.starts_with(&format!("{ancestor}/"))
 }
 
-fn body_paths_for_workspaces(
-    selected: &[WorkspaceCandidate],
-    files: &[FileEntry],
-) -> Vec<String> {
+fn body_paths_for_workspaces(selected: &[WorkspaceCandidate], files: &[FileEntry]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for c in selected {
         out.push(c.path.clone());
@@ -642,7 +643,13 @@ fn body_paths_for_workspaces(
         // Node — sibling lockfiles help the package-manager fallback
         // when `packageManager` isn't pinned in package.json.
         if c.language == "node" {
-            for lf in ["pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock", "package-lock.json"] {
+            for lf in [
+                "pnpm-lock.yaml",
+                "yarn.lock",
+                "bun.lockb",
+                "bun.lock",
+                "package-lock.json",
+            ] {
                 let sibling = join_dir(parent_dir(&c.path), lf);
                 if files.iter().any(|f| f.path == sibling) {
                     out.push(sibling);
@@ -721,7 +728,10 @@ fn build_workspace(
     use crate::schema::StackWorkspace as Ws;
 
     let dir = parent_dir(&candidate.path).to_string();
-    let body = bodies.get(&candidate.path).map(String::as_str).unwrap_or("");
+    let body = bodies
+        .get(&candidate.path)
+        .map(String::as_str)
+        .unwrap_or("");
 
     let (toolchain, package_manager) = match candidate.language {
         "rust" => {
@@ -798,10 +808,7 @@ mod tests {
 
     #[test]
     fn data_files_are_excluded_from_language_byte_share() {
-        let files = entries(&[
-            ("src/lib.rs", 100),
-            ("package-lock.json", 999_999),
-        ]);
+        let files = entries(&[("src/lib.rs", 100), ("package-lock.json", 999_999)]);
         let (langs, _) = tally_languages(&files);
         assert_eq!(langs.len(), 1);
         assert_eq!(langs[0].name, "Rust");
@@ -814,17 +821,17 @@ mod tests {
             workspace_manifest_language("server/Cargo.toml"),
             Some("rust")
         );
-        assert_eq!(
-            workspace_manifest_language("ui/package.json"),
-            Some("node")
-        );
+        assert_eq!(workspace_manifest_language("ui/package.json"), Some("node"));
         assert_eq!(workspace_manifest_language("go.mod"), Some("go"));
         assert_eq!(
             workspace_manifest_language("services/api/pyproject.toml"),
             Some("python")
         );
         assert_eq!(workspace_manifest_language("pom.xml"), Some("java"));
-        assert_eq!(workspace_manifest_language("build.gradle.kts"), Some("java"));
+        assert_eq!(
+            workspace_manifest_language("build.gradle.kts"),
+            Some("java")
+        );
         assert_eq!(workspace_manifest_language("Gemfile"), Some("ruby"));
         assert_eq!(workspace_manifest_language("README.md"), None);
         // Skip well-known vendored trees even when they contain manifests.

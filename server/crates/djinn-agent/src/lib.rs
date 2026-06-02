@@ -16,26 +16,26 @@ pub mod compaction;
 pub mod context;
 // Extension tools: `pub(crate)` internals, `chat_tools` re-exports the chat-safe subset.
 pub mod chat_tools;
+pub mod direct_services;
 pub(crate) mod extension;
 pub mod file_time;
 pub(crate) mod knowledge_promotion;
 pub mod lsp;
-pub(crate) mod task_merge;
+pub mod mcp_client;
 pub(crate) mod oauth;
 pub(crate) mod output_parser;
 pub mod output_stash;
 pub(crate) mod patch;
 pub mod prompts;
-pub mod mcp_client;
 pub mod roles;
+pub mod runtime_bridge;
 pub(crate) mod sandbox;
 pub mod skills;
-pub mod direct_services;
-pub mod runtime_bridge;
 pub mod supervisor;
-pub mod warmer;
 pub(crate) mod supervisor_impl;
+pub(crate) mod task_merge;
 pub(crate) mod truncate;
+pub mod warmer;
 
 // ─── Verification (was src/verification/) ────────────────────────────────────
 
@@ -192,5 +192,4 @@ mod tests {
         assert_eq!(AgentType::Planner.dispatch_role(), "planner");
         assert_eq!(AgentType::Architect.dispatch_role(), "architect");
     }
-
 }

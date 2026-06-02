@@ -118,7 +118,11 @@ mod tests {
             }
             other => panic!("expected ApiKey, got {other:?}"),
         }
-        match back.per_role.get(&RoleKind::Planner).expect("planner entry") {
+        match back
+            .per_role
+            .get(&RoleKind::Planner)
+            .expect("planner entry")
+        {
             SerializableCredential::OAuthConfig { config_json } => {
                 assert!(config_json.contains("api.example"));
             }

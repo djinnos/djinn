@@ -374,11 +374,12 @@ impl SessionRepository {
 
     pub async fn count_for_task(&self, task_id: &str) -> Result<i64> {
         self.db.ensure_initialized().await?;
-        Ok(
-            sqlx::query_scalar!(r#"SELECT COUNT(*) AS "count!: i64" FROM sessions WHERE task_id = $1"#, task_id)
-                .fetch_one(self.db.pool())
-                .await?,
+        Ok(sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count!: i64" FROM sessions WHERE task_id = $1"#,
+            task_id
         )
+        .fetch_one(self.db.pool())
+        .await?)
     }
 
     /// Batch count sessions per task for a list of task IDs.
@@ -453,8 +454,9 @@ impl SessionRepository {
     pub async fn set_event_taxonomy(&self, id: &str, taxonomy_json: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
 
-        let taxonomy: serde_json::Value = serde_json::from_str(taxonomy_json)
-            .map_err(|e| crate::Error::InvalidData(format!("invalid json for sessions.event_taxonomy: {e}")))?;
+        let taxonomy: serde_json::Value = serde_json::from_str(taxonomy_json).map_err(|e| {
+            crate::Error::InvalidData(format!("invalid json for sessions.event_taxonomy: {e}"))
+        })?;
         sqlx::query!(
             "UPDATE sessions SET event_taxonomy = $1 WHERE id = $2",
             taxonomy,
@@ -474,10 +476,12 @@ impl SessionRepository {
     /// can assert on the on-disk representation.
     pub async fn get_event_taxonomy_json(&self, id: &str) -> Result<Option<String>> {
         self.db.ensure_initialized().await?;
-        let row: Option<Option<String>> =
-            sqlx::query_scalar!(r#"SELECT event_taxonomy::text AS "event_taxonomy?" FROM sessions WHERE id = $1"#, id)
-                .fetch_optional(self.db.pool())
-                .await?;
+        let row: Option<Option<String>> = sqlx::query_scalar!(
+            r#"SELECT event_taxonomy::text AS "event_taxonomy?" FROM sessions WHERE id = $1"#,
+            id
+        )
+        .fetch_optional(self.db.pool())
+        .await?;
         Ok(row.flatten())
     }
 
@@ -603,10 +607,7 @@ impl SessionRepository {
         )
         .fetch_all(self.db.pool())
         .await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| (r.id, r.last_activity))
-            .collect())
+        Ok(rows.into_iter().map(|r| (r.id, r.last_activity)).collect())
     }
 
     /// Settle an idle chat session: `running` → `completed`, stamping
@@ -709,10 +710,7 @@ impl SessionRepository {
     /// The outer `Option` is presence of the row; the inner `Option` is the
     /// nullable column. Returns `Ok(Some(None))` for a legacy unattributed
     /// session that exists but has no owner.
-    pub async fn chat_session_owner(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<Option<String>>> {
+    pub async fn chat_session_owner(&self, session_id: &str) -> Result<Option<Option<String>>> {
         self.db.ensure_initialized().await?;
         let row = sqlx::query!(
             "SELECT created_by_user_id FROM sessions WHERE id = $1 AND agent_type = 'chat'",
@@ -915,9 +913,15 @@ mod tests {
             .filter_map(|(c, m, n)| c.map(|c| ((c, m), n)))
             .collect();
         // user_a's gpt count stays 2 — the chat session is excluded.
-        assert_eq!(map.get(&(user_a.clone(), "openai/gpt".to_string())), Some(&2));
+        assert_eq!(
+            map.get(&(user_a.clone(), "openai/gpt".to_string())),
+            Some(&2)
+        );
         assert_eq!(map.get(&(user_a.clone(), "x/kimi".to_string())), Some(&1));
-        assert_eq!(map.get(&(user_b.clone(), "openai/gpt".to_string())), Some(&1));
+        assert_eq!(
+            map.get(&(user_b.clone(), "openai/gpt".to_string())),
+            Some(&1)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1041,7 +1045,7 @@ mod tests {
                 model: "openai/gpt-5",
                 agent_type: "worker",
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .unwrap();
@@ -1053,7 +1057,7 @@ mod tests {
                 model: "openai/gpt-5-pause",
                 agent_type: "worker",
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .unwrap();
@@ -1066,7 +1070,7 @@ mod tests {
                 model: "openai/gpt-5-mini",
                 agent_type: "worker",
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .unwrap();
@@ -1078,7 +1082,7 @@ mod tests {
                 model: "openai/gpt-5",
                 agent_type: "worker",
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .unwrap();
@@ -1159,7 +1163,7 @@ mod tests {
                 model: "openai/gpt-5",
                 agent_type: "planner",
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .unwrap();
@@ -1172,7 +1176,7 @@ mod tests {
                 model: "openai/gpt-5",
                 agent_type: "planner",
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .unwrap();
@@ -1185,7 +1189,7 @@ mod tests {
                 model: "openai/gpt-5",
                 agent_type: "worker",
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .unwrap();
@@ -1198,7 +1202,7 @@ mod tests {
                 model: "openai/gpt-5",
                 agent_type: "planner",
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .unwrap();

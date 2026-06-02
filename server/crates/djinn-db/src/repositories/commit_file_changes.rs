@@ -251,9 +251,7 @@ impl CommitFileChangeRepository {
         // resolution path as the old composite PK gave us. Touch a
         // non-PK column with the same value so the UPSERT contract is
         // satisfied without changing semantics on duplicate keys.
-        sql.push_str(
-            " ON CONFLICT (event_key) DO UPDATE SET committed_at = EXCLUDED.committed_at",
-        );
+        sql.push_str(" ON CONFLICT (event_key) DO UPDATE SET committed_at = EXCLUDED.committed_at");
 
         let mut query = sqlx::query(&sql);
         for e in events {
@@ -326,13 +324,7 @@ impl CommitFileChangeRepository {
                 if let (Some(prev_sha), Some(prev_at)) =
                     (current_sha.take(), current_committed_at.take())
                 {
-                    derive_pair_events_into(
-                        project_id,
-                        &prev_sha,
-                        &prev_at,
-                        &files,
-                        &mut buffer,
-                    );
+                    derive_pair_events_into(project_id, &prev_sha, &prev_at, &files, &mut buffer);
                     if buffer.len() >= FLUSH_AT {
                         written += self.upsert_pair_events(&buffer).await?;
                         buffer.clear();
@@ -447,9 +439,10 @@ impl CommitFileChangeRepository {
         self.db.ensure_initialized().await?;
         let limit = limit.clamp(1, 500) as i64;
         let rows: Vec<FileChurn> = match since {
-            Some(ts) => sqlx::query_as!(
-                FileChurn,
-                r#"SELECT
+            Some(ts) => {
+                sqlx::query_as!(
+                    FileChurn,
+                    r#"SELECT
                     file_path AS "file_path!",
                     CAST(COUNT(DISTINCT commit_sha) AS BIGINT) AS "commit_count!",
                     CAST(COALESCE(SUM(insertions), 0) AS BIGINT) AS "insertions!",
@@ -460,15 +453,17 @@ impl CommitFileChangeRepository {
                  GROUP BY file_path
                  ORDER BY COUNT(DISTINCT commit_sha) DESC, MAX(committed_at) DESC, file_path ASC
                  LIMIT $3"#,
-                project_id,
-                ts,
-                limit,
-            )
-            .fetch_all(self.db.pool())
-            .await?,
-            None => sqlx::query_as!(
-                FileChurn,
-                r#"SELECT
+                    project_id,
+                    ts,
+                    limit,
+                )
+                .fetch_all(self.db.pool())
+                .await?
+            }
+            None => {
+                sqlx::query_as!(
+                    FileChurn,
+                    r#"SELECT
                     file_path AS "file_path!",
                     CAST(COUNT(DISTINCT commit_sha) AS BIGINT) AS "commit_count!",
                     CAST(COALESCE(SUM(insertions), 0) AS BIGINT) AS "insertions!",
@@ -479,11 +474,12 @@ impl CommitFileChangeRepository {
                  GROUP BY file_path
                  ORDER BY COUNT(DISTINCT commit_sha) DESC, MAX(committed_at) DESC, file_path ASC
                  LIMIT $2"#,
-                project_id,
-                limit,
-            )
-            .fetch_all(self.db.pool())
-            .await?,
+                    project_id,
+                    limit,
+                )
+                .fetch_all(self.db.pool())
+                .await?
+            }
         };
         Ok(rows)
     }
@@ -523,9 +519,10 @@ impl CommitFileChangeRepository {
         // self-join, this is a straight indexed range scan on
         // `idx_recent` (with `since`) or PK prefix (without).
         let rows: Vec<CoupledPair> = match since {
-            Some(ts) => sqlx::query_as!(
-                CoupledPair,
-                r#"SELECT
+            Some(ts) => {
+                sqlx::query_as!(
+                    CoupledPair,
+                    r#"SELECT
                     file_a AS "file_a!",
                     file_b AS "file_b!",
                     CAST(COUNT(*) AS BIGINT) AS "co_edits!",
@@ -535,15 +532,17 @@ impl CommitFileChangeRepository {
                  GROUP BY file_a, file_b
                  ORDER BY COUNT(*) DESC, MAX(committed_at) DESC, file_a ASC, file_b ASC
                  LIMIT $3"#,
-                project_id,
-                ts,
-                limit,
-            )
-            .fetch_all(self.db.pool())
-            .await?,
-            None => sqlx::query_as!(
-                CoupledPair,
-                r#"SELECT
+                    project_id,
+                    ts,
+                    limit,
+                )
+                .fetch_all(self.db.pool())
+                .await?
+            }
+            None => {
+                sqlx::query_as!(
+                    CoupledPair,
+                    r#"SELECT
                     file_a AS "file_a!",
                     file_b AS "file_b!",
                     CAST(COUNT(*) AS BIGINT) AS "co_edits!",
@@ -553,11 +552,12 @@ impl CommitFileChangeRepository {
                  GROUP BY file_a, file_b
                  ORDER BY COUNT(*) DESC, MAX(committed_at) DESC, file_a ASC, file_b ASC
                  LIMIT $2"#,
-                project_id,
-                limit,
-            )
-            .fetch_all(self.db.pool())
-            .await?,
+                    project_id,
+                    limit,
+                )
+                .fetch_all(self.db.pool())
+                .await?
+            }
         };
         Ok(rows)
     }
@@ -576,31 +576,35 @@ impl CommitFileChangeRepository {
         self.db.ensure_initialized().await?;
         let limit = limit.clamp(1, 200_000) as i64;
         let rows: Vec<CouplingPairEvent> = match since {
-            Some(ts) => sqlx::query_as!(
-                CouplingPairEvent,
-                "SELECT project_id, file_a, file_b, commit_sha, committed_at \
+            Some(ts) => {
+                sqlx::query_as!(
+                    CouplingPairEvent,
+                    "SELECT project_id, file_a, file_b, commit_sha, committed_at \
                  FROM coupling_pair_events \
                  WHERE project_id = $1 AND committed_at >= $2 \
                  ORDER BY committed_at DESC \
                  LIMIT $3",
-                project_id,
-                ts,
-                limit,
-            )
-            .fetch_all(self.db.pool())
-            .await?,
-            None => sqlx::query_as!(
-                CouplingPairEvent,
-                "SELECT project_id, file_a, file_b, commit_sha, committed_at \
+                    project_id,
+                    ts,
+                    limit,
+                )
+                .fetch_all(self.db.pool())
+                .await?
+            }
+            None => {
+                sqlx::query_as!(
+                    CouplingPairEvent,
+                    "SELECT project_id, file_a, file_b, commit_sha, committed_at \
                  FROM coupling_pair_events \
                  WHERE project_id = $1 \
                  ORDER BY committed_at DESC \
                  LIMIT $2",
-                project_id,
-                limit,
-            )
-            .fetch_all(self.db.pool())
-            .await?,
+                    project_id,
+                    limit,
+                )
+                .fetch_all(self.db.pool())
+                .await?
+            }
         };
         Ok(rows)
     }
@@ -936,8 +940,7 @@ mod tests {
         for p in ["src/a.rs", "src/b.rs"] {
             rows.push(row("p1", "small", p, "2026-04-01T00:00:00Z"));
         }
-        let big_files: Vec<String> =
-            (0..16).map(|i| format!("src/big_{i:02}.rs")).collect();
+        let big_files: Vec<String> = (0..16).map(|i| format!("src/big_{i:02}.rs")).collect();
         // Make sure a + b are also touched in the big commit so a
         // naive (no-cap) implementation would over-count a↔b at 2.
         let big_with_ab: Vec<String> = std::iter::once("src/a.rs".to_string())
@@ -965,8 +968,9 @@ mod tests {
             .expect("a↔b");
         assert_eq!(ab.co_edits, 1);
         assert!(
-            !pairs.iter().any(|p| p.file_a.starts_with("src/big_")
-                || p.file_b.starts_with("src/big_")),
+            !pairs
+                .iter()
+                .any(|p| p.file_a.starts_with("src/big_") || p.file_b.starts_with("src/big_")),
             "big commit files leaked into pair table"
         );
     }
@@ -985,9 +989,7 @@ mod tests {
         assert_eq!(events[0].file_b, "src/z.rs");
 
         // 1 file → no pair (commit must touch ≥2 to couple).
-        assert!(
-            derive_pair_events("p1", "abc", "ts", &["only.rs".to_string()]).is_empty()
-        );
+        assert!(derive_pair_events("p1", "abc", "ts", &["only.rs".to_string()]).is_empty());
 
         // > MAX_FILES_PER_COMMIT_FOR_PAIRS files → no pairs (cap drops
         // bulk rewrites at write time so the read path stays fast).
@@ -1007,7 +1009,10 @@ mod tests {
             .collect();
         let n = MAX_FILES_PER_COMMIT_FOR_PAIRS;
         let expected = n * (n - 1) / 2;
-        assert_eq!(derive_pair_events("p1", "abc", "ts", &at_cap).len(), expected);
+        assert_eq!(
+            derive_pair_events("p1", "abc", "ts", &at_cap).len(),
+            expected
+        );
     }
 
     #[test]
@@ -1018,7 +1023,11 @@ mod tests {
             "p1",
             "abc",
             "ts",
-            &["src/a.rs".to_string(), "src/a.rs".to_string(), "src/b.rs".to_string()],
+            &[
+                "src/a.rs".to_string(),
+                "src/a.rs".to_string(),
+                "src/b.rs".to_string(),
+            ],
         );
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].file_a, "src/a.rs");

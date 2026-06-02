@@ -48,8 +48,8 @@ impl CustomProviderRepository {
             serde_json::to_string(&provider.seed_models).unwrap_or_else(|_| "[]".into());
 
         ensure_db!(self.db);
-        let seed_value: serde_json::Value = serde_json::from_str(&seed_json)
-            .unwrap_or_else(|_| serde_json::Value::Array(vec![]));
+        let seed_value: serde_json::Value =
+            serde_json::from_str(&seed_json).unwrap_or_else(|_| serde_json::Value::Array(vec![]));
         sqlx::query!(
             "INSERT INTO custom_providers (id, name, base_url, env_var, seed_models)
              VALUES ($1, $2, $3, $4, $5)

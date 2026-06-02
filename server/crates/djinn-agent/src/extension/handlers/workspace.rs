@@ -529,8 +529,7 @@ async fn enrich_with_related_files(
         return response;
     }
 
-    let matcher =
-        load_project_exclusion_matcher(&state.db, &state.event_bus, project_id).await;
+    let matcher = load_project_exclusion_matcher(&state.db, &state.event_bus, project_id).await;
     let repo = CommitFileChangeRepository::new(state.db.clone());
 
     // (file_path -> co_edits) — union across touched paths, keeping the

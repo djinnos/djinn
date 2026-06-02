@@ -11,8 +11,9 @@ impl TaskRepository {
     ) -> Result<ActivityEntry> {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
-        let payload_value: serde_json::Value = serde_json::from_str(payload)
-            .map_err(|e| crate::Error::InvalidData(format!("invalid json for activity_log.payload: {e}")))?;
+        let payload_value: serde_json::Value = serde_json::from_str(payload).map_err(|e| {
+            crate::Error::InvalidData(format!("invalid json for activity_log.payload: {e}"))
+        })?;
         let mut tx = self.db.pool().begin().await?;
         sqlx::query!(
             "INSERT INTO activity_log

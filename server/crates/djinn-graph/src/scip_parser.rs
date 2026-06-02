@@ -69,8 +69,7 @@ pub struct ScipRange {
 /// or indexer emits parameter / return-type fields. Per the plan
 /// contract: NEVER regex the markdown — leave `signature_parts: None`
 /// when structured proto fields are absent.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ScipSymbol {
     pub symbol: String,
     pub kind: Option<ScipSymbolKind>,
@@ -111,7 +110,6 @@ pub struct ScipSignatureParam {
     pub type_name: Option<String>,
     pub default_value: Option<String>,
 }
-
 
 /// True for SCIP `local` identifiers (descriptor prefix `local `, e.g.
 /// `local 0`, `local 42`).
@@ -160,9 +158,9 @@ pub fn is_function_scoped_variable(sym: &ScipSymbol) -> bool {
     // variable / parameter itself). If any earlier descriptor carries the
     // `Method` suffix, the symbol is function-or-method-scoped.
     let upper_bound = descriptors.len() - 1;
-    descriptors[..upper_bound].iter().any(|descriptor| {
-        descriptor.suffix.enum_value().ok() == Some(descriptor::Suffix::Method)
-    })
+    descriptors[..upper_bound]
+        .iter()
+        .any(|descriptor| descriptor.suffix.enum_value().ok() == Some(descriptor::Suffix::Method))
 }
 
 /// Symbol visibility, derived from the SCIP symbol identifier shape.
@@ -406,21 +404,21 @@ pub(crate) fn is_repo_relative(path: &str) -> bool {
     // generated symbols) that drown out real code in `ranked` /
     // `cycles` / `orphans` output and in the graph visualization.
     const FORBIDDEN_SEGMENTS: &[&str] = &[
-        ".cache",      // generic on-disk cache
-        "target",      // cargo
+        ".cache",       // generic on-disk cache
+        "target",       // cargo
         "node_modules", // npm / pnpm / yarn
-        "dist",        // bundlers (webpack, vite, rollup, parcel)
-        "build",       // generic
-        "_build",      // ocaml dune, rebar3
-        ".next",       // nextjs
-        ".nuxt",       // nuxt
-        "__pycache__", // cpython bytecode
-        ".venv",       // python venv (PEP 405 convention)
-        "venv",        // python venv (older convention)
-        ".gradle",     // gradle local cache
-        ".tox",        // python tox
-        "vendor",      // go modules vendor / php composer / ruby vendor
-        "Pods",        // CocoaPods
+        "dist",         // bundlers (webpack, vite, rollup, parcel)
+        "build",        // generic
+        "_build",       // ocaml dune, rebar3
+        ".next",        // nextjs
+        ".nuxt",        // nuxt
+        "__pycache__",  // cpython bytecode
+        ".venv",        // python venv (PEP 405 convention)
+        "venv",         // python venv (older convention)
+        ".gradle",      // gradle local cache
+        ".tox",         // python tox
+        "vendor",       // go modules vendor / php composer / ruby vendor
+        "Pods",         // CocoaPods
     ];
     if FORBIDDEN_SEGMENTS
         .iter()
@@ -777,10 +775,7 @@ pub fn prettify_scip_descriptor(raw: &str) -> String {
     // namespace segments (`crate/foo/Bar`) and `#` between a parent type
     // and its member (`Bar#baz()`). The visible label is the deepest leaf —
     // walk past both.
-    let segments: Vec<&str> = tail
-        .split(['/', '#'])
-        .filter(|s| !s.is_empty())
-        .collect();
+    let segments: Vec<&str> = tail.split(['/', '#']).filter(|s| !s.is_empty()).collect();
     match segments.last() {
         Some(seg) if !seg.is_empty() => seg.to_string(),
         _ => raw.to_string(),
@@ -1069,9 +1064,15 @@ mod tests {
         // Next.js.
         assert!(!is_repo_relative(".next/server/pages/index.js"));
         // Python bytecode + venv.
-        assert!(!is_repo_relative("scripts/__pycache__/helper.cpython-311.pyc"));
-        assert!(!is_repo_relative(".venv/lib/python3.11/site-packages/foo.py"));
-        assert!(!is_repo_relative("venv/lib/python3.11/site-packages/foo.py"));
+        assert!(!is_repo_relative(
+            "scripts/__pycache__/helper.cpython-311.pyc"
+        ));
+        assert!(!is_repo_relative(
+            ".venv/lib/python3.11/site-packages/foo.py"
+        ));
+        assert!(!is_repo_relative(
+            "venv/lib/python3.11/site-packages/foo.py"
+        ));
         // Go vendor / PHP composer.
         assert!(!is_repo_relative("vendor/github.com/foo/bar.go"));
 
@@ -1202,8 +1203,7 @@ mod tests {
                         ..Relationship::new()
                     },
                     Relationship {
-                        symbol: "scip-go gomod example.com/svc . dispatcher/helper()."
-                            .to_string(),
+                        symbol: "scip-go gomod example.com/svc . dispatcher/helper().".to_string(),
                         is_reference: true,
                         ..Relationship::new()
                     },
@@ -1259,7 +1259,10 @@ mod tests {
 
         // Symbols must contain only the global `Run` (the local was filtered).
         assert_eq!(file.symbols.len(), 1, "expected only the global symbol");
-        assert_eq!(file.symbols[0].symbol, "scip-go gomod example.com/svc . dispatcher/Run().");
+        assert_eq!(
+            file.symbols[0].symbol,
+            "scip-go gomod example.com/svc . dispatcher/Run()."
+        );
         // The local-targeted relationship was stripped — only the global one
         // survives.
         assert_eq!(
@@ -1274,7 +1277,10 @@ mod tests {
 
         // External symbols must contain only the global `Helper`.
         assert_eq!(parsed.external_symbols.len(), 1);
-        assert_eq!(parsed.external_symbols[0].display_name.as_deref(), Some("Helper"));
+        assert_eq!(
+            parsed.external_symbols[0].display_name.as_deref(),
+            Some("Helper")
+        );
     }
 
     // ── is_function_scoped_variable predicate ──────────────────────────
@@ -1405,7 +1411,11 @@ mod tests {
         assert_eq!(parsed.files.len(), 1);
         let file = &parsed.files[0];
         // The constant must survive both filters.
-        assert_eq!(file.symbols.len(), 1, "expected only the constant to remain");
+        assert_eq!(
+            file.symbols.len(),
+            1,
+            "expected only the constant to remain"
+        );
         assert_eq!(
             file.symbols[0].symbol,
             "scip-go gomod example.com/svc . pkg/file_go/MaxRetries."
@@ -1439,8 +1449,7 @@ mod tests {
                         ..Relationship::new()
                     },
                     Relationship {
-                        symbol: "scip-go gomod example.com/svc . pkg/file_go/helper()."
-                            .to_string(),
+                        symbol: "scip-go gomod example.com/svc . pkg/file_go/helper().".to_string(),
                         is_reference: true,
                         ..Relationship::new()
                     },

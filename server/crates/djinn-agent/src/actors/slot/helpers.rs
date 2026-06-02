@@ -647,20 +647,15 @@ pub(crate) async fn initial_user_message_for_task(
         let review_cycle_floor = activity
             .iter()
             .rev()
-            .find(|e| {
-                e.event_type == PR_REVIEW_FEEDBACK_EVENT && e.actor_role == "system"
-            })
+            .find(|e| e.event_type == PR_REVIEW_FEEDBACK_EVENT && e.actor_role == "system")
             .map(|e| e.created_at.clone());
 
         // When this same cycle also produced a CI failure, compose BOTH sources
         // into one directive. Otherwise keep today's reviewer-only behavior.
-        if let Some(ci_raw) =
-            raw_ci_feedback_in_cycle(&activity, review_cycle_floor.as_deref())
-        {
+        if let Some(ci_raw) = raw_ci_feedback_in_cycle(&activity, review_cycle_floor.as_deref()) {
             // Fairly budget the two sections so neither a huge reviewer blob nor
             // a huge CI log can starve the other (E5). Unused budget is lent.
-            let (reviewer_section, ci_section) =
-                budget_combined_sections(&pr_feedback, &ci_raw);
+            let (reviewer_section, ci_section) = budget_combined_sections(&pr_feedback, &ci_raw);
             return format!(
                 "This PR has TWO blocking problems. Address ALL of the following in one pass before responding:\n\n\
                 **(A) A human reviewer requested changes.** Address every reviewer comment below:\n\n\
@@ -735,7 +730,9 @@ fn is_native_openai_provider(provider_id_lower: &str) -> bool {
         || provider_id_lower.contains("chatgpt")
 }
 
-pub fn capabilities_for_provider(provider_id: &str) -> djinn_provider::provider::ProviderCapabilities {
+pub fn capabilities_for_provider(
+    provider_id: &str,
+) -> djinn_provider::provider::ProviderCapabilities {
     use djinn_provider::provider::ProviderCapabilities;
     let lower = provider_id.to_lowercase();
     if lower.contains("synthetic") || lower.contains("local") {
@@ -753,7 +750,10 @@ pub fn capabilities_for_provider(provider_id: &str) -> djinn_provider::provider:
     }
 }
 
-pub fn auth_method_for_provider(provider_id: &str, api_key: &str) -> djinn_provider::provider::AuthMethod {
+pub fn auth_method_for_provider(
+    provider_id: &str,
+    api_key: &str,
+) -> djinn_provider::provider::AuthMethod {
     use djinn_provider::provider::AuthMethod;
     if provider_id.to_lowercase().contains("anthropic") {
         AuthMethod::ApiKeyHeader {
@@ -918,7 +918,9 @@ impl OAuthConfigWire {
     /// values; the worker overrides them per-stage before constructing the
     /// concrete provider client.
     pub fn to_provider_config(self) -> djinn_provider::provider::ProviderConfig {
-        use djinn_provider::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig};
+        use djinn_provider::provider::{
+            AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig,
+        };
         let auth = match self.auth {
             OAuthAuthMethodWire::BearerToken(t) => AuthMethod::BearerToken(t),
             OAuthAuthMethodWire::ApiKeyHeader { header, key } => {
@@ -1175,10 +1177,7 @@ pub(crate) fn derive_task_scope_paths(
 /// Format knowledge notes for injection into the system prompt.
 /// Uses L0 (abstract) for most notes, L1 (overview) for high-confidence ones.
 /// Budget-capped at `budget_chars`, dropping lowest-confidence notes first.
-pub(crate) fn format_knowledge_notes(
-    notes: &[djinn_memory::Note],
-    budget_chars: usize,
-) -> String {
+pub(crate) fn format_knowledge_notes(notes: &[djinn_memory::Note], budget_chars: usize) -> String {
     let mut lines = Vec::new();
     let mut used = 0;
 
@@ -1265,9 +1264,9 @@ fn path_under_any_scope(path: &str, scope_paths: &[String]) -> bool {
     if path.is_empty() {
         return false;
     }
-    scope_paths.iter().any(|scope| {
-        path == scope || path.starts_with(&format!("{scope}/"))
-    })
+    scope_paths
+        .iter()
+        .any(|scope| path == scope || path.starts_with(&format!("{scope}/")))
 }
 
 /// Format the inline `calls: a, b, c` style sub-bullet from a
@@ -1539,10 +1538,7 @@ pub(crate) async fn build_reviewer_diff_context(
         clone_path: project_path.to_string(),
     };
 
-    let detected = match graph_ops
-        .detect_changes(&ctx, from_sha, to_sha, &[])
-        .await
-    {
+    let detected = match graph_ops.detect_changes(&ctx, from_sha, to_sha, &[]).await {
         Ok(d) => d,
         Err(e) => {
             tracing::debug!(
@@ -1692,7 +1688,11 @@ pub(crate) async fn build_planner_patrol_context(
                     note.title,
                     scope_display,
                     note.confidence,
-                    if is_review_needed { "yes" } else { "pending decay" }
+                    if is_review_needed {
+                        "yes"
+                    } else {
+                        "pending decay"
+                    }
                 ));
             }
             documented_paths.extend(scopes);
@@ -1832,9 +1832,6 @@ pub(crate) async fn build_planner_patrol_context(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use djinn_core::events::EventBus;
-    use djinn_core::models::Project;
-    use djinn_db::{Database, NoteRepository, ProjectRepository};
     use djinn_control_plane::bridge::{
         ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangeKind, ChangedRange, CycleGroup,
         DeadSymbolEntry, DeprecatedHit, DetectedChangesResult, DetectedTouchedSymbol,
@@ -1843,6 +1840,9 @@ mod tests {
         PathResult, ProjectCtx, RankedNode, RelatedSymbol, RepoGraphOps, SearchHit, SymbolAtHit,
         SymbolContext, SymbolDescription, SymbolNode,
     };
+    use djinn_core::events::EventBus;
+    use djinn_core::models::Project;
+    use djinn_db::{Database, NoteRepository, ProjectRepository};
     use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
@@ -1899,11 +1899,7 @@ mod tests {
             // Tests that exercise other surfaces leave `impacts` empty,
             // so the previous `unused in test` error is preserved iff
             // they explicitly key off an empty result.
-            let entries = self
-                .impacts
-                .get(key)
-                .cloned()
-                .unwrap_or_default();
+            let entries = self.impacts.get(key).cloned().unwrap_or_default();
             Ok(ImpactResult::Detailed(entries))
         }
 
@@ -2361,9 +2357,8 @@ mod tests {
             short_id: "wtst".to_string(),
             epic_id: None,
             title: "Refactor server/src/new_area.rs".to_string(),
-            description:
-                "Touch server/src/new_area.rs to clean up the helpers in there."
-                    .to_string(),
+            description: "Touch server/src/new_area.rs to clean up the helpers in there."
+                .to_string(),
             design: String::new(),
             issue_type: "task".to_string(),
             status: "open".to_string(),
@@ -2513,14 +2508,8 @@ mod tests {
         let task = worker_task(&project.id);
 
         let scope_paths = vec!["server/src/new_area.rs".to_string()];
-        let result = build_role_code_graph_context(
-            "worker",
-            &task,
-            &ctx,
-            &project_path,
-            &scope_paths,
-        )
-        .await;
+        let result =
+            build_role_code_graph_context("worker", &task, &ctx, &project_path, &scope_paths).await;
         assert!(result.is_none());
     }
 
@@ -2596,15 +2585,10 @@ mod tests {
         let task = worker_task(&project.id);
         let scope_paths = vec!["server/src/new_area.rs".to_string()];
 
-        let body = build_role_code_graph_context(
-            "worker",
-            &task,
-            &ctx,
-            &project_path,
-            &scope_paths,
-        )
-        .await
-        .expect("worker code-graph context should be present");
+        let body =
+            build_role_code_graph_context("worker", &task, &ctx, &project_path, &scope_paths)
+                .await
+                .expect("worker code-graph context should be present");
 
         // Bar bullet — top symbol in scope file.
         assert!(
@@ -2628,25 +2612,14 @@ mod tests {
         assert!(body.contains("reads: my_field, other_field"));
 
         // Same role enabled for reviewer too.
-        let body_reviewer = build_role_code_graph_context(
-            "reviewer",
-            &task,
-            &ctx,
-            &project_path,
-            &scope_paths,
-        )
-        .await;
+        let body_reviewer =
+            build_role_code_graph_context("reviewer", &task, &ctx, &project_path, &scope_paths)
+                .await;
         assert!(body_reviewer.is_some());
 
         // Lead role is not in the allowlist → no auto-injection.
-        let body_lead = build_role_code_graph_context(
-            "lead",
-            &task,
-            &ctx,
-            &project_path,
-            &scope_paths,
-        )
-        .await;
+        let body_lead =
+            build_role_code_graph_context("lead", &task, &ctx, &project_path, &scope_paths).await;
         assert!(body_lead.is_none());
 
         unsafe {
@@ -2664,14 +2637,7 @@ mod tests {
         ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps::default()));
         let task = worker_task(&project.id);
 
-        let result = build_role_code_graph_context(
-            "worker",
-            &task,
-            &ctx,
-            "/tmp/proj",
-            &[],
-        )
-        .await;
+        let result = build_role_code_graph_context("worker", &task, &ctx, "/tmp/proj", &[]).await;
         assert!(result.is_none());
         unsafe {
             std::env::remove_var(AUTO_CODE_CONTEXT_ROLES_ENV);
@@ -2766,15 +2732,8 @@ mod tests {
         ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps::default()));
         let task = worker_task(&project.id);
 
-        let result = build_reviewer_diff_context(
-            "reviewer",
-            &task,
-            &ctx,
-            "/tmp/proj",
-            None,
-            None,
-        )
-        .await;
+        let result =
+            build_reviewer_diff_context("reviewer", &task, &ctx, "/tmp/proj", None, None).await;
         assert!(result.is_none(), "no shas → no injection");
         unsafe {
             std::env::remove_var(AUTO_CODE_CONTEXT_ROLES_ENV);
@@ -2905,10 +2864,7 @@ mod tests {
             Some("head-sha"),
         )
         .await;
-        assert!(
-            result.is_none(),
-            "empty detect_changes → no injection"
-        );
+        assert!(result.is_none(), "empty detect_changes → no injection");
 
         unsafe {
             std::env::remove_var(AUTO_CODE_CONTEXT_ROLES_ENV);

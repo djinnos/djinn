@@ -232,12 +232,19 @@ pub enum ProviderFailureClass {
 /// Terminal outcome of a task-run.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum TaskRunOutcome {
-    PrOpened { url: String, sha: String },
+    PrOpened {
+        url: String,
+        sha: String,
+    },
     /// Planner decided the task should not execute.
-    Closed { reason: String },
+    Closed {
+        reason: String,
+    },
     /// Planner/architect surfaced a question that blocks automated execution
     /// (e.g. ambiguous scope, missing design decision).
-    Escalated { reason: String },
+    Escalated {
+        reason: String,
+    },
     Failed {
         stage: String,
         reason: String,

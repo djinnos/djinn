@@ -65,11 +65,7 @@ pub const WARM_COMMAND_BIN: &str = "/opt/djinn/bin/djinn-agent-worker";
 /// The ServiceAccount (`config.service_account`) is reused from task-run
 /// dispatch — the warm Pod needs the mirror PVC + the DB env, both of
 /// which already work with the task-run SA.
-pub fn build_warm_job(
-    config: &KubernetesConfig,
-    project_id: &str,
-    project_image_tag: &str,
-) -> Job {
+pub fn build_warm_job(config: &KubernetesConfig, project_id: &str, project_image_tag: &str) -> Job {
     let suffix = Uuid::now_v7();
     let sanitized_project = sanitize_id(project_id);
     let job_name = format!("djinn-warm-{}-{}", sanitized_project, short_uuid(&suffix));
@@ -168,10 +164,7 @@ exec {bin} warm-graph "{project_id}"
         // OOM signals (see Gap 4 of the Phase 7 audit).
         resources: Some(ResourceRequirements {
             requests: Some(BTreeMap::from([
-                (
-                    "cpu".to_string(),
-                    Quantity(config.warm_cpu_request.clone()),
-                ),
+                ("cpu".to_string(), Quantity(config.warm_cpu_request.clone())),
                 (
                     "memory".to_string(),
                     Quantity(config.warm_memory_request.clone()),
@@ -210,10 +203,9 @@ exec {bin} warm-graph "{project_id}"
     // — otherwise the warmup is wasted. Both fields are `None` when no
     // operator scheduling hints are configured, keeping the manifest shape
     // unchanged for existing installs.
-    let node_selector = (!config.node_selector.is_empty())
-        .then(|| config.node_selector.clone());
-    let tolerations: Option<Vec<Toleration>> = (!config.tolerations.is_empty())
-        .then(|| config.tolerations.clone());
+    let node_selector = (!config.node_selector.is_empty()).then(|| config.node_selector.clone());
+    let tolerations: Option<Vec<Toleration>> =
+        (!config.tolerations.is_empty()).then(|| config.tolerations.clone());
 
     let pod_spec = PodSpec {
         service_account_name: Some(config.service_account.clone()),
@@ -307,25 +299,46 @@ mod tests {
         assert_eq!(meta.namespace.as_deref(), Some(cfg.namespace.as_str()));
 
         let labels = meta.labels.as_ref().expect("labels");
-        assert_eq!(labels.get(LABEL_COMPONENT).map(String::as_str), Some(COMPONENT_GRAPH_WARM));
+        assert_eq!(
+            labels.get(LABEL_COMPONENT).map(String::as_str),
+            Some(COMPONENT_GRAPH_WARM)
+        );
         assert_eq!(labels.get(LABEL_WARM).map(String::as_str), Some("true"));
-        assert_eq!(labels.get(LABEL_PROJECT_ID).map(String::as_str), Some("proj-xyz"));
+        assert_eq!(
+            labels.get(LABEL_PROJECT_ID).map(String::as_str),
+            Some("proj-xyz")
+        );
 
         let spec = job.spec.as_ref().expect("spec");
         assert_eq!(spec.backoff_limit, Some(0));
-        assert_eq!(spec.ttl_seconds_after_finished, Some(cfg.warm_job_ttl_seconds));
-        assert_eq!(spec.active_deadline_seconds, Some(cfg.warm_job_timeout_seconds));
+        assert_eq!(
+            spec.ttl_seconds_after_finished,
+            Some(cfg.warm_job_ttl_seconds)
+        );
+        assert_eq!(
+            spec.active_deadline_seconds,
+            Some(cfg.warm_job_timeout_seconds)
+        );
 
         let pod = spec.template.spec.as_ref().expect("pod");
         assert_eq!(pod.restart_policy.as_deref(), Some("Never"));
-        assert_eq!(pod.service_account_name.as_deref(), Some(cfg.service_account.as_str()));
+        assert_eq!(
+            pod.service_account_name.as_deref(),
+            Some(cfg.service_account.as_str())
+        );
         assert_eq!(pod.containers.len(), 1);
 
         // Default config carries no scheduling hints — manifest must be
         // byte-identical to the pre-feature shape. Mirrors the equivalent
         // assertion in job.rs.
-        assert!(pod.node_selector.is_none(), "default config must not set nodeSelector");
-        assert!(pod.tolerations.is_none(), "default config must not set tolerations");
+        assert!(
+            pod.node_selector.is_none(),
+            "default config must not set nodeSelector"
+        );
+        assert!(
+            pod.tolerations.is_none(),
+            "default config must not set tolerations"
+        );
 
         let container = &pod.containers[0];
         assert_eq!(container.name, "warmer");
@@ -346,7 +359,11 @@ mod tests {
         assert!(cmd[2].contains("warm-graph \"proj-xyz\""));
         // JS deps are installed (lockfile-gated) before warming so the TS
         // indexer can resolve workspace-package tsconfig `extends`.
-        assert!(cmd[2].contains("pnpm-lock.yaml"), "bash -c script: {}", cmd[2]);
+        assert!(
+            cmd[2].contains("pnpm-lock.yaml"),
+            "bash -c script: {}",
+            cmd[2]
+        );
         assert!(cmd[2].contains("pnpm install"));
 
         let envs: BTreeMap<&str, &str> = container
@@ -356,7 +373,10 @@ mod tests {
             .iter()
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
-        assert_eq!(envs.get("DJINN_MIRROR_ROOT").copied(), Some(MIRROR_MOUNT_DIR));
+        assert_eq!(
+            envs.get("DJINN_MIRROR_ROOT").copied(),
+            Some(MIRROR_MOUNT_DIR)
+        );
         assert_eq!(envs.get("DJINN_WARM_PROJECT_ID").copied(), Some("proj-xyz"));
         // DJINN_SERVER_ADDR is intentionally absent — `warm-graph` lives
         // on a disjoint subcommand whose `WorkerDefaultArgs` are not
@@ -405,7 +425,10 @@ mod tests {
         let workspace_v = by_volume_name
             .get(VOLUME_WORKSPACE)
             .expect("workspace volume");
-        assert!(workspace_v.empty_dir.is_some(), "workspace must be emptyDir");
+        assert!(
+            workspace_v.empty_dir.is_some(),
+            "workspace must be emptyDir"
+        );
         let env_v = by_volume_name
             .get(crate::env_config::VOLUME_ENV_CONFIG)
             .expect("env-config volume");
@@ -466,7 +489,8 @@ mod tests {
     #[test]
     fn warm_pod_scheduling_propagates_from_config() {
         let mut cfg = KubernetesConfig::for_testing();
-        cfg.node_selector.insert("workload-type".into(), "djinn".into());
+        cfg.node_selector
+            .insert("workload-type".into(), "djinn".into());
         cfg.tolerations.push(Toleration {
             key: Some("workload-type".into()),
             operator: Some("Equal".into()),

@@ -33,12 +33,12 @@ pub mod test_runtime;
 pub use credentials::{ResolvedCredentials, SerializableCredential};
 pub use handle::RunHandle;
 pub use session_runtime::{RuntimeError, SessionRuntime};
-pub use warmer::{GraphWarmerService, WarmerError};
 pub use spec::{
     ProviderFailureClass, RoleKind, SupervisorFlow, TaskRunOutcome, TaskRunReport, TaskRunSpec,
     role_sequence,
 };
 pub use stream::{BiStream, StreamEvent, StreamFrame};
+pub use warmer::{GraphWarmerService, WarmerError};
 pub use wire::{ControlMsg, MAX_FRAME_BYTES, WorkerEvent, WorkspaceRef, read_frame, write_frame};
 
 #[cfg(any(test, feature = "test-runtime"))]

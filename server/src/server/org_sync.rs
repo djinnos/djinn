@@ -517,7 +517,9 @@ mod tests {
             "automation service user must be skipped, never deactivated"
         );
         assert!(
-            !diff.present_members_to_touch.contains(&"u-automation".to_string()),
+            !diff
+                .present_members_to_touch
+                .contains(&"u-automation".to_string()),
             "automation service user must not be touched by the sync"
         );
         // The real human not on the roster is still deactivated.

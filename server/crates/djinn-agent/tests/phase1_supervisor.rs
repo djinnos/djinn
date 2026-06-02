@@ -38,8 +38,6 @@ use std::sync::{Arc, Mutex as StdMutex};
 use djinn_agent::context::AgentContext;
 use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
-use djinn_provider::message::{ContentBlock, Conversation};
-use djinn_provider::provider::{LlmProvider, StreamEvent, ToolChoice};
 use djinn_agent::roles::RoleRegistry;
 use djinn_agent::supervisor::{
     SupervisorError, SupervisorFlow, TaskRunOutcome, TaskRunSpec, TaskRunSupervisor,
@@ -52,6 +50,8 @@ use djinn_db::{
     TaskRepository, TaskRunRepository,
 };
 use djinn_provider::catalog::{CatalogService, HealthTracker};
+use djinn_provider::message::{ContentBlock, Conversation};
+use djinn_provider::provider::{LlmProvider, StreamEvent, ToolChoice};
 use djinn_workspace::MirrorManager;
 use futures::stream;
 use tempfile::TempDir;
@@ -268,9 +268,7 @@ async fn supervisor_clones_from_mirror_without_worktrees() {
                 "task_run_id should be populated on success"
             );
         }
-        Err(other) => panic!(
-            "unexpected supervisor error (expected Stage or Ok): {other:?}"
-        ),
+        Err(other) => panic!("unexpected supervisor error (expected Stage or Ok): {other:?}"),
     }
 
     // 7a. A task_run row was created before the stage attempted credential
@@ -359,7 +357,9 @@ impl LlmProvider for ScriptedProvider {
                 .expect("ScriptedProvider script exhausted");
             let iter = events.into_iter().map(Ok);
             Ok(Box::pin(stream::iter(iter))
-                as Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>)
+                as Pin<
+                    Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                >)
         })
     }
 }
@@ -517,18 +517,11 @@ async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
     );
     match &report.outcome {
         TaskRunOutcome::Closed { .. } => {}
-        other => panic!(
-            "expected TaskRunOutcome::Closed from Spike flow; got {other:?}"
-        ),
+        other => panic!("expected TaskRunOutcome::Closed from Spike flow; got {other:?}"),
     }
 
     // ── (b) task_runs.status row is terminal ──────────────────────────────────
-    let run_id = assert_task_run_with_status(
-        task_runs.as_ref(),
-        &task.id,
-        &["completed"],
-    )
-    .await;
+    let run_id = assert_task_run_with_status(task_runs.as_ref(), &task.id, &["completed"]).await;
     assert_eq!(run_id, report.task_run_id, "run_id round-trips");
 
     // ── (a) child sessions row exists with task_run_id FK populated ──────────
@@ -550,11 +543,11 @@ async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
         Some(report.task_run_id.as_str()),
         "session.task_run_id FK must point at the run we just drove"
     );
-    assert_eq!(architect_session.project_id.as_deref(), Some(project.id.as_str()));
     assert_eq!(
-        architect_session.task_id.as_deref(),
-        Some(task.id.as_str())
+        architect_session.project_id.as_deref(),
+        Some(project.id.as_str())
     );
+    assert_eq!(architect_session.task_id.as_deref(), Some(task.id.as_str()));
 
     // ── (c) no worktrees anywhere under the test-controlled roots ────────────
     assert_no_worktrees(source_dir.path());
@@ -630,11 +623,7 @@ async fn proactive_sync_merges_advanced_base_into_behind_task_branch() {
     //    non-conflicting commit so the task branch is genuinely behind base.
     let task_branch = "djinn/sync-behind";
     // Cut task_branch from main's tip inside the bare mirror.
-    run_git(
-        &["git", "branch", task_branch, "main"],
-        &mirror_path,
-    )
-    .await;
+    run_git(&["git", "branch", task_branch, "main"], &mirror_path).await;
 
     // Advance main via a throwaway clone touching a NEW file (no conflict), then
     // push back to the mirror's main.

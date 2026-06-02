@@ -206,10 +206,7 @@ pub(crate) fn flow_for_task_dispatch(
     // requested more work.  The planner decision is preserved from the
     // previous run, so the new run re-enters at worker.
     if has_review_response_context
-        || matches!(
-            task.status.as_str(),
-            "needs_task_review" | "in_task_review"
-        )
+        || matches!(task.status.as_str(), "needs_task_review" | "in_task_review")
     {
         return SupervisorFlow::ReviewResponse;
     }

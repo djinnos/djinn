@@ -84,7 +84,10 @@ pub fn build_env_config_config_map(
     environment_config_json: &str,
 ) -> ConfigMap {
     let mut data = BTreeMap::new();
-    data.insert(ENV_CONFIG_KEY.to_string(), environment_config_json.to_string());
+    data.insert(
+        ENV_CONFIG_KEY.to_string(),
+        environment_config_json.to_string(),
+    );
 
     let labels = env_config_labels(project_id);
 

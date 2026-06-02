@@ -29,11 +29,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::{
     NoteRepository, ProjectRepository, SessionRepository, TaskRepository, folder_for_type,
     permalink_for,
 };
-use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_provider::provider::LlmProvider;
 use djinn_provider::{CompletionRequest, complete, resolve_memory_provider};
 use serde::Deserialize;
@@ -115,14 +115,21 @@ fn build_transcript_excerpt(messages: &[djinn_core::message::Message], max_chars
                     }
                 }
                 ContentBlock::ToolUse { name, input, .. } => {
-                    lines.push(format!("{role} → {name}({})", take_chars(&input.to_string(), 200)));
+                    lines.push(format!(
+                        "{role} → {name}({})",
+                        take_chars(&input.to_string(), 200)
+                    ));
                 }
                 ContentBlock::ToolResult {
                     content, is_error, ..
                 } => {
                     let body = take_chars(&blocks_text(content), 600);
                     if !body.is_empty() {
-                        let tag = if *is_error { "tool error" } else { "tool result" };
+                        let tag = if *is_error {
+                            "tool error"
+                        } else {
+                            "tool result"
+                        };
                         lines.push(format!("{tag}: {body}"));
                     }
                 }
@@ -200,7 +207,9 @@ fn note_dedup_key(note_type: &str, note: &ExtractedNote) -> (String, String) {
 /// Collapse notes that are duplicated WITHIN a single extraction by their
 /// normalized (title, note_type) key, preserving first-seen order. Returns the
 /// deduplicated `(note_type, note)` list and the number of duplicates dropped.
-fn dedup_extracted_notes(extracted: &ExtractionResponse) -> (Vec<(&'static str, ExtractedNote)>, usize) {
+fn dedup_extracted_notes(
+    extracted: &ExtractionResponse,
+) -> (Vec<(&'static str, ExtractedNote)>, usize) {
     let candidates: [(&'static str, &[ExtractedNote]); 3] = [
         ("case", extracted.cases.as_slice()),
         ("pattern", extracted.patterns.as_slice()),
@@ -623,12 +632,11 @@ async fn run_llm_extraction_inner(
     // deep-thinking tokens/latency. `with_reasoning_effort` returns `None` for
     // config-less providers (e.g. test mocks), in which case we keep the
     // provider unchanged.
-    let provider: Box<dyn LlmProvider> = match provider
-        .with_reasoning_effort(djinn_provider::provider::ReasoningEffort::Minimal)
-    {
-        Some(downgraded) => downgraded,
-        None => provider,
-    };
+    let provider: Box<dyn LlmProvider> =
+        match provider.with_reasoning_effort(djinn_provider::provider::ReasoningEffort::Minimal) {
+            Some(downgraded) => downgraded,
+            None => provider,
+        };
 
     // ── Build prompt ───────────────────────────────────────────────────────
     let taxonomy_json = serde_json::to_string(&taxonomy).unwrap_or_else(|_| "{}".to_string());
@@ -1546,12 +1554,11 @@ mod tests {
         });
 
         // Exact downgrade logic from the call site.
-        let provider: Box<dyn LlmProvider> = match provider
-            .with_reasoning_effort(ReasoningEffort::Minimal)
-        {
-            Some(downgraded) => downgraded,
-            None => provider,
-        };
+        let provider: Box<dyn LlmProvider> =
+            match provider.with_reasoning_effort(ReasoningEffort::Minimal) {
+                Some(downgraded) => downgraded,
+                None => provider,
+            };
 
         assert_eq!(
             provider.config_snapshot().unwrap().reasoning_effort,
@@ -1592,7 +1599,10 @@ mod tests {
             },
         ];
         let out = build_transcript_excerpt(&messages, 12_000);
-        assert!(!out.contains("you are a worker"), "system prompt must be skipped");
+        assert!(
+            !out.contains("you are a worker"),
+            "system prompt must be skipped"
+        );
         assert!(out.contains("assistant: I'll fix the migrations path"));
         assert!(out.contains("assistant → edit("));
         assert!(out.contains("tool error: No such file or directory"));
@@ -1609,9 +1619,16 @@ mod tests {
             })
             .collect();
         let out = build_transcript_excerpt(&messages, 200);
-        assert!(out.len() <= 240, "should be capped near max_chars: {}", out.len());
+        assert!(
+            out.len() <= 240,
+            "should be capped near max_chars: {}",
+            out.len()
+        );
         assert!(out.contains("earlier turns omitted"));
-        assert!(out.contains("line 199"), "tail (latest) content must be kept");
+        assert!(
+            out.contains("line 199"),
+            "tail (latest) content must be kept"
+        );
         assert!(!out.contains("line 0:"), "head should be dropped");
     }
 
@@ -1740,7 +1757,7 @@ mod tests {
                 model: "test-model",
                 agent_type: "worker",
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .expect("create session");
@@ -1812,7 +1829,7 @@ mod tests {
                 model: "test-model",
                 agent_type: "worker",
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .expect("create session");

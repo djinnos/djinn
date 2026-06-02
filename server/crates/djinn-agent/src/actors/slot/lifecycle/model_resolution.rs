@@ -6,9 +6,7 @@
 //! releasing the slot — so that the extracted function has no knowledge of the
 //! surrounding task-run context.
 
-use crate::actors::slot::helpers::{
-    ProviderCredential, load_provider_credential, parse_model_id,
-};
+use crate::actors::slot::helpers::{ProviderCredential, load_provider_credential, parse_model_id};
 use crate::context::AgentContext;
 use djinn_db::AgentRepository;
 

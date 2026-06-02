@@ -265,9 +265,7 @@ impl RpcServices {
             .map_err(|e| ConnectTcpError::Io(io_other(format!("read AuthResult: {e}"))))?;
 
         match reply.payload {
-            FramePayload::AuthResult(AuthResultMsg {
-                accepted: true, ..
-            }) => {
+            FramePayload::AuthResult(AuthResultMsg { accepted: true, .. }) => {
                 info!(%task_run_id, "tcp auth accepted");
             }
             FramePayload::AuthResult(AuthResultMsg {
@@ -409,9 +407,7 @@ impl SupervisorServices for RpcServices {
         };
         match self.roundtrip(req).await {
             Ok(ServiceRpcResponse::ExecuteStage(result)) => result,
-            Ok(ServiceRpcResponse::Err(e)) => {
-                Err(StageError::Setup(format!("rpc transport: {e}")))
-            }
+            Ok(ServiceRpcResponse::Err(e)) => Err(StageError::Setup(format!("rpc transport: {e}"))),
             Ok(other) => Err(StageError::Setup(format!(
                 "rpc protocol: unexpected reply {other:?}"
             ))),
@@ -444,10 +440,7 @@ impl SupervisorServices for RpcServices {
         }
     }
 
-    async fn create_task_run(
-        &self,
-        params: SerializableCreateTaskRunParams,
-    ) -> Result<(), String> {
+    async fn create_task_run(&self, params: SerializableCreateTaskRunParams) -> Result<(), String> {
         match self
             .roundtrip(ServiceRpcRequest::CreateTaskRun { params })
             .await
@@ -487,10 +480,7 @@ impl SupervisorServices for RpcServices {
         }
     }
 
-    async fn get_provider_base_url(
-        &self,
-        catalog_provider_id: String,
-    ) -> Result<String, String> {
+    async fn get_provider_base_url(&self, catalog_provider_id: String) -> Result<String, String> {
         match self
             .roundtrip(ServiceRpcRequest::GetProviderBaseUrl {
                 catalog_provider_id,
@@ -505,10 +495,7 @@ impl SupervisorServices for RpcServices {
     }
 
     async fn pick_any_default_model(&self) -> Result<Option<String>, String> {
-        match self
-            .roundtrip(ServiceRpcRequest::PickAnyDefaultModel)
-            .await
-        {
+        match self.roundtrip(ServiceRpcRequest::PickAnyDefaultModel).await {
             Ok(ServiceRpcResponse::PickAnyDefaultModel(result)) => result,
             Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
             Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
@@ -589,8 +576,8 @@ impl SupervisorServices for RpcServices {
         // raw `Vec<Value>`. Both are JSON-stringified for the wire.
         let conversation_str = serde_json::to_string(&conversation)
             .map_err(|e| format!("encode conversation for rpc: {e}"))?;
-        let tools_str = serde_json::to_string(&tools)
-            .map_err(|e| format!("encode tools for rpc: {e}"))?;
+        let tools_str =
+            serde_json::to_string(&tools).map_err(|e| format!("encode tools for rpc: {e}"))?;
         match self
             .roundtrip(ServiceRpcRequest::InvokeLlm {
                 model_id,
@@ -963,10 +950,7 @@ impl SupervisorServices for UnimplementedRpcServices {
         )
     }
 
-    async fn get_provider_base_url(
-        &self,
-        _catalog_provider_id: String,
-    ) -> Result<String, String> {
+    async fn get_provider_base_url(&self, _catalog_provider_id: String) -> Result<String, String> {
         unimplemented!(
             "UnimplementedRpcServices::get_provider_base_url — construct RpcServices for real RPC"
         )
@@ -1015,9 +999,7 @@ impl SupervisorServices for UnimplementedRpcServices {
         _tools: Vec<serde_json::Value>,
         _tool_choice: Option<djinn_provider::provider::ToolChoice>,
     ) -> Result<djinn_provider::provider::LlmResponse, String> {
-        unimplemented!(
-            "UnimplementedRpcServices::invoke_llm — construct RpcServices for real RPC"
-        )
+        unimplemented!("UnimplementedRpcServices::invoke_llm — construct RpcServices for real RPC")
     }
 
     async fn update_session_status(
@@ -1298,9 +1280,9 @@ mod tests {
                     assert_eq!(model_id, "anthropic/claude-opus-4-7");
                     let reply = Frame {
                         correlation_id: frame.correlation_id,
-                        payload: FramePayload::RpcReply(
-                            ServiceRpcResponse::GetModelContextWindow(Ok(200_000)),
-                        ),
+                        payload: FramePayload::RpcReply(ServiceRpcResponse::GetModelContextWindow(
+                            Ok(200_000),
+                        )),
                     };
                     write_frame(&mut write, &reply).await.expect("write reply");
                 }
@@ -1335,9 +1317,9 @@ mod tests {
                 FramePayload::Rpc(ServiceRpcRequest::GetModelContextWindow { .. }) => {
                     let reply = Frame {
                         correlation_id: frame.correlation_id,
-                        payload: FramePayload::RpcReply(
-                            ServiceRpcResponse::GetModelContextWindow(Err("model not found".into())),
-                        ),
+                        payload: FramePayload::RpcReply(ServiceRpcResponse::GetModelContextWindow(
+                            Err("model not found".into()),
+                        )),
                     };
                     write_frame(&mut write, &reply).await.expect("write reply");
                 }
@@ -1538,9 +1520,7 @@ mod tests {
                     };
                     let reply = Frame {
                         correlation_id: frame.correlation_id,
-                        payload: FramePayload::RpcReply(ServiceRpcResponse::CreateSession(Ok(
-                            rec,
-                        ))),
+                        payload: FramePayload::RpcReply(ServiceRpcResponse::CreateSession(Ok(rec))),
                     };
                     write_frame(&mut write, &reply).await.expect("write reply");
                 }
@@ -1600,9 +1580,9 @@ mod tests {
                     assert_eq!(parsed["role"], "assistant");
                     let reply = Frame {
                         correlation_id: frame.correlation_id,
-                        payload: FramePayload::RpcReply(
-                            ServiceRpcResponse::PublishSessionMessage(Ok(())),
-                        ),
+                        payload: FramePayload::RpcReply(ServiceRpcResponse::PublishSessionMessage(
+                            Ok(()),
+                        )),
                     };
                     write_frame(&mut write, &reply).await.expect("write reply");
                 }
@@ -1670,8 +1650,7 @@ mod tests {
                             ..Default::default()
                         },
                     };
-                    let payload_str =
-                        serde_json::to_string(&resp).expect("encode resp");
+                    let payload_str = serde_json::to_string(&resp).expect("encode resp");
                     let reply = Frame {
                         correlation_id: frame.correlation_id,
                         payload: FramePayload::RpcReply(ServiceRpcResponse::InvokeLlm(Ok(
@@ -1745,10 +1724,7 @@ mod tests {
         // `EnvironmentConfig::empty()` sets `schema_version = SCHEMA_VERSION`
         // (1). The opaque-JSON wire shape preserves this; the older raw-bincode
         // path silently lost the field, which is why this asserted 0 before.
-        assert_eq!(
-            cfg.schema_version,
-            djinn_stack::environment::SCHEMA_VERSION
-        );
+        assert_eq!(cfg.schema_version, djinn_stack::environment::SCHEMA_VERSION);
 
         // Drop the `Arc<RpcServices>` (and its inner `mpsc::Sender<Frame>`)
         // BEFORE awaiting the writer — otherwise the writer's `rx.recv()`

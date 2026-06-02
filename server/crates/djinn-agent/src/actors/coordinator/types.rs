@@ -218,7 +218,11 @@ pub(super) fn stored_streak_after_failure(
     next_streak: u32,
     throttle: bool,
 ) -> u32 {
-    if throttle { current_streak } else { next_streak }
+    if throttle {
+        current_streak
+    } else {
+        next_streak
+    }
 }
 
 /// A6: floor an escalating-ladder cooldown by a provider-stated retry-after.

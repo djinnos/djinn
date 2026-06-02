@@ -121,7 +121,13 @@ async fn create_supports_case_and_pitfall_note_types() {
     let repo = NoteRepository::new(db, event_bus_for(&tx));
 
     let case_note = repo
-        .create(&project.id, "Incident Recovery", "Case details", "case", "[]")
+        .create(
+            &project.id,
+            "Incident Recovery",
+            "Case details",
+            "case",
+            "[]",
+        )
         .await
         .unwrap();
     assert_eq!(case_note.note_type, "case");
@@ -129,7 +135,13 @@ async fn create_supports_case_and_pitfall_note_types() {
     assert_eq!(case_note.permalink, "cases/incident-recovery");
 
     let pitfall_note = repo
-        .create(&project.id, "Retry Storm", "Pitfall details", "pitfall", "[]")
+        .create(
+            &project.id,
+            "Retry Storm",
+            "Pitfall details",
+            "pitfall",
+            "[]",
+        )
         .await
         .unwrap();
     assert_eq!(pitfall_note.note_type, "pitfall");
@@ -320,10 +332,13 @@ async fn db_create_and_delete_persists_state() {
     repo.delete(&created.id).await.unwrap();
     assert!(repo.get(&created.id).await.unwrap().is_none());
     assert_eq!(
-        sqlx::query_scalar!(r#"SELECT COUNT(*) AS "count!: i64" FROM notes WHERE id = $1"#, created.id)
-            .fetch_one(db.pool())
-            .await
-            .unwrap(),
+        sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count!: i64" FROM notes WHERE id = $1"#,
+            created.id
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap(),
         0
     );
 }

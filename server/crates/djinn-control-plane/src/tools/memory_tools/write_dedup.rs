@@ -1,5 +1,5 @@
-use djinn_memory::{Note, NoteDedupCandidate};
 use djinn_db::{NoteRepository, folder_for_type_with_status, note_hash::note_content_hash};
+use djinn_memory::{Note, NoteDedupCandidate};
 use djinn_provider::CompletionRequest;
 
 use super::MemoryNoteResponse;

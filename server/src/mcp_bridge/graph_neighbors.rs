@@ -213,11 +213,7 @@ fn kind_hint_match(node: &RepoGraphNode, kind_hint: Option<&str>) -> f64 {
 ///       + 0.2 * kind_hint_match(hint)
 ///       + kind_priority_tiebreaker
 /// ```
-pub(crate) fn score_candidate(
-    node: &RepoGraphNode,
-    query: &str,
-    kind_hint: Option<&str>,
-) -> f64 {
+pub(crate) fn score_candidate(node: &RepoGraphNode, query: &str, kind_hint: Option<&str>) -> f64 {
     0.5 + 0.4 * file_path_substring_match(node, query)
         + 0.2 * kind_hint_match(node, kind_hint)
         + kind_priority_tiebreaker(node)

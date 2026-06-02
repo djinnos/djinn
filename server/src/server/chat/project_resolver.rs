@@ -104,8 +104,7 @@ impl ProjectResolver {
                 id.clone()
             } else {
                 drop(guard);
-                let project_repo =
-                    ProjectRepository::new(self.db.clone(), self.event_bus.clone());
+                let project_repo = ProjectRepository::new(self.db.clone(), self.event_bus.clone());
                 let Some(id) = project_repo.resolve(project_ref).await? else {
                     return Err(ProjectResolverError::NotFound(project_ref.to_owned()));
                 };

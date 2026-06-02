@@ -263,9 +263,7 @@ pub fn is_chat_allowed_tool(name: &str) -> bool {
 /// Filter an `all_tool_schemas()` list down to the chat-allowed subset.
 /// Unknown-shaped entries (missing a string `name`) are dropped
 /// defensively.
-pub fn filter_chat_allowed_mcp_schemas(
-    schemas: Vec<serde_json::Value>,
-) -> Vec<serde_json::Value> {
+pub fn filter_chat_allowed_mcp_schemas(schemas: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
     schemas
         .into_iter()
         .filter(|schema| {
@@ -328,9 +326,7 @@ pub async fn call_chat_shell(
     let result = sandbox.run(request).await.map_err(|err| match err {
         ChatShellError::DisallowedCommand(name) => format!("disallowed command: {name}"),
         ChatShellError::InvalidArgv => "shell: invalid argv".to_owned(),
-        ChatShellError::CwdOutsideClone => {
-            "shell: cwd escaped clone root".to_owned()
-        }
+        ChatShellError::CwdOutsideClone => "shell: cwd escaped clone root".to_owned(),
         ChatShellError::SpawnFailed(e) => format!("shell: spawn failed: {e}"),
         ChatShellError::Interrupted => "shell: interrupted".to_owned(),
     })?;
@@ -413,13 +409,14 @@ pub struct ChatResolvedProject {
 /// are globally accessible to any authenticated caller under the
 /// one-org-per-deployment model, and the `WorkspaceStore` clone is
 /// shared across every chat session.
-pub type ChatProjectResolveFn<'a> = &'a (dyn Fn(
+pub type ChatProjectResolveFn<'a> = &'a (
+        dyn Fn(
     String,
-) -> Pin<
-    Box<dyn Future<Output = Result<ChatResolvedProject, String>> + Send + 'a>,
-> + Send
-              + Sync
-              + 'a);
+) -> Pin<Box<dyn Future<Output = Result<ChatResolvedProject, String>> + Send + 'a>>
+            + Send
+            + Sync
+            + 'a
+    );
 
 /// Dispatch a chat extension tool call.
 ///
@@ -502,7 +499,12 @@ pub async fn dispatch_chat_tool<'a>(
             } else {
                 None
             };
-            handlers::call_github_search(state, &arguments, resolved.as_ref().map(|r| r.id.as_str())).await
+            handlers::call_github_search(
+                state,
+                &arguments,
+                resolved.as_ref().map(|r| r.id.as_str()),
+            )
+            .await
         }
         "project_list" => call_project_list(state).await,
         _ => Err(format!("unknown chat extension tool: {name}")),
@@ -792,7 +794,11 @@ mod tests {
         let filtered = filter_chat_allowed_mcp_schemas(schemas);
         let names: BTreeSet<String> = filtered
             .iter()
-            .filter_map(|v| v.get("name").and_then(|n| n.as_str()).map(ToString::to_string))
+            .filter_map(|v| {
+                v.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(ToString::to_string)
+            })
             .collect();
         let expected: BTreeSet<String> = ["memory_read", "epic_create"]
             .iter()

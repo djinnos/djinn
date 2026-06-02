@@ -296,13 +296,8 @@ mod tests {
     async fn role_override_returns_single_command_immediately() {
         let db = Database::open_in_memory().unwrap();
         let dir = tempdir_in_tmp();
-        let result = resolve_scoped_commands(
-            &db,
-            dir.path(),
-            "main",
-            Some("cargo test --workspace"),
-        )
-        .await;
+        let result =
+            resolve_scoped_commands(&db, dir.path(), "main", Some("cargo test --workspace")).await;
         assert_eq!(result, vec!["cargo test --workspace"]);
     }
 
@@ -351,7 +346,11 @@ mod tests {
                 commands: vec!["cargo test -p djinn-core".into()],
             },
         ]);
-        git_commit_file(dir.path(), "crates/djinn-control-plane/src/lib.rs", "// mcp change");
+        git_commit_file(
+            dir.path(),
+            "crates/djinn-control-plane/src/lib.rs",
+            "// mcp change",
+        );
 
         let result = resolve_scoped_commands_from_config(&verification, dir.path(), &base);
         assert_eq!(result, vec!["cargo test -p djinn-control-plane"]);
@@ -371,13 +370,20 @@ mod tests {
                 commands: vec!["cargo test -p djinn-core".into()],
             },
         ]);
-        git_commit_file(dir.path(), "crates/djinn-control-plane/src/lib.rs", "// mcp");
+        git_commit_file(
+            dir.path(),
+            "crates/djinn-control-plane/src/lib.rs",
+            "// mcp",
+        );
         git_commit_file(dir.path(), "crates/djinn-core/src/lib.rs", "// core");
 
         let result = resolve_scoped_commands_from_config(&verification, dir.path(), &base);
         assert_eq!(
             result,
-            vec!["cargo test -p djinn-control-plane", "cargo test -p djinn-core"]
+            vec![
+                "cargo test -p djinn-control-plane",
+                "cargo test -p djinn-core"
+            ]
         );
     }
 
@@ -395,7 +401,11 @@ mod tests {
                 commands: vec!["cargo test --workspace".into()],
             },
         ]);
-        git_commit_file(dir.path(), "crates/djinn-control-plane/src/lib.rs", "// mcp");
+        git_commit_file(
+            dir.path(),
+            "crates/djinn-control-plane/src/lib.rs",
+            "// mcp",
+        );
         git_commit_file(dir.path(), "crates/djinn-core/src/lib.rs", "// core");
 
         let result = resolve_scoped_commands_from_config(&verification, dir.path(), &base);
@@ -491,7 +501,11 @@ mod tests {
             commands: vec!["cargo test -p djinn-control-plane".into()],
         }]);
         seed_project_with_verification(&db, "p1", &project_root, verification).await;
-        git_commit_file(&project_root, "crates/djinn-control-plane/src/lib.rs", "// mcp");
+        git_commit_file(
+            &project_root,
+            "crates/djinn-control-plane/src/lib.rs",
+            "// mcp",
+        );
 
         let result = resolve_scoped_commands(&db, &project_root, &base, None).await;
         assert_eq!(result, vec!["cargo test -p djinn-control-plane"]);

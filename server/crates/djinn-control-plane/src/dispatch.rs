@@ -17,42 +17,41 @@ use crate::tools::execution_tools::{ExecutionKillTaskParams, SessionForTaskParam
 use crate::tools::github_app_tools::{GithubAppInstallUrlParams, GithubAppInstallationsParams};
 use crate::tools::github_tools::{GithubFetchFileParams, GithubSearchParams};
 use crate::tools::graph_tools::CodeGraphParams;
-use crate::tools::pr_review_tools::PrReviewContextParams;
 use crate::tools::memory_tools::{
     AssociationsParams, BrokenLinksParams, BuildContextParams, CatalogParams, DeleteParams,
     DiffParams, EditParams, ExtractedAuditParams, GraphParams, HealthParams, HistoryParams,
     ListParams, MemoryConfirmParams, MoveParams, OrphansParams, ReadParams, RecentParams,
     RepairEmbeddingsParams, SearchParams, TaskRefsParams, WriteParams,
 };
+use crate::tools::pr_review_tools::PrReviewContextParams;
 use crate::tools::project_tools::{
     GetProjectDevcontainerStatusParams, GetProjectStackParams, GithubListReposParams,
     ProjectAddFromGithubParams, ProjectBranchesParams, ProjectConfigGetParams,
-    ProjectConfigSetParams, ProjectEnvironmentConfigGetParams,
-    ProjectEnvironmentConfigResetParams, ProjectEnvironmentConfigSetParams,
-    ProjectGraphExclusionsGetParams, ProjectGraphExclusionsSetParams, ProjectRemoveParams,
-    RetriggerImageBuildParams,
+    ProjectConfigSetParams, ProjectEnvironmentConfigGetParams, ProjectEnvironmentConfigResetParams,
+    ProjectEnvironmentConfigSetParams, ProjectGraphExclusionsGetParams,
+    ProjectGraphExclusionsSetParams, ProjectRemoveParams, RetriggerImageBuildParams,
 };
 use crate::tools::proposal_tools::{
     ProposeAdrAcceptParams, ProposeAdrListParams, ProposeAdrRejectParams, ProposeAdrShowParams,
 };
 use crate::tools::provider_tools::{
     ModelHealthInput, ProviderCatalogInput, ProviderConnectedInput, ProviderModelLookupInput,
-    ProviderModelsConnectedInput, ProviderModelsInput, ProviderOauthStartInput, ProviderRemoveInput,
-    ProviderValidateInput,
+    ProviderModelsConnectedInput, ProviderModelsInput, ProviderOauthStartInput,
+    ProviderRemoveInput, ProviderValidateInput,
 };
 use crate::tools::session_tools::{
     SessionActiveParams, SessionListParams, SessionMessagesParams, SessionShowParams,
     TaskTimelineParams,
 };
 use crate::tools::settings_tools::{SettingsGetParams, SettingsResetParams, SettingsSetParams};
-use crate::tools::tool_error::ToolOutcome;
-use crate::tools::user_settings_tools::{UserSettingsGetParams, UserSettingsSetParams};
 use crate::tools::task_tools::{
     BoardHealthParams, BoardReconcileParams, ErrorOr, TaskActivityListParams,
     TaskBlockedListParams, TaskBlockersListParams, TaskClaimParams, TaskCommentAddParams,
     TaskCountParams, TaskCreateParams, TaskListParams, TaskMemoryRefsParams, TaskReadyParams,
     TaskShowParams, TaskTransitionParams, TaskUpdateParams,
 };
+use crate::tools::tool_error::ToolOutcome;
+use crate::tools::user_settings_tools::{UserSettingsGetParams, UserSettingsSetParams};
 
 fn decode_args<T: DeserializeOwned>(tool: &str, args: Value) -> Result<T, String> {
     serde_json::from_value(args).map_err(|e| {
@@ -231,14 +230,14 @@ impl DjinnMcpServer {
                 self.project_graph_exclusions_get(Parameters(decode_args::<
                     ProjectGraphExclusionsGetParams,
                 >(name, args)?))
-                .await,
+                    .await,
             ),
             "project_graph_exclusions_set" => map_json(
                 name,
                 self.project_graph_exclusions_set(Parameters(decode_args::<
                     ProjectGraphExclusionsSetParams,
                 >(name, args)?))
-                .await,
+                    .await,
             ),
             "get_project_stack" => map_json(
                 name,
@@ -251,10 +250,8 @@ impl DjinnMcpServer {
                 name,
                 self.get_project_devcontainer_status(Parameters(decode_args::<
                     GetProjectDevcontainerStatusParams,
-                >(
-                    name, args
-                )?))
-                .await,
+                >(name, args)?))
+                    .await,
             ),
             "retrigger_image_build" => map_json(
                 name,
@@ -335,7 +332,7 @@ impl DjinnMcpServer {
                 self.provider_models_connected(Parameters(decode_args::<
                     ProviderModelsConnectedInput,
                 >(name, args)?))
-                .await,
+                    .await,
             ),
             "provider_oauth_start" => map_json(
                 name,

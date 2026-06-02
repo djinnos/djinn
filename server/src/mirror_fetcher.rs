@@ -243,10 +243,7 @@ struct RefreshResponse {
 }
 
 pub fn router() -> Router<AppState> {
-    Router::new().route(
-        "/api/projects/{id}/mirror/refresh",
-        post(refresh_handler),
-    )
+    Router::new().route("/api/projects/{id}/mirror/refresh", post(refresh_handler))
 }
 
 async fn refresh_handler(

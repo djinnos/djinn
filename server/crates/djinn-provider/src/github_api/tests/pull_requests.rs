@@ -513,10 +513,8 @@ async fn approve_pull_request_success_pins_commit_id() {
         .mount(&server)
         .await;
 
-    let client = GitHubApiClient::for_user_token_with_base_url(
-        "ghu_user_xyz".to_string(),
-        server.uri(),
-    );
+    let client =
+        GitHubApiClient::for_user_token_with_base_url("ghu_user_xyz".to_string(), server.uri());
     client
         .approve_pull_request("djinnos", "server", 501, "deadbeef1234")
         .await
@@ -538,10 +536,8 @@ async fn approve_pull_request_422_self_approval_surfaces_error() {
         .mount(&server)
         .await;
 
-    let client = GitHubApiClient::for_user_token_with_base_url(
-        "ghu_self".to_string(),
-        server.uri(),
-    );
+    let client =
+        GitHubApiClient::for_user_token_with_base_url("ghu_self".to_string(), server.uri());
     let err = client
         .approve_pull_request("djinnos", "server", 502, "abc")
         .await
@@ -565,10 +561,8 @@ async fn approve_pull_request_401_surfaces_user_token_expired() {
         .mount(&server)
         .await;
 
-    let client = GitHubApiClient::for_user_token_with_base_url(
-        "ghu_expired".to_string(),
-        server.uri(),
-    );
+    let client =
+        GitHubApiClient::for_user_token_with_base_url("ghu_expired".to_string(), server.uri());
     let err = client
         .approve_pull_request("djinnos", "server", 503, "abc")
         .await
@@ -799,7 +793,9 @@ async fn list_required_status_checks_404_is_none() {
     let install_id = seed_installation_token();
 
     Mock::given(method("GET"))
-        .and(path_regex(r"/repos/.+/branches/.+/protection/required_status_checks"))
+        .and(path_regex(
+            r"/repos/.+/branches/.+/protection/required_status_checks",
+        ))
         .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
             "message": "Branch not protected"
         })))
@@ -811,7 +807,10 @@ async fn list_required_status_checks_404_is_none() {
         .list_required_status_checks("o", "r", "main")
         .await
         .unwrap();
-    assert_eq!(contexts, None, "404 (no protection) maps to None for fallback");
+    assert_eq!(
+        contexts, None,
+        "404 (no protection) maps to None for fallback"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -820,7 +819,9 @@ async fn list_required_status_checks_403_errors() {
     let install_id = seed_installation_token();
 
     Mock::given(method("GET"))
-        .and(path_regex(r"/repos/.+/branches/.+/protection/required_status_checks"))
+        .and(path_regex(
+            r"/repos/.+/branches/.+/protection/required_status_checks",
+        ))
         .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
             "message": "Resource not accessible by integration"
         })))

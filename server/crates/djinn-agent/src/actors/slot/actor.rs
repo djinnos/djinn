@@ -185,8 +185,8 @@ impl SlotHandle {
         // `#[allow(dead_code)]` for rollback and test coverage; see
         // `lifecycle_tests.rs` which exercises it directly.  Task #8 will
         // delete the worktree/lifecycle code entirely after soak.
-        let runner: LifecycleRunner = Arc::new(
-            |task_id, project_path, model_id, app_state, kill, pause| {
+        let runner: LifecycleRunner =
+            Arc::new(|task_id, project_path, model_id, app_state, kill, pause| {
                 Box::pin(run_supervisor_dispatch(
                     task_id,
                     project_path,
@@ -195,8 +195,7 @@ impl SlotHandle {
                     kill,
                     pause,
                 ))
-            },
-        );
+            });
         Self::spawn_with_runner(id, model_id, event_tx, app_state, cancel, runner)
     }
 

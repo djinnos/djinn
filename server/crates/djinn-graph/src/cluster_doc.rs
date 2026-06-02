@@ -36,8 +36,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use djinn_core::events::EventBus;
-use djinn_db::repositories::note::NoteRepository;
 use djinn_db::Database;
+use djinn_db::repositories::note::NoteRepository;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef as PetgraphEdgeRef;
 
@@ -188,10 +188,7 @@ pub fn build_placeholder_body(graph: &RepoDependencyGraph, community: &Community
             out.push_str(&format!("- `{name}`\n"));
         }
         if member_names.len() > shown {
-            out.push_str(&format!(
-                "- _…and {} more_\n",
-                member_names.len() - shown
-            ));
+            out.push_str(&format!("- _…and {} more_\n", member_names.len() - shown));
         }
         out.push('\n');
     }
@@ -205,9 +202,7 @@ pub fn build_placeholder_body(graph: &RepoDependencyGraph, community: &Community
     }
 
     out.push_str("## Connectivity\n\n");
-    out.push_str(&format!(
-        "- intra-community edges: **{intra_edges}**\n",
-    ));
+    out.push_str(&format!("- intra-community edges: **{intra_edges}**\n",));
     out.push_str(&format!(
         "- outgoing edges (to other clusters / singletons): **{outgoing_count}**\n",
     ));
@@ -369,9 +364,8 @@ mod tests {
 
     use super::*;
     use crate::repo_graph::{
-        REPO_GRAPH_ARTIFACT_VERSION, RepoDependencyGraph, RepoGraphArtifact,
-        RepoGraphArtifactEdge, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind,
-        RepoNodeKey,
+        REPO_GRAPH_ARTIFACT_VERSION, RepoDependencyGraph, RepoGraphArtifact, RepoGraphArtifactEdge,
+        RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind, RepoNodeKey,
     };
 
     /// Build a tiny two-cluster graph (mirrors the one in `communities.rs`
@@ -558,8 +552,8 @@ mod tests {
         let graph = RepoDependencyGraph::from_artifact(&artifact);
 
         let arc = Arc::new(graph);
-        let written = generate_for_all(db.clone(), event_bus.clone(), &project.id, arc.clone())
-            .await;
+        let written =
+            generate_for_all(db.clone(), event_bus.clone(), &project.id, arc.clone()).await;
         assert_eq!(written, expected, "first pass should write all communities");
 
         // Verify each community has a note.

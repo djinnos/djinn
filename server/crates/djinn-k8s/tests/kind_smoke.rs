@@ -94,9 +94,7 @@ fn kind_test_enabled() -> bool {
         return false;
     }
     if !ensure_namespace(TEST_NAMESPACE) {
-        eprintln!(
-            "kind_smoke: could not ensure namespace {TEST_NAMESPACE} exists — skipping"
-        );
+        eprintln!("kind_smoke: could not ensure namespace {TEST_NAMESPACE} exists — skipping");
         return false;
     }
     true
@@ -187,7 +185,9 @@ async fn kind_smoke_prepare_then_cancel() {
         .as_ref()
         .expect("kind_smoke: secret should carry an OwnerReference back at the Job");
     assert!(
-        owner_refs.iter().any(|o| o.kind == "Job" && o.name == job_name),
+        owner_refs
+            .iter()
+            .any(|o| o.kind == "Job" && o.name == job_name),
         "kind_smoke: secret OwnerReference should point at Job {job_name}"
     );
 
@@ -210,9 +210,7 @@ async fn kind_smoke_prepare_then_cancel() {
     assert_job_eventually_gone(&jobs, &job_name, Duration::from_millis(500), 20).await;
 
     // 5) Best-effort Secret cleanup (OwnerRef GC may already have handled it).
-    let _ = secrets
-        .delete(&job_name, &DeleteParams::default())
-        .await;
+    let _ = secrets.delete(&job_name, &DeleteParams::default()).await;
 }
 
 /// Second smoke: exercises the full `prepare → attach_stdio → cancel →
@@ -258,10 +256,7 @@ async fn kind_smoke_runtime_lifecycle() {
 
     // 3) Cancel gets the Job deleting in the background so teardown's polling
     //    loop sees a 404 and returns immediately rather than waiting 5 min.
-    runtime
-        .cancel(&handle)
-        .await
-        .expect("kind_smoke: cancel()");
+    runtime.cancel(&handle).await.expect("kind_smoke: cancel()");
 
     // 4) teardown consumes the handle, polls job status (404-fast-path here),
     //    then best-effort deletes.  Returns an Ok(TaskRunReport) with the

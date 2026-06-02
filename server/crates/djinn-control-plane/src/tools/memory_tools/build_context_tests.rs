@@ -121,15 +121,9 @@ mod tests {
             let keywords = "architecture system design patterns".repeat(i);
             let content = format!("Independent note about {} unrelated concepts.", keywords);
 
-            repo.create(
-                &project.id,
-                &title,
-                &content,
-                "research",
-                "[\"unlinked\"]",
-            )
-            .await
-            .unwrap();
+            repo.create(&project.id, &title, &content, "research", "[\"unlinked\"]")
+                .await
+                .unwrap();
         }
 
         seed.permalink

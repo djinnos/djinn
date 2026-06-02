@@ -750,23 +750,11 @@ mod tests {
         let p1_note1 = make_note(&repo, &project1, &tmp, "P1 Note One").await;
         let p1_note2 = make_note(&repo, &project1, &tmp, "P1 Note Two").await;
         let p2_note1 = repo
-            .create(
-                &project2.id,
-                "P2 Note One",
-                "content",
-                "reference",
-                "[]",
-            )
+            .create(&project2.id, "P2 Note One", "content", "reference", "[]")
             .await
             .unwrap();
         let p2_note2 = repo
-            .create(
-                &project2.id,
-                "P2 Note Two",
-                "content",
-                "reference",
-                "[]",
-            )
+            .create(&project2.id, "P2 Note Two", "content", "reference", "[]")
             .await
             .unwrap();
 

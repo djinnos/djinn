@@ -229,10 +229,9 @@ pub fn build_task_run_job(
     // Pin Pods to a dedicated NodePool when the operator has configured one.
     // Both fields stay `None` if the corresponding config entry is empty so
     // the rendered manifest is identical to the pre-feature shape.
-    let node_selector = (!config.node_selector.is_empty())
-        .then(|| config.node_selector.clone());
-    let tolerations: Option<Vec<Toleration>> = (!config.tolerations.is_empty())
-        .then(|| config.tolerations.clone());
+    let node_selector = (!config.node_selector.is_empty()).then(|| config.node_selector.clone());
+    let tolerations: Option<Vec<Toleration>> =
+        (!config.tolerations.is_empty()).then(|| config.tolerations.clone());
 
     let pod_spec = PodSpec {
         service_account_name: Some(config.service_account.clone()),
@@ -244,9 +243,7 @@ pub fn build_task_run_job(
         // Give the worker enough time after SIGTERM to flush its final
         // RPC frame (TerminalReport) before SIGKILL — K8s default 30s is
         // tight when the supervisor is mid-stream over a slow link.
-        termination_grace_period_seconds: Some(
-            config.task_run_termination_grace_period_seconds,
-        ),
+        termination_grace_period_seconds: Some(config.task_run_termination_grace_period_seconds),
         // Force the worker to run as uid 10001 (the djinn user baked
         // into the agent-runtime base image — see
         // server/docker/djinn-agent-runtime.Dockerfile) so it matches
@@ -302,9 +299,7 @@ pub fn build_task_run_job(
             // (TTL doesn't fire until the Pod exits). `i64` per the
             // upstream `JobSpec` type, but we accept `u64` in config to
             // make negative deadlines unrepresentable.
-            active_deadline_seconds: Some(
-                config.task_run_active_deadline_seconds as i64,
-            ),
+            active_deadline_seconds: Some(config.task_run_active_deadline_seconds as i64),
             ..JobSpec::default()
         }),
         ..Job::default()
@@ -404,13 +399,7 @@ mod tests {
         let secret_name = "djinn-taskrun-test";
         let project_image = "registry.example:5000/djinn-project-p:abc123def456";
 
-        let job = build_task_run_job(
-            &cfg,
-            &task_run_id,
-            "proj-xyz",
-            secret_name,
-            project_image,
-        );
+        let job = build_task_run_job(&cfg, &task_run_id, "proj-xyz", secret_name, project_image);
 
         // Metadata.
         let meta = &job.metadata;
@@ -475,8 +464,14 @@ mod tests {
         // must stay `None` so the manifest is byte-identical to the
         // pre-feature shape. Anything else would mean existing installs
         // started seeing nodeSelector/tolerations they didn't ask for.
-        assert!(pod.node_selector.is_none(), "default config must not set nodeSelector");
-        assert!(pod.tolerations.is_none(), "default config must not set tolerations");
+        assert!(
+            pod.node_selector.is_none(),
+            "default config must not set nodeSelector"
+        );
+        assert!(
+            pod.tolerations.is_none(),
+            "default config must not set tolerations"
+        );
 
         // Exactly one container named "worker".
         assert_eq!(pod.containers.len(), 1);
@@ -547,10 +542,7 @@ mod tests {
 
         // Volume mounts: 5 from the pre-env-config layout + the
         // environment-config mount added in P4.
-        let mounts = container
-            .volume_mounts
-            .as_ref()
-            .expect("volume_mounts set");
+        let mounts = container.volume_mounts.as_ref().expect("volume_mounts set");
         assert_eq!(mounts.len(), 6, "expected 6 volume mounts");
         let expected_mounts: [(&str, &str, Option<bool>); 6] = [
             (VOLUME_SPEC, SPEC_MOUNT_DIR, Some(true)),
@@ -710,7 +702,8 @@ mod tests {
     #[test]
     fn task_run_pod_scheduling_propagates_from_config() {
         let mut cfg = KubernetesConfig::for_testing();
-        cfg.node_selector.insert("workload-type".into(), "djinn".into());
+        cfg.node_selector
+            .insert("workload-type".into(), "djinn".into());
         cfg.tolerations.push(Toleration {
             key: Some("workload-type".into()),
             operator: Some("Equal".into()),

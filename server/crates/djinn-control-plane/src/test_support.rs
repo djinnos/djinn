@@ -121,10 +121,7 @@ pub struct StubRuntime;
 
 #[async_trait]
 impl RuntimeOps for StubRuntime {
-    async fn apply_settings(
-        &self,
-        _settings: &DjinnSettings,
-    ) -> std::result::Result<(), String> {
+    async fn apply_settings(&self, _settings: &DjinnSettings) -> std::result::Result<(), String> {
         Err("stub: RuntimeOps::apply_settings not implemented".into())
     }
     async fn embed_memory_query(
@@ -265,10 +262,7 @@ impl RepoGraphOps for StubRepoGraph {
     ) -> std::result::Result<Option<crate::bridge::SymbolContext>, String> {
         Ok(None)
     }
-    async fn status(
-        &self,
-        ctx: &ProjectCtx,
-    ) -> std::result::Result<GraphStatus, String> {
+    async fn status(&self, ctx: &ProjectCtx) -> std::result::Result<GraphStatus, String> {
         Ok(GraphStatus {
             project_id: ctx.id.clone(),
             warmed: false,
@@ -373,10 +367,7 @@ impl RepoGraphOps for StubRepoGraph {
     ) -> std::result::Result<Vec<crate::bridge::RefactorCandidate>, String> {
         Ok(Vec::new())
     }
-    async fn metrics_at(
-        &self,
-        _ctx: &ProjectCtx,
-    ) -> std::result::Result<MetricsAtResult, String> {
+    async fn metrics_at(&self, _ctx: &ProjectCtx) -> std::result::Result<MetricsAtResult, String> {
         Ok(MetricsAtResult {
             commit: String::new(),
             node_count: 0,
@@ -501,11 +492,7 @@ impl NoteVectorStore for StubNoteVectorStore {
         ))
     }
 
-    async fn delete_embedding(
-        &self,
-        _repo: &NoteRepository,
-        _note_id: &str,
-    ) -> DbResult<()> {
+    async fn delete_embedding(&self, _repo: &NoteRepository, _note_id: &str) -> DbResult<()> {
         Err(DbError::Internal(
             "stub: NoteVectorStore::delete_embedding not implemented".into(),
         ))

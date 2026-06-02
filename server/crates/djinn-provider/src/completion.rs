@@ -8,9 +8,7 @@ use tokio::time::{Duration, timeout};
 
 use crate::catalog::{CatalogService, builtin};
 use crate::oauth::{self, codex::CodexTokens, copilot::CopilotTokens};
-use crate::provider::{
-    LlmProvider, ProviderConfig, StreamEvent, TokenUsage, create_provider,
-};
+use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage, create_provider};
 use crate::repos::CredentialRepository;
 
 const COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -447,8 +445,10 @@ mod tests {
     fn transient_error_prefers_typed_then_substring() {
         // Typed retryable variants short-circuit to true.
         assert!(is_transient_error(
-            &anyhow::Error::new(ProviderError::RateLimit { retry_after_ms: None })
-                .context("provider API error 429")
+            &anyhow::Error::new(ProviderError::RateLimit {
+                retry_after_ms: None
+            })
+            .context("provider API error 429")
         ));
         assert!(is_transient_error(
             &anyhow::Error::new(ProviderError::Transport).context("SSE read error")
@@ -808,7 +808,10 @@ mod tests {
         let settings = SettingsRepository::new(db.clone(), EventBus::noop());
         let credentials = CredentialRepository::new(db.clone(), EventBus::noop());
         settings
-            .set("settings.raw", r#"{"models":["openai/gpt-5.5-not-in-catalog"]}"#)
+            .set(
+                "settings.raw",
+                r#"{"models":["openai/gpt-5.5-not-in-catalog"]}"#,
+            )
             .await
             .unwrap();
         // A genuinely connected builtin provider for the fallback to land on.

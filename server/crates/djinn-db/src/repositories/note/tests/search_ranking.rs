@@ -179,15 +179,9 @@ async fn fts5_search_folder_filter() {
     let project = make_project(&db, tmp.path()).await;
     let repo = NoteRepository::new(db, event_bus_for(&tx));
 
-    repo.create(
-        &project.id,
-        "Design Note",
-        "common term",
-        "design",
-        "[]",
-    )
-    .await
-    .unwrap();
+    repo.create(&project.id, "Design Note", "common term", "design", "[]")
+        .await
+        .unwrap();
     repo.create(
         &project.id,
         "Research Note",
@@ -538,13 +532,7 @@ async fn update_confidence_reads_updates_and_persists() {
     let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
 
     let note = repo
-        .create(
-            &project.id,
-            "Confidence Note",
-            "body",
-            "research",
-            "[]",
-        )
+        .create(&project.id, "Confidence Note", "body", "research", "[]")
         .await
         .unwrap();
 
@@ -639,15 +627,9 @@ async fn catalog_generation() {
     repo.create(&project.id, "ADR One", "body", "adr", "[]")
         .await
         .unwrap();
-    repo.create(
-        &project.id,
-        "Research One",
-        "body",
-        "research",
-        "[]",
-    )
-    .await
-    .unwrap();
+    repo.create(&project.id, "Research One", "body", "research", "[]")
+        .await
+        .unwrap();
 
     let decisions = repo.list(&project.id, Some("decisions")).await.unwrap();
     assert_eq!(decisions.len(), 1);
@@ -665,15 +647,9 @@ async fn create_emits_event() {
     let project = make_project(&db, tmp.path()).await;
     let repo = NoteRepository::new(db, event_bus_for(&tx));
 
-    repo.create(
-        &project.id,
-        "Event Note",
-        "body",
-        "design",
-        "[]",
-    )
-    .await
-    .unwrap();
+    repo.create(&project.id, "Event Note", "body", "design", "[]")
+        .await
+        .unwrap();
 
     let envelope = rx.recv().await.unwrap();
     assert_eq!(envelope.entity_type, "note");
@@ -699,13 +675,7 @@ async fn touch_accessed_does_not_emit_event() {
     let repo = NoteRepository::new(db, event_bus_for(&tx));
 
     let note = repo
-        .create(
-            &project.id,
-            "Touch Me",
-            "body",
-            "reference",
-            "[]",
-        )
+        .create(&project.id, "Touch Me", "body", "reference", "[]")
         .await
         .unwrap();
     let _ = rx.recv().await.unwrap(); // NoteCreated
@@ -730,13 +700,7 @@ async fn touch_accessed_increments_access_count() {
     let repo = NoteRepository::new(db, event_bus_for(&tx));
 
     let note = repo
-        .create(
-            &project.id,
-            "Touch Count",
-            "body",
-            "reference",
-            "[]",
-        )
+        .create(&project.id, "Touch Count", "body", "reference", "[]")
         .await
         .unwrap();
 
@@ -757,13 +721,7 @@ async fn touch_accessed_emits_missing_summary_signal_when_summaries_are_missing(
     let repo = NoteRepository::new(db, event_bus_for(&tx));
 
     let note = repo
-        .create(
-            &project.id,
-            "Needs Summary",
-            "body",
-            "reference",
-            "[]",
-        )
+        .create(&project.id, "Needs Summary", "body", "reference", "[]")
         .await
         .unwrap();
     let _ = rx.recv().await.unwrap(); // NoteCreated
@@ -793,13 +751,7 @@ async fn update_summaries_persists_summary_fields() {
     let repo = NoteRepository::new(db, event_bus_for(&tx));
 
     let note = repo
-        .create(
-            &project.id,
-            "Summarize Me",
-            "body",
-            "reference",
-            "[]",
-        )
+        .create(&project.id, "Summarize Me", "body", "reference", "[]")
         .await
         .unwrap();
     let _ = rx.recv().await.unwrap(); // NoteCreated

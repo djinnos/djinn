@@ -4,7 +4,9 @@ use super::*;
 async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
-    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
+    let project_path = crate::extension::tests::project_fs_path(&project)
+        .to_string_lossy()
+        .into_owned();
     let epic = create_test_epic(&db, &project.id).await;
     let task = create_test_task(&db, &project.id, &epic.id).await;
     let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
@@ -174,7 +176,9 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
 async fn call_tool_architect_dispatches_memory_move_for_proposed_adr_recovery() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
-    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
+    let project_path = crate::extension::tests::project_fs_path(&project)
+        .to_string_lossy()
+        .into_owned();
     let epic = create_test_epic(&db, &project.id).await;
     let task = create_test_task(&db, &project.id, &epic.id).await;
     let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
@@ -221,7 +225,9 @@ async fn call_tool_architect_dispatches_memory_move_for_proposed_adr_recovery() 
 async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wide() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
-    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
+    let project_path = crate::extension::tests::project_fs_path(&project)
+        .to_string_lossy()
+        .into_owned();
     let epic = create_test_epic(&db, &project.id).await;
     let task = create_test_task(&db, &project.id, &epic.id).await;
     let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
@@ -352,7 +358,9 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
 async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
-    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
+    let project_path = crate::extension::tests::project_fs_path(&project)
+        .to_string_lossy()
+        .into_owned();
     std::fs::create_dir_all(&project_path).expect("create project dir");
     let worktree = Path::new(&project_path).join(".djinn/worktrees/test-singleton-worktree");
     std::fs::create_dir_all(worktree.join(".git")).expect("create worktree dir");
@@ -447,7 +455,9 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
 async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_worktree() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
-    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
+    let project_path = crate::extension::tests::project_fs_path(&project)
+        .to_string_lossy()
+        .into_owned();
     std::fs::create_dir_all(&project_path).expect("create project dir");
     let worktree = Path::new(&project_path).join(".djinn/worktrees/test-brief-singleton-worktree");
     std::fs::create_dir_all(worktree.join(".git")).expect("create worktree dir");
@@ -539,7 +549,9 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
 async fn call_tool_dispatches_registered_mcp_tool_success() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
-    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
+    let project_path = crate::extension::tests::project_fs_path(&project)
+        .to_string_lossy()
+        .into_owned();
     let state = agent_context_from_db(db, CancellationToken::new());
     let registry = crate::mcp_client::McpToolRegistry::with_dispatch(
         [("web_search".to_string(), "search-server".to_string())],
@@ -591,7 +603,9 @@ async fn call_tool_dispatches_registered_mcp_tool_success() {
 async fn call_tool_memory_current_requirement_targets_canonical_project_root_from_worktree() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
-    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
+    let project_path = crate::extension::tests::project_fs_path(&project)
+        .to_string_lossy()
+        .into_owned();
     std::fs::create_dir_all(&project_path).expect("create project dir");
     let worktree =
         Path::new(&project_path).join(".djinn/worktrees/test-current-requirement-worktree");
@@ -652,7 +666,10 @@ async fn call_tool_memory_current_requirement_targets_canonical_project_root_fro
     assert_eq!(note.note_type, "requirement");
     assert_eq!(note.permalink, "requirements/v1-requirements");
     assert_eq!(note.storage, "db");
-    assert!(note.content.contains("[[reference/cognitive-memory-scope]]"));
+    assert!(
+        note.content
+            .contains("[[reference/cognitive-memory-scope]]")
+    );
 
     assert!(
         note_repo
@@ -667,7 +684,9 @@ async fn call_tool_memory_current_requirement_targets_canonical_project_root_fro
 async fn call_tool_dispatches_registered_mcp_tool_error() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
-    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
+    let project_path = crate::extension::tests::project_fs_path(&project)
+        .to_string_lossy()
+        .into_owned();
     let state = agent_context_from_db(db, CancellationToken::new());
     let registry = crate::mcp_client::McpToolRegistry::with_dispatch(
         [("web_fetch".to_string(), "fetch-server".to_string())],

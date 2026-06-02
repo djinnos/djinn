@@ -38,11 +38,13 @@ pub async fn ensure_postgres_database_exists(db_url: &str) -> DbResult<()> {
         .map_err(|e| DbError::InvalidData(format!("invalid postgres url: {e}")))?
         .database("postgres");
     let mut conn = opts.connect().await.map_err(DbError::from)?;
-    let exists: Option<i32> =
-        sqlx::query_scalar!(r#"SELECT 1 AS "exists!" FROM pg_database WHERE datname = $1"#, database)
-            .fetch_optional(&mut conn)
-            .await
-            .map_err(DbError::from)?;
+    let exists: Option<i32> = sqlx::query_scalar!(
+        r#"SELECT 1 AS "exists!" FROM pg_database WHERE datname = $1"#,
+        database
+    )
+    .fetch_optional(&mut conn)
+    .await
+    .map_err(DbError::from)?;
     if exists.is_none() {
         let stmt = format!(r#"CREATE DATABASE "{database}""#);
         conn.execute(stmt.as_str()).await.map_err(DbError::from)?;

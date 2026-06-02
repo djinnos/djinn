@@ -9,12 +9,12 @@ use crate::events::EventBus;
 use crate::server::{self, AppState};
 use djinn_core::models::{Epic, Project, SessionRecord, Task};
 use djinn_core::paths::project_dir;
-use djinn_memory::Note;
 use djinn_db::repositories::session::CreateSessionParams;
 use djinn_db::{
     Database, EpicCreateInput, EpicRepository, NoteRepository, ProjectRepository,
     SessionRepository, TaskRepository,
 };
+use djinn_memory::Note;
 
 pub(crate) fn workspace_tempdir(prefix: &str) -> tempfile::TempDir {
     let base = std::env::current_dir()
@@ -175,7 +175,7 @@ pub async fn create_test_session(db: &Database, project_id: &str, task_id: &str)
         model: "test-model",
         agent_type: "worker",
         metadata_json: None,
-    task_run_id: None,
+        task_run_id: None,
     })
     .await
     .expect("failed to create test session")
@@ -192,15 +192,9 @@ pub async fn create_test_note(db: &Database, project_id: &str) -> Note {
 
     let _project_path = project_dir(&project.github_owner, &project.github_repo);
 
-    repo.create(
-        project_id,
-        "test note",
-        "test note body",
-        "research",
-        "[]",
-    )
-    .await
-    .expect("failed to create test note")
+    repo.create(project_id, "test note", "test note body", "research", "[]")
+        .await
+        .expect("failed to create test note")
 }
 
 fn parse_sse_json_events(body: &str) -> Vec<Value> {

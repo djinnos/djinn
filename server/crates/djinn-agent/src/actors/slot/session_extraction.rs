@@ -93,7 +93,8 @@ pub(crate) async fn run_post_session_extraction(
         if let Some(taxonomy) =
             run_structural_extraction(session.id.clone(), messages, app_state.clone()).await
         {
-            super::llm_extraction::run_llm_extraction(session.id, taxonomy, app_state.clone()).await;
+            super::llm_extraction::run_llm_extraction(session.id, taxonomy, app_state.clone())
+                .await;
         }
     }
 }
@@ -156,10 +157,7 @@ pub async fn run_extraction_backfill(app_state: AgentContext) {
         run_post_session_extraction(task_id, task_run_id, app_state.clone()).await;
     }
 
-    tracing::info!(
-        task_runs = total,
-        "extraction_backfill: sweep complete"
-    );
+    tracing::info!(task_runs = total, "extraction_backfill: sweep complete");
 }
 
 // ── Event taxonomy ────────────────────────────────────────────────────────────

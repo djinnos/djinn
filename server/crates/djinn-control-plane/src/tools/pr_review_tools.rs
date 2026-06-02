@@ -155,18 +155,12 @@ fn default_caps(caps: &Option<PrReviewCaps>) -> ResolvedCaps {
             c.and_then(|c| c.touched_symbols),
             DEFAULT_TOUCHED_SYMBOLS_CAP,
         ),
-        blast_radius: cap(
-            c.and_then(|c| c.blast_radius),
-            DEFAULT_BLAST_RADIUS_CAP,
-        ),
+        blast_radius: cap(c.and_then(|c| c.blast_radius), DEFAULT_BLAST_RADIUS_CAP),
         hotspot_overlap: cap(
             c.and_then(|c| c.hotspot_overlap),
             DEFAULT_HOTSPOT_OVERLAP_CAP,
         ),
-        touched_cycles: cap(
-            c.and_then(|c| c.touched_cycles),
-            DEFAULT_TOUCHED_CYCLES_CAP,
-        ),
+        touched_cycles: cap(c.and_then(|c| c.touched_cycles), DEFAULT_TOUCHED_CYCLES_CAP),
         touched_boundary_violations: cap(
             c.and_then(|c| c.touched_boundary_violations),
             DEFAULT_TOUCHED_BOUNDARY_VIOLATIONS_CAP,
@@ -278,8 +272,7 @@ impl DjinnMcpServer {
 
         // Resolve `project` (UUID or slug) to (project_id, clone_path) once;
         // every bridge call below reuses the same `ProjectCtx`.
-        let project_repo =
-            ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+        let project_repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
         let project_id = project_repo
             .resolve(&params.project)
             .await
@@ -367,7 +360,11 @@ impl DjinnMcpServer {
             touched_symbol_keys.iter().map(|s| s.as_str()).collect();
         let mut touched_cycles: Vec<CycleGroup> = cycles
             .into_iter()
-            .filter(|c| c.members.iter().any(|m| touched_set.contains(m.key.as_str())))
+            .filter(|c| {
+                c.members
+                    .iter()
+                    .any(|m| touched_set.contains(m.key.as_str()))
+            })
             .collect();
         touched_cycles.truncate(caps.touched_cycles);
 
@@ -382,7 +379,9 @@ impl DjinnMcpServer {
             .into_iter()
             .filter(|d| {
                 touched_set.contains(d.deprecated_symbol.as_str())
-                    || d.callers.iter().any(|c| touched_set.contains(c.key.as_str()))
+                    || d.callers
+                        .iter()
+                        .any(|c| touched_set.contains(c.key.as_str()))
             })
             .collect();
         touched_deprecated.truncate(caps.touched_deprecated);
@@ -447,15 +446,11 @@ impl DjinnMcpServer {
                 severity: "warn".into(),
                 subject_key: c.members.first().map(|m| m.key.clone()),
                 subject_file: None,
-                message: cap_message(format!(
-                    "PR touches a dependency cycle of size {}",
-                    c.size
-                )),
-                details_md: cap_details(format!(
-                    "Members (up to 5): {}",
-                    sample.join(", ")
-                )),
-                suggested_action: Some("Verify the cycle was present on base and not widened by this PR.".into()),
+                message: cap_message(format!("PR touches a dependency cycle of size {}", c.size)),
+                details_md: cap_details(format!("Members (up to 5): {}", sample.join(", "))),
+                suggested_action: Some(
+                    "Verify the cycle was present on base and not widened by this PR.".into(),
+                ),
                 confidence: 0.85,
             });
         }
@@ -499,7 +494,10 @@ impl DjinnMcpServer {
                     Some(p) => format!("Example path: {}", p.join(" → ")),
                     None => "No example path available.".into(),
                 }),
-                suggested_action: Some("Audit the change for latency/availability regressions on the critical path.".into()),
+                suggested_action: Some(
+                    "Audit the change for latency/availability regressions on the critical path."
+                        .into(),
+                ),
                 confidence: 0.8,
             });
         }
@@ -515,7 +513,9 @@ impl DjinnMcpServer {
                     v.from_key, v.to_key, v.edge_kind
                 )),
                 details_md: cap_details(format!("Rule index: {}", v.rule_index)),
-                suggested_action: Some("Remove the forbidden import or update the boundary rule.".into()),
+                suggested_action: Some(
+                    "Remove the forbidden import or update the boundary rule.".into(),
+                ),
                 confidence: 0.95,
             });
         }
@@ -530,11 +530,10 @@ impl DjinnMcpServer {
                     "PR touches hotspot `{}` (churn {}, composite {:.3})",
                     h.file, h.churn, h.composite_score
                 )),
-                details_md: cap_details(format!(
-                    "Top symbols: {}",
-                    h.top_symbols.join(", ")
-                )),
-                suggested_action: Some("Expect elevated regression risk — request extra review coverage.".into()),
+                details_md: cap_details(format!("Top symbols: {}", h.top_symbols.join(", "))),
+                suggested_action: Some(
+                    "Expect elevated regression risk — request extra review coverage.".into(),
+                ),
                 confidence: 0.6,
             });
         }

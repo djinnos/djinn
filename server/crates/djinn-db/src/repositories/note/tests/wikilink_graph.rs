@@ -40,13 +40,7 @@ async fn wikilink_resolves_on_create() {
 
     // Create target first.
     let target = repo
-        .create(
-            &project.id,
-            "Connection Strategy",
-            "body",
-            "adr",
-            "[]",
-        )
+        .create(&project.id, "Connection Strategy", "body", "adr", "[]")
         .await
         .unwrap();
 
@@ -104,24 +98,12 @@ async fn orphan_detection() {
         .create(&project.id, "Target", "body", "adr", "[]")
         .await
         .unwrap();
-    repo.create(
-        &project.id,
-        "Source",
-        "See [[Target]].",
-        "research",
-        "[]",
-    )
-    .await
-    .unwrap();
-    repo.create(
-        &project.id,
-        "Isolated",
-        "no links",
-        "pattern",
-        "[]",
-    )
-    .await
-    .unwrap();
+    repo.create(&project.id, "Source", "See [[Target]].", "research", "[]")
+        .await
+        .unwrap();
+    repo.create(&project.id, "Isolated", "no links", "pattern", "[]")
+        .await
+        .unwrap();
 
     let orphans = repo.orphans(&project.id, None).await.unwrap();
     // Target has an inbound link; Source and Isolated do not.
@@ -148,15 +130,9 @@ async fn orphan_detection_excludes_singletons_and_catalog_from_listing_and_healt
     let project = make_project(&db, tmp.path()).await;
     let repo = NoteRepository::new(db, event_bus_for(&tx));
 
-    repo.create(
-        &project.id,
-        "Project Brief",
-        "brief body",
-        "brief",
-        "[]",
-    )
-    .await
-    .unwrap();
+    repo.create(&project.id, "Project Brief", "brief body", "brief", "[]")
+        .await
+        .unwrap();
     repo.create(
         &project.id,
         "Project Roadmap",
@@ -169,15 +145,9 @@ async fn orphan_detection_excludes_singletons_and_catalog_from_listing_and_healt
     repo.create_db_note(&project.id, "Catalog", "generated catalog", "catalog", "[]")
         .await
         .unwrap();
-    repo.create(
-        &project.id,
-        "Reachable Target",
-        "body",
-        "adr",
-        "[]",
-    )
-    .await
-    .unwrap();
+    repo.create(&project.id, "Reachable Target", "body", "adr", "[]")
+        .await
+        .unwrap();
     repo.create(
         &project.id,
         "Linked Source",

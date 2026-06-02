@@ -110,8 +110,7 @@ pub fn detect_communities(graph: &RepoDependencyGraph) -> Vec<Community> {
     // in the modularity inner loop — the BTreeMap layer was about
     // determinism, but node visit order is enforced separately by
     // sorting node ids in the outer loop).
-    let mut adjacency: HashMap<usize, HashMap<usize, f64>> =
-        HashMap::with_capacity(node_count);
+    let mut adjacency: HashMap<usize, HashMap<usize, f64>> = HashMap::with_capacity(node_count);
     let mut k: HashMap<usize, f64> = HashMap::with_capacity(node_count);
     let mut total_weight = 0.0_f64;
 
@@ -208,9 +207,8 @@ fn local_moving_phase(
             let cur_comm = partition[v];
 
             // Σ A_vw over w in current community (excluding v itself).
-            let edges_to: HashMap<usize, f64> = aggregate_edges_to_communities(
-                v, adjacency, partition,
-            );
+            let edges_to: HashMap<usize, f64> =
+                aggregate_edges_to_communities(v, adjacency, partition);
             let weight_to_self = edges_to.get(&cur_comm).copied().unwrap_or(0.0);
 
             // Tentatively remove v from cur_comm so the gain math
@@ -444,13 +442,10 @@ fn derive_label(graph: &RepoDependencyGraph, members: &[usize]) -> String {
         if let Some(p) = &node.file_path {
             members_with_path += 1;
             // First non-empty path component (e.g. "src", "server").
-            if let Some(seg) = p
-                .components()
-                .find_map(|c| match c {
-                    std::path::Component::Normal(s) => s.to_str().map(str::to_string),
-                    _ => None,
-                })
-            {
+            if let Some(seg) = p.components().find_map(|c| match c {
+                std::path::Component::Normal(s) => s.to_str().map(str::to_string),
+                _ => None,
+            }) {
                 *segment_counts.entry(seg).or_default() += 1;
             }
         }
@@ -458,8 +453,9 @@ fn derive_label(graph: &RepoDependencyGraph, members: &[usize]) -> String {
     if members_with_path > 0 {
         // Pick the most common segment (BTreeMap iter is sorted by key,
         // so ties resolve alphabetically — deterministic).
-        if let Some((seg, &count)) =
-            segment_counts.iter().max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+        if let Some((seg, &count)) = segment_counts
+            .iter()
+            .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
             && count * 2 >= members_with_path
         {
             return seg.clone();
@@ -531,9 +527,36 @@ fn tokenize_identifier(input: &str) -> Vec<String> {
     let mut current = String::new();
     let mut prev_was_lower = false;
     for ch in input.chars() {
-        let is_sep = matches!(ch, '_' | '/' | '.' | ' ' | ':' | '-' | '`' | '(' | ')'
-            | '[' | ']' | '<' | '>' | '#' | '!' | '@' | '$' | '%' | '^'
-            | '&' | '*' | '+' | '=' | ',' | ';' | '?' | '"' | '\'');
+        let is_sep = matches!(
+            ch,
+            '_' | '/'
+                | '.'
+                | ' '
+                | ':'
+                | '-'
+                | '`'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '<'
+                | '>'
+                | '#'
+                | '!'
+                | '@'
+                | '$'
+                | '%'
+                | '^'
+                | '&'
+                | '*'
+                | '+'
+                | '='
+                | ','
+                | ';'
+                | '?'
+                | '"'
+                | '\''
+        );
         if is_sep {
             if !current.is_empty() {
                 tokens.push(std::mem::take(&mut current).to_ascii_lowercase());
@@ -572,8 +595,7 @@ mod tests {
 
     use super::*;
     use crate::repo_graph::{
-        RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind,
-        RepoNodeKey,
+        RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind, RepoNodeKey,
     };
 
     /// Build a tiny manual graph with two clusters of 3 nodes each,
@@ -678,7 +700,10 @@ mod tests {
             communities.len() >= 2,
             "expected at least two communities (auth + billing), got {}: {:?}",
             communities.len(),
-            communities.iter().map(|c| (c.label.clone(), c.member_ids.clone())).collect::<Vec<_>>()
+            communities
+                .iter()
+                .map(|c| (c.label.clone(), c.member_ids.clone()))
+                .collect::<Vec<_>>()
         );
 
         // Every member of the auth cluster should share a community

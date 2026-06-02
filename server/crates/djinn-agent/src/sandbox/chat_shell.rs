@@ -88,7 +88,9 @@ use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use landlock::{ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr};
+use landlock::{
+    ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
+};
 use seccompiler::{BpfProgram, SeccompAction, SeccompFilter};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -171,12 +173,7 @@ const GIT_SUB_DENYLIST: &[&str] = &[
 /// `find` argument deny list. `-exec`/`-execdir` can run arbitrary binaries;
 /// `-delete`/`-fprint*` can write.
 const FIND_ARG_DENYLIST: &[&str] = &[
-    "-exec",
-    "-execdir",
-    "-delete",
-    "-fprint",
-    "-fprintf",
-    "-fprint0",
+    "-exec", "-execdir", "-delete", "-fprint", "-fprintf", "-fprint0",
 ];
 
 /// Probe result for unprivileged namespace support.
@@ -254,9 +251,7 @@ impl ChatShellSandbox {
         }
 
         let started = Instant::now();
-        let mut child = cmd
-            .spawn()
-            .map_err(ChatShellError::SpawnFailed)?;
+        let mut child = cmd.spawn().map_err(ChatShellError::SpawnFailed)?;
 
         if let Some(stdin_bytes) = req.stdin
             && let Some(mut stdin) = child.stdin.take()
@@ -287,12 +282,10 @@ impl ChatShellSandbox {
             }
         };
 
-        let (stdout_bytes, stdout_trunc) = stdout_task
-            .await
-            .unwrap_or_else(|_| (Vec::new(), false));
-        let (stderr_bytes, stderr_trunc) = stderr_task
-            .await
-            .unwrap_or_else(|_| (Vec::new(), false));
+        let (stdout_bytes, stdout_trunc) =
+            stdout_task.await.unwrap_or_else(|_| (Vec::new(), false));
+        let (stderr_bytes, stderr_trunc) =
+            stderr_task.await.unwrap_or_else(|_| (Vec::new(), false));
 
         Ok(ChatShellResult {
             exit_code: exit_status.and_then(|s| s.code()),
@@ -541,9 +534,7 @@ fn apply_seccomp() -> io::Result<()> {
 
     let arch: seccompiler::TargetArch = std::env::consts::ARCH
         .try_into()
-        .map_err(|e: seccompiler::BackendError| {
-            io::Error::other(format!("seccomp arch: {e}"))
-        })?;
+        .map_err(|e: seccompiler::BackendError| io::Error::other(format!("seccomp arch: {e}")))?;
 
     let filter = SeccompFilter::new(
         rules,
@@ -555,14 +546,16 @@ fn apply_seccomp() -> io::Result<()> {
     )
     .map_err(|e| io::Error::other(format!("seccomp filter: {e}")))?;
 
-    let program: BpfProgram = filter
-        .try_into()
-        .map_err(|e: seccompiler::BackendError| {
-            io::Error::other(format!("seccomp compile: {e}"))
-        })?;
+    let program: BpfProgram = filter.try_into().map_err(|e: seccompiler::BackendError| {
+        io::Error::other(format!("seccomp compile: {e}"))
+    })?;
 
-    seccompiler::apply_filter(&program)
-        .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, format!("seccomp apply: {e}")))?;
+    seccompiler::apply_filter(&program).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("seccomp apply: {e}"),
+        )
+    })?;
     Ok(())
 }
 
@@ -729,7 +722,10 @@ mod tests {
             })
             .await
             .expect_err("cwd outside clone must be rejected");
-        assert!(matches!(err, ChatShellError::CwdOutsideClone), "got {err:?}");
+        assert!(
+            matches!(err, ChatShellError::CwdOutsideClone),
+            "got {err:?}"
+        );
     }
 
     /// `env` under the sandbox must return only the allowlisted env vars.
@@ -755,7 +751,9 @@ mod tests {
         let res = match res {
             Ok(r) => r,
             Err(ChatShellError::SpawnFailed(e)) => {
-                eprintln!("env_scrubbed: spawn failed (likely sandbox unavailable in test env): {e}");
+                eprintln!(
+                    "env_scrubbed: spawn failed (likely sandbox unavailable in test env): {e}"
+                );
                 return;
             }
             Err(e) => panic!("unexpected error: {e:?}"),
@@ -769,8 +767,14 @@ mod tests {
             !out.contains("ANTHROPIC_API_KEY"),
             "env scrub failed; ANTHROPIC_API_KEY name visible:\n{out}"
         );
-        assert!(out.contains("PATH="), "PATH should be in allowlist; got:\n{out}");
-        assert!(out.contains("HOME="), "HOME should be in allowlist; got:\n{out}");
+        assert!(
+            out.contains("PATH="),
+            "PATH should be in allowlist; got:\n{out}"
+        );
+        assert!(
+            out.contains("HOME="),
+            "HOME should be in allowlist; got:\n{out}"
+        );
     }
 
     #[tokio::test]
@@ -787,7 +791,12 @@ mod tests {
             }
             Err(e) => panic!("unexpected error: {e:?}"),
         };
-        assert_eq!(res.exit_code, Some(0), "stderr: {}", String::from_utf8_lossy(&res.stderr));
+        assert_eq!(
+            res.exit_code,
+            Some(0),
+            "stderr: {}",
+            String::from_utf8_lossy(&res.stderr)
+        );
         let stdout = String::from_utf8_lossy(&res.stdout);
         assert!(stdout.contains("hello"), "stdout was: {stdout}");
         assert!(!res.truncated);
@@ -810,11 +819,13 @@ mod tests {
         // Cap + footer.
         assert!(
             res.stdout.len() <= OUTPUT_CAP_BYTES + TRUNCATION_FOOTER.len(),
-            "stdout len {} exceeded cap", res.stdout.len()
+            "stdout len {} exceeded cap",
+            res.stdout.len()
         );
         assert!(
             res.stdout.len() >= OUTPUT_CAP_BYTES / 2,
-            "stdout len {} suspiciously small", res.stdout.len()
+            "stdout len {} suspiciously small",
+            res.stdout.len()
         );
     }
 

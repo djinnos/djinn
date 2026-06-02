@@ -1,10 +1,10 @@
 use super::reply_loop::{ReplyLoopContext, run_reply_loop};
-use djinn_provider::message::{ContentBlock, Conversation, Message, Role};
-use djinn_provider::provider::StreamEvent;
 use crate::test_helpers::{
     FailingProvider, FakeProvider, agent_context_from_db, create_test_db, create_test_epic,
     create_test_project, create_test_task, test_path,
 };
+use djinn_provider::message::{ContentBlock, Conversation, Message, Role};
+use djinn_provider::provider::StreamEvent;
 use tokio_util::sync::CancellationToken;
 
 fn dummy_tool_schema(name: &str) -> serde_json::Value {

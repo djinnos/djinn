@@ -37,7 +37,8 @@ mod tests {
 
     #[test]
     fn parses_module_and_go_version() {
-        let body = "module github.com/foo/bar\n\ngo 1.22\n\nrequire (\n  github.com/x/y v1.0.0\n)\n";
+        let body =
+            "module github.com/foo/bar\n\ngo 1.22\n\nrequire (\n  github.com/x/y v1.0.0\n)\n";
         let info = parse_go_mod(body);
         assert_eq!(info.module.as_deref(), Some("github.com/foo/bar"));
         assert_eq!(info.go_version.as_deref(), Some("1.22"));

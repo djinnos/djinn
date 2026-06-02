@@ -141,7 +141,11 @@ fn durable_write(tool_use_id: &str, tool_name: &str, full_text: &str) {
 /// Write `bytes` to `dest` atomically via a uniquely-named temp file in the same
 /// `dir` followed by a rename (atomic on the same filesystem). Avoids torn reads
 /// from a concurrent reader and only needs `std::fs` — no extra runtime dep.
-fn atomic_write(dir: &std::path::Path, dest: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+fn atomic_write(
+    dir: &std::path::Path,
+    dest: &std::path::Path,
+    bytes: &[u8],
+) -> std::io::Result<()> {
     use std::io::Write as _;
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -240,12 +244,7 @@ impl OutputStash {
     }
 
     /// Paginated line view of a stashed output.
-    pub fn view(
-        &self,
-        tool_use_id: &str,
-        offset: usize,
-        limit: usize,
-    ) -> Result<String, String> {
+    pub fn view(&self, tool_use_id: &str, offset: usize, limit: usize) -> Result<String, String> {
         let (_tool_name, full_text) = self.resolve(tool_use_id)?;
         let lines: Vec<&str> = full_text.lines().collect();
         let total_lines = lines.len();
@@ -447,11 +446,10 @@ pub fn render_tool_result(
     };
     if text.len() > MAX_TOOL_RESULT_CHARS {
         let stash_text = extract_stash_content(tool_name, value).unwrap_or_else(|| text.clone());
-        stash.lock().unwrap().insert(
-            tool_use_id.to_string(),
-            tool_name.to_string(),
-            stash_text,
-        );
+        stash
+            .lock()
+            .unwrap()
+            .insert(tool_use_id.to_string(), tool_name.to_string(), stash_text);
         let full_bytes = text.len();
         text = crate::truncate::smart_truncate(&text, MAX_TOOL_RESULT_CHARS);
         text.push_str(&format!(
@@ -658,7 +656,13 @@ mod tests {
         // Pretty JSON, untruncated, nothing stashed (no in-memory, no durable).
         assert!(text.contains("\"rows\""));
         assert!(!text.contains("Full output stashed"));
-        assert!(stash.lock().unwrap().view("small-passthrough-1", 0, 10).is_err());
+        assert!(
+            stash
+                .lock()
+                .unwrap()
+                .view("small-passthrough-1", 0, 10)
+                .is_err()
+        );
     }
 
     #[test]
@@ -677,7 +681,12 @@ mod tests {
         let viewed = handle_stash_tool(
             &stash,
             "output_view",
-            Some(&serde_json::json!({"tool_use_id": "call-1"}).as_object().unwrap().clone()),
+            Some(
+                &serde_json::json!({"tool_use_id": "call-1"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
         )
         .unwrap();
         assert!(viewed.contains("xxx"));
@@ -692,11 +701,19 @@ mod tests {
         });
         render_tool_result(&stash, "sh-1", "shell", &value);
         // The stash holds raw stdout (no JSON envelope), via extract_stash_content.
-        let grepped =
-            handle_stash_tool(&stash, "output_grep", Some(&serde_json::json!({
-                "tool_use_id": "sh-1", "pattern": "line"
-            }).as_object().unwrap().clone()))
-            .unwrap();
+        let grepped = handle_stash_tool(
+            &stash,
+            "output_grep",
+            Some(
+                &serde_json::json!({
+                    "tool_use_id": "sh-1", "pattern": "line"
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .unwrap();
         assert!(grepped.contains("line"));
         assert!(!grepped.contains("\"stdout\""));
     }
@@ -777,7 +794,12 @@ mod tests {
         isolated_durable_root();
         let stash = Mutex::new(OutputStash::new());
         let big = "y".repeat(MAX_TOOL_RESULT_CHARS * 2);
-        render_tool_result(&stash, "render-durable-1", "shell", &serde_json::Value::String(big));
+        render_tool_result(
+            &stash,
+            "render-durable-1",
+            "shell",
+            &serde_json::Value::String(big),
+        );
 
         // Wipe the in-memory map, leaving only the durable blob.
         stash.lock().unwrap().clear();
@@ -822,6 +844,10 @@ mod tests {
         let err = stash.view("corrupt-1", 0, 10).unwrap_err();
         assert!(err.contains("No stashed output"));
         // And the low-level reader reports the missing blob distinctly.
-        assert!(durable_read("corrupt-1").unwrap_err().contains("blob missing"));
+        assert!(
+            durable_read("corrupt-1")
+                .unwrap_err()
+                .contains("blob missing")
+        );
     }
 }

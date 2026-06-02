@@ -2,8 +2,8 @@
 // confidence signals and bilateral associations.
 
 use djinn_core::events::EventBus;
-use djinn_memory::ContradictionCandidate;
 use djinn_db::{CONTRADICTION, NoteRepository, STALE_CITATION};
+use djinn_memory::ContradictionCandidate;
 use djinn_provider::{CompletionRequest, complete, provider::LlmProvider, resolve_memory_provider};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -229,8 +229,8 @@ mod tests {
     use super::*;
     use djinn_core::events::EventBus;
     use djinn_core::message::{ContentBlock, Conversation};
-    use djinn_memory::TypeRisk;
     use djinn_db::{Database, NoteRepository, ProjectRepository};
+    use djinn_memory::TypeRisk;
     use djinn_provider::provider::{StreamEvent, ToolChoice};
     use futures::stream;
     use std::pin::Pin;
@@ -305,24 +305,12 @@ mod tests {
                               authorization role permission scope grant deny policy enforcement";
 
         let note1 = repo
-            .create(
-                &project.id,
-                "Auth Token A",
-                shared_content,
-                "pattern",
-                "[]",
-            )
+            .create(&project.id, "Auth Token A", shared_content, "pattern", "[]")
             .await
             .unwrap();
 
         let note2 = repo
-            .create(
-                &project.id,
-                "Auth Token B",
-                shared_content,
-                "pattern",
-                "[]",
-            )
+            .create(&project.id, "Auth Token B", shared_content, "pattern", "[]")
             .await
             .unwrap();
 

@@ -14,43 +14,19 @@ async fn task_affinity_scores_task_epic_blocker_and_max() {
     let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
 
     let task_note = repo
-        .create(
-            &project.id,
-            "Task Note",
-            "body",
-            "reference",
-            "[]",
-        )
+        .create(&project.id, "Task Note", "body", "reference", "[]")
         .await
         .unwrap();
     let epic_note = repo
-        .create(
-            &project.id,
-            "Epic Note",
-            "body",
-            "reference",
-            "[]",
-        )
+        .create(&project.id, "Epic Note", "body", "reference", "[]")
         .await
         .unwrap();
     let blocker_note = repo
-        .create(
-            &project.id,
-            "Blocker Note",
-            "body",
-            "reference",
-            "[]",
-        )
+        .create(&project.id, "Blocker Note", "body", "reference", "[]")
         .await
         .unwrap();
     let overlap_note = repo
-        .create(
-            &project.id,
-            "Overlap Note",
-            "body",
-            "reference",
-            "[]",
-        )
+        .create(&project.id, "Overlap Note", "body", "reference", "[]")
         .await
         .unwrap();
 
@@ -266,13 +242,7 @@ async fn graph_proximity_empty_for_seed_without_links() {
     let repo = NoteRepository::new(db, event_bus_for(&tx));
 
     let seed = repo
-        .create(
-            &project.id,
-            "Seed",
-            "no links",
-            "research",
-            "[]",
-        )
+        .create(&project.id, "Seed", "no links", "research", "[]")
         .await
         .unwrap();
 
@@ -319,13 +289,7 @@ async fn graph_proximity_diamond_keeps_max_path_score_not_sum() {
     let repo = NoteRepository::new(db, event_bus_for(&tx));
 
     let a = repo
-        .create(
-            &project.id,
-            "A",
-            "[[B]] [[D]]",
-            "research",
-            "[]",
-        )
+        .create(&project.id, "A", "[[B]] [[D]]", "research", "[]")
         .await
         .unwrap();
     repo.create(&project.id, "B", "[[C]]", "research", "[]")
@@ -475,23 +439,11 @@ async fn temporal_scores_higher_access_count_wins_same_age() {
     let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
 
     let high = repo
-        .create(
-            &project.id,
-            "High Access",
-            "body",
-            "reference",
-            "[]",
-        )
+        .create(&project.id, "High Access", "body", "reference", "[]")
         .await
         .unwrap();
     let low = repo
-        .create(
-            &project.id,
-            "Low Access",
-            "body",
-            "reference",
-            "[]",
-        )
+        .create(&project.id, "Low Access", "body", "reference", "[]")
         .await
         .unwrap();
 
@@ -589,13 +541,7 @@ async fn temporal_scores_edge_cases_are_finite() {
     let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
 
     let zero_age = repo
-        .create(
-            &project.id,
-            "Zero Age",
-            "body",
-            "reference",
-            "[]",
-        )
+        .create(&project.id, "Zero Age", "body", "reference", "[]")
         .await
         .unwrap();
     let old = repo

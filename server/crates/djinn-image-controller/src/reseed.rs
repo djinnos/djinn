@@ -34,10 +34,7 @@ pub struct ReseedStats {
 /// Run the reseed pass. Best-effort: per-row errors are counted + logged
 /// but don't abort the pass. Returns the aggregate [`ReseedStats`].
 pub async fn reseed_empty_configs(db: &Database) -> ReseedStats {
-    let repo = ProjectRepository::new(
-        db.clone(),
-        djinn_core::events::EventBus::noop(),
-    );
+    let repo = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
     let rows = match repo.list_for_reseed().await {
         Ok(rows) => rows,
         Err(err) => {

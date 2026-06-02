@@ -9,19 +9,19 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use djinn_git::{GitActorHandle, GitError};
 use djinn_control_plane::bridge::{
     ApiSurfaceEntry, BoundaryRule, BoundaryViolation, CallerRef, ChangeKind, ChangedRange,
     ComplexityMetrics as WireComplexityMetrics, CoordinatorOps, CoordinatorStatus, CycleGroup,
     CycleMember, DeadSymbolEntry, DeprecatedHit, DetectedChangesResult, DetectedTouchedSymbol,
     DiffTouchesResult, EdgeCategory, EdgeEntry, GitOps, GraphNeighbor, GraphStatus, HotPathHit,
-    HotspotEntry, ImpactEntry, ImpactResult, LspOps, LspWarning, MetricsAtResult,
-    ModelPoolStatus, NeighborsResult, OrphanEntry, PagerankTier, PathHop, PathResult,
-    PoolStatus, ProcessRef, ProjectCtx, RankedNode, RefactorCandidate, RelatedSymbol,
-    RepoGraphOps, ResolveOutcome, RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding,
-    SlotPoolOps, SnapshotEdge, SnapshotNode, SnapshotPayload, SymbolAtHit, SymbolContext,
-    SymbolDescription, SymbolNode, TouchedSymbol,
+    HotspotEntry, ImpactEntry, ImpactResult, LspOps, LspWarning, MetricsAtResult, ModelPoolStatus,
+    NeighborsResult, OrphanEntry, PagerankTier, PathHop, PathResult, PoolStatus, ProcessRef,
+    ProjectCtx, RankedNode, RefactorCandidate, RelatedSymbol, RepoGraphOps, ResolveOutcome,
+    RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding, SlotPoolOps, SnapshotEdge,
+    SnapshotNode, SnapshotPayload, SymbolAtHit, SymbolContext, SymbolDescription, SymbolNode,
+    TouchedSymbol,
 };
+use djinn_git::{GitActorHandle, GitError};
 
 fn complexity_metrics_to_wire(
     m: djinn_graph::complexity::ComplexityMetrics,
@@ -95,8 +95,7 @@ fn aggregate_files_complexity(
         agg.total_nloc = agg.total_nloc.saturating_add(u32::from(entry.metrics.nloc));
         if entry.metrics.cognitive > agg.max_function_cognitive
             || (entry.metrics.cognitive == agg.max_function_cognitive
-                && (agg.max_function_name.is_empty()
-                    || entry.display_name < agg.max_function_name))
+                && (agg.max_function_name.is_empty() || entry.display_name < agg.max_function_name))
         {
             agg.max_function_cognitive = entry.metrics.cognitive;
             agg.max_function_name = entry.display_name.clone();
@@ -169,8 +168,11 @@ fn compute_refactor_candidates(
         .collect();
 
     let n = candidates.len() as f64;
-    let mean_cog: f64 =
-        candidates.iter().map(|c| f64::from(c.cognitive)).sum::<f64>() / n;
+    let mean_cog: f64 = candidates
+        .iter()
+        .map(|c| f64::from(c.cognitive))
+        .sum::<f64>()
+        / n;
     let mean_churn: f64 = churn_for.iter().map(|c| f64::from(*c)).sum::<f64>() / n;
     let mean_pr: f64 = candidates.iter().map(|c| c.page_rank).sum::<f64>() / n;
 
@@ -196,9 +198,8 @@ fn compute_refactor_candidates(
     let std_churn = var_churn.sqrt();
     let std_pr = var_pr.sqrt();
 
-    let z = |x: f64, mean: f64, std: f64| -> f64 {
-        if std > 1e-9 { (x - mean) / std } else { 0.0 }
-    };
+    let z =
+        |x: f64, mean: f64, std: f64| -> f64 { if std > 1e-9 { (x - mean) / std } else { 0.0 } };
 
     let mut out: Vec<RefactorCandidate> = candidates
         .iter()
@@ -288,10 +289,10 @@ fn assign_refactor_tiers(out: &mut [djinn_control_plane::bridge::RefactorCandida
     }
 }
 
-use petgraph::visit::EdgeRef;
 use djinn_agent::actors::coordinator::CoordinatorHandle;
 use djinn_agent::actors::slot::SlotPoolHandle;
 use djinn_agent::lsp::LspManager;
+use petgraph::visit::EdgeRef;
 
 pub(crate) mod graph_neighbors;
 pub(crate) mod hybrid_search;
@@ -696,7 +697,10 @@ impl RepoGraphOps for RepoGraphBridge {
                     return None;
                 }
                 let key = format_node_key(&node.key);
-                let file_hint = graph_node.file_path.as_ref().map(|p| p.display().to_string());
+                let file_hint = graph_node
+                    .file_path
+                    .as_ref()
+                    .map(|p| p.display().to_string());
                 // PR F4: apply graph exclusions BEFORE the limit truncate
                 // so the user gets `limit` non-excluded results, not
                 // `limit` raw results minus exclusions.
@@ -724,9 +728,7 @@ impl RepoGraphOps for RepoGraphBridge {
                 // membership, which makes the bucket label the entry
                 // point closest to this node.
                 let process_id = pick_lowest_ordinal_process_id(&graph, node.node_index);
-                let community_id = graph
-                    .community_id(node.node_index)
-                    .map(|s| s.to_string());
+                let community_id = graph.community_id(node.node_index).map(|s| s.to_string());
                 Some(RankedNode {
                     key,
                     kind: format!("{:?}", node.kind).to_lowercase(),
@@ -777,11 +779,7 @@ impl RepoGraphOps for RepoGraphBridge {
         Ok(nodes)
     }
 
-    async fn implementations(
-        &self,
-        ctx: &ProjectCtx,
-        symbol: &str,
-    ) -> Result<Vec<String>, String> {
+    async fn implementations(&self, ctx: &ProjectCtx, symbol: &str) -> Result<Vec<String>, String> {
         use djinn_graph::repo_graph::RepoGraphEdgeKind;
         let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
             &self.state,
@@ -1066,7 +1064,10 @@ impl RepoGraphOps for RepoGraphBridge {
             if entry_set.contains(&idx) || node.is_test {
                 continue;
             }
-            if matches!(node.display_name.as_str(), "main" | "init" | "_start" | "TestMain") {
+            if matches!(
+                node.display_name.as_str(),
+                "main" | "init" | "_start" | "TestMain"
+            ) {
                 continue;
             }
             // v8: also skip test files (file-path heuristic) — they
@@ -1699,7 +1700,8 @@ impl RepoGraphOps for RepoGraphBridge {
         // we go through the helper so the worker binary can reuse it
         // without reaching into the bridge.
         let mut touched_indices: BTreeSet<petgraph::graph::NodeIndex> = BTreeSet::new();
-        let line_mode = matches!((from_sha, to_sha), (Some(f), Some(t)) if !f.is_empty() && !t.is_empty());
+        let line_mode =
+            matches!((from_sha, to_sha), (Some(f), Some(t)) if !f.is_empty() && !t.is_empty());
         let (effective_from, effective_to) = if line_mode {
             (
                 from_sha.unwrap_or("").to_string(),
@@ -1722,7 +1724,11 @@ impl RepoGraphOps for RepoGraphBridge {
             for hunk in &hunks {
                 let start = hunk.start_line.max(0) as u32;
                 let end = hunk.end_line.unwrap_or(hunk.start_line).max(0) as u32;
-                let (start, end) = if start <= end { (start, end) } else { (end, start) };
+                let (start, end) = if start <= end {
+                    (start, end)
+                } else {
+                    (end, start)
+                };
                 let path = std::path::Path::new(&hunk.file);
                 for idx in graph.symbols_enclosing(path, start, end) {
                     touched_indices.insert(idx);
@@ -1732,8 +1738,8 @@ impl RepoGraphOps for RepoGraphBridge {
             // changed_files mode: every symbol inside the listed files
             // is treated as touched. We find them by walking the
             // ContainsDefinition fan-out from the file node.
-            use petgraph::Direction;
             use djinn_graph::repo_graph::RepoGraphEdgeKind;
+            use petgraph::Direction;
             for file in changed_files {
                 let path = std::path::Path::new(file);
                 let Some(file_idx) = graph.file_node(path) else {
@@ -1867,10 +1873,7 @@ impl RepoGraphOps for RepoGraphBridge {
             {
                 continue;
             }
-            let file_str = node
-                .file_path
-                .as_ref()
-                .map(|p| p.display().to_string());
+            let file_str = node.file_path.as_ref().map(|p| p.display().to_string());
             if let Some(matcher) = &module_matcher {
                 let Some(f) = &file_str else { continue };
                 if !matcher.is_match(f) {
@@ -1879,13 +1882,13 @@ impl RepoGraphOps for RepoGraphBridge {
             }
             let key = format_node_key(&node.id);
             // Self-crate = the SCIP `<tool> <scheme> <crate-name> ...` token.
-            let own_crate = node
-                .symbol
-                .as_deref()
-                .and_then(scip_crate_name);
+            let own_crate = node.symbol.as_deref().and_then(scip_crate_name);
             let mut used_outside_crate = false;
             let mut fan_in = 0usize;
-            for edge in graph.graph().edges_directed(node_index, Direction::Incoming) {
+            for edge in graph
+                .graph()
+                .edges_directed(node_index, Direction::Incoming)
+            {
                 fan_in += 1;
                 if !used_outside_crate && own_crate.is_some() {
                     let src = graph.node(edge.source());
@@ -1962,9 +1965,23 @@ impl RepoGraphOps for RepoGraphBridge {
             let src_key = format_node_key(&src_node.id);
             let dst_key = format_node_key(&dst_node.id);
             // Skip the edge if either endpoint is filtered by exclusions.
-            if exclusions.excludes(&src_key, src_node.file_path.as_ref().map(|p| p.display().to_string()).as_deref(), &src_node.display_name)
-                || exclusions.excludes(&dst_key, dst_node.file_path.as_ref().map(|p| p.display().to_string()).as_deref(), &dst_node.display_name)
-            {
+            if exclusions.excludes(
+                &src_key,
+                src_node
+                    .file_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .as_deref(),
+                &src_node.display_name,
+            ) || exclusions.excludes(
+                &dst_key,
+                dst_node
+                    .file_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .as_deref(),
+                &dst_node.display_name,
+            ) {
                 continue;
             }
             let src_match_target = src_node
@@ -2067,8 +2084,7 @@ impl RepoGraphOps for RepoGraphBridge {
                 continue;
             }
             let node = graph.node(ranked.node_index);
-            let Some(file) = node.file_path.as_ref().map(|p| p.display().to_string())
-            else {
+            let Some(file) = node.file_path.as_ref().map(|p| p.display().to_string()) else {
                 continue;
             };
             *per_file_centrality.entry(file.clone()).or_insert(0.0) += ranked.page_rank;
@@ -2181,7 +2197,9 @@ impl RepoGraphOps for RepoGraphBridge {
         let mut functions: Vec<FunctionComplexityEntry> = Vec::new();
         for node_index in graph.graph().node_indices() {
             let node = graph.node(node_index);
-            let Some(metrics) = node.complexity else { continue };
+            let Some(metrics) = node.complexity else {
+                continue;
+            };
             let Some(symbol_kind) = node.symbol_kind.as_ref() else {
                 continue;
             };
@@ -2289,7 +2307,9 @@ impl RepoGraphOps for RepoGraphBridge {
             if node.is_external || node.is_test {
                 continue;
             }
-            let Some(metrics) = node.complexity else { continue };
+            let Some(metrics) = node.complexity else {
+                continue;
+            };
             let Some(symbol_kind) = node.symbol_kind.as_ref() else {
                 continue;
             };
@@ -2350,13 +2370,14 @@ impl RepoGraphOps for RepoGraphBridge {
             churn_map.insert(PathBuf::from(row.file_path), count);
         }
 
-        Ok(compute_refactor_candidates(&candidate_inputs, &churn_map, limit))
+        Ok(compute_refactor_candidates(
+            &candidate_inputs,
+            &churn_map,
+            limit,
+        ))
     }
 
-    async fn metrics_at(
-        &self,
-        ctx: &ProjectCtx,
-    ) -> Result<MetricsAtResult, String> {
+    async fn metrics_at(&self, ctx: &ProjectCtx) -> Result<MetricsAtResult, String> {
         use djinn_graph::repo_graph::RepoGraphNodeKind;
         use djinn_graph::scip_parser::ScipVisibility;
         use petgraph::Direction;
@@ -2383,8 +2404,14 @@ impl RepoGraphOps for RepoGraphBridge {
                 continue;
             }
             kept.push(node_index);
-            let td = graph.graph().edges_directed(node_index, Direction::Incoming).count()
-                + graph.graph().edges_directed(node_index, Direction::Outgoing).count();
+            let td = graph
+                .graph()
+                .edges_directed(node_index, Direction::Incoming)
+                .count()
+                + graph
+                    .graph()
+                    .edges_directed(node_index, Direction::Outgoing)
+                    .count();
             total_degree.push(td);
             if node.kind == RepoGraphNodeKind::Symbol
                 && node.visibility == Some(ScipVisibility::Public)
@@ -2587,8 +2614,7 @@ impl RepoGraphOps for RepoGraphBridge {
             let mut has_relationship_impl = false;
             for edge in graph.graph().edges_directed(idx, Direction::Incoming) {
                 match edge.weight().kind {
-                    RepoGraphEdgeKind::ContainsDefinition
-                    | RepoGraphEdgeKind::DeclaredInFile => {}
+                    RepoGraphEdgeKind::ContainsDefinition | RepoGraphEdgeKind::DeclaredInFile => {}
                     // PR F1: `EntryPointOf` is metadata, not a caller
                     // signal. Symbols with this edge already short-
                     // circuit above via `entry_set`; non-entry symbols
@@ -2888,7 +2914,12 @@ impl RepoGraphOps for RepoGraphBridge {
         let since = since_days_to_cutoff(since_days);
         let repo = CommitFileChangeRepository::new(self.state.db().clone());
         let rows = repo
-            .top_coupled_pairs(&ctx.id, limit.max(1), since.as_deref(), max_files_per_commit)
+            .top_coupled_pairs(
+                &ctx.id,
+                limit.max(1),
+                since.as_deref(),
+                max_files_per_commit,
+            )
             .await
             .map_err(|e| format!("coupling_hotspots lookup: {e}"))?;
         Ok(rows
@@ -3069,8 +3100,7 @@ impl AppState {
         project_id: &str,
     ) -> djinn_control_plane::tools::graph_exclusions::GraphExclusions {
         use djinn_control_plane::tools::graph_exclusions::GraphExclusions;
-        let repo =
-            djinn_db::ProjectRepository::new(self.db().clone(), self.event_bus());
+        let repo = djinn_db::ProjectRepository::new(self.db().clone(), self.event_bus());
         match repo.get_config(project_id).await {
             Ok(Some(c)) => GraphExclusions::from_config(&c),
             _ => GraphExclusions::empty(),
@@ -3317,8 +3347,7 @@ fn build_snapshot_payload(
             // The UI keeps a defensive `prettifyLabel` mirror in case a
             // future snapshot path forgets to call this — see
             // `djinn_graph::scip_parser::prettify_scip_descriptor`.
-            let label =
-                djinn_graph::scip_parser::prettify_scip_descriptor(&node.display_name);
+            let label = djinn_graph::scip_parser::prettify_scip_descriptor(&node.display_name);
             SnapshotNode {
                 id: format_node_key(&node.id),
                 kind: format!("{:?}", node.kind).to_lowercase(),
@@ -3366,9 +3395,7 @@ fn build_snapshot_payload(
             continue;
         }
         total_edges_post_excl += 1;
-        if !surviving.contains(&edge_ref.source())
-            || !surviving.contains(&edge_ref.target())
-        {
+        if !surviving.contains(&edge_ref.source()) || !surviving.contains(&edge_ref.target()) {
             continue;
         }
         let from_node = graph.node(edge_ref.source());
@@ -3560,7 +3587,7 @@ pub(crate) mod graph_bridge_tests {
     // unqualified name so the existing test patterns keep compiling.
     // The bridge crate's `ResolveOutcome` (String) is different — we
     // never use it directly in these tests.
-    use crate::mcp_bridge::graph_neighbors::{resolve_node, resolve_node_or_err, ResolveOutcome};
+    use crate::mcp_bridge::graph_neighbors::{ResolveOutcome, resolve_node, resolve_node_or_err};
     use djinn_graph::repo_graph::{RepoDependencyGraph, RepoNodeKey};
     use djinn_graph::scip_parser::{
         ParsedScipIndex, ScipFile, ScipMetadata, ScipOccurrence, ScipRange, ScipRelationship,
@@ -3588,7 +3615,7 @@ pub(crate) mod graph_bridge_tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(djinn_graph::scip_parser::ScipVisibility::Public),
-        signature_parts: None,
+            signature_parts: None,
         };
         let trait_symbol = ScipSymbol {
             symbol: "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
@@ -3598,7 +3625,7 @@ pub(crate) mod graph_bridge_tests {
             documentation: vec![],
             relationships: vec![],
             visibility: Some(djinn_graph::scip_parser::ScipVisibility::Public),
-        signature_parts: None,
+            signature_parts: None,
         };
         let main_symbol = ScipSymbol {
             symbol: "scip-rust pkg src/app.rs `main`().".to_string(),
@@ -3612,7 +3639,7 @@ pub(crate) mod graph_bridge_tests {
                 kinds: BTreeSet::from([ScipRelationshipKind::Implementation]),
             }],
             visibility: Some(djinn_graph::scip_parser::ScipVisibility::Public),
-        signature_parts: None,
+            signature_parts: None,
         };
         ParsedScipIndex {
             metadata: ScipMetadata::default(),
@@ -3800,10 +3827,7 @@ pub(crate) mod graph_bridge_tests {
                     .iter()
                     .filter(|c| c.uid.starts_with("symbol:"))
                     .count();
-                assert_eq!(
-                    symbol_count, 3,
-                    "expected exactly 3 symbol candidates"
-                );
+                assert_eq!(symbol_count, 3, "expected exactly 3 symbol candidates");
             }
             ResolveOutcome::Found(_) => panic!("expected Ambiguous, got Found"),
             ResolveOutcome::NotFound => panic!("expected Ambiguous, got NotFound"),
@@ -3879,11 +3903,7 @@ pub(crate) mod graph_bridge_tests {
         };
         // Both file-path match (User in path) and kind hint ("class")
         // fire. Tiebreaker for Type/Class is 0.05.
-        let s = crate::mcp_bridge::graph_neighbors::score_candidate(
-            &node,
-            "User",
-            Some("class"),
-        );
+        let s = crate::mcp_bridge::graph_neighbors::score_candidate(&node, "User", Some("class"));
         let expected = 0.5 + 0.4 * 1.0 + 0.2 * 1.0 + 0.05;
         assert!(
             (s - expected).abs() < 1e-9,
@@ -3891,9 +3911,7 @@ pub(crate) mod graph_bridge_tests {
         );
 
         // Same node, no kind hint: drop the 0.2 component.
-        let s_no_hint = crate::mcp_bridge::graph_neighbors::score_candidate(
-            &node, "User", None,
-        );
+        let s_no_hint = crate::mcp_bridge::graph_neighbors::score_candidate(&node, "User", None);
         let expected_no_hint = 0.5 + 0.4 * 1.0 + 0.05;
         assert!(
             (s_no_hint - expected_no_hint).abs() < 1e-9,
@@ -3901,11 +3919,8 @@ pub(crate) mod graph_bridge_tests {
         );
 
         // Query that doesn't appear in path: drop the 0.4 component.
-        let s_no_path = crate::mcp_bridge::graph_neighbors::score_candidate(
-            &node,
-            "Account",
-            Some("class"),
-        );
+        let s_no_path =
+            crate::mcp_bridge::graph_neighbors::score_candidate(&node, "Account", Some("class"));
         let expected_no_path = 0.5 + 0.2 * 1.0 + 0.05;
         assert!(
             (s_no_path - expected_no_path).abs() < 1e-9,
@@ -4155,10 +4170,7 @@ pub(crate) mod graph_bridge_tests {
                 result.push(ImpactEntry {
                     key: format_node_key(&node.id),
                     depth,
-                    file_path: node
-                        .file_path
-                        .as_ref()
-                        .map(|p| p.display().to_string()),
+                    file_path: node.file_path.as_ref().map(|p| p.display().to_string()),
                 });
             }
             if depth < max_depth {
@@ -4193,8 +4205,9 @@ pub(crate) mod graph_bridge_tests {
     #[tokio::test]
     async fn impact_bfs_skips_structural_anchors_but_walks_behavioral_edges() {
         use djinn_graph::repo_graph::{
-            RepoDependencyGraph, RepoGraphArtifact, RepoGraphArtifactEdge, RepoGraphEdgeKind,
-            RepoGraphNode, RepoGraphNodeKind, RepoNodeKey, REPO_GRAPH_ARTIFACT_VERSION,
+            REPO_GRAPH_ARTIFACT_VERSION, RepoDependencyGraph, RepoGraphArtifact,
+            RepoGraphArtifactEdge, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind,
+            RepoNodeKey,
         };
 
         let mk_node = |key: RepoNodeKey, name: &str, kind: RepoGraphNodeKind| RepoGraphNode {
@@ -4234,8 +4247,8 @@ pub(crate) mod graph_bridge_tests {
                 RepoGraphNodeKind::File,
             ),
         ];
-        let mk_edge = |source: usize, target: usize, kind: RepoGraphEdgeKind| {
-            RepoGraphArtifactEdge {
+        let mk_edge =
+            |source: usize, target: usize, kind: RepoGraphEdgeKind| RepoGraphArtifactEdge {
                 source,
                 target,
                 kind,
@@ -4244,8 +4257,7 @@ pub(crate) mod graph_bridge_tests {
                 confidence: 0.95,
                 reason: None,
                 step: None,
-            }
-        };
+            };
         let edges = vec![
             mk_edge(1, 0, RepoGraphEdgeKind::Reads),
             mk_edge(2, 0, RepoGraphEdgeKind::ContainsDefinition),
@@ -4315,8 +4327,7 @@ pub(crate) mod graph_bridge_tests {
     #[tokio::test]
     async fn impact_min_confidence_filters_bfs_frontier_pr_a2() {
         let graph = build_test_graph();
-        let start =
-            resolve_node_or_err(&graph, "scip-rust pkg src/helper.rs `helper`().").unwrap();
+        let start = resolve_node_or_err(&graph, "scip-rust pkg src/helper.rs `helper`().").unwrap();
 
         fn run_bfs(
             graph: &djinn_graph::repo_graph::RepoDependencyGraph,
@@ -4377,8 +4388,11 @@ pub(crate) mod graph_bridge_tests {
     /// Builds a synthetic graph and returns
     ///   (graph, helper_node_index, helper_uid_string)
     /// — used by the C1 tests below so they don't repeat the setup.
-    fn build_context_fixture()
-    -> (djinn_graph::repo_graph::RepoDependencyGraph, petgraph::graph::NodeIndex, String) {
+    fn build_context_fixture() -> (
+        djinn_graph::repo_graph::RepoDependencyGraph,
+        petgraph::graph::NodeIndex,
+        String,
+    ) {
         let graph = build_test_graph();
         let key = "scip-rust pkg src/helper.rs `helper`().";
         let node_index = match resolve_node(&graph, key) {
@@ -4569,7 +4583,10 @@ pub(crate) mod graph_bridge_tests {
         let any_node = mk_node(None);
         // SymbolReference with non-callable target → References.
         assert_eq!(
-            edge_category_for(Some(&mk_edge(RepoGraphEdgeKind::SymbolReference)), &any_node),
+            edge_category_for(
+                Some(&mk_edge(RepoGraphEdgeKind::SymbolReference)),
+                &any_node
+            ),
             EdgeCategory::References
         );
         // SymbolReference with Function target → Calls.
@@ -4581,13 +4598,19 @@ pub(crate) mod graph_bridge_tests {
         // SymbolReference with Method target → Calls.
         let method_node = mk_node(Some(ScipSymbolKind::Method));
         assert_eq!(
-            edge_category_for(Some(&mk_edge(RepoGraphEdgeKind::SymbolReference)), &method_node),
+            edge_category_for(
+                Some(&mk_edge(RepoGraphEdgeKind::SymbolReference)),
+                &method_node
+            ),
             EdgeCategory::Calls
         );
         // SymbolReference with Constructor target → Calls.
         let ctor_node = mk_node(Some(ScipSymbolKind::Constructor));
         assert_eq!(
-            edge_category_for(Some(&mk_edge(RepoGraphEdgeKind::SymbolReference)), &ctor_node),
+            edge_category_for(
+                Some(&mk_edge(RepoGraphEdgeKind::SymbolReference)),
+                &ctor_node
+            ),
             EdgeCategory::Calls
         );
         // PR A3 splits.
@@ -4613,10 +4636,7 @@ pub(crate) mod graph_bridge_tests {
             EdgeCategory::Contains
         );
         assert_eq!(
-            edge_category_for(
-                Some(&mk_edge(RepoGraphEdgeKind::DeclaredInFile)),
-                &any_node
-            ),
+            edge_category_for(Some(&mk_edge(RepoGraphEdgeKind::DeclaredInFile)), &any_node),
             EdgeCategory::Contains
         );
         // Symbol relationships.
@@ -4963,7 +4983,10 @@ pub(crate) mod graph_bridge_tests {
         assert_eq!(meta.params.len(), 2);
         assert_eq!(meta.params[0].name, "user");
         assert_eq!(meta.params[1].default_value.as_deref(), Some("20"));
-        assert_eq!(meta.return_type.as_deref(), Some("Result<Vec<Item>, Error>"));
+        assert_eq!(
+            meta.return_type.as_deref(),
+            Some("Result<Vec<Item>, Error>")
+        );
         assert_eq!(meta.is_async, Some(true));
         assert_eq!(meta.visibility.as_deref(), Some("pub"));
         assert_eq!(meta.annotations, vec!["#[tracing::instrument]"]);
@@ -5094,15 +5117,11 @@ pub(crate) mod graph_bridge_tests {
             cap,
             &GraphExclusions::empty(),
         );
-        assert_eq!(
-            payload.node_cap, cap,
-            "node_cap echoed back unchanged"
-        );
+        assert_eq!(payload.node_cap, cap, "node_cap echoed back unchanged");
         assert!(
             payload.truncated,
             "should be truncated when total_nodes={} > cap={}",
-            payload.total_nodes,
-            cap
+            payload.total_nodes, cap
         );
         assert!(
             payload.nodes.len() <= cap,
@@ -5122,8 +5141,7 @@ pub(crate) mod graph_bridge_tests {
             payload.nodes.iter().map(|n| n.id.as_str()).collect();
         for edge in &payload.edges {
             assert!(
-                node_ids.contains(edge.from.as_str())
-                    && node_ids.contains(edge.to.as_str()),
+                node_ids.contains(edge.from.as_str()) && node_ids.contains(edge.to.as_str()),
                 "truncated snapshot leaked an edge {} → {} into the wire",
                 edge.from,
                 edge.to
@@ -5280,7 +5298,13 @@ pub(crate) mod graph_bridge_tests {
 
     // ── Iter 28: complexity op ranking + aggregation ─────────────────────
 
-    fn complexity_metrics(cog: u16, cyc: u16, nloc: u16, nest: u8, params: u8) -> WireComplexityMetrics {
+    fn complexity_metrics(
+        cog: u16,
+        cyc: u16,
+        nloc: u16,
+        nest: u8,
+        params: u8,
+    ) -> WireComplexityMetrics {
         WireComplexityMetrics {
             cyclomatic: cyc,
             cognitive: cog,
@@ -5312,8 +5336,18 @@ pub(crate) mod graph_bridge_tests {
         // cognitive=1. After sorting by cognitive desc, the high-
         // complexity entry must lead.
         let mut entries = vec![
-            function_entry("symbol:a", "easy", "src/a.rs", complexity_metrics(1, 1, 5, 0, 0)),
-            function_entry("symbol:b", "hard", "src/b.rs", complexity_metrics(10, 8, 50, 4, 3)),
+            function_entry(
+                "symbol:a",
+                "easy",
+                "src/a.rs",
+                complexity_metrics(1, 1, 5, 0, 0),
+            ),
+            function_entry(
+                "symbol:b",
+                "hard",
+                "src/b.rs",
+                complexity_metrics(10, 8, 50, 4, 3),
+            ),
         ];
         sort_function_complexity_entries(&mut entries, "cognitive");
         assert_eq!(entries[0].display_name, "hard");
@@ -5327,11 +5361,24 @@ pub(crate) mod graph_bridge_tests {
         // Verify the non-default sort key actually rotates the ordering.
         // `easy` has higher cognitive but lower cyclomatic.
         let mut entries = vec![
-            function_entry("symbol:easy", "easy", "src/a.rs", complexity_metrics(10, 2, 5, 0, 0)),
-            function_entry("symbol:hard", "hard", "src/b.rs", complexity_metrics(5, 9, 50, 4, 3)),
+            function_entry(
+                "symbol:easy",
+                "easy",
+                "src/a.rs",
+                complexity_metrics(10, 2, 5, 0, 0),
+            ),
+            function_entry(
+                "symbol:hard",
+                "hard",
+                "src/b.rs",
+                complexity_metrics(5, 9, 50, 4, 3),
+            ),
         ];
         sort_function_complexity_entries(&mut entries, "cyclomatic");
-        assert_eq!(entries[0].display_name, "hard", "cyclomatic=9 should win over cyclomatic=2");
+        assert_eq!(
+            entries[0].display_name, "hard",
+            "cyclomatic=9 should win over cyclomatic=2"
+        );
         assert_eq!(entries[0].metrics.cyclomatic, 9);
     }
 
@@ -5343,9 +5390,24 @@ pub(crate) mod graph_bridge_tests {
         // (worst offender); small.rs has 1 function. Sorted by total
         // cognitive desc, big.rs leads.
         let entries = vec![
-            function_entry("symbol:big1", "big_fn", "src/big.rs", complexity_metrics(7, 5, 30, 2, 2)),
-            function_entry("symbol:big2", "small_fn", "src/big.rs", complexity_metrics(3, 2, 12, 1, 1)),
-            function_entry("symbol:s1", "tiny", "src/small.rs", complexity_metrics(2, 1, 8, 0, 0)),
+            function_entry(
+                "symbol:big1",
+                "big_fn",
+                "src/big.rs",
+                complexity_metrics(7, 5, 30, 2, 2),
+            ),
+            function_entry(
+                "symbol:big2",
+                "small_fn",
+                "src/big.rs",
+                complexity_metrics(3, 2, 12, 1, 1),
+            ),
+            function_entry(
+                "symbol:s1",
+                "tiny",
+                "src/small.rs",
+                complexity_metrics(2, 1, 8, 0, 0),
+            ),
         ];
         let files = aggregate_files_complexity(&entries, "cognitive");
         assert_eq!(files.len(), 2);
@@ -5367,12 +5429,30 @@ pub(crate) mod graph_bridge_tests {
         // functions). A file with one 5-param function ranks BELOW a
         // file with two 1-param functions.
         let entries = vec![
-            function_entry("symbol:a", "single", "src/wide.rs", complexity_metrics(1, 1, 5, 0, 5)),
-            function_entry("symbol:b", "first", "src/many.rs", complexity_metrics(1, 1, 5, 0, 1)),
-            function_entry("symbol:c", "second", "src/many.rs", complexity_metrics(1, 1, 5, 0, 1)),
+            function_entry(
+                "symbol:a",
+                "single",
+                "src/wide.rs",
+                complexity_metrics(1, 1, 5, 0, 5),
+            ),
+            function_entry(
+                "symbol:b",
+                "first",
+                "src/many.rs",
+                complexity_metrics(1, 1, 5, 0, 1),
+            ),
+            function_entry(
+                "symbol:c",
+                "second",
+                "src/many.rs",
+                complexity_metrics(1, 1, 5, 0, 1),
+            ),
         ];
         let files = aggregate_files_complexity(&entries, "param_count");
-        assert_eq!(files[0].file, "src/many.rs", "two functions should win by param_count proxy");
+        assert_eq!(
+            files[0].file, "src/many.rs",
+            "two functions should win by param_count proxy"
+        );
         assert_eq!(files[0].function_count, 2);
         assert_eq!(files[1].file, "src/wide.rs");
         assert_eq!(files[1].function_count, 1);
@@ -5393,7 +5473,10 @@ pub(crate) mod graph_bridge_tests {
         );
         let result = ComplexityResult::Functions(vec![entry]);
         let json = serde_json::to_value(&result).expect("serialize");
-        assert!(json.is_array(), "Functions should serialize as bare array: {json}");
+        assert!(
+            json.is_array(),
+            "Functions should serialize as bare array: {json}"
+        );
         assert_eq!(json.as_array().unwrap().len(), 1);
     }
 
@@ -5438,7 +5521,10 @@ pub(crate) mod graph_bridge_tests {
 
         let out = super::compute_refactor_candidates(&candidates, &churn_map, 30);
         assert_eq!(out.len(), 3);
-        assert_eq!(out[0].display_name, "b", "B should be the top refactor target");
+        assert_eq!(
+            out[0].display_name, "b",
+            "B should be the top refactor target"
+        );
         assert_eq!(out[0].cognitive, 10);
         assert_eq!(out[0].churn_commits, 20);
         // Score is the mean of three z-scores; with B at the top of
@@ -5465,7 +5551,10 @@ pub(crate) mod graph_bridge_tests {
         let out = super::compute_refactor_candidates(&candidates, &churn_map, 30);
         assert_eq!(out.len(), 3);
         for entry in &out {
-            assert_eq!(entry.composite_score, 0.0, "composite should be 0: {entry:?}");
+            assert_eq!(
+                entry.composite_score, 0.0,
+                "composite should be 0: {entry:?}"
+            );
             assert_eq!(entry.z_cognitive, 0.0);
             assert_eq!(entry.z_churn, 0.0);
             assert_eq!(entry.z_page_rank, 0.0);
@@ -5501,7 +5590,10 @@ pub(crate) mod graph_bridge_tests {
                 1,
                 f64::from(i),
             ));
-            churn_map.insert(std::path::PathBuf::from(&file), u32::try_from(i + 1).unwrap());
+            churn_map.insert(
+                std::path::PathBuf::from(&file),
+                u32::try_from(i + 1).unwrap(),
+            );
         }
         let out = super::compute_refactor_candidates(&candidates, &churn_map, 20);
         assert_eq!(out.len(), 20);
@@ -5559,11 +5651,17 @@ pub(crate) mod graph_bridge_tests {
         // The missing-file function inherits churn_commits=0.
         let missing = out.iter().find(|c| c.display_name == "b").unwrap();
         assert_eq!(missing.churn_commits, 0);
-        assert!(missing.z_churn < 0.0, "absent file should have negative z_churn");
+        assert!(
+            missing.z_churn < 0.0,
+            "absent file should have negative z_churn"
+        );
         // The in-map function has positive z_churn.
         let present = out.iter().find(|c| c.display_name == "a").unwrap();
         assert_eq!(present.churn_commits, 50);
-        assert!(present.z_churn > 0.0, "high-churn file should have positive z_churn");
+        assert!(
+            present.z_churn > 0.0,
+            "high-churn file should have positive z_churn"
+        );
     }
 
     #[test]
@@ -5594,7 +5692,10 @@ pub(crate) mod graph_bridge_tests {
                 1,
                 f64::from(i),
             ));
-            churn_map.insert(std::path::PathBuf::from(&file), u32::try_from(i + 1).unwrap());
+            churn_map.insert(
+                std::path::PathBuf::from(&file),
+                u32::try_from(i + 1).unwrap(),
+            );
         }
         let out = super::compute_refactor_candidates(&candidates, &churn_map, 5);
         assert_eq!(out.len(), 5);

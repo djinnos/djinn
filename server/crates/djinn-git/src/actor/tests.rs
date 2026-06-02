@@ -163,4 +163,3 @@ async fn delete_branch_removes_local() {
         .unwrap();
     assert!(out.stdout.trim().is_empty(), "branch should be deleted");
 }
-

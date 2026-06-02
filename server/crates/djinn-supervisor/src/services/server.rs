@@ -148,10 +148,7 @@ pub struct ExpectedTokenValidator {
 }
 
 impl ExpectedTokenValidator {
-    pub fn new(
-        expected_token: impl Into<String>,
-        expected_task_run_id: impl Into<String>,
-    ) -> Self {
+    pub fn new(expected_token: impl Into<String>, expected_task_run_id: impl Into<String>) -> Self {
         Self {
             expected_token: expected_token.into(),
             expected_task_run_id: expected_task_run_id.into(),
@@ -844,11 +841,7 @@ async fn handle_tcp_connection<V: TokenValidator>(
     //    frames should land on.
     let events_tx = if let Some(registry) = registry.as_ref() {
         registry
-            .attach(
-                &task_run_id,
-                reply_tx.clone(),
-                validation.username.clone(),
-            )
+            .attach(&task_run_id, reply_tx.clone(), validation.username.clone())
             .await
             .map(|slot| slot.events_tx)
     } else {
@@ -856,7 +849,10 @@ async fn handle_tcp_connection<V: TokenValidator>(
     };
 
     // 7. Enter the shared dispatch loop.
-    dispatch_loop(read_half, write_half, services, reply_tx, reply_rx, events_tx, cancel).await;
+    dispatch_loop(
+        read_half, write_half, services, reply_tx, reply_rx, events_tx, cancel,
+    )
+    .await;
 
     // 8. Deregister.
     conns.lock().await.remove(&task_run_id);
@@ -978,11 +974,8 @@ async fn reader_loop<R>(
     }
 }
 
-async fn writer_loop<W>(
-    mut write_half: W,
-    mut rx: mpsc::Receiver<Frame>,
-    cancel: CancellationToken,
-) where
+async fn writer_loop<W>(mut write_half: W, mut rx: mpsc::Receiver<Frame>, cancel: CancellationToken)
+where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     loop {
@@ -1034,9 +1027,9 @@ async fn dispatch(
             ) {
                 Ok(w) => w,
                 Err(e) => {
-                    return ServiceRpcResponse::ExecuteStage(Err(
-                        crate::StageError::Setup(format!("attach workspace: {e}")),
-                    ));
+                    return ServiceRpcResponse::ExecuteStage(Err(crate::StageError::Setup(
+                        format!("attach workspace: {e}"),
+                    )));
                 }
             };
             let result = services
@@ -1098,9 +1091,8 @@ async fn dispatch(
                 .get_environment_config(project_id)
                 .await
                 .and_then(|cfg| {
-                    serde_json::to_string(&cfg).map_err(|e| {
-                        format!("encode environment_config for rpc: {e}")
-                    })
+                    serde_json::to_string(&cfg)
+                        .map_err(|e| format!("encode environment_config for rpc: {e}"))
                 });
             ServiceRpcResponse::GetEnvironmentConfig(result)
         }
@@ -1122,9 +1114,8 @@ async fn dispatch(
                     .invoke_llm(model_id, conv, tool_vec, tool_choice)
                     .await
                     .and_then(|resp| {
-                        serde_json::to_string(&resp).map_err(|e| {
-                            format!("encode invoke_llm reply for rpc: {e}")
-                        })
+                        serde_json::to_string(&resp)
+                            .map_err(|e| format!("encode invoke_llm reply for rpc: {e}"))
                     }),
                 (Err(e), _) => Err(format!("rpc decode invoke_llm.conversation: {e}")),
                 (_, Err(e)) => Err(format!("rpc decode invoke_llm.tools: {e}")),
@@ -1507,10 +1498,7 @@ mod tests {
             cancel: CancellationToken::new(),
             canned_task_id: "never-reached".into(),
         });
-        let validator = Arc::new(ExpectedTokenValidator::new(
-            "matched-token",
-            "run-expected",
-        ));
+        let validator = Arc::new(ExpectedTokenValidator::new("matched-token", "run-expected"));
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let handle = serve_on_tcp(addr, services, validator, None)
             .await
@@ -1609,9 +1597,7 @@ mod tests {
     /// live `mpsc::Sender<Frame>` post-handshake.
     #[tokio::test]
     async fn serve_on_tcp_routes_event_to_pending_connection() {
-        use djinn_runtime::{
-            RoleKind, StreamEvent, TaskRunOutcome, TaskRunReport, WorkerEvent,
-        };
+        use djinn_runtime::{RoleKind, StreamEvent, TaskRunOutcome, TaskRunReport, WorkerEvent};
 
         let services: Arc<dyn SupervisorServices> = Arc::new(FakeServices {
             cancel: CancellationToken::new(),
@@ -1651,10 +1637,13 @@ mod tests {
         }
 
         // wait_for_connection should now resolve promptly.
-        tokio::time::timeout(std::time::Duration::from_secs(2), pending.wait_for_connection())
-            .await
-            .expect("wait_for_connection should resolve within 2s of handshake")
-            .expect("wait_for_connection Ok");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            pending.wait_for_connection(),
+        )
+        .await
+        .expect("wait_for_connection should resolve within 2s of handshake")
+        .expect("wait_for_connection Ok");
 
         // Outbound sender is live post-handshake.
         let outbound = pending
@@ -1752,7 +1741,9 @@ mod tests {
         // The registry slot must still be populated — `into_parts` does
         // NOT auto-deregister.  Dialling + handshaking against the same
         // task_run_id still flips the connected watch.
-        let mut stream = tokio::net::TcpStream::connect(bound).await.expect("connect");
+        let mut stream = tokio::net::TcpStream::connect(bound)
+            .await
+            .expect("connect");
         let hello = Frame {
             correlation_id: 1,
             payload: FramePayload::AuthHello(AuthHelloMsg {
@@ -1767,10 +1758,13 @@ mod tests {
             other => panic!("expected accepted auth, got {other:?}"),
         }
 
-        tokio::time::timeout(std::time::Duration::from_secs(2), parts.wait_for_connection())
-            .await
-            .expect("wait_for_connection should resolve within 2s post-handshake")
-            .expect("wait_for_connection Ok");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            parts.wait_for_connection(),
+        )
+        .await
+        .expect("wait_for_connection should resolve within 2s post-handshake")
+        .expect("wait_for_connection Ok");
 
         // The outbound sender is live — same guarantee as the non-consumed
         // path.

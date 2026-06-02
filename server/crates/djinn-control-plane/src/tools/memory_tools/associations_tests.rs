@@ -104,14 +104,7 @@ mod tests {
         let state = test_mcp_state(db, &tx);
         let server = DjinnMcpServer::new(state);
 
-        let resp = call_associations(
-            &server,
-            &project.slug(),
-            &note.permalink,
-            None,
-            None,
-        )
-        .await;
+        let resp = call_associations(&server, &project.slug(), &note.permalink, None, None).await;
 
         assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
         assert_eq!(resp.associations.len(), 0);
@@ -141,14 +134,7 @@ mod tests {
         let state = test_mcp_state(db, &tx);
         let server = DjinnMcpServer::new(state);
 
-        let resp = call_associations(
-            &server,
-            &project.slug(),
-            &note_a.permalink,
-            None,
-            None,
-        )
-        .await;
+        let resp = call_associations(&server, &project.slug(), &note_a.permalink, None, None).await;
 
         assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
         assert_eq!(resp.associations.len(), 2, "expected both directions");
@@ -194,14 +180,7 @@ mod tests {
         let state = test_mcp_state(db, &tx);
         let server = DjinnMcpServer::new(state);
 
-        let resp = call_associations(
-            &server,
-            &project.slug(),
-            &seed.permalink,
-            None,
-            None,
-        )
-        .await;
+        let resp = call_associations(&server, &project.slug(), &seed.permalink, None, None).await;
 
         assert!(resp.error.is_none());
         assert_eq!(resp.associations.len(), 2);
@@ -244,14 +223,8 @@ mod tests {
         let server = DjinnMcpServer::new(state);
 
         // With high min_weight, only the strong association should appear
-        let resp = call_associations(
-            &server,
-            &project.slug(),
-            &seed.permalink,
-            Some(0.5),
-            None,
-        )
-        .await;
+        let resp =
+            call_associations(&server, &project.slug(), &seed.permalink, Some(0.5), None).await;
 
         assert!(resp.error.is_none());
         assert_eq!(resp.associations.len(), 1);

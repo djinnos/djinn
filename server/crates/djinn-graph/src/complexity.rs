@@ -613,20 +613,20 @@ fn walk(node: Node, rules: &LangRules, src: &[u8], nesting: u8, state: &mut Walk
         child_nesting = nesting.saturating_add(1);
     } else if rules.binary_kind == Some(kind)
         && let Some(op) = binary_op(node, rules, src)
-            && rules.logical_ops.contains(&op.as_str()) {
-                let parent_is_logical_binary = node
-                    .parent()
-                    .filter(|p| Some(p.kind()) == rules.binary_kind)
-                    .and_then(|p| binary_op(p, rules, src))
-                    .map(|po| rules.logical_ops.contains(&po.as_str()))
-                    .unwrap_or(false);
-                if !parent_is_logical_binary {
-                    let switches = count_logical_switches(node, rules, src);
-                    state.cognitive = state.cognitive.saturating_add(switches);
-                    state.cyclomatic_decisions =
-                        state.cyclomatic_decisions.saturating_add(switches);
-                }
-            }
+        && rules.logical_ops.contains(&op.as_str())
+    {
+        let parent_is_logical_binary = node
+            .parent()
+            .filter(|p| Some(p.kind()) == rules.binary_kind)
+            .and_then(|p| binary_op(p, rules, src))
+            .map(|po| rules.logical_ops.contains(&po.as_str()))
+            .unwrap_or(false);
+        if !parent_is_logical_binary {
+            let switches = count_logical_switches(node, rules, src);
+            state.cognitive = state.cognitive.saturating_add(switches);
+            state.cyclomatic_decisions = state.cyclomatic_decisions.saturating_add(switches);
+        }
+    }
 
     let mut walker = node.walk();
     for child in node.named_children(&mut walker) {
@@ -637,16 +637,18 @@ fn walk(node: Node, rules: &LangRules, src: &[u8], nesting: u8, state: &mut Walk
 pub(crate) fn binary_op(node: Node, rules: &LangRules, src: &[u8]) -> Option<String> {
     if let Some(field) = rules.operator_field
         && let Some(op_node) = node.child_by_field_name(field)
-            && let Ok(t) = op_node.utf8_text(src) {
-                return Some(t.to_string());
-            }
+        && let Ok(t) = op_node.utf8_text(src)
+    {
+        return Some(t.to_string());
+    }
     let mut walker = node.walk();
     for child in node.children(&mut walker) {
         if !child.is_named()
             && let Ok(t) = child.utf8_text(src)
-                && rules.logical_ops.contains(&t) {
-                    return Some(t.to_string());
-                }
+            && rules.logical_ops.contains(&t)
+        {
+            return Some(t.to_string());
+        }
     }
     None
 }
@@ -754,9 +756,9 @@ mod tests {
 
     #[test]
     fn else_if_is_flat() {
-        let m = &rust(
-            "fn f(x: i32) { if x == 0 { } else if x == 1 { } else if x == 2 { } else { } }",
-        )[0];
+        let m =
+            &rust("fn f(x: i32) { if x == 0 { } else if x == 1 { } else if x == 2 { } else { } }")
+                [0];
         assert_eq!(m.cognitive, 3);
     }
 
@@ -774,8 +776,7 @@ mod tests {
 
     #[test]
     fn parenthesized_logical_groups() {
-        let m =
-            &rust("fn f(a: bool, b: bool, c: bool, d: bool) { if a && (b || c) && d { } }")[0];
+        let m = &rust("fn f(a: bool, b: bool, c: bool, d: bool) { if a && (b || c) && d { } }")[0];
         assert_eq!(m.cognitive, 3);
     }
 
@@ -787,9 +788,7 @@ mod tests {
 
     #[test]
     fn for_inside_if_doubles() {
-        let m = &rust(
-            "fn f(xs: &[i32]) { if !xs.is_empty() { for x in xs { let _ = x; } } }",
-        )[0];
+        let m = &rust("fn f(xs: &[i32]) { if !xs.is_empty() { for x in xs { let _ = x; } } }")[0];
         assert_eq!(m.cognitive, 1 + 2);
     }
 
@@ -897,7 +896,8 @@ mod tests {
 
     #[test]
     fn go_for_inside_if_doubles() {
-        let src = "package p\nfunc f(xs []int) { if len(xs) > 0 { for _, x := range xs { _ = x } } }";
+        let src =
+            "package p\nfunc f(xs []int) { if len(xs) > 0 { for _, x := range xs { _ = x } } }";
         let m = &go(src)[0];
         assert_eq!(m.cognitive, 1 + 2);
     }
@@ -937,9 +937,7 @@ mod tests {
 
     #[test]
     fn py_nested_if_grows_with_nesting() {
-        let m = &python(
-            "def f(x, y):\n    if x > 0:\n        if y > 0:\n            pass\n",
-        )[0];
+        let m = &python("def f(x, y):\n    if x > 0:\n        if y > 0:\n            pass\n")[0];
         assert_eq!(m.cognitive, 1 + 2);
         assert_eq!(m.max_nesting, 2);
     }
@@ -1116,7 +1114,8 @@ mod tests {
 
     #[test]
     fn js_else_if_is_flat() {
-        let src = "function f(x) { if (x === 0) {} else if (x === 1) {} else if (x === 2) {} else {} }";
+        let src =
+            "function f(x) { if (x === 0) {} else if (x === 1) {} else if (x === 2) {} else {} }";
         let m = &js(src)[0];
         assert_eq!(m.cognitive, 3);
     }
@@ -1142,7 +1141,8 @@ mod tests {
 
     #[test]
     fn tsx_else_if_is_flat() {
-        let src = "function f(x: number) { if (x === 0) {} else if (x === 1) {} else if (x === 2) {} }";
+        let src =
+            "function f(x: number) { if (x === 0) {} else if (x === 1) {} else if (x === 2) {} }";
         let m = &tsx(src)[0];
         assert_eq!(m.cognitive, 3);
     }
@@ -1343,7 +1343,8 @@ mod tests {
 
     #[test]
     fn cpp_else_if_is_flat() {
-        let src = "int f(int x) { if (x==0) {} else if (x==1) {} else if (x==2) {} else {} return 0; }";
+        let src =
+            "int f(int x) { if (x==0) {} else if (x==1) {} else if (x==2) {} else {} return 0; }";
         let m = &cpp(src)[0];
         assert_eq!(m.cognitive, 3);
     }
@@ -1462,8 +1463,7 @@ mod tests {
 
     #[test]
     fn cs_lambda_raises_nesting() {
-        let m =
-            cs_method("System.Action act = () => { if (a > 0) {} }; act();");
+        let m = cs_method("System.Action act = () => { if (a > 0) {} }; act();");
         assert_eq!(m.cognitive, 2);
     }
 
@@ -1475,8 +1475,7 @@ mod tests {
 
     #[test]
     fn cs_constructor_is_a_function() {
-        let metrics =
-            cs("class C { int x; public C(int v) { if (v > 0) { this.x = v; } } }");
+        let metrics = cs("class C { int x; public C(int v) { if (v > 0) { this.x = v; } } }");
         let m = &metrics[0];
         assert_eq!(m.cognitive, 1);
         assert_eq!(m.param_count, 1);
@@ -1535,7 +1534,8 @@ mod tests {
 
     #[test]
     fn ruby_case_is_one_increment() {
-        let src = "def f(x)\n  case x\n  when 0 then p 0\n  when 1 then p 1\n  else p 2\n  end\nend\n";
+        let src =
+            "def f(x)\n  case x\n  when 0 then p 0\n  when 1 then p 1\n  else p 2\n  end\nend\n";
         let m = &ruby(src)[0];
         assert_eq!(m.cognitive, 1);
     }

@@ -270,21 +270,11 @@ fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
         .collect()
 }
 
-pub fn embedding_document_text(
-    title: &str,
-    note_type: &str,
-    tags: &str,
-    content: &str,
-) -> String {
+pub fn embedding_document_text(title: &str, note_type: &str, tags: &str, content: &str) -> String {
     format!("title: {title}\ntype: {note_type}\ntags: {tags}\n\n{content}")
 }
 
-pub fn embedding_content_hash(
-    title: &str,
-    note_type: &str,
-    tags: &str,
-    content: &str,
-) -> String {
+pub fn embedding_content_hash(title: &str, note_type: &str, tags: &str, content: &str) -> String {
     crate::note_hash::note_content_hash(&embedding_document_text(title, note_type, tags, content))
 }
 
@@ -348,9 +338,12 @@ async fn delete_embedding_metadata(repo: &NoteRepository, note_id: &str) -> Resu
     sqlx::query!("DELETE FROM note_embeddings WHERE note_id = $1", note_id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query!("DELETE FROM note_embedding_meta WHERE note_id = $1", note_id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query!(
+        "DELETE FROM note_embedding_meta WHERE note_id = $1",
+        note_id
+    )
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -398,10 +391,7 @@ impl QdrantNoteVectorStore {
     ///   payload index, which is also idempotent).
     /// * If it exists with **different** dimensions → returns an `Err` so the
     ///   caller can fail startup loudly instead of silently mismatching.
-    pub async fn ensure_collection(
-        &self,
-        vector_size: u64,
-    ) -> std::result::Result<(), String> {
+    pub async fn ensure_collection(&self, vector_size: u64) -> std::result::Result<(), String> {
         use qdrant_client::qdrant::{CreateCollectionBuilder, Distance, VectorParamsBuilder};
 
         let client = self.client()?;
@@ -567,10 +557,7 @@ impl QdrantNoteVectorStore {
 
 #[cfg(not(feature = "qdrant"))]
 impl QdrantNoteVectorStore {
-    pub async fn ensure_collection(
-        &self,
-        _vector_size: u64,
-    ) -> std::result::Result<(), String> {
+    pub async fn ensure_collection(&self, _vector_size: u64) -> std::result::Result<(), String> {
         Err("qdrant support not compiled in; enable the 'qdrant' feature".to_owned())
     }
 

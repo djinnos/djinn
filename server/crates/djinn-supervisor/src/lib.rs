@@ -29,7 +29,9 @@
 use std::sync::Arc;
 
 use djinn_core::models::{TaskRunStatus, TaskRunTrigger};
-use djinn_workspace::{EphemeralWorkspaceError, GitIdentity, MergeOutcome, MirrorError, MirrorManager};
+use djinn_workspace::{
+    EphemeralWorkspaceError, GitIdentity, MergeOutcome, MirrorError, MirrorManager,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, info};
@@ -113,13 +115,21 @@ pub enum StageError {
 pub enum StageOutcome {
     WorkerDone,
     PlannerExecute,
-    PlannerClose { reason: String },
+    PlannerClose {
+        reason: String,
+    },
     ReviewerApproved,
-    ReviewerRejected { feedback: String },
+    ReviewerRejected {
+        feedback: String,
+    },
     VerifierPassed,
-    VerifierFailed { reason: String },
+    VerifierFailed {
+        reason: String,
+    },
     ArchitectDone,
-    Escalate { reason: String },
+    Escalate {
+        reason: String,
+    },
     Failed {
         reason: String,
         /// Set when the stage failed on a typed provider error the host
@@ -369,9 +379,7 @@ impl TaskRunSupervisor {
                                 // (task_branch:task_branch); best-effort — a
                                 // failure here just means open_pr / the worker
                                 // push retries.
-                                if let Err(e) =
-                                    workspace.push_to_origin(&spec.task_branch).await
-                                {
+                                if let Err(e) = workspace.push_to_origin(&spec.task_branch).await {
                                     tracing::warn!(
                                         task_run_id = %run_id,
                                         task_id = %spec.task_id,
@@ -578,10 +586,7 @@ impl TaskRunSupervisor {
                                 .as_deref()
                                 .unwrap_or("bot@djinn.local"),
                         };
-                        let message = format!(
-                            "{}: {}",
-                            task.short_id, task.title
-                        );
+                        let message = format!("{}: {}", task.short_id, task.title);
                         match workspace.commit(&message, identity).await {
                             Ok(true) => {
                                 tracing::info!(
@@ -614,10 +619,7 @@ impl TaskRunSupervisor {
                                 // a push failure here only means we'll
                                 // re-try at open_pr time; the run keeps
                                 // going.
-                                if let Err(e) = workspace
-                                    .push_to_origin(&spec.task_branch)
-                                    .await
-                                {
+                                if let Err(e) = workspace.push_to_origin(&spec.task_branch).await {
                                     tracing::warn!(
                                         task_id = %task.short_id,
                                         task_run_id = %run_id,
@@ -751,11 +753,7 @@ impl TaskRunSupervisor {
                             if let Some(action) = action
                                 && let Err(e) = self
                                     .services
-                                    .transition_task(
-                                        spec.task_id.clone(),
-                                        action.into(),
-                                        None,
-                                    )
+                                    .transition_task(spec.task_id.clone(), action.into(), None)
                                     .await
                             {
                                 tracing::warn!(
@@ -770,7 +768,9 @@ impl TaskRunSupervisor {
                         }
                     }
                     StageOutcome::PlannerClose { reason } => {
-                        result = Some(TaskRunOutcome::Closed { reason: reason.clone() });
+                        result = Some(TaskRunOutcome::Closed {
+                            reason: reason.clone(),
+                        });
                         // Also fire a real DB transition so the task row
                         // matches the run outcome. Same issue-type-aware
                         // routing as PlannerExecute.
@@ -1080,7 +1080,12 @@ mod tests {
         );
         assert!(StageOutcome::PlannerClose { reason: "x".into() }.is_terminal());
         assert!(StageOutcome::Escalate { reason: "x".into() }.is_terminal());
-        assert!(StageOutcome::ReviewerRejected { feedback: "x".into() }.is_terminal());
+        assert!(
+            StageOutcome::ReviewerRejected {
+                feedback: "x".into()
+            }
+            .is_terminal()
+        );
         assert!(StageOutcome::VerifierFailed { reason: "x".into() }.is_terminal());
         assert!(!StageOutcome::WorkerDone.is_terminal());
         assert!(!StageOutcome::PlannerExecute.is_terminal());

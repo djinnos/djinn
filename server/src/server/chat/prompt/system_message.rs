@@ -32,8 +32,7 @@ pub(in crate::server::chat) fn build_system_message(
     client_system: Option<&str>,
     model: &str,
 ) -> Message {
-    let segments =
-        compose_system_prompt_segments(base_prompt, project_context, client_system);
+    let segments = compose_system_prompt_segments(base_prompt, project_context, client_system);
     let layout = partition_system_prompt_segments(&segments);
     let metadata = system_message_metadata(model, !layout.stable_prefix.is_empty());
 

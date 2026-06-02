@@ -288,7 +288,9 @@ async fn edit_twice_without_reread_forces_reread() {
 async fn call_tool_dispatches_task_create_with_public_response_shape() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
-    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
+    let project_path = crate::extension::tests::project_fs_path(&project)
+        .to_string_lossy()
+        .into_owned();
     let epic = create_test_epic(&db, &project.id).await;
     let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
     state.task_ops_project_path_override = Some(project_path.clone().into());
@@ -368,7 +370,9 @@ async fn call_tool_dispatches_task_create_with_public_response_shape() {
 async fn call_tool_dispatches_task_update_with_public_response_shape() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
-    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
+    let project_path = crate::extension::tests::project_fs_path(&project)
+        .to_string_lossy()
+        .into_owned();
     let epic = create_test_epic(&db, &project.id).await;
     let task = create_test_task(&db, &project.id, &epic.id).await;
     let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
@@ -461,7 +465,9 @@ async fn call_tool_dispatches_task_update_with_public_response_shape() {
 async fn call_tool_dispatches_comment_and_transition_flows() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
-    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
+    let project_path = crate::extension::tests::project_fs_path(&project)
+        .to_string_lossy()
+        .into_owned();
     let epic = create_test_epic(&db, &project.id).await;
     let task = create_test_task(&db, &project.id, &epic.id).await;
     let mut state = agent_context_from_db(db.clone(), CancellationToken::new());
@@ -555,7 +561,9 @@ async fn call_tool_dispatches_comment_and_transition_flows() {
 async fn call_tool_dispatches_agent_ops_through_shared_agent_seam() {
     let db = create_test_db();
     let project = create_test_project(&db).await;
-    let project_path = crate::extension::tests::project_fs_path(&project).to_string_lossy().into_owned();
+    let project_path = crate::extension::tests::project_fs_path(&project)
+        .to_string_lossy()
+        .into_owned();
     let state = agent_context_from_db(db.clone(), CancellationToken::new());
 
     let create_response = call_tool(
@@ -701,8 +709,14 @@ async fn read_window_does_not_scan_whole_file() {
     assert!(content.contains("line 2"), "got: {content}");
     assert!(content.contains("line 3"), "got: {content}");
     assert!(content.contains("line 4"), "got: {content}");
-    assert!(!content.contains("line 5"), "window leaked extra line: {content}");
-    assert!(!content.contains("line 1\n"), "window leaked earlier line: {content}");
+    assert!(
+        !content.contains("line 5"),
+        "window leaked extra line: {content}"
+    );
+    assert!(
+        !content.contains("line 1\n"),
+        "window leaked earlier line: {content}"
+    );
     assert_eq!(result.get("offset").and_then(|v| v.as_u64()), Some(2));
     assert_eq!(result.get("limit").and_then(|v| v.as_u64()), Some(3));
     assert_eq!(result.get("has_more").and_then(|v| v.as_bool()), Some(true));

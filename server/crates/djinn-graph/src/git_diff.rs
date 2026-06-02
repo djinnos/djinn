@@ -71,11 +71,7 @@ pub async fn diff_changed_ranges(
     parse_unified_diff(&raw)
 }
 
-async fn run_git_diff(
-    repo_root: &Path,
-    from: &str,
-    to: &str,
-) -> Result<String, GitDiffError> {
+async fn run_git_diff(repo_root: &Path, from: &str, to: &str) -> Result<String, GitDiffError> {
     let range = format!("{from}..{to}");
     let mut cmd = Command::new("git");
     cmd.current_dir(repo_root);
@@ -167,18 +163,13 @@ fn parse_diff_git_header(rest: &str) -> Option<String> {
 /// Parse the post-image side of a hunk header — the `+c,d` block that
 /// follows the leading `-a,b`. Returns `None` for `+0,0` (pure delete
 /// with no anchor on the new image).
-fn parse_hunk_header(
-    rest: &str,
-    file: &str,
-) -> Result<Option<ChangedRange>, GitDiffError> {
+fn parse_hunk_header(rest: &str, file: &str) -> Result<Option<ChangedRange>, GitDiffError> {
     // `rest` is everything after the leading `@@ ` — e.g.
     // `-12,3 +30,5 @@ fn foo()`. We only need the `+...` token.
     let plus_token = rest
         .split_whitespace()
         .find(|tok| tok.starts_with('+'))
-        .ok_or_else(|| {
-            GitDiffError::Parse(format!("hunk header missing `+` token: @@ {rest}"))
-        })?;
+        .ok_or_else(|| GitDiffError::Parse(format!("hunk header missing `+` token: @@ {rest}")))?;
     let inside = plus_token
         .strip_prefix('+')
         .expect("checked starts_with above");
@@ -365,9 +356,12 @@ diff --git a/src/y.rs b/src/y.rs
         run(&root, &["init", "-q", "-b", "main"]).await;
         run(&root, &["config", "user.email", "t@t"]).await;
         run(&root, &["config", "user.name", "t"]).await;
-        tokio::fs::write(root.join("a.rs"), "fn one() {}\nfn two() {}\nfn three() {}\n")
-            .await
-            .expect("write");
+        tokio::fs::write(
+            root.join("a.rs"),
+            "fn one() {}\nfn two() {}\nfn three() {}\n",
+        )
+        .await
+        .expect("write");
         run(&root, &["add", "."]).await;
         run(&root, &["commit", "-q", "-m", "seed"]).await;
 

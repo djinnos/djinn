@@ -114,7 +114,10 @@ mod tests {
     #[test]
     fn classifies_rust_by_extension() {
         let table = LanguageTable::global();
-        assert_eq!(table.classify("src/lib.rs").map(|l| l.name.as_str()), Some("Rust"));
+        assert_eq!(
+            table.classify("src/lib.rs").map(|l| l.name.as_str()),
+            Some("Rust")
+        );
     }
 
     #[test]

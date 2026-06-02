@@ -142,7 +142,11 @@ struct WorkerDefaultArgs {
     /// Path the launcher mounted the bincode-serialized `TaskRunSpec` at.
     /// Contractual default is `/var/run/djinn/spec.bin` — projected
     /// read-only from the per-task-run Secret.
-    #[arg(long, env = "DJINN_SPEC_PATH", default_value = "/var/run/djinn/spec.bin")]
+    #[arg(
+        long,
+        env = "DJINN_SPEC_PATH",
+        default_value = "/var/run/djinn/spec.bin"
+    )]
     spec_path: PathBuf,
 
     /// Path the launcher mounted the bincode-serialized
@@ -221,7 +225,9 @@ async fn main() {
 
 async fn run() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_writer(std::io::stderr)
         .init();
 
@@ -265,7 +271,10 @@ async fn configure_private_dep_access(spec: &TaskRunSpec) {
         .await
     {
         Ok(s) if s.success() => {
-            info!(owner, "configure_private_dep_access: git insteadOf set for private deps")
+            info!(
+                owner,
+                "configure_private_dep_access: git insteadOf set for private deps"
+            )
         }
         Ok(s) => warn!(
             owner,
@@ -286,7 +295,10 @@ async fn configure_private_dep_access(spec: &TaskRunSpec) {
     {
         Ok(s) if s.success() => info!(owner, "configure_private_dep_access: GOPRIVATE set"),
         // Non-Go projects: `go` absent → expected; debug, not warn.
-        _ => tracing::debug!(owner, "configure_private_dep_access: `go env -w` skipped (go absent?)"),
+        _ => tracing::debug!(
+            owner,
+            "configure_private_dep_access: `go env -w` skipped (go absent?)"
+        ),
     }
 }
 
@@ -327,11 +339,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
         })?;
     let credentials: ResolvedCredentials = bincode::deserialize(&credentials_bytes)
         .context("bincode deserialize ResolvedCredentials")?;
-    let role_keys: Vec<&'static str> = credentials
-        .roles()
-        .copied()
-        .map(RoleKind::as_str)
-        .collect();
+    let role_keys: Vec<&'static str> = credentials.roles().copied().map(RoleKind::as_str).collect();
     info!(
         roles = ?role_keys,
         bytes = credentials_bytes.len(),
@@ -437,10 +445,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     //    task already exited (e.g. the launcher tore the connection down
     //    first) we log the drop but still exit zero — the Job-status
     //    fallback on the launcher side covers that case.
-    if let Err(e) = rpc
-        .emit_event(WorkerEvent::TerminalReport(report))
-        .await
-    {
+    if let Err(e) = rpc.emit_event(WorkerEvent::TerminalReport(report)).await {
         warn!(
             error = %e,
             "failed to emit TerminalReport over RPC; launcher will fall back to Job-status polling"
@@ -617,12 +622,9 @@ async fn run_warm_graph(project_id: &str) -> Result<()> {
                 "environment_config loaded from {}",
                 env_config_path.display()
             );
-            if let Err(e) = lifecycle::run_phase(
-                &lifecycle_root,
-                "pre_anything",
-                &cfg.lifecycle.pre_anything,
-            )
-            .await
+            if let Err(e) =
+                lifecycle::run_phase(&lifecycle_root, "pre_anything", &cfg.lifecycle.pre_anything)
+                    .await
             {
                 warn!(
                     project_id,

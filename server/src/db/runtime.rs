@@ -8,9 +8,7 @@ use djinn_db::{
     PostgresDatabaseConfig,
 };
 
-use crate::db::postgres::{
-    PostgresRuntimeError, ensure_postgres_runtime_for_connect_config,
-};
+use crate::db::postgres::{PostgresRuntimeError, ensure_postgres_runtime_for_connect_config};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DatabaseRuntimeConfig {

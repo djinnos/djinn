@@ -49,7 +49,10 @@ pub enum StreamEvent {
 pub enum StreamFrame {
     /// Correlated RPC reply for an `mcp_tool_call` / `task_get` / … the
     /// worker initiated (wire codec supplies the correlation-id envelope).
-    RpcResponse { correlation_id: u64, payload: Vec<u8> },
+    RpcResponse {
+        correlation_id: u64,
+        payload: Vec<u8>,
+    },
     /// Coordinator wants the task-run cancelled — graceful stop, flush
     /// outstanding events, then exit.
     Cancel,
@@ -74,11 +77,7 @@ impl BiStream {
     /// events into `events_rx` and observe the requests the consumer sent.
     pub fn new_in_memory(
         buffer: usize,
-    ) -> (
-        Self,
-        mpsc::Sender<StreamEvent>,
-        mpsc::Receiver<StreamFrame>,
-    ) {
+    ) -> (Self, mpsc::Sender<StreamEvent>, mpsc::Receiver<StreamFrame>) {
         let (events_tx, events_rx) = mpsc::channel(buffer);
         let (requests_tx, requests_rx) = mpsc::channel(buffer);
         (

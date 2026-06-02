@@ -41,8 +41,8 @@ fn encode_json_string_list(items: &[String]) -> String {
 /// (trimmed of surrounding whitespace, deduplicated while preserving
 /// order) so consumers always see a canonical blob.
 fn normalize_json_string_list(raw: &str) -> core::result::Result<String, String> {
-    let parsed: Vec<String> = serde_json::from_str(raw)
-        .map_err(|e| format!("expected JSON array of strings: {e}"))?;
+    let parsed: Vec<String> =
+        serde_json::from_str(raw).map_err(|e| format!("expected JSON array of strings: {e}"))?;
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(parsed.len());
     for item in parsed {
@@ -113,10 +113,9 @@ impl ProjectRepository {
 
         // UUID path: if the ref parses as a UUID and maps to a row, use it.
         if uuid::Uuid::parse_str(trimmed).is_ok()
-            && let Some(id) =
-                sqlx::query_scalar!("SELECT id FROM projects WHERE id = $1", trimmed)
-                    .fetch_optional(self.db.pool())
-                    .await?
+            && let Some(id) = sqlx::query_scalar!("SELECT id FROM projects WHERE id = $1", trimmed)
+                .fetch_optional(self.db.pool())
+                .await?
         {
             return Ok(Some(id));
         }
@@ -517,15 +516,17 @@ impl ProjectRepository {
             }
             "sync_remote" => {
                 let val = if value.is_empty() { None } else { Some(value) };
-                sqlx::query!("UPDATE projects SET sync_remote = $1 WHERE id = $2", val, id)
-                    .execute(self.db.pool())
-                    .await?;
+                sqlx::query!(
+                    "UPDATE projects SET sync_remote = $1 WHERE id = $2",
+                    val,
+                    id
+                )
+                .execute(self.db.pool())
+                .await?;
             }
             "graph_excluded_paths" => {
                 let canonical = normalize_json_string_list(value)
-                    .map_err(|e| crate::Error::InvalidData(format!(
-                        "graph_excluded_paths: {e}"
-                    )))?;
+                    .map_err(|e| crate::Error::InvalidData(format!("graph_excluded_paths: {e}")))?;
                 // The `$1::jsonb` cast makes the macro type this bind as
                 // `serde_json::Value`; `canonical` is already-validated JSON.
                 let canonical: serde_json::Value = serde_json::from_str(&canonical)
@@ -540,9 +541,7 @@ impl ProjectRepository {
             }
             "graph_orphan_ignore" => {
                 let canonical = normalize_json_string_list(value)
-                    .map_err(|e| crate::Error::InvalidData(format!(
-                        "graph_orphan_ignore: {e}"
-                    )))?;
+                    .map_err(|e| crate::Error::InvalidData(format!("graph_orphan_ignore: {e}")))?;
                 let canonical: serde_json::Value = serde_json::from_str(&canonical)
                     .unwrap_or_else(|_| serde_json::Value::Array(vec![]));
                 sqlx::query!(
@@ -617,8 +616,9 @@ impl ProjectRepository {
         if matches!(&current, Some(existing) if existing == stack_json) {
             return Ok(false);
         }
-        let stack: serde_json::Value = serde_json::from_str(stack_json)
-            .map_err(|e| crate::Error::InvalidData(format!("invalid json for projects.stack: {e}")))?;
+        let stack: serde_json::Value = serde_json::from_str(stack_json).map_err(|e| {
+            crate::Error::InvalidData(format!("invalid json for projects.stack: {e}"))
+        })?;
         sqlx::query!(
             "UPDATE projects SET stack = $1 WHERE id = $2",
             stack,
@@ -637,11 +637,12 @@ impl ProjectRepository {
     /// `None` typed payload.
     pub async fn get_stack(&self, project_id: &str) -> Result<Option<String>> {
         self.db.ensure_initialized().await?;
-        Ok(
-            sqlx::query_scalar!(r#"SELECT stack::text AS "stack!" FROM projects WHERE id = $1"#, project_id)
-                .fetch_optional(self.db.pool())
-                .await?,
+        Ok(sqlx::query_scalar!(
+            r#"SELECT stack::text AS "stack!" FROM projects WHERE id = $1"#,
+            project_id
         )
+        .fetch_optional(self.db.pool())
+        .await?)
     }
 
     /// Fetch the raw `environment_config` JSON string for a project.
@@ -686,9 +687,8 @@ impl ProjectRepository {
         self.db.ensure_initialized().await?;
         // The `$1::jsonb` cast makes the macro type this bind as
         // `serde_json::Value`; callers pass pre-validated JSON.
-        let environment_config: serde_json::Value =
-            serde_json::from_str(environment_config_json)
-                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+        let environment_config: serde_json::Value = serde_json::from_str(environment_config_json)
+            .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
         sqlx::query!(
             "UPDATE projects
                 SET environment_config = $1::jsonb,
@@ -748,11 +748,7 @@ impl ProjectRepository {
     /// `ready` + fill `tag`) or failure (flip to `failed` + fill
     /// `last_error`). Callers stringify [`ProjectImageStatus`] into the
     /// `status` field.
-    pub async fn set_project_image(
-        &self,
-        project_id: &str,
-        image: &ProjectImage,
-    ) -> Result<()> {
+    pub async fn set_project_image(&self, project_id: &str, image: &ProjectImage) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query!(
             "UPDATE projects
@@ -1133,7 +1129,12 @@ mod tests {
         assert_eq!(found.github_owner, "acme");
         assert_eq!(found.github_repo, "lookup");
 
-        assert!(repo.get_by_github("ghost", "missing").await.unwrap().is_none());
+        assert!(
+            repo.get_by_github("ghost", "missing")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1177,10 +1178,12 @@ mod tests {
         repo.create("proj-a", "acme", "proj-a").await.unwrap();
         repo.create("proj-b", "acme", "proj-b").await.unwrap();
 
-        let total: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "count!: i64" FROM agents WHERE is_default = TRUE"#)
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
+        let total: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count!: i64" FROM agents WHERE is_default = TRUE"#
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
         assert_eq!(total, 10, "2 projects × 5 roles = 10 default rows");
     }
 
@@ -1189,7 +1192,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_stack_default_is_empty_json_object() {
         let repo = ProjectRepository::new(test_db(), EventBus::noop());
-        let project = repo.create("stack-default", "acme", "stack-default").await.unwrap();
+        let project = repo
+            .create("stack-default", "acme", "stack-default")
+            .await
+            .unwrap();
         let stack = repo.get_stack(&project.id).await.unwrap().unwrap();
         assert_eq!(stack, "{}");
     }
@@ -1233,8 +1239,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            out,
-            r#"["**/workspace-hack/**","**/test-support/**"]"#,
+            out, r#"["**/workspace-hack/**","**/test-support/**"]"#,
             "trimmed, empty-dropped, deduplicated while preserving insertion order"
         );
     }
@@ -1267,7 +1272,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             updated.graph_excluded_paths,
-            vec!["**/workspace-hack/**".to_string(), "**/test-support/**".to_string()]
+            vec![
+                "**/workspace-hack/**".to_string(),
+                "**/test-support/**".to_string()
+            ]
         );
         assert!(updated.graph_orphan_ignore.is_empty());
 
@@ -1278,7 +1286,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_config_field_round_trips_graph_orphan_ignore() {
         let repo = ProjectRepository::new(test_db(), EventBus::noop());
-        let project = repo.create("graph-orphan", "acme", "graph-orphan").await.unwrap();
+        let project = repo
+            .create("graph-orphan", "acme", "graph-orphan")
+            .await
+            .unwrap();
 
         let updated = repo
             .update_config_field(

@@ -73,10 +73,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/auth/config", get(config))
         .route("/auth/github/start", get(github_start))
         .route("/auth/github/callback", get(github_callback))
-        .route(
-            "/auth/github/app-setup-callback",
-            get(app_setup_callback),
-        )
+        .route("/auth/github/app-setup-callback", get(app_setup_callback))
         .route("/auth/logout", post(logout))
         .route("/setup/status", get(setup_status))
         // Auth/setup responses reflect live deployment + session state. Without
@@ -931,15 +928,17 @@ async fn app_setup_callback(
             );
             return (
                 StatusCode::BAD_GATEWAY,
-                format!(
-                    "Failed to fetch installation {installation_id} from GitHub: {e}"
-                ),
+                format!("Failed to fetch installation {installation_id} from GitHub: {e}"),
             )
                 .into_response();
         }
     };
 
-    if !installation.account.account_type.eq_ignore_ascii_case("Organization") {
+    if !installation
+        .account
+        .account_type
+        .eq_ignore_ascii_case("Organization")
+    {
         tracing::warn!(
             installation_id,
             account_type = %installation.account.account_type,

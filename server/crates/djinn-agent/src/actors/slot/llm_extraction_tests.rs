@@ -124,7 +124,7 @@ async fn make_fixture() -> TestFixture {
             model: "test-model",
             agent_type: "worker",
             metadata_json: None,
-        task_run_id: None,
+            task_run_id: None,
         })
         .await
         .expect("create session");
@@ -446,10 +446,11 @@ async fn llm_extracted_notes_have_confidence_0_5() {
         assert!((note.confidence - 0.5).abs() < 1e-9);
     }
 
-    let stored_json = SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
-        .get_event_taxonomy_json(&fixture.session_id)
-        .await
-        .expect("query session event_taxonomy after llm extraction");
+    let stored_json =
+        SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
+            .get_event_taxonomy_json(&fixture.session_id)
+            .await
+            .expect("query session event_taxonomy after llm extraction");
     let stored_taxonomy: SessionTaxonomy = serde_json::from_str(stored_json.as_deref().unwrap())
         .expect("deserialize stored taxonomy after llm extraction");
     assert_eq!(stored_taxonomy.extraction_quality.extracted, 3);
@@ -525,8 +526,7 @@ async fn llm_extraction_distinguishes_empty_success_from_failed_call() {
     // EMPTY-but-successful: the LLM returned valid JSON with empty arrays. The
     // extraction is persisted with `extracted: 0` (normal, nothing to record).
     let empty_fixture = make_fixture().await;
-    let empty_ctx =
-        agent_context_from_db(empty_fixture.db.clone(), empty_fixture.cancel.clone());
+    let empty_ctx = agent_context_from_db(empty_fixture.db.clone(), empty_fixture.cancel.clone());
     let empty_provider = Arc::new(FakeProvider::text(
         r#"{"cases":[],"patterns":[],"pitfalls":[]}"#,
     ));
@@ -538,8 +538,10 @@ async fn llm_extraction_distinguishes_empty_success_from_failed_call() {
     )
     .await;
 
-    let empty_note_repo =
-        NoteRepository::new(empty_fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let empty_note_repo = NoteRepository::new(
+        empty_fixture.db.clone(),
+        djinn_core::events::EventBus::noop(),
+    );
     assert!(
         empty_note_repo
             .list(&empty_fixture.project.id, None)
@@ -548,11 +550,13 @@ async fn llm_extraction_distinguishes_empty_success_from_failed_call() {
             .is_empty(),
         "empty extraction writes no notes"
     );
-    let empty_taxonomy_json =
-        SessionRepository::new(empty_fixture.db.clone(), djinn_core::events::EventBus::noop())
-            .get_event_taxonomy_json(&empty_fixture.session_id)
-            .await
-            .expect("query event_taxonomy after empty success");
+    let empty_taxonomy_json = SessionRepository::new(
+        empty_fixture.db.clone(),
+        djinn_core::events::EventBus::noop(),
+    )
+    .get_event_taxonomy_json(&empty_fixture.session_id)
+    .await
+    .expect("query event_taxonomy after empty success");
     // Empty-success PERSISTS the taxonomy (extracted = 0) — it is a recorded
     // outcome, not an error.
     let empty_taxonomy: SessionTaxonomy =
@@ -574,8 +578,10 @@ async fn llm_extraction_distinguishes_empty_success_from_failed_call() {
     )
     .await;
 
-    let failed_note_repo =
-        NoteRepository::new(failed_fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let failed_note_repo = NoteRepository::new(
+        failed_fixture.db.clone(),
+        djinn_core::events::EventBus::noop(),
+    );
     assert!(
         failed_note_repo
             .list(&failed_fixture.project.id, None)
@@ -584,11 +590,13 @@ async fn llm_extraction_distinguishes_empty_success_from_failed_call() {
             .is_empty(),
         "failed extraction writes no notes"
     );
-    let failed_taxonomy_json =
-        SessionRepository::new(failed_fixture.db.clone(), djinn_core::events::EventBus::noop())
-            .get_event_taxonomy_json(&failed_fixture.session_id)
-            .await
-            .expect("query event_taxonomy after failed call");
+    let failed_taxonomy_json = SessionRepository::new(
+        failed_fixture.db.clone(),
+        djinn_core::events::EventBus::noop(),
+    )
+    .get_event_taxonomy_json(&failed_fixture.session_id)
+    .await
+    .expect("query event_taxonomy after failed call");
     assert!(
         failed_taxonomy_json.is_none(),
         "failed extraction must NOT persist an extraction taxonomy — it is an error, \
@@ -769,10 +777,11 @@ async fn llm_extraction_semantic_duplicate_skips_create_and_boosts_existing_conf
         .expect("existing note after run");
     assert!(updated_existing.confidence > starting_confidence);
 
-    let stored_json = SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
-        .get_event_taxonomy_json(&fixture.session_id)
-        .await
-        .expect("query session event_taxonomy after merge outcome");
+    let stored_json =
+        SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
+            .get_event_taxonomy_json(&fixture.session_id)
+            .await
+            .expect("query session event_taxonomy after merge outcome");
     let stored_taxonomy: SessionTaxonomy = serde_json::from_str(stored_json.as_deref().unwrap())
         .expect("deserialize stored taxonomy after merge outcome");
     assert_eq!(stored_taxonomy.extraction_quality.merged, 1);
@@ -893,10 +902,11 @@ async fn llm_extraction_downgrades_non_durable_note_to_working_spec_path() {
         "downgraded notes should not become durable extracted notes"
     );
 
-    let stored_json = SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
-        .get_event_taxonomy_json(&fixture.session_id)
-        .await
-        .expect("query session event_taxonomy after downgrade");
+    let stored_json =
+        SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
+            .get_event_taxonomy_json(&fixture.session_id)
+            .await
+            .expect("query session event_taxonomy after downgrade");
     let stored_taxonomy: SessionTaxonomy = serde_json::from_str(stored_json.as_deref().unwrap())
         .expect("deserialize stored taxonomy after downgrade");
     assert_eq!(stored_taxonomy.extraction_quality.extracted, 1);
@@ -964,10 +974,11 @@ async fn llm_extraction_downgrades_note_missing_required_adr_054_sections() {
         "notes missing ADR-054 sections should not become durable extracted notes"
     );
 
-    let stored_json = SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
-        .get_event_taxonomy_json(&fixture.session_id)
-        .await
-        .expect("query session event_taxonomy after template downgrade");
+    let stored_json =
+        SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
+            .get_event_taxonomy_json(&fixture.session_id)
+            .await
+            .expect("query session event_taxonomy after template downgrade");
     let stored_taxonomy: SessionTaxonomy = serde_json::from_str(stored_json.as_deref().unwrap())
         .expect("deserialize stored taxonomy after template downgrade");
     assert_eq!(stored_taxonomy.extraction_quality.extracted, 1);
@@ -1029,10 +1040,11 @@ async fn full_reflection_pipeline_structural_then_llm_extraction() {
         .ensure_initialized()
         .await
         .expect("db initialized");
-    let stored_json = SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
-        .get_event_taxonomy_json(&fixture.session_id)
-        .await
-        .expect("query session event_taxonomy");
+    let stored_json =
+        SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
+            .get_event_taxonomy_json(&fixture.session_id)
+            .await
+            .expect("query session event_taxonomy");
 
     assert!(stored_json.is_some());
     let stored_taxonomy: SessionTaxonomy =

@@ -41,7 +41,7 @@ pub mod types;
 pub mod watcher;
 
 pub use config::ImageControllerConfig;
-pub use controller::{format_image_tag, ImageController, ImageControllerError};
-pub use reseed::{reseed_empty_configs, reseed_empty_configs_arc, ReseedStats};
+pub use controller::{ImageController, ImageControllerError, format_image_tag};
+pub use reseed::{ReseedStats, reseed_empty_configs, reseed_empty_configs_arc};
 pub use types::{BuildRequest, BuildStatus, ProjectImageView};
 pub use watcher::ImageBuildWatcher;

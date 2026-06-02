@@ -42,10 +42,7 @@ impl LivenessConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProgressVerdict {
     Live,
-    Wedged {
-        idle_secs: i64,
-        zero_tokens: bool,
-    },
+    Wedged { idle_secs: i64, zero_tokens: bool },
 }
 
 /// Classify a session's progress based on its tokens and the timestamp of
@@ -99,10 +96,9 @@ pub fn elapsed_secs_since(iso: &str, now: OffsetDateTime) -> Option<i64> {
     let parsed = OffsetDateTime::parse(iso, &Iso8601::DEFAULT)
         .ok()
         .or_else(|| {
-            let fmt = time::format_description::parse(
-                "[year]-[month]-[day] [hour]:[minute]:[second]",
-            )
-            .ok()?;
+            let fmt =
+                time::format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]")
+                    .ok()?;
             let primitive = time::PrimitiveDateTime::parse(iso, &fmt).ok()?;
             Some(primitive.assume_utc())
         })?;
@@ -123,16 +119,12 @@ mod tests {
     fn zero_tokens_wedged_at_threshold() {
         let now = t("2026-05-22T12:43:00Z");
         let started = "2026-05-22T12:39:30Z"; // 210s ago, >= 180s
-        let v = classify_session_progress(
-            started,
-            None,
-            0,
-            0,
-            now,
-            &LivenessConfig::OBSERVATION,
-        );
+        let v = classify_session_progress(started, None, 0, 0, now, &LivenessConfig::OBSERVATION);
         match v {
-            ProgressVerdict::Wedged { idle_secs, zero_tokens } => {
+            ProgressVerdict::Wedged {
+                idle_secs,
+                zero_tokens,
+            } => {
                 assert!(zero_tokens);
                 assert_eq!(idle_secs, 210);
             }
@@ -144,14 +136,7 @@ mod tests {
     fn zero_tokens_live_below_threshold() {
         let now = t("2026-05-22T12:43:00Z");
         let started = "2026-05-22T12:41:00Z"; // 120s ago, < 180s
-        let v = classify_session_progress(
-            started,
-            None,
-            0,
-            0,
-            now,
-            &LivenessConfig::OBSERVATION,
-        );
+        let v = classify_session_progress(started, None, 0, 0, now, &LivenessConfig::OBSERVATION);
         assert_eq!(v, ProgressVerdict::Live);
     }
 
@@ -169,7 +154,10 @@ mod tests {
             &LivenessConfig::OBSERVATION,
         );
         match v {
-            ProgressVerdict::Wedged { idle_secs, zero_tokens } => {
+            ProgressVerdict::Wedged {
+                idle_secs,
+                zero_tokens,
+            } => {
                 assert!(!zero_tokens);
                 assert_eq!(idle_secs, 720);
             }
@@ -196,14 +184,7 @@ mod tests {
     #[test]
     fn unparseable_timestamp_is_live() {
         let now = t("2026-05-22T12:43:00Z");
-        let v = classify_session_progress(
-            "garbage",
-            None,
-            0,
-            0,
-            now,
-            &LivenessConfig::OBSERVATION,
-        );
+        let v = classify_session_progress("garbage", None, 0, 0, now, &LivenessConfig::OBSERVATION);
         assert_eq!(v, ProgressVerdict::Live);
     }
 
@@ -211,14 +192,7 @@ mod tests {
     fn space_separated_timestamp_parses() {
         let now = t("2026-05-22T12:43:00Z");
         let started = "2026-05-22 12:39:30"; // SQLite-style, 210s ago
-        let v = classify_session_progress(
-            started,
-            None,
-            0,
-            0,
-            now,
-            &LivenessConfig::OBSERVATION,
-        );
+        let v = classify_session_progress(started, None, 0, 0, now, &LivenessConfig::OBSERVATION);
         assert!(matches!(v, ProgressVerdict::Wedged { .. }));
     }
 
@@ -226,14 +200,7 @@ mod tests {
     fn negative_elapsed_clamped_to_zero() {
         let now = t("2026-05-22T12:00:00Z");
         let started = "2026-05-22T12:05:00Z"; // future
-        let v = classify_session_progress(
-            started,
-            None,
-            0,
-            0,
-            now,
-            &LivenessConfig::OBSERVATION,
-        );
+        let v = classify_session_progress(started, None, 0, 0, now, &LivenessConfig::OBSERVATION);
         assert_eq!(v, ProgressVerdict::Live);
     }
 }

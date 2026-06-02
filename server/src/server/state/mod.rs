@@ -7,14 +7,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db::runtime::{DatabaseRuntimeHealth, DatabaseRuntimeManager};
 use crate::events::DjinnEventEnvelope;
-use djinn_provider::embeddings::{EmbeddingService, default_embedding_cache_dir};
 use djinn_agent::actors::coordinator::CoordinatorHandle;
 use djinn_agent::actors::slot::{SlotPoolConfig, SlotPoolHandle};
 use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_agent::runtime_bridge::{K8sTokenReviewValidator, RuntimeKind, runtime_kind};
-use djinn_supervisor::{AllowAllValidator, ConnectionRegistry, ServeHandle, serve_on_tcp};
 use djinn_db::{
     Database, NoopNoteVectorStore, NoteVectorStore, ProjectRepository, QdrantCodeChunkConfig,
     QdrantCodeChunkVectorStore, QdrantConfig, QdrantNoteVectorStore, SettingsRepository,
@@ -23,8 +21,10 @@ use djinn_git::{GitActorHandle, GitError};
 use djinn_image_controller::{ImageBuildWatcher, ImageController, ImageControllerConfig};
 use djinn_k8s::{K8sGraphWarmer, KubernetesConfig};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
+use djinn_provider::embeddings::{EmbeddingService, default_embedding_cache_dir};
 use djinn_provider::github_app::AppConfig as GitHubAppConfig;
 use djinn_runtime::GraphWarmerService;
+use djinn_supervisor::{AllowAllValidator, ConnectionRegistry, ServeHandle, serve_on_tcp};
 use djinn_workspace::{MirrorManager, WorkspaceStore, mirrors_root, workspaces_root};
 
 mod canonical_graph_refresh_planner;
@@ -230,9 +230,9 @@ struct Inner {
 
 impl AppState {
     pub fn new(db: Database, cancel: CancellationToken) -> Self {
-        let runtime = DatabaseRuntimeManager::new(crate::db::runtime::DatabaseRuntimeConfig::postgres(
-            db.bootstrap_info().target.clone(),
-        ));
+        let runtime = DatabaseRuntimeManager::new(
+            crate::db::runtime::DatabaseRuntimeConfig::postgres(db.bootstrap_info().target.clone()),
+        );
         Self::new_with_runtime(db, runtime, cancel)
     }
 
@@ -251,10 +251,7 @@ impl AppState {
     ) -> Self {
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let mirror = Arc::new(MirrorManager::new(mirrors_root()));
-        let workspace_store = Arc::new(WorkspaceStore::new(
-            workspaces_root(),
-            Arc::clone(&mirror),
-        ));
+        let workspace_store = Arc::new(WorkspaceStore::new(workspaces_root(), Arc::clone(&mirror)));
         Self {
             inner: Arc::new(Inner {
                 db,
@@ -882,8 +879,7 @@ impl AppState {
                 qdrant_code_chunk_config_from_env(),
             )) as Arc<dyn djinn_db::CodeChunkVectorStore>
         } else {
-            Arc::new(djinn_db::NoopCodeChunkVectorStore)
-                as Arc<dyn djinn_db::CodeChunkVectorStore>
+            Arc::new(djinn_db::NoopCodeChunkVectorStore) as Arc<dyn djinn_db::CodeChunkVectorStore>
         }
     }
 
@@ -1243,9 +1239,7 @@ impl AppState {
         use std::net::SocketAddr;
 
         if !matches!(runtime_kind(), RuntimeKind::Kubernetes) {
-            tracing::info!(
-                "rpc_server: DJINN_RUNTIME is not kubernetes; skipping TCP listener"
-            );
+            tracing::info!("rpc_server: DJINN_RUNTIME is not kubernetes; skipping TCP listener");
             return;
         }
 
@@ -1567,9 +1561,7 @@ impl djinn_graph::WarmContext for AppState {
         AppState::indexer_lock(self)
     }
 
-    fn code_chunk_embeddings(
-        &self,
-    ) -> Option<Arc<dyn djinn_db::CodeChunkEmbeddingProvider>> {
+    fn code_chunk_embeddings(&self) -> Option<Arc<dyn djinn_db::CodeChunkEmbeddingProvider>> {
         // The shared `EmbeddingService` impls both `NoteEmbeddingProvider`
         // and `CodeChunkEmbeddingProvider` (PR B3) — same model, same
         // version stamp. Cloning is cheap (Arc-internal).
@@ -1599,8 +1591,11 @@ impl CanonicalGraphRefreshProbe for AppStateCanonicalGraphRefreshProbe {
     }
 
     async fn commits_since(&self, project_root: &Path, pinned_commit: &str) -> Option<u64> {
-        djinn_graph::canonical_graph::canonical_graph_count_commits_since(project_root, pinned_commit)
-            .await
+        djinn_graph::canonical_graph::canonical_graph_count_commits_since(
+            project_root,
+            pinned_commit,
+        )
+        .await
     }
 }
 
@@ -1625,9 +1620,7 @@ impl CanonicalGraphRefreshProbe for AppStateCanonicalGraphRefreshProbe {
 ///   are treated as not-fresh; everything else (the cache contains an entry
 ///   whose pinned commit is either known-current or
 ///   commit-check-failed) is treated as fresh so `await_fresh` does not spin.
-fn build_in_process_graph_warmer(
-    state: AppState,
-) -> djinn_agent::warmer::InProcessGraphWarmer {
+fn build_in_process_graph_warmer(state: AppState) -> djinn_agent::warmer::InProcessGraphWarmer {
     use djinn_agent::warmer::{InProcessGraphWarmer, InProcessWarmerDeps};
     use djinn_db::ProjectRepository;
 
@@ -1719,28 +1712,27 @@ fn build_in_process_graph_warmer(
     });
 
     let project_root_state = state.clone();
-    let project_root: djinn_agent::warmer::ProjectRootResolver =
-        Arc::new(move |project_id| {
-            let state = project_root_state.clone();
-            Box::pin(async move {
-                let repo = ProjectRepository::new(state.db().clone(), state.event_bus());
-                match repo.get(&project_id).await {
-                    Ok(Some(project)) => Some(djinn_core::paths::project_dir(
-                        &project.github_owner,
-                        &project.github_repo,
-                    )),
-                    Ok(None) => None,
-                    Err(e) => {
-                        tracing::warn!(
-                            project_id = %project_id,
-                            error = %e,
-                            "AppStateGraphWarmer: project lookup failed"
-                        );
-                        None
-                    }
+    let project_root: djinn_agent::warmer::ProjectRootResolver = Arc::new(move |project_id| {
+        let state = project_root_state.clone();
+        Box::pin(async move {
+            let repo = ProjectRepository::new(state.db().clone(), state.event_bus());
+            match repo.get(&project_id).await {
+                Ok(Some(project)) => Some(djinn_core::paths::project_dir(
+                    &project.github_owner,
+                    &project.github_repo,
+                )),
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::warn!(
+                        project_id = %project_id,
+                        error = %e,
+                        "AppStateGraphWarmer: project lookup failed"
+                    );
+                    None
                 }
-            })
-        });
+            }
+        })
+    });
 
     let is_fresh: djinn_agent::warmer::FreshnessProbe =
         Arc::new(move |_project_id, project_root, _ttl| {
@@ -1758,8 +1750,9 @@ fn build_in_process_graph_warmer(
                     RefreshPlan::SkipColdCache
                     | RefreshPlan::SkipPinnedCommitUnavailable
                     | RefreshPlan::RefreshStale { .. } => false,
-                    RefreshPlan::SkipCurrent { .. }
-                    | RefreshPlan::SkipCommitCheckFailed { .. } => true,
+                    RefreshPlan::SkipCurrent { .. } | RefreshPlan::SkipCommitCheckFailed { .. } => {
+                        true
+                    }
                 }
             })
         });

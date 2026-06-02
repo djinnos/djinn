@@ -193,7 +193,9 @@ impl McpState {
         project_id: &str,
         config: &djinn_stack::environment::EnvironmentConfig,
     ) -> Result<(), String> {
-        self.runtime.apply_environment_config(project_id, config).await
+        self.runtime
+            .apply_environment_config(project_id, config)
+            .await
     }
 
     pub async fn trigger_mirror_refresh(&self, project_id: &str) {

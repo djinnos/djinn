@@ -391,16 +391,10 @@ mod tests {
         let embeddings: Arc<dyn djinn_db::CodeChunkEmbeddingProvider> = Arc::new(FakeProvider);
         let store: Arc<dyn djinn_db::CodeChunkVectorStore> = Arc::new(NoopCodeChunkVectorStore);
 
-        let report = run_chunk_and_embed_pass(
-            &db,
-            embeddings,
-            store,
-            graph,
-            &proj.id,
-            &project_root,
-        )
-        .await
-        .expect("pass succeeds");
+        let report =
+            run_chunk_and_embed_pass(&db, embeddings, store, graph, &proj.id, &project_root)
+                .await
+                .expect("pass succeeds");
 
         assert!(
             report.chunks_total >= 2,

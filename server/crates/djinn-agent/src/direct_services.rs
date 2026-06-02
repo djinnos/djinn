@@ -16,29 +16,27 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use djinn_core::events::DjinnEventEnvelope;
+use djinn_core::models::SessionRecord;
 use djinn_core::models::{Task, TaskRunStatus};
+use djinn_db::SessionRepository;
 use djinn_db::TaskRunRepository;
+use djinn_db::repositories::session::CreateSessionParams;
 use djinn_db::repositories::task_run::CreateTaskRunParams;
+use djinn_stack::environment::EnvironmentConfig;
 use djinn_supervisor::services::{
     SerializableCreateSessionParams, SerializableCreateTaskRunParams, SerializableDjinnEvent,
 };
 use djinn_supervisor::{
     RoleKind, StageError, StageOutcome, SupervisorServices, TaskRunOutcome, TaskRunSpec,
 };
-use djinn_core::events::DjinnEventEnvelope;
-use djinn_core::models::SessionRecord;
-use djinn_db::SessionRepository;
-use djinn_db::repositories::session::CreateSessionParams;
-use djinn_stack::environment::EnvironmentConfig;
 use djinn_workspace::Workspace;
 use tokio_util::sync::CancellationToken;
 
 use crate::context::AgentContext;
-use djinn_provider::message::Conversation;
-use djinn_provider::provider::{
-    LlmProvider, LlmResponse, StreamEvent, TokenUsage, ToolChoice,
-};
 use crate::supervisor_impl::{SupervisorCallbackContext, execute_stage, supervisor_pr_open};
+use djinn_provider::message::Conversation;
+use djinn_provider::provider::{LlmProvider, LlmResponse, StreamEvent, TokenUsage, ToolChoice};
 use futures::StreamExt;
 
 /// In-process `SupervisorServices` impl that delegates straight to the
@@ -119,10 +117,7 @@ impl SupervisorServices for DirectServices {
         supervisor_pr_open(spec, task, &self.callbacks).await
     }
 
-    async fn create_task_run(
-        &self,
-        params: SerializableCreateTaskRunParams,
-    ) -> Result<(), String> {
+    async fn create_task_run(&self, params: SerializableCreateTaskRunParams) -> Result<(), String> {
         self.task_runs
             .create(CreateTaskRunParams {
                 id: params.id.as_str(),
@@ -158,10 +153,7 @@ impl SupervisorServices for DirectServices {
             .ok_or_else(|| format!("model not found in catalog: {model_id}"))
     }
 
-    async fn get_provider_base_url(
-        &self,
-        catalog_provider_id: String,
-    ) -> Result<String, String> {
+    async fn get_provider_base_url(&self, catalog_provider_id: String) -> Result<String, String> {
         let base_url = self
             .callbacks
             .agent_context
@@ -250,13 +242,14 @@ impl SupervisorServices for DirectServices {
         // event-bus correlation; there is no real Task row backing this
         // host-side invocation.
         let synthetic_task_id = format!("invoke_llm:{model_id}");
-        let resolved = crate::actors::slot::lifecycle::model_resolution::resolve_model_and_credential(
-            &model_id,
-            &synthetic_task_id,
-            &self.callbacks.agent_context,
-        )
-        .await
-        .map_err(|e| e.reason)?;
+        let resolved =
+            crate::actors::slot::lifecycle::model_resolution::resolve_model_and_credential(
+                &model_id,
+                &synthetic_task_id,
+                &self.callbacks.agent_context,
+            )
+            .await
+            .map_err(|e| e.reason)?;
 
         // Build the provider from the resolved credential. Mirrors the
         // construction in `supervisor_impl::stage` — minus the session
@@ -266,10 +259,8 @@ impl SupervisorServices for DirectServices {
             .await
             .unwrap_or(0)
             .max(0) as u32;
-        let telemetry_meta = crate::actors::slot::helpers::build_telemetry_meta(
-            "invoke_llm",
-            &synthetic_task_id,
-        );
+        let telemetry_meta =
+            crate::actors::slot::helpers::build_telemetry_meta("invoke_llm", &synthetic_task_id);
         // Look up the API base URL only for API-key providers (OAuth configs
         // carry their own); then build the provider via the shared helper.
         let base_url = if crate::actors::slot::helpers::resolved_needs_base_url(&resolved) {
@@ -429,9 +420,7 @@ impl SupervisorServices for DirectServices {
 /// `lifecycle/model_resolution`). Unknown pairs return `Err((entity_type,
 /// action))` so the caller can log + drop rather than leaking strings into
 /// the static lifetime.
-fn intern_envelope(
-    wire: SerializableDjinnEvent,
-) -> Result<DjinnEventEnvelope, (String, String)> {
+fn intern_envelope(wire: SerializableDjinnEvent) -> Result<DjinnEventEnvelope, (String, String)> {
     let SerializableDjinnEvent {
         entity_type,
         action,

@@ -31,7 +31,8 @@ fn provider_status_error(
     secrets: &[&str],
 ) -> anyhow::Error {
     let redacted = redact_secrets(body, secrets);
-    let typed = ProviderError::from_status(status.as_u16(), &redacted).with_retry_after(retry_after_ms);
+    let typed =
+        ProviderError::from_status(status.as_u16(), &redacted).with_retry_after(retry_after_ms);
     anyhow::Error::new(typed).context(format!("provider API error {status}: {redacted}"))
 }
 
@@ -264,9 +265,8 @@ impl ApiClient {
                         // string downstream where it would masquerade as a
                         // retryable empty completion the worker hammers.
                         if text.trim().is_empty() {
-                            return Err(anyhow::Error::new(ProviderError::InvalidOutput).context(
-                                "provider returned a success status with an empty body",
-                            ));
+                            return Err(anyhow::Error::new(ProviderError::InvalidOutput)
+                                .context("provider returned a success status with an empty body"));
                         }
                         return Ok(text);
                     }
@@ -289,7 +289,12 @@ impl ApiClient {
 
                     let retry_after_ms = retry_after_ms(resp.headers());
                     let body_text = resp.text().await.unwrap_or_default();
-                    return Err(provider_status_error(status, &body_text, retry_after_ms, &secret_refs));
+                    return Err(provider_status_error(
+                        status,
+                        &body_text,
+                        retry_after_ms,
+                        &secret_refs,
+                    ));
                 }
                 Err(e) => {
                     let is_retryable = e.is_connect() || e.is_timeout() || e.is_request();
@@ -300,11 +305,13 @@ impl ApiClient {
                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                         continue;
                     }
-                    return Err(anyhow::Error::new(ProviderError::Transport).context(format!(
-                        "failed to send POST after {} attempts: {}",
-                        attempt + 1,
-                        e
-                    )));
+                    return Err(
+                        anyhow::Error::new(ProviderError::Transport).context(format!(
+                            "failed to send POST after {} attempts: {}",
+                            attempt + 1,
+                            e
+                        )),
+                    );
                 }
             }
         }

@@ -15,10 +15,9 @@ pub(super) async fn memory_move(
 
     let project_repo = ProjectRepository::new(server.state.db().clone(), server.state.event_bus());
     let canonical_project_path = match project_repo.get(&project_id).await {
-        Ok(Some(project)) => djinn_core::paths::project_dir(
-            &project.github_owner,
-            &project.github_repo,
-        ),
+        Ok(Some(project)) => {
+            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
+        }
         _ => Path::new(&p.project).to_path_buf(),
     };
 

@@ -176,14 +176,11 @@ impl AccessClassifier {
         }
 
         // Miss — parse, then evict if we're over capacity.
-        let parser = self
-            .parsers
-            .entry(lang)
-            .or_insert_with(|| {
-                let mut p = Parser::new();
-                let _ = p.set_language(&lang.tree_sitter_language());
-                p
-            });
+        let parser = self.parsers.entry(lang).or_insert_with(|| {
+            let mut p = Parser::new();
+            let _ = p.set_language(&lang.tree_sitter_language());
+            p
+        });
         let tree = parser.parse(source, None)?;
         #[cfg(test)]
         {
@@ -269,8 +266,11 @@ fn classify_rust(node: &mut Node) -> AccessKind {
                 return AccessKind::Read;
             }
             // Function/closure parameter binding sites are also pure defs.
-            "parameter" | "closure_parameters" | "tuple_pattern"
-            | "tuple_struct_pattern" | "struct_pattern" => {
+            "parameter"
+            | "closure_parameters"
+            | "tuple_pattern"
+            | "tuple_struct_pattern"
+            | "struct_pattern" => {
                 return AccessKind::NotAnAccess;
             }
             "assignment_expression" => {
@@ -346,8 +346,13 @@ fn classify_go(node: &mut Node) -> AccessKind {
                 }
                 return AccessKind::Read;
             }
-            "var_spec" | "const_spec" | "parameter_declaration" | "field_declaration"
-            | "method_declaration" | "function_declaration" | "type_spec" => {
+            "var_spec"
+            | "const_spec"
+            | "parameter_declaration"
+            | "field_declaration"
+            | "method_declaration"
+            | "function_declaration"
+            | "type_spec" => {
                 // identifier appearing as the bound name is a definition.
                 if child_is_field(parent, "name", current) {
                     return AccessKind::NotAnAccess;
@@ -425,8 +430,11 @@ fn classify_python(node: &mut Node) -> AccessKind {
                 }
                 return AccessKind::Read;
             }
-            "parameters" | "lambda_parameters" | "typed_parameter"
-            | "default_parameter" | "typed_default_parameter" => {
+            "parameters"
+            | "lambda_parameters"
+            | "typed_parameter"
+            | "default_parameter"
+            | "typed_default_parameter" => {
                 return AccessKind::NotAnAccess;
             }
             "assignment" => {
@@ -511,9 +519,14 @@ fn classify_ts_like(node: &mut Node) -> AccessKind {
     let mut current = *node;
     while let Some(parent) = current.parent() {
         match parent.kind() {
-            "variable_declarator" | "function_declaration" | "function_expression"
-            | "method_definition" | "class_declaration" | "formal_parameters"
-            | "required_parameter" | "optional_parameter" => {
+            "variable_declarator"
+            | "function_declaration"
+            | "function_expression"
+            | "method_definition"
+            | "class_declaration"
+            | "formal_parameters"
+            | "required_parameter"
+            | "optional_parameter" => {
                 if child_is_field(parent, "name", current) {
                     return AccessKind::NotAnAccess;
                 }
@@ -788,10 +801,7 @@ mod tests {
     fn out_of_range_position_returns_unknown() {
         let mut c = AccessClassifier::new();
         // Source has 1 line; ask far past it.
-        assert_eq!(
-            c.classify("rust", "fn f() {}", 999, 0),
-            AccessKind::Unknown
-        );
+        assert_eq!(c.classify("rust", "fn f() {}", 999, 0), AccessKind::Unknown);
     }
 
     #[test]

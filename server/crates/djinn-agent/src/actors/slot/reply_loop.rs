@@ -13,6 +13,8 @@ use super::*;
 pub(crate) mod error_handling;
 mod streaming;
 mod tool_dispatch;
+#[cfg(test)]
+use crate::output_stash::extract_stash_content;
 use error_handling::{
     MAX_COMPACTION_RETRIES, empty_turn_backoff, is_context_length_error,
     is_orphaned_tool_call_error, next_nudge_message, should_retry_after_tool_call_compaction,
@@ -20,8 +22,6 @@ use error_handling::{
     wind_down_message,
 };
 use streaming::{StreamLoopContext, consume_provider_stream};
-#[cfg(test)]
-use crate::output_stash::extract_stash_content;
 use tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_concurrency_safety};
 
 const MAX_TURNS: u32 = 1000;
@@ -197,10 +197,13 @@ pub(crate) async fn run_reply_loop(
     // re-persisting it would duplicate every row — only seed the opening
     // turn(s) for fresh sessions. The system prompt is intentionally skipped
     // (large, static, and not part of the transcript — mirrors the chat path).
-    let msg_repo =
-        SessionMessageRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let msg_repo = SessionMessageRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     if !is_resumed_session {
-        for msg in conversation.messages.iter().filter(|m| m.role != Role::System) {
+        for msg in conversation
+            .messages
+            .iter()
+            .filter(|m| m.role != Role::System)
+        {
             persist_session_message(&msg_repo, session_id, task_id, msg).await;
         }
     }
@@ -2043,6 +2046,9 @@ mod tests {
                         .any(|t| t.contains("You are out of steps"))
             })
             .count();
-        assert_eq!(injected, 1, "wind-down injected exactly once, then hard-errors");
+        assert_eq!(
+            injected, 1,
+            "wind-down injected exactly once, then hard-errors"
+        );
     }
 }

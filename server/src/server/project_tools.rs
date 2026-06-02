@@ -55,9 +55,11 @@ async fn resolve_project_path(
                 format!("project not found: {project_id}"),
             )
         })?;
-    Ok(djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
-        .to_string_lossy()
-        .into_owned())
+    Ok(
+        djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 // ── MCP Server JSON format ───────────────────────────────────────────────────

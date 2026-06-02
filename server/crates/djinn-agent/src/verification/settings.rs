@@ -61,7 +61,10 @@ pub fn effective_mcp_server_names(
 ) -> Vec<String> {
     match role_mcp_servers {
         Some(names) => dedupe_names(names.iter().cloned()),
-        None => dedupe_names(default_mcp_servers_for_agent(agent_mcp_defaults, agent_name)),
+        None => dedupe_names(default_mcp_servers_for_agent(
+            agent_mcp_defaults,
+            agent_name,
+        )),
     }
 }
 

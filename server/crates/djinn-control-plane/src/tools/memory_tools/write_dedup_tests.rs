@@ -110,13 +110,7 @@ mod tests {
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
 
         let existing = repo
-            .create(
-                &project.id,
-                "Async Pattern",
-                "tokio spawn",
-                "pattern",
-                "[]",
-            )
+            .create(&project.id, "Async Pattern", "tokio spawn", "pattern", "[]")
             .await
             .unwrap();
 

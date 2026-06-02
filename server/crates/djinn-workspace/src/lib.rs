@@ -16,6 +16,4 @@ pub mod workspace_store;
 
 pub use mirror::{MirrorError, MirrorManager, mirror_path_for, mirrors_root};
 pub use workspace::{EphemeralWorkspaceError, GitIdentity, MergeOutcome, Workspace};
-pub use workspace_store::{
-    WorkspaceError, WorkspaceStore, workspace_path_for, workspaces_root,
-};
+pub use workspace_store::{WorkspaceError, WorkspaceStore, workspace_path_for, workspaces_root};

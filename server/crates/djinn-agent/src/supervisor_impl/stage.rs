@@ -64,17 +64,17 @@
 use std::sync::Arc;
 
 use djinn_core::models::{SessionStatus, Task};
+use djinn_db::ProjectRepository;
+use djinn_git::run_git_command;
 use djinn_runtime::spec::{RoleKind, TaskRunSpec};
 use djinn_supervisor::{StageError, StageOutcome, SupervisorServices};
 use djinn_workspace::Workspace;
-use djinn_db::ProjectRepository;
-use djinn_git::run_git_command;
 
 use crate::AgentType;
+use crate::actors::slot::helpers::conflict_context_for_dispatch;
 use crate::actors::slot::helpers::{
     build_provider_from_resolved, build_telemetry_meta, default_base_url, resolved_needs_base_url,
 };
-use crate::actors::slot::helpers::conflict_context_for_dispatch;
 use crate::actors::slot::lifecycle::mcp_resolve::{McpAndSkills, resolve_mcp_and_skills};
 use crate::actors::slot::lifecycle::model_resolution::{
     ModelResolutionError, resolve_model_and_credential,
@@ -82,18 +82,20 @@ use crate::actors::slot::lifecycle::model_resolution::{
 use crate::actors::slot::lifecycle::prompt_context::{
     PromptContext, PromptContextInputs, ReadSourceInfo, build_prompt_context,
 };
-use crate::actors::slot::lifecycle::role_overrides::{ResolvedRoleOverrides, resolve_role_overrides};
+use crate::actors::slot::lifecycle::role_overrides::{
+    ResolvedRoleOverrides, resolve_role_overrides,
+};
 use crate::actors::slot::lifecycle::setup::{
     SetupAndVerificationContext, SetupError, resolve_setup_and_verification_context,
 };
 use crate::actors::slot::lifecycle::teardown::{PostSessionParams, spawn_post_session_work};
 use crate::actors::slot::reply_loop::{ReplyLoopContext, run_reply_loop};
 use crate::context::AgentContext;
+use crate::roles::{AgentRole, role_impl_for};
 use djinn_provider::message::{Conversation, Message};
 use djinn_provider::provider::LlmProvider;
 use djinn_provider::provider::error::ProviderError;
 use djinn_runtime::ProviderFailureClass;
-use crate::roles::{AgentRole, role_impl_for};
 
 use super::SupervisorCallbackContext;
 
@@ -243,7 +245,9 @@ async fn materialize_read_sources(
 /// so the read-source clones never enter the task's commits.
 async fn add_git_exclude(worktree_path: &std::path::Path, pattern: &str) {
     let exclude = worktree_path.join(".git/info/exclude");
-    let existing = tokio::fs::read_to_string(&exclude).await.unwrap_or_default();
+    let existing = tokio::fs::read_to_string(&exclude)
+        .await
+        .unwrap_or_default();
     if existing.lines().any(|l| l.trim() == pattern) {
         return;
     }
@@ -451,14 +455,16 @@ pub(crate) async fn execute_stage(
     // in-Pod worker never opens its own DB connection.  Host-side
     // `DirectServices` delegates to `SessionRepository::create` verbatim.
     let session_record = services
-        .create_session(djinn_supervisor::services::SerializableCreateSessionParams {
-            project_id: task.project_id.clone(),
-            task_id: Some(task.id.clone()),
-            model: model_id.clone(),
-            agent_type: role_name.to_string(),
-            metadata_json: None,
-            task_run_id: Some(task_run_id.to_string()),
-        })
+        .create_session(
+            djinn_supervisor::services::SerializableCreateSessionParams {
+                project_id: task.project_id.clone(),
+                task_id: Some(task.id.clone()),
+                model: model_id.clone(),
+                agent_type: role_name.to_string(),
+                metadata_json: None,
+                task_run_id: Some(task_run_id.to_string()),
+            },
+        )
         .await
         .map_err(StageError::SessionCreate)?;
     let session_id = session_record.id.clone();

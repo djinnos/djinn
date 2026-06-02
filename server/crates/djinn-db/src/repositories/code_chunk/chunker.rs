@@ -25,9 +25,7 @@
 
 use sha2::{Digest, Sha256};
 
-use super::text_generator::{
-    EMBEDDING_TEXT_VERSION, RenderInput, content_hash, render_chunk_text,
-};
+use super::text_generator::{EMBEDDING_TEXT_VERSION, RenderInput, content_hash, render_chunk_text};
 
 /// One row destined for the `code_chunks` table.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -428,7 +426,11 @@ fn find_statement_boundaries(body: &str, target_depth: i32) -> Vec<usize> {
                 if depth == target_depth {
                     let after = i + 1;
                     if after >= bytes.len() || bytes[after] == b'\n' {
-                        let cut = if after < bytes.len() { after + 1 } else { after };
+                        let cut = if after < bytes.len() {
+                            after + 1
+                        } else {
+                            after
+                        };
                         boundaries.push(cut);
                     }
                 }
@@ -550,15 +552,30 @@ fn identifier_before_paren(line: &str) -> Option<String> {
     let head = &line[..paren];
     let token = head.split_whitespace().next_back()?;
     let cleaned: String = token.chars().filter(|c| is_identifier_char(*c)).collect();
-    if cleaned.is_empty() { None } else { Some(cleaned) }
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
 }
 
 /// Pull the first identifier-shaped token off the line (after stripping
 /// keyword prefixes like `pub`/`let`/`const`/`final` etc.).
 fn leading_identifier(line: &str) -> Option<String> {
     const KEYWORDS: &[&str] = &[
-        "pub", "let", "const", "static", "final", "var", "val", "private", "public", "protected",
-        "internal", "readonly", "@",
+        "pub",
+        "let",
+        "const",
+        "static",
+        "final",
+        "var",
+        "val",
+        "private",
+        "public",
+        "protected",
+        "internal",
+        "readonly",
+        "@",
     ];
     for token in line.split_whitespace() {
         let stripped = token.trim_start_matches('@');
@@ -861,11 +878,7 @@ mod tests {
 
     #[test]
     fn python_small_function_is_single_chunk() {
-        let content = concat!(
-            "def hello():\n",
-            "    print('hi')\n",
-            "    return 42\n",
-        );
+        let content = concat!("def hello():\n", "    print('hi')\n", "    return 42\n",);
         let mut sym = function_symbol("hello", 1, 3);
         sym.signature = Some("def hello()".to_owned());
         let file = FileInput {
@@ -1005,7 +1018,11 @@ mod tests {
         // which is what function-body chunking relies on.
         let body = "fn outer() {\n    { stmt_a(); }\n    { stmt_b(); }\n    { stmt_c(); }\n}\n";
         let bs = find_statement_boundaries(body, 1);
-        assert_eq!(bs.len(), 3, "expected 3 inner-block boundaries, got: {bs:?}");
+        assert_eq!(
+            bs.len(),
+            3,
+            "expected 3 inner-block boundaries, got: {bs:?}"
+        );
     }
 
     #[test]

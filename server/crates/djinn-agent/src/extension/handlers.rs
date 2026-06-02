@@ -10,12 +10,13 @@ use crate::context::AgentContext;
 use crate::lsp::format_diagnostics_xml;
 use crate::lsp::{SymbolQuery, parse_symbol_kind_filter};
 use crate::mcp_client::McpToolRegistry;
-use djinn_db::{AgentRepository, EpicRepository, SessionRepository, TaskRepository};
 use djinn_control_plane::tools::agent_tools::{
     AgentCreateParams as SharedAgentCreateParams, AgentMetricsParams as SharedAgentMetricsParams,
     create_agent as shared_create_agent, metrics_for_agents as shared_metrics_for_agents,
 };
-use djinn_control_plane::tools::epic_ops::{EpicShowRequest, EpicTasksRequest, EpicUpdateDeltaRequest};
+use djinn_control_plane::tools::epic_ops::{
+    EpicShowRequest, EpicTasksRequest, EpicUpdateDeltaRequest,
+};
 use djinn_control_plane::tools::memory_tools::{
     BrokenLinksParams as SharedMemoryBrokenLinksParams,
     BuildContextParams as SharedMemoryBuildContextParams, EditParams as SharedMemoryEditParams,
@@ -31,6 +32,7 @@ use djinn_control_plane::tools::task_tools::{
     create_task as shared_create_task, transition_task as shared_transition_task,
     update_task as shared_update_task,
 };
+use djinn_db::{AgentRepository, EpicRepository, SessionRepository, TaskRepository};
 use djinn_provider::github_api::GitHubApiClient;
 
 use super::fuzzy::fuzzy_replace;
@@ -176,58 +178,28 @@ where
         "epic_close" => call_epic_close(state, &call.arguments, project_id.as_deref()).await,
         "memory_read" => call_memory_read(state, &call.arguments, &project_ref).await,
         "memory_search" => {
-            call_memory_search(
-                state,
-                &call.arguments,
-                session_task_id,
-                &project_ref,
-            )
-            .await
+            call_memory_search(state, &call.arguments, session_task_id, &project_ref).await
         }
         "memory_list" => call_memory_list(state, &call.arguments, &project_ref).await,
         "memory_build_context" => {
-            call_memory_build_context(
-                state,
-                &call.arguments,
-                session_task_id,
-                &project_ref,
-            )
-            .await
+            call_memory_build_context(state, &call.arguments, session_task_id, &project_ref).await
         }
         "memory_write" => {
-            call_memory_write(
-                state,
-                &call.arguments,
-                &project_ref,
-                worktree_path,
-            )
-            .await
+            call_memory_write(state, &call.arguments, &project_ref, worktree_path).await
         }
         "memory_edit" => {
-            call_memory_edit(
-                state,
-                &call.arguments,
-                &project_ref,
-                worktree_path,
-            )
-            .await
+            call_memory_edit(state, &call.arguments, &project_ref, worktree_path).await
         }
         "memory_move" => call_memory_move(state, &call.arguments, &project_ref).await,
-        "memory_health" => {
-            call_memory_health(state, &call.arguments, &project_ref).await
-        }
+        "memory_health" => call_memory_health(state, &call.arguments, &project_ref).await,
         "memory_extracted_audit" => {
             call_memory_extracted_audit(state, &call.arguments, &project_ref).await
         }
         "memory_broken_links" => {
             call_memory_broken_links(state, &call.arguments, &project_ref).await
         }
-        "memory_orphans" => {
-            call_memory_orphans(state, &call.arguments, &project_ref).await
-        }
-        "agent_metrics" => {
-            call_agent_metrics(state, &call.arguments, &project_ref).await
-        }
+        "memory_orphans" => call_memory_orphans(state, &call.arguments, &project_ref).await,
+        "agent_metrics" => call_agent_metrics(state, &call.arguments, &project_ref).await,
         "agent_amend_prompt" => {
             call_agent_amend_prompt(state, &call.arguments, &worktree_project_path).await
         }
@@ -257,12 +229,8 @@ where
             let root = state.working_root_for(worktree_path);
             call_skill_read(&call.arguments, &root).await
         }
-        "write" => {
-            call_write(state, &call.arguments, worktree_path, project_id.as_deref()).await
-        }
-        "edit" => {
-            call_edit(state, &call.arguments, worktree_path, project_id.as_deref()).await
-        }
+        "write" => call_write(state, &call.arguments, worktree_path, project_id.as_deref()).await,
+        "edit" => call_edit(state, &call.arguments, worktree_path, project_id.as_deref()).await,
         "apply_patch" => {
             call_apply_patch(state, &call.arguments, worktree_path, project_id.as_deref()).await
         }

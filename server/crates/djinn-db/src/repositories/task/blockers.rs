@@ -90,23 +90,20 @@ impl TaskRepository {
         let blocking_id_owned = blocking_id.to_owned();
 
         // DELETE is idempotent; retry on Dolt 1213.
-        crate::retry::retry_on_serialization_failure(
-            crate::retry::DEFAULT_MAX_TX_RETRIES,
-            || {
-                let task_id = task_id_owned.clone();
-                let blocking_id = blocking_id_owned.clone();
-                async move {
-                    sqlx::query!(
-                        "DELETE FROM blockers WHERE task_id = $1 AND blocking_task_id = $2",
-                        task_id,
-                        blocking_id
-                    )
-                    .execute(self.db.pool())
-                    .await?;
-                    Ok::<_, crate::Error>(())
-                }
-            },
-        )
+        crate::retry::retry_on_serialization_failure(crate::retry::DEFAULT_MAX_TX_RETRIES, || {
+            let task_id = task_id_owned.clone();
+            let blocking_id = blocking_id_owned.clone();
+            async move {
+                sqlx::query!(
+                    "DELETE FROM blockers WHERE task_id = $1 AND blocking_task_id = $2",
+                    task_id,
+                    blocking_id
+                )
+                .execute(self.db.pool())
+                .await?;
+                Ok::<_, crate::Error>(())
+            }
+        })
         .await?;
 
         if let Some(task) = self.get(task_id).await? {

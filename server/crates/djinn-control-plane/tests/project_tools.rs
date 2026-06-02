@@ -18,10 +18,7 @@ async fn project_add_rejects_empty_owner_or_repo() {
     let harness = McpTestHarness::new().await;
 
     let added = harness
-        .call_tool(
-            "project_add_from_github",
-            json!({"owner": "", "repo": ""}),
-        )
+        .call_tool("project_add_from_github", json!({"owner": "", "repo": ""}))
         .await
         .expect("project_add_from_github should dispatch");
     let status = added["status"].as_str().unwrap_or_default();
@@ -71,8 +68,10 @@ async fn project_add_and_list_success_shape() {
         .expect("project_list should dispatch");
     let projects = listed["projects"].as_array().expect("projects array");
     assert!(
-        projects.iter().any(|p| p["github_owner"] == json!(project.github_owner)
-            && p["github_repo"] == json!(project.github_repo)),
+        projects
+            .iter()
+            .any(|p| p["github_owner"] == json!(project.github_owner)
+                && p["github_repo"] == json!(project.github_repo)),
         "project_list must include the registered project"
     );
     assert!(
@@ -130,10 +129,7 @@ async fn project_remove_unknown_slug_is_rejected() {
     let (project, _dir) = common::create_test_project_with_dir(harness.db()).await;
 
     let rejected = harness
-        .call_tool(
-            "project_remove",
-            json!({"project": "nonexistent/project"}),
-        )
+        .call_tool("project_remove", json!({"project": "nonexistent/project"}))
         .await
         .expect("project_remove should dispatch");
     assert!(

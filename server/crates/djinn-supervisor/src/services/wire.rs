@@ -228,7 +228,10 @@ pub enum ServiceRpcRequest {
         params: SerializableCreateTaskRunParams,
     },
     /// [`crate::SupervisorServices::update_task_run_status`].
-    UpdateTaskRunStatus { run_id: String, status: TaskRunStatus },
+    UpdateTaskRunStatus {
+        run_id: String,
+        status: TaskRunStatus,
+    },
     /// [`crate::SupervisorServices::get_model_context_window`].
     /// Phase 6b — catalog read extraction.
     GetModelContextWindow { model_id: String },
@@ -549,8 +552,7 @@ mod tests {
 
     #[test]
     fn execute_stage_reply_err_roundtrip() {
-        let resp =
-            ServiceRpcResponse::ExecuteStage(Err(StageError::Setup("no such role".into())));
+        let resp = ServiceRpcResponse::ExecuteStage(Err(StageError::Setup("no such role".into())));
         let f = Frame {
             correlation_id: 2,
             payload: FramePayload::RpcReply(resp),
@@ -558,9 +560,9 @@ mod tests {
         let bytes = bincode::serialize(&f).unwrap();
         let back: Frame = bincode::deserialize(&bytes).unwrap();
         match back.payload {
-            FramePayload::RpcReply(ServiceRpcResponse::ExecuteStage(Err(
-                StageError::Setup(msg),
-            ))) => {
+            FramePayload::RpcReply(ServiceRpcResponse::ExecuteStage(Err(StageError::Setup(
+                msg,
+            )))) => {
                 assert_eq!(msg, "no such role");
             }
             other => panic!("unexpected: {other:?}"),
@@ -585,10 +587,12 @@ mod tests {
         let bytes = bincode::serialize(&f).unwrap();
         let back: Frame = bincode::deserialize(&bytes).unwrap();
         match back.payload {
-            FramePayload::RpcReply(ServiceRpcResponse::ExecuteStage(Ok(StageOutcome::Failed {
-                reason,
-                provider_failure,
-            }))) => {
+            FramePayload::RpcReply(ServiceRpcResponse::ExecuteStage(Ok(
+                StageOutcome::Failed {
+                    reason,
+                    provider_failure,
+                },
+            ))) => {
                 assert_eq!(reason, "rate limited");
                 assert_eq!(
                     provider_failure,
@@ -816,8 +820,7 @@ mod tests {
 
     #[test]
     fn get_provider_base_url_reply_roundtrip() {
-        let resp =
-            ServiceRpcResponse::GetProviderBaseUrl(Ok("https://api.anthropic.com".into()));
+        let resp = ServiceRpcResponse::GetProviderBaseUrl(Ok("https://api.anthropic.com".into()));
         let f = Frame {
             correlation_id: 22,
             payload: FramePayload::RpcReply(resp),
@@ -863,9 +866,7 @@ mod tests {
 
     #[test]
     fn pick_any_default_model_reply_roundtrip() {
-        let resp = ServiceRpcResponse::PickAnyDefaultModel(Ok(Some(
-            "openai/gpt-4o-mini".into(),
-        )));
+        let resp = ServiceRpcResponse::PickAnyDefaultModel(Ok(Some("openai/gpt-4o-mini".into())));
         let f = Frame {
             correlation_id: 23,
             payload: FramePayload::RpcReply(resp),
@@ -1038,11 +1039,12 @@ mod tests {
         // untagged-enum HookCommand variants (Shell, Exec, Parallel) to
         // prove the opaque-JSON wire shape survives the trap shape
         // production sees once `lifecycle.*` lists are non-empty.
-        use djinn_stack::environment::{
-            EnvironmentConfig, HookCommand, LifecycleHooks,
-        };
+        use djinn_stack::environment::{EnvironmentConfig, HookCommand, LifecycleHooks};
         let mut parallel = std::collections::BTreeMap::new();
-        parallel.insert("install".into(), HookCommand::Shell("pip install -e .".into()));
+        parallel.insert(
+            "install".into(),
+            HookCommand::Shell("pip install -e .".into()),
+        );
         parallel.insert(
             "index".into(),
             HookCommand::Exec(vec!["scip-python".into(), "index".into()]),
@@ -1060,8 +1062,7 @@ mod tests {
             },
             ..EnvironmentConfig::empty()
         };
-        let cfg_json =
-            serde_json::to_string(&cfg).expect("encode EnvironmentConfig");
+        let cfg_json = serde_json::to_string(&cfg).expect("encode EnvironmentConfig");
         let resp = ServiceRpcResponse::GetEnvironmentConfig(Ok(cfg_json.clone()));
         let f = Frame {
             correlation_id: 33,
@@ -1139,11 +1140,9 @@ mod tests {
                 assert_eq!(tools, tools_str);
                 assert_eq!(tool_choice, Some(ToolChoice::Auto));
                 // Re-parse and confirm structural fidelity end-to-end.
-                let conv_back: Conversation =
-                    serde_json::from_str(&conversation).unwrap();
+                let conv_back: Conversation = serde_json::from_str(&conversation).unwrap();
                 assert_eq!(conv_back.len(), 2);
-                let tools_back: Vec<serde_json::Value> =
-                    serde_json::from_str(&tools).unwrap();
+                let tools_back: Vec<serde_json::Value> = serde_json::from_str(&tools).unwrap();
                 assert_eq!(tools_back, tools_value);
             }
             other => panic!("unexpected: {other:?}"),
@@ -1274,8 +1273,8 @@ mod tests {
     /// and needs every field slot populated. Keep this test as the canary.
     #[test]
     fn emit_djinn_event_request_roundtrip_with_both_options_none() {
-        let payload_str = serde_json::json!({"kind": "activity", "msg": "tearing down"})
-            .to_string();
+        let payload_str =
+            serde_json::json!({"kind": "activity", "msg": "tearing down"}).to_string();
         let event = SerializableDjinnEvent {
             entity_type: "activity".into(),
             action: "logged".into(),

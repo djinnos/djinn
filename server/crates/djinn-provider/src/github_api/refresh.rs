@@ -72,7 +72,12 @@ pub struct DbBackedRefresher {
 }
 
 impl DbBackedRefresher {
-    pub fn new(db: Database, session_token: String, client_id: String, client_secret: String) -> Self {
+    pub fn new(
+        db: Database,
+        session_token: String,
+        client_id: String,
+        client_secret: String,
+    ) -> Self {
         Self {
             db,
             session_token,
@@ -138,7 +143,9 @@ async fn persist_rotated_tokens(
     tokens: &GithubUserTokens,
 ) -> Result<()> {
     let access_expires_at = tokens.expires_in.map(rfc3339_seconds_from_now);
-    let refresh_expires_at = tokens.refresh_token_expires_in.map(rfc3339_seconds_from_now);
+    let refresh_expires_at = tokens
+        .refresh_token_expires_in
+        .map(rfc3339_seconds_from_now);
 
     repo.update_github_tokens(
         session_token,

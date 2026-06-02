@@ -1531,13 +1531,19 @@ mod tests {
         state.agent_context().register_activity(&task.id);
 
         let selection = state
-            .resolve_memory_mount_view_selection(&project.id, &djinn_core::paths::project_dir(&project.github_owner, &project.github_repo))
+            .resolve_memory_mount_view_selection(
+                &project.id,
+                &djinn_core::paths::project_dir(&project.github_owner, &project.github_repo),
+            )
             .await;
 
         assert_eq!(selection, MemoryViewSelection::Canonical);
 
         let resolution = state
-            .resolve_memory_mount_view_resolution(&project.id, &djinn_core::paths::project_dir(&project.github_owner, &project.github_repo))
+            .resolve_memory_mount_view_resolution(
+                &project.id,
+                &djinn_core::paths::project_dir(&project.github_owner, &project.github_repo),
+            )
             .await;
         assert_eq!(
             resolution.health.kind,
@@ -1571,13 +1577,19 @@ mod tests {
         agent.register_activity(&second.id);
 
         let selection = state
-            .resolve_memory_mount_view_selection(&project.id, &djinn_core::paths::project_dir(&project.github_owner, &project.github_repo))
+            .resolve_memory_mount_view_selection(
+                &project.id,
+                &djinn_core::paths::project_dir(&project.github_owner, &project.github_repo),
+            )
             .await;
 
         assert_eq!(selection, MemoryViewSelection::Canonical);
 
         let resolution = state
-            .resolve_memory_mount_view_resolution(&project.id, &djinn_core::paths::project_dir(&project.github_owner, &project.github_repo))
+            .resolve_memory_mount_view_resolution(
+                &project.id,
+                &djinn_core::paths::project_dir(&project.github_owner, &project.github_repo),
+            )
             .await;
         let fallback = resolution
             .health

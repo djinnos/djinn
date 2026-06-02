@@ -300,7 +300,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn applies_task_success_signal_to_referenced_notes() {
         let harness = make_harness().await;
-        spawn_task_outcome_listener(harness.db.clone(), harness.event_bus.clone(), &harness.events);
+        spawn_task_outcome_listener(
+            harness.db.clone(),
+            harness.event_bus.clone(),
+            &harness.events,
+        );
 
         let task_repo = TaskRepository::new(harness.db.clone(), harness.event_bus.clone());
         let note_repo = NoteRepository::new(harness.db.clone(), harness.event_bus.clone());
@@ -395,7 +399,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn no_memory_refs_is_noop_for_task_completion() {
         let harness = make_harness().await;
-        spawn_task_outcome_listener(harness.db.clone(), harness.event_bus.clone(), &harness.events);
+        spawn_task_outcome_listener(
+            harness.db.clone(),
+            harness.event_bus.clone(),
+            &harness.events,
+        );
 
         let task_repo = TaskRepository::new(harness.db.clone(), harness.event_bus.clone());
         let project_repo =
@@ -453,7 +461,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn missing_memory_refs_are_skipped() {
         let harness = make_harness().await;
-        spawn_task_outcome_listener(harness.db.clone(), harness.event_bus.clone(), &harness.events);
+        spawn_task_outcome_listener(
+            harness.db.clone(),
+            harness.event_bus.clone(),
+            &harness.events,
+        );
 
         let task_repo = TaskRepository::new(harness.db.clone(), harness.event_bus.clone());
         let project_repo =
@@ -523,7 +535,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn duplicate_task_completion_events_are_ignored() {
         let harness = make_harness().await;
-        spawn_task_outcome_listener(harness.db.clone(), harness.event_bus.clone(), &harness.events);
+        spawn_task_outcome_listener(
+            harness.db.clone(),
+            harness.event_bus.clone(),
+            &harness.events,
+        );
 
         let task_repo = TaskRepository::new(harness.db.clone(), harness.event_bus.clone());
         let note_repo = NoteRepository::new(harness.db.clone(), harness.event_bus.clone());

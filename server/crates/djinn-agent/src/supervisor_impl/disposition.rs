@@ -162,7 +162,10 @@ mod tests {
             .iter()
             .filter(|d| **d == RunDisposition::Nudge)
             .count();
-        assert_eq!(nudge_total, NUDGE_CAP as usize, "must nudge exactly the cap");
+        assert_eq!(
+            nudge_total, NUDGE_CAP as usize,
+            "must nudge exactly the cap"
+        );
     }
 
     // ── Inconclusive is never auto-nudged ───────────────────────────────────

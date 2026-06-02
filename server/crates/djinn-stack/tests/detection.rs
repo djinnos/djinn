@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use djinn_stack::{detect, Stack};
+use djinn_stack::{Stack, detect};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -59,8 +59,7 @@ async fn assert_fixture(name: &str) {
         stack.primary_language, expected.primary_language,
         "{name}: primary_language"
     );
-    let detected_lang_names: Vec<String> =
-        stack.languages.iter().map(|l| l.name.clone()).collect();
+    let detected_lang_names: Vec<String> = stack.languages.iter().map(|l| l.name.clone()).collect();
     assert_eq!(
         detected_lang_names, expected.languages,
         "{name}: language byte-share order"
@@ -73,20 +72,47 @@ async fn assert_fixture(name: &str) {
         stack.monorepo_tools, expected.monorepo_tools,
         "{name}: monorepo_tools"
     );
-    assert_eq!(stack.is_monorepo, expected.is_monorepo, "{name}: is_monorepo");
-    assert_eq!(stack.test_runners, expected.test_runners, "{name}: test_runners");
+    assert_eq!(
+        stack.is_monorepo, expected.is_monorepo,
+        "{name}: is_monorepo"
+    );
+    assert_eq!(
+        stack.test_runners, expected.test_runners,
+        "{name}: test_runners"
+    );
     assert_eq!(stack.frameworks, expected.frameworks, "{name}: frameworks");
-    assert_eq!(stack.runtimes.node, expected.runtimes.node, "{name}: node runtime");
-    assert_eq!(stack.runtimes.rust, expected.runtimes.rust, "{name}: rust runtime");
-    assert_eq!(stack.runtimes.python, expected.runtimes.python, "{name}: python runtime");
-    assert_eq!(stack.runtimes.go, expected.runtimes.go, "{name}: go runtime");
+    assert_eq!(
+        stack.runtimes.node, expected.runtimes.node,
+        "{name}: node runtime"
+    );
+    assert_eq!(
+        stack.runtimes.rust, expected.runtimes.rust,
+        "{name}: rust runtime"
+    );
+    assert_eq!(
+        stack.runtimes.python, expected.runtimes.python,
+        "{name}: python runtime"
+    );
+    assert_eq!(
+        stack.runtimes.go, expected.runtimes.go,
+        "{name}: go runtime"
+    );
 
     let got = &stack.manifest_signals;
-    assert_eq!(got.has_package_json, expected.manifest_signals.has_package_json);
+    assert_eq!(
+        got.has_package_json,
+        expected.manifest_signals.has_package_json
+    );
     assert_eq!(got.has_cargo_toml, expected.manifest_signals.has_cargo_toml);
-    assert_eq!(got.has_pyproject_toml, expected.manifest_signals.has_pyproject_toml);
+    assert_eq!(
+        got.has_pyproject_toml,
+        expected.manifest_signals.has_pyproject_toml
+    );
     assert_eq!(got.has_go_mod, expected.manifest_signals.has_go_mod);
-    assert_eq!(got.has_pnpm_workspace, expected.manifest_signals.has_pnpm_workspace);
+    assert_eq!(
+        got.has_pnpm_workspace,
+        expected.manifest_signals.has_pnpm_workspace
+    );
     assert_eq!(got.has_turbo_json, expected.manifest_signals.has_turbo_json);
 }
 

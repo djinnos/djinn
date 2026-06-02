@@ -27,8 +27,11 @@ impl SessionMessageRepository {
         self.db.ensure_initialized().await?;
         let id = uuid::Uuid::now_v7().to_string();
 
-        let content_value: serde_json::Value = serde_json::from_str(content_json)
-            .map_err(|e| crate::Error::InvalidData(format!("invalid json for session_messages.content_json: {e}")))?;
+        let content_value: serde_json::Value = serde_json::from_str(content_json).map_err(|e| {
+            crate::Error::InvalidData(format!(
+                "invalid json for session_messages.content_json: {e}"
+            ))
+        })?;
         sqlx::query!(
             "INSERT INTO session_messages (id, session_id, role, content_json, token_count)
              VALUES ($1, $2, $3, $4, $5)",
@@ -167,8 +170,7 @@ impl SessionMessageRepository {
         // positional placeholders ($1, $2, …), NOT MySQL `?` — the latter is
         // a syntax error inside `IN (...)` and 500'd the whole chat-sessions
         // list (`syntax error at or near ","`), leaving the chat tab empty.
-        let placeholders: Vec<String> =
-            (1..=session_ids.len()).map(|n| format!("${n}")).collect();
+        let placeholders: Vec<String> = (1..=session_ids.len()).map(|n| format!("${n}")).collect();
         // content_json is JSONB; cast to text so it decodes into the
         // String tuple slot (sqlx won't coerce JSONB→String otherwise).
         let sql = format!(

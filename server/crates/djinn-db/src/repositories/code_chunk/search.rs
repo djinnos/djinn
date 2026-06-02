@@ -138,13 +138,10 @@ pub async fn lexical_search_chunks(
             let body_lower = r.embedded_text.to_ascii_lowercase();
 
             let trimmed_pattern = pattern.trim_matches('%');
-            let phrase_hit = !trimmed_pattern.is_empty()
-                && body_lower.contains(trimmed_pattern);
+            let phrase_hit = !trimmed_pattern.is_empty() && body_lower.contains(trimmed_pattern);
 
-            let symbol_full = !tokens.is_empty()
-                && tokens.iter().all(|t| symbol_lower.contains(t));
-            let file_full = !tokens.is_empty()
-                && tokens.iter().all(|t| file_lower.contains(t));
+            let symbol_full = !tokens.is_empty() && tokens.iter().all(|t| symbol_lower.contains(t));
+            let file_full = !tokens.is_empty() && tokens.iter().all(|t| file_lower.contains(t));
 
             let mut score = 0.0;
             if symbol_full {
@@ -210,11 +207,9 @@ pub async fn hydrate_chunk_ids(
         crate::repositories::pg_placeholders(chunk_id_scores.len(), 2)
     );
 
-    let mut q = sqlx::query_as::<
-        sqlx::Postgres,
-        (String, String, Option<String>, String, i32, i32),
-    >(&sql)
-    .bind(project_id);
+    let mut q =
+        sqlx::query_as::<sqlx::Postgres, (String, String, Option<String>, String, i32, i32)>(&sql)
+            .bind(project_id);
     for (chunk_id, _) in chunk_id_scores {
         q = q.bind(chunk_id);
     }
@@ -229,8 +224,7 @@ pub async fn hydrate_chunk_ids(
     let hits: Vec<CodeChunkSearchHit> = chunk_id_scores
         .iter()
         .filter_map(|(chunk_id, score)| {
-            let (file_path, symbol_key, kind, start_line, end_line) =
-                by_id.get(chunk_id)?.clone();
+            let (file_path, symbol_key, kind, start_line, end_line) = by_id.get(chunk_id)?.clone();
             Some(CodeChunkSearchHit {
                 chunk_id: chunk_id.clone(),
                 file_path,
@@ -273,8 +267,7 @@ mod tests {
 
     #[test]
     fn sanitize_like_query_strips_metachars() {
-        let (pattern, tokens) =
-            sanitize_like_query("permissions check %_\\").expect("non-empty");
+        let (pattern, tokens) = sanitize_like_query("permissions check %_\\").expect("non-empty");
         assert!(!pattern.contains('%') || pattern.starts_with('%') && pattern.ends_with('%'));
         // The %s on the outside are our wildcard; only those two should remain.
         assert_eq!(pattern.matches('%').count(), 2);
@@ -310,7 +303,10 @@ mod tests {
         let capped = cap_per_file(hits, 3);
         assert_eq!(capped.len(), 4);
         assert_eq!(
-            capped.iter().map(|h| h.chunk_id.as_str()).collect::<Vec<_>>(),
+            capped
+                .iter()
+                .map(|h| h.chunk_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["a", "b", "c", "f"]
         );
     }
@@ -347,12 +343,24 @@ mod tests {
         // Insert a chunk whose `embedded_text` mentions "permissions" and
         // another that doesn't, plus a third whose symbol_key matches.
         for (id, file, sym, body) in [
-            ("c1", "src/auth.rs", Some("rust:auth::check_permissions"),
-             "Label: check_permissions\nFile: src/auth.rs\nKind: function\n…"),
-            ("c2", "src/unrelated.rs", Some("rust::other::helper"),
-             "Label: helper\nFile: src/unrelated.rs\nKind: function\n…"),
-            ("c3", "src/auth.rs", None,
-             "Label: file body\nFile: src/auth.rs\nNote: discusses permissions logic"),
+            (
+                "c1",
+                "src/auth.rs",
+                Some("rust:auth::check_permissions"),
+                "Label: check_permissions\nFile: src/auth.rs\nKind: function\n…",
+            ),
+            (
+                "c2",
+                "src/unrelated.rs",
+                Some("rust::other::helper"),
+                "Label: helper\nFile: src/unrelated.rs\nKind: function\n…",
+            ),
+            (
+                "c3",
+                "src/auth.rs",
+                None,
+                "Label: file body\nFile: src/auth.rs\nNote: discusses permissions logic",
+            ),
         ] {
             sqlx::query!(
                 r#"INSERT INTO code_chunks

@@ -2,12 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use djinn_memory::Note;
 use djinn_db::{
     NoteRepository, folder_for_type, infer_embedding_branch_from_worktree, infer_note_type,
     normalize_virtual_note_path, permalink_for, permalink_from_virtual_note_path,
     render_note_markdown, task_branch_name, title_from_permalink, virtual_note_path_for_permalink,
 };
+use djinn_memory::Note;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,8 +94,8 @@ impl MemoryViewResolver for DefaultMemoryViewResolver {
             MemoryViewSelection::Canonical => ("main".to_string(), None),
             MemoryViewSelection::Branch { branch } => (branch.clone(), None),
             MemoryViewSelection::Worktree { root } => {
-                let branch =
-                    infer_embedding_branch_from_worktree(root).unwrap_or_else(|| "main".to_string());
+                let branch = infer_embedding_branch_from_worktree(root)
+                    .unwrap_or_else(|| "main".to_string());
                 (branch, Some(root.clone()))
             }
             MemoryViewSelection::Task {
@@ -752,15 +752,9 @@ mod tests {
     async fn stats_and_lists_directories() {
         let (core, db, project_id, _project_root) = make_core().await;
         let repo = NoteRepository::new(db, EventBus::noop());
-        repo.create(
-            &project_id,
-            "Project Brief",
-            "Overview",
-            "brief",
-            "[]",
-        )
-        .await
-        .unwrap();
+        repo.create(&project_id, "Project Brief", "Overview", "brief", "[]")
+            .await
+            .unwrap();
         repo.create(
             &project_id,
             "Routing Guide",
@@ -827,15 +821,9 @@ mod tests {
         let (core, db, project_id, project_root) = make_core().await;
         let repo = NoteRepository::new(db, EventBus::noop());
 
-        repo.create(
-            &project_id,
-            "Target Note",
-            "Target body",
-            "reference",
-            "[]",
-        )
-        .await
-        .unwrap();
+        repo.create(&project_id, "Target Note", "Target body", "reference", "[]")
+            .await
+            .unwrap();
 
         let created = core
             .write_file(
@@ -1049,15 +1037,9 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let project = make_project(&db, project_root.path()).await;
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
-        repo.create(
-            &project.id,
-            "Selection Note",
-            "body",
-            "reference",
-            "[]",
-        )
-        .await
-        .unwrap();
+        repo.create(&project.id, "Selection Note", "body", "reference", "[]")
+            .await
+            .unwrap();
 
         let recording = Arc::new(RecordingResolver::default());
         let core = MemoryFilesystemCore::new(repo.clone()).with_view_resolver(recording.clone());

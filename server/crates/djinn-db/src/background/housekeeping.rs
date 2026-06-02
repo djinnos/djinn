@@ -5,9 +5,9 @@ use djinn_core::models::Project;
 use tokio::time::{Interval, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
+use crate::Database;
 use crate::repositories::note::NoteRepository;
 use crate::repositories::project::ProjectRepository;
-use crate::Database;
 
 const DEFAULT_HOUSEKEEPING_INTERVAL_SECS: u64 = 60 * 60;
 const ORPHAN_TAG: &str = "orphan";
@@ -120,10 +120,7 @@ fn ticker_missed_tick_behavior(interval: Duration) -> MissedTickBehavior {
     ticker.missed_tick_behavior()
 }
 
-async fn run_tick(
-    db: &Database,
-    event_bus: &EventBus,
-) -> anyhow::Result<HousekeepingTickReport> {
+async fn run_tick(db: &Database, event_bus: &EventBus) -> anyhow::Result<HousekeepingTickReport> {
     let project_repo = ProjectRepository::new(db.clone(), event_bus.clone());
     let projects = project_repo.list().await?;
 
@@ -201,8 +198,8 @@ pub(crate) fn merge_orphan_tag(tags_json: &str, orphan_tag: &str) -> String {
 mod tests {
     use std::collections::HashMap;
 
-    use crate::repositories::test_support::build_multi_project_housekeeping_fixture;
     use crate::NoteSearchParams;
+    use crate::repositories::test_support::build_multi_project_housekeeping_fixture;
     use djinn_core::events::EventBus;
     use futures::StreamExt;
 
@@ -370,11 +367,12 @@ mod tests {
             .unwrap();
             assert_eq!(unresolved_after, 0);
 
-            let orphan_tags: String = sqlx::query_scalar(r#"SELECT tags::text AS "tags!" FROM notes WHERE id = $1"#)
-                .bind(&fixture_project.orphan_note_id)
-                .fetch_one(db.pool())
-                .await
-                .unwrap();
+            let orphan_tags: String =
+                sqlx::query_scalar(r#"SELECT tags::text AS "tags!" FROM notes WHERE id = $1"#)
+                    .bind(&fixture_project.orphan_note_id)
+                    .fetch_one(db.pool())
+                    .await
+                    .unwrap();
             assert_eq!(orphan_tags, "[\"orphan\"]");
 
             let rebuilt_hashes: Vec<Option<String>> =

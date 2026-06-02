@@ -272,12 +272,8 @@ impl CoordinatorActor {
                 let reason = self
                     .build_pr_conflict_reason(&task.short_id, &task.project_id)
                     .await;
-                self.apply_pr_transition(
-                    &task.id,
-                    TransitionAction::PrConflict,
-                    Some(&reason),
-                )
-                .await;
+                self.apply_pr_transition(&task.id, TransitionAction::PrConflict, Some(&reason))
+                    .await;
                 // Reactive auto-blocker: if exactly one racing same-epic sibling
                 // is landing on main, make this task WAIT for it (beside the
                 // reopen above) instead of looping on the moving main.
@@ -630,12 +626,8 @@ impl CoordinatorActor {
                 let reason = self
                     .build_pr_conflict_reason(&task.short_id, &task.project_id)
                     .await;
-                self.apply_pr_transition(
-                    &task.id,
-                    TransitionAction::PrConflict,
-                    Some(&reason),
-                )
-                .await;
+                self.apply_pr_transition(&task.id, TransitionAction::PrConflict, Some(&reason))
+                    .await;
                 // Reactive auto-blocker: if exactly one racing same-epic sibling
                 // is landing on main, make this task WAIT for it (beside the
                 // reopen above) instead of looping on the moving main.
@@ -737,8 +729,9 @@ impl CoordinatorActor {
                     .auto_approve_attempted
                     .get(&task.id)
                     .is_none_or(|sha| sha != &current_sha)
-                && let Some((user_id, session)) =
-                    self.find_auto_approver_session(&task.id, &task.short_id).await
+                && let Some((user_id, session)) = self
+                    .find_auto_approver_session(&task.id, &task.short_id)
+                    .await
             {
                 // Build a refreshable client when App OAuth creds are
                 // visible to this process — that lets the transport
@@ -750,13 +743,8 @@ impl CoordinatorActor {
                 let user_client = match github_app_user::client_credentials_from_env() {
                     Some((cid, secret)) => GitHubApiClient::for_user_session(
                         session.github_access_token.clone(),
-                        DbBackedRefresher::new(
-                            self.db.clone(),
-                            session.token.clone(),
-                            cid,
-                            secret,
-                        )
-                        .into_arc(),
+                        DbBackedRefresher::new(self.db.clone(), session.token.clone(), cid, secret)
+                            .into_arc(),
                     ),
                     None => {
                         tracing::debug!(
@@ -1275,9 +1263,8 @@ impl CoordinatorActor {
             ),
         }
 
-        let transition_reason = format!(
-            "merge queue rejected PR (reason: {reason}) — re-run with fresh CI feedback"
-        );
+        let transition_reason =
+            format!("merge queue rejected PR (reason: {reason}) — re-run with fresh CI feedback");
         self.apply_pr_transition(
             task_id,
             TransitionAction::PrCiFailed,
@@ -1381,7 +1368,8 @@ impl CoordinatorActor {
             .await
         {
             Ok(0) => {
-                let blocking_names: Vec<&str> = blocking.iter().map(|cr| cr.name.as_str()).collect();
+                let blocking_names: Vec<&str> =
+                    blocking.iter().map(|cr| cr.name.as_str()).collect();
                 let reason = format!(
                     "PR #{pull_number} stuck: required checks keep failing ({}) but the task branch \
                      has no commits ahead of `{base_ref}` (head `{sha}`) — the worker produced no new \
@@ -1395,7 +1383,8 @@ impl CoordinatorActor {
                     sha = %current_sha,
                     "PR poller: CI failed but branch is diff-empty vs base — escalating + force-closing"
                 );
-                self.escalate_ci_failure_and_close(task, pr_url, &reason).await;
+                self.escalate_ci_failure_and_close(task, pr_url, &reason)
+                    .await;
                 return true;
             }
             Ok(_) => {}
@@ -1454,7 +1443,8 @@ impl CoordinatorActor {
                 threshold = PR_CI_FAILURE_THRESHOLD,
                 "PR poller: CI-failure rework threshold exceeded — escalating + force-closing"
             );
-            self.escalate_ci_failure_and_close(task, pr_url, &reason).await;
+            self.escalate_ci_failure_and_close(task, pr_url, &reason)
+                .await;
             return true;
         }
 
@@ -2131,11 +2121,7 @@ impl CoordinatorActor {
 
         // `None` means "no run jobs available at all" → fall back to listing
         // raw check-run names. An empty-but-fetched list is still `Some`.
-        let jobs: Option<&[ActionsJob]> = if any_fetched {
-            Some(&all_jobs)
-        } else {
-            None
-        };
+        let jobs: Option<&[ActionsJob]> = if any_fetched { Some(&all_jobs) } else { None };
 
         let (mut sections, ci_jobs) = build_ci_failure_sections(jobs, failed_checks);
 
@@ -2944,7 +2930,9 @@ mod tests {
     #[test]
     fn advisory_check_names_classified() {
         // The real 1ck3 offenders.
-        assert!(is_advisory_check_name("PR Preview Environment Setup / setup-preview"));
+        assert!(is_advisory_check_name(
+            "PR Preview Environment Setup / setup-preview"
+        ));
         assert!(is_advisory_check_name("Vercel – acme-portal"));
         assert!(is_advisory_check_name("Vercel – admin-portal"));
         assert!(is_advisory_check_name("Netlify deploy"));
@@ -3007,7 +2995,11 @@ mod tests {
         let mystery = check("some-custom-gate");
         let failed = vec![&mystery];
         let blocking = blocking_failed_checks(&failed, None);
-        assert_eq!(blocking.len(), 1, "unknown checks must be treated as blocking");
+        assert_eq!(
+            blocking.len(),
+            1,
+            "unknown checks must be treated as blocking"
+        );
     }
 
     #[test]
@@ -3035,9 +3027,8 @@ mod tests {
 
     #[test]
     fn is_merge_queue_405_ignores_other_status_codes() {
-        let err = anyhow::anyhow!(
-            "merge_pull_request failed (422): Pull Request is in the merge queue."
-        );
+        let err =
+            anyhow::anyhow!("merge_pull_request failed (422): Pull Request is in the merge queue.");
         // Not a 405 — must not match.
         assert!(!is_merge_queue_405(&err));
     }
@@ -3064,8 +3055,7 @@ mod tests {
 
     #[test]
     fn is_conversation_resolution_block_ignores_generic_405() {
-        let err =
-            anyhow::anyhow!("merge_pull_request failed (405): {{\"message\":\"locked\"}}");
+        let err = anyhow::anyhow!("merge_pull_request failed (405): {{\"message\":\"locked\"}}");
         assert!(!is_conversation_resolution_block(&err));
     }
 
@@ -3142,12 +3132,7 @@ mod tests {
         }
     }
 
-    fn failed_job(
-        id: u64,
-        name: &str,
-        workflow: &str,
-        steps: Vec<ActionsJobStep>,
-    ) -> ActionsJob {
+    fn failed_job(id: u64, name: &str, workflow: &str, steps: Vec<ActionsJobStep>) -> ActionsJob {
         ActionsJob {
             id,
             name: name.to_string(),
@@ -3207,7 +3192,10 @@ mod tests {
                 vec![failed_step("cargo publish", 5)],
             ),
         ];
-        let checks = [check_run("CI / build", 100), check_run("Release / publish", 200)];
+        let checks = [
+            check_run("CI / build", 100),
+            check_run("Release / publish", 200),
+        ];
         let refs: Vec<&CheckRun> = checks.iter().collect();
         let (sections, ci_jobs) = build_ci_failure_sections(Some(&jobs), &refs);
 
@@ -3242,8 +3230,7 @@ mod tests {
         ];
         // Simulate the caller's de-dup so the helper sees deduped input.
         let mut seen = std::collections::HashSet::new();
-        let deduped: Vec<ActionsJob> =
-            jobs.into_iter().filter(|j| seen.insert(j.id)).collect();
+        let deduped: Vec<ActionsJob> = jobs.into_iter().filter(|j| seen.insert(j.id)).collect();
         let refs: Vec<&CheckRun> = Vec::new();
         let (_sections, ci_jobs) = build_ci_failure_sections(Some(&deduped), &refs);
         assert_eq!(ci_jobs.len(), 1);

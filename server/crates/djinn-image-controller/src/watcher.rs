@@ -212,12 +212,7 @@ async fn handle_event(
         return;
     };
 
-    let labels = job
-        .metadata
-        .labels
-        .as_ref()
-        .cloned()
-        .unwrap_or_default();
+    let labels = job.metadata.labels.as_ref().cloned().unwrap_or_default();
     let Some(project_id) = labels.get(LABEL_PROJECT_ID).cloned() else {
         warn!(
             job = ?job.metadata.name,
@@ -246,12 +241,12 @@ async fn handle_event(
     // (or after the in-memory set was populated by a prior run) silently
     // skipped the DB status flip, leaving image_status pinned at
     // "building" even though the fresh Job completed successfully.
-    let job_uid = job
-        .metadata
-        .uid
-        .clone()
-        .unwrap_or_else(|| job_name.clone());
-    let dedupe_key = format!("{project_id}:{hash_prefix}:{}:{}", outcome.kind_str(), job_uid);
+    let job_uid = job.metadata.uid.clone().unwrap_or_else(|| job_name.clone());
+    let dedupe_key = format!(
+        "{project_id}:{hash_prefix}:{}:{}",
+        outcome.kind_str(),
+        job_uid
+    );
     if seen.contains(&dedupe_key) {
         debug!(
             project_id,
@@ -264,8 +259,16 @@ async fn handle_event(
 
     match outcome {
         JobOutcome::Succeeded => {
-            apply_success(config, repo, event_bus, &project_id, &hash_prefix, &job_name, &labels)
-                .await;
+            apply_success(
+                config,
+                repo,
+                event_bus,
+                &project_id,
+                &hash_prefix,
+                &job_name,
+                &labels,
+            )
+            .await;
             // Kick the canonical-graph warmer so the coordinator's dispatch
             // gate clears without waiting for the next mirror-fetch tick.
             // Fire-and-forget: the warmer's own single-flight guard + DB
@@ -672,7 +675,9 @@ mod tests {
             "proj-xyz",
             None,
             Some("deadbeef"),
-            Some("build Job djinn-build-proj-xyz-deadbeef failed; see kubectl logs job/djinn-build-proj-xyz-deadbeef"),
+            Some(
+                "build Job djinn-build-proj-xyz-deadbeef failed; see kubectl logs job/djinn-build-proj-xyz-deadbeef",
+            ),
             None,
             "djinn-build-proj-xyz-deadbeef",
         );

@@ -298,11 +298,8 @@ mod tests {
         };
         state.set_app_config(Some(Arc::new(cfg))).await;
 
-        let resp = select_installation(
-            State(state),
-            Json(SelectRequest { installation_id: 0 }),
-        )
-        .await;
+        let resp =
+            select_installation(State(state), Json(SelectRequest { installation_id: 0 })).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

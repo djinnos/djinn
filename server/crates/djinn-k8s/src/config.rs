@@ -274,27 +274,29 @@ impl KubernetesConfig {
             cfg.warm_memory_limit = v;
         }
         if let Ok(v) = std::env::var("DJINN_K8S_NODE_SELECTOR")
-            && !v.is_empty() {
-                match serde_json::from_str::<BTreeMap<String, String>>(&v) {
-                    Ok(map) => cfg.node_selector = map,
-                    Err(e) => tracing::warn!(
-                        value = %v,
-                        error = %e,
-                        "DJINN_K8S_NODE_SELECTOR not valid JSON (expected object of string→string) — keeping default"
-                    ),
-                }
+            && !v.is_empty()
+        {
+            match serde_json::from_str::<BTreeMap<String, String>>(&v) {
+                Ok(map) => cfg.node_selector = map,
+                Err(e) => tracing::warn!(
+                    value = %v,
+                    error = %e,
+                    "DJINN_K8S_NODE_SELECTOR not valid JSON (expected object of string→string) — keeping default"
+                ),
             }
+        }
         if let Ok(v) = std::env::var("DJINN_K8S_TOLERATIONS")
-            && !v.is_empty() {
-                match serde_json::from_str::<Vec<Toleration>>(&v) {
-                    Ok(t) => cfg.tolerations = t,
-                    Err(e) => tracing::warn!(
-                        value = %v,
-                        error = %e,
-                        "DJINN_K8S_TOLERATIONS not valid JSON (expected array of Toleration objects) — keeping default"
-                    ),
-                }
+            && !v.is_empty()
+        {
+            match serde_json::from_str::<Vec<Toleration>>(&v) {
+                Ok(t) => cfg.tolerations = t,
+                Err(e) => tracing::warn!(
+                    value = %v,
+                    error = %e,
+                    "DJINN_K8S_TOLERATIONS not valid JSON (expected array of Toleration objects) — keeping default"
+                ),
             }
+        }
         cfg
     }
 }
@@ -360,10 +362,7 @@ mod tests {
         let saved_tol = std::env::var("DJINN_K8S_TOLERATIONS").ok();
         // SAFETY: serialized against sibling tests via ENV_LOCK.
         unsafe {
-            std::env::set_var(
-                "DJINN_K8S_NODE_SELECTOR",
-                r#"{"workload-type":"djinn"}"#,
-            );
+            std::env::set_var("DJINN_K8S_NODE_SELECTOR", r#"{"workload-type":"djinn"}"#);
             std::env::set_var(
                 "DJINN_K8S_TOLERATIONS",
                 r#"[{"key":"workload-type","operator":"Equal","value":"djinn","effect":"NoSchedule"}]"#,

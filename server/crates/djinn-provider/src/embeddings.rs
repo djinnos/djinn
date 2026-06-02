@@ -14,7 +14,10 @@ use candle_nn::VarBuilder;
 use candle_transformers::models::nomic_bert::{self, Config, NomicBertModel};
 use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
 use serde::Serialize;
-use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationDirection, TruncationParams, TruncationStrategy};
+use tokenizers::{
+    PaddingParams, PaddingStrategy, Tokenizer, TruncationDirection, TruncationParams,
+    TruncationStrategy,
+};
 use tokio::sync::{Mutex, OnceCell};
 
 use djinn_db::{

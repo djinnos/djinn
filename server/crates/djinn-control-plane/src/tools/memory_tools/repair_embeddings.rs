@@ -69,11 +69,7 @@ async fn repair_embeddings(
     // When the vector store cannot index (Noop, or Qdrant unreachable),
     // every meta row is "pending" by design and re-embedding would just
     // loop, so fall back to the hash+version-only freshness check.
-    let vector_store_active = repo
-        .vector_store()
-        .can_index(&repo)
-        .await
-        .unwrap_or(false);
+    let vector_store_active = repo.vector_store().can_index(&repo).await.unwrap_or(false);
 
     let rows = match repo.list_repair_embedding_rows(&project_id).await {
         Ok(rows) => rows,
@@ -96,8 +92,7 @@ async fn repair_embeddings(
 
         let is_stale = match (row.content_hash.as_deref(), row.model_version.as_deref()) {
             (Some(hash), Some(version)) => {
-                let content_or_model_drifted =
-                    hash != expected_hash || version != model_version;
+                let content_or_model_drifted = hash != expected_hash || version != model_version;
                 // Only let `extension_state` invalidate freshness when the
                 // vector store can actually index. Otherwise every Noop /
                 // unreachable-Qdrant meta row reads as stale forever.
@@ -139,7 +134,10 @@ async fn repair_embeddings(
     // doesn't crash on the first scan after enabling
     // `DJINN_CODE_CHUNKS_BACKEND`.
     let code_chunk_repo = CodeChunkRepository::new(server.state.db().clone());
-    match code_chunk_repo.list_repair_embedding_rows(&project_id).await {
+    match code_chunk_repo
+        .list_repair_embedding_rows(&project_id)
+        .await
+    {
         Ok(rows) => {
             response.code_chunks_total = rows.len() as i64;
             for row in rows {
@@ -155,11 +153,7 @@ async fn repair_embeddings(
                     (Some(hash), Some(version)) => {
                         hash != row.content_hash
                             || version != model_version
-                            || row
-                                .meta_extension_state
-                                .as_deref()
-                                .unwrap_or("pending")
-                                != "ready"
+                            || row.meta_extension_state.as_deref().unwrap_or("pending") != "ready"
                     }
                     _ => true,
                 };

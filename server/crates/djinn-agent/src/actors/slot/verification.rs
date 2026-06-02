@@ -179,9 +179,7 @@ async fn run_verification_pipeline(
     // out the task branch so verification sees the same tree the worker just
     // pushed to.  The workspace tempdir is dropped at the end of the pipeline.
     let mirror = app_state.mirror.as_ref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "verification requires a MirrorManager on AgentContext; none configured"
-        )
+        anyhow::anyhow!("verification requires a MirrorManager on AgentContext; none configured")
     })?;
     let target_branch = default_target_branch(&task.project_id, app_state).await;
     let task_branch = format!("task/{}", task.short_id);

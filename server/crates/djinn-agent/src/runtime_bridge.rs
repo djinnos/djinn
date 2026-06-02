@@ -23,9 +23,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use djinn_runtime::test_runtime::{RunnerCancel, TaskRunner};
 use djinn_runtime::{RuntimeError, TaskRunReport, TaskRunSpec};
-use djinn_supervisor::{
-    SupervisorServices, TaskRunSupervisor, TokenValidation, TokenValidator,
-};
+use djinn_supervisor::{SupervisorServices, TaskRunSupervisor, TokenValidation, TokenValidator};
 use djinn_workspace::MirrorManager;
 
 // ─── SupervisorTaskRunner ───────────────────────────────────────────────────

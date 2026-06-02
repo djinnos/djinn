@@ -29,7 +29,10 @@ async fn pr_review_context_on_empty_graph_returns_limitations_note() {
     // touched_symbols is empty because the file isn't in the graph (stub returns empty).
     assert_eq!(out["changed_ranges_count"], 1);
     assert!(
-        !out["limitations_note"].as_str().unwrap_or_default().is_empty(),
+        !out["limitations_note"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty(),
         "limitations_note must be present"
     );
 }

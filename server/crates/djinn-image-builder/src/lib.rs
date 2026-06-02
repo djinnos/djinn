@@ -38,4 +38,4 @@ pub mod scripts;
 
 pub use dockerfile::{AgentWorkerImage, BuildContext, DockerfileError, generate_dockerfile};
 pub use hash::{compute_environment_hash, compute_script_bundle_sha};
-pub use scripts::{ScriptFile, SCRIPTS};
+pub use scripts::{SCRIPTS, ScriptFile};

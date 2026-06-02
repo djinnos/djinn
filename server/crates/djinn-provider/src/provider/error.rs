@@ -268,8 +268,14 @@ mod tests {
 
     #[test]
     fn from_status_maps_auth() {
-        assert_eq!(ProviderError::from_status(401, ""), ProviderError::Authentication);
-        assert_eq!(ProviderError::from_status(403, ""), ProviderError::Authentication);
+        assert_eq!(
+            ProviderError::from_status(401, ""),
+            ProviderError::Authentication
+        );
+        assert_eq!(
+            ProviderError::from_status(403, ""),
+            ProviderError::Authentication
+        );
     }
 
     #[test]
@@ -277,7 +283,9 @@ mod tests {
         for code in [408, 425, 429, 529] {
             assert_eq!(
                 ProviderError::from_status(code, ""),
-                ProviderError::RateLimit { retry_after_ms: None },
+                ProviderError::RateLimit {
+                    retry_after_ms: None
+                },
                 "status {code} should be RateLimit"
             );
         }
@@ -285,10 +293,17 @@ mod tests {
 
     #[test]
     fn from_status_maps_context_overflow() {
-        assert_eq!(ProviderError::from_status(413, ""), ProviderError::ContextOverflow);
+        assert_eq!(
+            ProviderError::from_status(413, ""),
+            ProviderError::ContextOverflow
+        );
         // 400 with a context-length body also classifies as overflow.
-        let body = r#"{"error":{"message":"This model's maximum context length is 128000 tokens"}}"#;
-        assert_eq!(ProviderError::from_status(400, body), ProviderError::ContextOverflow);
+        let body =
+            r#"{"error":{"message":"This model's maximum context length is 128000 tokens"}}"#;
+        assert_eq!(
+            ProviderError::from_status(400, body),
+            ProviderError::ContextOverflow
+        );
     }
 
     #[test]
@@ -337,8 +352,18 @@ mod tests {
 
     #[test]
     fn retryable_classification() {
-        assert!(ProviderError::RateLimit { retry_after_ms: None }.retryable());
-        assert!(ProviderError::RateLimit { retry_after_ms: Some(5) }.retryable());
+        assert!(
+            ProviderError::RateLimit {
+                retry_after_ms: None
+            }
+            .retryable()
+        );
+        assert!(
+            ProviderError::RateLimit {
+                retry_after_ms: Some(5)
+            }
+            .retryable()
+        );
         assert!(ProviderError::Transport.retryable());
         assert!(ProviderError::EmptyCompletion.retryable());
         assert!(ProviderError::ProviderInternal { status: 500 }.retryable());
@@ -354,7 +379,12 @@ mod tests {
     fn retry_after_roundtrip() {
         let e = ProviderError::from_status(429, "").with_retry_after(Some(1234));
         assert_eq!(e.retry_after_ms(), Some(1234));
-        assert_eq!(e, ProviderError::RateLimit { retry_after_ms: Some(1234) });
+        assert_eq!(
+            e,
+            ProviderError::RateLimit {
+                retry_after_ms: Some(1234)
+            }
+        );
         // with_retry_after is a no-op on non-rate-limit variants.
         let e2 = ProviderError::Authentication.with_retry_after(Some(99));
         assert_eq!(e2.retry_after_ms(), None);
@@ -363,7 +393,8 @@ mod tests {
 
     #[test]
     fn redact_pass1_structural_fields() {
-        let body = r#"{"authorization":"Bearer sk-abc123","model":"gpt-5","api_key":"k-9","note":"ok"}"#;
+        let body =
+            r#"{"authorization":"Bearer sk-abc123","model":"gpt-5","api_key":"k-9","note":"ok"}"#;
         let out = redact_secrets(body, &[]);
         assert!(out.contains(r#""authorization":"***REDACTED***""#), "{out}");
         assert!(out.contains(r#""api_key":"***REDACTED***""#), "{out}");

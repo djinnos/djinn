@@ -160,9 +160,7 @@ impl TaskRepository {
     /// Uses the JSONB containment operator (`@>`) so the lookup can be
     /// driven by a GIN index if/when we add one.
     pub async fn list_by_memory_ref(&self, permalink: &str) -> Result<Vec<Task>> {
-        let probe = serde_json::Value::Array(vec![serde_json::Value::String(
-            permalink.to_owned(),
-        )]);
+        let probe = serde_json::Value::Array(vec![serde_json::Value::String(permalink.to_owned())]);
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             Task,
@@ -243,10 +241,12 @@ impl TaskRepository {
         let mut tx = self.db.pool().begin().await?;
         // Verify epic exists before INSERT when task references one.
         if let Some(epic_id) = &task.epic_id {
-            let epic_exists: i64 =
-                sqlx::query_scalar!(r#"SELECT COUNT(*) AS "count!: i64" FROM epics WHERE id = $1"#, epic_id)
-                    .fetch_one(&mut *tx)
-                    .await?;
+            let epic_exists: i64 = sqlx::query_scalar!(
+                r#"SELECT COUNT(*) AS "count!: i64" FROM epics WHERE id = $1"#,
+                epic_id
+            )
+            .fetch_one(&mut *tx)
+            .await?;
             if epic_exists == 0 {
                 tx.commit().await?;
                 return Ok(false);
@@ -436,10 +436,12 @@ impl TaskRepository {
     ) -> Result<bool> {
         // Verify epic exists before INSERT when task references one.
         if let Some(epic_id) = &task.epic_id {
-            let epic_exists: i64 =
-                sqlx::query_scalar!(r#"SELECT COUNT(*) AS "count!: i64" FROM epics WHERE id = $1"#, epic_id)
-                    .fetch_one(&mut **tx)
-                    .await?;
+            let epic_exists: i64 = sqlx::query_scalar!(
+                r#"SELECT COUNT(*) AS "count!: i64" FROM epics WHERE id = $1"#,
+                epic_id
+            )
+            .fetch_one(&mut **tx)
+            .await?;
             if epic_exists == 0 {
                 return Ok(false);
             }

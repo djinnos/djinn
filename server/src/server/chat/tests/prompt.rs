@@ -14,8 +14,11 @@ use super::super::DJINN_CHAT_SYSTEM_PROMPT;
 fn system_prompt_contains_base_prompt_first_and_project_block_before_client_system() {
     let project_context = "## Current Project\n**Name**: Demo  **Path**: /tmp/demo\n**Open epics**: 1  **Open tasks**: 2\n**Brief**: hello";
     let client_system = "client system message";
-    let prompt =
-        compose_system_prompt(DJINN_CHAT_SYSTEM_PROMPT, Some(project_context), Some(client_system));
+    let prompt = compose_system_prompt(
+        DJINN_CHAT_SYSTEM_PROMPT,
+        Some(project_context),
+        Some(client_system),
+    );
 
     let base = DJINN_CHAT_SYSTEM_PROMPT.trim();
     assert!(prompt.starts_with(base));
@@ -103,7 +106,8 @@ fn build_system_message_skips_cache_breakpoint_for_non_anthropic() {
 
 #[test]
 fn compose_segments_skips_empty_optional_segments() {
-    let segments = compose_system_prompt_segments(DJINN_CHAT_SYSTEM_PROMPT, Some(""), Some("  \n "));
+    let segments =
+        compose_system_prompt_segments(DJINN_CHAT_SYSTEM_PROMPT, Some(""), Some("  \n "));
     assert_eq!(segments.len(), 1);
     assert_eq!(segments[0].text, DJINN_CHAT_SYSTEM_PROMPT.trim());
 }
@@ -164,9 +168,7 @@ async fn codebase_header_builder_renders_status_hotspots_and_tree() {
         build_codebase_header, clear_cache_for_tests,
     };
     use async_trait::async_trait;
-    use djinn_control_plane::bridge::{
-        GraphStatus, ProjectCtx, RankedNode, RepoGraphOps,
-    };
+    use djinn_control_plane::bridge::{GraphStatus, ProjectCtx, RankedNode, RepoGraphOps};
     use djinn_control_plane::test_support::StubRepoGraph;
     use std::sync::Arc;
 

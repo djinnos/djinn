@@ -171,8 +171,7 @@ fn emit_base(df: &mut String, _config: &EnvironmentConfig) {
 // over missing dirs, rustup ignores RUSTUP_HOME if Rust isn't installed.
 // Listing everything unconditionally keeps the emitter simple and the
 // generated hash stable across language toggles.
-const IMAGE_PATH: &str =
-    "/opt/djinn/bin:/usr/local/cargo/bin:/opt/node/bin:/usr/local/go/bin:/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const IMAGE_PATH: &str = "/opt/djinn/bin:/usr/local/cargo/bin:/opt/node/bin:/usr/local/go/bin:/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 fn emit_path(df: &mut String) {
     writeln!(df, "ENV PATH={IMAGE_PATH}").unwrap();
@@ -195,7 +194,11 @@ fn emit_path(df: &mut String) {
     // `emit_cleanup`. That keeps stable readable to everyone AND lets
     // the non-root djinn user `rustup install <pinned>` at session
     // time without falling back to spilling .rustup/ into the workspace.
-    writeln!(df, "ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo").unwrap();
+    writeln!(
+        df,
+        "ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo"
+    )
+    .unwrap();
     // GOPATH stays /go (image layer): install-go.sh `go install`s scip-go to
     // /go/bin at build time and IMAGE_PATH lists /go/bin, so the indexer must
     // not be hidden behind the empty /cache PVC overlay — same constraint as
@@ -211,11 +214,7 @@ fn emit_path(df: &mut String) {
     // and explicitly write-allowed in the sandbox (see djinn-agent
     // sandbox/linux.rs). go creates these dirs at runtime on the writable PVC.
     writeln!(df, "ENV GOPATH=/go GOROOT=/usr/local/go").unwrap();
-    writeln!(
-        df,
-        "ENV GOMODCACHE=/cache/go/mod GOCACHE=/cache/go/build"
-    )
-    .unwrap();
+    writeln!(df, "ENV GOMODCACHE=/cache/go/mod GOCACHE=/cache/go/build").unwrap();
 }
 
 fn emit_system_packages(df: &mut String, config: &EnvironmentConfig) {
@@ -259,10 +258,14 @@ fn emit_language_blocks(
 
     // Catch misspellings — if a workspace declares a language no
     // installer covers, fail the build rather than silently dropping it.
-    let known = ["rust", "node", "python", "go", "java", "ruby", "dotnet", "clang"];
+    let known = [
+        "rust", "node", "python", "go", "java", "ruby", "dotnet", "clang",
+    ];
     for ws in &config.workspaces {
         if !known.contains(&ws.language.as_str()) {
-            return Err(DockerfileError::UnknownWorkspaceLanguage(ws.language.clone()));
+            return Err(DockerfileError::UnknownWorkspaceLanguage(
+                ws.language.clone(),
+            ));
         }
     }
     Ok(())
@@ -359,10 +362,7 @@ fn aggregate_node_versions<'a>(
     out
 }
 
-fn aggregate_node_pms<'a>(
-    node: &'a NodeLanguage,
-    config: &'a EnvironmentConfig,
-) -> Vec<&'a str> {
+fn aggregate_node_pms<'a>(node: &'a NodeLanguage, config: &'a EnvironmentConfig) -> Vec<&'a str> {
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     let mut out: Vec<&str> = Vec::new();
     for pm in node.default_package_manager.as_deref().into_iter().chain(
@@ -427,7 +427,9 @@ const SCIP_RUBY_VERSION: &str = "0.4.7";
 const SCIP_DOTNET_VERSION: &str = "0.2.14";
 
 fn emit_python_block(df: &mut String, languages: &Languages, config: &EnvironmentConfig) {
-    let Some(python) = &languages.python else { return };
+    let Some(python) = &languages.python else {
+        return;
+    };
     let versions = aggregate_simple(&python.default_version, config, "python");
     let line = format!(
         "RUN PYTHON_VERSIONS=\"{}\" DEFAULT_PYTHON=\"{}\" SCIP_INDEXER=\"{PYTHON_SCIP_INDEXER}\" SCIP_PYTHON_VERSION=\"{SCIP_PYTHON_VERSION}\" /tmp/djinn-scripts/install-python.sh",
@@ -627,7 +629,10 @@ mod tests {
     fn empty_config_emits_base_and_worker_only() {
         let df = generate_dockerfile(&minimal_valid_config(), &agent_worker()).unwrap();
         assert!(df.dockerfile.contains("FROM debian:trixie-slim"));
-        assert!(df.dockerfile.contains("COPY --from=djinn/agent-worker:sha256-deadbeef"));
+        assert!(
+            df.dockerfile
+                .contains("COPY --from=djinn/agent-worker:sha256-deadbeef")
+        );
         assert!(df.dockerfile.contains("install-agent-worker.sh"));
         assert!(!df.dockerfile.contains("install-rust.sh"));
     }
@@ -670,13 +675,15 @@ mod tests {
         // A single RUN line with both toolchains, default preserved,
         // components carried through.
         assert!(
-            df.dockerfile
-                .contains("TOOLCHAINS=\"stable 1.85.0\""),
+            df.dockerfile.contains("TOOLCHAINS=\"stable 1.85.0\""),
             "dockerfile:\n{}",
             df.dockerfile
         );
         assert!(df.dockerfile.contains("DEFAULT_TOOLCHAIN=\"stable\""));
-        assert!(df.dockerfile.contains("COMPONENTS=\"rust-analyzer clippy rustfmt\""));
+        assert!(
+            df.dockerfile
+                .contains("COMPONENTS=\"rust-analyzer clippy rustfmt\"")
+        );
     }
 
     #[test]
@@ -735,7 +742,8 @@ mod tests {
         let df = generate_dockerfile(&cfg, &agent_worker()).unwrap();
         assert!(df.dockerfile.contains("RUN echo build"));
         assert!(
-            df.dockerfile.contains(r#"RUN ["bash", "-lc", "echo exec"]"#),
+            df.dockerfile
+                .contains(r#"RUN ["bash", "-lc", "echo exec"]"#),
             "actual:\n{}",
             df.dockerfile
         );
@@ -752,9 +760,7 @@ mod tests {
             package_manager: None,
         }];
         let err = generate_dockerfile(&cfg, &agent_worker()).unwrap_err();
-        assert!(
-            matches!(err, DockerfileError::UnknownWorkspaceLanguage(s) if s == "zig")
-        );
+        assert!(matches!(err, DockerfileError::UnknownWorkspaceLanguage(s) if s == "zig"));
     }
 
     #[test]

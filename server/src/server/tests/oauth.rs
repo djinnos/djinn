@@ -76,7 +76,10 @@ async fn register_client(app: &axum::Router, redirect_uri: &str) -> String {
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED, "register should 201");
     let json = body_json(resp).await;
-    assert!(json["client_secret"].is_null(), "public client has no secret");
+    assert!(
+        json["client_secret"].is_null(),
+        "public client has no secret"
+    );
     json["client_id"].as_str().unwrap().to_string()
 }
 
@@ -237,7 +240,11 @@ async fn full_happy_path_register_authorize_token_bearer() {
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::FOUND, "authorize should redirect");
+    assert_eq!(
+        resp.status(),
+        StatusCode::FOUND,
+        "authorize should redirect"
+    );
     let loc = resp.headers().get(LOCATION).unwrap().to_str().unwrap();
     assert!(loc.starts_with(redirect), "got {loc}");
     assert!(loc.contains("state=xyz"), "state must be echoed: {loc}");
@@ -257,7 +264,11 @@ async fn full_happy_path_register_authorize_token_bearer() {
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), 200, "token exchange should succeed");
     assert_eq!(
-        resp.headers().get("cache-control").unwrap().to_str().unwrap(),
+        resp.headers()
+            .get("cache-control")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "no-store"
     );
     let json = body_json(resp).await;
@@ -280,7 +291,11 @@ async fn full_happy_path_register_authorize_token_bearer() {
         .body(Body::from(form))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "code replay must fail");
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "code replay must fail"
+    );
 
     // Use the bearer token on /mcp (tools/list). Should be accepted.
     let payload = serde_json::json!({
@@ -299,10 +314,14 @@ async fn full_happy_path_register_authorize_token_bearer() {
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), 200, "bearer-authed tools/list should 200");
     let json = body_json(resp).await;
-    assert!(json["result"]["tools"].is_array(), "tools/list returns tools");
+    assert!(
+        json["result"]["tools"].is_array(),
+        "tools/list returns tools"
+    );
 
     // Refresh-token rotation.
-    let form = format!("grant_type=refresh_token&refresh_token={refresh_token}&client_id={client_id}");
+    let form =
+        format!("grant_type=refresh_token&refresh_token={refresh_token}&client_id={client_id}");
     let req = Request::builder()
         .method("POST")
         .uri("/oauth/token")
@@ -313,14 +332,18 @@ async fn full_happy_path_register_authorize_token_bearer() {
     assert_eq!(resp.status(), 200, "refresh should succeed");
     let json2 = body_json(resp).await;
     let new_access = json2["access_token"].as_str().unwrap();
-    assert_ne!(new_access, access_token, "rotation issues a new access token");
+    assert_ne!(
+        new_access, access_token,
+        "rotation issues a new access token"
+    );
 
     // The OLD access token is now revoked → bearer rejected on /mcp. But our
     // /mcp gate only *requires* auth when a GitHub App is configured; with no
     // App config the old token simply resolves to no-attribution. Verify the
     // revocation at the token-store level via a fresh refresh attempt with the
     // old refresh token (should fail — it was rotated/revoked).
-    let form = format!("grant_type=refresh_token&refresh_token={refresh_token}&client_id={client_id}");
+    let form =
+        format!("grant_type=refresh_token&refresh_token={refresh_token}&client_id={client_id}");
     let req = Request::builder()
         .method("POST")
         .uri("/oauth/token")
@@ -367,7 +390,13 @@ async fn token_rejects_wrong_pkce_verifier() {
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    let loc = resp.headers().get(LOCATION).unwrap().to_str().unwrap().to_string();
+    let loc = resp
+        .headers()
+        .get(LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     let code = extract_query_param(&loc, "code").unwrap();
 
     // Exchange with the WRONG verifier.
@@ -382,7 +411,11 @@ async fn token_rejects_wrong_pkce_verifier() {
         .body(Body::from(form))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "wrong PKCE must fail");
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "wrong PKCE must fail"
+    );
     let json = body_json(resp).await;
     assert_eq!(json["error"], "invalid_grant");
 }
@@ -415,4 +448,3 @@ fn urlencoding_min(s: &str) -> String {
     }
     out
 }
-

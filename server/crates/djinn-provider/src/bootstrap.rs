@@ -37,12 +37,14 @@ pub async fn bootstrap_env_credentials(repo: &CredentialRepository) -> Result<()
             if trimmed.is_empty() {
                 continue;
             }
-            repo.set(provider.id, env_name, trimmed).await.with_context(|| {
-                format!(
-                    "failed to bootstrap credential for provider={} key={}",
-                    provider.id, env_name
-                )
-            })?;
+            repo.set(provider.id, env_name, trimmed)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to bootstrap credential for provider={} key={}",
+                        provider.id, env_name
+                    )
+                })?;
             tracing::info!(
                 provider = provider.id,
                 key = env_name,

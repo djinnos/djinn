@@ -521,9 +521,12 @@ impl EpicRepository {
     /// Count child tasks then CASCADE-delete the epic. Returns the child task count.
     pub async fn delete_with_count(&self, id: &str) -> Result<i64> {
         self.db.ensure_initialized().await?;
-        let count: i64 = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "count!: i64" FROM tasks WHERE epic_id = $1"#, id)
-            .fetch_one(self.db.pool())
-            .await?;
+        let count: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count!: i64" FROM tasks WHERE epic_id = $1"#,
+            id
+        )
+        .fetch_one(self.db.pool())
+        .await?;
         self.delete(id).await?;
         Ok(count)
     }
@@ -573,8 +576,7 @@ impl EpicRepository {
     /// Count epics with optional group_by.
     pub async fn count_grouped(&self, query: EpicCountQuery) -> Result<serde_json::Value> {
         self.db.ensure_initialized().await?;
-        let (where_sql, params) =
-            epic_build_where(&query.project_id, &query.status, &None, 0);
+        let (where_sql, params) = epic_build_where(&query.project_id, &query.status, &None, 0);
 
         match query.group_by.as_deref() {
             Some("status") => {
@@ -1111,7 +1113,10 @@ mod tests {
     async fn read_sources_add_list_remove() {
         let db = test_db();
         let repo = EpicRepository::new(db.clone(), EventBus::noop());
-        let epic = repo.create("Migration", "", "", "", "", None).await.unwrap();
+        let epic = repo
+            .create("Migration", "", "", "", "", None)
+            .await
+            .unwrap();
         let src_id = insert_project(&db, "legacy").await;
 
         assert!(repo.read_sources(&epic.id).await.unwrap().is_empty());

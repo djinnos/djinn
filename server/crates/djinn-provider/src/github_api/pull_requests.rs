@@ -369,7 +369,11 @@ impl GitHubApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("enqueue_pull_request failed ({}): {}", status, body));
+            return Err(anyhow!(
+                "enqueue_pull_request failed ({}): {}",
+                status,
+                body
+            ));
         }
 
         let json: serde_json::Value = resp.json().await?;
@@ -539,7 +543,11 @@ impl GitHubApiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("dequeue_pull_request failed ({}): {}", status, body));
+            return Err(anyhow!(
+                "dequeue_pull_request failed ({}): {}",
+                status,
+                body
+            ));
         }
 
         let json: serde_json::Value = resp.json().await?;
@@ -658,17 +666,18 @@ impl GitHubApiClient {
 
         let merge_queue_entry = if pr["mergeQueueEntry"].is_object() {
             let state_str = pr["mergeQueueEntry"]["state"].as_str().unwrap_or("");
-            let state = serde_json::from_value::<MergeQueueEntryState>(
-                serde_json::Value::String(state_str.to_string()),
-            )
+            let state = serde_json::from_value::<MergeQueueEntryState>(serde_json::Value::String(
+                state_str.to_string(),
+            ))
             .ok();
-            let id = pr["mergeQueueEntry"]["id"].as_str().unwrap_or("").to_string();
+            let id = pr["mergeQueueEntry"]["id"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
             state.map(|state| MergeQueueEntry {
                 id,
                 state,
-                position: pr["mergeQueueEntry"]["position"]
-                    .as_u64()
-                    .map(|n| n as u32),
+                position: pr["mergeQueueEntry"]["position"].as_u64().map(|n| n as u32),
                 estimated_time_to_merge: pr["mergeQueueEntry"]["estimatedTimeToMerge"]
                     .as_u64()
                     .map(|n| n as u32),

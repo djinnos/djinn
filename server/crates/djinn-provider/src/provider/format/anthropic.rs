@@ -1961,7 +1961,9 @@ mod tests {
         let mut conv_b = conv.clone();
         // The last message is the user turn; its content is the dynamic tail and is
         // not part of the cached system/tool prefix.
-        conv_b.push(crate::message::Message::user("a different follow-up question"));
+        conv_b.push(crate::message::Message::user(
+            "a different follow-up question",
+        ));
         let body_b = provider.build_request(&conv_b, &tools, None);
 
         // The system + tool stable prefix is byte-identical, so those serialized

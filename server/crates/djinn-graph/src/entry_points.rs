@@ -415,10 +415,7 @@ fn ts_index_entry_heuristic(path: &str) -> bool {
 /// the SCIP symbol identifier for `axum`, `actix_web`, `warp`, `rocket`,
 /// or `hyper` package paths.
 fn file_imports_http_router(graph: &RepoDependencyGraph, file_node: NodeIndex) -> bool {
-    for edge in graph
-        .graph()
-        .edges_directed(file_node, Direction::Outgoing)
-    {
+    for edge in graph.graph().edges_directed(file_node, Direction::Outgoing) {
         if !matches!(edge.weight().kind, RepoGraphEdgeKind::FileReference) {
             continue;
         }
@@ -430,10 +427,7 @@ fn file_imports_http_router(graph: &RepoDependencyGraph, file_node: NodeIndex) -
         if id.contains(" axum ") || id.contains("/axum/") || id.contains("`axum`") {
             return true;
         }
-        if id.contains(" actix_web ")
-            || id.contains("/actix-web/")
-            || id.contains("`actix_web`")
-        {
+        if id.contains(" actix_web ") || id.contains("/actix-web/") || id.contains("`actix_web`") {
             return true;
         }
         if id.contains(" warp ") || id.contains("`warp`") {

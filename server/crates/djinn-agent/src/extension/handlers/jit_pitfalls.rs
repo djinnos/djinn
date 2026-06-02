@@ -88,8 +88,7 @@ pub(super) async fn maybe_pitfall_hint(
         return None;
     }
 
-    let note_repo =
-        djinn_db::NoteRepository::new(state.db.clone(), state.event_bus.clone());
+    let note_repo = djinn_db::NoteRepository::new(state.db.clone(), state.event_bus.clone());
 
     let notes = match note_repo
         .query_by_scope_overlap(
@@ -135,7 +134,12 @@ fn render_pitfall_block(notes: &[djinn_memory::Note]) -> String {
             .or(note.abstract_.as_deref())
             .unwrap_or_else(|| &note.content[..note.content.len().min(280)])
             .trim();
-        out.push_str(&format!("- [{}] {}: {}\n", label, note.title.trim(), summary));
+        out.push_str(&format!(
+            "- [{}] {}: {}\n",
+            label,
+            note.title.trim(),
+            summary
+        ));
     }
     out.push_str("</relevant-pitfalls>");
     out

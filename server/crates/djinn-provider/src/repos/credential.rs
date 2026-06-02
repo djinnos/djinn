@@ -146,7 +146,11 @@ impl CredentialRepository {
     /// owner only matches the org-shared row; a non-NULL owner only matches
     /// that user's private row (no fallback — callers that want fallback use
     /// [`Self::get_decrypted_for_user`]).
-    async fn scoped_id(&self, key_name: &str, owner_user_id: Option<&str>) -> Result<Option<String>> {
+    async fn scoped_id(
+        &self,
+        key_name: &str,
+        owner_user_id: Option<&str>,
+    ) -> Result<Option<String>> {
         let id = match owner_user_id {
             None => {
                 sqlx::query_scalar!(
@@ -368,25 +372,24 @@ impl CredentialRepository {
         ensure_db!(self.db);
         let owner = djinn_core::auth_context::current_user_id();
 
-        let ids: Vec<String> = match owner.as_deref() {
-            Some(uid) => {
-                sqlx::query_scalar!(
-                    "SELECT id FROM credentials WHERE provider_id = $1 AND owner_user_id = $2",
-                    provider_id,
-                    uid
-                )
-                .fetch_all(self.db.pool())
-                .await?
-            }
-            None => {
-                sqlx::query_scalar!(
+        let ids: Vec<String> =
+            match owner.as_deref() {
+                Some(uid) => {
+                    sqlx::query_scalar!(
+                        "SELECT id FROM credentials WHERE provider_id = $1 AND owner_user_id = $2",
+                        provider_id,
+                        uid
+                    )
+                    .fetch_all(self.db.pool())
+                    .await?
+                }
+                None => sqlx::query_scalar!(
                     "SELECT id FROM credentials WHERE provider_id = $1 AND owner_user_id IS NULL",
                     provider_id
                 )
                 .fetch_all(self.db.pool())
-                .await?
-            }
-        };
+                .await?,
+            };
 
         if ids.is_empty() {
             return Ok(0);
@@ -419,11 +422,7 @@ impl CredentialRepository {
 
     /// Check whether `key_name` is resolvable for `user_id` (their own row,
     /// else the org-shared fallback), without decrypting.
-    pub async fn exists_for_user(
-        &self,
-        key_name: &str,
-        user_id: Option<&str>,
-    ) -> Result<bool> {
+    pub async fn exists_for_user(&self, key_name: &str, user_id: Option<&str>) -> Result<bool> {
         ensure_db!(self.db);
         let found: Option<String> = self.resolve_id_for_user(key_name, user_id).await?;
         Ok(found.is_some())
@@ -446,9 +445,9 @@ impl CredentialRepository {
             )
             .fetch_optional(self.db.pool())
             .await?
-            {
-                return Ok(Some(id));
-            }
+        {
+            return Ok(Some(id));
+        }
         // Fall back to the org-shared row.
         let id = sqlx::query_scalar!(
             "SELECT id FROM credentials WHERE key_name = $1 AND owner_user_id IS NULL",
@@ -883,7 +882,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(repo.list().await.unwrap().len(), 2, "still exactly two rows");
+        assert_eq!(
+            repo.list().await.unwrap().len(),
+            2,
+            "still exactly two rows"
+        );
         assert_eq!(
             repo.get_decrypted_for_user("OPENAI_API_KEY", None)
                 .await

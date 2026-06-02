@@ -287,10 +287,8 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             // symbols to synthetic `Table` nodes. Logged at info level
             // so we can see the size of the signal during rollout.
             if crate::db_access::db_access_detection_enabled() {
-                let added = crate::db_access::detect_db_access(
-                    &mut graph,
-                    &project_root_for_blocking,
-                );
+                let added =
+                    crate::db_access::detect_db_access(&mut graph, &project_root_for_blocking);
                 tracing::info!(
                     db_access_edges = added,
                     "ensure_canonical_graph: db_access pass complete"
@@ -461,9 +459,7 @@ pub async fn canonical_graph_cache_has_entry_for(index_tree_path: &Path) -> bool
         .is_some_and(|cached| cached.project_path == index_tree_path)
 }
 
-pub async fn canonical_graph_cache_pinned_commit_for(
-    index_tree_path: &Path,
-) -> Option<String> {
+pub async fn canonical_graph_cache_pinned_commit_for(index_tree_path: &Path) -> Option<String> {
     let cache = GRAPH_CACHE.read().await;
     cache
         .as_ref()
@@ -518,8 +514,7 @@ async fn load_cached_artifact(
     .map_err(|e| format!("spawn_blocking join: {e}"))?
 }
 
-const GRAPH_NOT_WARMED_ERR: &str =
-    "canonical graph not warmed yet — K8s graph warmer will populate it once the project's devcontainer image is ready";
+const GRAPH_NOT_WARMED_ERR: &str = "canonical graph not warmed yet — K8s graph warmer will populate it once the project's devcontainer image is ready";
 
 /// Server-side read-only load: return the canonical graph for the given
 /// `project_id` + `project_path`.
@@ -547,10 +542,7 @@ pub async fn load_canonical_graph<C: WarmContext>(
 
     {
         let cache = GRAPH_CACHE.read().await;
-        if let Some(cached) = cache
-            .as_ref()
-            .filter(|c| c.project_path == index_tree_path)
-        {
+        if let Some(cached) = cache.as_ref().filter(|c| c.project_path == index_tree_path) {
             return Ok((
                 cached.graph.clone(),
                 cached.pagerank.clone(),
@@ -676,7 +668,11 @@ async fn resolve_stack_indexer_filter<C: WarmContext>(
             _ => {}
         }
     }
-    if wanted.is_empty() { None } else { Some(wanted) }
+    if wanted.is_empty() {
+        None
+    } else {
+        Some(wanted)
+    }
 }
 
 pub fn normalize_graph_query_paths(project_path: &str) -> (PathBuf, PathBuf) {
@@ -727,7 +723,7 @@ pub fn build_test_parsed_index_fixture() -> crate::scip_parser::ParsedScipIndex 
         documentation: vec![],
         relationships: vec![],
         visibility: Some(crate::scip_parser::ScipVisibility::Public),
-    signature_parts: None,
+        signature_parts: None,
     };
     let trait_symbol = ScipSymbol {
         symbol: "scip-rust pkg src/types.rs `HelperTrait`#".to_string(),
@@ -737,7 +733,7 @@ pub fn build_test_parsed_index_fixture() -> crate::scip_parser::ParsedScipIndex 
         documentation: vec![],
         relationships: vec![],
         visibility: Some(crate::scip_parser::ScipVisibility::Public),
-    signature_parts: None,
+        signature_parts: None,
     };
     let main_symbol = ScipSymbol {
         symbol: "scip-rust pkg src/app.rs `main`().".to_string(),
@@ -751,7 +747,7 @@ pub fn build_test_parsed_index_fixture() -> crate::scip_parser::ParsedScipIndex 
             kinds: BTreeSet::from([ScipRelationshipKind::Implementation]),
         }],
         visibility: Some(crate::scip_parser::ScipVisibility::Public),
-    signature_parts: None,
+        signature_parts: None,
     };
 
     fn def_occ(symbol: &str) -> ScipOccurrence {
@@ -1055,5 +1051,4 @@ mod tests {
             "empty `{{}}` stack must return None so callers run every indexer"
         );
     }
-
 }

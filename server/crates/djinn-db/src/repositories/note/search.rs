@@ -690,9 +690,7 @@ impl NoteRepository {
         // `memory_refs` is a JSONB array of strings; use containment to match
         // any task whose array contains the requested permalink. We pass the
         // probe as a JSONB array literal so the index can drive the lookup.
-        let probe = serde_json::Value::Array(vec![serde_json::Value::String(
-            permalink.to_owned(),
-        )]);
+        let probe = serde_json::Value::Array(vec![serde_json::Value::String(permalink.to_owned())]);
         let rows = sqlx::query!(
             r#"SELECT id, short_id, title, status AS "status!" FROM tasks
              WHERE memory_refs @> $1
@@ -756,15 +754,9 @@ mod contradiction_tests {
             "webpack bundling tree shaking code splitting lazy loading module federation",
         ];
         for (i, content) in noise_content.iter().enumerate() {
-            repo.create(
-                &project_id,
-                &format!("Noise {i}"),
-                content,
-                "adr",
-                "[]",
-            )
-            .await
-            .unwrap();
+            repo.create(&project_id, &format!("Noise {i}"), content, "adr", "[]")
+                .await
+                .unwrap();
         }
 
         // Existing pattern note with specific rare content
@@ -772,25 +764,13 @@ mod contradiction_tests {
                       rust_xqz service_xqz pattern_xqz distributed_xqz systems_xqz \
                       architectural_xqz decision_xqz record_xqz implementation_xqz guide_xqz";
         let existing = repo
-            .create(
-                &project_id,
-                "Existing Pattern",
-                shared,
-                "pattern",
-                "[]",
-            )
+            .create(&project_id, "Existing Pattern", shared, "pattern", "[]")
             .await
             .unwrap();
 
         // New note with identical content — should be detected
         let new_note = repo
-            .create(
-                &project_id,
-                "New Pattern",
-                shared,
-                "pattern",
-                "[]",
-            )
+            .create(&project_id, "New Pattern", shared, "pattern", "[]")
             .await
             .unwrap();
 
@@ -955,13 +935,7 @@ mod scope_overlap_decay_tests {
             .await
             .unwrap();
         let global = repo
-            .create(
-                &project_id,
-                "Global Note",
-                "content",
-                "pattern",
-                "[]",
-            )
+            .create(&project_id, "Global Note", "content", "pattern", "[]")
             .await
             .unwrap();
 

@@ -40,12 +40,7 @@ impl GitHubApiClient {
     /// Resolve `ref_name` (e.g. `"heads/main"`) to the SHA it points at.
     /// Returns `Ok(None)` on `404 Not Found` so callers can branch on
     /// ref absence without catching error strings.
-    pub async fn get_ref(
-        &self,
-        owner: &str,
-        repo: &str,
-        ref_name: &str,
-    ) -> Result<Option<String>> {
+    pub async fn get_ref(&self, owner: &str, repo: &str, ref_name: &str) -> Result<Option<String>> {
         let url = format!(
             "{}/repos/{}/{}/git/ref/{}",
             self.base_url, owner, repo, ref_name

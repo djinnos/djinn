@@ -154,10 +154,7 @@ impl OAuthRepository {
 
     // ── Authorization codes ────────────────────────────────────────────────────
 
-    pub async fn create_authorization_code(
-        &self,
-        params: NewAuthorizationCode<'_>,
-    ) -> Result<()> {
+    pub async fn create_authorization_code(&self, params: NewAuthorizationCode<'_>) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query(
             "INSERT INTO oauth_authorization_codes
@@ -268,7 +265,10 @@ impl OAuthRepository {
         Ok(row.map(token_from_row))
     }
 
-    pub async fn get_by_refresh_token(&self, refresh_token: &str) -> Result<Option<McpAccessToken>> {
+    pub async fn get_by_refresh_token(
+        &self,
+        refresh_token: &str,
+    ) -> Result<Option<McpAccessToken>> {
         self.db.ensure_initialized().await?;
         let row = sqlx::query(
             "SELECT token, refresh_token, client_id, user_id, resource, scope,
@@ -367,7 +367,10 @@ mod tests {
             "http://127.0.0.1:9999/callback".to_string(),
             "cursor://anysphere.cursor-retrieval/callback".to_string(),
         ];
-        let grants = vec!["authorization_code".to_string(), "refresh_token".to_string()];
+        let grants = vec![
+            "authorization_code".to_string(),
+            "refresh_token".to_string(),
+        ];
 
         let created = repo
             .create_client(NewOAuthClient {
@@ -448,7 +451,11 @@ mod tests {
         .await
         .unwrap();
 
-        let fetched = repo.get_authorization_code("code-xyz").await.unwrap().unwrap();
+        let fetched = repo
+            .get_authorization_code("code-xyz")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(fetched.user_id, user_id);
         assert!(fetched.consumed_at.is_none());
 
@@ -482,7 +489,10 @@ mod tests {
         let repo = OAuthRepository::new(db);
 
         let redirects = vec!["http://127.0.0.1:9999/cb".to_string()];
-        let grants = vec!["authorization_code".to_string(), "refresh_token".to_string()];
+        let grants = vec![
+            "authorization_code".to_string(),
+            "refresh_token".to_string(),
+        ];
         repo.create_client(NewOAuthClient {
             client_id: "c2",
             client_secret: None,
@@ -569,7 +579,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(swept, 1);
-        assert!(repo.get_authorization_code("old-code").await.unwrap().is_none());
+        assert!(
+            repo.get_authorization_code("old-code")
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         repo.create_access_token(NewAccessToken {
             token: "old-at",

@@ -271,10 +271,7 @@ mod tests {
             "recording"
         }
 
-        fn with_reasoning_effort(
-            &self,
-            effort: ReasoningEffort,
-        ) -> Option<Box<dyn LlmProvider>> {
+        fn with_reasoning_effort(&self, effort: ReasoningEffort) -> Option<Box<dyn LlmProvider>> {
             *self.requested_effort.lock().unwrap() = Some(effort);
             Some(Box::new(RecordingProvider {
                 downgraded: true,
@@ -293,9 +290,7 @@ mod tests {
                 dyn futures::Future<
                         Output = anyhow::Result<
                             Pin<
-                                Box<
-                                    dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send,
-                                >,
+                                Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
                             >,
                         >,
                     > + Send

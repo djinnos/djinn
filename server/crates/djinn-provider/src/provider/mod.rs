@@ -367,8 +367,12 @@ mod reasoning_effort_override_tests {
     /// weaker variant that the cheap call sites should switch to).
     #[test]
     fn minimal_is_the_weakest_reasoning_tier() {
-        assert!(ReasoningEffort::Minimal.thinking_budget() <= ReasoningEffort::Low.thinking_budget());
-        assert!(ReasoningEffort::Low.thinking_budget() <= ReasoningEffort::Medium.thinking_budget());
+        assert!(
+            ReasoningEffort::Minimal.thinking_budget() <= ReasoningEffort::Low.thinking_budget()
+        );
+        assert!(
+            ReasoningEffort::Low.thinking_budget() <= ReasoningEffort::Medium.thinking_budget()
+        );
         assert!(
             ReasoningEffort::Medium.thinking_budget() <= ReasoningEffort::High.thinking_budget()
         );

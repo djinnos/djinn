@@ -184,7 +184,7 @@ mod tests {
                 model: "openai/gpt-5",
                 agent_type: "planner",
                 metadata_json: None,
-            task_run_id: None,
+                task_run_id: None,
             })
             .await
             .unwrap();

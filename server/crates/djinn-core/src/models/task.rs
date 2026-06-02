@@ -914,18 +914,16 @@ mod tests {
             }
             (TransitionAction::PrCreated, TaskStatus::Approved) => Some(TaskStatus::PrDraft),
             (TransitionAction::PrUndraft, TaskStatus::PrDraft) => Some(TaskStatus::PrReview),
-            (
-                TransitionAction::PrCiFailed,
-                TaskStatus::PrDraft | TaskStatus::PrReview,
-            ) => Some(TaskStatus::Open),
+            (TransitionAction::PrCiFailed, TaskStatus::PrDraft | TaskStatus::PrReview) => {
+                Some(TaskStatus::Open)
+            }
             (
                 TransitionAction::PrConflict,
                 TaskStatus::Approved | TaskStatus::PrDraft | TaskStatus::PrReview,
             ) => Some(TaskStatus::Open),
-            (
-                TransitionAction::PrMerge,
-                TaskStatus::PrDraft | TaskStatus::PrReview,
-            ) => Some(TaskStatus::Closed),
+            (TransitionAction::PrMerge, TaskStatus::PrDraft | TaskStatus::PrReview) => {
+                Some(TaskStatus::Closed)
+            }
             (TransitionAction::PrChangesRequested, TaskStatus::PrReview) => Some(TaskStatus::Open),
             (TransitionAction::SubmitForMerge, TaskStatus::InProgress) => {
                 Some(TaskStatus::Approved)

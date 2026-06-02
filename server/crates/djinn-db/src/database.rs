@@ -587,12 +587,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn postgres_backend_selection_metadata_is_shaped_as_expected() {
-        let db = Database::open_with_config(DatabaseConnectConfig::Postgres(
-            PostgresDatabaseConfig {
+        let db =
+            Database::open_with_config(DatabaseConnectConfig::Postgres(PostgresDatabaseConfig {
                 url: "postgres://postgres:postgres@127.0.0.1:5433/djinn".to_owned(),
-            },
-        ))
-        .expect("postgres backend should construct a concrete runtime path");
+            }))
+            .expect("postgres backend should construct a concrete runtime path");
 
         assert_eq!(db.backend_kind(), DatabaseBackendKind::Postgres);
         assert_eq!(db.bootstrap_info().backend_label, "postgres");

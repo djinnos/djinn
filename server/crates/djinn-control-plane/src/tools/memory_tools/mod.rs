@@ -6,9 +6,9 @@ use std::path::Path;
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 
 use crate::server::DjinnMcpServer;
-use djinn_memory::{GitLogEntry, Note};
 use djinn_db::NoteRepository;
 use djinn_db::ProjectRepository;
+use djinn_memory::{GitLogEntry, Note};
 
 pub(crate) mod types;
 pub use types::*;

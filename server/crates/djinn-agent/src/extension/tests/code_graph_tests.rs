@@ -665,10 +665,7 @@ async fn code_graph_dispatch_detect_changes_validates_inputs() {
     )
     .await
     .unwrap_err();
-    assert!(
-        err.contains("detect_changes requires"),
-        "got: {err}"
-    );
+    assert!(err.contains("detect_changes requires"), "got: {err}");
 }
 
 /// v8 batch: 6 trait-delegation ops (api_surface / metrics_at /
@@ -915,18 +912,38 @@ async fn code_graph_dispatch_capabilities_returns_introspection_payload() {
 
     // Top-level keys clients depend on:
     let obj = result.as_object().expect("payload must be a JSON object");
-    assert!(obj.contains_key("operations"), "missing operations: {result}");
-    assert!(obj.contains_key("default_search_mode"), "missing default_search_mode");
-    assert!(obj.contains_key("available_search_modes"), "missing available_search_modes");
+    assert!(
+        obj.contains_key("operations"),
+        "missing operations: {result}"
+    );
+    assert!(
+        obj.contains_key("default_search_mode"),
+        "missing default_search_mode"
+    );
+    assert!(
+        obj.contains_key("available_search_modes"),
+        "missing available_search_modes"
+    );
     assert!(obj.contains_key("env_features"), "missing env_features");
-    assert!(obj.contains_key("access_classifier_languages"), "missing access_classifier_languages");
-    assert!(obj.contains_key("repo_graph_artifact_version"), "missing repo_graph_artifact_version");
+    assert!(
+        obj.contains_key("access_classifier_languages"),
+        "missing access_classifier_languages"
+    );
+    assert!(
+        obj.contains_key("repo_graph_artifact_version"),
+        "missing repo_graph_artifact_version"
+    );
     assert!(obj.contains_key("filter_tiers"), "missing filter_tiers");
-    assert!(obj.contains_key("default_filters"), "missing default_filters");
+    assert!(
+        obj.contains_key("default_filters"),
+        "missing default_filters"
+    );
 
     // capabilities itself must list itself, otherwise clients can't
     // discover the op via probing.
-    let ops = obj["operations"].as_array().expect("operations must be array");
+    let ops = obj["operations"]
+        .as_array()
+        .expect("operations must be array");
     assert!(
         ops.iter().any(|o| o.as_str() == Some("capabilities")),
         "capabilities op must list itself in `operations`"

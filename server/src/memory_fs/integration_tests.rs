@@ -130,13 +130,7 @@ async fn repository_backed_mutation_flow_preserves_frontmatter_and_index_side_ef
     let repo = NoteRepository::new(db.clone(), test_events());
 
     let target = repo
-        .create(
-            &project_id,
-            "Target Note",
-            "Target body",
-            "reference",
-            "[]",
-        )
+        .create(&project_id, "Target Note", "Target body", "reference", "[]")
         .await
         .unwrap();
 

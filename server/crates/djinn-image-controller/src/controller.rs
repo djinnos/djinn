@@ -45,8 +45,8 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::build_job::{
-    build_context_config_map_name, build_image_build_context_config_map, build_image_build_job,
-    build_job_owner_reference, sanitize_id, LABEL_BUILD,
+    LABEL_BUILD, build_context_config_map_name, build_image_build_context_config_map,
+    build_image_build_job, build_job_owner_reference, sanitize_id,
 };
 use crate::config::ImageControllerConfig;
 
@@ -113,7 +113,10 @@ impl ImageController {
         let raw = match repo.get_environment_config(project_id).await? {
             Some(s) => s,
             None => {
-                debug!(project_id, "image_controller: project row missing — skipping");
+                debug!(
+                    project_id,
+                    "image_controller: project row missing — skipping"
+                );
                 return Ok(());
             }
         };
@@ -130,12 +133,11 @@ impl ImageController {
             return Ok(());
         }
 
-        let cfg: EnvironmentConfig = serde_json::from_str(&raw).map_err(|e| {
-            ImageControllerError::ConfigParse {
+        let cfg: EnvironmentConfig =
+            serde_json::from_str(&raw).map_err(|e| ImageControllerError::ConfigParse {
                 project_id: project_id.to_string(),
                 reason: e.to_string(),
-            }
-        })?;
+            })?;
 
         if cfg.schema_version == 0 {
             debug!(
@@ -263,13 +265,12 @@ impl ImageController {
         let agent_worker_image = AgentWorkerImage::new(repo_ref, tag_ref);
 
         // 1. Generate the Dockerfile + script bundle.
-        let build_context =
-            generate_dockerfile(cfg, &agent_worker_image).map_err(|source| {
-                ImageControllerError::Dockerfile {
-                    project_id: project_id.to_string(),
-                    source,
-                }
-            })?;
+        let build_context = generate_dockerfile(cfg, &agent_worker_image).map_err(|source| {
+            ImageControllerError::Dockerfile {
+                project_id: project_id.to_string(),
+                source,
+            }
+        })?;
 
         // 2. Create the build-context ConfigMap *before* the Job so the
         // Pod's volume mount is satisfiable at startup. The CM is
@@ -313,10 +314,7 @@ impl ImageController {
                     namespace = %self.config.namespace,
                     "image_controller: build Job in Failed state — deleting so the next reconcile recreates it"
                 );
-                if let Err(e) = jobs
-                    .delete(&job_name, &DeleteParams::background())
-                    .await
-                {
+                if let Err(e) = jobs.delete(&job_name, &DeleteParams::background()).await {
                     warn!(
                         project_id,
                         hash = %hash_prefix,
@@ -437,8 +435,7 @@ impl ImageController {
         project_id: &str,
         environment_config_json: &str,
     ) -> Result<()> {
-        let cms: Api<ConfigMap> =
-            Api::namespaced(self.client.clone(), &self.config.namespace);
+        let cms: Api<ConfigMap> = Api::namespaced(self.client.clone(), &self.config.namespace);
         let cm = djinn_k8s::build_env_config_config_map(
             &self.config.namespace,
             project_id,
@@ -461,8 +458,7 @@ impl ImageController {
         hash_prefix: &str,
         ctx: &BuildContext,
     ) -> Result<()> {
-        let cms: Api<ConfigMap> =
-            Api::namespaced(self.client.clone(), &self.config.namespace);
+        let cms: Api<ConfigMap> = Api::namespaced(self.client.clone(), &self.config.namespace);
         let cm = build_image_build_context_config_map(&self.config, project_id, hash_prefix, ctx);
         let name = build_context_config_map_name(project_id, hash_prefix);
         let params = PatchParams::apply("djinn-image-controller").force();
@@ -482,8 +478,7 @@ impl ImageController {
         hash_prefix: &str,
         owner: k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference,
     ) -> Result<()> {
-        let cms: Api<ConfigMap> =
-            Api::namespaced(self.client.clone(), &self.config.namespace);
+        let cms: Api<ConfigMap> = Api::namespaced(self.client.clone(), &self.config.namespace);
         let name = build_context_config_map_name(project_id, hash_prefix);
         let patch = serde_json::json!({
             "metadata": { "ownerReferences": [owner] }
@@ -758,11 +753,11 @@ mod tests {
     #[test]
     fn count_active_jobs_ignores_terminal_and_excluded() {
         let jobs = vec![
-            build_job_with("a", None),       // active, other project
-            build_job_with("b", None),       // active, other project
-            build_job_with("c", Some(true)), // succeeded — not active
-            build_job_with("d", Some(false)),// failed — not active
-            build_job_with("me", None),      // active, but excluded
+            build_job_with("a", None),        // active, other project
+            build_job_with("b", None),        // active, other project
+            build_job_with("c", Some(true)),  // succeeded — not active
+            build_job_with("d", Some(false)), // failed — not active
+            build_job_with("me", None),       // active, but excluded
         ];
         // Exclude "me": two genuinely-active other-project builds remain.
         assert_eq!(count_active_jobs(&jobs, Some("me")), 2);

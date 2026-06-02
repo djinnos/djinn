@@ -50,7 +50,11 @@ pub enum EnvironmentConfigError {
     #[error("{field}: value is empty")]
     EmptyValue { field: String },
     #[error("{field}: length {len} exceeds max {max}")]
-    TooLong { field: String, len: usize, max: usize },
+    TooLong {
+        field: String,
+        len: usize,
+        max: usize,
+    },
     #[error("{field}: list length {len} exceeds max {max}")]
     ListTooLong {
         field: String,
@@ -77,9 +81,7 @@ pub type EnvResult<T> = std::result::Result<T, EnvironmentConfigError>;
 ///   Re-writing from detection is OK (config may still be overwritten on the
 ///   next detector pass until the user edits it).
 /// * `UserEdited` — saved via the MCP tool or UI. Never reseeded from stack.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema,
-)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum ConfigSource {
     #[default]
@@ -163,14 +165,14 @@ impl EnvironmentConfig {
         // Detect which languages appear in workspaces or runtimes so we
         // only populate `languages.*` blocks that the image will actually
         // install.
-        let has_rust = stack.runtimes.rust.is_some()
-            || stack.workspaces.iter().any(|w| w.language == "rust");
-        let has_node = stack.runtimes.node.is_some()
-            || stack.workspaces.iter().any(|w| w.language == "node");
+        let has_rust =
+            stack.runtimes.rust.is_some() || stack.workspaces.iter().any(|w| w.language == "rust");
+        let has_node =
+            stack.runtimes.node.is_some() || stack.workspaces.iter().any(|w| w.language == "node");
         let has_python = stack.runtimes.python.is_some()
             || stack.workspaces.iter().any(|w| w.language == "python");
-        let has_go = stack.runtimes.go.is_some()
-            || stack.workspaces.iter().any(|w| w.language == "go");
+        let has_go =
+            stack.runtimes.go.is_some() || stack.workspaces.iter().any(|w| w.language == "go");
 
         if has_rust {
             cfg.languages.rust = Some(RustLanguage {
@@ -182,7 +184,11 @@ impl EnvironmentConfig {
             });
         }
         if has_node {
-            let default_version = stack.runtimes.node.clone().unwrap_or_else(|| "22".to_string());
+            let default_version = stack
+                .runtimes
+                .node
+                .clone()
+                .unwrap_or_else(|| "22".to_string());
             // Pick the first package manager the stack saw among the
             // Node set, else pnpm (matches djinn's own default).
             let default_pm = stack
@@ -1210,11 +1216,11 @@ mod tests {
             }
         }"#;
         let cfg: EnvironmentConfig = serde_json::from_str(raw).unwrap();
+        assert!(matches!(cfg.lifecycle.post_build[0], HookCommand::Shell(_)));
         assert!(matches!(
-            cfg.lifecycle.post_build[0],
-            HookCommand::Shell(_)
+            cfg.lifecycle.pre_anything[0],
+            HookCommand::Exec(_)
         ));
-        assert!(matches!(cfg.lifecycle.pre_anything[0], HookCommand::Exec(_)));
         assert!(matches!(
             cfg.lifecycle.pre_task[0],
             HookCommand::Parallel(_)
@@ -1300,10 +1306,7 @@ mod tests {
             cfg.languages.rust.as_ref().unwrap().default_toolchain,
             "1.84"
         );
-        assert_eq!(
-            cfg.languages.node.as_ref().unwrap().default_version,
-            "22"
-        );
+        assert_eq!(cfg.languages.node.as_ref().unwrap().default_version, "22");
         // The first Node-capable package manager wins for the language default.
         assert_eq!(
             cfg.languages

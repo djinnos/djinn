@@ -165,14 +165,7 @@ pub fn qdrant_code_chunk_point_id_hex(chunk_id: &str, content_hash: &str) -> Str
         u16::from_be_bytes([digest[6], digest[7]]),
         u16::from_be_bytes([digest[8], digest[9]]),
         u64::from_be_bytes([
-            0,
-            0,
-            digest[10],
-            digest[11],
-            digest[12],
-            digest[13],
-            digest[14],
-            digest[15]
+            0, 0, digest[10], digest[11], digest[12], digest[13], digest[14], digest[15]
         ]) & 0xFFFF_FFFF_FFFFu64
     )
 }
@@ -196,10 +189,7 @@ impl QdrantCodeChunkVectorStore {
     ///   payload indexes, which are also idempotent).
     /// * If it exists with **different** dimensions → returns an `Err` so the
     ///   caller can fail startup loudly instead of silently mismatching.
-    pub async fn ensure_collection(
-        &self,
-        vector_size: u64,
-    ) -> std::result::Result<(), String> {
+    pub async fn ensure_collection(&self, vector_size: u64) -> std::result::Result<(), String> {
         use qdrant_client::qdrant::{CreateCollectionBuilder, Distance, VectorParamsBuilder};
 
         let client = self.client()?;
@@ -296,13 +286,9 @@ impl QdrantCodeChunkVectorStore {
 
         let response = client
             .search_points(
-                SearchPointsBuilder::new(
-                    &self.config.collection,
-                    query_embedding.to_vec(),
-                    limit,
-                )
-                .filter(filter)
-                .with_payload(true),
+                SearchPointsBuilder::new(&self.config.collection, query_embedding.to_vec(), limit)
+                    .filter(filter)
+                    .with_payload(true),
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -329,9 +315,7 @@ impl QdrantCodeChunkVectorStore {
     ) -> std::result::Result<(), String> {
         use std::collections::HashMap;
 
-        use qdrant_client::qdrant::{
-            PointStruct, UpsertPointsBuilder, Value, value::Kind,
-        };
+        use qdrant_client::qdrant::{PointStruct, UpsertPointsBuilder, Value, value::Kind};
 
         let client = self.client()?;
 
@@ -359,7 +343,11 @@ impl QdrantCodeChunkVectorStore {
             .upsert_points(
                 UpsertPointsBuilder::new(
                     &self.config.collection,
-                    vec![PointStruct::new(point_id, input.embedding.to_vec(), payload)],
+                    vec![PointStruct::new(
+                        point_id,
+                        input.embedding.to_vec(),
+                        payload,
+                    )],
                 )
                 .wait(true),
             )
@@ -375,10 +363,7 @@ impl QdrantCodeChunkVectorStore {
         Err("qdrant support not compiled in; enable the 'qdrant' feature".to_owned())
     }
 
-    pub async fn ensure_collection(
-        &self,
-        _vector_size: u64,
-    ) -> std::result::Result<(), String> {
+    pub async fn ensure_collection(&self, _vector_size: u64) -> std::result::Result<(), String> {
         Err("qdrant support not compiled in; enable the 'qdrant' feature".to_owned())
     }
 

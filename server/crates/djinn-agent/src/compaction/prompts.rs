@@ -16,9 +16,7 @@ pub enum CompactionContext {
 pub(crate) fn compaction_prompt(ctx: &CompactionContext) -> &'static str {
     match ctx {
         CompactionContext::MidSession(role) if role == "worker" => MID_SESSION_WORKER_PROMPT,
-        CompactionContext::MidSession(role)
-            if role == "reviewer" || role == "task_reviewer" =>
-        {
+        CompactionContext::MidSession(role) if role == "reviewer" || role == "task_reviewer" => {
             REVIEWER_PROMPT
         }
         _ => GENERIC_PROMPT,
@@ -31,9 +29,7 @@ pub(crate) fn summariser_system(ctx: &CompactionContext) -> &'static str {
         CompactionContext::MidSession(role) if role == "worker" => {
             SUMMARISER_SYSTEM_WORKER_MID_SESSION
         }
-        CompactionContext::MidSession(role)
-            if role == "reviewer" || role == "task_reviewer" =>
-        {
+        CompactionContext::MidSession(role) if role == "reviewer" || role == "task_reviewer" => {
             SUMMARISER_SYSTEM_TASK_REVIEWER
         }
         _ => SUMMARISER_SYSTEM_GENERIC,
@@ -64,8 +60,7 @@ closing remarks — and never mention this summary, the conversation's length, o
 // from the messages being summarised. Each compaction fully rebuilds, so at most
 // one such pair ever exists. Detection by content (not a persisted MessageMeta
 // tag) keeps this off the bincode worker boundary and a clean no-op when absent.
-pub(super) const FULL_COMPACTION_CONTINUATION: &str =
-    "Your context was compacted. The previous message contains a summary of the \
+pub(super) const FULL_COMPACTION_CONTINUATION: &str = "Your context was compacted. The previous message contains a summary of the \
      conversation so far. Continue calling tools as necessary to complete the task.";
 
 /// Find a prior full-compaction summary in `messages`: the user message
@@ -158,8 +153,7 @@ pub(super) const PARTIAL_COMPACTION_SUMMARISER_SYSTEM: &str = "You summarise the
 
 pub(crate) const SUMMARISER_SYSTEM_WORKER_MID_SESSION: &str = "You summarise a coding agent's in-progress work session. Produce a dense, faithful, terse summary that preserves all implementation context so the agent can continue without re-reading files. Follow the requested section format exactly, output only the summary, and never mention summarisation or compaction.";
 pub(crate) const SUMMARISER_SYSTEM_TASK_REVIEWER: &str = "You summarise a code review session. Produce a dense, faithful, terse summary that preserves the review findings, issues identified, and assessment progress. Follow the requested section format exactly, output only the summary, and never mention summarisation or compaction.";
-pub(crate) const SUMMARISER_SYSTEM_GENERIC: &str =
-    "You summarise an agent–user working session. Produce a dense, faithful, terse summary. Follow the requested section format exactly, output only the summary, and never mention summarisation or compaction.";
+pub(crate) const SUMMARISER_SYSTEM_GENERIC: &str = "You summarise an agent–user working session. Produce a dense, faithful, terse summary. Follow the requested section format exactly, output only the summary, and never mention summarisation or compaction.";
 
 pub(super) fn last_user_text(messages: &[Message]) -> Option<String> {
     messages
@@ -340,8 +334,7 @@ pub(super) fn rebuild_partial_compaction_messages(
         tail_len, summary,
     )));
 
-    let continuation_msg =
-        "Part of your context was compacted. The messages above the summary are \
+    let continuation_msg = "Part of your context was compacted. The messages above the summary are \
          preserved verbatim; the summary covers your more recent work. Continue \
          calling tools as necessary to complete the task.";
     new_messages.push(Message::assistant(continuation_msg));
@@ -438,7 +431,10 @@ mod tests {
             extract_prior_summary(&grown).expect("prior summary detected");
         assert_eq!(text, "SUMMARY TEXT");
         assert_eq!(grown[summary_idx].text_content(), "SUMMARY TEXT");
-        assert_eq!(grown[continuation_idx].text_content(), FULL_COMPACTION_CONTINUATION);
+        assert_eq!(
+            grown[continuation_idx].text_content(),
+            FULL_COMPACTION_CONTINUATION
+        );
     }
 
     #[test]
@@ -758,11 +754,14 @@ mod tests {
         // No ToolUse without a matching result should survive into the rebuilt
         // conversation.
         let dangling = rebuilt.iter().any(|m| {
-            m.content.iter().any(|b| {
-                matches!(b, CB::ToolUse { id, .. } if id == "t1")
-            })
+            m.content
+                .iter()
+                .any(|b| matches!(b, CB::ToolUse { id, .. } if id == "t1"))
         });
-        assert!(!dangling, "dangling tool call was preserved after the summary");
+        assert!(
+            !dangling,
+            "dangling tool call was preserved after the summary"
+        );
         assert!(crate::compaction::policy::find_orphaned_tool_result(&rebuilt).is_none());
 
         // The user line is still preserved/re-appended so the model has the task.
@@ -800,7 +799,10 @@ mod tests {
             occurrences, 1,
             "last user line must appear exactly once, not double-appended"
         );
-        assert_eq!(rebuilt.last().unwrap().text_content(), "the final user line");
+        assert_eq!(
+            rebuilt.last().unwrap().text_content(),
+            "the final user line"
+        );
     }
 
     /// C5: re-append the last user line when the preserved tail ends on an

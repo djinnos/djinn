@@ -205,12 +205,9 @@ impl WorkspaceStore {
                     branch = default_branch,
                     "ensure_workspace: fast-path sync"
                 );
-                run_git_command(
-                    target.clone(),
-                    vec!["fetch".into(), "origin".into()],
-                )
-                .await
-                .map_err(|e| git_err("git fetch origin", e))?;
+                run_git_command(target.clone(), vec!["fetch".into(), "origin".into()])
+                    .await
+                    .map_err(|e| git_err("git fetch origin", e))?;
                 run_git_command(
                     target.clone(),
                     vec![
@@ -286,14 +283,15 @@ impl WorkspaceStore {
         let lock = self.lock_for(project_id).await;
         let _held = lock.lock().await;
 
-        debug!(project_id, branch = default_branch, "syncing persistent workspace");
+        debug!(
+            project_id,
+            branch = default_branch,
+            "syncing persistent workspace"
+        );
 
-        run_git_command(
-            target.clone(),
-            vec!["fetch".into(), "origin".into()],
-        )
-        .await
-        .map_err(|e| git_err("git fetch origin", e))?;
+        run_git_command(target.clone(), vec!["fetch".into(), "origin".into()])
+            .await
+            .map_err(|e| git_err("git fetch origin", e))?;
 
         run_git_command(
             target.clone(),

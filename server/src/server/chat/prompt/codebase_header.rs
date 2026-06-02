@@ -120,9 +120,11 @@ pub(in crate::server::chat) async fn build_codebase_header(
         ops.ranked(&ctx, None, Some("pagerank"), HOTSPOTS_LIMIT),
     );
     let clone_path_owned = clone_path.to_path_buf();
-    let tree_fut = tokio::task::spawn_blocking(move || folder_tree(&clone_path_owned, FOLDER_TREE_DEPTH));
+    let tree_fut =
+        tokio::task::spawn_blocking(move || folder_tree(&clone_path_owned, FOLDER_TREE_DEPTH));
 
-    let (status_outcome, ranked_outcome, tree_outcome) = tokio::join!(status_fut, ranked_fut, tree_fut);
+    let (status_outcome, ranked_outcome, tree_outcome) =
+        tokio::join!(status_fut, ranked_fut, tree_fut);
 
     let status = match status_outcome {
         Ok(Ok(s)) => Some(s),
@@ -252,16 +254,15 @@ fn render_header(
     if !ranked.is_empty() {
         let mut lines = vec!["**Top hotspots** (by PageRank):".to_string()];
         for node in ranked.iter().take(HOTSPOTS_LIMIT) {
-            lines.push(format!(
-                "- `{}` ({:.2})",
-                node.display_name, node.page_rank
-            ));
+            lines.push(format!("- `{}` ({:.2})", node.display_name, node.page_rank));
         }
         sections.push(lines.join("\n"));
     }
 
     if let Some(tree) = folder_tree.filter(|t| !t.trim().is_empty()) {
-        sections.push(format!("**Folder tree (depth {FOLDER_TREE_DEPTH})**:\n{tree}"));
+        sections.push(format!(
+            "**Folder tree (depth {FOLDER_TREE_DEPTH})**:\n{tree}"
+        ));
     }
 
     if sections.is_empty() {
@@ -279,16 +280,21 @@ fn render_status_line(status: Option<&djinn_control_plane::bridge::GraphStatus>)
     if status.warmed {
         parts.push("graph warmed".to_string());
         if let Some(commit) = &status.pinned_commit {
-            let short = if commit.len() > 8 { &commit[..8] } else { commit.as_str() };
+            let short = if commit.len() > 8 {
+                &commit[..8]
+            } else {
+                commit.as_str()
+            };
             parts.push(format!("commit `{short}`"));
         }
         if let Some(last_warm) = &status.last_warm_at {
             parts.push(format!("warmed at {last_warm}"));
         }
         if let Some(commits_since) = status.commits_since_pin
-            && commits_since > 0 {
-                parts.push(format!("{commits_since} commit(s) ahead"));
-            }
+            && commits_since > 0
+        {
+            parts.push(format!("{commits_since} commit(s) ahead"));
+        }
     } else {
         parts.push("graph not yet warmed".to_string());
     }

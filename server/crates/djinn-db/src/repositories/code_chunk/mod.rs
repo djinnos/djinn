@@ -31,9 +31,7 @@ pub use pipeline::{
     ChunkAndEmbedReport, CodeChunkEmbeddingProvider, EmbeddedCodeChunk, InflightGuard,
     chunk_and_embed_files, try_claim_project,
 };
-pub use search::{
-    CodeChunkSearchHit, cap_per_file, hydrate_chunk_ids, lexical_search_chunks,
-};
+pub use search::{CodeChunkSearchHit, cap_per_file, hydrate_chunk_ids, lexical_search_chunks};
 pub use text_generator::{EMBEDDING_TEXT_VERSION, RenderInput, content_hash, render_chunk_text};
 
 /// Per-chunk state surfaced by [`CodeChunkRepository::list_repair_embedding_rows`].

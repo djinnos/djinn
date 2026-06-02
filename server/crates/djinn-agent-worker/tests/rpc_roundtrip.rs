@@ -150,10 +150,7 @@ impl SupervisorServices for FakeServices {
         unimplemented!("not exercised on the auth-rejection path")
     }
 
-    async fn get_provider_base_url(
-        &self,
-        _catalog_provider_id: String,
-    ) -> Result<String, String> {
+    async fn get_provider_base_url(&self, _catalog_provider_id: String) -> Result<String, String> {
         unimplemented!("not exercised on the auth-rejection path")
     }
 

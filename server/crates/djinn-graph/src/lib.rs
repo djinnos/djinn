@@ -60,9 +60,7 @@ pub trait WarmContext: Send + Sync {
     /// `code_chunk_vector_store()` are `Some`). Returning `None` keeps
     /// the embed pass disabled — the right default for the warm worker
     /// binary, which doesn't ship an embedding model.
-    fn code_chunk_embeddings(
-        &self,
-    ) -> Option<Arc<dyn djinn_db::CodeChunkEmbeddingProvider>> {
+    fn code_chunk_embeddings(&self) -> Option<Arc<dyn djinn_db::CodeChunkEmbeddingProvider>> {
         None
     }
 

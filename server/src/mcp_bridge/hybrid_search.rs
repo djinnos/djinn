@@ -228,10 +228,7 @@ async fn run_semantic_signal(
         return Ok(vec![]);
     }
 
-    let scored: Vec<(String, f64)> = matches
-        .into_iter()
-        .map(|m| (m.chunk_id, m.score))
-        .collect();
+    let scored: Vec<(String, f64)> = matches.into_iter().map(|m| (m.chunk_id, m.score)).collect();
     let hits = djinn_db::hydrate_chunk_ids(state.db(), project_id, &scored)
         .await
         .map_err(|e| e.to_string())?;
@@ -293,7 +290,11 @@ impl Registry {
         }
     }
 
-    fn ingest_chunks(&mut self, hits: &[CodeChunkSearchHit], match_kind: &str) -> Vec<(String, f64)> {
+    fn ingest_chunks(
+        &mut self,
+        hits: &[CodeChunkSearchHit],
+        match_kind: &str,
+    ) -> Vec<(String, f64)> {
         let mut ranked = Vec::with_capacity(hits.len());
         for hit in hits {
             let entry = chunk_hit_to_search_hit(hit, match_kind);

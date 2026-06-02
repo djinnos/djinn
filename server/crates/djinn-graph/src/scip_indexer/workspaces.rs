@@ -292,7 +292,8 @@ mod tests {
 
         // Vendored packages buried under node_modules/.pnpm — each has a
         // tsconfig and a package.json the OLD discovery would have planned.
-        let pnpm_pkg = project_root.join("node_modules/.pnpm/typed-array-length-1.0.7/node_modules/typed-array-length");
+        let pnpm_pkg = project_root
+            .join("node_modules/.pnpm/typed-array-length-1.0.7/node_modules/typed-array-length");
         fs::create_dir_all(&pnpm_pkg).expect("create pnpm pkg dir");
         fs::write(pnpm_pkg.join("tsconfig.json"), "{}\n").expect("write vendored tsconfig");
         fs::write(pnpm_pkg.join("package.json"), "{}\n").expect("write vendored package.json");

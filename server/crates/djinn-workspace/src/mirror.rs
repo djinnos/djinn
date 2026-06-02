@@ -409,9 +409,9 @@ async fn snapshot_refs(mirror: &Path) -> Result<String, MirrorError> {
         // `git show-ref` exits 1 with empty output when the repo has no
         // matching refs (e.g. a freshly cloned empty mirror). Treat that
         // as an empty snapshot rather than an error.
-        Err(djinn_git::GitError::CommandFailed { code: 1, stdout, .. }) if stdout.is_empty() => {
-            Ok(String::new())
-        }
+        Err(djinn_git::GitError::CommandFailed {
+            code: 1, stdout, ..
+        }) if stdout.is_empty() => Ok(String::new()),
         Err(e) => Err(git_err_to_mirror("git show-ref", e)),
     }
 }

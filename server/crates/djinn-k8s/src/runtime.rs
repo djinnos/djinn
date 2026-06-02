@@ -265,7 +265,8 @@ impl SessionRuntime for KubernetesRuntime {
             RuntimeError::Prepare(
                 "KubernetesRuntime constructed without a database handle; \
                  `with_db` / `from_client_with_db` is required to dispatch \
-                 task-run Jobs".into(),
+                 task-run Jobs"
+                    .into(),
             )
         })?;
         let repo = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
@@ -273,10 +274,7 @@ impl SessionRuntime for KubernetesRuntime {
             .get_project_image(&spec.project_id)
             .await
             .map_err(|e| {
-                RuntimeError::Prepare(format!(
-                    "get_project_image({}): {e}",
-                    spec.project_id
-                ))
+                RuntimeError::Prepare(format!("get_project_image({}): {e}", spec.project_id))
             })?;
         let project_image_tag = match image_row {
             Some(row) if row.status == ProjectImageStatus::READY => match row.tag {
@@ -465,11 +463,7 @@ impl SessionRuntime for KubernetesRuntime {
         // Best-effort cancel-frame delivery.  Errors here are never
         // propagated: the worker may already be dead, the handshake may
         // never have landed, or the outbound writer may have closed.
-        if let Some(outbound) = self
-            .registry
-            .outbound_sender_for(&handle.task_run_id)
-            .await
-        {
+        if let Some(outbound) = self.registry.outbound_sender_for(&handle.task_run_id).await {
             let cancel_frame = Frame {
                 correlation_id: 0,
                 payload: FramePayload::Control(ControlMsg::Cancel),
@@ -609,8 +603,7 @@ impl SessionRuntime for KubernetesRuntime {
         }
 
         // Foreground-delete the Job so Pods cascade-clean. 404 is fine.
-        if let Err(e) =
-            delete_job_foreground(&self.client, &ns, &job_name, 30 /* seconds */).await
+        if let Err(e) = delete_job_foreground(&self.client, &ns, &job_name, 30 /* seconds */).await
         {
             warn!(
                 job = %job_name,
@@ -974,13 +967,9 @@ mod tests {
         };
         let credentials = ResolvedCredentials::default();
 
-        let secret = crate::secret::build_task_run_secret(
-            &cfg.namespace,
-            &task_run_id,
-            &spec,
-            &credentials,
-        )
-        .expect("build per-task-run Secret");
+        let secret =
+            crate::secret::build_task_run_secret(&cfg.namespace, &task_run_id, &spec, &credentials)
+                .expect("build per-task-run Secret");
         let job = crate::job::build_task_run_job(
             &cfg,
             &task_run_id,
@@ -1002,8 +991,14 @@ mod tests {
         );
 
         // Both live in the same namespace.
-        assert_eq!(secret.metadata.namespace.as_deref(), Some(cfg.namespace.as_str()));
-        assert_eq!(job.metadata.namespace.as_deref(), Some(cfg.namespace.as_str()));
+        assert_eq!(
+            secret.metadata.namespace.as_deref(),
+            Some(cfg.namespace.as_str())
+        );
+        assert_eq!(
+            job.metadata.namespace.as_deref(),
+            Some(cfg.namespace.as_str())
+        );
 
         // The Job's spec volume references the Secret by the name we just
         // asserted is shared. This is the handshake `prepare` depends on.
@@ -1269,11 +1264,13 @@ mod tests {
             .await
             .expect("send Cancel on BiStream");
 
-        let cancel_frame: SupFrame =
-            tokio::time::timeout(Duration::from_secs(2), djinn_runtime::wire::read_frame(&mut stream))
-                .await
-                .expect("inbound cancel frame within 2s")
-                .expect("read cancel frame");
+        let cancel_frame: SupFrame = tokio::time::timeout(
+            Duration::from_secs(2),
+            djinn_runtime::wire::read_frame(&mut stream),
+        )
+        .await
+        .expect("inbound cancel frame within 2s")
+        .expect("read cancel frame");
         match cancel_frame.payload {
             FramePayload::Control(ControlMsg::Cancel) => {}
             other => panic!("expected Control(Cancel), got {other:?}"),

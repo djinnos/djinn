@@ -16,9 +16,7 @@
 
 use std::path::Path;
 
-use crate::repo_graph::{
-    RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNodeKind, SymbolRange,
-};
+use crate::repo_graph::{RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNodeKind, SymbolRange};
 
 /// Env-gate for [`detect_db_access`]. Set to `1` / `true` / `on` to
 /// enable; any other value (or unset) keeps the pass off.
@@ -284,13 +282,13 @@ fn is_ident_char(c: u8) -> bool {
 /// `SELECT ... FROM users` queries materializes just one edge.
 fn dedupe(mut hits: Vec<SqlHit>) -> Vec<SqlHit> {
     hits.sort_by(|a, b| {
-        a.verb
-            .cmp(b.verb)
-            .then_with(|| a.table.to_ascii_lowercase().cmp(&b.table.to_ascii_lowercase()))
+        a.verb.cmp(b.verb).then_with(|| {
+            a.table
+                .to_ascii_lowercase()
+                .cmp(&b.table.to_ascii_lowercase())
+        })
     });
-    hits.dedup_by(|a, b| {
-        a.verb == b.verb && a.table.eq_ignore_ascii_case(&b.table)
-    });
+    hits.dedup_by(|a, b| a.verb == b.verb && a.table.eq_ignore_ascii_case(&b.table));
     hits
 }
 

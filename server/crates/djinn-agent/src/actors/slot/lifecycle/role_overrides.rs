@@ -180,8 +180,7 @@ pub(crate) async fn resolve_role_overrides(
                     Ok(agent_type) => {
                         let specialist_role = role_impl_for(agent_type);
                         out.runtime_role = specialist_role;
-                        out.specialist_overrode_runtime_role =
-                            agent_type != injected_agent_type;
+                        out.specialist_overrode_runtime_role = agent_type != injected_agent_type;
                     }
                     Err(_) => {
                         tracing::warn!(

@@ -513,7 +513,6 @@ impl AgentRepository {
         Ok(result.rows_affected())
     }
 
-
     pub async fn list_for_project(&self, query: AgentListQuery) -> Result<AgentListResult> {
         self.db.ensure_initialized().await?;
 
@@ -810,8 +809,12 @@ impl AgentRepository {
         metrics_after: &str,
     ) -> Result<()> {
         self.db.ensure_initialized().await?;
-        let metrics_after_value: serde_json::Value = serde_json::from_str(metrics_after)
-            .map_err(|e| Error::InvalidData(format!("invalid json for learned_prompt_history.metrics_after: {e}")))?;
+        let metrics_after_value: serde_json::Value =
+            serde_json::from_str(metrics_after).map_err(|e| {
+                Error::InvalidData(format!(
+                    "invalid json for learned_prompt_history.metrics_after: {e}"
+                ))
+            })?;
         sqlx::query!(
             "UPDATE learned_prompt_history
              SET action = $1, metrics_after = $2
@@ -864,7 +867,9 @@ impl AgentRepository {
         let amendment_trimmed = amendment.trim();
         let metrics_snapshot_value: Option<serde_json::Value> = match metrics_snapshot {
             Some(s) => Some(serde_json::from_str(s).map_err(|e| {
-                Error::InvalidData(format!("invalid json for learned_prompt_history.metrics_before: {e}"))
+                Error::InvalidData(format!(
+                    "invalid json for learned_prompt_history.metrics_before: {e}"
+                ))
             })?),
             None => None,
         };

@@ -26,10 +26,7 @@ use djinn_runtime::{GraphWarmerService, WarmerError};
 /// onto a background task.  Calling it a second time for a project that is
 /// already being warmed is a no-op that returns quickly.
 pub type WarmCallback = Arc<
-    dyn Fn(
-            String,
-            PathBuf,
-        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'static>>
+    dyn Fn(String, PathBuf) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'static>>
         + Send
         + Sync,
 >;
@@ -40,9 +37,7 @@ pub type WarmCallback = Arc<
 /// Returns `None` when the project has been deleted or cannot be resolved —
 /// the warmer treats this as a non-fatal signal and skips the call.
 pub type ProjectRootResolver = Arc<
-    dyn Fn(String) -> Pin<Box<dyn Future<Output = Option<PathBuf>> + Send + 'static>>
-        + Send
-        + Sync,
+    dyn Fn(String) -> Pin<Box<dyn Future<Output = Option<PathBuf>> + Send + 'static>> + Send + Sync,
 >;
 
 /// Callback that decides whether the canonical-graph cache is considered
@@ -50,11 +45,7 @@ pub type ProjectRootResolver = Arc<
 /// caller-supplied TTL — implementations may ignore the TTL if their
 /// freshness model is commit-SHA based rather than wall-clock based.
 pub type FreshnessProbe = Arc<
-    dyn Fn(
-            String,
-            PathBuf,
-            Duration,
-        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'static>>
+    dyn Fn(String, PathBuf, Duration) -> Pin<Box<dyn Future<Output = bool> + Send + 'static>>
         + Send
         + Sync,
 >;
@@ -237,7 +228,11 @@ mod tests {
             .await
             .unwrap();
         let elapsed = started.elapsed();
-        assert!(elapsed >= Duration::from_millis(250), "elapsed={:?}", elapsed);
+        assert!(
+            elapsed >= Duration::from_millis(250),
+            "elapsed={:?}",
+            elapsed
+        );
         assert!(elapsed < Duration::from_secs(2), "elapsed={:?}", elapsed);
     }
 }

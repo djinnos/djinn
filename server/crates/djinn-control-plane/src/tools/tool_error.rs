@@ -117,7 +117,9 @@ impl ToolError {
     pub fn from_http_error(method: &str, path: &str, raw: &str) -> Self {
         let status = extract_http_status(raw);
         let hint = match status.as_deref() {
-            Some("404") => "Resource not found — verify the repo/path/ref exists and is accessible.",
+            Some("404") => {
+                "Resource not found — verify the repo/path/ref exists and is accessible."
+            }
             Some("422") => "Request was rejected as invalid — check the query/parameter syntax.",
             Some("401") | Some("403") => {
                 "Access denied — the session may lack a GitHub token or permission for this resource."
@@ -278,7 +280,10 @@ mod tests {
     fn extract_http_status_ignores_non_status_digit_runs() {
         // A bare number that isn't a 3-digit HTTP code must not be misread.
         assert_eq!(extract_http_status("processed 12345 rows"), None);
-        assert_eq!(extract_http_status("returned 503 Service Unavailable").as_deref(), Some("503"));
+        assert_eq!(
+            extract_http_status("returned 503 Service Unavailable").as_deref(),
+            Some("503")
+        );
         assert_eq!(extract_http_status("no status here"), None);
     }
 }

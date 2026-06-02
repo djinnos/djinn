@@ -338,9 +338,11 @@ async fn mcp_memory_move_can_recover_proposed_adr_and_make_it_visible_to_proposa
         .await
         .expect("propose_adr_list should dispatch");
 
-    assert!(proposals["items"].as_array().is_some_and(|items| {
-        items.iter().any(|item| item["title"] == "Recover Me")
-    }));
+    assert!(
+        proposals["items"]
+            .as_array()
+            .is_some_and(|items| { items.iter().any(|item| item["title"] == "Recover Me") })
+    );
 }
 
 #[tokio::test]

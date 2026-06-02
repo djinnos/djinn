@@ -588,11 +588,13 @@ async fn housekeeping_rebuild_missing_content_hashes_repairs_legacy_null_hashes_
         assert_eq!(content_hash.as_deref(), Some(expected_hash.as_str()));
     }
 
-    let unaffected_hash =
-        sqlx::query_scalar!("SELECT content_hash FROM notes WHERE id = $1", unaffected.id)
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
+    let unaffected_hash = sqlx::query_scalar!(
+        "SELECT content_hash FROM notes WHERE id = $1",
+        unaffected.id
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
     assert_eq!(
         unaffected_hash.as_deref(),
         Some(crate::note_hash::note_content_hash("Gamma").as_str())
@@ -624,23 +626,11 @@ async fn housekeeping_flag_orphan_notes_tags_stale_unlinked_notes_only() {
     let repo = NoteRepository::new(db.clone(), event_bus_for(&tx));
 
     let orphan = repo
-        .create(
-            &project.id,
-            "Old orphan",
-            "body",
-            "reference",
-            "[]",
-        )
+        .create(&project.id, "Old orphan", "body", "reference", "[]")
         .await
         .unwrap();
     let linked = repo
-        .create(
-            &project.id,
-            "Linked target",
-            "body",
-            "reference",
-            "[]",
-        )
+        .create(&project.id, "Linked target", "body", "reference", "[]")
         .await
         .unwrap();
     let source = repo
@@ -675,14 +665,20 @@ async fn housekeeping_flag_orphan_notes_tags_stale_unlinked_notes_only() {
         .unwrap();
     assert_eq!(flagged, 1);
 
-    let orphan_tags = sqlx::query_scalar!(r#"SELECT tags::text AS "tags!" FROM notes WHERE id = $1"#, orphan.id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-    let linked_tags = sqlx::query_scalar!(r#"SELECT tags::text AS "tags!" FROM notes WHERE id = $1"#, linked.id)
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
+    let orphan_tags = sqlx::query_scalar!(
+        r#"SELECT tags::text AS "tags!" FROM notes WHERE id = $1"#,
+        orphan.id
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    let linked_tags = sqlx::query_scalar!(
+        r#"SELECT tags::text AS "tags!" FROM notes WHERE id = $1"#,
+        linked.id
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
 
     assert_eq!(orphan_tags, "[\"orphan\"]");
     assert_eq!(linked_tags, "[]");

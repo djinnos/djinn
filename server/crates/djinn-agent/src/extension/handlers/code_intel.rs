@@ -2,8 +2,8 @@ use super::*;
 use crate::extension::github_search;
 // v10: canonical test-path classification, shared with the graph
 // builder's `RepoGraphNode::is_test` stamping.
-use djinn_core::test_paths::is_test_path;
 use djinn_control_plane::bridge::{ProjectCtx, RepoGraphOps, ResolveOutcome};
+use djinn_core::test_paths::is_test_path;
 
 /// PR C2 mirror of the MCP-side dispatcher's pre-resolve. When the chat
 /// tool's caller passes a short identifier (`User`, `helper`) we go
@@ -19,27 +19,34 @@ async fn pre_resolve_chat_key(
     ctx: &ProjectCtx,
     params: &mut CodeGraphParams,
 ) -> Result<Option<serde_json::Value>, String> {
-    let single_key_ops = ["neighbors", "impact", "implementations", "describe", "context"];
+    let single_key_ops = [
+        "neighbors",
+        "impact",
+        "implementations",
+        "describe",
+        "context",
+    ];
     if single_key_ops.contains(&params.operation.as_str())
-        && let Some(key) = params.key.as_deref().filter(|k| !k.is_empty()) {
-            let kind_hint = params.kind_hint.as_deref();
-            match graph.resolve(ctx, key, kind_hint).await? {
-                ResolveOutcome::Found(uid) => {
-                    params.key = Some(uid);
-                }
-                ResolveOutcome::Ambiguous(candidates) => {
-                    return Ok(Some(serde_json::json!({ "candidates": candidates })));
-                }
-                ResolveOutcome::NotFound => {
-                    return Ok(Some(serde_json::json!({
-                        "not_found": {
-                            "query": key,
-                            "kind_hint": kind_hint,
-                        }
-                    })));
-                }
+        && let Some(key) = params.key.as_deref().filter(|k| !k.is_empty())
+    {
+        let kind_hint = params.kind_hint.as_deref();
+        match graph.resolve(ctx, key, kind_hint).await? {
+            ResolveOutcome::Found(uid) => {
+                params.key = Some(uid);
+            }
+            ResolveOutcome::Ambiguous(candidates) => {
+                return Ok(Some(serde_json::json!({ "candidates": candidates })));
+            }
+            ResolveOutcome::NotFound => {
+                return Ok(Some(serde_json::json!({
+                    "not_found": {
+                        "query": key,
+                        "kind_hint": kind_hint,
+                    }
+                })));
             }
         }
+    }
 
     if params.operation == "path" {
         // Validate required args BEFORE the resolve loop so a missing
@@ -248,9 +255,7 @@ pub(crate) async fn call_code_graph(
     // PR C2: pre-resolve key-bearing ops so the chat tool surfaces
     // `Ambiguous` / `NotFound` as structured JSON the model can act on,
     // instead of failing the call with a generic "not found" string.
-    if let Some(short_circuit) =
-        pre_resolve_chat_key(graph_ops.as_ref(), &ctx, &mut p).await?
-    {
+    if let Some(short_circuit) = pre_resolve_chat_key(graph_ops.as_ref(), &ctx, &mut p).await? {
         return Ok(short_circuit);
     }
 
@@ -349,12 +354,7 @@ async fn call_code_graph_inner(
         "ranked" => {
             let limit = p.limit.unwrap_or(20);
             let ranked = graph_ops
-                .ranked(
-                    ctx,
-                    p.kind_filter.as_deref(),
-                    p.sort_by.as_deref(),
-                    limit,
-                )
+                .ranked(ctx, p.kind_filter.as_deref(), p.sort_by.as_deref(), limit)
                 .await?;
             serde_json::to_value(&ranked).map_err(|e| format!("serialize error: {e}"))?
         }
@@ -387,18 +387,10 @@ async fn call_code_graph_inner(
             if let Some(c) = p.min_confidence
                 && !(0.0..=1.0).contains(&c)
             {
-                return Err(format!(
-                    "invalid min_confidence {c}: must be in [0.0, 1.0]"
-                ));
+                return Err(format!("invalid min_confidence {c}: must be in [0.0, 1.0]"));
             }
             let impact = graph_ops
-                .impact(
-                    ctx,
-                    key,
-                    depth,
-                    p.group_by.as_deref(),
-                    p.min_confidence,
-                )
+                .impact(ctx, key, depth, p.group_by.as_deref(), p.min_confidence)
                 .await?;
             serde_json::to_value(&impact).map_err(|e| format!("serialize error: {e}"))?
         }
@@ -461,9 +453,7 @@ async fn call_code_graph_inner(
             // kind_filter=null explicitly via the underlying bridge
             // for the mixed view.
             let kind_filter = p.kind_filter.as_deref().or(Some("symbol"));
-            let cycles = graph_ops
-                .cycles(ctx, kind_filter, min_size)
-                .await?;
+            let cycles = graph_ops.cycles(ctx, kind_filter, min_size).await?;
             serde_json::to_value(&cycles).map_err(|e| format!("serialize error: {e}"))?
         }
         "orphans" => {
@@ -488,9 +478,7 @@ async fn call_code_graph_inner(
                 p.to.as_deref()
                     .filter(|s| !s.is_empty())
                     .ok_or("'to' is required for 'path'")?;
-            let path = graph_ops
-                .path(ctx, from, to, p.max_depth)
-                .await?;
+            let path = graph_ops.path(ctx, from, to, p.max_depth).await?;
             serde_json::to_value(&path).map_err(|e| format!("serialize error: {e}"))?
         }
         "edges" => {
@@ -506,13 +494,7 @@ async fn call_code_graph_inner(
                 .ok_or("'to_glob' is required for 'edges'")?;
             let limit = p.limit.unwrap_or(100);
             let edges = graph_ops
-                .edges(
-                    ctx,
-                    from_glob,
-                    to_glob,
-                    p.edge_kind.as_deref(),
-                    limit,
-                )
+                .edges(ctx, from_glob, to_glob, p.edge_kind.as_deref(), limit)
                 .await?;
             serde_json::to_value(&edges).map_err(|e| format!("serialize error: {e}"))?
         }
@@ -637,12 +619,7 @@ async fn call_code_graph_inner(
             // this is just dispatch wiring.
             let limit = p.limit.unwrap_or(50);
             let result = graph_ops
-                .api_surface(
-                    ctx,
-                    p.from_glob.as_deref(),
-                    p.visibility.as_deref(),
-                    limit,
-                )
+                .api_surface(ctx, p.from_glob.as_deref(), p.visibility.as_deref(), limit)
                 .await?;
             serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
         }
@@ -687,24 +664,40 @@ async fn call_code_graph_inner(
             let entries: Vec<String> = p
                 .from_glob
                 .as_deref()
-                .map(|s| s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect())
+                .map(|s| {
+                    s.split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
                 .unwrap_or_default();
             let sinks: Vec<String> = p
                 .to_glob
                 .as_deref()
-                .map(|s| s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect())
+                .map(|s| {
+                    s.split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
                 .unwrap_or_default();
             let queried: Vec<String> = p
                 .query
                 .as_deref()
-                .map(|s| s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect())
+                .map(|s| {
+                    s.split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
                 .unwrap_or_default();
             if entries.is_empty() || sinks.is_empty() || queried.is_empty() {
-                return Err(
-                    "touches_hot_path requires from_glob (entries, comma-sep), \
+                return Err("touches_hot_path requires from_glob (entries, comma-sep), \
                      to_glob (sinks, comma-sep), and query (symbols, comma-sep)"
-                        .to_string(),
-                );
+                    .to_string());
             }
             let result = graph_ops
                 .touches_hot_path(ctx, &entries, &sinks, &queried)
@@ -748,9 +741,7 @@ async fn call_code_graph_inner(
                     "coupled": coupled,
                 })
             } else {
-                let pairs = graph_ops
-                    .coupling_hotspots(ctx, limit, None, 15)
-                    .await?;
+                let pairs = graph_ops.coupling_hotspots(ctx, limit, None, 15).await?;
                 serde_json::json!({ "pairs": pairs })
             }
         }
@@ -1294,7 +1285,9 @@ mod blast_radius_categorize_tests {
     #[test]
     fn separates_e2e_from_unit_tests() {
         // E2E directory variants.
-        assert!(is_e2e_test_path("tests/integration/e2e/cw_polling_e2e_test.go"));
+        assert!(is_e2e_test_path(
+            "tests/integration/e2e/cw_polling_e2e_test.go"
+        ));
         assert!(is_e2e_test_path("tests/e2e/auth_flow_test.go"));
         assert!(is_e2e_test_path("e2e/page_lifecycle_test.go"));
         assert!(is_e2e_test_path("integration/billing_test.go"));

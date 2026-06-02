@@ -58,7 +58,10 @@ async fn mirror_clone_commit_cycle() {
     run(&["git", "add", "."], source_dir.path()).await;
     run(&["git", "commit", "-m", "add new"], source_dir.path()).await;
     let changed = mgr.fetch_mirror(project_id, &source_url).await.unwrap();
-    assert!(changed, "fetch after upstream commit must report a ref advance");
+    assert!(
+        changed,
+        "fetch after upstream commit must report a ref advance"
+    );
 
     let ws = mgr.clone_ephemeral(project_id, "main").await.unwrap();
     assert!(ws.path().join("README.md").exists());
@@ -114,7 +117,9 @@ async fn push_to_origin_lands_worker_commit_in_mirror() {
     let made = ws.commit("worker stage", id).await.unwrap();
     assert!(made, "expected a commit since from-worker.txt was added");
 
-    ws.push_to_origin(task_branch).await.expect("push to origin");
+    ws.push_to_origin(task_branch)
+        .await
+        .expect("push to origin");
 
     // The mirror must now have the task_branch ref pointing at the
     // worker's commit. `git rev-parse refs/heads/{branch}` inside the

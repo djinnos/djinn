@@ -21,11 +21,8 @@ use djinn_stack::environment::EnvironmentConfig;
 fn test_build_context() -> BuildContext {
     let mut cfg = EnvironmentConfig::empty();
     cfg.schema_version = djinn_stack::environment::SCHEMA_VERSION;
-    generate_dockerfile(
-        &cfg,
-        &AgentWorkerImage::new("djinn/agent-runtime", "dev"),
-    )
-    .expect("generate")
+    generate_dockerfile(&cfg, &AgentWorkerImage::new("djinn/agent-runtime", "dev"))
+        .expect("generate")
 }
 
 #[test]
@@ -52,14 +49,7 @@ fn build_job_labels_and_envs_match_plan() {
         .expect("template labels");
     assert_eq!(template_labels.get(LABEL_PROJECT_ID).unwrap(), "proj-abc");
 
-    let pod = job
-        .spec
-        .as_ref()
-        .unwrap()
-        .template
-        .spec
-        .as_ref()
-        .unwrap();
+    let pod = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
     assert_eq!(pod.containers.len(), 1);
     let env: BTreeMap<&str, &str> = pod.containers[0]
         .env
@@ -157,8 +147,7 @@ mod watcher_transitions {
     async fn succeeded_event_flips_status_to_ready_and_emits_event() {
         let cfg = ImageControllerConfig::for_testing();
         let db = Database::open_in_memory().expect("open_in_memory");
-        let repo_seed =
-            ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let repo_seed = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
         let project = repo_seed
             .create("demo", "test", "demo")
             .await
@@ -190,8 +179,14 @@ mod watcher_transitions {
             None,
         );
 
-        __test_handle_event(&cfg, &db, &bus, &mut seen, watcher::Event::Apply(job.clone()))
-            .await;
+        __test_handle_event(
+            &cfg,
+            &db,
+            &bus,
+            &mut seen,
+            watcher::Event::Apply(job.clone()),
+        )
+        .await;
 
         let row = repo_seed
             .get_project_image(&project.id)
@@ -218,10 +213,7 @@ mod watcher_transitions {
             assert_eq!(events[0].action, "ready");
             assert_eq!(events[0].project_id.as_deref(), Some(project.id.as_str()));
             assert_eq!(
-                events[0]
-                    .payload
-                    .get("image_hash")
-                    .and_then(|v| v.as_str()),
+                events[0].payload.get("image_hash").and_then(|v| v.as_str()),
                 Some(hash_prefix)
             );
         }
@@ -270,8 +262,14 @@ mod watcher_transitions {
             .expect("row present");
         assert_eq!(row.status, ProjectImageStatus::FAILED);
         let err = row.last_error.as_deref().expect("last_error populated");
-        assert!(err.contains(&job_name), "error '{err}' should cite job name");
-        assert!(err.contains("kubectl logs"), "error '{err}' should hint logs");
+        assert!(
+            err.contains(&job_name),
+            "error '{err}' should cite job name"
+        );
+        assert!(
+            err.contains("kubectl logs"),
+            "error '{err}' should hint logs"
+        );
 
         let events = captured.lock().unwrap();
         assert_eq!(events.len(), 1);

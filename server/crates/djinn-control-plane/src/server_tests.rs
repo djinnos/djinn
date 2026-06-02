@@ -90,8 +90,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, std::path::Path::new("")).await;
-        let canonical =
-            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+        let canonical = djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
         let _guard = PathCleanupGuard::new(canonical);
         let server = DjinnMcpServer::new(state);
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
@@ -166,8 +165,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, std::path::Path::new("")).await;
-        let canonical =
-            djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
+        let canonical = djinn_core::paths::project_dir(&project.github_owner, &project.github_repo);
         std::fs::create_dir_all(&canonical).expect("create canonical project dir");
         let _guard = PathCleanupGuard::new(canonical.clone());
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
@@ -219,13 +217,7 @@ mod tests {
             .unwrap();
         let repo = NoteRepository::new(db.clone(), EventBus::noop());
         let note_a = repo
-            .create(
-                &project.id,
-                "Note A",
-                "alpha",
-                "reference",
-                "[]",
-            )
+            .create(&project.id, "Note A", "alpha", "reference", "[]")
             .await
             .unwrap();
         let note_b = repo
@@ -300,10 +292,7 @@ mod tests {
         .await;
 
         let response = server
-            .dispatch_tool(
-                "propose_adr_list",
-                json!({ "project": project.slug() }),
-            )
+            .dispatch_tool("propose_adr_list", json!({ "project": project.slug() }))
             .await
             .expect("dispatch propose_adr_list");
 
@@ -434,13 +423,7 @@ mod tests {
         let project = create_project(&db, std::path::Path::new("")).await;
         let server = DjinnMcpServer::new(state);
 
-        seed_proposed_adr(
-            &db,
-            &project.id,
-            "ADR 999 Routing",
-            "# ADR 999 Routing\n",
-        )
-        .await;
+        seed_proposed_adr(&db, &project.id, "ADR 999 Routing", "# ADR 999 Routing\n").await;
 
         let response = server
             .dispatch_tool(

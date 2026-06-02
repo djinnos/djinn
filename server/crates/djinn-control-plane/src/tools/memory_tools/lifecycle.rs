@@ -2,8 +2,8 @@ use super::*;
 
 use crate::tools::memory_tools::contradiction::ContradictionAnalysisInput;
 use crate::tools::memory_tools::summaries::NoteSummaryService;
-use djinn_memory::Note;
 use djinn_db::folder_for_type;
+use djinn_memory::Note;
 
 pub(crate) fn schedule_summary_regeneration(server: &DjinnMcpServer, note_id: &str) {
     let db = server.state.db().clone();

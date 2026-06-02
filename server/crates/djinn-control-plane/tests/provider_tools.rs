@@ -42,10 +42,7 @@ async fn provider_models_returns_models_for_valid_provider_and_error_for_unknown
     );
 
     let unknown = harness
-        .call_tool(
-            "provider_models",
-            json!({"provider_id":"no-such-provider"}),
-        )
+        .call_tool("provider_models", json!({"provider_id":"no-such-provider"}))
         .await
         .expect("provider_models should dispatch");
     assert_eq!(unknown["total"], 0);
@@ -121,13 +118,19 @@ async fn provider_model_lookup_returns_found_and_not_found_shapes() {
     // G3: a 404-style miss must carry the structured tool-error envelope so the
     // agent can branch on status instead of re-guessing the same bad id.
     let env = &not_found["error"];
-    assert!(env.is_object(), "expected structured error envelope: {not_found}");
+    assert!(
+        env.is_object(),
+        "expected structured error envelope: {not_found}"
+    );
     assert_eq!(env["status"], "404");
     assert_eq!(env["method"], "provider_model_lookup");
     assert_eq!(env["path"], "nope/unknown-model");
     assert!(env["error"].as_str().unwrap().contains("not found"));
     assert!(
-        env["hint"].as_str().unwrap().contains("provider_models_connected"),
+        env["hint"]
+            .as_str()
+            .unwrap()
+            .contains("provider_models_connected"),
         "hint should point at the recovery tool: {env}"
     );
 

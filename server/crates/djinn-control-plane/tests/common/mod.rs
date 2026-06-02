@@ -124,11 +124,7 @@ pub async fn create_test_task(db: &Database, project_id: &str, epic_id: &str) ->
     .expect("failed to set test task acceptance criteria")
 }
 
-pub async fn create_test_session(
-    db: &Database,
-    project_id: &str,
-    task_id: &str,
-) -> SessionRecord {
+pub async fn create_test_session(db: &Database, project_id: &str, task_id: &str) -> SessionRecord {
     let repo = SessionRepository::new(db.clone(), test_events());
     repo.create(CreateSessionParams {
         project_id,
@@ -153,13 +149,7 @@ pub async fn create_test_note(db: &Database, project_id: &str) -> Note {
 
     let _project_path = project_dir(&project.github_owner, &project.github_repo);
 
-    repo.create(
-        project_id,
-        "test note",
-        "test note body",
-        "research",
-        "[]",
-    )
-    .await
-    .expect("failed to create test note")
+    repo.create(project_id, "test note", "test note body", "research", "[]")
+        .await
+        .expect("failed to create test note")
 }

@@ -158,14 +158,15 @@ impl CodexTokens {
             tracing::warn!("Codex: corrupt token JSON in DB, ignoring");
         }
         if owner.is_none()
-            && let Some(tokens) = Self::load_cached() {
-                tracing::info!("Codex: migrating tokens from filesystem to DB");
-                if let Err(e) = tokens.save_to_db(repo).await {
-                    tracing::warn!("Codex: migration save failed: {e}");
-                }
-                let _ = std::fs::remove_file(Self::cache_path());
-                return Some(tokens);
+            && let Some(tokens) = Self::load_cached()
+        {
+            tracing::info!("Codex: migrating tokens from filesystem to DB");
+            if let Err(e) = tokens.save_to_db(repo).await {
+                tracing::warn!("Codex: migration save failed: {e}");
             }
+            let _ = std::fs::remove_file(Self::cache_path());
+            return Some(tokens);
+        }
         None
     }
 
@@ -419,7 +420,9 @@ pub async fn start_codex_device_auth(
                 // above was owner-scoped, but `save_to_db` → `set` resolves the
                 // owner from the task-local).
                 let _ = djinn_core::auth_context::SESSION_USER_ID
-                    .scope(owner_user_id.clone(), async { tokens.save_to_db(&repo).await })
+                    .scope(owner_user_id.clone(), async {
+                        tokens.save_to_db(&repo).await
+                    })
                     .await;
                 tracing::info!("Codex: token refreshed silently, skipping device flow");
                 return Ok(None);
@@ -436,7 +439,9 @@ pub async fn start_codex_device_auth(
     let resp = client
         .post(&url)
         .header("Content-Type", "application/json")
-        .json(&UserCodeReq { client_id: CLIENT_ID })
+        .json(&UserCodeReq {
+            client_id: CLIENT_ID,
+        })
         .send()
         .await?;
     if !resp.status().is_success() {
@@ -485,15 +490,14 @@ pub async fn start_codex_device_auth(
     let poll_repo = repo.clone();
     let device_auth_id = uc.device_auth_id;
     let user_code = uc.user_code;
-    tokio::spawn(djinn_core::auth_context::SESSION_USER_ID.scope(
-        owner_user_id,
-        async move {
+    tokio::spawn(
+        djinn_core::auth_context::SESSION_USER_ID.scope(owner_user_id, async move {
             match poll_codex_device_auth(&device_auth_id, &user_code, interval, &poll_repo).await {
                 Ok(_) => tracing::info!("Codex: device-code flow completed, tokens persisted"),
                 Err(e) => tracing::warn!(error = %e, "Codex: device-code flow failed"),
             }
-        },
-    ));
+        }),
+    );
 
     Ok(Some(session))
 }

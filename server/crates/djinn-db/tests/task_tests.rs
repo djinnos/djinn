@@ -126,10 +126,7 @@ pub(crate) async fn create_test_project(db: &Database) -> djinn_core::models::Pr
         .expect("failed to create test project")
 }
 
-pub(crate) async fn create_test_epic(
-    db: &Database,
-    project_id: &str,
-) -> djinn_core::models::Epic {
+pub(crate) async fn create_test_epic(db: &Database, project_id: &str) -> djinn_core::models::Epic {
     use djinn_db::{EpicCreateInput, EpicRepository};
     let repo = EpicRepository::new(db.clone(), noop_events());
     repo.create_for_project(

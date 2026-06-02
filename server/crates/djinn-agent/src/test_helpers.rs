@@ -112,7 +112,10 @@ pub async fn create_test_project(db: &Database) -> Project {
     // without threading a full devcontainer pipeline: mark the image as ready
     // and stamp `graph_warmed_at` via a cache row with a synthetic commit SHA.
     let image = djinn_db::ProjectImage {
-        tag: Some(format!("test-registry/djinn-project-{}:testhash", &project.id)),
+        tag: Some(format!(
+            "test-registry/djinn-project-{}:testhash",
+            &project.id
+        )),
         hash: Some("testhash".into()),
         status: djinn_db::ProjectImageStatus::READY.into(),
         last_error: None,

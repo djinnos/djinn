@@ -221,12 +221,7 @@ mod tests {
     async fn verify_commit_failure_is_not_cached() {
         let dir = tempdir_in_tmp();
         let state = test_db();
-        seed_project_with_setup(
-            &state,
-            "p1",
-            vec![HookCommand::Shell("echo setup".into())],
-        )
-        .await;
+        seed_project_with_setup(&state, "p1", vec![HookCommand::Shell("echo setup".into())]).await;
         let scoped = vec!["false".to_string()];
 
         let result = verify_commit("p1", "sha3", dir.path(), &state, &scoped)

@@ -358,10 +358,8 @@ impl DjinnMcpServer {
                                 // a never-returning model call. Classify
                                 // using the latest session_messages
                                 // timestamp + token counts.
-                                let last_msg = repo
-                                    .last_message_at(&session.id)
-                                    .await
-                                    .unwrap_or(None);
+                                let last_msg =
+                                    repo.last_message_at(&session.id).await.unwrap_or(None);
                                 let verdict = djinn_core::liveness::classify_session_progress(
                                     &session.started_at,
                                     last_msg.as_deref(),
@@ -405,10 +403,9 @@ impl DjinnMcpServer {
                     recovery_triggered = true;
                 }
 
-                let task_run_repo =
-                    djinn_db::repositories::task_run::TaskRunRepository::new(
-                        self.state.db().clone(),
-                    );
+                let task_run_repo = djinn_db::repositories::task_run::TaskRunRepository::new(
+                    self.state.db().clone(),
+                );
                 let mut runtime_out = Vec::with_capacity(runtime_sessions.len());
                 for s in runtime_sessions {
                     runtime_out

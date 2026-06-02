@@ -213,8 +213,10 @@ impl NoteRepository {
         status: Option<&str>,
         tags: &str,
     ) -> Result<Note> {
-        self.create_internal(project_id, None, title, content, note_type, status, tags, "[]")
-            .await
+        self.create_internal(
+            project_id, None, title, content, note_type, status, tags, "[]",
+        )
+        .await
     }
 
     /// Create with explicit `scope_paths`.
@@ -601,18 +603,15 @@ impl NoteRepository {
         // autocommit DELETE when another writer commits to an overlapping
         // branch at the same moment. Retry the DELETE (idempotent) before
         // giving up.
-        crate::retry::retry_on_serialization_failure(
-            crate::retry::DEFAULT_MAX_TX_RETRIES,
-            || {
-                let id_owned = id_owned.clone();
-                async move {
-                    sqlx::query!("DELETE FROM notes WHERE id = $1", id_owned)
-                        .execute(self.db.pool())
-                        .await?;
-                    Ok::<_, crate::Error>(())
-                }
-            },
-        )
+        crate::retry::retry_on_serialization_failure(crate::retry::DEFAULT_MAX_TX_RETRIES, || {
+            let id_owned = id_owned.clone();
+            async move {
+                sqlx::query!("DELETE FROM notes WHERE id = $1", id_owned)
+                    .execute(self.db.pool())
+                    .await?;
+                Ok::<_, crate::Error>(())
+            }
+        })
         .await?;
 
         if let Err(error) = self.delete_embedding(&id_owned).await {

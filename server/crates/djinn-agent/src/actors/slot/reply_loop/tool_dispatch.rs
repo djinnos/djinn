@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use crate::extension;
-use djinn_provider::message::ContentBlock;
 use crate::output_stash::{OutputStash, handle_stash_tool, is_stash_tool, render_tool_result};
+use djinn_provider::message::ContentBlock;
 use djinn_provider::provider::telemetry;
 
 /// Maximum number of concurrent-safe tools that can execute in parallel within
@@ -404,7 +404,12 @@ mod tests {
     /// before handing it back to the model. Mirrors the `Ok(value)` arm of the
     /// MCP branch in [`dispatch_single_tool`] so the test exercises the exact
     /// `render_tool_result` chokepoint the fix routes MCP results through.
-    fn mcp_branch_render(stash: &Mutex<OutputStash>, id: &str, name: &str, value: &serde_json::Value) -> String {
+    fn mcp_branch_render(
+        stash: &Mutex<OutputStash>,
+        id: &str,
+        name: &str,
+        value: &serde_json::Value,
+    ) -> String {
         render_tool_result(stash, id, name, value)
     }
 

@@ -47,9 +47,7 @@ impl BuildStatus {
         match status {
             ProjectImageStatus::BUILDING => Self::Building,
             ProjectImageStatus::READY => Self::Ready,
-            ProjectImageStatus::FAILED => {
-                Self::Failed(last_error.unwrap_or_default().to_string())
-            }
+            ProjectImageStatus::FAILED => Self::Failed(last_error.unwrap_or_default().to_string()),
             _ => Self::None,
         }
     }

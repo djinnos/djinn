@@ -69,13 +69,7 @@ mod tests {
             .unwrap();
         let note_repo = NoteRepository::new(db.clone(), event_bus);
         let note = note_repo
-            .create(
-                &project.id,
-                "Any Note",
-                "body",
-                "adr",
-                "[]",
-            )
+            .create(&project.id, "Any Note", "body", "adr", "[]")
             .await
             .unwrap();
 
@@ -90,7 +84,10 @@ mod tests {
             .await
             .0;
 
-        assert!(response.error.is_some(), "memory_diff should now return error");
+        assert!(
+            response.error.is_some(),
+            "memory_diff should now return error"
+        );
         assert!(response.diff.is_empty());
     }
 

@@ -146,8 +146,8 @@ async fn dispatch(
             }
         }
         Some("tools/list") => {
-            let tools =
-                djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state()).all_tool_schemas();
+            let tools = djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state())
+                .all_tool_schemas();
             serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": payload.get("id").cloned().unwrap_or(Value::Null),

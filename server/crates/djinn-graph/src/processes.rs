@@ -32,9 +32,7 @@ use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
 use sha2::{Digest, Sha256};
 
-use crate::repo_graph::{
-    RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNodeKind, RepoNodeKey,
-};
+use crate::repo_graph::{RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNodeKind, RepoNodeKey};
 
 /// Hard cap on the number of candidate outgoing edges a step can have
 /// before the trace bails out. Tuned to match the plan's "branch
@@ -133,11 +131,7 @@ pub fn detect_processes(graph: &mut RepoDependencyGraph) -> Vec<Process> {
             let process_node_id = graph.ensure_process_node(&id, &label);
 
             for (step_ordinal, &step_node) in steps.iter().enumerate() {
-                graph.add_step_in_process_edge(
-                    process_node_id,
-                    step_node,
-                    step_ordinal as i32,
-                );
+                graph.add_step_in_process_edge(process_node_id, step_node, step_ordinal as i32);
             }
 
             processes.push(Process {
@@ -182,10 +176,7 @@ fn collect_entry_points(graph: &RepoDependencyGraph) -> Vec<NodeIndex> {
 /// pruning rules. Returns the ordered step list when a viable trace
 /// was captured (always at least the entry node), or `None` when the
 /// fan-out check fired at the root.
-fn trace_from_entry(
-    graph: &RepoDependencyGraph,
-    entry: NodeIndex,
-) -> Option<Vec<NodeIndex>> {
+fn trace_from_entry(graph: &RepoDependencyGraph, entry: NodeIndex) -> Option<Vec<NodeIndex>> {
     let mut visited: BTreeSet<NodeIndex> = BTreeSet::new();
     let mut steps: Vec<NodeIndex> = Vec::new();
     let mut queue: VecDeque<NodeIndex> = VecDeque::new();
@@ -258,10 +249,7 @@ fn trace_from_entry(
 /// Relationship edges (definition, implementation, type-def) are
 /// structural metadata and don't describe execution flow, so they're
 /// excluded.
-fn call_chain_successors(
-    graph: &RepoDependencyGraph,
-    node: NodeIndex,
-) -> Vec<NodeIndex> {
+fn call_chain_successors(graph: &RepoDependencyGraph, node: NodeIndex) -> Vec<NodeIndex> {
     let g = graph.graph();
     let mut out: Vec<NodeIndex> = Vec::new();
 
@@ -322,10 +310,7 @@ fn call_chain_successors(
 /// Build the stable process id from the entry-point node's uid plus
 /// the step count. Truncating to 16 hex chars (64 bits of entropy) is
 /// plenty for collision avoidance within a single repo's process set.
-fn build_process_id(
-    entry_node: &crate::repo_graph::RepoGraphNode,
-    step_count: usize,
-) -> String {
+fn build_process_id(entry_node: &crate::repo_graph::RepoGraphNode, step_count: usize) -> String {
     let uid = match &entry_node.id {
         RepoNodeKey::File(p) => format!("file:{}", p.display()),
         RepoNodeKey::Symbol(s) => format!("symbol:{s}"),
@@ -586,9 +571,7 @@ mod tests {
             "node `b` should be a step in at least one process"
         );
         assert!(
-            memberships
-                .iter()
-                .any(|p| p.label == "main process"),
+            memberships.iter().any(|p| p.label == "main process"),
             "node `b` should appear in the `main` process: {memberships:?}"
         );
     }
@@ -614,8 +597,7 @@ mod tests {
             "rerunning detection must not change process count"
         );
         assert!(
-            graph.node_count() == nodes_before
-                || graph.node_count() == nodes_before, /* always */
+            graph.node_count() == nodes_before || graph.node_count() == nodes_before, /* always */
             "synthetic process nodes are reused across re-runs"
         );
         // Edges *can* grow because we don't dedupe `StepInProcess`

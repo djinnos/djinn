@@ -151,13 +151,9 @@ impl UserRepository {
     /// promotion paths.
     pub async fn set_admin_status(&self, id: &str, is_admin: bool) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
-            "UPDATE users SET is_admin = $1 WHERE id = $2",
-            is_admin,
-            id,
-        )
-        .execute(self.db.pool())
-        .await?;
+        sqlx::query!("UPDATE users SET is_admin = $1 WHERE id = $2", is_admin, id,)
+            .execute(self.db.pool())
+            .await?;
         Ok(())
     }
 
@@ -166,11 +162,10 @@ impl UserRepository {
     /// just-upserted user is stamped admin.
     pub async fn admin_count(&self) -> Result<i64> {
         self.db.ensure_initialized().await?;
-        let n: i64 = sqlx::query_scalar!(
-            r#"SELECT COUNT(*) AS "count!" FROM users WHERE is_admin = TRUE"#,
-        )
-        .fetch_one(self.db.pool())
-        .await?;
+        let n: i64 =
+            sqlx::query_scalar!(r#"SELECT COUNT(*) AS "count!" FROM users WHERE is_admin = TRUE"#,)
+                .fetch_one(self.db.pool())
+                .await?;
         Ok(n)
     }
 

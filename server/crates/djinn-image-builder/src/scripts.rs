@@ -87,8 +87,7 @@ mod tests {
     fn every_script_has_bash_shebang() {
         for s in SCRIPTS {
             assert!(
-                s.body.starts_with("#!/usr/bin/env bash")
-                    || s.body.starts_with("#!/bin/sh"),
+                s.body.starts_with("#!/usr/bin/env bash") || s.body.starts_with("#!/bin/sh"),
                 "{} must declare a POSIX-shell shebang",
                 s.name
             );

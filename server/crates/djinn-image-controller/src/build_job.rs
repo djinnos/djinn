@@ -466,14 +466,7 @@ mod tests {
         let cfg = test_cfg();
         let ctx = test_build_context();
         let job = build_image_build_job(&cfg, "proj-xyz", "abc123", "reg/p:abc123", &ctx);
-        let pod = job
-            .spec
-            .as_ref()
-            .unwrap()
-            .template
-            .spec
-            .as_ref()
-            .unwrap();
+        let pod = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         let volumes = pod.volumes.as_ref().unwrap();
         let ctx_vol = volumes
             .iter()
@@ -484,7 +477,9 @@ mod tests {
         let items = cm.items.as_ref().expect("items");
         // Dockerfile + one item per script.
         assert!(
-            items.iter().any(|i| i.path == "Dockerfile" && i.key == "Dockerfile"),
+            items
+                .iter()
+                .any(|i| i.path == "Dockerfile" && i.key == "Dockerfile"),
             "Dockerfile item missing"
         );
         for s in djinn_image_builder::SCRIPTS {
@@ -505,14 +500,7 @@ mod tests {
         cfg.build_service_account = "custom-build-sa".into();
         let ctx = test_build_context();
         let job = build_image_build_job(&cfg, "p", "abc123", "reg/p:abc123", &ctx);
-        let pod = job
-            .spec
-            .as_ref()
-            .unwrap()
-            .template
-            .spec
-            .as_ref()
-            .unwrap();
+        let pod = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         assert_eq!(pod.service_account_name.as_deref(), Some("custom-build-sa"));
     }
 
@@ -521,14 +509,7 @@ mod tests {
         let cfg = test_cfg();
         let ctx = test_build_context();
         let job = build_image_build_job(&cfg, "p", "abc123", "reg/p:abc123", &ctx);
-        let pod = job
-            .spec
-            .as_ref()
-            .unwrap()
-            .template
-            .spec
-            .as_ref()
-            .unwrap();
+        let pod = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         let volumes = pod.volumes.as_ref().unwrap();
         assert!(
             !volumes.iter().any(|v| v.name == "mirror"),
@@ -543,7 +524,10 @@ mod tests {
         let job = build_image_build_job(&cfg, "p", "abc123", "reg/p:abc123", &ctx);
         let spec = job.spec.as_ref().unwrap();
         assert_eq!(spec.backoff_limit, Some(1));
-        assert_eq!(spec.ttl_seconds_after_finished, Some(BUILD_TTL_AFTER_FINISH));
+        assert_eq!(
+            spec.ttl_seconds_after_finished,
+            Some(BUILD_TTL_AFTER_FINISH)
+        );
         assert_eq!(spec.active_deadline_seconds, Some(BUILD_ACTIVE_DEADLINE));
     }
 

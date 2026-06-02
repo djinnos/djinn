@@ -50,8 +50,7 @@ use std::time::Duration;
 
 use djinn_core::models::{SessionRecord, Task, TaskRunStatus, TaskRunTrigger};
 use djinn_runtime::{
-    ResolvedCredentials, RoleKind, SerializableCredential, SupervisorFlow, TaskRunSpec,
-    WorkerEvent,
+    ResolvedCredentials, RoleKind, SerializableCredential, SupervisorFlow, TaskRunSpec, WorkerEvent,
 };
 use djinn_supervisor::services::{
     SerializableCreateSessionParams, SerializableCreateTaskRunParams,
@@ -125,7 +124,9 @@ async fn make_source_repo(path: &Path) {
     run_git(&["git", "init", "-b", "main"], path).await;
     run_git(&["git", "config", "user.email", "test@example.com"], path).await;
     run_git(&["git", "config", "user.name", "Test"], path).await;
-    tokio::fs::write(path.join("README.md"), "hello").await.unwrap();
+    tokio::fs::write(path.join("README.md"), "hello")
+        .await
+        .unwrap();
     run_git(&["git", "add", "."], path).await;
     run_git(&["git", "commit", "-m", "init"], path).await;
 }
@@ -208,7 +209,8 @@ async fn start_fake_server(
             let cid = frame.correlation_id;
             match frame.payload {
                 FramePayload::Rpc(req) => {
-                    let reply_payload = handle_rpc(req, &canned_task_id, &canned_project_id, &audit).await;
+                    let reply_payload =
+                        handle_rpc(req, &canned_task_id, &canned_project_id, &audit).await;
                     let reply = Frame {
                         correlation_id: cid,
                         payload: FramePayload::RpcReply(reply_payload),
@@ -306,8 +308,7 @@ async fn handle_rpc(
             // representation is bincode-fatal — see
             // `server/crates/djinn-supervisor/src/services/wire.rs`).
             let cfg = djinn_stack::environment::EnvironmentConfig::empty();
-            let cfg_json =
-                serde_json::to_string(&cfg).expect("encode EnvironmentConfig");
+            let cfg_json = serde_json::to_string(&cfg).expect("encode EnvironmentConfig");
             ServiceRpcResponse::GetEnvironmentConfig(Ok(cfg_json))
         }
         ServiceRpcRequest::GetModelContextWindow { model_id } => {
@@ -315,7 +316,9 @@ async fn handle_rpc(
             let _ = model_id;
             ServiceRpcResponse::GetModelContextWindow(Ok(100_000))
         }
-        ServiceRpcRequest::GetProviderBaseUrl { catalog_provider_id } => {
+        ServiceRpcRequest::GetProviderBaseUrl {
+            catalog_provider_id,
+        } => {
             // Worker uses default base URL when this errors — return an Err
             // so it falls back without us needing to know the right value.
             let _ = catalog_provider_id;
@@ -331,7 +334,9 @@ async fn handle_rpc(
         }
         ServiceRpcRequest::InvokeLlm { .. } => {
             audit.lock().await.invoke_llm_attempts += 1;
-            panic!("worker must call the provider locally; invoke_llm RPC is a Phase 7b regression");
+            panic!(
+                "worker must call the provider locally; invoke_llm RPC is a Phase 7b regression"
+            );
         }
         ServiceRpcRequest::OpenPr { .. } => {
             audit.lock().await.open_pr += 1;
@@ -344,14 +349,12 @@ async fn handle_rpc(
             let _ = event;
             ServiceRpcResponse::EmitDjinnEvent(Ok(()))
         }
-        ServiceRpcRequest::ToolGithubSearch { .. } => {
-            ServiceRpcResponse::ToolGithubSearch(Err("fake server: tool_github_search not wired".into()))
-        }
-        ServiceRpcRequest::ToolGithubFetchFile { .. } => {
-            ServiceRpcResponse::ToolGithubFetchFile(Err(
-                "fake server: tool_github_fetch_file not wired".into(),
-            ))
-        }
+        ServiceRpcRequest::ToolGithubSearch { .. } => ServiceRpcResponse::ToolGithubSearch(Err(
+            "fake server: tool_github_search not wired".into(),
+        )),
+        ServiceRpcRequest::ToolGithubFetchFile { .. } => ServiceRpcResponse::ToolGithubFetchFile(
+            Err("fake server: tool_github_fetch_file not wired".into()),
+        ),
         ServiceRpcRequest::ToolCiJobLog { .. } => {
             ServiceRpcResponse::ToolCiJobLog(Err("fake server: tool_ci_job_log not wired".into()))
         }
@@ -606,15 +609,12 @@ async fn worker_drives_real_supervisor_in_pod() {
     );
 
     // Terminal report should have surfaced via Event frame.
-    let report = log
-        .terminal_report
-        .as_ref()
-        .unwrap_or_else(|| {
-            panic!(
-                "worker should have emitted TerminalReport via Event frame\n\
+    let report = log.terminal_report.as_ref().unwrap_or_else(|| {
+        panic!(
+            "worker should have emitted TerminalReport via Event frame\n\
                  --- captured stderr ---\n{captured}"
-            )
-        });
+        )
+    });
     assert!(
         !report.task_run_id.is_empty(),
         "terminal report missing task_run_id"

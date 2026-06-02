@@ -1355,17 +1355,16 @@ impl DjinnMcpServer {
         // Parse + validate up front so the MCP error surface is the
         // typed EnvironmentConfigError, not whatever the DB layer
         // returns later.
-        let cfg: djinn_stack::environment::EnvironmentConfig = match serde_json::from_value(
-            serde_json::Value::Object(input.config.0),
-        ) {
-            Ok(c) => c,
-            Err(err) => {
-                return Json(ProjectEnvironmentConfigSetResponse {
-                    status: "error".into(),
-                    error: Some(format!("parse config: {err}")),
-                });
-            }
-        };
+        let cfg: djinn_stack::environment::EnvironmentConfig =
+            match serde_json::from_value(serde_json::Value::Object(input.config.0)) {
+                Ok(c) => c,
+                Err(err) => {
+                    return Json(ProjectEnvironmentConfigSetResponse {
+                        status: "error".into(),
+                        error: Some(format!("parse config: {err}")),
+                    });
+                }
+            };
         if let Err(err) = cfg.validate() {
             return Json(ProjectEnvironmentConfigSetResponse {
                 status: "error".into(),
@@ -1473,7 +1472,9 @@ impl DjinnMcpServer {
         }
 
         let json = match serde_json::to_value(&cfg) {
-            Ok(serde_json::Value::Object(map)) => Some(ObjectJson::from(serde_json::Value::Object(map))),
+            Ok(serde_json::Value::Object(map)) => {
+                Some(ObjectJson::from(serde_json::Value::Object(map)))
+            }
             _ => None,
         };
         Json(ProjectEnvironmentConfigResetResponse {
@@ -1482,7 +1483,6 @@ impl DjinnMcpServer {
             config: json,
         })
     }
-
 }
 
 #[cfg(test)]

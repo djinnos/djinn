@@ -370,10 +370,7 @@ mod tests {
         }
     }
 
-    fn small_function_file_input<'a>(
-        source: &'a str,
-        symbol: &'a [SymbolInput],
-    ) -> FileInput<'a> {
+    fn small_function_file_input<'a>(source: &'a str, symbol: &'a [SymbolInput]) -> FileInput<'a> {
         FileInput {
             path: "src/lib.rs",
             content: source,
@@ -432,7 +429,10 @@ mod tests {
             .expect("scan rows");
         assert!(!rows.is_empty(), "expected ≥1 chunk row in DB");
         for row in &rows {
-            assert_eq!(row.meta_model_version.as_deref(), Some("fake-test-model@v1"));
+            assert_eq!(
+                row.meta_model_version.as_deref(),
+                Some("fake-test-model@v1")
+            );
             assert_eq!(row.meta_extension_state.as_deref(), Some("pending"));
         }
 

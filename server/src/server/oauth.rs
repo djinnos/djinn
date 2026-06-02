@@ -191,8 +191,14 @@ async fn register(State(state): State<AppState>, Json(req): Json<RegisterRequest
         .as_deref()
         .unwrap_or("none")
         .to_string();
-    let is_confidential = matches!(auth_method.as_str(), "client_secret_post" | "client_secret_basic");
-    if !matches!(auth_method.as_str(), "none" | "client_secret_post" | "client_secret_basic") {
+    let is_confidential = matches!(
+        auth_method.as_str(),
+        "client_secret_post" | "client_secret_basic"
+    );
+    if !matches!(
+        auth_method.as_str(),
+        "none" | "client_secret_post" | "client_secret_basic"
+    ) {
         return oauth_error(
             StatusCode::BAD_REQUEST,
             "invalid_client_metadata",
@@ -200,9 +206,12 @@ async fn register(State(state): State<AppState>, Json(req): Json<RegisterRequest
         );
     }
 
-    let grant_types = req
-        .grant_types
-        .unwrap_or_else(|| vec!["authorization_code".to_string(), "refresh_token".to_string()]);
+    let grant_types = req.grant_types.unwrap_or_else(|| {
+        vec![
+            "authorization_code".to_string(),
+            "refresh_token".to_string(),
+        ]
+    });
     // We only support these two grants; reject anything exotic up front.
     for g in &grant_types {
         if !matches!(g.as_str(), "authorization_code" | "refresh_token") {
@@ -376,7 +385,11 @@ async fn authorize(
     }
 
     // ── 5. 302 back to the client's redirect_uri with code + state.
-    let mut location = format!("{redirect_uri}{}code={}", uri_query_sep(redirect_uri), urlencode(&code));
+    let mut location = format!(
+        "{redirect_uri}{}code={}",
+        uri_query_sep(redirect_uri),
+        urlencode(&code)
+    );
     if let Some(s) = st {
         location.push_str(&format!("&state={}", urlencode(s)));
     }
@@ -481,7 +494,11 @@ async fn token_authorization_code(state: AppState, form: TokenForm) -> Response 
         );
     };
     let Some(client_id) = form.client_id.as_deref().filter(|s| !s.is_empty()) else {
-        return token_error(StatusCode::BAD_REQUEST, "invalid_request", "missing client_id");
+        return token_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "missing client_id",
+        );
     };
 
     // Authenticate the client (confidential clients must present a valid
@@ -489,11 +506,19 @@ async fn token_authorization_code(state: AppState, form: TokenForm) -> Response 
     let client = match repo.get_client(client_id).await {
         Ok(Some(c)) => c,
         Ok(None) => {
-            return token_error(StatusCode::UNAUTHORIZED, "invalid_client", "unknown client_id");
+            return token_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_client",
+                "unknown client_id",
+            );
         }
         Err(e) => {
             tracing::error!(error = %e, "oauth/token: client lookup failed");
-            return token_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "db error");
+            return token_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "db error",
+            );
         }
     };
     if let Some(resp) = verify_client_secret(&client, form.client_secret.as_deref()) {
@@ -507,13 +532,21 @@ async fn token_authorization_code(state: AppState, form: TokenForm) -> Response 
         }
         Err(e) => {
             tracing::error!(error = %e, "oauth/token: code lookup failed");
-            return token_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "db error");
+            return token_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "db error",
+            );
         }
     };
 
     // Reject already-consumed or expired codes.
     if auth_code.consumed_at.is_some() {
-        return token_error(StatusCode::BAD_REQUEST, "invalid_grant", "code already used");
+        return token_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "code already used",
+        );
     }
     if session_expired(&auth_code.expires_at) {
         return token_error(StatusCode::BAD_REQUEST, "invalid_grant", "code expired");
@@ -524,19 +557,33 @@ async fn token_authorization_code(state: AppState, form: TokenForm) -> Response 
     }
     match form.redirect_uri.as_deref() {
         Some(r) if r == auth_code.redirect_uri => {}
-        _ => return token_error(StatusCode::BAD_REQUEST, "invalid_grant", "redirect_uri mismatch"),
+        _ => {
+            return token_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "redirect_uri mismatch",
+            );
+        }
     }
     // Optional `resource` param must match the bound audience if supplied.
     if let Some(r) = form.resource.as_deref()
         && r != auth_code.resource
     {
-        return token_error(StatusCode::BAD_REQUEST, "invalid_target", "resource mismatch");
+        return token_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_target",
+            "resource mismatch",
+        );
     }
 
     // PKCE: BASE64URL_NOPAD(SHA256(code_verifier)) == code_challenge.
     let computed = pkce_s256(code_verifier);
     if !constant_time_eq(computed.as_bytes(), auth_code.code_challenge.as_bytes()) {
-        return token_error(StatusCode::BAD_REQUEST, "invalid_grant", "PKCE verification failed");
+        return token_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "PKCE verification failed",
+        );
     }
 
     // Mark the code consumed atomically. If this loses the race (double
@@ -545,11 +592,19 @@ async fn token_authorization_code(state: AppState, form: TokenForm) -> Response 
     match repo.consume_authorization_code(code, &now).await {
         Ok(true) => {}
         Ok(false) => {
-            return token_error(StatusCode::BAD_REQUEST, "invalid_grant", "code already used");
+            return token_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "code already used",
+            );
         }
         Err(e) => {
             tracing::error!(error = %e, "oauth/token: consume failed");
-            return token_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "db error");
+            return token_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "db error",
+            );
         }
     }
 
@@ -577,20 +632,36 @@ async fn token_refresh(state: AppState, form: TokenForm) -> Response {
     let existing = match repo.get_by_refresh_token(refresh_token).await {
         Ok(Some(t)) => t,
         Ok(None) => {
-            return token_error(StatusCode::BAD_REQUEST, "invalid_grant", "unknown refresh_token");
+            return token_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "unknown refresh_token",
+            );
         }
         Err(e) => {
             tracing::error!(error = %e, "oauth/token: refresh lookup failed");
-            return token_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "db error");
+            return token_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "db error",
+            );
         }
     };
 
     if existing.revoked_at.is_some() {
-        return token_error(StatusCode::BAD_REQUEST, "invalid_grant", "refresh_token revoked");
+        return token_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "refresh_token revoked",
+        );
     }
     match existing.refresh_token_expires_at.as_deref() {
         Some(exp) if session_expired(exp) => {
-            return token_error(StatusCode::BAD_REQUEST, "invalid_grant", "refresh_token expired");
+            return token_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "refresh_token expired",
+            );
         }
         _ => {}
     }
@@ -604,7 +675,11 @@ async fn token_refresh(state: AppState, form: TokenForm) -> Response {
         }
         Err(e) => {
             tracing::error!(error = %e, "oauth/token: client lookup failed");
-            return token_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "db error");
+            return token_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "db error",
+            );
         }
     };
     // If a client_id was supplied it must match the token's owner.
@@ -622,7 +697,11 @@ async fn token_refresh(state: AppState, form: TokenForm) -> Response {
     let now = rfc3339_in(0);
     if let Err(e) = repo.revoke_access_token(&existing.token, &now).await {
         tracing::error!(error = %e, "oauth/token: revoke-on-rotate failed");
-        return token_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "db error");
+        return token_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "db error",
+        );
     }
 
     issue_tokens(
@@ -662,7 +741,11 @@ async fn issue_tokens(
         .await
     {
         tracing::error!(error = %e, "oauth/token: persist token failed");
-        return token_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "db error");
+        return token_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "db error",
+        );
     }
 
     let resp = TokenResponse {
@@ -866,9 +949,15 @@ pub(super) async fn resolve_request_user(state: &AppState, headers: &HeaderMap) 
 /// Extract an `Authorization: Bearer <token>` value (case-insensitive scheme).
 fn extract_bearer(headers: &HeaderMap) -> Option<String> {
     let raw = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    let rest = raw.strip_prefix("Bearer ").or_else(|| raw.strip_prefix("bearer "))?;
+    let rest = raw
+        .strip_prefix("Bearer ")
+        .or_else(|| raw.strip_prefix("bearer "))?;
     let tok = rest.trim();
-    if tok.is_empty() { None } else { Some(tok.to_string()) }
+    if tok.is_empty() {
+        None
+    } else {
+        Some(tok.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -911,11 +1000,17 @@ mod tests {
     #[test]
     fn extract_bearer_parses_scheme_case_insensitively() {
         let mut h = HeaderMap::new();
-        h.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer abc.def"));
+        h.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer abc.def"),
+        );
         assert_eq!(extract_bearer(&h).as_deref(), Some("abc.def"));
 
         let mut h2 = HeaderMap::new();
-        h2.insert(header::AUTHORIZATION, HeaderValue::from_static("bearer xyz"));
+        h2.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("bearer xyz"),
+        );
         assert_eq!(extract_bearer(&h2).as_deref(), Some("xyz"));
 
         let mut h3 = HeaderMap::new();
