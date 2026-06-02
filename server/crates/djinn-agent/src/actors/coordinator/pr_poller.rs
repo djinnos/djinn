@@ -1,8 +1,8 @@
 use djinn_core::models::{Task, TransitionAction};
 use djinn_db::{ActivityQuery, SessionAuthRepository, UserSettingsRepository};
 use djinn_provider::github_api::{
-    CheckRun, DbBackedRefresher, GitHubApiClient, MergeMethod, PrReview, PrReviewFeedback, PrState,
-    PullRequest, UserTokenExpired,
+    ActionsJob, CheckRun, DbBackedRefresher, GitHubApiClient, MergeMethod, PrReview,
+    PrReviewFeedback, PrState, PullRequest, UserTokenExpired,
 };
 use djinn_provider::oauth::github_app_user;
 
@@ -26,6 +26,14 @@ const PR_DRAFT_MIN_AGE_SECS: i64 = 10;
 /// after we cached a "green" SHA, or where branch-protection rules block
 /// the merge for reasons we didn't anticipate.
 const MERGE_RETRY_RECHECK_THRESHOLD: u32 = 3;
+
+/// Maximum number of distinct failing workflow runs whose jobs/steps are
+/// aggregated into a single CI-failure rework comment. Failures frequently
+/// span multiple workflow runs (e.g. separate `CI` and `Release` workflows on
+/// the same SHA); we union all of them so the worker fixes every failure in one
+/// pass instead of whack-a-mole. Bounded to keep the Actions API fan-out and
+/// the comment size sane; if more runs failed we cap here and signal it.
+const MAX_AGGREGATED_CI_RUNS: usize = 5;
 
 /// Activity log event type for stored PR review feedback payloads.
 ///
@@ -2023,137 +2031,65 @@ impl CoordinatorActor {
         owner: &str,
         repo: &str,
     ) {
-        let mut sections: Vec<String> = Vec::new();
+        // A PR's failures often span *multiple* workflow runs (e.g. a separate
+        // `CI` run and a `Release` run on the same SHA). Aggregating only the
+        // first run's jobs/steps drops the rest, so the worker fixes one and the
+        // others keep failing on the next push. Collect every distinct failing
+        // workflow run (bounded by `MAX_AGGREGATED_CI_RUNS`) and union their
+        // jobs into a single feedback comment.
+        let mut run_ids: Vec<u64> = Vec::new();
+        for cr in failed_checks {
+            if let Some(rid) = parse_actions_run_id(&cr.html_url)
+                && !run_ids.contains(&rid)
+            {
+                run_ids.push(rid);
+            }
+        }
 
-        // Try to get rich job/step info from the Actions API.
-        // Parse run_id from the first failed check run's URL.
-        let run_id = failed_checks.first().and_then(|cr| {
-            cr.html_url
-                .split("/actions/runs/")
-                .nth(1)
-                .and_then(|rest| rest.split('/').next())
-                .and_then(|s| s.parse::<u64>().ok())
-        });
+        let capped = run_ids.len() > MAX_AGGREGATED_CI_RUNS;
+        if capped {
+            tracing::warn!(
+                task_id,
+                total_failing_runs = run_ids.len(),
+                cap = MAX_AGGREGATED_CI_RUNS,
+                "PR poller: more failing workflow runs than the aggregation cap; \
+                 truncating CI-failure feedback to the first {MAX_AGGREGATED_CI_RUNS} runs"
+            );
+            run_ids.truncate(MAX_AGGREGATED_CI_RUNS);
+        }
 
-        let jobs = if let Some(rid) = run_id {
-            gh_client.list_run_jobs(owner, repo, rid).await.ok()
+        // Fetch jobs for each run and union them, de-duping by job id so the same
+        // job reported under multiple check runs of one run isn't double-counted.
+        let mut all_jobs: Vec<ActionsJob> = Vec::new();
+        let mut seen_job_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut any_fetched = false;
+        for rid in &run_ids {
+            if let Ok(jobs) = gh_client.list_run_jobs(owner, repo, *rid).await {
+                any_fetched = true;
+                for job in jobs {
+                    if seen_job_ids.insert(job.id) {
+                        all_jobs.push(job);
+                    }
+                }
+            }
+        }
+
+        // `None` means "no run jobs available at all" → fall back to listing
+        // raw check-run names. An empty-but-fetched list is still `Some`.
+        let jobs: Option<&[ActionsJob]> = if any_fetched {
+            Some(&all_jobs)
         } else {
             None
         };
 
-        // Build the structural overview: workflow, jobs, failed steps.
-        if let Some(ref jobs) = jobs {
-            if let Some(workflow_name) = jobs.first().and_then(|j| j.workflow_name.as_deref()) {
-                sections.push(format!("**Workflow:** {workflow_name}"));
-            }
+        let (mut sections, ci_jobs) = build_ci_failure_sections(jobs, failed_checks);
 
-            for job in jobs.iter().filter(|j| {
-                matches!(
-                    j.conclusion.as_deref(),
-                    Some("failure") | Some("timed_out") | Some("cancelled")
-                )
-            }) {
-                let conclusion = job.conclusion.as_deref().unwrap_or("unknown");
-                sections.push(format!("**Failed job:** {} ({})", job.name, conclusion));
-
-                let failed_steps: Vec<_> = job
-                    .steps
-                    .iter()
-                    .filter(|s| {
-                        matches!(
-                            s.conclusion.as_deref(),
-                            Some("failure") | Some("timed_out") | Some("cancelled")
-                        )
-                    })
-                    .collect();
-
-                if !failed_steps.is_empty() {
-                    for step in &failed_steps {
-                        let step_conclusion = step.conclusion.as_deref().unwrap_or("unknown");
-                        sections.push(format!(
-                            "**Failed step:** {} (step #{}, {})",
-                            step.name, step.number, step_conclusion
-                        ));
-                    }
-                }
-
-                sections.push(format!("Job URL: {}", job.html_url));
-            }
-        } else {
-            // Fallback: just list the check run names.
-            for cr in failed_checks {
-                let conclusion = cr.conclusion.as_deref().unwrap_or("unknown");
-                sections.push(format!(
-                    "- **{}** ({}): {}",
-                    cr.name, conclusion, cr.html_url
-                ));
-            }
-        }
-
-        // Build structured CI job metadata for the `ci_job_log` tool instead of
-        // inlining truncated logs. The worker can call `ci_job_log(job_id=...)` to
-        // fetch the full log on demand, with output_view/output_grep for navigation.
-        let mut ci_jobs = Vec::new();
-        if let Some(ref jobs) = jobs {
-            for job in jobs.iter().filter(|j| {
-                matches!(
-                    j.conclusion.as_deref(),
-                    Some("failure") | Some("timed_out") | Some("cancelled")
-                )
-            }) {
-                let failed_step_names: Vec<serde_json::Value> = job
-                    .steps
-                    .iter()
-                    .filter(|s| {
-                        matches!(
-                            s.conclusion.as_deref(),
-                            Some("failure") | Some("timed_out") | Some("cancelled")
-                        )
-                    })
-                    .map(|s| {
-                        serde_json::json!({
-                            "name": s.name,
-                            "number": s.number,
-                        })
-                    })
-                    .collect();
-
-                ci_jobs.push(serde_json::json!({
-                    "job_id": job.id,
-                    "name": job.name,
-                    "failed_steps": failed_step_names,
-                }));
-            }
-        }
-
-        // Build ci_job_log hint lines so the worker knows exactly which tool
-        // call to make for each failed job.
-        if !ci_jobs.is_empty() {
-            let hints: Vec<String> = ci_jobs
-                .iter()
-                .map(|j| {
-                    let job_id = j["job_id"].as_u64().unwrap_or(0);
-                    let name = j["name"].as_str().unwrap_or("unknown");
-                    let steps: Vec<String> = j["failed_steps"]
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|s| s["name"].as_str().map(|n| n.to_string()))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    if let Some(step) = steps.first() {
-                        format!(
-                            "Use `ci_job_log(job_id={job_id}, step=\"{step}\")` to view the **{name}** failed step log."
-                        )
-                    } else {
-                        format!(
-                            "Use `ci_job_log(job_id={job_id})` to view the **{name}** job log."
-                        )
-                    }
-                })
-                .collect();
-            sections.push(format!("\n{}", hints.join("\n")));
+        if capped {
+            sections.push(format!(
+                "\n_Note: more than {MAX_AGGREGATED_CI_RUNS} workflow runs failed; \
+                 showing the first {MAX_AGGREGATED_CI_RUNS}. Re-run CI after fixing \
+                 these to surface any remaining failures._"
+            ));
         }
 
         sections.push(format!("\nPR: {pr_url}"));
@@ -2589,14 +2525,150 @@ fn effective_review_decision(reviews: &[PrReview]) -> (bool, bool) {
     (changes_requested, has_approved)
 }
 
+/// Parse a GitHub Actions workflow-run id out of a check-run's `html_url`.
+///
+/// URLs look like `https://github.com/{owner}/{repo}/actions/runs/{run_id}/...`.
+/// Returns `None` for URLs that don't carry a run id (e.g. non-Actions checks).
+fn parse_actions_run_id(html_url: &str) -> Option<u64> {
+    html_url
+        .split("/actions/runs/")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .and_then(|s| s.parse::<u64>().ok())
+}
+
+/// True when a job/step conclusion represents a CI failure worth surfacing.
+fn is_failing_conclusion(conclusion: Option<&str>) -> bool {
+    matches!(
+        conclusion,
+        Some("failure") | Some("timed_out") | Some("cancelled")
+    )
+}
+
+/// Build the human-readable `sections` and the structured `ci_jobs` payload for
+/// a CI-failure rework comment from the *union* of failing jobs across one or
+/// more workflow runs.
+///
+/// `jobs` is `Some` when the Actions API returned job data for at least one run
+/// (possibly empty), and `None` when no run jobs could be fetched at all — in
+/// which case we fall back to listing the raw failed check-run names. The output
+/// format matches what the worker already expects (Workflow / Failed job /
+/// Failed step lines plus `ci_job_log(...)` hint lines and a `ci_jobs` array);
+/// it is just unioned across every failing run rather than the first one only.
+///
+/// `jobs` is expected to already be de-duplicated by job id by the caller.
+fn build_ci_failure_sections(
+    jobs: Option<&[ActionsJob]>,
+    failed_checks: &[&CheckRun],
+) -> (Vec<String>, Vec<serde_json::Value>) {
+    let mut sections: Vec<String> = Vec::new();
+    let mut ci_jobs: Vec<serde_json::Value> = Vec::new();
+
+    match jobs {
+        Some(jobs) => {
+            // One `**Workflow:** <name>` header per distinct workflow, in first-seen
+            // order, so multi-run aggregation names every workflow that failed.
+            let mut seen_workflows: Vec<&str> = Vec::new();
+            for name in jobs.iter().filter_map(|j| j.workflow_name.as_deref()) {
+                if !seen_workflows.contains(&name) {
+                    seen_workflows.push(name);
+                    sections.push(format!("**Workflow:** {name}"));
+                }
+            }
+
+            for job in jobs
+                .iter()
+                .filter(|j| is_failing_conclusion(j.conclusion.as_deref()))
+            {
+                let conclusion = job.conclusion.as_deref().unwrap_or("unknown");
+                sections.push(format!("**Failed job:** {} ({})", job.name, conclusion));
+
+                let failed_steps: Vec<_> = job
+                    .steps
+                    .iter()
+                    .filter(|s| is_failing_conclusion(s.conclusion.as_deref()))
+                    .collect();
+
+                for step in &failed_steps {
+                    let step_conclusion = step.conclusion.as_deref().unwrap_or("unknown");
+                    sections.push(format!(
+                        "**Failed step:** {} (step #{}, {})",
+                        step.name, step.number, step_conclusion
+                    ));
+                }
+
+                sections.push(format!("Job URL: {}", job.html_url));
+
+                // Structured metadata for the `ci_job_log` tool. The worker can
+                // call `ci_job_log(job_id=...)` to fetch the full log on demand.
+                let failed_step_names: Vec<serde_json::Value> = failed_steps
+                    .iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "name": s.name,
+                            "number": s.number,
+                        })
+                    })
+                    .collect();
+
+                ci_jobs.push(serde_json::json!({
+                    "job_id": job.id,
+                    "name": job.name,
+                    "failed_steps": failed_step_names,
+                }));
+            }
+        }
+        None => {
+            // Fallback: just list the check run names.
+            for cr in failed_checks {
+                let conclusion = cr.conclusion.as_deref().unwrap_or("unknown");
+                sections.push(format!(
+                    "- **{}** ({}): {}",
+                    cr.name, conclusion, cr.html_url
+                ));
+            }
+        }
+    }
+
+    // Build `ci_job_log` hint lines so the worker knows exactly which tool call
+    // to make for each failed job (across all aggregated runs).
+    if !ci_jobs.is_empty() {
+        let hints: Vec<String> = ci_jobs
+            .iter()
+            .map(|j| {
+                let job_id = j["job_id"].as_u64().unwrap_or(0);
+                let name = j["name"].as_str().unwrap_or("unknown");
+                let steps: Vec<String> = j["failed_steps"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|s| s["name"].as_str().map(|n| n.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if let Some(step) = steps.first() {
+                    format!(
+                        "Use `ci_job_log(job_id={job_id}, step=\"{step}\")` to view the **{name}** failed step log."
+                    )
+                } else {
+                    format!("Use `ci_job_log(job_id={job_id})` to view the **{name}** job log.")
+                }
+            })
+            .collect();
+        sections.push(format!("\n{}", hints.join("\n")));
+    }
+
+    (sections, ci_jobs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Task, blocking_failed_checks, dequeue_reason_is_failure, effective_review_decision,
-        is_advisory_check_name, is_merge_queue_405, is_racing_unmerged_status, parse_pr_url,
-        pick_conflict_blocker_sibling,
+        Task, blocking_failed_checks, build_ci_failure_sections, dequeue_reason_is_failure,
+        effective_review_decision, is_advisory_check_name, is_merge_queue_405,
+        is_racing_unmerged_status, parse_actions_run_id, parse_pr_url, pick_conflict_blocker_sibling,
     };
-    use djinn_provider::github_api::{CheckRun, GitHubUser, PrReview};
+    use djinn_provider::github_api::{ActionsJob, ActionsJobStep, CheckRun, GitHubUser, PrReview};
 
     /// Minimal `PrReview` builder for the effective-decision tests.
     fn review(author: &str, state: &str, submitted_at: &str) -> PrReview {
@@ -2931,5 +3003,169 @@ mod tests {
     #[test]
     fn rejects_non_github_url() {
         assert_eq!(parse_pr_url("https://gitlab.com/owner/repo/pull/1"), None);
+    }
+
+    // ---- CI-failure aggregation (E3) -------------------------------------
+
+    fn check_run(name: &str, run_id: u64) -> CheckRun {
+        CheckRun {
+            id: run_id * 100 + name.len() as u64,
+            name: name.to_string(),
+            status: "completed".to_string(),
+            conclusion: Some("failure".to_string()),
+            html_url: format!("https://github.com/o/r/actions/runs/{run_id}/job/{run_id}9"),
+        }
+    }
+
+    fn failed_step(name: &str, number: u64) -> ActionsJobStep {
+        ActionsJobStep {
+            name: name.to_string(),
+            status: "completed".to_string(),
+            conclusion: Some("failure".to_string()),
+            number,
+        }
+    }
+
+    fn failed_job(
+        id: u64,
+        name: &str,
+        workflow: &str,
+        steps: Vec<ActionsJobStep>,
+    ) -> ActionsJob {
+        ActionsJob {
+            id,
+            name: name.to_string(),
+            status: "completed".to_string(),
+            conclusion: Some("failure".to_string()),
+            html_url: format!("https://github.com/o/r/actions/runs/x/job/{id}"),
+            workflow_name: Some(workflow.to_string()),
+            steps,
+        }
+    }
+
+    #[test]
+    fn parse_actions_run_id_extracts_id() {
+        assert_eq!(
+            parse_actions_run_id("https://github.com/o/r/actions/runs/123456/job/99"),
+            Some(123456)
+        );
+        // Non-Actions check-run URL carries no run id.
+        assert_eq!(
+            parse_actions_run_id("https://github.com/o/r/checks/abc"),
+            None
+        );
+    }
+
+    #[test]
+    fn ci_failure_sections_single_run() {
+        // Baseline: one run with one failing job/step still renders correctly.
+        let jobs = vec![failed_job(
+            10,
+            "build",
+            "CI",
+            vec![failed_step("cargo build", 3)],
+        )];
+        let checks = [check_run("CI / build", 100)];
+        let refs: Vec<&CheckRun> = checks.iter().collect();
+        let (sections, ci_jobs) = build_ci_failure_sections(Some(&jobs), &refs);
+
+        let body = sections.join("\n");
+        assert!(body.contains("**Workflow:** CI"), "{body}");
+        assert!(body.contains("**Failed job:** build"), "{body}");
+        assert!(body.contains("**Failed step:** cargo build"), "{body}");
+        assert!(body.contains("ci_job_log(job_id=10"), "{body}");
+        assert_eq!(ci_jobs.len(), 1);
+        assert_eq!(ci_jobs[0]["job_id"].as_u64(), Some(10));
+    }
+
+    #[test]
+    fn ci_failure_sections_unions_multiple_runs() {
+        // Failures spread across two workflow runs (CI + Release): BOTH must be
+        // represented, not just the first — this is the core E3 fix.
+        let jobs = vec![
+            failed_job(10, "build", "CI", vec![failed_step("cargo build", 3)]),
+            failed_job(
+                20,
+                "publish",
+                "Release",
+                vec![failed_step("cargo publish", 5)],
+            ),
+        ];
+        let checks = [check_run("CI / build", 100), check_run("Release / publish", 200)];
+        let refs: Vec<&CheckRun> = checks.iter().collect();
+        let (sections, ci_jobs) = build_ci_failure_sections(Some(&jobs), &refs);
+
+        let body = sections.join("\n");
+        // Both workflows headered.
+        assert!(body.contains("**Workflow:** CI"), "{body}");
+        assert!(body.contains("**Workflow:** Release"), "{body}");
+        // Both jobs + steps present.
+        assert!(body.contains("**Failed job:** build"), "{body}");
+        assert!(body.contains("**Failed job:** publish"), "{body}");
+        assert!(body.contains("cargo build"), "{body}");
+        assert!(body.contains("cargo publish"), "{body}");
+        // Both ci_jobs entries (the structured payload the worker consumes).
+        assert_eq!(ci_jobs.len(), 2);
+        let ids: Vec<u64> = ci_jobs
+            .iter()
+            .map(|j| j["job_id"].as_u64().unwrap())
+            .collect();
+        assert!(ids.contains(&10) && ids.contains(&20), "{ids:?}");
+        // Hint lines reference both jobs.
+        assert!(body.contains("ci_job_log(job_id=10"), "{body}");
+        assert!(body.contains("ci_job_log(job_id=20"), "{body}");
+    }
+
+    #[test]
+    fn ci_failure_sections_dedups_identical_jobs() {
+        // The caller de-dups by job id; verify a duplicate job id collapses to
+        // a single entry (defends the grouping invariant).
+        let jobs = vec![
+            failed_job(10, "build", "CI", vec![failed_step("cargo build", 3)]),
+            failed_job(10, "build", "CI", vec![failed_step("cargo build", 3)]),
+        ];
+        // Simulate the caller's de-dup so the helper sees deduped input.
+        let mut seen = std::collections::HashSet::new();
+        let deduped: Vec<ActionsJob> =
+            jobs.into_iter().filter(|j| seen.insert(j.id)).collect();
+        let refs: Vec<&CheckRun> = Vec::new();
+        let (_sections, ci_jobs) = build_ci_failure_sections(Some(&deduped), &refs);
+        assert_eq!(ci_jobs.len(), 1);
+    }
+
+    #[test]
+    fn ci_failure_run_cap_bounds_aggregation() {
+        // The run cap is MAX_AGGREGATED_CI_RUNS. Emulate the caller's run-id
+        // collection + truncation and assert it bounds the number of runs and
+        // flags the cap, while keeping every run under the cap represented.
+        let cap = super::MAX_AGGREGATED_CI_RUNS;
+        let checks: Vec<CheckRun> = (0..(cap as u64 + 3))
+            .map(|i| check_run(&format!("wf{i} / job"), 1000 + i))
+            .collect();
+        let refs: Vec<&CheckRun> = checks.iter().collect();
+
+        let mut run_ids: Vec<u64> = Vec::new();
+        for cr in &refs {
+            if let Some(rid) = parse_actions_run_id(&cr.html_url)
+                && !run_ids.contains(&rid)
+            {
+                run_ids.push(rid);
+            }
+        }
+        let capped = run_ids.len() > cap;
+        assert!(capped, "should exceed the cap with {} runs", run_ids.len());
+        run_ids.truncate(cap);
+        assert_eq!(run_ids.len(), cap, "run ids bounded to the cap");
+    }
+
+    #[test]
+    fn ci_failure_sections_fallback_when_no_jobs() {
+        // No Actions job data → fall back to listing raw check-run names.
+        let checks = [check_run("lint", 100)];
+        let refs: Vec<&CheckRun> = checks.iter().collect();
+        let (sections, ci_jobs) = build_ci_failure_sections(None, &refs);
+        let body = sections.join("\n");
+        assert!(body.contains("**lint**"), "{body}");
+        assert!(ci_jobs.is_empty());
     }
 }
