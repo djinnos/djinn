@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::actors::coordinator::CoordinatorHandle;
 use crate::context::AgentContext;
-use djinn_db::TaskRepository;
+use djinn_db::{SessionRepository, TaskRepository};
 
 use super::super::{ModelSlotConfig, SlotEvent, SlotHandle, SlotPoolConfig, SlotState};
 use super::types::{PoolError, PoolMessage, SlotFactory, now_unix_string};
@@ -257,6 +257,7 @@ impl SlotPool {
     }
 
     async fn handle_slot_event(&mut self, event: SlotEvent) {
+        let killed = matches!(event, SlotEvent::Killed { .. });
         match event {
             SlotEvent::Free {
                 slot_id,
@@ -268,6 +269,20 @@ impl SlotPool {
                 model_id,
                 task_id,
             } => {
+                // On a killed lifecycle (stall-kill, interrupt_all/project,
+                // explicit Kill command) settle the session DB row to a terminal
+                // state *now*, at the moment the kill lands — not only later via
+                // the periodic zombie backstop. A worker that is killed mid-flow
+                // never reaches its own end-of-session flush, so its row would sit
+                // `running` and keep over-counting the per-user concurrency cap
+                // (fatal at max_sessions=1: the user can't redispatch because a
+                // dead session still "counts"). Idempotent: a no-op if no running
+                // row exists. `Free` lifecycles settle their own row through the
+                // normal terminal path, so we only settle here on `Killed`.
+                if killed {
+                    self.settle_session_row(&task_id).await;
+                }
+
                 self.task_to_slot.remove(&task_id);
                 self.task_started.remove(&task_id);
                 self.task_projects.remove(&task_id);
@@ -327,6 +342,12 @@ impl SlotPool {
             let _ = slot.kill().await;
         }
         let model_id = self.slot_models.get(&slot_id).cloned();
+        // A leaked/evicted pod never emits `SlotEvent::Killed`, so its session
+        // row is settled here at eviction (idempotent) rather than in
+        // `handle_slot_event`. Without this, the orphaned `running` row keeps
+        // over-counting the per-user concurrency cap even after the slot is
+        // reclaimed.
+        self.settle_session_row(task_id).await;
         self.task_to_slot.remove(task_id);
         self.task_started.remove(task_id);
         self.task_projects.remove(task_id);
@@ -342,6 +363,25 @@ impl SlotPool {
         }
         self.trigger_redispatch().await;
         Ok(())
+    }
+
+    /// Transition any `running` session row for `task_id` to a terminal
+    /// (`interrupted`) state so it stops counting against the per-user
+    /// concurrency cap the moment the slot is killed/evicted. Idempotent:
+    /// `interrupt_running_for_task` updates only `running` rows, so re-settling
+    /// an already-terminal row affects zero rows and is a no-op. Best-effort:
+    /// the slot teardown proceeds regardless of a transient DB error, and the
+    /// periodic `reap_zombie_sessions` backstop still covers any miss.
+    async fn settle_session_row(&self, task_id: &str) {
+        let session_repo =
+            SessionRepository::new(self.app_state.db.clone(), self.app_state.event_bus.clone());
+        if let Err(e) = session_repo.interrupt_running_for_task(task_id).await {
+            tracing::warn!(
+                task_id = %task_id,
+                error = %e,
+                "SlotPool: failed to settle session row on kill/evict (zombie backstop will retry)"
+            );
+        }
     }
 
     async fn pause_session(&self, task_id: &str) -> Result<(), PoolError> {
