@@ -163,11 +163,11 @@ pub(super) async fn dispatch_single_tool<'a>(
         let mcp_result = registry.call_tool(&name, args.clone()).await;
         let (content, is_error) = match mcp_result {
             Ok(value) => {
-                let text = if value.is_string() {
-                    value.as_str().unwrap_or("").to_string()
-                } else {
-                    serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
-                };
+                // Route MCP results through the same stash/truncate/pagination
+                // chokepoint as native tools so an oversized MCP payload (e.g. a
+                // 12MB result) is bounded + stashed instead of blowing the
+                // context window / tripping the 400.
+                let text = render_tool_result(&stash, &id, &name, &value);
                 if let Some(ts) = &tool_span {
                     ts.record_output(&text, false);
                 }
@@ -393,4 +393,67 @@ pub(super) async fn collect_tool_results(
         .into_iter()
         .map(|(_, block)| block)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::output_stash::{MAX_TOOL_RESULT_CHARS, handle_stash_tool};
+
+    /// The transformation the worker MCP success branch applies to a tool result
+    /// before handing it back to the model. Mirrors the `Ok(value)` arm of the
+    /// MCP branch in [`dispatch_single_tool`] so the test exercises the exact
+    /// `render_tool_result` chokepoint the fix routes MCP results through.
+    fn mcp_branch_render(stash: &Mutex<OutputStash>, id: &str, name: &str, value: &serde_json::Value) -> String {
+        render_tool_result(stash, id, name, value)
+    }
+
+    #[test]
+    fn oversized_mcp_result_is_stashed_and_truncated() {
+        let stash = Mutex::new(OutputStash::new());
+        // A 12MB-class MCP payload, well over the clamp — the exact case G6 guards.
+        let big = "z".repeat(MAX_TOOL_RESULT_CHARS * 4);
+        let value = serde_json::Value::String(big.clone());
+        let id = "mcp__server__huge-1";
+
+        let text = mcp_branch_render(&stash, id, "mcp__server__huge", &value);
+
+        // Bounded inline content + the output_view/grep navigation hint, exactly
+        // like native tools.
+        assert!(text.len() < big.len(), "inline text must be truncated");
+        assert!(text.len() <= MAX_TOOL_RESULT_CHARS + 512);
+        assert!(text.contains("Full output stashed"));
+        assert!(text.contains(&format!("output_view(tool_use_id=\"{id}\")")));
+        assert!(text.contains(&format!("output_grep(tool_use_id=\"{id}\"")));
+
+        // The full payload is recoverable from the stash.
+        let viewed = handle_stash_tool(
+            &stash,
+            "output_view",
+            Some(
+                &serde_json::json!({ "tool_use_id": id })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .unwrap();
+        assert!(viewed.contains("zzz"));
+    }
+
+    #[test]
+    fn small_mcp_result_passes_through_unchanged() {
+        let stash = Mutex::new(OutputStash::new());
+        let value = serde_json::json!({ "ok": true, "answer": "hello" });
+        let id = "mcp__server__small-1";
+
+        let text = mcp_branch_render(&stash, id, "mcp__server__small", &value);
+
+        // Small results are returned verbatim (pretty JSON) with no stash hint…
+        assert!(text.contains("\"answer\""));
+        assert!(text.contains("hello"));
+        assert!(!text.contains("Full output stashed"));
+        // …and nothing was stashed.
+        assert!(stash.lock().unwrap().view(id, 0, 10).is_err());
+    }
 }
