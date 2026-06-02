@@ -779,3 +779,245 @@ async fn read_detects_binary_file() {
         .expect_err("binary file must be rejected");
     assert!(err.contains("binary file"), "got: {err}");
 }
+
+// ─── F2: just-in-time pitfall retrieval on first write (gated) ────────────
+
+/// Env-lock for the `DJINN_JIT_PITFALLS` gate. Held across `.await` on
+/// purpose: the flag is process-global, so concurrent JIT tests must not
+/// observe each other's env mutation. Same pattern as the auto-code-context
+/// env tests in `helpers.rs`.
+static JIT_PITFALLS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Seed a `pitfall` note scoped to `scope_path` for `project_id`. Default
+/// confidence (1.0) clears the 0.3 floor in `query_by_scope_overlap`. The
+/// rendered hint falls back to the note body when no overview/abstract is
+/// present, so the title alone is enough to identify a note in the output.
+async fn seed_pitfall(
+    db: &djinn_db::Database,
+    project_id: &str,
+    title: &str,
+    body: &str,
+    scope_path: &str,
+) {
+    let repo = NoteRepository::new(db.clone(), EventBus::noop());
+    let scope_json = format!("[\"{scope_path}\"]");
+    repo.create_db_note_with_scope(project_id, title, body, "pitfall", "[]", &scope_json)
+        .await
+        .expect("seed pitfall note");
+}
+
+/// With the gate OFF (default), a write must produce byte-identical output:
+/// no scoped search, no `jit_pitfalls` field — even when matching pitfall
+/// notes exist for the touched path.
+// Holds `JIT_PITFALLS_ENV_LOCK` across `.await` on purpose — the lock
+// serializes process-env mutation for the duration of the async test (same
+// rationale as the auto-code-context env tests). Deliberate test-only guard.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn jit_pitfalls_off_by_default_no_hint() {
+    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    // SAFETY: single-threaded section guarded by the env-lock mutex.
+    unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS");
+    }
+
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let pid = project.id.as_str();
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-jit-off-");
+    tokio::fs::create_dir_all(worktree.path().join("src"))
+        .await
+        .expect("mkdir src");
+
+    // A pitfall scoped to `src` overlaps `src/a.rs` — it WOULD surface if the
+    // gate were on.
+    seed_pitfall(&db, pid, "Off-Path Pitfall", "do not foo the bar", "src").await;
+
+    let args = Some(
+        serde_json::json!({ "path": "src/a.rs", "content": "// x\n" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    let response = call_write(&state, &args, worktree.path(), Some(pid))
+        .await
+        .expect("write");
+
+    assert!(
+        response.get("jit_pitfalls").is_none(),
+        "gate OFF must not append jit_pitfalls, got {response:?}"
+    );
+}
+
+/// With the gate ON: the FIRST write to a session runs the scoped search and
+/// appends the top-2 pitfalls as a `<relevant-pitfalls>` block; a SECOND write
+/// in the same session does NOT re-append (once-per-session).
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn jit_pitfalls_on_first_write_appends_then_not_again() {
+    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    // SAFETY: single-threaded section guarded by the env-lock mutex.
+    unsafe {
+        std::env::set_var("DJINN_JIT_PITFALLS", "1");
+    }
+
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let pid = project.id.as_str();
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-jit-on-");
+    tokio::fs::create_dir_all(worktree.path().join("src"))
+        .await
+        .expect("mkdir src");
+
+    // Three matching pitfalls scoped to `src`; only the top 2 should render.
+    seed_pitfall(&db, pid, "First Pitfall", "watch the lock ordering", "src").await;
+    seed_pitfall(&db, pid, "Second Pitfall", "flush before close", "src").await;
+    seed_pitfall(&db, pid, "Third Pitfall", "never block in drop", "src").await;
+
+    let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+
+    let args1 = Some(
+        serde_json::json!({ "path": "src/a.rs", "content": "// first\n" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let r1 = call_write(&state, &args1, worktree.path(), Some(pid))
+        .await
+        .expect("first write");
+
+    let hint = r1
+        .get("jit_pitfalls")
+        .and_then(|v| v.as_str())
+        .expect("first write appends jit_pitfalls");
+    assert!(hint.starts_with("<relevant-pitfalls>"), "got: {hint}");
+    assert!(hint.contains("</relevant-pitfalls>"), "got: {hint}");
+    // Top-2 only: exactly two bullet lines.
+    let bullets = hint.lines().filter(|l| l.starts_with("- [")).count();
+    assert_eq!(bullets, 2, "expected top-2 only, got hint:\n{hint}");
+
+    // Cleanup the OTHER session-keyed entries can't leak: a SECOND write to the
+    // SAME worktree (session) must NOT re-append.
+    let args2 = Some(
+        serde_json::json!({ "path": "src/b.rs", "content": "// second\n" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let r2 = call_write(&state, &args2, worktree.path(), Some(pid))
+        .await
+        .expect("second write");
+    assert!(
+        r2.get("jit_pitfalls").is_none(),
+        "second write in same session must NOT re-append, got {r2:?}"
+    );
+
+    unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS");
+    }
+}
+
+/// With the gate ON but NO matching notes (a search "miss"), the write must
+/// still succeed with no `jit_pitfalls` field — the hint is skipped, never
+/// fatal.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn jit_pitfalls_on_miss_leaves_write_succeeding() {
+    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    // SAFETY: single-threaded section guarded by the env-lock mutex.
+    unsafe {
+        std::env::set_var("DJINN_JIT_PITFALLS", "1");
+    }
+
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let pid = project.id.as_str();
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-jit-miss-");
+    tokio::fs::create_dir_all(worktree.path().join("src"))
+        .await
+        .expect("mkdir src");
+
+    // No pitfall notes seeded → scoped search returns empty.
+    let args = Some(
+        serde_json::json!({ "path": "src/a.rs", "content": "// x\n" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    let response = call_write(&state, &args, worktree.path(), Some(pid))
+        .await
+        .expect("write must still succeed on search miss");
+
+    assert_eq!(response.get("ok").and_then(|v| v.as_bool()), Some(true));
+    assert!(
+        response.get("jit_pitfalls").is_none(),
+        "miss must not append a hint, got {response:?}"
+    );
+
+    unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS");
+    }
+}
+
+/// With the gate ON, `call_edit`'s FIRST modification also surfaces the hint
+/// (parity with `call_write`) — confirms the wiring isn't write-only.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn jit_pitfalls_on_edit_first_modification_appends() {
+    let _guard = JIT_PITFALLS_ENV_LOCK.lock().unwrap();
+    // SAFETY: single-threaded section guarded by the env-lock mutex.
+    unsafe {
+        std::env::set_var("DJINN_JIT_PITFALLS", "1");
+    }
+
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let pid = project.id.as_str();
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-jit-edit-");
+    tokio::fs::create_dir_all(worktree.path().join("src"))
+        .await
+        .expect("mkdir src");
+    let file = worktree.path().join("src/a.rs");
+    tokio::fs::write(&file, "fn a() {}\n").await.expect("seed");
+
+    seed_pitfall(&db, pid, "Edit Pitfall", "mind the borrow", "src").await;
+
+    let state = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+
+    // edit requires a prior read in-session.
+    let read_args = Some(
+        serde_json::json!({ "file_path": "src/a.rs" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    call_read(&state, &read_args, worktree.path())
+        .await
+        .expect("read");
+
+    let edit_args = Some(
+        serde_json::json!({
+            "path": "src/a.rs",
+            "old_text": "fn a() {}",
+            "new_text": "fn a() { /* edited */ }"
+        })
+        .as_object()
+        .expect("obj")
+        .clone(),
+    );
+    let response = call_edit(&state, &edit_args, worktree.path(), Some(pid))
+        .await
+        .expect("edit");
+
+    let hint = response
+        .get("jit_pitfalls")
+        .and_then(|v| v.as_str())
+        .expect("edit appends jit_pitfalls on first modification");
+    assert!(hint.contains("Edit Pitfall"), "got: {hint}");
+
+    unsafe {
+        std::env::remove_var("DJINN_JIT_PITFALLS");
+    }
+}

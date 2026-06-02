@@ -40,6 +40,7 @@ use super::types::*;
 
 mod ci;
 mod code_intel;
+mod jit_pitfalls;
 mod memory_agent;
 mod task_admin;
 mod task_epic;
