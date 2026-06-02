@@ -1,7 +1,7 @@
 use futures::StreamExt;
 
 use djinn_provider::message::{Conversation, Message, Role};
-use djinn_provider::provider::{LlmProvider, StreamEvent};
+use djinn_provider::provider::{LlmProvider, ReasoningEffort, StreamEvent};
 
 use super::prompts::{
     CompactionContext, PARTIAL_COMPACTION_PROMPT, PARTIAL_COMPACTION_SUMMARISER_SYSTEM,
@@ -121,7 +121,19 @@ async fn call_llm_for_summary(
     provider: &dyn LlmProvider,
     conv: &Conversation,
 ) -> anyhow::Result<String> {
-    let mut stream = provider.stream(conv, &[], None).await?;
+    // B5a: compaction summarization is a cheap background call (condense the
+    // conversation tail into a summary), not the agent's main reasoning loop.
+    // Force the weakest reasoning tier so it doesn't waste deep-thinking
+    // tokens/latency. `with_reasoning_effort` returns `None` for config-less
+    // providers (e.g. test mocks), in which case we stream through the original
+    // provider unchanged.
+    let weak = provider.with_reasoning_effort(ReasoningEffort::Minimal);
+    let summary_provider: &dyn LlmProvider = match weak.as_deref() {
+        Some(p) => p,
+        None => provider,
+    };
+
+    let mut stream = summary_provider.stream(conv, &[], None).await?;
     let mut summary = String::new();
 
     while let Some(evt) = stream.next().await {
@@ -240,6 +252,102 @@ pub(super) fn is_context_error_message(message: &str) -> bool {
 mod tests {
     use super::*;
     use djinn_provider::message::ContentBlock;
+    use djinn_provider::provider::ToolChoice;
+    use serde_json::Value;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Fake provider that records whether `with_reasoning_effort` was requested
+    /// (and with which tier) and whether `stream` ran on the DOWNGRADED instance.
+    struct RecordingProvider {
+        downgraded: bool,
+        requested_effort: Arc<std::sync::Mutex<Option<ReasoningEffort>>>,
+        streamed_on_downgraded: Arc<AtomicBool>,
+    }
+
+    impl LlmProvider for RecordingProvider {
+        fn name(&self) -> &str {
+            "recording"
+        }
+
+        fn with_reasoning_effort(
+            &self,
+            effort: ReasoningEffort,
+        ) -> Option<Box<dyn LlmProvider>> {
+            *self.requested_effort.lock().unwrap() = Some(effort);
+            Some(Box::new(RecordingProvider {
+                downgraded: true,
+                requested_effort: self.requested_effort.clone(),
+                streamed_on_downgraded: self.streamed_on_downgraded.clone(),
+            }))
+        }
+
+        fn stream<'a>(
+            &'a self,
+            _conversation: &'a Conversation,
+            _tools: &'a [Value],
+            _tool_choice: Option<ToolChoice>,
+        ) -> Pin<
+            Box<
+                dyn futures::Future<
+                        Output = anyhow::Result<
+                            Pin<
+                                Box<
+                                    dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send,
+                                >,
+                            >,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            if self.downgraded {
+                self.streamed_on_downgraded.store(true, Ordering::SeqCst);
+            }
+            Box::pin(async move {
+                let events = vec![
+                    Ok(StreamEvent::Delta(ContentBlock::text("summary text"))),
+                    Ok(StreamEvent::Done),
+                ];
+                let stream: Pin<Box<dyn futures::Stream<Item = _> + Send>> =
+                    Box::pin(futures::stream::iter(events));
+                Ok(stream)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_summary_runs_at_weakest_reasoning_tier() {
+        let requested_effort = Arc::new(std::sync::Mutex::new(None));
+        let streamed_on_downgraded = Arc::new(AtomicBool::new(false));
+        let provider = RecordingProvider {
+            downgraded: false,
+            requested_effort: requested_effort.clone(),
+            streamed_on_downgraded: streamed_on_downgraded.clone(),
+        };
+
+        let mut conv = Conversation::new();
+        conv.push(Message::system("summarise"));
+        conv.push(Message::user("a long tail of messages"));
+
+        let summary = call_llm_for_summary(&provider, &conv)
+            .await
+            .expect("summary");
+        assert_eq!(summary, "summary text");
+
+        // The cheap compaction call must request the weakest tier …
+        assert_eq!(
+            *requested_effort.lock().unwrap(),
+            Some(ReasoningEffort::Minimal),
+            "compaction summary must run at the weakest reasoning tier"
+        );
+        // … and actually stream through the downgraded provider.
+        assert!(
+            streamed_on_downgraded.load(Ordering::SeqCst),
+            "compaction summary must stream through the downgraded (Minimal) provider"
+        );
+    }
 
     #[test]
     fn filter_tool_responses_zero_percent_unchanged() {

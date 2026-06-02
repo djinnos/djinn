@@ -617,6 +617,19 @@ async fn run_llm_extraction_inner(
         }
     };
 
+    // B5a: knowledge extraction (the extraction completion + the per-note
+    // novelty judgements) is a cheap background distillation, not the agent's
+    // reasoning loop. Force the weakest reasoning tier so it doesn't waste
+    // deep-thinking tokens/latency. `with_reasoning_effort` returns `None` for
+    // config-less providers (e.g. test mocks), in which case we keep the
+    // provider unchanged.
+    let provider: Box<dyn LlmProvider> = match provider
+        .with_reasoning_effort(djinn_provider::provider::ReasoningEffort::Minimal)
+    {
+        Some(downgraded) => downgraded,
+        None => provider,
+    };
+
     // ── Build prompt ───────────────────────────────────────────────────────
     let taxonomy_json = serde_json::to_string(&taxonomy).unwrap_or_else(|_| "{}".to_string());
     // Load the actual conversation so the LLM has real content to distill —
@@ -1505,6 +1518,47 @@ mod tests {
     use super::*;
     use crate::actors::slot::session_extraction::ExtractionQuality;
     use crate::test_helpers::{agent_context_from_db, create_test_db, test_path};
+
+    /// B5a: knowledge extraction is a cheap background distillation. The call
+    /// site downgrades its resolved provider to the weakest reasoning tier
+    /// before issuing the extraction + novelty completions. This locks the
+    /// exact downgrade expression used in `run_llm_extraction_inner`.
+    #[test]
+    fn extraction_downgrades_provider_to_weakest_reasoning_tier() {
+        use djinn_provider::provider::{
+            AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig, ReasoningEffort,
+            create_provider,
+        };
+
+        // A resolved provider as extraction would build it — start STRONG so a
+        // missing/incorrect override is visible.
+        let provider: Box<dyn LlmProvider> = create_provider(ProviderConfig {
+            base_url: "https://example.test".to_string(),
+            auth: AuthMethod::NoAuth,
+            format_family: FormatFamily::Anthropic,
+            model_id: "test-model".to_string(),
+            context_window: 128_000,
+            telemetry: None,
+            session_affinity_key: None,
+            provider_headers: Default::default(),
+            capabilities: ProviderCapabilities::default(),
+            reasoning_effort: Some(ReasoningEffort::High),
+        });
+
+        // Exact downgrade logic from the call site.
+        let provider: Box<dyn LlmProvider> = match provider
+            .with_reasoning_effort(ReasoningEffort::Minimal)
+        {
+            Some(downgraded) => downgraded,
+            None => provider,
+        };
+
+        assert_eq!(
+            provider.config_snapshot().unwrap().reasoning_effort,
+            Some(ReasoningEffort::Minimal),
+            "extraction must run its LLM calls at the weakest reasoning tier"
+        );
+    }
 
     #[test]
     fn transcript_excerpt_renders_text_tools_and_results_and_skips_system() {

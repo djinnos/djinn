@@ -244,6 +244,37 @@ pub trait LlmProvider: Send + Sync {
                 + 'a,
         >,
     >;
+
+    /// Clone of this provider's [`ProviderConfig`], if it has one.
+    ///
+    /// Real network providers return `Some(self.config.clone())`; test mocks
+    /// and other config-less providers leave the default `None`. This is the
+    /// hook [`LlmProvider::with_reasoning_effort`] uses to rebuild a variant of
+    /// the provider with a different reasoning tier without each call site
+    /// needing to know the concrete provider type.
+    fn config_snapshot(&self) -> Option<ProviderConfig> {
+        None
+    }
+
+    /// Return a fresh provider identical to this one but with its
+    /// [`ProviderConfig::reasoning_effort`] overridden to `effort`.
+    ///
+    /// Used by the cheap background call sites (compaction summary, knowledge
+    /// extraction, chat-title generation) which hold an already-constructed
+    /// provider but want to issue a single request at a weaker reasoning tier
+    /// without disturbing the provider the main agent loop streams through.
+    ///
+    /// The default implementation rebuilds from [`Self::config_snapshot`] with
+    /// `reasoning_effort` set. Providers without a config snapshot (test mocks)
+    /// fall back to returning an unchanged equivalent via the same snapshot
+    /// hook returning `None`, in which case the override is a no-op handled by
+    /// the caller. Concrete network providers therefore only need to implement
+    /// `config_snapshot`.
+    fn with_reasoning_effort(&self, effort: ReasoningEffort) -> Option<Box<dyn LlmProvider>> {
+        let mut config = self.config_snapshot()?;
+        config.reasoning_effort = Some(effort);
+        Some(create_provider(config))
+    }
 }
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
@@ -257,5 +288,133 @@ pub fn create_provider(config: ProviderConfig) -> Box<dyn LlmProvider> {
         ),
         FormatFamily::Anthropic => Box::new(format::anthropic::AnthropicProvider::new(config)),
         FormatFamily::Google => Box::new(format::google::GoogleProvider::new(config)),
+    }
+}
+
+#[cfg(test)]
+mod reasoning_effort_override_tests {
+    use super::*;
+    use std::pin::Pin;
+
+    fn config_for(format_family: FormatFamily) -> ProviderConfig {
+        ProviderConfig {
+            base_url: "https://example.test".to_string(),
+            auth: AuthMethod::NoAuth,
+            format_family,
+            model_id: "test-model".to_string(),
+            context_window: 128_000,
+            telemetry: None,
+            session_affinity_key: None,
+            provider_headers: Default::default(),
+            capabilities: ProviderCapabilities::default(),
+            // Start from a STRONG tier so a regression that fails to override
+            // (or that lowers the wrong field) is visible.
+            reasoning_effort: Some(ReasoningEffort::High),
+        }
+    }
+
+    /// B5a: every concrete network provider must round-trip its config through
+    /// `config_snapshot`, and `with_reasoning_effort` must rebuild it with the
+    /// requested tier — leaving every other field untouched. Minimal is the
+    /// weakest tier the cheap background call sites request.
+    #[test]
+    fn with_reasoning_effort_minimal_rebuilds_each_format_family() {
+        for family in [
+            FormatFamily::OpenAI,
+            FormatFamily::OpenAIResponses,
+            FormatFamily::Anthropic,
+            FormatFamily::Google,
+        ] {
+            let provider = create_provider(config_for(family));
+
+            // The provider exposes its config so the override can rebuild it.
+            let snapshot = provider
+                .config_snapshot()
+                .unwrap_or_else(|| panic!("{family:?} provider must expose config_snapshot"));
+            assert_eq!(snapshot.reasoning_effort, Some(ReasoningEffort::High));
+
+            let weak = provider
+                .with_reasoning_effort(ReasoningEffort::Minimal)
+                .unwrap_or_else(|| {
+                    panic!("{family:?} provider must support with_reasoning_effort")
+                });
+            let weak_snapshot = weak
+                .config_snapshot()
+                .unwrap_or_else(|| panic!("{family:?} downgraded provider must expose config"));
+
+            // The weakest tier is applied …
+            assert_eq!(
+                weak_snapshot.reasoning_effort,
+                Some(ReasoningEffort::Minimal),
+                "{family:?}: cheap call must run at the weakest reasoning tier"
+            );
+            // … and nothing else changed (model/base_url/window preserved).
+            assert_eq!(weak_snapshot.model_id, snapshot.model_id);
+            assert_eq!(weak_snapshot.base_url, snapshot.base_url);
+            assert_eq!(weak_snapshot.context_window, snapshot.context_window);
+
+            // The override must NOT mutate the original provider in place — the
+            // main agent loop keeps streaming through it at its own tier.
+            assert_eq!(
+                provider.config_snapshot().unwrap().reasoning_effort,
+                Some(ReasoningEffort::High),
+                "{family:?}: original provider effort must be left unchanged"
+            );
+        }
+    }
+
+    /// Minimal is the weakest available tier (guards against the enum gaining a
+    /// weaker variant that the cheap call sites should switch to).
+    #[test]
+    fn minimal_is_the_weakest_reasoning_tier() {
+        assert!(ReasoningEffort::Minimal.thinking_budget() <= ReasoningEffort::Low.thinking_budget());
+        assert!(ReasoningEffort::Low.thinking_budget() <= ReasoningEffort::Medium.thinking_budget());
+        assert!(
+            ReasoningEffort::Medium.thinking_budget() <= ReasoningEffort::High.thinking_budget()
+        );
+        assert_eq!(ReasoningEffort::Minimal.openai_effort(), "minimal");
+    }
+
+    /// Config-less providers (test mocks) return `None`, so call sites keep the
+    /// original provider rather than panicking.
+    #[test]
+    fn config_less_provider_returns_none() {
+        struct MockProvider;
+        impl LlmProvider for MockProvider {
+            fn name(&self) -> &str {
+                "mock"
+            }
+            fn stream<'a>(
+                &'a self,
+                _conversation: &'a Conversation,
+                _tools: &'a [Value],
+                _tool_choice: Option<ToolChoice>,
+            ) -> Pin<
+                Box<
+                    dyn futures::Future<
+                            Output = anyhow::Result<
+                                Pin<
+                                    Box<
+                                        dyn futures::Stream<Item = anyhow::Result<StreamEvent>>
+                                            + Send,
+                                    >,
+                                >,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async { unreachable!("mock stream not used in this test") })
+            }
+        }
+
+        let provider = MockProvider;
+        assert!(provider.config_snapshot().is_none());
+        assert!(
+            provider
+                .with_reasoning_effort(ReasoningEffort::Minimal)
+                .is_none(),
+            "config-less provider yields no override so the caller keeps the original"
+        );
     }
 }
