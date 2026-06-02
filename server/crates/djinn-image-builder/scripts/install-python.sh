@@ -49,6 +49,37 @@ export PATH="${UV_INSTALL_DIR}:${PATH}"
 EOF
 chmod 0644 /etc/profile.d/30-python.sh
 
+# --- expose the default interpreter + pip on the PERSISTENT image PATH -------
+# /etc/profile.d only fires for LOGIN shells, but the warm-graph job and the
+# agent spawn non-login subprocesses that inherit the image-level ENV PATH
+# (which lists /usr/local/bin but NOT uv's versioned install dir). scip-python
+# shells out to a `pip` executable to enumerate installed packages and
+# HARD-FAILS ("Could not find valid pip command. Searched PATH: ...") when none
+# is resolvable — exactly the failure observed for uv-managed interpreters,
+# since `uv python install` never drops a `python`/`pip` onto PATH. Materialise
+# stable shims in /usr/local/bin so both are always found.
+DEFAULT_PYTHON_BIN="$(uv python find "${DEFAULT_PYTHON_VALUE}" 2>/dev/null || true)"
+if [ -n "${DEFAULT_PYTHON_BIN}" ] && [ -x "${DEFAULT_PYTHON_BIN}" ]; then
+    ln -sf "${DEFAULT_PYTHON_BIN}" /usr/local/bin/python3
+    ln -sf "${DEFAULT_PYTHON_BIN}" /usr/local/bin/python
+    # uv's standalone CPython builds may ship without pip; ensure the module is
+    # present, then expose `pip`/`pip3` as wrappers that route through this
+    # interpreter. A wrapper (vs. symlinking the pip console-script) keeps the
+    # shim independent of where that script lands across CPython versions.
+    "${DEFAULT_PYTHON_BIN}" -m ensurepip --upgrade >/dev/null 2>&1 || true
+    if "${DEFAULT_PYTHON_BIN}" -m pip --version >/dev/null 2>&1; then
+        for shim in pip pip3; do
+            cat > "/usr/local/bin/${shim}" <<EOF
+#!/bin/sh
+exec "${DEFAULT_PYTHON_BIN}" -m pip "\$@"
+EOF
+            chmod 0755 "/usr/local/bin/${shim}"
+        done
+    else
+        echo "[install-python] pip unavailable in ${DEFAULT_PYTHON_BIN} (non-fatal); scip-python dependency resolution may be skipped" >&2
+    fi
+fi
+
 if [ "${SCIP_INDEXER:-}" = "scip-python" ]; then
     # --- ensure a Node runtime at /opt/node (matches the image PATH) -------
     # A polyglot project may already have Node from install-node.sh (it runs

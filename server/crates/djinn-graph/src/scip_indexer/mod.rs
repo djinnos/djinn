@@ -91,6 +91,25 @@ impl SupportedIndexer {
         }
     }
 
+    /// Wall-clock cap for a single invocation of this indexer.
+    ///
+    /// `rust-analyzer scip` drives a full `cargo metadata` + analysis pass.
+    /// On a COLD `/cache` (the *first* warm of a large edition-2024 workspace
+    /// like `platform`) that routinely needs several minutes — the old flat
+    /// 120s cap timed it out on every run, so the warm never produced an index
+    /// and never populated the build cache that would make later runs fast →
+    /// the warm Pod exited 1 forever and re-dispatched every ~60s. Give Rust a
+    /// generous cap (still well under the 1800s warm-Job `activeDeadline`); the
+    /// other indexers are comparatively cheap, so keep them on the short cap so
+    /// a genuinely hung indexer can't pin the warm Job for ten minutes.
+    pub(crate) fn timeout(self) -> std::time::Duration {
+        let secs = match self {
+            Self::RustAnalyzer => 600,
+            _ => 120,
+        };
+        std::time::Duration::from_secs(secs)
+    }
+
     fn marker_files(self) -> &'static [&'static str] {
         match self {
             Self::RustAnalyzer => &["Cargo.toml"],

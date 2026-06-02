@@ -11,7 +11,6 @@ use super::{
 };
 
 const SCIP_ARTIFACT_EXTENSION: &str = "scip";
-const INDEXER_TIMEOUT_SECS: u64 = 120;
 
 pub(crate) fn detect_indexers_in_path(path_var: impl AsRef<str>) -> Vec<IndexerAvailability> {
     let path_var = path_var.as_ref();
@@ -174,10 +173,12 @@ pub(crate) async fn run_indexers(
     }
 
     let plans = plan_indexer_commands(&project_root, &output_root, &available);
-    let timeout = std::time::Duration::from_secs(INDEXER_TIMEOUT_SECS);
     let futures: Vec<_> = plans
         .into_iter()
         .map(|plan| {
+            // Per-indexer cap: rust-analyzer needs minutes on a cold cache;
+            // the rest stay on the short default. See `SupportedIndexer::timeout`.
+            let timeout = plan.indexer.timeout();
             let cmd = plan.build_command();
             async move {
                 let result = process::output_with_timeout(cmd, timeout).await;
