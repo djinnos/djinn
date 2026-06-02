@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 use crate::context::AgentContext;
 use djinn_provider::provider::LlmProvider;
 
+pub(crate) mod disposition;
 pub(crate) mod pr;
 pub(crate) mod stage;
 
