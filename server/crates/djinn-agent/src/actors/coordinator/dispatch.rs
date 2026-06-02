@@ -2294,6 +2294,19 @@ impl CoordinatorActor {
                 commit_author_name: None,
                 commit_author_email: None,
             };
+            // E6 Part B: proactively rebase the (approved) task branch onto its
+            // current target before the PR-open push, so the PR opens/updates on
+            // top of current `main` instead of stale history — the single biggest
+            // source of merge-queue rejections. Best-effort: a conflict or any
+            // git failure logs and proceeds; `supervisor_pr_open` (and the
+            // downstream pr_poller conflict/merge-queue handling) run unchanged.
+            self.proactively_rebase_approved_branch(
+                &task.project_id,
+                &spec.task_branch,
+                &spec.base_branch,
+            )
+            .await;
+
             let callbacks = crate::supervisor_impl::SupervisorCallbackContext {
                 agent_context: app_state.clone(),
                 cancel: tokio_util::sync::CancellationToken::new(),
@@ -2399,6 +2412,111 @@ impl CoordinatorActor {
             }
         }
     }
+
+    /// E6 Part B: best-effort proactive rebase of an approved task branch onto
+    /// its target BEFORE the PR-open push, to cut merge-queue rejections caused
+    /// by branch staleness.
+    ///
+    /// The task branch was cut from `target` when the work started; by the time
+    /// it reaches approval, `target` has usually moved on. GitHub's merge queue
+    /// then rejects the PR (it re-tests against the *current* base), bouncing the
+    /// task through a `PrCiFailed` reopen loop. Replaying the branch's commits on
+    /// top of the current base here removes that drift before the PR is opened or
+    /// re-pushed.
+    ///
+    /// Mechanics (all self-contained, no token plumbing):
+    ///   1. Clone the mirror ephemerally on `task_branch` (`--local --shared`, so
+    ///      the clone's `origin` is the local mirror and `origin/<target>` is the
+    ///      mirror's current base tip — kept fresh by the tick loop's mirror
+    ///      fetch).
+    ///   2. `rebase_with_retry(workspace, "origin/<target>")` — the djinn-git
+    ///      helper that aborts + retries on transient git-state failures and
+    ///      cleanly `--abort`s on a real conflict.
+    ///   3. Force-push the rewritten `task_branch` back to the mirror so the
+    ///      subsequent `supervisor_pr_open` clone (which force-pushes the mirror's
+    ///      `task_branch` to GitHub) carries the rebased history.
+    ///
+    /// STRICTLY best-effort: every failure mode (missing branch, no mirror,
+    /// rebase conflict, push failure) is logged and swallowed. Dispatch is never
+    /// hard-failed — the existing flow (`supervisor_pr_open`, and downstream the
+    /// pr_poller's conflict/merge-queue handling) still runs unchanged. A rebase
+    /// conflict in particular is EXPECTED to be common and is intentionally a
+    /// no-op here; the downstream conflict machinery owns its resolution.
+    pub(super) async fn proactively_rebase_approved_branch(
+        &self,
+        project_id: &str,
+        task_branch: &str,
+        target_branch: &str,
+    ) {
+        let Some(mirror) = self.mirror.as_ref() else {
+            // No mirror configured (e.g. in-process test runtime) — nothing to
+            // rebase against. Silent skip.
+            return;
+        };
+
+        let workspace = match mirror.clone_ephemeral(project_id, task_branch).await {
+            Ok(ws) => ws,
+            Err(e) => {
+                // Branch not present in the mirror yet, mirror missing, etc.
+                // The PR-open path below has its own branch-missing recovery.
+                tracing::debug!(
+                    project_id,
+                    task_branch,
+                    error = %e,
+                    "CoordinatorActor: proactive rebase skipped — could not clone task branch from mirror"
+                );
+                return;
+            }
+        };
+
+        let upstream = format!("origin/{target_branch}");
+        if let Err(e) = djinn_git::rebase_with_retry(workspace.path(), &upstream).await {
+            // Conflict or other git failure. rebase_with_retry has already
+            // `--abort`ed, so the workspace is clean. Proceed — the downstream
+            // flow resolves staleness/conflicts.
+            tracing::info!(
+                project_id,
+                task_branch,
+                upstream = %upstream,
+                error = %e,
+                "CoordinatorActor: proactive rebase did not apply (conflict or transient) — proceeding to PR-open unchanged"
+            );
+            return;
+        }
+
+        // Rebase rewrote history → non-fast-forward, so the push back to the
+        // mirror must be forced. `origin` here is the local mirror; djinn is the
+        // sole writer of `task_branch`, so `--force` is the correct semantic
+        // (matching the supervisor's own force-push to GitHub).
+        let push = djinn_git::run_git_command(
+            workspace.path().to_path_buf(),
+            vec![
+                "push".into(),
+                "--force".into(),
+                "origin".into(),
+                format!("{task_branch}:{task_branch}"),
+            ],
+        )
+        .await;
+        match push {
+            Ok(_) => {
+                tracing::info!(
+                    project_id,
+                    task_branch,
+                    upstream = %upstream,
+                    "CoordinatorActor: proactively rebased task branch onto target before PR-open"
+                );
+            }
+            Err(e) => {
+                tracing::info!(
+                    project_id,
+                    task_branch,
+                    error = %e,
+                    "CoordinatorActor: proactive rebase succeeded but mirror push failed — proceeding to PR-open unchanged"
+                );
+            }
+        }
+    }
 }
 
 /// Parse an ISO-8601 datetime string from the DB (e.g. "2026-03-27T13:52:47.231Z"
@@ -2422,4 +2540,262 @@ fn parse_iso_elapsed(started_at: &str) -> Option<u64> {
     let now = OffsetDateTime::now_utc();
     let elapsed = (now - parsed).whole_seconds();
     Some(if elapsed < 0 { 0 } else { elapsed as u64 })
+}
+
+/// E6 regression tests.
+///
+/// Part A locks the reopen→Planner escalation gate for the merge-queue-rejection
+/// path: a merge-queue rejection reopens the task via `PrCiFailed`, which must
+/// (1) land the task at `open` while *incrementing* `reopen_count`, (2) route the
+/// reopened task to the `worker` role, and (3) cross the
+/// `REOPEN_INTERVENTION_THRESHOLD` after enough rejections — exactly the three
+/// preconditions for the `role == "worker" && maybe_intervene_on_stuck_task(..)`
+/// gate in `dispatch_ready_tasks`. (The intervention body itself is covered in
+/// `mod.rs` tests.)
+///
+/// Part B locks the proactive-rebase non-fatal contract: a genuine rebase
+/// conflict surfaces as an `Err` from `djinn_git::rebase_with_retry` AND leaves a
+/// clean (not mid-rebase) workspace — so `proactively_rebase_approved_branch`
+/// (which swallows that `Err` and proceeds) can never wedge dispatch.
+#[cfg(test)]
+mod e6_tests {
+    use super::*;
+    use crate::roles::{DispatchContext, RoleRegistry};
+    use djinn_core::models::Task;
+    use djinn_core::models::task::compute_transition;
+
+    /// A `Task` shaped like a worker task reopened by a merge-queue rejection:
+    /// `issue_type=task`, `status=open`, with the given `reopen_count`.
+    fn reopened_worker_task(reopen_count: i64) -> Task {
+        Task {
+            id: "t1".into(),
+            project_id: "p1".into(),
+            short_id: "t1".into(),
+            epic_id: Some("e1".into()),
+            title: "stuck on merge queue".into(),
+            description: String::new(),
+            design: String::new(),
+            issue_type: "task".into(),
+            status: "open".into(),
+            priority: 0,
+            owner: String::new(),
+            labels: "[]".into(),
+            acceptance_criteria: "[]".into(),
+            reopen_count,
+            continuation_count: 0,
+            verification_failure_count: 0,
+            total_reopen_count: reopen_count,
+            total_verification_failure_count: 0,
+            intervention_count: 0,
+            last_intervention_at: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            closed_at: None,
+            close_reason: None,
+            merge_commit_sha: None,
+            pr_url: None,
+            merge_conflict_metadata: None,
+            memory_refs: "[]".into(),
+            agent_type: None,
+            created_by_user_id: None,
+            unresolved_blocker_count: 0,
+        }
+    }
+
+    /// Part A — the `PrCiFailed` transition used by the merge-queue-rejection
+    /// reopen path lands the task at `open` AND increments `reopen_count`. This
+    /// is what drives the reopen counter toward the intervention threshold; if a
+    /// future change stopped incrementing it, the escalation would never arm.
+    #[test]
+    fn merge_queue_rejection_reopen_increments_reopen_count() {
+        // Merge queue rejects an undrafted PR → poller fires PrCiFailed from
+        // pr_review (and the pre-undraft pr_draft case is equally valid).
+        for from in [TaskStatus::PrReview, TaskStatus::PrDraft] {
+            let apply = compute_transition(&TransitionAction::PrCiFailed, &from, None)
+                .expect("PrCiFailed must be a legal transition from pr_review/pr_draft");
+            assert_eq!(
+                apply.to_status,
+                Some(TaskStatus::Open),
+                "merge-queue rejection must reopen the task ({from:?} → open)"
+            );
+            assert!(
+                apply.increment_reopen,
+                "merge-queue rejection reopen MUST bump reopen_count (arms the escalation), from {from:?}"
+            );
+        }
+    }
+
+    /// Part A — a merge-queue-reopened worker task routes to the `worker`
+    /// dispatch role. The escalation gate in `dispatch_ready_tasks` is
+    /// `role == "worker" && maybe_intervene_on_stuck_task(..)`, so if a reopened
+    /// task routed anywhere else the escalation would silently never fire on this
+    /// path.
+    #[test]
+    fn merge_queue_reopened_task_routes_to_worker_role() {
+        let registry = RoleRegistry::new();
+        let ctx = DispatchContext;
+        let task = reopened_worker_task(REOPEN_INTERVENTION_THRESHOLD);
+        assert_eq!(
+            registry.dispatch_role_for_task(&task, &ctx),
+            Some("worker"),
+            "a reopened (open, issue_type=task) merge-queue task must dispatch as worker — \
+             the role the escalation gate keys on"
+        );
+    }
+
+    /// Part A — the escalation gate's threshold predicate. Below the threshold
+    /// the worker re-dispatches normally; at/above it the gate routes the task to
+    /// a Planner intervention. This is the `reopen_count` crossing 3 → Planner
+    /// regression lock at the predicate level.
+    #[test]
+    fn reopen_count_crossing_threshold_arms_planner_escalation() {
+        assert_eq!(
+            REOPEN_INTERVENTION_THRESHOLD, 3,
+            "escalation threshold is 3 reopens (memory: reopen_count >= 3 → Planner)"
+        );
+
+        // Below threshold: the gate predicate is false → worker re-dispatches.
+        let below = reopened_worker_task(REOPEN_INTERVENTION_THRESHOLD - 1);
+        assert!(
+            below.reopen_count < REOPEN_INTERVENTION_THRESHOLD,
+            "two reopens stay under the threshold — no escalation yet"
+        );
+
+        // At and above threshold: predicate is true → routed to Planner.
+        for n in [
+            REOPEN_INTERVENTION_THRESHOLD,
+            REOPEN_INTERVENTION_THRESHOLD + 1,
+        ] {
+            let stuck = reopened_worker_task(n);
+            assert!(
+                stuck.reopen_count >= REOPEN_INTERVENTION_THRESHOLD,
+                "reopen_count {n} crosses the threshold and must arm the Planner escalation"
+            );
+            // And it is still a worker task at that point (the gate's other half).
+            let registry = RoleRegistry::new();
+            assert_eq!(
+                registry.dispatch_role_for_task(&stuck, &DispatchContext),
+                Some("worker"),
+                "still a worker task at reopen_count={n} — the full escalation gate is satisfied"
+            );
+        }
+    }
+
+    // ── Part B: proactive-rebase non-fatal contract ──────────────────────────
+
+    async fn git(dir: &std::path::Path, args: &[&str]) {
+        djinn_git::run_git_command(
+            dir.to_path_buf(),
+            args.iter().map(|s| (*s).to_string()).collect(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("git {args:?} in {dir:?} failed: {e}"));
+    }
+
+    async fn write(dir: &std::path::Path, name: &str, contents: &str) {
+        tokio::fs::write(dir.join(name), contents).await.unwrap();
+    }
+
+    /// Part B — a real rebase CONFLICT is reported as `Err` by
+    /// `djinn_git::rebase_with_retry` and the helper `--abort`s, leaving the
+    /// workspace clean (no in-progress rebase). This is the exact failure
+    /// `proactively_rebase_approved_branch` swallows: it logs the `Err` and
+    /// proceeds to `supervisor_pr_open`, so a conflict can never hard-fail
+    /// dispatch and never leaves a wedged mid-rebase tree behind.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proactive_rebase_conflict_is_non_fatal_and_aborts_cleanly() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path();
+
+        // Init a repo with a committed base on `main`.
+        git(repo, &["init", "-q", "-b", "main"]).await;
+        git(repo, &["config", "user.email", "t@example.com"]).await;
+        git(repo, &["config", "user.name", "Test"]).await;
+        write(repo, "f.txt", "base\n").await;
+        git(repo, &["add", "f.txt"]).await;
+        git(repo, &["commit", "-q", "-m", "base"]).await;
+
+        // Task branch edits the SAME line one way…
+        git(repo, &["checkout", "-q", "-b", "task/x"]).await;
+        write(repo, "f.txt", "from-task\n").await;
+        git(repo, &["commit", "-qam", "task edit"]).await;
+
+        // …and `main` advances editing it the other way → guaranteed conflict.
+        git(repo, &["checkout", "-q", "main"]).await;
+        write(repo, "f.txt", "from-main\n").await;
+        git(repo, &["commit", "-qam", "main edit"]).await;
+        git(repo, &["checkout", "-q", "task/x"]).await;
+
+        // Rebase task/x onto the diverged main: MUST error (conflict), never panic.
+        let result = djinn_git::rebase_with_retry(repo, "main").await;
+        assert!(
+            result.is_err(),
+            "a conflicting rebase must surface as Err (which the proactive helper swallows)"
+        );
+
+        // And the helper must have aborted: the tree is clean, not mid-rebase.
+        assert!(
+            !repo.join(".git/rebase-merge").exists() && !repo.join(".git/rebase-apply").exists(),
+            "rebase_with_retry must --abort on failure so no wedged mid-rebase state is left behind"
+        );
+        let status = djinn_git::run_git_command(
+            repo.to_path_buf(),
+            vec!["status".into(), "--porcelain".into()],
+        )
+        .await
+        .unwrap();
+        assert!(
+            status.stdout.trim().is_empty(),
+            "workspace must be clean after the aborted rebase, got: {:?}",
+            status.stdout
+        );
+    }
+
+    /// Part B — the clean path: when the task branch rebases without conflict,
+    /// `rebase_with_retry` succeeds and the branch now sits on top of the current
+    /// target. (Confirms the helper actually replays the branch, not just no-ops.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proactive_rebase_clean_replays_branch_onto_target() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path();
+
+        git(repo, &["init", "-q", "-b", "main"]).await;
+        git(repo, &["config", "user.email", "t@example.com"]).await;
+        git(repo, &["config", "user.name", "Test"]).await;
+        write(repo, "base.txt", "base\n").await;
+        git(repo, &["add", "base.txt"]).await;
+        git(repo, &["commit", "-q", "-m", "base"]).await;
+
+        // Task branch touches a DIFFERENT file than main advances → no conflict.
+        git(repo, &["checkout", "-q", "-b", "task/y"]).await;
+        write(repo, "task.txt", "task\n").await;
+        git(repo, &["add", "task.txt"]).await;
+        git(repo, &["commit", "-q", "-m", "task edit"]).await;
+
+        git(repo, &["checkout", "-q", "main"]).await;
+        write(repo, "main.txt", "main\n").await;
+        git(repo, &["add", "main.txt"]).await;
+        git(repo, &["commit", "-q", "-m", "main edit"]).await;
+        git(repo, &["checkout", "-q", "task/y"]).await;
+
+        djinn_git::rebase_with_retry(repo, "main")
+            .await
+            .expect("non-conflicting rebase must succeed");
+
+        // After rebase, main's tip is an ancestor of HEAD (branch sits on top).
+        let out = djinn_git::run_git_command(
+            repo.to_path_buf(),
+            vec![
+                "merge-base".into(),
+                "--is-ancestor".into(),
+                "main".into(),
+                "HEAD".into(),
+            ],
+        )
+        .await;
+        assert!(
+            out.is_ok(),
+            "after a clean rebase, main must be an ancestor of the task branch HEAD"
+        );
+    }
 }
