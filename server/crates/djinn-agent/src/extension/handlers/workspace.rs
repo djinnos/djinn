@@ -270,6 +270,10 @@ pub(crate) async fn call_write(
                 }
                 _ => response,
             };
+            let touched: Vec<String> = touched_rel.iter().cloned().collect();
+            let response =
+                maybe_append_pitfall_hint(response, state, worktree_path, project_id, &touched)
+                    .await;
             Ok(response)
         })
         .await
@@ -350,6 +354,9 @@ pub(crate) async fn call_edit(
                 }
                 _ => result,
             };
+            let touched: Vec<String> = touched_rel.iter().cloned().collect();
+            let result =
+                maybe_append_pitfall_hint(result, state, worktree_path, project_id, &touched).await;
             Ok(result)
         })
         .await
@@ -449,7 +456,37 @@ pub(crate) async fn call_apply_patch(
         }
         _ => response,
     };
+    let response =
+        maybe_append_pitfall_hint(response, state, worktree_path, project_id, &touched_rel).await;
     Ok(response)
+}
+
+/// F2: best-effort just-in-time pitfall hint. On the FIRST write/edit/
+/// apply_patch of a session (gated by `DJINN_JIT_PITFALLS=1`, default OFF),
+/// run a scoped pitfall/pattern search over the touched paths and append the
+/// top-2 as a transient `jit_pitfalls` field on the response JSON. A miss,
+/// an error, or a non-first modification leaves `response` untouched. When the
+/// gate is OFF this is a single cheap env read with zero further cost.
+async fn maybe_append_pitfall_hint(
+    response: serde_json::Value,
+    state: &AgentContext,
+    worktree_path: &Path,
+    project_id: Option<&str>,
+    touched_paths: &[String],
+) -> serde_json::Value {
+    let session_id = worktree_path.display().to_string();
+    match super::jit_pitfalls::maybe_pitfall_hint(state, &session_id, project_id, touched_paths)
+        .await
+    {
+        Some(block) => {
+            let mut response = response;
+            if let Some(obj) = response.as_object_mut() {
+                obj.insert("jit_pitfalls".to_string(), serde_json::Value::String(block));
+            }
+            response
+        }
+        None => response,
+    }
 }
 
 /// Resolve the path to a repo-relative form for coupling lookup. Paths
