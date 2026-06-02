@@ -23,6 +23,18 @@ spec:
         # shuffled between nodes for bin-packing.
         karpenter.sh/do-not-disrupt: "true"
     spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: qdrant
           image: {{ .Values.qdrant.image | quote }}
