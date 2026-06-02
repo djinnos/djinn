@@ -512,11 +512,15 @@ impl CoordinatorActor {
                     })
                     .collect();
                 if !blocking_failed.is_empty() {
-                    let required_contexts: Option<Vec<String>> = gh_client
-                        .list_required_status_checks(&owner, &repo, &pr.base.ref_name)
-                        .await
-                        .ok()
-                        .flatten();
+                    let required_contexts: Option<Vec<String>> = self
+                        .resolve_required_contexts(
+                            gh_client,
+                            &owner,
+                            &repo,
+                            &pr.base.ref_name,
+                            pull_number,
+                        )
+                        .await;
                     let blocking =
                         blocking_failed_checks(&blocking_failed, required_contexts.as_deref());
                     if !blocking.is_empty() {
@@ -1276,6 +1280,54 @@ impl CoordinatorActor {
         self.delegated_to_github.remove(task_id);
     }
 
+    /// Resolve the set of merge-gating (required) check contexts for a PR,
+    /// preferring GitHub's authoritative per-PR `isRequired` answer.
+    ///
+    /// Source precedence:
+    /// 1. GraphQL `required_check_contexts_for_pr` — reflects branch protection,
+    ///    **rulesets**, and the merge queue exactly as the PR-page "Required"
+    ///    badge does. An authoritative `Some(..)` (including an empty set) is
+    ///    used as-is: empty means nothing is required, so no failure blocks.
+    /// 2. Classic `list_required_status_checks` (branch-protection REST) — only
+    ///    when GraphQL is unreadable (no head commit / transport error). This
+    ///    returns 404→`None` for ruleset-only repos, which is the historical
+    ///    blind spot the GraphQL source closes.
+    /// 3. `None` — neither source could answer, so the caller falls back to the
+    ///    advisory-name heuristic in [`blocking_failed_checks`].
+    async fn resolve_required_contexts(
+        &self,
+        gh_client: &GitHubApiClient,
+        owner: &str,
+        repo: &str,
+        base_ref: &str,
+        pull_number: u64,
+    ) -> Option<Vec<String>> {
+        match gh_client
+            .required_check_contexts_for_pr(owner, repo, pull_number)
+            .await
+        {
+            Ok(Some(contexts)) => return Some(contexts),
+            Ok(None) => {
+                tracing::info!(
+                    pr = pull_number,
+                    "PR poller: no status-check rollup on PR head — falling back to branch-protection required checks"
+                );
+            }
+            Err(e) => {
+                tracing::info!(
+                    pr = pull_number,
+                    error = %e,
+                    "PR poller: could not read per-PR required checks via GraphQL — falling back to branch-protection required checks"
+                );
+            }
+        }
+        gh_client
+            .list_required_status_checks(owner, repo, base_ref)
+            .await
+            .ok()
+            .flatten()
+    }
+
     /// Shared handler for a "CI checks failed on PR" event, used by both the
     /// `pr_draft` and `pr_review` polling paths.
     ///
@@ -1283,11 +1335,13 @@ impl CoordinatorActor {
     /// things, in order:
     ///
     /// 1. **Blocking-only filter.** The failed check-runs are intersected with
-    ///    the branch's *required* status-check contexts (read from branch
-    ///    protection — the source of truth). Advisory/preview checks (Vercel
-    ///    deploys, preview-env provisioning, etc.) are dropped: a code diff
-    ///    cannot fix that infra, so reworking on it loops forever. When branch
-    ///    protection is unreadable we fall back to a conservative name-pattern
+    ///    the PR's *required* status-check contexts, resolved via
+    ///    [`Self::resolve_required_contexts`] (GitHub's per-PR `isRequired`
+    ///    answer — branch protection, rulesets, and merge queue alike).
+    ///    Advisory/preview checks (Vercel deploys, preview-env provisioning,
+    ///    a repo's non-required `Sentinel` bot gate, etc.) are dropped: a code
+    ///    diff cannot fix that infra, so reworking on it loops forever. When no
+    ///    source can answer we fall back to a conservative name-pattern
     ///    heuristic. If nothing blocking remains, we do **not** reopen — the
     ///    required checks are green and the PR is fine to proceed.
     ///
@@ -1324,26 +1378,13 @@ impl CoordinatorActor {
         let base_ref = &pr.base.ref_name;
 
         // ── 1. Filter to blocking (required) failures ─────────────────────────
-        // Read the branch's required status checks from branch protection (the
-        // source of truth). On any read failure we pass `None` and fall back to
-        // the name-pattern heuristic.
-        let required_contexts: Option<Vec<String>> = match gh_client
-            .list_required_status_checks(owner, repo, base_ref)
-            .await
-        {
-            Ok(contexts) => contexts,
-            Err(e) => {
-                tracing::info!(
-                    task_id = %task_short_id,
-                    pr = pull_number,
-                    base = %base_ref,
-                    error = %e,
-                    "PR poller: could not read required status checks (no admin perm or no protection); \
-                     falling back to advisory-name heuristic for blocking-check filter"
-                );
-                None
-            }
-        };
+        // Resolve the PR's required check contexts (GitHub's own per-PR
+        // `isRequired` answer, falling back to branch protection then the
+        // advisory-name heuristic). `None` → heuristic; an authoritative empty
+        // set → nothing is required, so no failure is blocking.
+        let required_contexts: Option<Vec<String>> = self
+            .resolve_required_contexts(gh_client, owner, repo, base_ref, pull_number)
+            .await;
 
         let blocking = blocking_failed_checks(failed_checks, required_contexts.as_deref());
 

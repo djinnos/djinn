@@ -1231,6 +1231,97 @@ impl GitHubApiClient {
         Ok(Some(parsed.contexts))
     }
 
+    /// Return the status-check **context names GitHub treats as required for a
+    /// specific PR** — exactly what the "Required" badge on the PR page shows.
+    ///
+    /// Reads the GraphQL `isRequired(pullRequestNumber:)` field on the head
+    /// commit's status-check rollup. Unlike the classic
+    /// `branches/{branch}/protection/required_status_checks` endpoint (see
+    /// [`Self::list_required_status_checks`]), this reflects *every* mechanism
+    /// GitHub uses to gate the merge — classic branch protection, repository
+    /// **rulesets**, and the merge queue — in one authoritative per-PR answer,
+    /// and needs no `administration` permission. Repos configured via rulesets
+    /// (increasingly the default) return 404 from the classic endpoint, which
+    /// is why that source alone makes the rework loop treat every unknown
+    /// advisory check (e.g. `Sentinel`) as blocking.
+    ///
+    /// Returns:
+    /// - `Ok(Some(names))` when the rollup is readable; `names` is exactly the
+    ///   contexts with `isRequired == true` (an empty vec authoritatively means
+    ///   *nothing* is required, so no check failure is merge-blocking).
+    /// - `Ok(None)` when there is no head commit / no rollup to read, so the
+    ///   caller can fall back to another source of truth.
+    /// - `Err(..)` on transport/GraphQL errors, so the caller can fall back
+    ///   rather than treating every check as non-blocking.
+    pub async fn required_check_contexts_for_pr(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: u64,
+    ) -> Result<Option<Vec<String>>> {
+        let query = r#"
+            query($owner: String!, $repo: String!, $pr: Int!) {
+                repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $pr) {
+                        commits(last: 1) { nodes { commit {
+                            statusCheckRollup {
+                                contexts(first: 100) { nodes {
+                                    __typename
+                                    ... on CheckRun { name isRequired(pullRequestNumber: $pr) }
+                                    ... on StatusContext { context isRequired(pullRequestNumber: $pr) }
+                                } }
+                            }
+                        } } }
+                    }
+                }
+            }
+        "#;
+
+        let body = serde_json::json!({
+            "query": query,
+            "variables": { "owner": owner, "repo": repo, "pr": pr_number }
+        });
+
+        let base_url = self.base_url.clone();
+        let resp = self
+            .send_with_retry(|token| {
+                let body = body.clone();
+                let http = self.http.clone();
+                let base_url = base_url.clone();
+                async move {
+                    let graphql_url = format!("{}/graphql", base_url);
+                    let resp = http
+                        .post(&graphql_url)
+                        .bearer_auth(&token)
+                        .json(&body)
+                        .send()
+                        .await?;
+                    handle_rate_limit(resp).await
+                }
+            })
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "required_check_contexts_for_pr failed ({}): {}",
+                status,
+                body
+            ));
+        }
+
+        let json: serde_json::Value = resp.json().await?;
+        if let Some(errors) = json.get("errors") {
+            return Err(anyhow!(
+                "required_check_contexts_for_pr GraphQL error: {}",
+                errors
+            ));
+        }
+
+        Ok(parse_required_contexts_from_rollup(&json))
+    }
+
     /// Return how many commits `head` is ahead of `base` on GitHub via the
     /// compare API (`GET /repos/{owner}/{repo}/compare/{base}...{head}`).
     ///
@@ -1278,5 +1369,96 @@ impl GitHubApiClient {
         }
         let parsed: CompareResponse = resp.json().await?;
         Ok(parsed.ahead_by)
+    }
+}
+
+/// Extract the required check-context names from a `statusCheckRollup` GraphQL
+/// response (see [`GitHubApiClient::required_check_contexts_for_pr`]).
+///
+/// Walks `data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup`
+/// and returns the `name`/`context` of every rollup context whose
+/// `isRequired` is `true`. Returns `None` when there is no head commit or no
+/// rollup (so the caller can fall back to another source); `Some(vec![])` when
+/// a rollup exists but nothing in it is required.
+fn parse_required_contexts_from_rollup(json: &serde_json::Value) -> Option<Vec<String>> {
+    let rollup =
+        json.pointer("/data/repository/pullRequest/commits/nodes/0/commit/statusCheckRollup")?;
+    // `statusCheckRollup` is JSON `null` when the commit has no checks at all.
+    let nodes = rollup.get("contexts")?.get("nodes")?.as_array()?;
+    let required = nodes
+        .iter()
+        .filter(|n| {
+            n.get("isRequired")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter_map(|n| {
+            n.get("name")
+                .or_else(|| n.get("context"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    Some(required)
+}
+
+#[cfg(test)]
+mod required_contexts_tests {
+    use super::parse_required_contexts_from_rollup;
+
+    fn rollup(nodes: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "data": { "repository": { "pullRequest": { "commits": { "nodes": [
+                { "commit": { "statusCheckRollup": { "contexts": { "nodes": nodes } } } }
+            ] } } } }
+        })
+    }
+
+    #[test]
+    fn keeps_only_required_contexts() {
+        let json = rollup(serde_json::json!([
+            { "__typename": "CheckRun", "name": "Sentinel", "isRequired": false },
+            { "__typename": "CheckRun", "name": "Run Unit Tests", "isRequired": true },
+            { "__typename": "CheckRun", "name": "Aikido / aikido", "isRequired": true },
+            { "__typename": "StatusContext", "context": "Vercel", "isRequired": false }
+        ]));
+        let got = parse_required_contexts_from_rollup(&json).expect("rollup present");
+        assert_eq!(got, vec!["Run Unit Tests", "Aikido / aikido"]);
+    }
+
+    #[test]
+    fn empty_when_nothing_required() {
+        let json = rollup(serde_json::json!([
+            { "__typename": "CheckRun", "name": "Sentinel", "isRequired": false }
+        ]));
+        // Authoritative empty: a rollup exists but nothing is required → no
+        // failing check is merge-blocking (no heuristic fallback).
+        assert_eq!(
+            parse_required_contexts_from_rollup(&json),
+            Some(Vec::<String>::new())
+        );
+    }
+
+    #[test]
+    fn none_when_rollup_absent() {
+        // `statusCheckRollup: null` (commit has no checks) → fall back.
+        let json = rollup_null();
+        assert_eq!(parse_required_contexts_from_rollup(&json), None);
+    }
+
+    #[test]
+    fn none_when_no_commits() {
+        let json = serde_json::json!({
+            "data": { "repository": { "pullRequest": { "commits": { "nodes": [] } } } }
+        });
+        assert_eq!(parse_required_contexts_from_rollup(&json), None);
+    }
+
+    fn rollup_null() -> serde_json::Value {
+        serde_json::json!({
+            "data": { "repository": { "pullRequest": { "commits": { "nodes": [
+                { "commit": { "statusCheckRollup": null } }
+            ] } } } }
+        })
     }
 }
