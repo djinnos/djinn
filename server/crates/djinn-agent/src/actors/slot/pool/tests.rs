@@ -472,6 +472,170 @@ async fn reconfigure_scale_down_drains_busy_slots_then_retires_them() {
     .await;
 }
 
+/// Sum the per-(user, model) running-session counts the coordinator uses to
+/// enforce the per-user concurrency cap. A settled (terminal) row must not
+/// appear here.
+async fn running_count_for_cap(repo: &djinn_db::SessionRepository) -> i64 {
+    repo.count_active_by_user_and_model()
+        .await
+        .expect("count_active_by_user_and_model should succeed")
+        .into_iter()
+        .map(|(_creator, _model, cnt)| cnt)
+        .sum()
+}
+
+/// D4: a stall-kill (any `SlotEvent::Killed` path) must SETTLE the session DB
+/// row to a terminal state at the moment of the kill — not leave it `running`
+/// until the periodic zombie backstop. A lingering `running` row over-counts
+/// the per-user concurrency cap (fatal at `max_sessions = 1`: the user can't
+/// redispatch because a dead session still "counts"). Re-settling an
+/// already-terminal row is a no-op (idempotent).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stall_kill_settles_session_row_and_clears_from_per_user_cap() {
+    use djinn_db::{EpicCreateInput, EpicRepository, TaskRepository};
+
+    let (app_state, cancel, _temp) = test_app_state();
+    let db = app_state.db.clone();
+    let event_bus = app_state.event_bus.clone();
+    let session_repo = djinn_db::SessionRepository::new(db.clone(), event_bus.clone());
+
+    // Seed a real project → epic → task so the session row satisfies its
+    // FK constraints (`sessions.project_id` → projects, `sessions.task_id`
+    // → tasks).
+    let project = test_helpers::create_test_project(&db).await;
+    let epic = EpicRepository::new(db.clone(), event_bus.clone())
+        .create_for_project(
+            &project.id,
+            EpicCreateInput {
+                title: "Epic",
+                description: "",
+                emoji: "",
+                color: "",
+                owner: "",
+                memory_refs: None,
+                status: None,
+                auto_breakdown: None,
+                originating_adr_id: None,
+            },
+        )
+        .await
+        .expect("epic create should succeed");
+    let task = TaskRepository::new(db.clone(), event_bus.clone())
+        .create(&epic.id, "stall-kill", "", "", "task", 0, "", Some("open"))
+        .await
+        .expect("task create should succeed");
+    let task_id = task.id.as_str();
+
+    // Materialize the `running` session row the real worker lifecycle would
+    // create. (The test slot runner is a stub and does not touch the DB.)
+    let created = session_repo
+        .create(djinn_db::CreateSessionParams {
+            project_id: &project.id,
+            task_id: Some(task_id),
+            model: "model-a",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+        })
+        .await
+        .expect("session create should succeed");
+    assert_eq!(
+        created.status,
+        djinn_core::models::SessionStatus::Running.as_str(),
+        "session starts in the running state"
+    );
+    assert_eq!(
+        running_count_for_cap(&session_repo).await,
+        1,
+        "a running worker session counts against the per-user cap"
+    );
+
+    let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
+    let config = make_config(
+        vec![model("model-a", 1, &["worker"])],
+        &[("worker", vec!["model-a"])],
+    );
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel,
+        config,
+        test_slot_factory(Duration::from_secs(10), signal_tx),
+    );
+
+    pool.dispatch(task_id, "/tmp/project", "model-a")
+        .await
+        .expect("dispatch should succeed");
+
+    // Stall-kill: the coordinator's stall detector routes through
+    // `pool.kill_session`, which kills the slot and emits `SlotEvent::Killed`.
+    pool.kill_session(task_id)
+        .await
+        .expect("kill_session should succeed");
+
+    // Wait for the slot to drain (the `Killed` event handler runs the settle).
+    wait_until_no_sessions(&pool, &[task_id.to_string()]).await;
+
+    // The settle is performed in `handle_slot_event` after the kill event; poll
+    // until the row goes terminal (the event is processed async).
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let row = session_repo
+            .get(&created.id)
+            .await
+            .expect("get should succeed")
+            .expect("session row should still exist");
+        if row.status != djinn_core::models::SessionStatus::Running.as_str() {
+            assert_eq!(
+                row.status,
+                djinn_core::models::SessionStatus::Interrupted.as_str(),
+                "stall-killed session must settle to a terminal (interrupted) state"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "stall-killed session row was never settled (still running)"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // The settled row no longer counts against the per-user concurrency cap.
+    assert_eq!(
+        running_count_for_cap(&session_repo).await,
+        0,
+        "a settled (terminal) session must NOT count against the per-user cap"
+    );
+    assert!(
+        session_repo
+            .list_active()
+            .await
+            .expect("list_active should succeed")
+            .is_empty(),
+        "no running sessions should remain after a stall-kill"
+    );
+
+    // Idempotent: re-settling an already-terminal row affects zero rows and
+    // leaves it terminal.
+    let reaffected = session_repo
+        .interrupt_running_for_task(task_id)
+        .await
+        .expect("re-settle should succeed");
+    assert_eq!(
+        reaffected, 0,
+        "re-settling an already-terminal row must be a no-op"
+    );
+    let row = session_repo
+        .get(&created.id)
+        .await
+        .expect("get should succeed")
+        .expect("session row should still exist");
+    assert_eq!(
+        row.status,
+        djinn_core::models::SessionStatus::Interrupted.as_str(),
+        "re-settle leaves the row terminal"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn kill_and_pause_are_routed_to_the_correct_task_slot() {
     let (app_state, cancel, _temp) = test_app_state();
