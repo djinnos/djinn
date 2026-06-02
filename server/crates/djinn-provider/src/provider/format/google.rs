@@ -177,6 +177,10 @@ impl LlmProvider for GoogleProvider {
         "google"
     }
 
+    fn config_snapshot(&self) -> Option<ProviderConfig> {
+        Some(self.config.clone())
+    }
+
     fn stream<'a>(
         &'a self,
         conversation: &'a Conversation,

@@ -1060,6 +1060,14 @@ async fn generate_chat_title(
         }
     };
 
+    // B5a: chat-title generation is a cheap, throwaway background call (3-6
+    // words). Force the weakest reasoning tier so it doesn't burn deep-thinking
+    // tokens/latency, regardless of what the main chat model is configured for.
+    // The OAuth branch above may have inherited a `reasoning_effort` from the
+    // reused config, so override unconditionally after the match.
+    let mut provider_config = provider_config;
+    provider_config.reasoning_effort = Some(djinn_provider::provider::ReasoningEffort::Minimal);
+
     let provider = create_provider(provider_config);
     let mut conversation = Conversation::new();
     conversation.push(Message {
