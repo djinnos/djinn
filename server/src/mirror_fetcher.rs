@@ -209,10 +209,38 @@ pub(crate) async fn fetch_one(
     }
 
     // Phase 3 PR 8: fire the canonical-graph warmer. The warmer's own
-    // freshness + single-flight guards make a duplicate trigger on an
-    // already-hot cache cheap. Log + swallow — warmer failure must never
-    // break the mirror fetch tick.
-    state.graph_warmer().await.trigger(project_id).await;
+    // commit-aligned freshness + single-flight guards make a duplicate
+    // trigger on an already-hot cache cheap. Log + swallow — warmer failure
+    // must never break the mirror fetch tick.
+    //
+    // First skip code-less repos (docs / memory-only — no detected language).
+    // The canonical graph is a CODE graph, so such a repo always indexes to
+    // 0 nodes; `ensure_canonical_graph` then refuses to cache the empty
+    // graph, so it never writes the cache row the warmer's freshness gate
+    // reads — meaning every 60s tick would otherwise re-dispatch a 4Gi warm
+    // Job that can never satisfy the gate. Mirror the coordinator's code-less
+    // skip (see `refresh_canonical_graphs_if_stale`) and stamp the project
+    // warmed so the UI badge resolves to "ready".
+    let env_cfg = djinn_agent::verification::environment::environment_config_for_project_id(
+        state.db(),
+        project_id,
+    )
+    .await;
+    if env_cfg.languages.has_any() {
+        state.graph_warmer().await.trigger(project_id).await;
+    } else {
+        tracing::debug!(
+            project_id,
+            "mirror_fetcher: project has no indexable code stack; skipping warm"
+        );
+        if let Err(err) = repo_db.mark_graph_warmed(project_id).await {
+            tracing::warn!(
+                project_id,
+                error = %err,
+                "mirror_fetcher: failed to stamp graph_warmed_at for code-less project"
+            );
+        }
+    }
 
     Ok(())
 }
