@@ -859,3 +859,112 @@ async fn compare_commits_ahead_by_parses_count() {
         .unwrap();
     assert_eq!(ahead, 0, "diff-empty branch reports ahead_by == 0");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_unresolved_review_thread_ids_returns_only_unresolved() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(header("Authorization", "Bearer ghs_test_install"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "reviewThreads": {
+                            "nodes": [
+                                { "id": "RT_unresolved_1", "isResolved": false },
+                                { "id": "RT_resolved", "isResolved": true },
+                                { "id": "RT_unresolved_2", "isResolved": false }
+                            ]
+                        }
+                    }
+                }
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let ids = client
+        .list_unresolved_review_thread_ids("djinnos", "server", 42)
+        .await
+        .expect("thread list should parse");
+    assert_eq!(
+        ids,
+        vec!["RT_unresolved_1".to_string(), "RT_unresolved_2".to_string()],
+        "only isResolved==false threads returned"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_unresolved_review_thread_ids_propagates_graphql_error() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "errors": [{ "message": "Could not resolve to a Repository" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let err = client
+        .list_unresolved_review_thread_ids("djinnos", "server", 42)
+        .await
+        .expect_err("GraphQL error should propagate");
+    assert!(err.to_string().contains("GraphQL error"), "got: {err}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resolve_review_thread_issues_mutation() {
+    use wiremock::matchers::body_json;
+
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(header("Authorization", "Bearer ghs_test_install"))
+        .and(body_json(serde_json::json!({
+            "query": "mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}",
+            "variables": { "threadId": "RT_node123" }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {
+                "resolveReviewThread": { "thread": { "isResolved": true } }
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    client
+        .resolve_review_thread("RT_node123")
+        .await
+        .expect("resolve mutation should succeed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resolve_review_thread_propagates_graphql_error() {
+    let server = MockServer::start().await;
+    let install_id = seed_installation_token();
+
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "errors": [{ "message": "Could not resolve to a node with the global id" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitHubApiClient::for_installation_with_base_url(install_id, server.uri());
+    let err = client
+        .resolve_review_thread("RT_bad")
+        .await
+        .expect_err("GraphQL error should propagate");
+    assert!(err.to_string().contains("GraphQL error"), "got: {err}");
+}

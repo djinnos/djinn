@@ -934,6 +934,61 @@ impl CoordinatorActor {
                         continue;
                     }
 
+                    // Conversation-resolution 405: the repo's branch protection
+                    // requires every review conversation to be resolved before
+                    // merge, and an external review bot approved the PR *and*
+                    // left inline comments → unresolved threads. An explicit
+                    // approval is the override signal: the reviewer's comments
+                    // are non-blocking, so resolve the leftover threads and let
+                    // the next tick re-attempt the merge. Only do this when the
+                    // PR is approved — otherwise this rule is a legitimate gate.
+                    if has_approved && is_conversation_resolution_block(&e) {
+                        match gh_client
+                            .list_unresolved_review_thread_ids(&owner, &repo, pull_number)
+                            .await
+                        {
+                            Ok(ids) if !ids.is_empty() => {
+                                let mut resolved = 0;
+                                for tid in &ids {
+                                    match gh_client.resolve_review_thread(tid).await {
+                                        Ok(()) => resolved += 1,
+                                        Err(re) => tracing::warn!(
+                                            task_id = %task.short_id,
+                                            pr = pull_number,
+                                            thread = %tid,
+                                            error = %re,
+                                            "PR poller: resolve_review_thread failed"
+                                        ),
+                                    }
+                                }
+                                tracing::info!(
+                                    task_id = %task.short_id,
+                                    pr = pull_number,
+                                    resolved,
+                                    total = ids.len(),
+                                    "PR poller: approved PR blocked on unresolved conversations — resolved threads, will retry merge next tick"
+                                );
+                                // Re-resolving is idempotent (resolved threads
+                                // won't reappear), so this converges. Reset the
+                                // fail count and retry next tick.
+                                self.merge_fail_count.remove(&task.id);
+                                continue;
+                            }
+                            // No unresolved threads yet GitHub still blocked, or
+                            // we couldn't list them: do NOT continue. Fall
+                            // through to the generic merge_fail_count path so a
+                            // PR blocked for some OTHER reason can't spin forever
+                            // through this branch.
+                            Ok(_) => {}
+                            Err(le) => tracing::warn!(
+                                task_id = %task.short_id,
+                                pr = pull_number,
+                                error = %le,
+                                "PR poller: failed to list unresolved threads"
+                            ),
+                        }
+                    }
+
                     let count = self.merge_fail_count.entry(task.id.clone()).or_insert(0);
                     *count += 1;
                     tracing::warn!(
@@ -2301,6 +2356,30 @@ fn is_merge_queue_405(err: &anyhow::Error) -> bool {
     msg.contains("405") && msg.contains("merge queue")
 }
 
+/// Recognise the "conversation must be resolved" 405 from a REST
+/// `PUT /pulls/{n}/merge` error.
+///
+/// When a repo enforces branch protection's "A conversation must be resolved
+/// before this pull request can be merged" rule and a PR has unresolved
+/// review threads, GitHub rejects the direct merge with:
+/// `405 Method Not Allowed: {"message":"Repository rule violations found\n\nA
+/// conversation must be resolved before this pull request can be merged.\n\n"}`.
+///
+/// This is neither the merge-queue 405 ([`is_merge_queue_405`]) nor a
+/// `mergeable == false` signal, so without this discriminator it falls into
+/// the generic "merge failed, retry" arm and loops forever. We match the real
+/// payload case-insensitively: a 405 that mentions a conversation needing
+/// resolution (also accepting the "Repository rule violations" + "conversation"
+/// combination GitHub wraps it in).
+fn is_conversation_resolution_block(err: &anyhow::Error) -> bool {
+    let msg = format!("{err}").to_lowercase();
+    if !msg.contains("405") {
+        return false;
+    }
+    msg.contains("conversation must be resolved")
+        || (msg.contains("repository rule violations") && msg.contains("conversation"))
+}
+
 /// Determine if a `DequeuedEvent.reason` indicates a real failure that
 /// should kick the task back into the worker loop.
 ///
@@ -2665,8 +2744,9 @@ fn build_ci_failure_sections(
 mod tests {
     use super::{
         Task, blocking_failed_checks, build_ci_failure_sections, dequeue_reason_is_failure,
-        effective_review_decision, is_advisory_check_name, is_merge_queue_405,
-        is_racing_unmerged_status, parse_actions_run_id, parse_pr_url, pick_conflict_blocker_sibling,
+        effective_review_decision, is_advisory_check_name, is_conversation_resolution_block,
+        is_merge_queue_405, is_racing_unmerged_status, parse_actions_run_id, parse_pr_url,
+        pick_conflict_blocker_sibling,
     };
     use djinn_provider::github_api::{ActionsJob, ActionsJobStep, CheckRun, GitHubUser, PrReview};
 
@@ -2960,6 +3040,42 @@ mod tests {
         );
         // Not a 405 — must not match.
         assert!(!is_merge_queue_405(&err));
+    }
+
+    #[test]
+    fn is_conversation_resolution_block_matches_real_payload() {
+        // The exact production payload: a 405 whose body carries the repo-rule
+        // "conversation must be resolved" violation.
+        let err = anyhow::anyhow!(
+            "merge_pull_request failed (405 Method Not Allowed): {{\"message\":\"Repository rule violations found\\n\\nA conversation must be resolved before this pull request can be merged.\\n\\n\",\"status\":\"405\"}}"
+        );
+        assert!(is_conversation_resolution_block(&err));
+    }
+
+    #[test]
+    fn is_conversation_resolution_block_ignores_merge_queue_405() {
+        // The merge-queue 405 is a different 405 and must NOT be treated as a
+        // conversation-resolution block (it has its own handler).
+        let err = anyhow::anyhow!(
+            r#"merge_pull_request failed (405 Method Not Allowed): {{"message":"Pull Request is in the merge queue.","status":"405"}}"#
+        );
+        assert!(!is_conversation_resolution_block(&err));
+    }
+
+    #[test]
+    fn is_conversation_resolution_block_ignores_generic_405() {
+        let err =
+            anyhow::anyhow!("merge_pull_request failed (405): {{\"message\":\"locked\"}}");
+        assert!(!is_conversation_resolution_block(&err));
+    }
+
+    #[test]
+    fn is_conversation_resolution_block_ignores_other_status_codes() {
+        // Same wording but not a 405 → not our case.
+        let err = anyhow::anyhow!(
+            "merge_pull_request failed (409): A conversation must be resolved before this pull request can be merged."
+        );
+        assert!(!is_conversation_resolution_block(&err));
     }
 
     #[test]
