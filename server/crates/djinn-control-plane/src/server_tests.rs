@@ -534,4 +534,98 @@ mod tests {
              Add a match arm for each in server/crates/djinn-control-plane/src/dispatch.rs"
         );
     }
+
+    /// Extract the tool-name string literals that head the top-level match
+    /// arms of `dispatch_tool` in `dispatch.rs`.
+    ///
+    /// The dispatcher is a flat `match name { "tool_name" => ... }` whose arms
+    /// are each written as a single `            "tool_name" => ...` line (no
+    /// `|`-combined or multi-line patterns — enforced by this test's exact
+    /// set-equality with the registered tools). We parse the source rather
+    /// than reflect because the arm names live only as literals in the match;
+    /// there is no runtime list to introspect.
+    fn dispatch_arm_tool_names() -> std::collections::BTreeSet<String> {
+        // `include_str!` resolves relative to this source file (src/), so the
+        // dispatcher is its sibling `dispatch.rs`.
+        const DISPATCH_SRC: &str = include_str!("dispatch.rs");
+        DISPATCH_SRC
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim_start();
+                // Match-arm heads look like: "tool_name" => ...
+                let rest = trimmed.strip_prefix('"')?;
+                let (name, after) = rest.split_once('"')?;
+                if !after.trim_start().starts_with("=>") {
+                    return None;
+                }
+                // Tool names are snake_case identifiers; this filters out any
+                // unrelated string-literal-then-`=>` constructs.
+                if name.is_empty()
+                    || !name
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                {
+                    return None;
+                }
+                Some(name.to_string())
+            })
+            .collect()
+    }
+
+    /// G4 — reverse-direction (and exact-equality) drift guard.
+    ///
+    /// `every_registered_tool_has_a_dispatch_arm` proves
+    /// `registered ⊆ dispatch_arms` (no tool is unroutable). It does NOT catch
+    /// the other drift direction: an **orphan** arm in `dispatch.rs` that no
+    /// longer corresponds to a registered `#[tool]` (e.g. a tool renamed/removed
+    /// in the router but left behind — or fat-fingered — in the match). Such an
+    /// arm is dead code that silently masks the real bug and can shadow intent.
+    ///
+    /// This test asserts the dispatcher's set of routable tool names is exactly
+    /// equal to the set of `#[tool]`-registered names — failing loudly in either
+    /// direction. Together with the sibling test it closes the full
+    /// register↔dispatch sync hazard without the risky "generate one from the
+    /// other" codegen rewrite.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_arms_exactly_match_registered_tools() {
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db);
+        let server = DjinnMcpServer::new(state);
+
+        let registered: std::collections::BTreeSet<String> = server
+            .all_tool_schemas()
+            .into_iter()
+            .filter_map(|schema| {
+                schema
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        assert!(
+            !registered.is_empty(),
+            "tool_router returned zero tools — check rmcp wiring"
+        );
+
+        let arms = dispatch_arm_tool_names();
+        assert!(
+            !arms.is_empty(),
+            "parsed zero match arms from dispatch.rs — the parser in \
+             dispatch_arm_tool_names() is out of sync with the file's shape"
+        );
+
+        // Orphan arms: routed by dispatch.rs but not registered via #[tool].
+        let orphan: Vec<&String> = arms.difference(&registered).collect();
+        // Unrouted tools: registered via #[tool] but no dispatch arm.
+        // (Also covered by every_registered_tool_has_a_dispatch_arm; asserted
+        //  here too so this one test fails on drift in EITHER direction.)
+        let unrouted: Vec<&String> = registered.difference(&arms).collect();
+
+        assert!(
+            orphan.is_empty() && unrouted.is_empty(),
+            "dispatch.rs match arms and #[tool]-registered tools have drifted.\n\
+             Orphan arms (in dispatch.rs, NOT a registered tool — remove or fix the name): {orphan:#?}\n\
+             Unrouted tools (registered via #[tool], NO dispatch arm — add one in dispatch.rs): {unrouted:#?}"
+        );
+    }
 }
