@@ -158,22 +158,42 @@ impl SupportedIndexer {
             // scip-typescript try to index that path as a TS project → every
             // target failed "missing tsconfig.json" / "no files got indexed".
             Self::TypeScript => vec!["index".to_string(), "--output".to_string(), output],
-            Self::Python => vec!["index".to_string(), output],
+            // Same `--output` requirement as TypeScript: `scip-python index`
+            // takes NO positional and writes to `--output` (default
+            // `index.scip` relative to cwd). Passing the planned path
+            // positionally made scip-python ignore it and dump `index.scip`
+            // into the workspace, so djinn's collector found nothing in the
+            // output dir → exit 0 but `node_count=0` (empty graph).
+            Self::Python => vec!["index".to_string(), "--output".to_string(), output],
             // scip-go: positional non-flag args are package patterns (default
             // `./...`). Giving the output path positionally silently narrows
             // indexing to ~nothing and dumps ./index.scip in cwd, which the
             // artifact collector never looks at. `-o` routes the SCIP output
             // to the planner-chosen path.
             Self::Go => vec!["index".to_string(), "-o".to_string(), output],
-            Self::Java => vec!["index".to_string(), output],
+            // scip-java `index` writes to `--output` (default `index.scip`);
+            // the planned path must be passed via the flag, same as TS/Python.
+            // NOTE: not exercised in this deployment (no Java projects) — fix
+            // matches the upstream `--output` convention but is unverified
+            // against a live scip-java run.
+            Self::Java => vec!["index".to_string(), "--output".to_string(), output],
             Self::Clang => vec![
                 "--compdb-path".to_string(),
                 ".".to_string(),
                 "--output-path".to_string(),
                 output,
             ],
+            // FIXME(ruby): scip-ruby has NO `index` subcommand — it runs as
+            // `bundle exec scip-ruby --index-file <out> --gem-metadata <name@ver>
+            // <dirs>` inside the project's bundler context. This `["index",
+            // output]` form is wrong on every axis (subcommand, output flag,
+            // missing bundler env) and will not produce an index. Left as-is
+            // pending a proper rewrite — no Ruby projects use it today.
             Self::Ruby => vec!["index".to_string(), output],
-            Self::DotNet => vec!["index".to_string(), output],
+            // scip-dotnet `index` writes to `--output` (default `index.scip`),
+            // same pattern as TS/Python. NOTE: unverified locally (no .NET
+            // toolchain here); matches the documented scip-dotnet CLI.
+            Self::DotNet => vec!["index".to_string(), "--output".to_string(), output],
         }
     }
 }

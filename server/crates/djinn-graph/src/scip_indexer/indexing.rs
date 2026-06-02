@@ -534,7 +534,11 @@ mod tests {
         assert_eq!(plans[0].workspace_root, PathBuf::from("/workspace/repo"));
         assert_eq!(
             plans[0].args,
-            vec!["index", "/workspace/repo/.djinn/scip/repo-python-root.scip"]
+            vec![
+                "index",
+                "--output",
+                "/workspace/repo/.djinn/scip/repo-python-root.scip"
+            ]
         );
     }
 
@@ -679,7 +683,11 @@ mod tests {
         );
         assert_eq!(
             plans[2].args,
-            vec!["index", "/workspace/repo/.djinn/scip/repo-python-root.scip"]
+            vec![
+                "index",
+                "--output",
+                "/workspace/repo/.djinn/scip/repo-python-root.scip"
+            ]
         );
         assert_eq!(
             plans[3].args,
@@ -691,7 +699,11 @@ mod tests {
         );
         assert_eq!(
             plans[4].args,
-            vec!["index", "/workspace/repo/.djinn/scip/repo-java-root.scip"]
+            vec![
+                "index",
+                "--output",
+                "/workspace/repo/.djinn/scip/repo-java-root.scip"
+            ]
         );
     }
 
