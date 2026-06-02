@@ -260,6 +260,26 @@ impl K8sGraphWarmer {
         let age_duration = Duration::from_secs(age.as_secs());
         age_duration < ttl
     }
+
+    /// True iff `repo_graph_cache` holds a row keyed by the project's
+    /// current `origin/main` tip — i.e. the canonical graph is
+    /// commit-aligned (`commits_since_pin == 0`) and a re-index would
+    /// produce the identical graph.
+    ///
+    /// Unlike [`cache_is_fresh`] this ignores row age: a graph built for
+    /// the current commit stays valid no matter how old, so the proactive
+    /// refresh / mirror-tick path must not re-warm it just because some
+    /// wall-clock TTL elapsed. Returns `false` (→ caller dispatches a warm)
+    /// when the mirror tip can't be resolved, or when no cache row exists
+    /// yet — i.e. first-ever warm, a freshly-advanced commit, or a cache
+    /// miss. That fail-open default preserves every legitimate warm.
+    async fn cache_has_current_commit(&self, project_id: &str) -> bool {
+        let Some(tip) = discover_mirror_main_tip(project_id).await else {
+            return false;
+        };
+        let repo = RepoGraphCacheRepository::new(self.db.clone());
+        matches!(repo.get(project_id, &tip).await, Ok(Some(_)))
+    }
 }
 
 /// Best-effort lookup of the project's `origin/main` tip inside the
@@ -294,6 +314,24 @@ impl GraphWarmerService for K8sGraphWarmer {
                 );
                 return;
             }
+        }
+
+        // Commit-aligned freshness short-circuit (ADR-051 §3). Every caller
+        // — the 60s mirror-fetch tick (`mirror_fetcher::fetch_one`), the
+        // coordinator's 10-min refresh (`refresh_canonical_graphs_if_stale`),
+        // and the post-build image watcher — fires `trigger` unconditionally
+        // and, per their own call-site comments, relies on the warmer to
+        // no-op when nothing has changed. If the cache already holds a graph
+        // for the project's current origin/main tip then `commits_since_pin
+        // == 0` and a re-index is pure waste, so we skip dispatching a (4Gi)
+        // warm Job. Without this gate every tick re-warms every project and
+        // pins the cluster. Fail-open on an undeterminable tip / cache miss.
+        if self.cache_has_current_commit(project_id).await {
+            debug!(
+                project_id,
+                "K8sGraphWarmer::trigger: graph already current for origin/main tip; skipping warm"
+            );
+            return;
         }
 
         let Some(image_tag) = self.resolve_project_image_tag(project_id).await else {
