@@ -10,6 +10,62 @@ use djinn_provider::provider::telemetry;
 /// a single batch (ADR-048 §1A).
 pub(super) const MAX_TOOL_CONCURRENCY: usize = 8;
 
+/// Cadence at which an in-flight tool call emits a liveness heartbeat
+/// (`touch_activity`).  The worker otherwise only touches activity on LLM
+/// stream events (see `reply_loop/streaming.rs`), so a multi-minute *blocking*
+/// tool — most acutely a cold `cargo clippy` on a large workspace — emits
+/// nothing for its whole duration.  The coordinator's 10-minute zombie hard cap
+/// (`coordinator/dispatch.rs::reap_zombie_sessions`) then cannot tell a live,
+/// busy worker from a dead pod (both read `idle_seconds > 600`) and false-reaps
+/// the session mid-build.  30s keeps `idle_seconds` well under every reap
+/// threshold (180s zero-token breaker, 300s first-call, 600s zombie cap).
+const TOOL_HEARTBEAT_SECS: u64 = 30;
+
+fn tool_heartbeat_interval() -> std::time::Duration {
+    std::time::Duration::from_secs(TOOL_HEARTBEAT_SECS)
+}
+
+/// Drive `fut` to completion while invoking `beat` every `interval`.
+///
+/// The heartbeat runs in the SAME task via `select!`, so the beat future may
+/// borrow freely (no `'static`/`spawn` requirement — `services`/`task_id` are
+/// borrows). `tokio::time::interval`'s first tick is immediate and is consumed
+/// up front, so a tool that completes before the first cadence never beats.
+async fn run_with_heartbeat<F, T, MkBeat, BeatFut>(
+    interval: std::time::Duration,
+    mk_beat: MkBeat,
+    fut: F,
+) -> T
+where
+    F: std::future::Future<Output = T>,
+    MkBeat: Fn() -> BeatFut,
+    BeatFut: std::future::Future<Output = ()>,
+{
+    let mut fut = std::pin::pin!(fut);
+    let mut ticker = tokio::time::interval(interval);
+    // Consume the immediate first tick so we only beat once a tool has actually
+    // been running for `interval`.
+    ticker.tick().await;
+    loop {
+        tokio::select! {
+            out = &mut fut => return out,
+            _ = ticker.tick() => mk_beat().await,
+        }
+    }
+}
+
+/// One liveness heartbeat: best-effort `touch_activity` RPC. Failures are
+/// logged at debug and swallowed — a missed beat must never abort a tool call.
+async fn beat_activity(services: &dyn djinn_supervisor::SupervisorServices, task_id: &str) {
+    if let Err(e) = services.touch_activity(task_id.to_string()).await {
+        tracing::debug!(
+            task_id = %task_id,
+            error = %e,
+            "ReplyLoop: tool-heartbeat touch_activity failed"
+        );
+    }
+}
+
 pub(super) fn tool_concurrency_safety(tools: &[serde_json::Value]) -> HashMap<String, bool> {
     tools
         .iter()
@@ -160,7 +216,12 @@ pub(super) async fn dispatch_single_tool<'a>(
         && registry.has_tool(&name)
     {
         tracing::debug!(task_id = %task_id, tool = %name, "ReplyLoop: dispatching to MCP server");
-        let mcp_result = registry.call_tool(&name, args.clone()).await;
+        let mcp_result = run_with_heartbeat(
+            tool_heartbeat_interval(),
+            || beat_activity(services, task_id),
+            registry.call_tool(&name, args.clone()),
+        )
+        .await;
         let (content, is_error) = match mcp_result {
             Ok(value) => {
                 // Route MCP results through the same stash/truncate/pagination
@@ -202,15 +263,19 @@ pub(super) async fn dispatch_single_tool<'a>(
         );
     }
 
-    let mut result = extension::call_tool(
-        app_state,
-        services,
-        &name,
-        args.clone(),
-        worktree_path,
-        Some(task_id),
-        Some(role_name),
-        mcp_registry,
+    let mut result = run_with_heartbeat(
+        tool_heartbeat_interval(),
+        || beat_activity(services, task_id),
+        extension::call_tool(
+            app_state,
+            services,
+            &name,
+            args.clone(),
+            worktree_path,
+            Some(task_id),
+            Some(role_name),
+            mcp_registry,
+        ),
     )
     .await;
     {
@@ -228,15 +293,19 @@ pub(super) async fn dispatch_single_tool<'a>(
                         "ReplyLoop: database locked, retrying"
                     );
                     tokio::time::sleep(backoff).await;
-                    result = extension::call_tool(
-                        app_state,
-                        services,
-                        &name,
-                        args.clone(),
-                        worktree_path,
-                        Some(task_id),
-                        Some(role_name),
-                        mcp_registry,
+                    result = run_with_heartbeat(
+                        tool_heartbeat_interval(),
+                        || beat_activity(services, task_id),
+                        extension::call_tool(
+                            app_state,
+                            services,
+                            &name,
+                            args.clone(),
+                            worktree_path,
+                            Some(task_id),
+                            Some(role_name),
+                            mcp_registry,
+                        ),
                     )
                     .await;
                 }
@@ -399,6 +468,54 @@ pub(super) async fn collect_tool_results(
 mod tests {
     use super::*;
     use crate::output_stash::{MAX_TOOL_RESULT_CHARS, handle_stash_tool};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A blocking tool that runs longer than several heartbeat intervals must
+    /// keep emitting `touch_activity` so the coordinator's zombie reaper sees a
+    /// live worker. With a 30s cadence, a 95s tool beats at t=30/60/90 → 3.
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_fires_while_a_long_tool_runs() {
+        let beats = AtomicU32::new(0);
+        let interval = std::time::Duration::from_secs(30);
+
+        let out = run_with_heartbeat(
+            interval,
+            || async {
+                beats.fetch_add(1, Ordering::SeqCst);
+            },
+            async {
+                tokio::time::sleep(std::time::Duration::from_secs(95)).await;
+                42u32
+            },
+        )
+        .await;
+
+        assert_eq!(out, 42);
+        assert_eq!(
+            beats.load(Ordering::SeqCst),
+            3,
+            "a 95s tool at a 30s cadence should beat at 30/60/90s"
+        );
+    }
+
+    /// A tool that completes before the first cadence must never heartbeat
+    /// (the immediate first interval tick is consumed up front).
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_does_not_fire_for_a_fast_tool() {
+        let beats = AtomicU32::new(0);
+
+        let out = run_with_heartbeat(
+            std::time::Duration::from_secs(30),
+            || async {
+                beats.fetch_add(1, Ordering::SeqCst);
+            },
+            async { 7u32 },
+        )
+        .await;
+
+        assert_eq!(out, 7);
+        assert_eq!(beats.load(Ordering::SeqCst), 0);
+    }
 
     /// The transformation the worker MCP success branch applies to a tool result
     /// before handing it back to the model. Mirrors the `Ok(value)` arm of the
