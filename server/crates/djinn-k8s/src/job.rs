@@ -118,7 +118,7 @@ pub fn build_task_run_job(
             crate::warm_job::WARM_COMMAND_BIN.to_string(),
             "task-run".to_string(),
         ]),
-        env: Some(build_task_run_env(config, &task_run_id_str)),
+        env: Some(build_task_run_env(config, &task_run_id_str, project_id)),
         volume_mounts: Some(vec![
             volume_mount(VOLUME_SPEC, SPEC_MOUNT_DIR, Some(true)),
             volume_mount(VOLUME_AUTH_TOKEN, TOKEN_MOUNT_DIR, Some(true)),
@@ -331,7 +331,11 @@ fn job_labels(task_run_id: &str) -> BTreeMap<String, String> {
 /// `mysql://root@127.0.0.1:3306/djinn` (single-node dev default) and the
 /// connection fails silently in any real cluster. Mirrors the warm-Pod
 /// pattern in `warm_job.rs`.
-fn build_task_run_env(config: &KubernetesConfig, task_run_id_str: &str) -> Vec<EnvVar> {
+fn build_task_run_env(
+    config: &KubernetesConfig,
+    task_run_id_str: &str,
+    project_id: &str,
+) -> Vec<EnvVar> {
     let mut env = vec![
         env_var("DJINN_SERVER_ADDR", &config.server_addr),
         env_var("DJINN_SPEC_PATH", SPEC_MOUNT_FILE),
@@ -368,6 +372,37 @@ fn build_task_run_env(config: &KubernetesConfig, task_run_id_str: &str) -> Vec<E
     env.push(env_var("GIT_CONFIG_COUNT", "1"));
     env.push(env_var("GIT_CONFIG_KEY_0", "safe.directory"));
     env.push(env_var("GIT_CONFIG_VALUE_0", "*"));
+
+    // Route Cargo's caches to the persistent /cache PVC, mirroring the Go
+    // GOMODCACHE/GOCACHE treatment baked into the image. Without this every
+    // Rust task-run recompiles the entire workspace dependency graph COLD:
+    // the image's CARGO_HOME (/usr/local/cargo, an image layer) loses any
+    // runtime-downloaded crates when the Pod dies, and CARGO_TARGET_DIR
+    // defaults to <workspace>/target inside the ephemeral clone.
+    //
+    // These are set at RUNTIME, not as image ENV, on purpose: the image must
+    // keep CARGO_HOME at the baked /usr/local/cargo so install-rust.sh's
+    // cargo/rustc proxies stay on PATH. Pointing CARGO_HOME at /cache in the
+    // Dockerfile would install those proxies into a path the runtime PVC
+    // overlay then HIDES — the v2→v3 RUSTUP_HOME regression (see
+    // image-builder/src/hash.rs). Here the proxies stay at
+    // /usr/local/cargo/bin (on PATH); only cargo's data dirs move to the PVC,
+    // which is djinn-owned (uid 10001), persistent, and in the Landlock
+    // allowlist (djinn-agent sandbox/linux.rs).
+    //
+    // - CARGO_HOME: registry index + crate sources, content-addressed by
+    //   crate@version, so it is safe to SHARE across projects (like Go's
+    //   module cache) — common crates download once.
+    // - CARGO_TARGET_DIR: compiled artifacts are workspace-specific, so they
+    //   are namespaced per project. cargo flocks the target dir, so two
+    //   concurrent task-runs on the SAME project serialize on the build lock
+    //   (correct — no corruption); different projects use different dirs and
+    //   build in parallel.
+    env.push(env_var("CARGO_HOME", &format!("{CACHE_MOUNT_DIR}/cargo")));
+    env.push(env_var(
+        "CARGO_TARGET_DIR",
+        &format!("{CACHE_MOUNT_DIR}/cargo-target/{project_id}"),
+    ));
     env
 }
 
@@ -692,6 +727,44 @@ mod tests {
         assert_eq!(
             envs.get("DJINN_DATABASE_URL").copied(),
             Some("postgres://djinn@djinn-postgres.djinn.svc:5432/djinn")
+        );
+    }
+
+    /// Cargo caches must be routed to the persistent /cache PVC so Rust
+    /// task-runs don't recompile the whole dependency graph cold every time.
+    /// CARGO_HOME is shared (content-addressed registry); CARGO_TARGET_DIR is
+    /// namespaced per project so different workspaces don't collide.
+    #[test]
+    fn routes_cargo_caches_to_cache_pvc_per_project() {
+        let cfg = KubernetesConfig::for_testing();
+
+        let job = build_task_run_job(
+            &cfg,
+            &Uuid::now_v7(),
+            "proj-xyz",
+            "djinn-taskrun-test",
+            "registry.example:5000/djinn-project-p:abc123def456",
+        );
+
+        let pod = job
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .expect("pod spec set");
+        let container = &pod.containers[0];
+        let envs: BTreeMap<&str, &str> = container
+            .env
+            .as_ref()
+            .expect("container.env set")
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().expect("env value")))
+            .collect();
+
+        assert_eq!(envs.get("CARGO_HOME").copied(), Some("/cache/cargo"));
+        assert_eq!(
+            envs.get("CARGO_TARGET_DIR").copied(),
+            Some("/cache/cargo-target/proj-xyz"),
+            "target dir must be namespaced per project to avoid cross-workspace collisions"
         );
     }
 
