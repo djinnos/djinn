@@ -438,6 +438,7 @@ mod tests {
             plans[1].args,
             vec![
                 "index",
+                "--output",
                 "/tmp/example-project/.djinn/scip/example-project-typescript-root.scip"
             ]
         );
@@ -672,6 +673,7 @@ mod tests {
             plans[1].args,
             vec![
                 "index",
+                "--output",
                 "/workspace/repo/.djinn/scip/repo-typescript-root.scip"
             ]
         );

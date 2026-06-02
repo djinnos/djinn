@@ -64,7 +64,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod lifecycle;
-mod warm_deps;
 mod worker_services;
 
 use anyhow::{Context, Result};
@@ -646,13 +645,6 @@ async fn run_warm_graph(project_id: &str) -> Result<()> {
             "environment_config present but failed to load; ignoring"
         ),
     }
-
-    // Populate `node_modules` for JS/TS projects so scip-typescript can
-    // resolve workspace `tsconfig` packages, project references, and @types.
-    // Without this, a workspace-tsconfig monorepo fails every TS target
-    // ("missing tsconfig.json") and the warm Pod re-dispatches forever.
-    // Best-effort + a no-op for non-JS projects — see `warm_deps`.
-    warm_deps::maybe_install_node_deps(&lifecycle_root).await;
 
     // Architect-only warm path: this subcommand binary is dispatched
     // exclusively by `K8sGraphWarmer`, which is wired into the

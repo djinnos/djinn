@@ -104,7 +104,10 @@ impl SupportedIndexer {
     /// a genuinely hung indexer can't pin the warm Job for ten minutes.
     pub(crate) fn timeout(self) -> std::time::Duration {
         let secs = match self {
-            Self::RustAnalyzer => 600,
+            // rust-analyzer drives a full cargo metadata + analysis pass;
+            // scip-typescript at a monorepo root indexes the whole tree
+            // (alt-front-end root = ~60s of input files). Both need headroom.
+            Self::RustAnalyzer | Self::TypeScript => 600,
             _ => 120,
         };
         std::time::Duration::from_secs(secs)
@@ -149,7 +152,12 @@ impl SupportedIndexer {
                 "--output".to_string(),
                 output,
             ],
-            Self::TypeScript => vec!["index".to_string(), output],
+            // `--output` is REQUIRED: scip-typescript's positional args are
+            // *projects* to index, not the output path (which defaults to
+            // `index.scip`). Passing the planned `.scip` path positionally made
+            // scip-typescript try to index that path as a TS project → every
+            // target failed "missing tsconfig.json" / "no files got indexed".
+            Self::TypeScript => vec!["index".to_string(), "--output".to_string(), output],
             Self::Python => vec!["index".to_string(), output],
             // scip-go: positional non-flag args are package patterns (default
             // `./...`). Giving the output path positionally silently narrows
