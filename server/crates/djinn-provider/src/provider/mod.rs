@@ -125,10 +125,17 @@ pub enum ReasoningEffort {
 
 impl ReasoningEffort {
     /// OpenAI Responses `reasoning.effort` token for this tier.
+    ///
+    /// `Minimal` maps to `"low"` rather than `"minimal"`: newer OpenAI models
+    /// (gpt-5.5+) dropped `minimal` from their supported effort set (`none`,
+    /// `low`, `medium`, `high`, `xhigh`) and 400 on it, while older gpt-5 models
+    /// never had `none`. `low` is the only weak tier every gpt-5.x model
+    /// accepts, so collapsing `Minimal`→`low` keeps our cheapest helper calls
+    /// (compaction, extraction, chat-title) wire-valid on the whole family. The
+    /// Anthropic/Google budget tiers ([`thinking_budget`]) are unaffected.
     pub fn openai_effort(self) -> &'static str {
         match self {
-            ReasoningEffort::Minimal => "minimal",
-            ReasoningEffort::Low => "low",
+            ReasoningEffort::Minimal | ReasoningEffort::Low => "low",
             ReasoningEffort::Medium => "medium",
             ReasoningEffort::High => "high",
         }
@@ -376,7 +383,10 @@ mod reasoning_effort_override_tests {
         assert!(
             ReasoningEffort::Medium.thinking_budget() <= ReasoningEffort::High.thinking_budget()
         );
-        assert_eq!(ReasoningEffort::Minimal.openai_effort(), "minimal");
+        // `Minimal` maps to the `"low"` OpenAI wire token (gpt-5.5+ rejects
+        // `"minimal"`; `low` is the weakest tier the whole gpt-5.x family
+        // accepts). See `openai_effort`.
+        assert_eq!(ReasoningEffort::Minimal.openai_effort(), "low");
     }
 
     /// Config-less providers (test mocks) return `None`, so call sites keep the

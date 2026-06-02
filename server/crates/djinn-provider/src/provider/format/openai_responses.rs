@@ -7,6 +7,7 @@ use std::pin::Pin;
 
 use crate::message::{ContentBlock, Conversation};
 use crate::provider::client::ApiClient;
+use crate::provider::error::ProviderError;
 use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice};
 
 // ─── Provider ─────────────────────────────────────────────────────────────────
@@ -282,7 +283,23 @@ fn parse_stream_event(data: &str) -> anyhow::Result<Option<ResponsesStreamEvent>
 /// that should be propagated through the stream.
 enum ParsedLine {
     Events(Vec<StreamEvent>),
-    ProviderError(String),
+    /// A typed provider error parsed from a mid-stream `response.failed` /
+    /// `error` event, plus the human-readable message. The typed
+    /// [`ProviderError`] is preserved (not stringified) so the supervisor's
+    /// `classify_provider_failure` can `downcast_ref` it and feed the host
+    /// breaker — a `server_error` here is a real provider-side 5xx, not an
+    /// untyped blip.
+    ProviderError(ProviderError, String),
+}
+
+/// Extract the OpenAI error `code` (top-level or nested under `error`) for
+/// typed classification, separate from the human-readable message.
+fn extract_error_code(error: &Value) -> Option<String> {
+    error
+        .get("code")
+        .or_else(|| error.get("error").and_then(|e| e.get("code")))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// Extract a human-readable error message from an OpenAI error JSON value.
@@ -434,13 +451,17 @@ fn parse_responses_line(line: &str, accumulated_items: &mut Vec<OutputItemInfo>)
         }
         ResponsesStreamEvent::ResponseFailed { error } => {
             let msg = extract_error_message(&error);
-            tracing::error!(error = %msg, "Responses API failed");
-            ParsedLine::ProviderError(msg)
+            let class =
+                ProviderError::from_stream_error(extract_error_code(&error).as_deref(), &msg);
+            tracing::error!(error = %msg, ?class, "Responses API failed");
+            ParsedLine::ProviderError(class, msg)
         }
         ResponsesStreamEvent::Error { error } => {
             let msg = extract_error_message(&error);
-            tracing::error!(error = %msg, "Responses API error");
-            ParsedLine::ProviderError(msg)
+            let class =
+                ProviderError::from_stream_error(extract_error_code(&error).as_deref(), &msg);
+            tracing::error!(error = %msg, ?class, "Responses API error");
+            ParsedLine::ProviderError(class, msg)
         }
         // Ignore all other event types
         _ => ParsedLine::Events(vec![]),
@@ -494,8 +515,13 @@ impl LlmProvider for OpenAIResponsesProvider {
                                             yield Ok(event);
                                         }
                                     }
-                                    ParsedLine::ProviderError(msg) => {
-                                        yield Err(anyhow::anyhow!("{}", msg));
+                                    ParsedLine::ProviderError(class, msg) => {
+                                        // Preserve the typed ProviderError as the
+                                        // source so downstream `downcast_ref` can
+                                        // classify it; the human message rides as
+                                        // anyhow context (so `to_string()` is
+                                        // unchanged for logs/tests).
+                                        yield Err(anyhow::Error::new(class).context(msg));
                                         return;
                                     }
                                 }
@@ -897,20 +923,25 @@ mod tests {
     fn test_parse_error_propagates() {
         let line = r#"{"type":"error","error":{"message":"context_length_exceeded: too many tokens","code":"context_length_exceeded"}}"#;
         let mut acc = Vec::new();
-        let ParsedLine::ProviderError(msg) = parse_responses_line(line, &mut acc) else {
+        let ParsedLine::ProviderError(class, msg) = parse_responses_line(line, &mut acc) else {
             panic!("expected provider error");
         };
         assert!(msg.contains("context_length_exceeded"));
+        assert_eq!(class, ProviderError::ContextOverflow);
     }
 
     #[test]
     fn test_parse_response_failed_propagates() {
         let line = r#"{"type":"response.failed","error":{"message":"server error","code":"server_error"}}"#;
         let mut acc = Vec::new();
-        let ParsedLine::ProviderError(msg) = parse_responses_line(line, &mut acc) else {
+        let ParsedLine::ProviderError(class, msg) = parse_responses_line(line, &mut acc) else {
             panic!("expected provider error");
         };
         assert!(msg.contains("server_error"));
+        // A mid-stream server_error must be typed as a provider-internal 5xx so
+        // the supervisor breaker can act on it (was previously an untyped string
+        // → provider_failure: None → breaker never fed).
+        assert_eq!(class, ProviderError::ProviderInternal { status: 500 });
     }
 
     #[test]
@@ -1090,7 +1121,7 @@ mod tests {
                 assert_eq!(events.len(), 1);
                 assert!(matches!(&events[0], StreamEvent::Thinking(t) if t == "The user wants to"));
             }
-            ParsedLine::ProviderError(e) => panic!("unexpected error: {e}"),
+            ParsedLine::ProviderError(_, e) => panic!("unexpected error: {e}"),
         }
     }
 
@@ -1100,7 +1131,7 @@ mod tests {
         let line = r#"{"type":"response.reasoning_summary_text.delta","item_id":"rs_abc","output_index":0,"summary_index":0,"delta":"","sequence_number":4}"#;
         match parse_responses_line(line, &mut acc) {
             ParsedLine::Events(events) => assert!(events.is_empty()),
-            ParsedLine::ProviderError(e) => panic!("unexpected error: {e}"),
+            ParsedLine::ProviderError(_, e) => panic!("unexpected error: {e}"),
         }
     }
 
@@ -1117,7 +1148,7 @@ mod tests {
                 ParsedLine::Events(events) => {
                     assert!(events.is_empty(), "expected no events for lifecycle event")
                 }
-                ParsedLine::ProviderError(e) => panic!("unexpected error: {e}"),
+                ParsedLine::ProviderError(_, e) => panic!("unexpected error: {e}"),
             }
         }
     }
@@ -1209,7 +1240,10 @@ mod tests {
         let mut conv = Conversation::new();
         conv.push(Message::user("Hello"));
         let req = provider.build_request(&conv, &[], None);
-        assert_eq!(req["reasoning"]["effort"], "minimal");
+        // `Minimal` maps to `"low"`: gpt-5.5+ rejects `"minimal"`, and `low` is
+        // the weakest tier the whole gpt-5.x family accepts (see
+        // `ReasoningEffort::openai_effort`).
+        assert_eq!(req["reasoning"]["effort"], "low");
         assert_eq!(req["reasoning"]["summary"], "detailed");
     }
 

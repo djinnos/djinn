@@ -114,6 +114,44 @@ impl ProviderError {
         }
     }
 
+    /// Classify an **in-stream** OpenAI error event into a [`ProviderError`].
+    ///
+    /// Unlike [`from_status`], the HTTP response was `200 OK` — the failure
+    /// arrived mid-stream as a `response.failed` / `error` SSE event carrying an
+    /// error `code` (e.g. `server_error`, `insufficient_quota`,
+    /// `context_length_exceeded`) but no HTTP status to lean on. We map the
+    /// `code` string, fall back to a body scan for context-overflow phrasing,
+    /// and default an unrecognised/absent code to a transient provider-internal
+    /// failure: the failure was real, so it should feed the breaker as a 5xx
+    /// `Failure` rather than be dropped as an untyped/legacy string error
+    /// (which classifies as `None` and never reaches the breaker).
+    pub fn from_stream_error(code: Option<&str>, message: &str) -> Self {
+        let code = code.unwrap_or("").to_ascii_lowercase();
+        if code.contains("rate_limit") || code.contains("quota") {
+            ProviderError::RateLimit {
+                retry_after_ms: None,
+            }
+        } else if code.contains("context_length")
+            || code.contains("context_window")
+            || body_indicates_context_overflow(message)
+        {
+            ProviderError::ContextOverflow
+        } else if code.contains("invalid_api_key")
+            || code.contains("authentication")
+            || code.contains("unauthorized")
+            || code.contains("permission")
+        {
+            ProviderError::Authentication
+        } else if code.contains("invalid_request") || code.contains("invalid_prompt") {
+            ProviderError::InvalidRequest
+        } else {
+            // `server_error`, `internal_error`, an empty code, or any code we
+            // don't specifically recognise: treat as a transient provider-side
+            // 5xx so it feeds the gentle consecutive-failure breaker.
+            ProviderError::ProviderInternal { status: 500 }
+        }
+    }
+
     /// Attach a parsed Retry-After (ms) to a RateLimit variant. No-op for
     /// other variants.
     pub fn with_retry_after(self, retry_after_ms: Option<u64>) -> Self {
@@ -348,6 +386,54 @@ mod tests {
             );
             assert!(!ProviderError::from_status(code, "").retryable());
         }
+    }
+
+    #[test]
+    fn from_stream_error_classifies_by_code() {
+        // The mid-stream failure that was being dropped as an untyped string:
+        // a `server_error` code → transient 5xx → breaker `Failure`.
+        assert_eq!(
+            ProviderError::from_stream_error(Some("server_error"), "An error occurred"),
+            ProviderError::ProviderInternal { status: 500 }
+        );
+        // Quota / rate-limit codes → throttle.
+        assert_eq!(
+            ProviderError::from_stream_error(Some("insufficient_quota"), "quota exceeded"),
+            ProviderError::RateLimit {
+                retry_after_ms: None
+            }
+        );
+        assert_eq!(
+            ProviderError::from_stream_error(Some("rate_limit_exceeded"), ""),
+            ProviderError::RateLimit {
+                retry_after_ms: None
+            }
+        );
+        // Context overflow by code or by message phrasing.
+        assert_eq!(
+            ProviderError::from_stream_error(Some("context_length_exceeded"), "too many tokens"),
+            ProviderError::ContextOverflow
+        );
+        assert_eq!(
+            ProviderError::from_stream_error(None, "prompt is too long for this model"),
+            ProviderError::ContextOverflow
+        );
+        // Auth.
+        assert_eq!(
+            ProviderError::from_stream_error(Some("invalid_api_key"), "bad key"),
+            ProviderError::Authentication
+        );
+        // Unknown / absent code defaults to a transient provider-internal
+        // failure (real failure, fed to the breaker) rather than untyped.
+        assert_eq!(
+            ProviderError::from_stream_error(None, "something opaque"),
+            ProviderError::ProviderInternal { status: 500 }
+        );
+        // The classified server_error is retryable, matching its transient nature.
+        assert!(
+            ProviderError::from_stream_error(Some("server_error"), "boom").retryable(),
+            "server_error must be retryable"
+        );
     }
 
     #[test]
