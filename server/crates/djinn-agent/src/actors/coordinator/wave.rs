@@ -51,6 +51,38 @@ impl CoordinatorActor {
                     );
                     return;
                 }
+
+                // Wave-1 guard.  This entry point fires on the generic
+                // `epic.updated` event, which is re-emitted on EVERY epic
+                // mutation — including the Planner re-linking the roadmap note
+                // via `update_memory_refs` mid-grooming.  Without this guard,
+                // each such update regenerates a "Plan next wave" planning task
+                // as soon as the previous one has closed: a self-sustaining
+                // respawn loop that starves the epic's own worker tasks (epic
+                // `lywz`, 2026-06-02 — 7 planner generations in ~40min while
+                // zero worker tasks ran).
+                //
+                // `maybe_create_planning_task` is for an epic's FIRST wave only
+                // (epic created / drafting→open / proposed→open promotion).
+                // Once any worker task exists the epic has already been
+                // decomposed; subsequent waves are owned exclusively by the
+                // batch-completion rule (`on_task_closed`, all workers closed).
+                // So bail if any non-planning worker task already exists,
+                // regardless of status.
+                let has_worker_task = tasks.iter().any(|t| {
+                    !matches!(
+                        t.issue_type.as_str(),
+                        "planning" | "decomposition" | "review"
+                    )
+                });
+                if has_worker_task {
+                    tracing::debug!(
+                        epic_id = %epic.short_id,
+                        "CoordinatorActor: epic already decomposed (worker tasks exist), \
+                         skipping wave-1 planning task creation"
+                    );
+                    return;
+                }
             }
             Err(e) => {
                 tracing::warn!(
@@ -664,6 +696,89 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
+    }
+
+    /// Regression (epic `lywz`, 2026-06-02): the Planner re-links the epic
+    /// roadmap note while grooming, which re-emits `epic.updated`.  Once the
+    /// epic already has worker tasks, that event must NOT regenerate a wave-1
+    /// planning task — otherwise the planner respawns every cycle and starves
+    /// its own worker tasks.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn epic_updated_does_not_recreate_planning_when_worker_tasks_exist() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+
+        let project = test_helpers::create_test_project(&db).await;
+        let epic_repo = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let _handle = spawn_coordinator_with_planner(&db, &tx);
+        tokio::task::yield_now().await;
+
+        let epic = epic_repo
+            .create_for_project(
+                &project.id,
+                djinn_db::EpicCreateInput {
+                    title: "Already Decomposed Epic",
+                    description: "",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                    status: Some("open"),
+                    auto_breakdown: None,
+                    originating_adr_id: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Wave 1: epic creation produces the first planning task.
+        let decomp_tasks = wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;
+        assert_eq!(decomp_tasks.len(), 1);
+
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+        // Simulate the planner having decomposed the epic: close the planning
+        // task and add a worker task (mirrors the real board after wave 1).
+        task_repo
+            .set_status_with_reason(&decomp_tasks[0].id, "closed", Some("completed"))
+            .await
+            .unwrap();
+        task_repo
+            .create(
+                &epic.id,
+                "Worker Task 1",
+                "",
+                "",
+                "task",
+                1,
+                "",
+                Some("open"),
+            )
+            .await
+            .unwrap();
+
+        // The planner re-touches the epic (e.g. update_memory_refs) → epic.updated.
+        let touched = epic_repo
+            .update_memory_refs(&epic.id, r#"["design/roadmap"]"#)
+            .await
+            .unwrap();
+        let _ = tx.send(DjinnEventEnvelope::epic_updated(&touched));
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        // No NEW planning task must have been created — the worker task is still
+        // open, so the epic is already decomposed.
+        let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
+        let open_planning = tasks
+            .iter()
+            .filter(|t| {
+                matches!(t.issue_type.as_str(), "planning" | "decomposition")
+                    && matches!(t.status.as_str(), "open" | "in_progress")
+            })
+            .count();
+        assert_eq!(
+            open_planning, 0,
+            "epic.updated must not recreate a planning task while worker tasks exist"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
