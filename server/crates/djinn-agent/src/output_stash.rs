@@ -6,9 +6,20 @@
 //!
 //! Bounded: max 10 entries, max 5 MB total. FIFO eviction when either limit is
 //! hit. Each reply-loop instance owns its own stash — no cross-session sharing.
+//!
+//! Durable read-through (C6): in addition to the in-memory map, every stashed
+//! blob is written once to a content-addressed file under the djinn cache dir
+//! (keyed by `sha256(content)`), plus a tiny id-pointer so `output_view` /
+//! `output_grep` can resolve a `tool_use_id` after the in-memory entry is gone
+//! (process restart, eviction, or post-compaction `clear`). The in-memory path
+//! is unchanged and always wins; the disk fallback only runs on a miss and
+//! degrades gracefully (best-effort writes, clear errors on read failure).
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::Mutex;
+
+use sha2::{Digest, Sha256};
 
 /// Maximum number of stashed entries.
 const MAX_ENTRIES: usize = 10;
@@ -32,6 +43,146 @@ struct StashedOutput {
     full_text: String,
 }
 
+/// Lowercase hex sha256 of `bytes`.
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    let mut s = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// Test-only override for the durable root, so the whole test binary writes to
+/// an isolated tempdir instead of the real `$HOME/.cache`. Initialized lazily on
+/// first use to a unique per-run directory so no test ever touches the user's
+/// real cache, and so durable state is shared across a single binary's tests.
+#[cfg(test)]
+static DURABLE_ROOT_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn test_durable_root() -> PathBuf {
+    DURABLE_ROOT_OVERRIDE
+        .get_or_init(|| crate::test_helpers::test_persistent_dir("djinn-output-stash-"))
+        .clone()
+}
+
+/// Root directory for the durable stash, e.g. `$XDG_CACHE_HOME/djinn/output_stash`
+/// (or `$HOME/.cache/djinn/output_stash`). `None` when neither env var is set,
+/// in which case durability is silently disabled (in-memory still works).
+///
+/// Mirrors [`crate::sandbox::djinn_cache_dir`] — the sandbox backends already
+/// permit writes beneath the djinn cache dir, so blobs land in an allowed path.
+#[cfg(test)]
+fn durable_root() -> Option<PathBuf> {
+    Some(test_durable_root())
+}
+
+#[cfg(not(test))]
+fn durable_root() -> Option<PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME")
+        && !xdg.is_empty()
+    {
+        return Some(PathBuf::from(xdg).join("djinn").join("output_stash"));
+    }
+    std::env::var("HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .map(|h| {
+            PathBuf::from(h)
+                .join(".cache")
+                .join("djinn")
+                .join("output_stash")
+        })
+}
+
+/// Content-addressed blob path: `<root>/blobs/<sha256(content)>`.
+fn blob_path(root: &std::path::Path, content_hash: &str) -> PathBuf {
+    root.join("blobs").join(content_hash)
+}
+
+/// Id-pointer path: `<root>/ids/<sha256(tool_use_id)>`. The pointer file holds a
+/// single line `tool_name\tcontent_hash` so a bare `tool_use_id` resolves to its
+/// blob + tool name after the in-memory entry is gone.
+fn id_pointer_path(root: &std::path::Path, tool_use_id: &str) -> PathBuf {
+    root.join("ids").join(sha256_hex(tool_use_id.as_bytes()))
+}
+
+/// Persist a stashed blob durably. Best-effort: any IO error is swallowed so a
+/// disk problem never breaks the in-memory fast path. Writes are atomic
+/// (temp-file + rename) to avoid torn reads.
+fn durable_write(tool_use_id: &str, tool_name: &str, full_text: &str) {
+    let Some(root) = durable_root() else {
+        return;
+    };
+    let content_hash = sha256_hex(full_text.as_bytes());
+
+    let blobs_dir = root.join("blobs");
+    let ids_dir = root.join("ids");
+    if std::fs::create_dir_all(&blobs_dir).is_err() || std::fs::create_dir_all(&ids_dir).is_err() {
+        return;
+    }
+
+    // Content-addressed blob: write once (skip if it already exists — identical
+    // content hashes to the same name).
+    let blob = blob_path(&root, &content_hash);
+    if !blob.exists() {
+        let _ = atomic_write(&blobs_dir, &blob, full_text.as_bytes());
+    }
+
+    // Id pointer: `tool_name\tcontent_hash`.
+    let pointer = id_pointer_path(&root, tool_use_id);
+    let line = format!("{tool_name}\t{content_hash}");
+    let _ = atomic_write(&ids_dir, &pointer, line.as_bytes());
+}
+
+/// Write `bytes` to `dest` atomically via a uniquely-named temp file in the same
+/// `dir` followed by a rename (atomic on the same filesystem). Avoids torn reads
+/// from a concurrent reader and only needs `std::fs` — no extra runtime dep.
+fn atomic_write(dir: &std::path::Path, dest: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".tmp-{}-{nanos}-{seq}", std::process::id()));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.flush()?;
+    }
+    match std::fs::rename(&tmp, dest) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// Resolve a `tool_use_id` from the durable store. Returns `(tool_name, full_text)`
+/// on success. Errors (no root, missing/corrupt pointer or blob) propagate as a
+/// human-readable message — never a panic.
+fn durable_read(tool_use_id: &str) -> Result<(String, String), String> {
+    let root = durable_root().ok_or("durable stash unavailable (no cache dir)")?;
+    let pointer = id_pointer_path(&root, tool_use_id);
+    let raw = std::fs::read_to_string(&pointer)
+        .map_err(|_| format!("no durable stash for tool_use_id \"{tool_use_id}\""))?;
+    let (tool_name, content_hash) = raw
+        .trim_end()
+        .split_once('\t')
+        .ok_or("corrupt durable stash pointer")?;
+    let blob = blob_path(&root, content_hash);
+    let full_text = std::fs::read_to_string(&blob)
+        .map_err(|_| "durable stash blob missing or unreadable".to_string())?;
+    Ok((tool_name.to_string(), full_text))
+}
+
 pub struct OutputStash {
     entries: VecDeque<StashedOutput>,
     total_bytes: usize,
@@ -45,8 +196,12 @@ impl OutputStash {
         }
     }
 
-    /// Stash full tool output. Evicts oldest entries if count or byte limits are exceeded.
+    /// Stash full tool output. Evicts oldest entries if count or byte limits are
+    /// exceeded. The blob is also persisted durably (content-addressed) so the
+    /// navigation tools survive an in-memory eviction, `clear`, or restart.
     pub fn insert(&mut self, tool_use_id: String, tool_name: String, full_text: String) {
+        durable_write(&tool_use_id, &tool_name, &full_text);
+
         let new_bytes = full_text.len();
 
         // Evict until we have room for the new entry (both count and bytes).
@@ -66,6 +221,24 @@ impl OutputStash {
         });
     }
 
+    /// Resolve the `(tool_name, full_text)` for a `tool_use_id`, preferring the
+    /// in-memory entry and falling back to the durable on-disk store when the
+    /// in-memory map has been evicted / cleared / lost to a restart.
+    fn resolve(&self, tool_use_id: &str) -> Result<(String, String), String> {
+        if let Some(entry) = self.entries.iter().find(|e| e.tool_use_id == tool_use_id) {
+            return Ok((entry.tool_name.clone(), entry.full_text.clone()));
+        }
+        // In-memory miss: try the durable store, but surface the familiar
+        // not-found message if disk has nothing either.
+        durable_read(tool_use_id).map_err(|_| {
+            format!(
+                "No stashed output for tool_use_id \"{tool_use_id}\". \
+                 Stashed outputs are cleared after context compaction and \
+                 only exist for results that were truncated."
+            )
+        })
+    }
+
     /// Paginated line view of a stashed output.
     pub fn view(
         &self,
@@ -73,8 +246,8 @@ impl OutputStash {
         offset: usize,
         limit: usize,
     ) -> Result<String, String> {
-        let entry = self.find(tool_use_id)?;
-        let lines: Vec<&str> = entry.full_text.lines().collect();
+        let (_tool_name, full_text) = self.resolve(tool_use_id)?;
+        let lines: Vec<&str> = full_text.lines().collect();
         let total_lines = lines.len();
 
         if offset >= total_lines {
@@ -115,10 +288,10 @@ impl OutputStash {
         pattern: &str,
         context_lines: usize,
     ) -> Result<String, String> {
-        let entry = self.find(tool_use_id)?;
+        let (tool_name, full_text) = self.resolve(tool_use_id)?;
         let re = regex::Regex::new(pattern).map_err(|e| format!("invalid regex: {e}"))?;
 
-        let lines: Vec<&str> = entry.full_text.lines().collect();
+        let lines: Vec<&str> = full_text.lines().collect();
         let total_lines = lines.len();
 
         // Collect matching line indices.
@@ -131,8 +304,7 @@ impl OutputStash {
 
         if matches.is_empty() {
             return Ok(format!(
-                "[No matches for pattern \"{pattern}\" in output from {} ({total_lines} lines)]",
-                entry.tool_name
+                "[No matches for pattern \"{pattern}\" in output from {tool_name} ({total_lines} lines)]"
             ));
         }
 
@@ -196,17 +368,15 @@ impl OutputStash {
         self.total_bytes = 0;
     }
 
+    /// In-memory-only lookup. Used by tests to assert the *in-memory* map state
+    /// (eviction / clear). Production reads go through [`Self::resolve`], which
+    /// additionally falls back to the durable on-disk store.
+    #[cfg(test)]
     fn find(&self, tool_use_id: &str) -> Result<&StashedOutput, String> {
         self.entries
             .iter()
             .find(|e| e.tool_use_id == tool_use_id)
-            .ok_or_else(|| {
-                format!(
-                    "No stashed output for tool_use_id \"{tool_use_id}\". \
-                     Stashed outputs are cleared after context compaction and \
-                     only exist for results that were truncated."
-                )
-            })
+            .ok_or_else(|| format!("No stashed output for tool_use_id \"{tool_use_id}\""))
     }
 }
 
@@ -343,6 +513,14 @@ pub fn handle_stash_tool(
 mod tests {
     use super::*;
 
+    /// Force-initialize the test-binary-wide durable root (an isolated, persistent
+    /// tempdir) before a durable-path assertion. In test builds `durable_root`
+    /// always resolves here, so the real `$HOME/.cache` is never touched; this is
+    /// just an explicit marker that the test depends on durable state.
+    fn isolated_durable_root() {
+        let _ = durable_root();
+    }
+
     #[test]
     fn insert_and_view_round_trip() {
         let mut stash = OutputStash::new();
@@ -472,13 +650,15 @@ mod tests {
 
     #[test]
     fn render_small_result_is_passthrough() {
+        isolated_durable_root();
         let stash = Mutex::new(OutputStash::new());
         let value = serde_json::json!({"ok": true, "rows": 3});
-        let text = render_tool_result(&stash, "t1", "task_list", &value);
-        // Pretty JSON, untruncated, nothing stashed.
+        // Unique id so neither the in-memory map nor the durable store has it.
+        let text = render_tool_result(&stash, "small-passthrough-1", "task_list", &value);
+        // Pretty JSON, untruncated, nothing stashed (no in-memory, no durable).
         assert!(text.contains("\"rows\""));
         assert!(!text.contains("Full output stashed"));
-        assert!(stash.lock().unwrap().view("t1", 0, 10).is_err());
+        assert!(stash.lock().unwrap().view("small-passthrough-1", 0, 10).is_err());
     }
 
     #[test]
@@ -525,5 +705,123 @@ mod tests {
     fn handle_stash_tool_rejects_unknown_name() {
         let stash = Mutex::new(OutputStash::new());
         assert!(handle_stash_tool(&stash, "shell", None).is_err());
+    }
+
+    // ─── C6: durable (sha256 disk-backed) read-through ─────────────────────────
+
+    #[test]
+    fn stash_insert_writes_durable_blob_to_disk() {
+        isolated_durable_root();
+        let mut stash = OutputStash::new();
+        let body = "durable line a\ndurable line b\n";
+        stash.insert("durable-write-1".into(), "shell".into(), body.into());
+
+        let root = durable_root().expect("override sets a root");
+        // The id-pointer exists and names the content-addressed blob.
+        let pointer = id_pointer_path(&root, "durable-write-1");
+        let raw = std::fs::read_to_string(&pointer).expect("id pointer written");
+        let (tool_name, content_hash) = raw.trim_end().split_once('\t').unwrap();
+        assert_eq!(tool_name, "shell");
+        assert_eq!(content_hash, sha256_hex(body.as_bytes()));
+        // The blob exists and round-trips the exact content.
+        let blob = blob_path(&root, content_hash);
+        assert_eq!(std::fs::read_to_string(&blob).unwrap(), body);
+    }
+
+    #[test]
+    fn output_view_fast_path_then_durable_path_after_eviction() {
+        isolated_durable_root();
+        let mut stash = OutputStash::new();
+        let text: String = (0..20).map(|i| format!("view-line {i}\n")).collect();
+        stash.insert("view-durable-1".into(), "shell".into(), text);
+
+        // Fast path: in-memory entry present.
+        let fast = stash.view("view-durable-1", 0, 5).unwrap();
+        assert!(fast.contains("view-line 0"));
+        assert!(fast.contains("view-line 4"));
+
+        // Drop the in-memory entry (simulates eviction / clear / restart).
+        stash.clear();
+        assert!(stash.find("view-durable-1").is_err());
+
+        // Durable path: view still resolves from disk by the id pointer.
+        let durable = stash.view("view-durable-1", 0, 5).unwrap();
+        assert!(durable.contains("view-line 0"));
+        assert!(durable.contains("view-line 4"));
+    }
+
+    #[test]
+    fn output_grep_fast_path_then_durable_path_after_eviction() {
+        isolated_durable_root();
+        let mut stash = OutputStash::new();
+        let text = "alpha\nbeta\nERROR: durable boom\ngamma\n";
+        stash.insert("grep-durable-1".into(), "shell".into(), text.into());
+
+        // Fast path.
+        let fast = stash.grep("grep-durable-1", "ERROR", 1).unwrap();
+        assert!(fast.contains("ERROR: durable boom"));
+
+        // Drop in-memory state.
+        stash.clear();
+        assert!(stash.find("grep-durable-1").is_err());
+
+        // Durable path: grep still resolves from disk.
+        let durable = stash.grep("grep-durable-1", "ERROR", 1).unwrap();
+        assert!(durable.contains("ERROR: durable boom"));
+        assert!(durable.contains("beta")); // context before
+        assert!(durable.contains("gamma")); // context after
+    }
+
+    #[test]
+    fn durable_path_survives_via_handle_stash_tool() {
+        isolated_durable_root();
+        let stash = Mutex::new(OutputStash::new());
+        let big = "y".repeat(MAX_TOOL_RESULT_CHARS * 2);
+        render_tool_result(&stash, "render-durable-1", "shell", &serde_json::Value::String(big));
+
+        // Wipe the in-memory map, leaving only the durable blob.
+        stash.lock().unwrap().clear();
+
+        let viewed = handle_stash_tool(
+            &stash,
+            "output_view",
+            Some(
+                &serde_json::json!({"tool_use_id": "render-durable-1"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .expect("durable view resolves after in-memory clear");
+        assert!(viewed.contains("yyy"));
+    }
+
+    #[test]
+    fn missing_durable_blob_degrades_gracefully() {
+        isolated_durable_root();
+        let stash = OutputStash::new();
+        // Never inserted: neither in-memory nor on disk → clean error, no panic.
+        let err = stash.view("never-stashed-id", 0, 10).unwrap_err();
+        assert!(err.contains("No stashed output"));
+    }
+
+    #[test]
+    fn corrupt_durable_blob_degrades_gracefully() {
+        isolated_durable_root();
+        let mut stash = OutputStash::new();
+        stash.insert("corrupt-1".into(), "shell".into(), "real content\n".into());
+        stash.clear();
+
+        // Corrupt the durable store: delete the content blob, leaving the pointer.
+        let root = durable_root().unwrap();
+        let pointer = std::fs::read_to_string(id_pointer_path(&root, "corrupt-1")).unwrap();
+        let (_name, hash) = pointer.trim_end().split_once('\t').unwrap();
+        std::fs::remove_file(blob_path(&root, hash)).unwrap();
+
+        // Read falls through to a clear error rather than panicking.
+        let err = stash.view("corrupt-1", 0, 10).unwrap_err();
+        assert!(err.contains("No stashed output"));
+        // And the low-level reader reports the missing blob distinctly.
+        assert!(durable_read("corrupt-1").unwrap_err().contains("blob missing"));
     }
 }
