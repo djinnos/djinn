@@ -6,12 +6,13 @@ use std::path::Path as StdPath;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::{delete, get, put},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::server::AppState;
+use crate::server::auth::require_admin;
 use djinn_core::models::Agent;
 use djinn_db::repositories::agent::ExtractionQualityMetrics as DbExtractionQualityMetrics;
 use djinn_db::{
@@ -162,8 +163,10 @@ struct CreateBody {
 
 async fn create_agent(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<CreateBody>,
 ) -> Result<Json<AgentResponse>, (StatusCode, String)> {
+    require_admin(&state, &headers).await?;
     let repo = AgentRepository::new(state.db().clone(), state.event_bus());
     let extensions = body.system_prompt_extensions.unwrap_or_default().join("\n");
     let mcp_servers_json = body
@@ -208,8 +211,10 @@ struct UpdateBody {
 async fn update_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<UpdateBody>,
 ) -> Result<Json<AgentResponse>, (StatusCode, String)> {
+    require_admin(&state, &headers).await?;
     let repo = AgentRepository::new(state.db().clone(), state.event_bus());
     let existing = repo
         .get(&id)
@@ -270,7 +275,9 @@ async fn update_agent(
 async fn delete_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    require_admin(&state, &headers).await?;
     let repo = AgentRepository::new(state.db().clone(), state.event_bus());
     let role = repo
         .get(&id)
@@ -596,7 +603,9 @@ async fn learned_prompt_history(
 async fn clear_learned_prompt(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    require_admin(&state, &headers).await?;
     let repo = AgentRepository::new(state.db().clone(), state.event_bus());
     repo.clear_learned_prompt(&id)
         .await

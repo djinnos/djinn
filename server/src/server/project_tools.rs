@@ -8,12 +8,13 @@ use std::path::Path;
 use axum::{
     Json, Router,
     extract::{Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::{delete, get, put},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::server::AppState;
+use crate::server::auth::require_admin;
 use djinn_db::ProjectRepository;
 
 pub(super) fn router() -> Router<AppState> {
@@ -151,8 +152,10 @@ struct CreateMcpServerBody {
 
 async fn create_mcp_server(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<CreateMcpServerBody>,
 ) -> Result<Json<McpServerResponse>, (StatusCode, String)> {
+    require_admin(&state, &headers).await?;
     let project_path = resolve_project_path(&state, &body.project_id).await?;
     let mut config = read_mcp_json(&project_path);
     if config.mcp_servers.contains_key(&body.name) {
@@ -193,8 +196,10 @@ struct UpdateMcpServerBody {
 
 async fn update_mcp_server(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<UpdateMcpServerBody>,
 ) -> Result<Json<McpServerResponse>, (StatusCode, String)> {
+    require_admin(&state, &headers).await?;
     let project_path = resolve_project_path(&state, &body.project_id).await?;
     let mut config = read_mcp_json(&project_path);
     if !config.mcp_servers.contains_key(&body.name) {
@@ -229,8 +234,10 @@ struct DeleteMcpServerQuery {
 
 async fn delete_mcp_server(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(q): Query<DeleteMcpServerQuery>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    require_admin(&state, &headers).await?;
     let project_path = resolve_project_path(&state, &q.project_id).await?;
     let mut config = read_mcp_json(&project_path);
     if config.mcp_servers.remove(&q.name).is_none() {
@@ -316,8 +323,10 @@ struct SetMcpDefaultsBody {
 
 async fn set_mcp_defaults(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<SetMcpDefaultsBody>,
 ) -> Result<Json<McpDefaultsResponse>, (StatusCode, String)> {
+    require_admin(&state, &headers).await?;
     let mut cfg = load_environment_config(&state, &body.project_id).await?;
     cfg.agent_mcp_defaults = body.agent_mcp_defaults.clone().into_iter().collect();
     cfg.global_skills = body.global_skills.clone();
@@ -410,8 +419,10 @@ struct CreateSkillBody {
 
 async fn create_skill(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<CreateSkillBody>,
 ) -> Result<Json<SkillResponse>, (StatusCode, String)> {
+    require_admin(&state, &headers).await?;
     let project_path = resolve_project_path(&state, &body.project_id).await?;
     let dir = skills_dir(&project_path);
     let file_path = dir.join(format!("{}.md", body.name));
@@ -455,8 +466,10 @@ struct UpdateSkillBody {
 
 async fn update_skill(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<UpdateSkillBody>,
 ) -> Result<Json<SkillResponse>, (StatusCode, String)> {
+    require_admin(&state, &headers).await?;
     let project_path = resolve_project_path(&state, &body.project_id).await?;
     let dir = skills_dir(&project_path);
     let file_path = dir.join(format!("{}.md", body.name));
@@ -491,8 +504,10 @@ struct DeleteSkillQuery {
 
 async fn delete_skill(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(q): Query<DeleteSkillQuery>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    require_admin(&state, &headers).await?;
     let project_path = resolve_project_path(&state, &q.project_id).await?;
     let dir = skills_dir(&project_path);
     let file_path = dir.join(format!("{}.md", q.name));

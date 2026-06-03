@@ -120,6 +120,15 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<AgentCreateParams>,
     ) -> Json<AgentSingleResponse> {
+        // Mutating agents (which carry mcp_servers + skills config) is
+        // admin-only. The no-user trusted path is still allowed for background
+        // agents — see `acting_user::require_admin`.
+        if let Err(e) = crate::tools::acting_user::require_admin(self.state.db()).await {
+            return Json(AgentSingleResponse {
+                agent: None,
+                error: Some(e),
+            });
+        }
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => {
@@ -228,6 +237,13 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<AgentUpdateParams>,
     ) -> Json<AgentSingleResponse> {
+        // Admin-only — same rationale as `agent_create`.
+        if let Err(e) = crate::tools::acting_user::require_admin(self.state.db()).await {
+            return Json(AgentSingleResponse {
+                agent: None,
+                error: Some(e),
+            });
+        }
         let project_id = match self.resolve_project_id(&p.project).await {
             Ok(id) => id,
             Err(e) => {

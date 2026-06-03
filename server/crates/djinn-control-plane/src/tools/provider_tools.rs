@@ -1112,12 +1112,25 @@ impl DjinnMcpServer {
         }
 
         // 3. Delete custom provider entry (no-op for built-in providers).
+        //
+        // Steps 1–2 above are the *per-user* disconnect (the acting user's own
+        // credentials + OAuth tokens) and stay open to everyone. Deleting the
+        // custom-provider *definition*, however, is org-shared — it removes the
+        // provider for ALL users — so it is admin-only. A non-admin "Remove"
+        // therefore disconnects their own keys but leaves the shared definition
+        // intact. The no-user trusted path is still allowed (local/background).
         let custom_repo =
             CustomProviderRepository::new(self.state.db().clone(), self.state.event_bus());
-        let custom_provider_deleted = match custom_repo.delete(provider_id).await {
-            Ok(deleted) => deleted,
-            Err(e) => {
-                tracing::warn!(provider_id = %provider_id, error = %e, "provider_remove: custom provider delete failed");
+        let custom_provider_deleted = match acting_user::require_admin(self.state.db()).await {
+            Ok(()) => match custom_repo.delete(provider_id).await {
+                Ok(deleted) => deleted,
+                Err(e) => {
+                    tracing::warn!(provider_id = %provider_id, error = %e, "provider_remove: custom provider delete failed");
+                    false
+                }
+            },
+            Err(_) => {
+                tracing::info!(provider_id = %provider_id, "provider_remove: non-admin removed own credentials; shared custom-provider definition left intact");
                 false
             }
         };

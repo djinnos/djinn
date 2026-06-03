@@ -5,6 +5,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ConfirmButton } from "@/components/ConfirmButton";
 import { InlineError } from "@/components/InlineError";
+import { useAuthUser } from "@/components/AuthGate";
 import { useSelectedProject } from "@/stores/useProjectStore";
 import {
   type Skill,
@@ -103,11 +104,14 @@ function SkillCard({
   onEdit,
   onDelete,
   isDeleting,
+  canEdit,
 }: {
   skill: Skill;
   onEdit: () => void;
   onDelete: () => void;
   isDeleting: boolean;
+  /** Editing skills is admin-only. */
+  canEdit: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -131,21 +135,23 @@ function SkillCard({
             <p className="text-xs text-muted-foreground mt-0.5">{skill.description}</p>
           )}
         </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <Button variant="outline" size="sm" onClick={onEdit}>
-            Edit
-          </Button>
-          <ConfirmButton
-            title="Delete skill"
-            description={`Delete "${skill.name}"? This removes the .md file from .djinn/skills/.`}
-            confirmLabel="Delete"
-            onConfirm={onDelete}
-            size="sm"
-            disabled={isDeleting}
-          >
-            {isDeleting ? "Deleting..." : "Delete"}
-          </ConfirmButton>
-        </div>
+        {canEdit && (
+          <div className="flex items-center gap-2 shrink-0">
+            <Button variant="outline" size="sm" onClick={onEdit}>
+              Edit
+            </Button>
+            <ConfirmButton
+              title="Delete skill"
+              description={`Delete "${skill.name}"? This removes the .md file from .djinn/skills/.`}
+              confirmLabel="Delete"
+              onConfirm={onDelete}
+              size="sm"
+              disabled={isDeleting}
+            >
+              {isDeleting ? "Deleting..." : "Delete"}
+            </ConfirmButton>
+          </div>
+        )}
       </div>
 
       {expanded && (
@@ -161,6 +167,7 @@ function SkillCard({
 
 export function SkillsManager() {
   const project = useSelectedProject();
+  const isAdmin = useAuthUser()?.isAdmin ?? false;
   const [skills, setSkills] = useState<Skill[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -271,7 +278,9 @@ export function SkillsManager() {
             Prompt-based skills stored in .djinn/skills/. Assign skills to agents to inject domain knowledge into their system prompt.
           </p>
         </div>
-        <Button onClick={() => setIsCreating(true)}>New Skill</Button>
+        {isAdmin && (
+          <Button onClick={() => setIsCreating(true)}>New Skill</Button>
+        )}
       </div>
 
       {error && <InlineError message={error} onRetry={() => void loadSkills()} />}
@@ -293,6 +302,7 @@ export function SkillsManager() {
               onEdit={() => setEditingName(skill.name)}
               onDelete={() => void handleDelete(skill.name)}
               isDeleting={deletingName === skill.name}
+              canEdit={isAdmin}
             />
           ))}
         </div>

@@ -192,6 +192,39 @@ pub async fn authenticate(
     }))
 }
 
+/// Admin gate for REST handlers. Resolves the `djinn_session` cookie and
+/// requires the resulting user to be an admin. Returns the authenticated admin
+/// on success, or an `(status, message)` error suitable for `?` in handlers
+/// that return `Result<_, (StatusCode, String)>`:
+/// - `401 UNAUTHORIZED` when there is no valid session,
+/// - `403 FORBIDDEN` when the session is valid but the user is not an admin,
+/// - `500 INTERNAL_SERVER_ERROR` on a database error.
+///
+/// Unlike the MCP-tool gate (`tools::acting_user::require_admin`, which allows
+/// the no-user "trusted" path for background agents), this never grants access
+/// without a valid session — these REST endpoints are client-facing, so a
+/// missing cookie must mean unauthenticated, not admin.
+pub async fn require_admin(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<AuthenticatedUser, (StatusCode, String)> {
+    match authenticate(state, headers).await {
+        Ok(Some(user)) if user.is_admin => Ok(user),
+        Ok(Some(_)) => Err((
+            StatusCode::FORBIDDEN,
+            "admin privileges are required".to_string(),
+        )),
+        Ok(None) => Err((
+            StatusCode::UNAUTHORIZED,
+            "authentication required".to_string(),
+        )),
+        Err(e) => {
+            tracing::error!(error = %e, "admin gate: auth lookup failed");
+            Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        }
+    }
+}
+
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]

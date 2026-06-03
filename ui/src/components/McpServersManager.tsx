@@ -4,6 +4,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ConfirmButton } from "@/components/ConfirmButton";
 import { InlineError } from "@/components/InlineError";
+import { useAuthUser } from "@/components/AuthGate";
 import { useSelectedProject } from "@/stores/useProjectStore";
 import { Delete02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -171,11 +172,14 @@ function ServerCard({
   onEdit,
   onDelete,
   isDeleting,
+  canEdit,
 }: {
   server: McpServer;
   onEdit: () => void;
   onDelete: () => void;
   isDeleting: boolean;
+  /** MCP servers can carry API keys (env/headers) — editing is admin-only. */
+  canEdit: boolean;
 }) {
   const transport = server.url ? "http" : "stdio";
   const endpoint = server.url ?? server.command ?? "—";
@@ -192,21 +196,23 @@ function ServerCard({
           </div>
           <p className="text-xs text-muted-foreground font-mono mt-0.5 truncate">{endpoint}</p>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <Button variant="outline" size="sm" onClick={onEdit}>
-            Edit
-          </Button>
-          <ConfirmButton
-            title="Delete MCP server"
-            description={`Remove "${server.name}" from mcp.json?`}
-            confirmLabel="Delete"
-            onConfirm={onDelete}
-            size="sm"
-            disabled={isDeleting}
-          >
-            {isDeleting ? "Deleting..." : "Delete"}
-          </ConfirmButton>
-        </div>
+        {canEdit && (
+          <div className="flex items-center gap-2 shrink-0">
+            <Button variant="outline" size="sm" onClick={onEdit}>
+              Edit
+            </Button>
+            <ConfirmButton
+              title="Delete MCP server"
+              description={`Remove "${server.name}" from mcp.json?`}
+              confirmLabel="Delete"
+              onConfirm={onDelete}
+              size="sm"
+              disabled={isDeleting}
+            >
+              {isDeleting ? "Deleting..." : "Delete"}
+            </ConfirmButton>
+          </div>
+        )}
       </div>
       {server.args.length > 0 && (
         <p className="text-xs text-muted-foreground font-mono">
@@ -238,9 +244,12 @@ const AGENT_TYPES = [
 function DefaultAssignments({
   projectId,
   serverNames,
+  canEdit,
 }: {
   projectId: string;
   serverNames: string[];
+  /** Editing default assignments is admin-only. */
+  canEdit: boolean;
 }) {
   const [defaults, setDefaults] = useState<McpDefaults>({
     agent_mcp_defaults: {},
@@ -324,7 +333,7 @@ function DefaultAssignments({
             environment config). Specialist role assignments override these.
           </p>
         </div>
-        {dirty && (
+        {canEdit && dirty && (
           <Button size="sm" onClick={() => void handleSave()} disabled={saving}>
             {saving ? "Saving..." : "Save"}
           </Button>
@@ -355,18 +364,20 @@ function DefaultAssignments({
                         className="inline-flex items-center gap-1 rounded-full bg-blue-500/10 px-2 py-0.5 text-xs text-blue-700 dark:text-blue-300"
                       >
                         {name}
-                        <button
-                          type="button"
-                          onClick={() => removeServerFromAgent(key, name)}
-                          className="text-blue-500 hover:text-destructive transition-colors"
-                        >
-                          <HugeiconsIcon icon={Delete02Icon} size={12} />
-                        </button>
+                        {canEdit && (
+                          <button
+                            type="button"
+                            onClick={() => removeServerFromAgent(key, name)}
+                            className="text-blue-500 hover:text-destructive transition-colors"
+                          >
+                            <HugeiconsIcon icon={Delete02Icon} size={12} />
+                          </button>
+                        )}
                       </span>
                     ))
                   )}
                 </div>
-                {unassigned.length > 0 && (
+                {canEdit && unassigned.length > 0 && (
                   <select
                     className="text-xs rounded-md border border-border bg-card px-2 py-1 text-foreground shrink-0"
                     value=""
@@ -395,6 +406,7 @@ function DefaultAssignments({
 
 export function McpServersManager() {
   const project = useSelectedProject();
+  const isAdmin = useAuthUser()?.isAdmin ?? false;
   const [servers, setServers] = useState<McpServer[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -509,7 +521,9 @@ export function McpServersManager() {
               Servers registered in your project's mcp.json.
             </p>
           </div>
-          <Button onClick={() => setIsCreating(true)}>Add Server</Button>
+          {isAdmin && (
+            <Button onClick={() => setIsCreating(true)}>Add Server</Button>
+          )}
         </div>
 
         {error && <InlineError message={error} onRetry={() => void loadServers()} />}
@@ -531,6 +545,7 @@ export function McpServersManager() {
                 onEdit={() => setEditingName(server.name)}
                 onDelete={() => void handleDelete(server.name)}
                 isDeleting={deletingName === server.name}
+                canEdit={isAdmin}
               />
             ))}
           </div>
@@ -541,7 +556,7 @@ export function McpServersManager() {
       {!loading && servers.length > 0 && (
         <>
           <div className="border-t border-border" />
-          <DefaultAssignments projectId={project.id} serverNames={serverNames} />
+          <DefaultAssignments projectId={project.id} serverNames={serverNames} canEdit={isAdmin} />
         </>
       )}
     </div>

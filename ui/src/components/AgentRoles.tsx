@@ -6,6 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ConfirmButton } from "@/components/ConfirmButton";
 import { InlineError } from "@/components/InlineError";
+import { useAuthUser } from "@/components/AuthGate";
 import { cn } from "@/lib/utils";
 import { getAgentIdentity } from "@/lib/agentIdentity";
 import ReactMarkdown from "react-markdown";
@@ -549,9 +550,11 @@ interface AgentCardProps {
   onEdit: () => void;
   onDelete: () => void;
   isDeleting: boolean;
+  /** Editing agents (incl. their MCP servers + skills) is admin-only. */
+  canEdit: boolean;
 }
 
-function AgentCard({ role, onEdit, onDelete, isDeleting }: AgentCardProps) {
+function AgentCard({ role, onEdit, onDelete, isDeleting, canEdit }: AgentCardProps) {
   const identity = getAgentIdentity(role.base_role);
   const mcpCount = role.mcp_servers?.length ?? 0;
   const skillCount = role.skills?.length ?? 0;
@@ -566,24 +569,26 @@ function AgentCard({ role, onEdit, onDelete, isDeleting }: AgentCardProps) {
           alt={role.base_role}
           className="h-32 w-32 pointer-events-none"
         />
-        {/* Hover actions */}
-        <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          <Button variant="outline" size="sm" className="h-7 px-2 text-xs bg-card" onClick={onEdit}>
-            Edit
-          </Button>
-          {!role.is_default && (
-            <ConfirmButton
-              title="Delete specialist"
-              description={`Delete "${role.name}"? This cannot be undone.`}
-              confirmLabel="Delete"
-              onConfirm={onDelete}
-              size="sm"
-              disabled={isDeleting}
-            >
-              <HugeiconsIcon icon={Delete02Icon} size={14} />
-            </ConfirmButton>
-          )}
-        </div>
+        {/* Hover actions — admin-only */}
+        {canEdit && (
+          <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+            <Button variant="outline" size="sm" className="h-7 px-2 text-xs bg-card" onClick={onEdit}>
+              Edit
+            </Button>
+            {!role.is_default && (
+              <ConfirmButton
+                title="Delete specialist"
+                description={`Delete "${role.name}"? This cannot be undone.`}
+                confirmLabel="Delete"
+                onConfirm={onDelete}
+                size="sm"
+                disabled={isDeleting}
+              >
+                <HugeiconsIcon icon={Delete02Icon} size={14} />
+              </ConfirmButton>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Info area */}
@@ -637,6 +642,7 @@ function AgentCard({ role, onEdit, onDelete, isDeleting }: AgentCardProps) {
 
 export function AgentRoles() {
   const project = useSelectedProject();
+  const isAdmin = useAuthUser()?.isAdmin ?? false;
   const [roles, setRoles] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -801,7 +807,9 @@ export function AgentRoles() {
             Manage specialist roles that extend base agent behaviour.
           </p>
         </div>
-        <Button onClick={() => setIsCreating(true)}>New Specialist</Button>
+        {isAdmin && (
+          <Button onClick={() => setIsCreating(true)}>New Specialist</Button>
+        )}
       </div>
 
       {error && <InlineError message={error} onRetry={() => void loadRoles()} />}
@@ -819,6 +827,7 @@ export function AgentRoles() {
               onEdit={() => setEditingId(role.id)}
               onDelete={() => void handleDelete(role.id)}
               isDeleting={deletingId === role.id}
+              canEdit={isAdmin}
             />
           ))}
         </div>

@@ -19,7 +19,7 @@ mod project_tools;
 mod state;
 mod static_ui;
 mod users;
-pub use auth::{AuthenticatedUser, authenticate};
+pub use auth::{AuthenticatedUser, authenticate, require_admin};
 pub use org_sync::{SyncReport, start_org_member_sync, sync_once};
 pub use state::AppState;
 
