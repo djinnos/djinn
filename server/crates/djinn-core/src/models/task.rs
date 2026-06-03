@@ -1011,6 +1011,32 @@ mod tests {
         assert!(escalate.reset_continuation);
     }
 
+    /// A spike walks open → in_progress → closed: the supervisor moves it to
+    /// in_progress when the Architect stage starts (so the board reflects the
+    /// running architect instead of sitting `open`), then closes it on
+    /// completion. Both transitions must be valid for the `spike` issue_type
+    /// (simple lifecycle), with no acceptance-criteria gate on Start.
+    #[test]
+    fn spike_simple_lifecycle_walks_open_in_progress_closed() {
+        let start = compute_transition_for_issue_type(
+            &TransitionAction::Start,
+            &TaskStatus::Open,
+            None,
+            "spike",
+        )
+        .expect("spike should start from open without an acceptance-criteria gate");
+        assert_eq!(start.to_status, Some(TaskStatus::InProgress));
+
+        let close = compute_transition_for_issue_type(
+            &TransitionAction::Close,
+            &TaskStatus::InProgress,
+            None,
+            "spike",
+        )
+        .expect("spike should close from in_progress");
+        assert_eq!(close.to_status, Some(TaskStatus::Closed));
+    }
+
     #[test]
     fn stale_rejections_three_cycles_trigger_lead_intervention_at_threshold() {
         let mut status = TaskStatus::InTaskReview;

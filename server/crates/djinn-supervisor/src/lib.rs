@@ -518,6 +518,16 @@ impl TaskRunSupervisor {
                     // single slot), and (b) the post-planner `close`
                     // transition below is valid (close from in_progress).
                     RoleKind::Planner => Some("start"),
+                    // Spike runs the Architect as its sole stage. Move it
+                    // open → in_progress so the board reflects the running
+                    // architect — without this the spike sat `open` for the
+                    // entire ~10min run and jumped straight to `closed`, so the
+                    // FE never showed it as in-progress — and so the coordinator
+                    // stops seeing it as ready and re-dispatching during the run
+                    // (same rationale as Worker/Planner above). The
+                    // spike-completion `close` below then fires from in_progress,
+                    // a valid simple-lifecycle transition.
+                    RoleKind::Architect => Some("start"),
                     _ => None,
                 };
                 if let Some(action) = pre_stage_action
@@ -909,12 +919,15 @@ impl TaskRunSupervisor {
                         SupervisorFlow::Spike => {
                             // The Architect is a read-only consultant (ADR-051):
                             // it records spike findings to memory but never
-                            // transitions the board. So a completed Spike would
-                            // otherwise stay `open`, and the coordinator would
-                            // re-dispatch it every ~30s in a tight loop (the same
-                            // failure mode the planner-review `close` above guards
-                            // against) — and, worse, block every task that depends
-                            // on the spike. Force-close it here on success.
+                            // transitions the board itself. The pre-stage
+                            // transition above moved the task open → in_progress;
+                            // close it here (in_progress → closed) on success.
+                            // Without this terminal close a completed Spike would
+                            // linger in_progress (and, once released back to open
+                            // by the stall reaper, be re-dispatched every ~30s in
+                            // a tight loop — the same failure mode the
+                            // planner-review `close` above guards against — and,
+                            // worse, block every task that depends on the spike).
                             // Planning closes via the Planner agent's own board
                             // transitions, so it needs no force-close.
                             let reason = format!(
