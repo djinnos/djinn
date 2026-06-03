@@ -9,7 +9,7 @@ use crate::actors::coordinator::CoordinatorHandle;
 use crate::context::AgentContext;
 use djinn_db::{SessionRepository, TaskRepository};
 
-use super::super::{ModelSlotConfig, SlotEvent, SlotHandle, SlotPoolConfig, SlotState};
+use super::super::{ModelSlotConfig, SlotError, SlotEvent, SlotHandle, SlotPoolConfig, SlotState};
 use super::types::{PoolError, PoolMessage, SlotFactory, now_unix_string};
 
 pub(super) struct SlotPool {
@@ -101,9 +101,28 @@ impl SlotPool {
             self.cancel.clone(),
         );
         self.slots.push(slot);
-        self.slot_states.insert(id, SlotState::Free);
         self.slot_models.insert(id, model_id.clone());
-        self.free_slots.entry(model_id).or_default().push(id);
+        self.mark_slot_free(id, model_id);
+    }
+
+    /// Return a slot to the free pool — the single authoritative way to append
+    /// to `free_slots`. Enforces two invariants the dispatch path depends on: a
+    /// slot id appears on the free list at most once (no duplicates), and a
+    /// retired slot is never resurrected into rotation. A duplicate or stale
+    /// entry is what hands a still-busy slot to the next task, which answers
+    /// `SlotBusy` and (pre-fix) wedged the whole model in a hot retry loop. Only
+    /// `spawn_slot` (fresh slot) and `handle_slot_event` (a real `Free`/`Killed`
+    /// event, i.e. the actor has actually stopped) call this — speculative
+    /// callers like `evict_session` must not.
+    fn mark_slot_free(&mut self, slot_id: usize, model_id: String) {
+        if self.retired_slots.contains(&slot_id) {
+            return;
+        }
+        self.slot_states.insert(slot_id, SlotState::Free);
+        let free = self.free_slots.entry(model_id).or_default();
+        if !free.contains(&slot_id) {
+            free.push(slot_id);
+        }
     }
 
     fn slot(&self, slot_id: usize) -> Result<&SlotHandle, PoolError> {
@@ -206,43 +225,82 @@ impl SlotPool {
 
         // Elastic: there is no fixed per-model ceiling. Admission is gated
         // per-user by the coordinator (each user's per-model cap); if that gate
-        // let this dispatch through, ensure a slot exists — reuse a free one, or
-        // spawn a fresh slot on demand (Karpenter backs the worker pod). The
-        // `AtCapacity` arm is now just an unreachable safety net.
-        let slot_id = match self.free_slots.entry(model_id.clone()).or_default().pop() {
-            Some(id) => id,
-            None => {
-                self.spawn_slot(model_id.clone());
-                self.free_slots
-                    .entry(model_id.clone())
-                    .or_default()
-                    .pop()
-                    .ok_or(PoolError::AtCapacity {
-                        model_id: model_id.clone(),
-                    })?
+        // let this dispatch through, place the task on a slot — reuse a free
+        // one, or spawn a fresh slot on demand (Karpenter backs the worker pod).
+        //
+        // A slot can linger on `free_slots` while its actor is still mid-
+        // lifecycle. `mark_slot_free` makes that rare, but a residual stale
+        // entry must never wedge dispatch: such a slot answers `run_task` with
+        // `SlotBusy`. We must NOT return it to the free list — re-queuing a busy
+        // slot re-poisons it and wedges every later dispatch for this model in a
+        // hot `SlotBusy` retry loop (the `None => spawn_slot` arm never runs
+        // because the poisoned entry keeps the list non-empty). Instead drop it
+        // from rotation (it rejoins only when its real `Free`/`Killed` event
+        // lands) and try the next free slot, finally spawning a fresh one.
+        // Termination is guaranteed: a brand-new slot starts idle and always
+        // accepts the task.
+        loop {
+            let slot_id = match self.free_slots.entry(model_id.clone()).or_default().pop() {
+                Some(id) => id,
+                None => {
+                    self.spawn_slot(model_id.clone());
+                    self.free_slots
+                        .entry(model_id.clone())
+                        .or_default()
+                        .pop()
+                        .ok_or(PoolError::AtCapacity {
+                            model_id: model_id.clone(),
+                        })?
+                }
+            };
+
+            let slot = self.slot(slot_id)?;
+            match slot.run_task(task_id.clone(), project_path.clone()).await {
+                Ok(()) => {}
+                Err(SlotError::SlotBusy) => {
+                    // Stale free-list entry: the slot's actor never truly freed.
+                    // Drop it from rotation (do NOT re-queue) and mark it Busy so
+                    // `get_status` stops counting phantom free capacity. It
+                    // returns to the free list only when its real `Free`/`Killed`
+                    // event reaches `handle_slot_event`.
+                    self.slot_states.insert(
+                        slot_id,
+                        SlotState::Busy {
+                            task_id: String::new(),
+                            started_at: now_unix_string(),
+                            agent_type: "worker".to_string(),
+                        },
+                    );
+                    tracing::warn!(
+                        slot_id,
+                        model_id = %model_id,
+                        "SlotPool: dropped stale free slot (actor still busy); retrying with another slot"
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    // Other errors leave the slot genuinely free — return it to
+                    // the pool and surface the failure.
+                    self.mark_slot_free(slot_id, model_id);
+                    return Err(PoolError::Slot(err));
+                }
             }
-        };
 
-        let slot = self.slot(slot_id)?;
-        if let Err(err) = slot.run_task(task_id.clone(), project_path).await {
-            self.free_slots.entry(model_id).or_default().push(slot_id);
-            return Err(PoolError::Slot(err));
+            self.task_to_slot.insert(task_id.clone(), slot_id);
+            self.task_started.insert(task_id.clone(), Instant::now());
+            if let Some(project_id) = self.project_id_for_task(&task_id).await {
+                self.task_projects.insert(task_id.clone(), project_id);
+            }
+            self.slot_states.insert(
+                slot_id,
+                SlotState::Busy {
+                    task_id,
+                    started_at: now_unix_string(),
+                    agent_type: "worker".to_string(),
+                },
+            );
+            return Ok(());
         }
-
-        self.task_to_slot.insert(task_id.clone(), slot_id);
-        self.task_started.insert(task_id.clone(), Instant::now());
-        if let Some(project_id) = self.project_id_for_task(&task_id).await {
-            self.task_projects.insert(task_id.clone(), project_id);
-        }
-        self.slot_states.insert(
-            slot_id,
-            SlotState::Busy {
-                task_id,
-                started_at: now_unix_string(),
-                agent_type: "worker".to_string(),
-            },
-        );
-        Ok(())
     }
 
     async fn project_id_for_task(&self, task_id: &str) -> Option<String> {
@@ -298,8 +356,7 @@ impl SlotPool {
                     self.retired_slots.insert(slot_id);
                     self.slot_states.insert(slot_id, SlotState::Draining);
                 } else {
-                    self.slot_states.insert(slot_id, SlotState::Free);
-                    self.free_slots.entry(model_id).or_default().push(slot_id);
+                    self.mark_slot_free(slot_id, model_id);
                 }
 
                 self.trigger_redispatch().await;
@@ -341,7 +398,6 @@ impl SlotPool {
         if let Ok(slot) = self.slot(slot_id) {
             let _ = slot.kill().await;
         }
-        let model_id = self.slot_models.get(&slot_id).cloned();
         // A leaked/evicted pod never emits `SlotEvent::Killed`, so its session
         // row is settled here at eviction (idempotent) rather than in
         // `handle_slot_event`. Without this, the orphaned `running` row keeps
@@ -355,12 +411,18 @@ impl SlotPool {
         if self.draining_slots.remove(&slot_id) {
             self.retired_slots.insert(slot_id);
             self.slot_states.insert(slot_id, SlotState::Draining);
-        } else {
-            self.slot_states.insert(slot_id, SlotState::Free);
-            if let Some(model_id) = model_id {
-                self.free_slots.entry(model_id).or_default().push(slot_id);
-            }
         }
+        // A non-draining slot is intentionally NOT returned to the free pool
+        // here. The `kill` above drives the slot's actor to wind down its
+        // lifecycle and emit `SlotEvent::Killed`; `handle_slot_event` then
+        // returns the slot via `mark_slot_free` — exactly once, and only after
+        // the actor has actually stopped running the task. Pushing it here
+        // (before that confirmation) created a duplicate/stale free-list entry:
+        // the slot would be handed to the next task, answer `SlotBusy`, and
+        // wedge the whole model in a hot retry loop. If the worker is so wedged
+        // that `Killed` never arrives, the slot leaks out of rotation and the
+        // elastic pool spawns a fresh one on demand — strictly safer than
+        // poisoning the free list.
         self.trigger_redispatch().await;
         Ok(())
     }
@@ -646,5 +708,53 @@ impl SlotPool {
                 _ => break,
             }
         }
+    }
+}
+
+#[cfg(test)]
+impl SlotPool {
+    /// White-box accessors for `pool::tests` (a sibling module that cannot
+    /// otherwise reach `SlotPool`'s private state). They let a test drive
+    /// `dispatch` directly and inspect/poison the free list to reproduce the
+    /// stale-busy-slot wedge deterministically, without standing up the actor
+    /// loop.
+    pub(super) async fn test_dispatch(
+        &mut self,
+        task_id: &str,
+        project_path: &str,
+        model_id: &str,
+    ) -> Result<(), PoolError> {
+        self.dispatch(
+            task_id.to_string(),
+            project_path.to_string(),
+            model_id.to_string(),
+        )
+        .await
+    }
+
+    pub(super) fn test_slot_of(&self, task_id: &str) -> Option<usize> {
+        self.task_to_slot.get(task_id).copied()
+    }
+
+    pub(super) fn test_free_slots(&self, model_id: &str) -> Vec<usize> {
+        self.free_slots.get(model_id).cloned().unwrap_or_default()
+    }
+
+    /// Raw push onto the free list, bypassing `mark_slot_free` — used to inject
+    /// the exact desync (`evict_session`'s old "push regardless" + the Killed
+    /// event pushing again) that produced a duplicate/stale entry.
+    pub(super) fn test_inject_free(&mut self, slot_id: usize, model_id: &str) {
+        self.free_slots
+            .entry(model_id.to_string())
+            .or_default()
+            .push(slot_id);
+    }
+
+    pub(super) fn test_mark_slot_free(&mut self, slot_id: usize, model_id: &str) {
+        self.mark_slot_free(slot_id, model_id.to_string());
+    }
+
+    pub(super) fn test_retire(&mut self, slot_id: usize) {
+        self.retired_slots.insert(slot_id);
     }
 }

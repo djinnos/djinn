@@ -8,6 +8,7 @@ use super::*;
 use crate::test_helpers;
 
 use super::super::{ModelSlotConfig, SlotHandle, SlotPoolConfig};
+use super::actor::SlotPool;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -703,4 +704,104 @@ async fn kill_and_pause_are_routed_to_the_correct_task_slot() {
     }
 
     wait_until_no_sessions(&pool, &["task-kill".into(), "task-pause".into()]).await;
+}
+
+/// Regression: a slot that is still busy must never wedge dispatch even if it
+/// wrongly reappears on the free list. Before the fix, `evict_session` pushed an
+/// evicted slot back to `free_slots` while its actor was still winding down (and
+/// the Killed event pushed it a second time); `dispatch` then popped that stale
+/// entry, got `SlotBusy`, re-queued it, and spun forever — every task for the
+/// model stuck on "slot is busy", never spawning a fresh slot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dispatch_recovers_from_stale_busy_free_slot() {
+    let (app_state, cancel, _temp) = test_app_state();
+    let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
+    let config = make_config(
+        vec![model("model-a", 1, &["worker"])],
+        &[("worker", vec!["model-a"])],
+    );
+    let (_pool_tx, pool_rx) = mpsc::channel(8);
+    let mut pool = SlotPool::new_with_factory(
+        pool_rx,
+        app_state,
+        cancel,
+        config,
+        // Long runtime: the slot stays genuinely busy for the whole test.
+        test_slot_factory(Duration::from_secs(3600), signal_tx),
+    );
+
+    pool.test_dispatch("task-a", "/tmp/project", "model-a")
+        .await
+        .expect("first dispatch should occupy a slot");
+    let slot_a = pool
+        .test_slot_of("task-a")
+        .expect("task-a should hold a slot");
+
+    // Inject the exact desync: the still-busy slot back on the free list.
+    pool.test_inject_free(slot_a, "model-a");
+
+    // Must self-heal: drop the stale entry and spawn a fresh slot — NOT wedge.
+    pool.test_dispatch("task-b", "/tmp/project", "model-a")
+        .await
+        .expect("second dispatch must recover instead of wedging on the busy slot");
+    let slot_b = pool
+        .test_slot_of("task-b")
+        .expect("task-b should hold a slot");
+
+    assert_ne!(
+        slot_b, slot_a,
+        "task-b must land on a fresh slot, not the still-busy one"
+    );
+    assert!(
+        !pool.test_free_slots("model-a").contains(&slot_a),
+        "the stale busy slot must be dropped from the free list, not re-queued"
+    );
+}
+
+/// `mark_slot_free` is the single authoritative free-list append: it must never
+/// create a duplicate entry and must never resurrect a retired slot. A duplicate
+/// is precisely what hands a busy slot to a later task (`SlotBusy` → wedge), and
+/// a resurrected retired slot would route work to a drained worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mark_slot_free_is_idempotent_and_skips_retired() {
+    let (app_state, cancel, _temp) = test_app_state();
+    let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
+    let config = make_config(
+        vec![model("model-a", 1, &["worker"])],
+        &[("worker", vec!["model-a"])],
+    );
+    let (_pool_tx, pool_rx) = mpsc::channel(8);
+    let mut pool = SlotPool::new_with_factory(
+        pool_rx,
+        app_state,
+        cancel,
+        config,
+        test_slot_factory(Duration::from_secs(3600), signal_tx),
+    );
+
+    // spawn_slots_for_config already created slot 0, free exactly once.
+    assert_eq!(pool.test_free_slots("model-a"), vec![0]);
+
+    // Re-freeing an already-free slot is a no-op, never a duplicate.
+    pool.test_mark_slot_free(0, "model-a");
+    assert_eq!(
+        pool.test_free_slots("model-a"),
+        vec![0],
+        "mark_slot_free must not duplicate an already-free slot"
+    );
+
+    // Take slot 0 out of the free list (as a dispatch would), then retire it.
+    pool.test_dispatch("task-a", "/tmp/project", "model-a")
+        .await
+        .expect("dispatch should occupy slot 0");
+    assert_eq!(pool.test_slot_of("task-a"), Some(0));
+    assert!(!pool.test_free_slots("model-a").contains(&0));
+    pool.test_retire(0);
+
+    // A stale Free event for a retired slot must not return it to rotation.
+    pool.test_mark_slot_free(0, "model-a");
+    assert!(
+        !pool.test_free_slots("model-a").contains(&0),
+        "mark_slot_free must refuse to resurrect a retired slot"
+    );
 }
