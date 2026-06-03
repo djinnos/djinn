@@ -321,6 +321,7 @@ mod tests {
             model_priorities: HashMap::new(),
             pr_errors: HashMap::new(),
             last_dispatched: HashMap::new(),
+            inflight_dispatches: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
             dispatch_failure_streak: HashMap::new(),
             verification_tracker: VerificationTracker::default(),

@@ -445,6 +445,7 @@ mod tests {
             model_priorities: std::collections::HashMap::new(),
             pr_errors: std::collections::HashMap::new(),
             last_dispatched: std::collections::HashMap::new(),
+            inflight_dispatches: std::collections::HashMap::new(),
             dispatch_cooldowns: std::collections::HashMap::new(),
             dispatch_failure_streak: std::collections::HashMap::new(),
             verification_tracker: VerificationTracker::default(),

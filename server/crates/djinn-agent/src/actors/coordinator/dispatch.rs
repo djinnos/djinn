@@ -21,6 +21,31 @@ fn readiness_gate_enabled() -> bool {
     }
 }
 
+/// Overlay the in-flight dispatch ledger onto the DB-seeded per-user running
+/// counts, taking `max(db, ledger)` per `(creator, model)`.
+///
+/// The DB seed counts only sessions that reached `running`, which lags a fresh
+/// dispatch by the worker pod's boot time (20-60s). The ledger holds dispatches
+/// that have not yet produced a `running` row, so overlaying it makes those
+/// count against the per-user cap immediately and prevents re-firing passes from
+/// overshooting it. `max` (not sum) is deliberate: a task present in BOTH the
+/// running rows and the ledger must count once, not twice.
+fn overlay_inflight_ledger(
+    running_by_user_model: &mut HashMap<(String, String), u32>,
+    inflight_dispatches: &HashMap<String, (Option<String>, String)>,
+) {
+    let mut ledger_counts: HashMap<(String, String), u32> = HashMap::new();
+    for (creator, model) in inflight_dispatches.values() {
+        if let Some(c) = creator {
+            *ledger_counts.entry((c.clone(), model.clone())).or_insert(0) += 1;
+        }
+    }
+    for (key, lcount) in ledger_counts {
+        let entry = running_by_user_model.entry(key).or_insert(0);
+        *entry = (*entry).max(lcount);
+    }
+}
+
 /// Result of a single `try_dispatch_to_pool` attempt.
 pub(super) enum DispatchOutcome {
     /// Successfully dispatched to a slot.
@@ -374,6 +399,39 @@ impl CoordinatorActor {
                     HashMap::new()
                 }
             };
+
+        // In-flight dispatch ledger overlay. The DB seed above only counts
+        // sessions that have reached `running`, but a worker pod takes 20-60s to
+        // boot and write that row — so a task dispatched moments ago is invisible
+        // to the seed. Dispatch passes that re-fire in that window would re-seed
+        // from the stale-low count and overshoot the per-user cap (observed: 8
+        // workers dispatched in one ~167ms burst for a cap of 4, because every
+        // session row only landed ~20-60s later). Fix: reconcile the ledger
+        // against the live slot pool (drop entries whose task the pool no longer
+        // runs — completed/freed/evicted), then overlay `max(db, ledger)` so an
+        // in-flight dispatch counts against the cap the instant it lands. `max`
+        // (not sum) avoids double-counting a task present in both, and keeps the
+        // DB as a durable floor that survives a server restart (the in-memory
+        // ledger resets, but old `running` rows still gate until reaped).
+        match self.pool.get_status().await {
+            Ok(status) => {
+                let live: std::collections::HashSet<String> = status
+                    .running_tasks
+                    .into_iter()
+                    .map(|t| t.task_id)
+                    .collect();
+                self.inflight_dispatches
+                    .retain(|task_id, _| live.contains(task_id));
+            }
+            // On a pool query error, keep the ledger as-is rather than dropping
+            // it — a stale-but-present ledger is conservative (may briefly defer
+            // a task), whereas dropping it would re-open the overshoot window.
+            Err(e) => {
+                tracing::warn!(error = %e, "CoordinatorActor: pool get_status failed during cap seed; keeping in-flight ledger as-is");
+            }
+        }
+        overlay_inflight_ledger(&mut running_by_user_model, &self.inflight_dispatches);
+
         // Memoized per-creator cap maps (model_id → max concurrent) for this pass.
         let mut creator_caps: HashMap<String, std::collections::HashMap<String, u32>> =
             HashMap::new();
@@ -755,6 +813,13 @@ impl CoordinatorActor {
                         *running_by_user_model
                             .entry((c.to_string(), used.clone()))
                             .or_insert(0) += 1;
+                        // Record in the in-flight ledger so the NEXT pass counts
+                        // this dispatch against the cap immediately — before its
+                        // `running` session row lands (pod boot lags 20-60s).
+                        // Reconciled against the live pool at the top of each
+                        // pass, so it drops out the moment the task completes.
+                        self.inflight_dispatches
+                            .insert(task.id.clone(), (Some(c.to_string()), used.clone()));
                     }
                 }
                 DispatchOutcome::AtCapacity => {
@@ -2557,6 +2622,74 @@ fn parse_iso_elapsed(started_at: &str) -> Option<u64> {
 /// conflict surfaces as an `Err` from `djinn_git::rebase_with_retry` AND leaves a
 /// clean (not mid-rebase) workspace — so `proactively_rebase_approved_branch`
 /// (which swallows that `Err` and proceeds) can never wedge dispatch.
+#[cfg(test)]
+mod inflight_ledger_tests {
+    use super::*;
+
+    fn key(creator: &str, model: &str) -> (String, String) {
+        (creator.to_string(), model.to_string())
+    }
+
+    /// The overshoot fix: a dispatch whose `running` session row hasn't landed
+    /// yet still counts against the per-user cap. The DB seed shows 0 running,
+    /// but four in-flight dispatches must raise the count to 4 so the next pass
+    /// defers instead of dispatching four more.
+    #[test]
+    fn ledger_overlay_counts_inflight_dispatches_when_db_seed_is_cold() {
+        let mut running: HashMap<(String, String), u32> = HashMap::new(); // cold DB seed
+        let mut inflight: HashMap<String, (Option<String>, String)> = HashMap::new();
+        for i in 0..4 {
+            inflight.insert(
+                format!("task-{i}"),
+                (Some("user-a".into()), "openai/gpt-5.5".into()),
+            );
+        }
+
+        overlay_inflight_ledger(&mut running, &inflight);
+
+        assert_eq!(
+            running.get(&key("user-a", "openai/gpt-5.5")).copied(),
+            Some(4),
+            "four in-flight dispatches must count against the cap even with a cold DB seed"
+        );
+    }
+
+    /// `max`, not sum: a task counted in BOTH the running rows and the ledger
+    /// (its session row landed but the ledger entry hasn't been reconciled away
+    /// yet) must count once. Also: a larger DB count wins over a smaller ledger.
+    #[test]
+    fn ledger_overlay_takes_max_never_double_counts() {
+        let mut running: HashMap<(String, String), u32> = HashMap::new();
+        running.insert(key("user-a", "m"), 3); // 3 already running in DB
+        running.insert(key("user-b", "m"), 5); // 5 running, ledger will be lower
+        let mut inflight: HashMap<String, (Option<String>, String)> = HashMap::new();
+        // user-a: 3 in-flight that overlap the 3 running rows → must stay 3, not 6.
+        for i in 0..3 {
+            inflight.insert(format!("a{i}"), (Some("user-a".into()), "m".into()));
+        }
+        // user-b: 2 in-flight, fewer than the 5 running → DB count wins.
+        for i in 0..2 {
+            inflight.insert(format!("b{i}"), (Some("user-b".into()), "m".into()));
+        }
+
+        overlay_inflight_ledger(&mut running, &inflight);
+
+        assert_eq!(running.get(&key("user-a", "m")).copied(), Some(3));
+        assert_eq!(running.get(&key("user-b", "m")).copied(), Some(5));
+    }
+
+    /// Creator-less (system/patrol) dispatches are ungated by the per-user cap,
+    /// so they must not contribute to any count.
+    #[test]
+    fn ledger_overlay_ignores_creatorless_entries() {
+        let mut running: HashMap<(String, String), u32> = HashMap::new();
+        let mut inflight: HashMap<String, (Option<String>, String)> = HashMap::new();
+        inflight.insert("sys".into(), (None, "m".into()));
+        overlay_inflight_ledger(&mut running, &inflight);
+        assert!(running.is_empty());
+    }
+}
+
 #[cfg(test)]
 mod e6_tests {
     use super::*;

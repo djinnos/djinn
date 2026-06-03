@@ -58,6 +58,16 @@ pub(super) struct CoordinatorActor {
     /// loops (missing credential, crash, or a provider returning empty/throttled
     /// turns). A role change is a successful stage transition, not a failure.
     pub(super) last_dispatched: HashMap<String, DispatchMarker>,
+    /// In-flight dispatch ledger: task UUID → (creator, model actually used).
+    /// Recorded the instant a dispatch succeeds and reconciled against the live
+    /// slot pool each pass. The per-user concurrency cap is seeded from running
+    /// session ROWS, but those don't exist until the worker pod boots and
+    /// registers (20-60s after dispatch). Without this ledger, dispatch passes
+    /// that re-fire during that window re-seed from a stale-low count and
+    /// overshoot the cap (e.g. 8 workers for a cap of 4). This ledger makes a
+    /// dispatched-but-not-yet-running task count against the cap immediately;
+    /// `max(db_count, ledger_count)` keeps the seed correct across restarts too.
+    pub(super) inflight_dispatches: HashMap<String, (Option<String>, String)>,
     /// Task UUID → cooldown EXPIRY instant. A task is skipped for dispatch while
     /// an entry exists; entries are pruned once their expiry passes.
     pub(super) dispatch_cooldowns: HashMap<String, StdInstant>,
@@ -194,6 +204,7 @@ impl CoordinatorActor {
             model_priorities: HashMap::new(),
             pr_errors: HashMap::new(),
             last_dispatched: HashMap::new(),
+            inflight_dispatches: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
             dispatch_failure_streak: HashMap::new(),
             verification_tracker,
