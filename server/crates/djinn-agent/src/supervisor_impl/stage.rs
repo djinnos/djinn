@@ -703,6 +703,60 @@ pub(crate) async fn execute_stage(
                         provider_failure: None,
                     },
                 },
+                RoleKind::Lead => match finalize_name {
+                    "submit_decision" => {
+                        let decision = final_output
+                            .finalize_payload
+                            .as_ref()
+                            .and_then(|p| p.get("decision"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let reason = extract_reason(&final_output.finalize_payload);
+                        match decision {
+                            // Work is complete + correct; reviewer/worker just
+                            // couldn't certify. Reconnects the existing
+                            // lead_approve DB transition (the incident fix).
+                            "approve" | "approved" => StageOutcome::LeadApproved,
+                            "approve_conflict" => StageOutcome::LeadApproveConflict {
+                                reason: reason
+                                    .unwrap_or_else(|| "lead approved with merge conflict".into()),
+                            },
+                            // Rescope / guide / block-on-deps: the Lead made the
+                            // edits and sends the task back for a fresh worker.
+                            "reopen" => StageOutcome::LeadReopen {
+                                reason: reason.unwrap_or_else(|| "lead reopened task".into()),
+                            },
+                            // decompose: replacement subtasks already created by
+                            // the Lead via MCP; force_close: redundant /
+                            // already-landed work. Both terminally close the
+                            // original task.
+                            "decompose" | "force_close" => StageOutcome::LeadClose {
+                                reason: reason
+                                    .unwrap_or_else(|| format!("lead closed task ({decision})")),
+                            },
+                            "escalate" => StageOutcome::LeadEscalate {
+                                reason: reason
+                                    .unwrap_or_else(|| "lead escalated for board review".into()),
+                            },
+                            other => StageOutcome::Failed {
+                                reason: format!("lead submitted unknown decision '{other}'"),
+                                provider_failure: None,
+                            },
+                        }
+                    }
+                    // The Lead ended without calling submit_decision. Releasing
+                    // the task back to the lead queue (it stays
+                    // in_lead_intervention → redispatch a fresh Lead) is safer
+                    // than guessing a board transition.
+                    "" => StageOutcome::Failed {
+                        reason: "lead session ended without calling submit_decision".into(),
+                        provider_failure: None,
+                    },
+                    other => StageOutcome::Failed {
+                        reason: format!("lead finalized via unexpected tool '{other}'"),
+                        provider_failure: None,
+                    },
+                },
             }
         }
     };
@@ -736,6 +790,7 @@ fn role_arc_for(kind: RoleKind) -> Arc<dyn AgentRole> {
         RoleKind::Reviewer => role_impl_for(AgentType::Reviewer),
         RoleKind::Verifier => role_impl_for(AgentType::Worker),
         RoleKind::Architect => role_impl_for(AgentType::Architect),
+        RoleKind::Lead => role_impl_for(AgentType::Lead),
     }
 }
 

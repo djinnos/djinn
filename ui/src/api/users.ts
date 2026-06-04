@@ -8,6 +8,8 @@ export interface OrgUser {
   github_avatar_url: string | null;
   is_member_of_org: boolean;
   is_admin: boolean;
+  /** Proposal capability role: `proposer` | `pm` | `engineer`. */
+  role?: string;
   /**
    * True for the non-human "automation" service user — the synthetic account
    * that owns system-initiated work (board patrols, etc.). It can't log in, so
@@ -32,4 +34,18 @@ export async function fetchUsers(): Promise<OrgUser[]> {
 /** Human-friendly label for a user: real name when known, else the login. */
 export function userDisplayName(user: OrgUser): string {
   return user.github_name?.trim() || user.github_login;
+}
+
+/** Admin-only: set a user's proposal capability role. */
+export async function setUserRole(userId: string, role: string): Promise<void> {
+  const baseUrl = getServerBaseUrl();
+  const response = await fetch(`${baseUrl}/api/users/${userId}/role`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ role }),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to set role: ${response.status}`);
+  }
 }

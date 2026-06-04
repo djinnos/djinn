@@ -15,6 +15,8 @@ export interface User {
   name: string | null;
   avatarUrl: string | null;
   isAdmin: boolean;
+  /** Proposal capability role: `proposer` | `pm` | `engineer`. */
+  role: string;
 }
 
 interface ServerUser {
@@ -23,6 +25,7 @@ interface ServerUser {
   name?: string | null;
   avatar_url?: string | null;
   is_admin?: boolean;
+  role?: string;
 }
 
 function mapUser(raw: ServerUser): User {
@@ -32,6 +35,7 @@ function mapUser(raw: ServerUser): User {
     name: raw.name ?? null,
     avatarUrl: raw.avatar_url ?? null,
     isAdmin: raw.is_admin ?? false,
+    role: raw.role ?? "proposer",
   };
 }
 

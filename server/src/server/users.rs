@@ -5,17 +5,56 @@
 // owner filter). The list is small (one row per human who has ever signed
 // in) so it is returned unpaginated, mirroring `UserRepository::list_all`.
 
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
-use serde::Serialize;
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode},
+    routing::{get, post},
+};
+use serde::{Deserialize, Serialize};
 
 use crate::server::AppState;
+use crate::server::auth::require_admin;
 use djinn_db::{User, UserRepository};
 
 pub(super) fn router() -> Router<AppState> {
     // Namespaced under `/api` so it does not shadow the SPA client-side route
     // of the same name: a hard refresh on `/users` must fall through to the
     // static `index.html` fallback, not hit this JSON handler.
-    Router::new().route("/api/users", get(list_users))
+    Router::new()
+        .route("/api/users", get(list_users))
+        .route("/api/users/{id}/role", post(set_role))
+}
+
+#[derive(Deserialize)]
+struct SetRoleBody {
+    /// `proposer` | `pm` | `engineer`.
+    role: String,
+}
+
+/// Admin-only: set a user's proposal capability role. `is_admin` is managed
+/// separately (the bootstrap admin / SQL promotion path).
+async fn set_role(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<SetRoleBody>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_admin(&state, &headers).await?;
+    if !matches!(body.role.as_str(), "proposer" | "pm" | "engineer") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "invalid role: {} (expected proposer, pm, or engineer)",
+                body.role
+            ),
+        ));
+    }
+    UserRepository::new(state.db().clone())
+        .set_role(&id, &body.role)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Serialize)]
@@ -26,6 +65,8 @@ struct UserResponse {
     github_avatar_url: Option<String>,
     is_member_of_org: bool,
     is_admin: bool,
+    /// Proposal capability role: `proposer` | `pm` | `engineer`.
+    role: String,
     /// True for the synthetic "automation" service user (sentinel github_id).
     /// The UI labels it and offers the admin "configure automation" surface.
     is_service: bool,
@@ -41,6 +82,7 @@ impl From<&User> for UserResponse {
             github_avatar_url: u.github_avatar_url.clone(),
             is_member_of_org: u.is_member_of_org,
             is_admin: u.is_admin,
+            role: u.role.clone(),
             is_service: u.github_id == djinn_core::AUTOMATION_GITHUB_ID,
             last_seen_at: u.last_seen_at.clone(),
         }

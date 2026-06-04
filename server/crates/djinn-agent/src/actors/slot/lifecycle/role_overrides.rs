@@ -120,6 +120,7 @@ fn agent_type_for_role_kind(kind: RoleKind) -> AgentType {
         RoleKind::Reviewer => AgentType::Reviewer,
         RoleKind::Verifier => AgentType::Worker,
         RoleKind::Architect => AgentType::Architect,
+        RoleKind::Lead => AgentType::Lead,
     }
 }
 

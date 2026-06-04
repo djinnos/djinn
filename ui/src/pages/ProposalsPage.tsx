@@ -34,6 +34,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { showToast } from "@/lib/toast";
+import { useAuthUser } from "@/components/AuthGate";
+import { canEdit, capsFromUser } from "@/lib/proposalPermissions";
 import { useProjects } from "@/stores/useProjectStore";
 import {
   type ProposalDetail as ProposalDetailData,
@@ -345,6 +347,10 @@ function ProposalDetailView({
   onDeleted: () => void;
 }) {
   const proposal = detail.proposal as Proposal;
+  const me = useAuthUser();
+  const caps = capsFromUser(me);
+  const isAuthor = !!me && proposal.author_user_id === me.id;
+  const canDirectEdit = canEdit(caps, isAuthor);
   const [editingBody, setEditingBody] = useState(false);
   const [bodyDraft, setBodyDraft] = useState("");
   const untargeted = useMemo(
@@ -416,20 +422,22 @@ function ProposalDetailView({
                 ))}
               </SelectContent>
             </Select>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                if (confirm("Delete this proposal? This cannot be undone.")) {
-                  run(
-                    () => callMcpTool("proposal_delete", { id: proposal.id }),
-                    "Proposal deleted"
-                  ).then(onDeleted);
-                }
-              }}
-            >
-              Delete
-            </Button>
+            {(isAuthor || caps?.isAdmin) && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  if (confirm("Delete this proposal? This cannot be undone.")) {
+                    run(
+                      () => callMcpTool("proposal_delete", { id: proposal.id }),
+                      "Proposal deleted"
+                    ).then(onDeleted);
+                  }
+                }}
+              >
+                Delete
+              </Button>
+            )}
           </div>
         </div>
 
@@ -526,17 +534,19 @@ function ProposalDetailView({
                 className="min-h-[240px] font-mono text-sm"
               />
               <div className="flex gap-2">
-                <Button
-                  size="sm"
-                  onClick={() =>
-                    run(
-                      () => callMcpTool("proposal_update", { id: proposal.id, body: bodyDraft }),
-                      "Spec updated"
-                    ).then(() => setEditingBody(false))
-                  }
-                >
-                  Save
-                </Button>
+                {canDirectEdit && (
+                  <Button
+                    size="sm"
+                    onClick={() =>
+                      run(
+                        () => callMcpTool("proposal_update", { id: proposal.id, body: bodyDraft }),
+                        "Spec updated"
+                      ).then(() => setEditingBody(false))
+                    }
+                  >
+                    Save
+                  </Button>
+                )}
                 <Button
                   size="sm"
                   variant="outline"
@@ -579,6 +589,7 @@ function ProposalDetailView({
           proposalId={proposal.id}
           feedback={detail.feedback}
           currentBody={proposal.body}
+          canAccept={canDirectEdit}
           onChanged={onChanged}
         />
       </div>
@@ -592,11 +603,13 @@ function FeedbackThread({
   proposalId,
   feedback,
   currentBody,
+  canAccept,
   onChanged,
 }: {
   proposalId: string;
   feedback: ProposalFeedback[];
   currentBody: string;
+  canAccept: boolean;
   onChanged: () => void;
 }) {
   const [body, setBody] = useState("");
@@ -681,7 +694,7 @@ function FeedbackThread({
                 <DiffView before={currentBody} after={f.proposed_body} />
               </div>
             )}
-            {f.status === "open" && (
+            {f.status === "open" && canAccept && (
               <div className="mt-2 flex gap-2">
                 <Button size="sm" variant="outline" onClick={() => accept(f.id)}>
                   {f.proposed_body != null ? "Accept & apply" : "Accept"}

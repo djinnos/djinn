@@ -211,6 +211,19 @@ pub(crate) fn flow_for_task_dispatch(
         return SupervisorFlow::ReviewResponse;
     }
 
+    // Lead intervention: a task parked in the lead queue runs the single-stage
+    // Lead flow. WITHOUT this arm these statuses fell through to `NewTask`
+    // (worker→reviewer), so the Lead never ran, the task never left
+    // `needs_lead_intervention`, and the coordinator re-dispatched it forever
+    // (the 82g0/78y9 wedge). Keep in sync with `role_for_task_dispatch`, which
+    // already maps these statuses to `AgentType::Lead`.
+    if matches!(
+        task.status.as_str(),
+        "needs_lead_intervention" | "in_lead_intervention"
+    ) {
+        return SupervisorFlow::Lead;
+    }
+
     SupervisorFlow::NewTask
 }
 
@@ -703,5 +716,23 @@ mod tests {
             flow_for_task_dispatch(&task, false, true),
             SupervisorFlow::Spike
         );
+    }
+
+    #[test]
+    fn flow_for_lead_intervention_is_lead() {
+        use crate::supervisor::{RoleKind, SupervisorFlow};
+        // Regression for the 82g0/78y9 wedge: a task parked in the lead queue
+        // MUST route to the single-stage Lead flow. Before this arm existed
+        // these statuses fell through to NewTask (worker→reviewer), so the Lead
+        // never ran and the task could never leave needs_lead_intervention.
+        for status in ["needs_lead_intervention", "in_lead_intervention"] {
+            let task = make_task(status);
+            assert_eq!(
+                flow_for_task_dispatch(&task, false, false),
+                SupervisorFlow::Lead,
+                "status {status} should route to the Lead flow"
+            );
+            assert_eq!(SupervisorFlow::Lead.role_sequence(), &[RoleKind::Lead]);
+        }
     }
 }

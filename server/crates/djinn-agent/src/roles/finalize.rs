@@ -52,7 +52,10 @@ pub struct SubmitReview {
 #[derive(Debug, Deserialize)]
 pub struct SubmitDecision {
     pub task_id: String,
-    /// Decision taken: "reopen", "decompose", "force_close", or "escalate".
+    /// Decision taken: "approve", "approve_conflict", "reopen", "decompose",
+    /// "force_close", or "escalate". The supervisor maps this to the terminal
+    /// board transition (see `StageOutcome` Lead variants); the Lead does NOT
+    /// call `task_transition` for the terminal move itself.
     pub decision: String,
     pub rationale: Option<String>,
     /// IDs of tasks created during this Lead intervention (for decompose decisions).
@@ -143,7 +146,7 @@ pub fn tool_submit_review() -> RmcpTool {
 pub fn tool_submit_decision() -> RmcpTool {
     RmcpTool::new(
         "submit_decision".to_string(),
-        "Submit the Lead intervention decision and release the task back to the worker queue. Your session ends after this call.".to_string(),
+        "Submit the Lead intervention decision. This is the ONLY way to end your session and is what applies the board transition — do not call task_transition yourself. Your session ends after this call.".to_string(),
         object!({
             "type": "object",
             "required": ["task_id", "decision"],
@@ -151,8 +154,8 @@ pub fn tool_submit_decision() -> RmcpTool {
                 "task_id": {"type": "string", "description": "Task UUID or short_id"},
                 "decision": {
                     "type": "string",
-                    "enum": ["reopen", "decompose", "force_close", "escalate"],
-                    "description": "The decision taken: reopen (send back to worker), decompose (split into subtasks), force_close, or escalate (release back to Lead queue)"
+                    "enum": ["approve", "approve_conflict", "reopen", "decompose", "force_close", "escalate"],
+                    "description": "The decision: approve (work is complete + correct — the worker just couldn't self-certify; this merges via the PR pipeline), approve_conflict (correct but a merge conflict exists — approve then send for conflict retry), reopen (send back to a fresh worker after you've rescoped/guided/added blockers), decompose (you created replacement subtasks — close the original), force_close (redundant or already-landed work), escalate (you cannot resolve it — return to the board for Planner/human review)"
                 },
                 "rationale": {"type": "string", "description": "Explanation for the decision"},
                 "created_tasks": {

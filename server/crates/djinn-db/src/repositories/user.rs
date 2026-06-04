@@ -30,6 +30,9 @@ pub struct User {
     /// yet) is stamped admin by the auth callback; gates the global runtime
     /// settings. See migration 30.
     pub is_admin: bool,
+    /// Proposal capability role: `proposer` (default) | `pm` | `engineer`.
+    /// `is_admin` is an orthogonal superset.
+    pub role: String,
     pub last_seen_at: Option<String>,
     pub created_at: String,
 }
@@ -90,7 +93,7 @@ impl UserRepository {
             User,
             r#"SELECT id, github_id, github_login, github_name, github_avatar_url,
                       is_member_of_org AS "is_member_of_org!: bool",
-                      is_admin AS "is_admin!: bool",
+                      is_admin AS "is_admin!: bool", role,
                       last_seen_at, created_at
                FROM users WHERE github_id = $1"#,
             github_id,
@@ -107,7 +110,7 @@ impl UserRepository {
             User,
             r#"SELECT id, github_id, github_login, github_name, github_avatar_url,
                       is_member_of_org AS "is_member_of_org!: bool",
-                      is_admin AS "is_admin!: bool",
+                      is_admin AS "is_admin!: bool", role,
                       last_seen_at, created_at
                FROM users WHERE id = $1"#,
             id,
@@ -122,7 +125,7 @@ impl UserRepository {
             User,
             r#"SELECT id, github_id, github_login, github_name, github_avatar_url,
                       is_member_of_org AS "is_member_of_org!: bool",
-                      is_admin AS "is_admin!: bool",
+                      is_admin AS "is_admin!: bool", role,
                       last_seen_at, created_at
                FROM users WHERE github_id = $1"#,
             github_id,
@@ -152,6 +155,15 @@ impl UserRepository {
     pub async fn set_admin_status(&self, id: &str, is_admin: bool) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query!("UPDATE users SET is_admin = $1 WHERE id = $2", is_admin, id,)
+            .execute(self.db.pool())
+            .await?;
+        Ok(())
+    }
+
+    /// Set a user's proposal capability `role` (`proposer` | `pm` | `engineer`).
+    pub async fn set_role(&self, id: &str, role: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!("UPDATE users SET role = $1 WHERE id = $2", role, id)
             .execute(self.db.pool())
             .await?;
         Ok(())
@@ -195,7 +207,7 @@ impl UserRepository {
             User,
             r#"SELECT id, github_id, github_login, github_name, github_avatar_url,
                       is_member_of_org AS "is_member_of_org!: bool",
-                      is_admin AS "is_admin!: bool",
+                      is_admin AS "is_admin!: bool", role,
                       last_seen_at, created_at
                FROM users
                ORDER BY github_login"#,

@@ -15,6 +15,7 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use serde::{Deserialize, Serialize};
 
 use crate::server::DjinnMcpServer;
+use crate::tools::acting_user::acting_caps;
 use crate::tools::epic_ops::AcceptanceCriterionItem;
 use crate::tools::list_response::{
     self, ListMeta, NamedListResponse, named_list_response_schema, serialize_named_list_response,
@@ -382,6 +383,12 @@ impl DjinnMcpServer {
         let Some(existing) = repo.resolve(&p.id).await.ok().flatten() else {
             return Json(err_single(proposal_not_found_error(&p.id)));
         };
+        if let Err(e) = self
+            .gate_proposal_edit(existing.author_user_id.as_deref())
+            .await
+        {
+            return Json(err_single(e));
+        }
 
         let title = if let Some(ref t) = p.title {
             match validate_title(t) {
@@ -457,6 +464,15 @@ impl DjinnMcpServer {
                 error: Some(proposal_not_found_error(&p.id)),
             });
         };
+        if let Err(e) = self
+            .gate_proposal_edit(existing.author_user_id.as_deref())
+            .await
+        {
+            return Json(ProposalDeleteResponse {
+                ok: None,
+                error: Some(e),
+            });
+        }
         match repo.delete(&existing.id).await {
             Ok(()) => Json(ProposalDeleteResponse {
                 ok: Some(true),
@@ -482,6 +498,12 @@ impl DjinnMcpServer {
         let Some(proposal) = repo.resolve(&p.id).await.ok().flatten() else {
             return Json(err_targets(proposal_not_found_error(&p.id)));
         };
+        if let Err(e) = self
+            .gate_proposal_edit(proposal.author_user_id.as_deref())
+            .await
+        {
+            return Json(err_targets(e));
+        }
         let role = p.role.as_deref().unwrap_or("primary");
         if !matches!(role, "primary" | "reference") {
             return Json(err_targets(format!(
@@ -511,6 +533,12 @@ impl DjinnMcpServer {
         let Some(proposal) = repo.resolve(&p.id).await.ok().flatten() else {
             return Json(err_targets(proposal_not_found_error(&p.id)));
         };
+        if let Err(e) = self
+            .gate_proposal_edit(proposal.author_user_id.as_deref())
+            .await
+        {
+            return Json(err_targets(e));
+        }
         // Fall back to the raw value so a stale target can still be removed.
         let project_id = project_repo
             .resolve(&p.project)
@@ -580,8 +608,18 @@ impl DjinnMcpServer {
         Parameters(p): Parameters<ProposalFeedbackAcceptParams>,
     ) -> Json<ProposalFeedbackResponse> {
         let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
-        if repo.get_feedback(&p.id).await.ok().flatten().is_none() {
+        let Some(feedback) = repo.get_feedback(&p.id).await.ok().flatten() else {
             return Json(err_feedback(format!("feedback not found: {}", p.id)));
+        };
+        // Accepting applies an edit → requires edit rights on the proposal.
+        let author = repo
+            .resolve(&feedback.proposal_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|pr| pr.author_user_id);
+        if let Err(e) = self.gate_proposal_edit(author.as_deref()).await {
+            return Json(err_feedback(e));
         }
         match repo.accept_feedback(&p.id).await {
             Ok(f) => Json(ProposalFeedbackResponse {
@@ -641,6 +679,22 @@ impl DjinnMcpServer {
                 "sign-off requires an authenticated user".to_string(),
             ));
         };
+        // Role gate: scoped = PM/engineer/admin; technical = engineer/admin.
+        match acting_caps(self.state.db()).await {
+            Ok(Some(caps)) if !caps.can_signoff(&p.kind) => {
+                return Json(err_single(format!(
+                    "a {} sign-off requires the {} role",
+                    p.kind,
+                    if p.kind == "technical" {
+                        "engineer (or admin)"
+                    } else {
+                        "PM, engineer (or admin)"
+                    }
+                )));
+            }
+            Err(e) => return Json(err_single(e)),
+            _ => {}
+        }
         let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
         let Some(proposal) = repo.resolve(&p.id).await.ok().flatten() else {
             return Json(err_single(proposal_not_found_error(&p.id)));
@@ -678,6 +732,25 @@ impl DjinnMcpServer {
             }),
             Err(e) => Json(err_single(e.to_string())),
         }
+    }
+}
+
+// ── Permission gates ─────────────────────────────────────────────────────────
+
+impl DjinnMcpServer {
+    /// Gate a direct spec edit: allowed for the author, a PM, an engineer, or
+    /// an admin. `Ok(())` when unauthenticated (trusted/system path).
+    async fn gate_proposal_edit(&self, author_user_id: Option<&str>) -> Result<(), String> {
+        if let Some(caps) = acting_caps(self.state.db()).await? {
+            let is_author = author_user_id == Some(caps.user_id.as_str());
+            if !caps.can_edit(is_author) {
+                return Err(
+                    "editing this proposal requires its author, a PM, an engineer, or an admin"
+                        .to_string(),
+                );
+            }
+        }
+        Ok(())
     }
 }
 

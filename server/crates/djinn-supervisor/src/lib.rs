@@ -130,6 +130,42 @@ pub enum StageOutcome {
     Escalate {
         reason: String,
     },
+    /// Lead `submit_decision(decision="approve")` — the work is complete and
+    /// correct, the worker just couldn't self-certify. Maps to `lead_approve`
+    /// (in_lead_intervention → approved); the supervisor then opens/updates the
+    /// PR (same terminal path as a reviewer approval). NOT terminal: it falls
+    /// through to the post-loop `open_pr`.
+    LeadApproved,
+    /// Lead `submit_decision(decision="approve_conflict")` — approved, but a
+    /// merge conflict was found. Maps to `lead_approve_conflict`
+    /// (in_lead_intervention → open + conflict metadata) so the coordinator
+    /// re-dispatches a conflict-retry run.
+    LeadApproveConflict {
+        reason: String,
+    },
+    /// Lead `submit_decision(decision="reopen")` — the task was rescoped /
+    /// guided / blocked-on-deps and should retry with a fresh worker. Maps to
+    /// `lead_intervention_complete` (in_lead_intervention → open).
+    LeadReopen {
+        reason: String,
+    },
+    /// Lead `submit_decision(decision="decompose"|"force_close")` — terminal
+    /// closure of the original task (decompose: replacement subtasks were
+    /// already created by the Lead via MCP; force_close: redundant /
+    /// already-landed work). Maps to `force_close` (→ closed).
+    LeadClose {
+        reason: String,
+    },
+    /// Lead `submit_decision(decision="escalate")` — the Lead could not resolve
+    /// the task and it needs board/Planner-level review. Maps to
+    /// `lead_intervention_complete` (in_lead_intervention → open) so the task
+    /// leaves the lead queue (no dead-end), and produces an `Escalated` run
+    /// outcome. Distinct from `LeadClose` (board re-review vs terminal closure)
+    /// per the design review. The standing reopen-count safety net routes
+    /// persistently-failing tasks to the Planner.
+    LeadEscalate {
+        reason: String,
+    },
     Failed {
         reason: String,
         /// Set when the stage failed on a typed provider error the host
@@ -153,6 +189,14 @@ impl StageOutcome {
                 | StageOutcome::Failed { .. }
                 | StageOutcome::ReviewerRejected { .. }
                 | StageOutcome::VerifierFailed { .. }
+                // Lead decisions that fire their own terminal board transition
+                // and short-circuit the (single-stage) run. `LeadApproved` is
+                // intentionally absent — it falls through to the post-loop
+                // `open_pr`, the same shape as a reviewer approval.
+                | StageOutcome::LeadApproveConflict { .. }
+                | StageOutcome::LeadReopen { .. }
+                | StageOutcome::LeadClose { .. }
+                | StageOutcome::LeadEscalate { .. }
         )
     }
 }
@@ -528,6 +572,15 @@ impl TaskRunSupervisor {
                     // spike-completion `close` below then fires from in_progress,
                     // a valid simple-lifecycle transition.
                     RoleKind::Architect => Some("start"),
+                    // Lead intervention runs the Lead as its sole stage. Move
+                    // the task needs_lead_intervention → in_lead_intervention so
+                    // (a) the board reflects the active Lead, (b) the host
+                    // coordinator stops seeing it as ready and re-dispatching
+                    // during the run, and (c) the terminal lead_* transitions
+                    // below (lead_approve / lead_intervention_complete /
+                    // force_close) are valid — they all require the task to be
+                    // in_lead_intervention.
+                    RoleKind::Lead => Some("lead_intervention_start"),
                     _ => None,
                 };
                 if let Some(action) = pre_stage_action
@@ -814,6 +867,129 @@ impl TaskRunSupervisor {
                         result = Some(TaskRunOutcome::Escalated { reason });
                         break;
                     }
+                    // ── Lead intervention decisions ──────────────────────────
+                    // All are cancel-gated like the worker/reviewer transitions
+                    // above: a stall-kill / preempt can flip cancel mid-stage
+                    // and the agent may still emit a late outcome. We must NOT
+                    // transition the board on a cancelled run — leave the task
+                    // in `in_lead_intervention` for a clean redispatch.
+                    StageOutcome::LeadApproved => {
+                        // Work is complete + correct; the worker just couldn't
+                        // self-certify. lead_approve: in_lead_intervention →
+                        // approved. Do NOT set `result` — fall through to the
+                        // post-loop `open_pr` (approved → pr_draft), the same
+                        // terminal path as a reviewer approval, so the PR is
+                        // pushed/undrafted immediately rather than waiting for
+                        // the coordinator's next approved-task sweep.
+                        if self.services.cancel().is_cancelled() {
+                            tracing::debug!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                "supervisor: run cancelled — skipping lead_approve (task stays in_lead_intervention for redispatch)"
+                            );
+                            result = Some(TaskRunOutcome::Interrupted);
+                            break;
+                        }
+                        if let Err(e) = self
+                            .services
+                            .transition_task(spec.task_id.clone(), "lead_approve".into(), None)
+                            .await
+                        {
+                            tracing::warn!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                error = %e,
+                                "supervisor: lead_approve transition skipped"
+                            );
+                        }
+                    }
+                    StageOutcome::LeadApproveConflict { reason } => {
+                        if !self.services.cancel().is_cancelled()
+                            && let Err(e) = self
+                                .services
+                                .transition_task(
+                                    spec.task_id.clone(),
+                                    "lead_approve_conflict".into(),
+                                    Some(reason.clone()),
+                                )
+                                .await
+                        {
+                            tracing::warn!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                error = %e,
+                                "supervisor: lead_approve_conflict transition skipped"
+                            );
+                        }
+                        result = Some(TaskRunOutcome::Closed { reason });
+                        break;
+                    }
+                    StageOutcome::LeadReopen { reason } => {
+                        if !self.services.cancel().is_cancelled()
+                            && let Err(e) = self
+                                .services
+                                .transition_task(
+                                    spec.task_id.clone(),
+                                    "lead_intervention_complete".into(),
+                                    Some(reason.clone()),
+                                )
+                                .await
+                        {
+                            tracing::warn!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                error = %e,
+                                "supervisor: lead_intervention_complete transition skipped"
+                            );
+                        }
+                        result = Some(TaskRunOutcome::Closed { reason });
+                        break;
+                    }
+                    StageOutcome::LeadClose { reason } => {
+                        if !self.services.cancel().is_cancelled()
+                            && let Err(e) = self
+                                .services
+                                .transition_task(
+                                    spec.task_id.clone(),
+                                    "force_close".into(),
+                                    Some(reason.clone()),
+                                )
+                                .await
+                        {
+                            tracing::warn!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                error = %e,
+                                "supervisor: lead force_close transition skipped"
+                            );
+                        }
+                        result = Some(TaskRunOutcome::Closed { reason });
+                        break;
+                    }
+                    StageOutcome::LeadEscalate { reason } => {
+                        // Lead couldn't resolve → return to the board (open) for
+                        // re-dispatch / Planner safety net. Distinct from
+                        // LeadClose (board re-review vs terminal closure).
+                        if !self.services.cancel().is_cancelled()
+                            && let Err(e) = self
+                                .services
+                                .transition_task(
+                                    spec.task_id.clone(),
+                                    "lead_intervention_complete".into(),
+                                    Some(reason.clone()),
+                                )
+                                .await
+                        {
+                            tracing::warn!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                error = %e,
+                                "supervisor: lead escalate transition skipped"
+                            );
+                        }
+                        result = Some(TaskRunOutcome::Escalated { reason });
+                        break;
+                    }
                     StageOutcome::ReviewerRejected { feedback } => {
                         // Reviewer rejected → task_review_reject
                         // (in_task_review → open). The reject action
@@ -960,9 +1136,16 @@ impl TaskRunSupervisor {
                                 last_stage_role
                             ),
                         },
+                        // The Lead flow only reaches here on the `approve`
+                        // decision (every other lead decision set `result` and
+                        // broke). lead_approve already moved the task to
+                        // `approved`; open_pr pushes the branch and fires
+                        // pr_created (approved → pr_draft), the same terminal
+                        // path as a reviewer approval.
                         SupervisorFlow::NewTask
                         | SupervisorFlow::ReviewResponse
-                        | SupervisorFlow::ConflictRetry => {
+                        | SupervisorFlow::ConflictRetry
+                        | SupervisorFlow::Lead => {
                             info!(
                                 task_run_id = %run_id,
                                 task_id = %spec.task_id,

@@ -230,6 +230,7 @@ impl SessionAuthRepository {
                  u.github_avatar_url                AS u_github_avatar_url,
                  u.is_member_of_org                 AS "u_is_member_of_org!: bool",
                  u.is_admin                         AS "u_is_admin!: bool",
+                 u.role                             AS u_role,
                  u.last_seen_at                     AS u_last_seen_at,
                  u.created_at                       AS u_created_at
                FROM user_auth_sessions s
@@ -262,6 +263,7 @@ impl SessionAuthRepository {
                 github_avatar_url: r.u_github_avatar_url,
                 is_member_of_org: r.u_is_member_of_org,
                 is_admin: r.u_is_admin,
+                role: r.u_role,
                 last_seen_at: r.u_last_seen_at,
                 created_at: r.u_created_at,
             };

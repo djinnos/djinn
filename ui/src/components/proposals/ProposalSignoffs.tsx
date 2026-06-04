@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { showToast } from "@/lib/toast";
+import { canSignoff, capsFromUser } from "@/lib/proposalPermissions";
 import type { ProposalDetail } from "@/lib/proposalQueries";
 
 const KINDS: { key: "scoped" | "technical"; label: string }[] = [
@@ -25,6 +26,7 @@ export function ProposalSignoffs({
 }) {
   const proposal = detail.proposal!;
   const me = useAuthUser();
+  const caps = capsFromUser(me);
   const usersQuery = useQuery(usersQueryOptions());
   const nameFor = (userId: string) => {
     const u = (usersQuery.data ?? []).find((x: OrgUser) => x.id === userId);
@@ -97,11 +99,11 @@ export function ProposalSignoffs({
                 <Button size="sm" variant="ghost" onClick={() => withdraw(key)}>
                   Withdraw
                 </Button>
-              ) : (
+              ) : canSignoff(caps, key) ? (
                 <Button size="sm" variant="outline" onClick={() => sign(key)}>
                   {mine?.stale ? "Re-sign" : "Sign off"}
                 </Button>
-              )}
+              ) : null}
             </div>
           );
         })}

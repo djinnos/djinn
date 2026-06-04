@@ -149,6 +149,8 @@ pub struct AuthenticatedUser {
     /// Admin privilege, sourced from the joined `users` row. Gates global
     /// runtime settings and the Users admin page.
     pub is_admin: bool,
+    /// Proposal capability role: `proposer` | `pm` | `engineer`.
+    pub role: String,
     /// The raw cookie token, for callers that want to refresh or revoke it.
     #[serde(skip)]
     pub session_token: String,
@@ -187,6 +189,7 @@ pub async fn authenticate(
         name: user.github_name,
         avatar_url: user.github_avatar_url,
         is_admin: user.is_admin,
+        role: user.role,
         session_token: session.token,
         github_access_token: session.github_access_token,
     }))
@@ -235,6 +238,8 @@ struct MeResponse {
     avatar_url: Option<String>,
     /// Whether this user is an admin (gates the global settings + Users page).
     is_admin: bool,
+    /// Proposal capability role: `proposer` | `pm` | `engineer`.
+    role: String,
     /// GitHub org this deployment is locked to. Surfaced so the web client can
     /// show "signed in as <login> on <org>" without a second round-trip.
     /// `None` when the deployment hasn't finished the manifest flow yet.
@@ -251,6 +256,7 @@ async fn me(State(state): State<AppState>, headers: HeaderMap) -> Response {
                 name: user.name,
                 avatar_url: user.avatar_url,
                 is_admin: user.is_admin,
+                role: user.role,
                 org_login,
             })
             .into_response()

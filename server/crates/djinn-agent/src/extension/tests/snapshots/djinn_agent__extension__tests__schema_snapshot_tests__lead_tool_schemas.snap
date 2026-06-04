@@ -747,7 +747,7 @@ expression: tool_schemas_lead()
   },
   {
     "name": "submit_decision",
-    "description": "Submit the Lead intervention decision and release the task back to the worker queue. Your session ends after this call.",
+    "description": "Submit the Lead intervention decision. This is the ONLY way to end your session and is what applies the board transition — do not call task_transition yourself. Your session ends after this call.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -762,12 +762,14 @@ expression: tool_schemas_lead()
         "decision": {
           "type": "string",
           "enum": [
+            "approve",
+            "approve_conflict",
             "reopen",
             "decompose",
             "force_close",
             "escalate"
           ],
-          "description": "The decision taken: reopen (send back to worker), decompose (split into subtasks), force_close, or escalate (release back to Lead queue)"
+          "description": "The decision: approve (work is complete + correct — the worker just couldn't self-certify; this merges via the PR pipeline), approve_conflict (correct but a merge conflict exists — approve then send for conflict retry), reopen (send back to a fresh worker after you've rescoped/guided/added blockers), decompose (you created replacement subtasks — close the original), force_close (redundant or already-landed work), escalate (you cannot resolve it — return to the board for Planner/human review)"
         },
         "rationale": {
           "type": "string",

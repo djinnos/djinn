@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { HugeiconsIcon } from '@hugeicons/react';
 import { Settings02Icon, ShieldUserIcon, UserGroupIcon } from '@hugeicons/core-free-icons';
 import { usersQueryOptions } from '@/api/queryOptions';
-import { userDisplayName, type OrgUser } from '@/api/users';
+import { setUserRole, userDisplayName, type OrgUser } from '@/api/users';
 import { InlineError } from '@/components/InlineError';
 import { UserConfigDialog, ServiceBadge } from '@/components/UserConfigDialog';
 import { useAuthUser } from '@/components/AuthGate';
@@ -70,6 +70,9 @@ function UserRow({ user }: { user: OrgUser }) {
   // normal Settings page, so hide Configure on their own row.
   const me = useAuthUser();
   const isSelf = me?.id === user.id;
+  const queryClient = useQueryClient();
+  const role = user.role ?? 'proposer';
+  const canManageRole = !!me?.isAdmin && !user.is_service;
 
   return (
     <li className="flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3">
@@ -98,9 +101,32 @@ function UserRow({ user }: { user: OrgUser }) {
           {user.is_member_of_org && (
             <Badge variant="outline">Org member</Badge>
           )}
+          {!user.is_service && !user.is_admin && (
+            <Badge variant="outline" className="capitalize">{role}</Badge>
+          )}
         </div>
         <p className="truncate text-xs text-muted-foreground">@{user.github_login}</p>
       </div>
+
+      {canManageRole && (
+        <select
+          value={role}
+          onChange={async (e) => {
+            try {
+              await setUserRole(user.id, e.target.value);
+              queryClient.invalidateQueries({ queryKey: ['users'] });
+            } catch (err) {
+              console.error('Failed to set role', err);
+            }
+          }}
+          className="shrink-0 rounded-md border bg-background px-2 py-1 text-xs"
+          title="Proposal role"
+        >
+          <option value="proposer">Proposer</option>
+          <option value="pm">PM</option>
+          <option value="engineer">Engineer</option>
+        </select>
+      )}
 
       {!user.is_service && user.last_seen_at && (
         <span className="shrink-0 text-xs text-muted-foreground" title={user.last_seen_at}>

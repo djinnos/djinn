@@ -28,6 +28,7 @@ pub enum RoleKind {
     Reviewer,
     Verifier,
     Architect,
+    Lead,
 }
 
 impl RoleKind {
@@ -38,6 +39,7 @@ impl RoleKind {
             RoleKind::Reviewer => "reviewer",
             RoleKind::Verifier => "verifier",
             RoleKind::Architect => "architect",
+            RoleKind::Lead => "lead",
         }
     }
 }
@@ -58,6 +60,14 @@ pub enum SupervisorFlow {
     ConflictRetry,
     Spike,
     Planning,
+    /// Lead intervention: a single-stage flow that runs the Lead agent on a
+    /// task parked in `needs_lead_intervention`. The Lead inspects the stuck
+    /// task and ends with `submit_decision`, which the supervisor maps to the
+    /// terminal board transition (approve / reopen / decompose / close /
+    /// escalate). Without this flow, lead-intervention tasks fell through to
+    /// `NewTask` and looped worker→reviewer forever (the dead-end that wedged
+    /// 82g0/78y9).
+    Lead,
 }
 
 impl SupervisorFlow {
@@ -72,6 +82,7 @@ impl SupervisorFlow {
             SupervisorFlow::ConflictRetry => "conflict_retry",
             SupervisorFlow::Spike => "spike",
             SupervisorFlow::Planning => "planning",
+            SupervisorFlow::Lead => "lead",
         }
     }
 }
@@ -95,6 +106,12 @@ pub fn role_sequence(flow: SupervisorFlow) -> &'static [RoleKind] {
         }
         SupervisorFlow::Spike => &[Architect],
         SupervisorFlow::Planning => &[Planner],
+        // Single-stage: the Lead is the only actor. Its `submit_decision`
+        // drives the terminal board transition (handled in the supervisor
+        // body); there is no follow-on worker/reviewer in the same task-run —
+        // `reopen` returns the task to `open` and the coordinator starts a
+        // clean subsequent run.
+        SupervisorFlow::Lead => &[Lead],
     }
 }
 
