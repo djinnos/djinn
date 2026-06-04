@@ -21,7 +21,12 @@ export default defineConfig({
       ignored: ["**/.djinn/**"],
     },
   },
-  base: './',
+  // Absolute base so hashed-asset URLs in index.html are root-anchored
+  // (`/assets/...`). With a relative base (`./`), a hard-refresh on a nested
+  // route like /proposals/<id> makes the browser resolve assets against
+  // /proposals/, request paths that don't exist, and get index.html (HTML)
+  // back where it expected JS — a white page.
+  base: '/',
   build: {
     target: "chrome130",
     minify: true,
