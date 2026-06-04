@@ -116,7 +116,8 @@ pub struct ProposalCreateParams {
     /// Target projects (UUIDs or owner/repo slugs) this proposal touches.
     /// Editable later via proposal_add_target / proposal_remove_target.
     pub target_projects: Option<Vec<String>>,
-    /// Initial status: `draft` (default), `shared`, or `ready`.
+    /// Initial status: `triage`, `draft` (default), or `in_review`. Proposer-
+    /// role authors are always placed in `triage` regardless of this value.
     pub status: Option<String>,
 }
 
@@ -246,8 +247,16 @@ impl DjinnMcpServer {
         if let Err(e) = validate_ac_count(ac.len()) {
             return Json(err_single(e));
         }
-        let status = match validate_proposal_create_status(p.status.as_deref()) {
+        let requested_status = match validate_proposal_create_status(p.status.as_deref()) {
             Ok(s) => s,
+            Err(e) => return Json(err_single(e)),
+        };
+        // Proposer-role authors are forced into `triage` (an inbox a PM/engineer
+        // promotes to `draft`); higher roles default to their requested status
+        // (or `draft`).
+        let status = match acting_caps(self.state.db()).await {
+            Ok(Some(caps)) if !caps.is_admin && caps.role == "proposer" => Some("triage"),
+            Ok(_) => requested_status,
             Err(e) => return Json(err_single(e)),
         };
         let ac_json = serde_json::to_string(&ac).unwrap_or_else(|_| "[]".to_string());

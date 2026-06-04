@@ -5781,7 +5781,7 @@ expression: signatures
           "type": "string"
         },
         "status": {
-          "description": "Initial status: `draft` (default), `shared`, or `ready`.",
+          "description": "Initial status: `triage`, `draft` (default), or `in_review`. Proposer-\nrole authors are always placed in `triage` regardless of this value.",
           "nullable": true,
           "type": "string"
         },

@@ -1,4 +1,5 @@
 export type ProposalStatus =
+  | "triage"
   | "draft"
   | "in_review"
   | "approved"
@@ -21,14 +22,15 @@ export interface StatusMeta {
 }
 
 export const PROPOSAL_STATUS_META: Record<ProposalStatus, StatusMeta> = {
-  in_review: { label: "In Review", order: 0, dot: "bg-amber-500" },
-  draft: { label: "Draft", order: 1, dot: "border-2 border-dashed border-muted-foreground/50" },
-  approved: { label: "Approved", order: 2, dot: "bg-blue-500" },
-  building: { label: "Building", order: 3, dot: "bg-purple-500" },
-  done: { label: "Done", order: 4, dot: "bg-green-500", done: true, terminal: true },
-  rejected: { label: "Rejected", order: 5, dot: "bg-red-500/70", terminal: true },
-  superseded: { label: "Superseded", order: 6, dot: "bg-muted-foreground/50", terminal: true },
-  archived: { label: "Archived", order: 7, dot: "bg-muted-foreground/40", terminal: true },
+  triage: { label: "Triage", order: 0, dot: "border-2 border-dashed border-muted-foreground/50" },
+  draft: { label: "Draft", order: 1, dot: "bg-amber-500/70" },
+  in_review: { label: "In Review", order: 2, dot: "bg-amber-500" },
+  approved: { label: "Approved", order: 3, dot: "bg-blue-500" },
+  building: { label: "Building", order: 4, dot: "bg-purple-500" },
+  done: { label: "Done", order: 5, dot: "bg-green-500", done: true, terminal: true },
+  rejected: { label: "Rejected", order: 6, dot: "bg-red-500/70", terminal: true },
+  superseded: { label: "Superseded", order: 7, dot: "bg-muted-foreground/50", terminal: true },
+  archived: { label: "Archived", order: 8, dot: "bg-muted-foreground/40", terminal: true },
 };
 
 export const PROPOSAL_STATUS_KEYS = (

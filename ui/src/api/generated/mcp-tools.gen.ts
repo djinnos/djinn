@@ -3009,7 +3009,8 @@ export namespace ProposalCreateInputSchema {
    */
   body?: string
   /**
-   * Initial status: `draft` (default), `shared`, or `ready`.
+   * Initial status: `triage`, `draft` (default), or `in_review`. Proposer-
+   * role authors are always placed in `triage` regardless of this value.
    */
   status?: string
   /**

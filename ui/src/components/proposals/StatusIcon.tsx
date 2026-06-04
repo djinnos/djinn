@@ -4,7 +4,10 @@ import {
   CheckmarkCircle02Icon,
   CircleArrowUpIcon,
   DashedLineCircleIcon,
-  SearchCircleIcon,
+  Progress01Icon,
+  Progress02Icon,
+  Progress03Icon,
+  Progress04Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { cn } from "@/lib/utils";
@@ -12,15 +15,18 @@ import { PROPOSAL_STATUS_META, type ProposalStatus } from "./proposalStatus";
 
 type IconObj = typeof CheckmarkCircle02Icon;
 
-// Per-status Hugeicons glyph + color. `approved`/`building` fall back to the
-// colored dot from PROPOSAL_STATUS_META.
+// Per-status Hugeicons glyph + color. The active pipeline (draft → building)
+// uses the filling Progress01–04 glyphs.
 //
 // Note: a few requested names aren't in the installed @hugeicons free set, so
-// the closest matches are used: DashedLineCircle (draft), CircleArrowUp
+// the closest matches are used: DashedLineCircle (triage), CircleArrowUp
 // (superseded), Archive02 (archived).
-const STATUS_ICONS: Partial<Record<ProposalStatus, { icon: IconObj; className: string }>> = {
-  draft: { icon: DashedLineCircleIcon, className: "text-muted-foreground" },
-  in_review: { icon: SearchCircleIcon, className: "text-amber-500" },
+const STATUS_ICONS: Record<ProposalStatus, { icon: IconObj; className: string }> = {
+  triage: { icon: DashedLineCircleIcon, className: "text-muted-foreground" },
+  draft: { icon: Progress01Icon, className: "text-amber-500" },
+  in_review: { icon: Progress02Icon, className: "text-amber-500" },
+  approved: { icon: Progress03Icon, className: "text-blue-500" },
+  building: { icon: Progress04Icon, className: "text-purple-500" },
   done: { icon: CheckmarkCircle02Icon, className: "text-green-500" },
   rejected: { icon: CancelCircleIcon, className: "text-red-500" },
   superseded: { icon: CircleArrowUpIcon, className: "text-muted-foreground" },
@@ -35,7 +41,6 @@ export function StatusIcon({ status, size = 14 }: { status: string; size?: numbe
       <HugeiconsIcon icon={mapped.icon} size={size} className={cn("shrink-0", mapped.className)} />
     );
   }
-  // approved / building (and any unknown) → colored dot.
   const meta = PROPOSAL_STATUS_META[status as ProposalStatus];
   return (
     <span

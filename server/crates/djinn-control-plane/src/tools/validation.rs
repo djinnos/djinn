@@ -210,6 +210,7 @@ pub fn validate_epic_create_status(status: Option<&str>) -> Result<Option<&str>,
 /// `draft` → `in_review` → `approved` → `building` → `done`, plus the
 /// off-ramps `rejected` / `archived` / `superseded`.
 pub const PROPOSAL_STATUSES: &[&str] = &[
+    "triage",
     "draft",
     "in_review",
     "approved",
@@ -238,9 +239,9 @@ pub fn validate_proposal_status(status: &str) -> Result<(), String> {
 pub fn validate_proposal_create_status(status: Option<&str>) -> Result<Option<&str>, String> {
     match status {
         None => Ok(None),
-        Some(s @ ("draft" | "in_review")) => Ok(Some(s)),
+        Some(s @ ("triage" | "draft" | "in_review")) => Ok(Some(s)),
         Some(other) => Err(format!(
-            "invalid initial proposal status: {other:?} (expected draft or in_review)"
+            "invalid initial proposal status: {other:?} (expected triage, draft, or in_review)"
         )),
     }
 }

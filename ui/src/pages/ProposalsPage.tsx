@@ -49,6 +49,7 @@ import type { AcceptanceCriterion, Proposal, ProposalFeedback } from "@/api/type
 // Statuses a human sets directly. `approved` is reached via sign-offs;
 // `building`/`done` via graduation.
 const MANUAL_STATUSES: ProposalStatus[] = [
+  "triage",
   "draft",
   "in_review",
   "rejected",
