@@ -17,7 +17,7 @@ pub use credential::Credential;
 pub use epic::Epic;
 pub use git_settings::GitSettings;
 pub use project::Project;
-pub use proposal::{Proposal, ProposalFeedback, ProposalTarget};
+pub use proposal::{Proposal, ProposalFeedback, ProposalRevision, ProposalSignoff, ProposalTarget};
 pub use provider::{CustomProvider, Model, Pricing, Provider, SeedModel};
 pub use session::{SessionRecord, SessionStatus};
 pub use session_message::SessionMessage;

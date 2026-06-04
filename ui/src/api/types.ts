@@ -29,3 +29,5 @@ export type Epic = Omit<EpicListOutputSchema.EpicModel, "owner"> & {
 export type Proposal = ProposalShowOutputSchema.ProposalModel;
 export type ProposalFeedback = ProposalShowOutputSchema.ProposalFeedbackModel;
 export type ProposalTarget = ProposalShowOutputSchema.ProposalTargetModel;
+export type ProposalRevision = ProposalShowOutputSchema.ProposalRevisionModel;
+export type ProposalSignoff = ProposalShowOutputSchema.ProposalSignoffModel;

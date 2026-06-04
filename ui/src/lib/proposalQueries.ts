@@ -8,7 +8,13 @@
 
 import { queryOptions } from "@tanstack/react-query";
 import { callMcpTool } from "@/api/mcpClient";
-import type { Proposal, ProposalFeedback, ProposalTarget } from "@/api/types";
+import type {
+  Proposal,
+  ProposalFeedback,
+  ProposalRevision,
+  ProposalSignoff,
+  ProposalTarget,
+} from "@/api/types";
 
 export interface ProposalListFilters {
   status?: string;
@@ -37,6 +43,8 @@ export interface ProposalDetail {
   proposal: Proposal | null;
   targets: ProposalTarget[];
   feedback: ProposalFeedback[];
+  revisions: ProposalRevision[];
+  signoffs: ProposalSignoff[];
 }
 
 export function proposalDetailQueryOptions(id: string | null) {
@@ -49,6 +57,8 @@ export function proposalDetailQueryOptions(id: string | null) {
         proposal: (res.proposal ?? null) as Proposal | null,
         targets: (res.targets ?? []) as ProposalTarget[],
         feedback: (res.feedback ?? []) as ProposalFeedback[],
+        revisions: (res.revisions ?? []) as ProposalRevision[],
+        signoffs: (res.signoffs ?? []) as ProposalSignoff[],
       };
     },
     staleTime: 15_000,

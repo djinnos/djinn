@@ -25,6 +25,39 @@ pub struct Proposal {
     pub created_at: String,
     pub updated_at: String,
     pub closed_at: Option<String>,
+    /// Head revision number; sign-offs anchored to an earlier seq are stale.
+    pub latest_revision_seq: i32,
+}
+
+/// An immutable snapshot of a proposal's spec at a point in time. Appended on
+/// every material edit; diffs between revisions drive the "changes since your
+/// approval" review.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
+pub struct ProposalRevision {
+    pub id: String,
+    pub proposal_id: String,
+    pub seq: i32,
+    pub title: String,
+    pub body: String,
+    /// JSON array text (parse with [`crate::models::parse_json_array`] or the
+    /// structured AC parser).
+    pub acceptance_criteria: String,
+    pub edited_by_user_id: Option<String>,
+    pub created_at: String,
+}
+
+/// A review sign-off on a proposal. `kind` is `scoped` (product) or
+/// `technical` (engineering). `revision_seq` is the head revision it was given
+/// against — when the proposal advances past it, the sign-off is stale.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
+pub struct ProposalSignoff {
+    pub proposal_id: String,
+    pub kind: String,
+    pub user_id: String,
+    pub revision_seq: i32,
+    pub created_at: String,
 }
 
 /// A project this proposal targets. `role` is `primary` (a write-target) or

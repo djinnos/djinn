@@ -21,7 +21,7 @@ use crate::tools::list_response::{
 };
 use crate::tools::proposal_ops::{
     ProposalDeleteResponse, ProposalFeedbackResponse, ProposalModel, ProposalShowResponse,
-    ProposalSingleResponse, ProposalTargetModel, ProposalTargetsResponse,
+    ProposalSignoffModel, ProposalSingleResponse, ProposalTargetModel, ProposalTargetsResponse,
 };
 use crate::tools::validation::{
     validate_ac_count, validate_body, validate_design, validate_feedback_status, validate_limit,
@@ -194,6 +194,14 @@ pub struct ProposalFeedbackResolveParams {
     pub status: String,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalSignoffParams {
+    /// Proposal UUID or short_id.
+    pub id: String,
+    /// `scoped` (product) or `technical` (engineering).
+    pub kind: String,
+}
+
 // ── Tool router ──────────────────────────────────────────────────────────────
 
 #[tool_router(router = proposal_tool_router, vis = "pub")]
@@ -255,9 +263,9 @@ impl DjinnMcpServer {
         })
     }
 
-    /// Show a proposal with its targets and feedback.
+    /// Show a proposal with targets, feedback, revisions, and sign-offs.
     #[tool(
-        description = "Show a proposal (by UUID or short_id) including its target projects and the full feedback/discussion thread."
+        description = "Show a proposal (by UUID or short_id) including target projects, the feedback/discussion thread, its revision history, and review sign-offs (each flagged `stale` when given against an older revision)."
     )]
     pub async fn proposal_show(
         &self,
@@ -266,39 +274,33 @@ impl DjinnMcpServer {
         let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
         let project_repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
         let Some(proposal) = repo.resolve(&p.id).await.ok().flatten() else {
-            return Json(ProposalShowResponse {
-                proposal: None,
-                targets: None,
-                feedback: None,
-                error: Some(proposal_not_found_error(&p.id)),
-            });
+            return Json(err_show(proposal_not_found_error(&p.id)));
         };
         let targets = match target_models(&repo, &project_repo, &proposal.id).await {
             Ok(t) => t,
-            Err(e) => {
-                return Json(ProposalShowResponse {
-                    proposal: None,
-                    targets: None,
-                    feedback: None,
-                    error: Some(e),
-                });
-            }
+            Err(e) => return Json(err_show(e)),
         };
         let feedback = match repo.feedback(&proposal.id).await {
             Ok(f) => f.iter().map(Into::into).collect(),
-            Err(e) => {
-                return Json(ProposalShowResponse {
-                    proposal: None,
-                    targets: None,
-                    feedback: None,
-                    error: Some(e.to_string()),
-                });
-            }
+            Err(e) => return Json(err_show(e.to_string())),
+        };
+        let revisions = match repo.revisions(&proposal.id).await {
+            Ok(r) => r.iter().map(Into::into).collect(),
+            Err(e) => return Json(err_show(e.to_string())),
+        };
+        let signoffs = match repo.signoffs(&proposal.id).await {
+            Ok(s) => s
+                .iter()
+                .map(|so| ProposalSignoffModel::from_signoff(so, proposal.latest_revision_seq))
+                .collect(),
+            Err(e) => return Json(err_show(e.to_string())),
         };
         Json(ProposalShowResponse {
             proposal: Some(ProposalModel::from(&proposal)),
             targets: Some(targets),
             feedback: Some(feedback),
+            revisions: Some(revisions),
+            signoffs: Some(signoffs),
             error: None,
         })
     }
@@ -588,9 +590,78 @@ impl DjinnMcpServer {
             Err(e) => Json(err_feedback(e.to_string())),
         }
     }
+
+    /// Give a review sign-off (scoped or technical) as the authenticated user.
+    #[tool(
+        description = "Record a review sign-off on a proposal as the authenticated user. `kind` is `scoped` (product/scope) or `technical` (engineering). The sign-off anchors to the current head revision; later spec edits mark it stale. When a proposal in `in_review` has both a fresh scoped and technical sign-off, it auto-advances to `approved`."
+    )]
+    pub async fn proposal_signoff(
+        &self,
+        Parameters(p): Parameters<ProposalSignoffParams>,
+    ) -> Json<ProposalSingleResponse> {
+        if !matches!(p.kind.as_str(), "scoped" | "technical") {
+            return Json(err_single(format!(
+                "invalid sign-off kind: {:?} (expected scoped or technical)",
+                p.kind
+            )));
+        }
+        let Some(user_id) = djinn_core::auth_context::current_user_id() else {
+            return Json(err_single(
+                "sign-off requires an authenticated user".to_string(),
+            ));
+        };
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        let Some(proposal) = repo.resolve(&p.id).await.ok().flatten() else {
+            return Json(err_single(proposal_not_found_error(&p.id)));
+        };
+        match repo.add_signoff(&proposal.id, &p.kind, &user_id).await {
+            Ok(updated) => Json(ProposalSingleResponse {
+                proposal: Some(ProposalModel::from(&updated)),
+                error: None,
+            }),
+            Err(e) => Json(err_single(e.to_string())),
+        }
+    }
+
+    /// Withdraw the authenticated user's sign-off of a given kind.
+    #[tool(
+        description = "Withdraw the authenticated user's sign-off (`scoped` or `technical`) from a proposal. May demote an `approved` proposal back to `in_review` if the approval gate is no longer met."
+    )]
+    pub async fn proposal_signoff_clear(
+        &self,
+        Parameters(p): Parameters<ProposalSignoffParams>,
+    ) -> Json<ProposalSingleResponse> {
+        let Some(user_id) = djinn_core::auth_context::current_user_id() else {
+            return Json(err_single(
+                "sign-off requires an authenticated user".to_string(),
+            ));
+        };
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        let Some(proposal) = repo.resolve(&p.id).await.ok().flatten() else {
+            return Json(err_single(proposal_not_found_error(&p.id)));
+        };
+        match repo.clear_signoff(&proposal.id, &p.kind, &user_id).await {
+            Ok(updated) => Json(ProposalSingleResponse {
+                proposal: Some(ProposalModel::from(&updated)),
+                error: None,
+            }),
+            Err(e) => Json(err_single(e.to_string())),
+        }
+    }
 }
 
 // ── Small response constructors ──────────────────────────────────────────────
+
+fn err_show(error: impl Into<String>) -> ProposalShowResponse {
+    ProposalShowResponse {
+        proposal: None,
+        targets: None,
+        feedback: None,
+        revisions: None,
+        signoffs: None,
+        error: Some(error.into()),
+    }
+}
 
 fn err_single(error: impl Into<String>) -> ProposalSingleResponse {
     ProposalSingleResponse {

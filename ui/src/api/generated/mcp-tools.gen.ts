@@ -3043,6 +3043,10 @@ export namespace ProposalCreateOutputSchema {
   created_at?: string
   error?: string
   id?: string
+  /**
+   * Head revision number (sign-offs anchored earlier are stale).
+   */
+  latest_revision_seq?: number
   short_id?: string
   /**
    * Lifecycle: draft | in_review | approved | building | done | rejected |
@@ -3236,6 +3240,10 @@ export namespace ProposalListOutputSchema {
   closed_at?: string
   created_at: string
   id: string
+  /**
+   * Head revision number (sign-offs anchored earlier are stale).
+   */
+  latest_revision_seq: number
   short_id: string
   /**
    * Lifecycle: draft | in_review | approved | building | done | rejected |
@@ -3318,6 +3326,8 @@ export namespace ProposalShowOutputSchema {
   error?: string
   feedback?: ProposalFeedbackModel[]
   proposal?: (ProposalModel | null)
+  revisions?: ProposalRevisionModel[]
+  signoffs?: ProposalSignoffModel[]
   targets?: ProposalTargetModel[]
   [k: string]: any
   }
@@ -3352,6 +3362,10 @@ export namespace ProposalShowOutputSchema {
   closed_at?: string
   created_at: string
   id: string
+  /**
+   * Head revision number (sign-offs anchored earlier are stale).
+   */
+  latest_revision_seq: number
   short_id: string
   /**
    * Lifecycle: draft | in_review | approved | building | done | rejected |
@@ -3366,6 +3380,33 @@ export namespace ProposalShowOutputSchema {
   export interface AcceptanceCriterionStatus {
   criterion: string
   met?: boolean
+  [k: string]: any
+  }
+  export interface ProposalRevisionModel {
+  acceptance_criteria: AcceptanceCriterionItem[]
+  body: string
+  created_at: string
+  edited_by_user_id?: string
+  id: string
+  seq: number
+  title: string
+  [k: string]: any
+  }
+  export interface ProposalSignoffModel {
+  created_at: string
+  /**
+   * `scoped` (product) or `technical` (engineering).
+   */
+  kind: string
+  /**
+   * Revision this sign-off was given against.
+   */
+  revision_seq: number
+  /**
+   * True when the proposal advanced past `revision_seq` (needs re-approval).
+   */
+  stale: boolean
+  user_id: string
   [k: string]: any
   }
   export interface ProposalTargetModel {
@@ -3388,6 +3429,112 @@ export namespace ProposalShowOutputSchema {
 
 }
 export type ProposalShowOutput = ProposalShowOutputSchema.ProposalShowOutput;
+export namespace ProposalSignoffInputSchema {
+  export interface ProposalSignoffInput {
+  /**
+   * Proposal UUID or short_id.
+   */
+  id: string
+  /**
+   * `scoped` (product) or `technical` (engineering).
+   */
+  kind: string
+  [k: string]: any
+  }
+
+}
+export type ProposalSignoffInput = ProposalSignoffInputSchema.ProposalSignoffInput;
+export namespace ProposalSignoffOutputSchema {
+  export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
+
+  export interface ProposalSignoffOutput {
+  /**
+   * Structured acceptance criteria (`{criterion, met}` or plain string),
+   * same shape as tasks. `met` means "agreed during scoping".
+   */
+  acceptance_criteria?: AcceptanceCriterionItem[]
+  author_user_id?: string
+  body?: string
+  closed_at?: string
+  created_at?: string
+  error?: string
+  id?: string
+  /**
+   * Head revision number (sign-offs anchored earlier are stale).
+   */
+  latest_revision_seq?: number
+  short_id?: string
+  /**
+   * Lifecycle: draft | in_review | approved | building | done | rejected |
+   * archived | superseded.
+   */
+  status?: string
+  superseded_by?: string
+  title?: string
+  updated_at?: string
+  [k: string]: any
+  }
+  export interface AcceptanceCriterionStatus {
+  criterion: string
+  met?: boolean
+  [k: string]: any
+  }
+
+}
+export type ProposalSignoffOutput = ProposalSignoffOutputSchema.ProposalSignoffOutput;
+export namespace ProposalSignoffClearInputSchema {
+  export interface ProposalSignoffClearInput {
+  /**
+   * Proposal UUID or short_id.
+   */
+  id: string
+  /**
+   * `scoped` (product) or `technical` (engineering).
+   */
+  kind: string
+  [k: string]: any
+  }
+
+}
+export type ProposalSignoffClearInput = ProposalSignoffClearInputSchema.ProposalSignoffClearInput;
+export namespace ProposalSignoffClearOutputSchema {
+  export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
+
+  export interface ProposalSignoffClearOutput {
+  /**
+   * Structured acceptance criteria (`{criterion, met}` or plain string),
+   * same shape as tasks. `met` means "agreed during scoping".
+   */
+  acceptance_criteria?: AcceptanceCriterionItem[]
+  author_user_id?: string
+  body?: string
+  closed_at?: string
+  created_at?: string
+  error?: string
+  id?: string
+  /**
+   * Head revision number (sign-offs anchored earlier are stale).
+   */
+  latest_revision_seq?: number
+  short_id?: string
+  /**
+   * Lifecycle: draft | in_review | approved | building | done | rejected |
+   * archived | superseded.
+   */
+  status?: string
+  superseded_by?: string
+  title?: string
+  updated_at?: string
+  [k: string]: any
+  }
+  export interface AcceptanceCriterionStatus {
+  criterion: string
+  met?: boolean
+  [k: string]: any
+  }
+
+}
+export type ProposalSignoffClearOutput = ProposalSignoffClearOutputSchema.ProposalSignoffClearOutput;
 export namespace ProposalUpdateInputSchema {
   export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
 
@@ -3435,6 +3582,10 @@ export namespace ProposalUpdateOutputSchema {
   created_at?: string
   error?: string
   id?: string
+  /**
+   * Head revision number (sign-offs anchored earlier are stale).
+   */
+  latest_revision_seq?: number
   short_id?: string
   /**
    * Lifecycle: draft | in_review | approved | building | done | rejected |
@@ -4894,7 +5045,7 @@ export namespace UserSettingsSetOutputSchema {
 }
 export type UserSettingsSetOutput = UserSettingsSetOutputSchema.UserSettingsSetOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_add_read_source" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "proposal_add_target" | "proposal_create" | "proposal_delete" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_list" | "proposal_remove_target" | "proposal_show" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "user_settings_get" | "user_settings_set";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_add_read_source" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "proposal_add_target" | "proposal_create" | "proposal_delete" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_list" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "user_settings_get" | "user_settings_set";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -4970,6 +5121,8 @@ export interface McpToolMap {
   "proposal_list": { input: ProposalListInput; output: ProposalListOutput };
   "proposal_remove_target": { input: ProposalRemoveTargetInput; output: ProposalRemoveTargetOutput };
   "proposal_show": { input: ProposalShowInput; output: ProposalShowOutput };
+  "proposal_signoff": { input: ProposalSignoffInput; output: ProposalSignoffOutput };
+  "proposal_signoff_clear": { input: ProposalSignoffClearInput; output: ProposalSignoffClearOutput };
   "proposal_update": { input: ProposalUpdateInput; output: ProposalUpdateOutput };
   "provider_catalog": { input: ProviderCatalogInput; output: ProviderCatalogOutput };
   "provider_connected": { input: ProviderConnectedInput; output: ProviderConnectedOutput };

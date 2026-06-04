@@ -16,6 +16,7 @@ import {
   type ProposalStatus,
 } from "@/components/proposals/proposalStatus";
 import { StatusIcon } from "@/components/proposals/StatusIcon";
+import { ProposalSignoffs } from "@/components/proposals/ProposalSignoffs";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -41,11 +42,11 @@ import {
 import type { Project } from "@/api/server";
 import type { AcceptanceCriterion, Proposal, ProposalFeedback } from "@/api/types";
 
-// Statuses a human sets directly. building/done are reached via graduation.
+// Statuses a human sets directly. `approved` is reached via sign-offs;
+// `building`/`done` via graduation.
 const MANUAL_STATUSES: ProposalStatus[] = [
   "draft",
   "in_review",
-  "approved",
   "rejected",
   "archived",
   "superseded",
@@ -398,7 +399,7 @@ function ProposalDetailView({
               <SelectTrigger className="w-[150px]">
                 <span className="flex items-center gap-2">
                   <StatusIcon status={proposal.status} />
-                  <SelectValue />
+                  {statusLabel(proposal.status)}
                 </span>
               </SelectTrigger>
               <SelectContent>
@@ -503,6 +504,10 @@ function ProposalDetailView({
             {proposal.body || "_No spec body yet._"}
           </ReactMarkdown>
         </div>
+
+        <Separator />
+
+        <ProposalSignoffs detail={detail} onChanged={onChanged} />
 
         <Separator />
 

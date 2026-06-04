@@ -1,5 +1,7 @@
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
-use djinn_core::models::{Proposal, ProposalFeedback, ProposalTarget};
+use djinn_core::models::{
+    Proposal, ProposalFeedback, ProposalRevision, ProposalSignoff, ProposalTarget,
+};
 
 use crate::database::Database;
 use crate::{Error, Result};
@@ -94,7 +96,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq
              FROM proposals WHERE id = $1"#,
             id
         )
@@ -108,7 +110,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq
              FROM proposals WHERE short_id = $1"#,
             short_id
         )
@@ -123,7 +125,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq
              FROM proposals WHERE id = $1 OR short_id = $2"#,
             id_or_short,
             id_or_short
@@ -147,8 +149,8 @@ impl ProposalRepository {
         // `created_by_user_id`. `None` when no user context is in scope.
         let author_user_id = djinn_core::auth_context::current_user_id();
         sqlx::query!(
-            "INSERT INTO proposals (id, short_id, title, body, acceptance_criteria, status, author_user_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO proposals (id, short_id, title, body, acceptance_criteria, status, author_user_id, latest_revision_seq)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 1)",
             id,
             short_id,
             input.title,
@@ -158,6 +160,17 @@ impl ProposalRepository {
             author_user_id
         )
         .execute(self.db.pool())
+        .await?;
+        // Seed revision 1 with the initial spec so every proposal has a head to
+        // diff against.
+        self.insert_revision(
+            &id,
+            1,
+            input.title,
+            input.body,
+            &acceptance_criteria,
+            author_user_id.as_deref(),
+        )
         .await?;
         let proposal = self.get_required(&id).await?;
         self.events
@@ -173,9 +186,37 @@ impl ProposalRepository {
                     "invalid json for proposals.acceptance_criteria: {e}"
                 ))
             })?;
+        let current = self
+            .get(id)
+            .await?
+            .ok_or_else(|| Error::InvalidData(format!("proposal not found: {id}")))?;
+        let current_ac: serde_json::Value =
+            serde_json::from_str(&current.acceptance_criteria).unwrap_or(serde_json::json!([]));
+        // A "material" edit changes the spec (title/body/AC), not just status.
+        // Only material edits append a revision and disturb sign-offs.
+        let content_changed = input.title != current.title
+            || input.body != current.body
+            || acceptance_criteria != current_ac;
+
+        // Stale/hard rule: editing the spec of an *approved* proposal reverts it
+        // to in_review and clears its sign-offs (you changed an approved spec).
+        // While in_review, edits leave sign-offs in place — they go stale
+        // automatically because the head revision advances past them.
+        let demote = content_changed && current.status == "approved";
+        let effective_status = if demote && input.status == "approved" {
+            "in_review"
+        } else {
+            input.status
+        };
+        let next_seq = if content_changed {
+            current.latest_revision_seq + 1
+        } else {
+            current.latest_revision_seq
+        };
+
         sqlx::query!(
             r#"UPDATE proposals SET title = $1, body = $2, acceptance_criteria = $3, status = $4,
-                    superseded_by = $5,
+                    superseded_by = $5, latest_revision_seq = $8,
                     closed_at = CASE WHEN $6 IN ('done', 'rejected', 'archived', 'superseded')
                         THEN COALESCE(closed_at, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
                         ELSE NULL END,
@@ -184,13 +225,33 @@ impl ProposalRepository {
             input.title,
             input.body,
             acceptance_criteria,
-            input.status,
+            effective_status,
             input.superseded_by,
-            input.status,
-            id
+            effective_status,
+            id,
+            next_seq
         )
         .execute(self.db.pool())
         .await?;
+
+        if content_changed {
+            let editor = djinn_core::auth_context::current_user_id();
+            self.insert_revision(
+                id,
+                next_seq,
+                input.title,
+                input.body,
+                &acceptance_criteria,
+                editor.as_deref(),
+            )
+            .await?;
+        }
+        if demote {
+            sqlx::query!("DELETE FROM proposal_signoffs WHERE proposal_id = $1", id)
+                .execute(self.db.pool())
+                .await?;
+        }
+
         let proposal = self.get_required(id).await?;
         self.events
             .send(DjinnEventEnvelope::proposal_updated(&proposal));
@@ -370,7 +431,7 @@ impl ProposalRepository {
         // NOTE: dynamic SQL (WHERE + ORDER built from optional filters) — compile-time check not possible
         let sql = format!(
             r#"SELECT id, short_id, title, body, acceptance_criteria::text AS acceptance_criteria,
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq
              FROM proposals WHERE {where_sql} ORDER BY {order_sql} LIMIT {limit_ph} OFFSET {offset_ph}"#
         );
         let mut q = sqlx::query_as::<_, Proposal>(&sql);
@@ -388,6 +449,154 @@ impl ProposalRepository {
             proposals,
             total_count: total,
         })
+    }
+
+    // ── Revisions + sign-offs ────────────────────────────────────────────────
+
+    async fn insert_revision(
+        &self,
+        proposal_id: &str,
+        seq: i32,
+        title: &str,
+        body: &str,
+        acceptance_criteria: &serde_json::Value,
+        edited_by: Option<&str>,
+    ) -> Result<()> {
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query!(
+            "INSERT INTO proposal_revisions (id, proposal_id, seq, title, body, acceptance_criteria, edited_by_user_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            id,
+            proposal_id,
+            seq,
+            title,
+            body,
+            acceptance_criteria,
+            edited_by
+        )
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Revisions of a proposal, oldest first.
+    pub async fn revisions(&self, proposal_id: &str) -> Result<Vec<ProposalRevision>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            ProposalRevision,
+            r#"SELECT id, proposal_id, seq, title, body,
+                    acceptance_criteria::text AS "acceptance_criteria!",
+                    edited_by_user_id, created_at
+             FROM proposal_revisions WHERE proposal_id = $1 ORDER BY seq"#,
+            proposal_id
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    pub async fn signoffs(&self, proposal_id: &str) -> Result<Vec<ProposalSignoff>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            ProposalSignoff,
+            r#"SELECT proposal_id, kind, user_id, revision_seq, created_at
+             FROM proposal_signoffs WHERE proposal_id = $1 ORDER BY created_at"#,
+            proposal_id
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// Record (or refresh) a `kind` sign-off by `user_id`, anchored to the head
+    /// revision. Idempotent per (proposal, kind, user). Reconciles approval.
+    pub async fn add_signoff(
+        &self,
+        proposal_id: &str,
+        kind: &str,
+        user_id: &str,
+    ) -> Result<Proposal> {
+        self.db.ensure_initialized().await?;
+        let proposal = self
+            .get(proposal_id)
+            .await?
+            .ok_or_else(|| Error::InvalidData(format!("proposal not found: {proposal_id}")))?;
+        sqlx::query!(
+            r#"INSERT INTO proposal_signoffs (proposal_id, kind, user_id, revision_seq)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (proposal_id, kind, user_id) DO UPDATE
+                 SET revision_seq = EXCLUDED.revision_seq,
+                     created_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#,
+            proposal_id,
+            kind,
+            user_id,
+            proposal.latest_revision_seq
+        )
+        .execute(self.db.pool())
+        .await?;
+        self.reconcile_approval(proposal_id).await?;
+        let updated = self.get_required(proposal_id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_updated(&updated));
+        Ok(updated)
+    }
+
+    /// Withdraw `user_id`'s `kind` sign-off. Reconciles approval (may demote
+    /// `approved → in_review` if the gate is no longer met).
+    pub async fn clear_signoff(
+        &self,
+        proposal_id: &str,
+        kind: &str,
+        user_id: &str,
+    ) -> Result<Proposal> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            "DELETE FROM proposal_signoffs WHERE proposal_id = $1 AND kind = $2 AND user_id = $3",
+            proposal_id,
+            kind,
+            user_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        self.reconcile_approval(proposal_id).await?;
+        let updated = self.get_required(proposal_id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_updated(&updated));
+        Ok(updated)
+    }
+
+    /// Auto-advance `in_review → approved` when both a scoped and a technical
+    /// sign-off exist at the head revision; auto-demote `approved → in_review`
+    /// when that's no longer true.
+    async fn reconcile_approval(&self, proposal_id: &str) -> Result<()> {
+        let proposal = match self.get(proposal_id).await? {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        let fresh: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(DISTINCT kind) AS "n!: i64" FROM proposal_signoffs
+             WHERE proposal_id = $1 AND revision_seq = $2 AND kind IN ('scoped', 'technical')"#,
+            proposal_id,
+            proposal.latest_revision_seq
+        )
+        .fetch_one(self.db.pool())
+        .await?;
+        let both = fresh == 2;
+        let new_status = match proposal.status.as_str() {
+            "in_review" if both => Some("approved"),
+            "approved" if !both => Some("in_review"),
+            _ => None,
+        };
+        if let Some(status) = new_status {
+            sqlx::query!(
+                r#"UPDATE proposals SET status = $1,
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                 WHERE id = $2"#,
+                status,
+                proposal_id
+            )
+            .execute(self.db.pool())
+            .await?;
+        }
+        Ok(())
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────────
@@ -700,5 +909,70 @@ mod tests {
             .unwrap();
         assert_eq!(targeted.total_count, 1);
         assert_eq!(targeted.proposals[0].id, a.id);
+    }
+
+    fn update_input<'a>(
+        title: &'a str,
+        body: &'a str,
+        ac: &'a str,
+        status: &'a str,
+    ) -> ProposalUpdateInput<'a> {
+        ProposalUpdateInput {
+            title,
+            body,
+            acceptance_criteria: ac,
+            status,
+            superseded_by: None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn signoffs_gate_approval_revisions_and_staleness() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Gate")).await.unwrap();
+        assert_eq!(p.latest_revision_seq, 1);
+        // create seeds revision 1.
+        assert_eq!(repo.revisions(&p.id).await.unwrap().len(), 1);
+
+        // Move to in_review (status-only → no new revision).
+        repo.update(&p.id, update_input("Gate", "", "[]", "in_review"))
+            .await
+            .unwrap();
+        assert_eq!(repo.revisions(&p.id).await.unwrap().len(), 1);
+
+        // One sign-off is not enough.
+        let after_scoped = repo.add_signoff(&p.id, "scoped", "user-a").await.unwrap();
+        assert_eq!(after_scoped.status, "in_review");
+        // Both fresh sign-offs auto-advance to approved.
+        let after_tech = repo
+            .add_signoff(&p.id, "technical", "user-b")
+            .await
+            .unwrap();
+        assert_eq!(after_tech.status, "approved");
+
+        // Editing an approved spec demotes to in_review, bumps the revision, and
+        // clears sign-offs.
+        let edited = repo
+            .update(&p.id, update_input("Gate v2", "", "[]", "approved"))
+            .await
+            .unwrap();
+        assert_eq!(edited.status, "in_review");
+        assert_eq!(edited.latest_revision_seq, 2);
+        assert_eq!(repo.revisions(&p.id).await.unwrap().len(), 2);
+        assert!(repo.signoffs(&p.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clearing_signoff_demotes_from_approved() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Demote")).await.unwrap();
+        repo.update(&p.id, update_input("Demote", "", "[]", "in_review"))
+            .await
+            .unwrap();
+        repo.add_signoff(&p.id, "scoped", "u1").await.unwrap();
+        let approved = repo.add_signoff(&p.id, "technical", "u2").await.unwrap();
+        assert_eq!(approved.status, "approved");
+        let demoted = repo.clear_signoff(&p.id, "technical", "u2").await.unwrap();
+        assert_eq!(demoted.status, "in_review");
     }
 }

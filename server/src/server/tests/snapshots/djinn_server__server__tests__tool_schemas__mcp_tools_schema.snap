@@ -5861,6 +5861,11 @@ expression: signatures
         "id": {
           "type": "string"
         },
+        "latest_revision_seq": {
+          "description": "Head revision number (sign-offs anchored earlier are stale).",
+          "format": "int32",
+          "type": "integer"
+        },
         "short_id": {
           "type": "string"
         },
@@ -6233,6 +6238,11 @@ expression: signatures
             "id": {
               "type": "string"
             },
+            "latest_revision_seq": {
+              "description": "Head revision number (sign-offs anchored earlier are stale).",
+              "format": "int32",
+              "type": "integer"
+            },
             "short_id": {
               "type": "string"
             },
@@ -6259,7 +6269,8 @@ expression: signatures
             "acceptance_criteria",
             "status",
             "created_at",
-            "updated_at"
+            "updated_at",
+            "latest_revision_seq"
           ],
           "type": "object"
         }
@@ -6500,6 +6511,11 @@ expression: signatures
             "id": {
               "type": "string"
             },
+            "latest_revision_seq": {
+              "description": "Head revision number (sign-offs anchored earlier are stale).",
+              "format": "int32",
+              "type": "integer"
+            },
             "short_id": {
               "type": "string"
             },
@@ -6526,7 +6542,78 @@ expression: signatures
             "acceptance_criteria",
             "status",
             "created_at",
-            "updated_at"
+            "updated_at",
+            "latest_revision_seq"
+          ],
+          "type": "object"
+        },
+        "ProposalRevisionModel": {
+          "properties": {
+            "acceptance_criteria": {
+              "items": {
+                "$ref": "#/$defs/AcceptanceCriterionItem"
+              },
+              "type": "array"
+            },
+            "body": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "edited_by_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "seq",
+            "title",
+            "body",
+            "acceptance_criteria",
+            "created_at"
+          ],
+          "type": "object"
+        },
+        "ProposalSignoffModel": {
+          "properties": {
+            "created_at": {
+              "type": "string"
+            },
+            "kind": {
+              "description": "`scoped` (product) or `technical` (engineering).",
+              "type": "string"
+            },
+            "revision_seq": {
+              "description": "Revision this sign-off was given against.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "stale": {
+              "description": "True when the proposal advanced past `revision_seq` (needs re-approval).",
+              "type": "boolean"
+            },
+            "user_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "user_id",
+            "revision_seq",
+            "stale",
+            "created_at"
           ],
           "type": "object"
         },
@@ -6585,6 +6672,20 @@ expression: signatures
             }
           ]
         },
+        "revisions": {
+          "items": {
+            "$ref": "#/$defs/ProposalRevisionModel"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "signoffs": {
+          "items": {
+            "$ref": "#/$defs/ProposalSignoffModel"
+          },
+          "nullable": true,
+          "type": "array"
+        },
         "targets": {
           "items": {
             "$ref": "#/$defs/ProposalTargetModel"
@@ -6594,6 +6695,218 @@ expression: signatures
         }
       },
       "title": "ProposalShowResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_signoff",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "`scoped` (product) or `technical` (engineering).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind"
+      ],
+      "title": "ProposalSignoffParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "AcceptanceCriterionItem": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/AcceptanceCriterionStatus"
+            }
+          ]
+        },
+        "AcceptanceCriterionStatus": {
+          "properties": {
+            "criterion": {
+              "type": "string"
+            },
+            "met": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "criterion"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "acceptance_criteria": {
+          "description": "Structured acceptance criteria (`{criterion, met}` or plain string),\nsame shape as tasks. `met` means \"agreed during scoping\".",
+          "items": {
+            "$ref": "#/$defs/AcceptanceCriterionItem"
+          },
+          "type": "array"
+        },
+        "author_user_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "closed_at": {
+          "nullable": true,
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "latest_revision_seq": {
+          "description": "Head revision number (sign-offs anchored earlier are stale).",
+          "format": "int32",
+          "type": "integer"
+        },
+        "short_id": {
+          "type": "string"
+        },
+        "status": {
+          "description": "Lifecycle: draft | in_review | approved | building | done | rejected |\narchived | superseded.",
+          "type": "string"
+        },
+        "superseded_by": {
+          "nullable": true,
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "title": "ProposalSingleResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_signoff_clear",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "`scoped` (product) or `technical` (engineering).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind"
+      ],
+      "title": "ProposalSignoffParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "AcceptanceCriterionItem": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/AcceptanceCriterionStatus"
+            }
+          ]
+        },
+        "AcceptanceCriterionStatus": {
+          "properties": {
+            "criterion": {
+              "type": "string"
+            },
+            "met": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "criterion"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "acceptance_criteria": {
+          "description": "Structured acceptance criteria (`{criterion, met}` or plain string),\nsame shape as tasks. `met` means \"agreed during scoping\".",
+          "items": {
+            "$ref": "#/$defs/AcceptanceCriterionItem"
+          },
+          "type": "array"
+        },
+        "author_user_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "closed_at": {
+          "nullable": true,
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "latest_revision_seq": {
+          "description": "Head revision number (sign-offs anchored earlier are stale).",
+          "format": "int32",
+          "type": "integer"
+        },
+        "short_id": {
+          "type": "string"
+        },
+        "status": {
+          "description": "Lifecycle: draft | in_review | approved | building | done | rejected |\narchived | superseded.",
+          "type": "string"
+        },
+        "superseded_by": {
+          "nullable": true,
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "title": "ProposalSingleResponse",
       "type": "object"
     }
   },
@@ -6723,6 +7036,11 @@ expression: signatures
         },
         "id": {
           "type": "string"
+        },
+        "latest_revision_seq": {
+          "description": "Head revision number (sign-offs anchored earlier are stale).",
+          "format": "int32",
+          "type": "integer"
         },
         "short_id": {
           "type": "string"

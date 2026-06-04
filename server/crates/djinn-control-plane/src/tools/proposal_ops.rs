@@ -3,7 +3,9 @@
 // JSON-array fields expanded to `Vec<String>`.
 
 use crate::tools::epic_ops::AcceptanceCriterionItem;
-use djinn_core::models::{Proposal, ProposalFeedback, ProposalTarget};
+use djinn_core::models::{
+    Proposal, ProposalFeedback, ProposalRevision, ProposalSignoff, ProposalTarget,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
@@ -26,6 +28,8 @@ pub struct ProposalModel {
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub closed_at: Option<String>,
+    /// Head revision number (sign-offs anchored earlier are stale).
+    pub latest_revision_seq: i32,
 }
 
 impl From<&Proposal> for ProposalModel {
@@ -42,6 +46,57 @@ impl From<&Proposal> for ProposalModel {
             created_at: p.created_at.clone(),
             updated_at: p.updated_at.clone(),
             closed_at: p.closed_at.clone(),
+            latest_revision_seq: p.latest_revision_seq,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalRevisionModel {
+    pub id: String,
+    pub seq: i32,
+    pub title: String,
+    pub body: String,
+    pub acceptance_criteria: Vec<AcceptanceCriterionItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edited_by_user_id: Option<String>,
+    pub created_at: String,
+}
+
+impl From<&ProposalRevision> for ProposalRevisionModel {
+    fn from(r: &ProposalRevision) -> Self {
+        Self {
+            id: r.id.clone(),
+            seq: r.seq,
+            title: r.title.clone(),
+            body: r.body.clone(),
+            acceptance_criteria: parse_acceptance_criteria(&r.acceptance_criteria),
+            edited_by_user_id: r.edited_by_user_id.clone(),
+            created_at: r.created_at.clone(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalSignoffModel {
+    /// `scoped` (product) or `technical` (engineering).
+    pub kind: String,
+    pub user_id: String,
+    /// Revision this sign-off was given against.
+    pub revision_seq: i32,
+    /// True when the proposal advanced past `revision_seq` (needs re-approval).
+    pub stale: bool,
+    pub created_at: String,
+}
+
+impl ProposalSignoffModel {
+    pub fn from_signoff(s: &ProposalSignoff, latest_revision_seq: i32) -> Self {
+        Self {
+            kind: s.kind.clone(),
+            user_id: s.user_id.clone(),
+            revision_seq: s.revision_seq,
+            stale: s.revision_seq < latest_revision_seq,
+            created_at: s.created_at.clone(),
         }
     }
 }
@@ -130,6 +185,10 @@ pub struct ProposalShowResponse {
     pub targets: Option<Vec<ProposalTargetModel>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub feedback: Option<Vec<ProposalFeedbackModel>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revisions: Option<Vec<ProposalRevisionModel>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signoffs: Option<Vec<ProposalSignoffModel>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
