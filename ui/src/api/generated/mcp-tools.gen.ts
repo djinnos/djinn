@@ -3086,6 +3086,54 @@ export namespace ProposalDeleteOutputSchema {
 
 }
 export type ProposalDeleteOutput = ProposalDeleteOutputSchema.ProposalDeleteOutput;
+export namespace ProposalFeedbackAcceptInputSchema {
+  export interface ProposalFeedbackAcceptInput {
+  /**
+   * Feedback entry UUID.
+   */
+  id: string
+  [k: string]: any
+  }
+
+}
+export type ProposalFeedbackAcceptInput = ProposalFeedbackAcceptInputSchema.ProposalFeedbackAcceptInput;
+export namespace ProposalFeedbackAcceptOutputSchema {
+  export interface ProposalFeedbackAcceptOutput {
+  error?: string
+  feedback?: (ProposalFeedbackModel | null)
+  [k: string]: any
+  }
+  export interface ProposalFeedbackModel {
+  /**
+   * Revision the proposed change landed in once accepted.
+   */
+  applied_revision_seq?: number
+  /**
+   * `user` or `ai`.
+   */
+  author_kind: string
+  author_model?: string
+  author_user_id?: string
+  body: string
+  created_at: string
+  id: string
+  parent_id?: string
+  proposal_id: string
+  /**
+   * For an edit suggestion, the proposed new spec body.
+   */
+  proposed_body?: string
+  /**
+   * `null` = discussion; `open` | `accepted` | `rejected` = suggestion.
+   */
+  status?: string
+  target_section?: string
+  updated_at: string
+  [k: string]: any
+  }
+
+}
+export type ProposalFeedbackAcceptOutput = ProposalFeedbackAcceptOutputSchema.ProposalFeedbackAcceptOutput;
 export namespace ProposalFeedbackAddInputSchema {
   export interface ProposalFeedbackAddInput {
   /**
@@ -3105,6 +3153,11 @@ export namespace ProposalFeedbackAddInputSchema {
    * Proposal UUID or short_id.
    */
   proposal_id: string
+  /**
+   * For an edit suggestion, the proposed new spec body. Accepting the
+   * feedback applies it (appending a revision).
+   */
+  proposed_body?: string
   /**
    * Omit for plain discussion; set `open` to file a trackable suggestion.
    */
@@ -3126,6 +3179,10 @@ export namespace ProposalFeedbackAddOutputSchema {
   }
   export interface ProposalFeedbackModel {
   /**
+   * Revision the proposed change landed in once accepted.
+   */
+  applied_revision_seq?: number
+  /**
    * `user` or `ai`.
    */
   author_kind: string
@@ -3136,6 +3193,10 @@ export namespace ProposalFeedbackAddOutputSchema {
   id: string
   parent_id?: string
   proposal_id: string
+  /**
+   * For an edit suggestion, the proposed new spec body.
+   */
+  proposed_body?: string
   /**
    * `null` = discussion; `open` | `accepted` | `rejected` = suggestion.
    */
@@ -3170,6 +3231,10 @@ export namespace ProposalFeedbackResolveOutputSchema {
   }
   export interface ProposalFeedbackModel {
   /**
+   * Revision the proposed change landed in once accepted.
+   */
+  applied_revision_seq?: number
+  /**
    * `user` or `ai`.
    */
   author_kind: string
@@ -3180,6 +3245,10 @@ export namespace ProposalFeedbackResolveOutputSchema {
   id: string
   parent_id?: string
   proposal_id: string
+  /**
+   * For an edit suggestion, the proposed new spec body.
+   */
+  proposed_body?: string
   /**
    * `null` = discussion; `open` | `accepted` | `rejected` = suggestion.
    */
@@ -3333,6 +3402,10 @@ export namespace ProposalShowOutputSchema {
   }
   export interface ProposalFeedbackModel {
   /**
+   * Revision the proposed change landed in once accepted.
+   */
+  applied_revision_seq?: number
+  /**
    * `user` or `ai`.
    */
   author_kind: string
@@ -3343,6 +3416,10 @@ export namespace ProposalShowOutputSchema {
   id: string
   parent_id?: string
   proposal_id: string
+  /**
+   * For an edit suggestion, the proposed new spec body.
+   */
+  proposed_body?: string
   /**
    * `null` = discussion; `open` | `accepted` | `rejected` = suggestion.
    */
@@ -5045,7 +5122,7 @@ export namespace UserSettingsSetOutputSchema {
 }
 export type UserSettingsSetOutput = UserSettingsSetOutputSchema.UserSettingsSetOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_add_read_source" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "proposal_add_target" | "proposal_create" | "proposal_delete" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_list" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "user_settings_get" | "user_settings_set";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_add_read_source" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "proposal_add_target" | "proposal_create" | "proposal_delete" | "proposal_feedback_accept" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_list" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "user_settings_get" | "user_settings_set";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -5116,6 +5193,7 @@ export interface McpToolMap {
   "proposal_add_target": { input: ProposalAddTargetInput; output: ProposalAddTargetOutput };
   "proposal_create": { input: ProposalCreateInput; output: ProposalCreateOutput };
   "proposal_delete": { input: ProposalDeleteInput; output: ProposalDeleteOutput };
+  "proposal_feedback_accept": { input: ProposalFeedbackAcceptInput; output: ProposalFeedbackAcceptOutput };
   "proposal_feedback_add": { input: ProposalFeedbackAddInput; output: ProposalFeedbackAddOutput };
   "proposal_feedback_resolve": { input: ProposalFeedbackResolveInput; output: ProposalFeedbackResolveOutput };
   "proposal_list": { input: ProposalListInput; output: ProposalListOutput };

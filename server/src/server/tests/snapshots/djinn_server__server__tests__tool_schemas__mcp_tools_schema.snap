@@ -5921,54 +5921,31 @@ expression: signatures
     }
   },
   {
-    "name": "proposal_feedback_add",
+    "name": "proposal_feedback_accept",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
-        "author_kind": {
-          "description": "`user` (default) or `ai`.",
-          "nullable": true,
-          "type": "string"
-        },
-        "author_model": {
-          "description": "Model id when author_kind is `ai`.",
-          "nullable": true,
-          "type": "string"
-        },
-        "body": {
-          "type": "string"
-        },
-        "parent_id": {
-          "description": "Parent feedback id for a threaded reply.",
-          "nullable": true,
-          "type": "string"
-        },
-        "proposal_id": {
-          "description": "Proposal UUID or short_id.",
-          "type": "string"
-        },
-        "status": {
-          "description": "Omit for plain discussion; set `open` to file a trackable suggestion.",
-          "nullable": true,
-          "type": "string"
-        },
-        "target_section": {
-          "description": "Optional pointer to the spec section this is about.",
-          "nullable": true,
+        "id": {
+          "description": "Feedback entry UUID.",
           "type": "string"
         }
       },
       "required": [
-        "proposal_id",
-        "body"
+        "id"
       ],
-      "title": "ProposalFeedbackAddParams",
+      "title": "ProposalFeedbackAcceptParams",
       "type": "object"
     },
     "output_schema": {
       "$defs": {
         "ProposalFeedbackModel": {
           "properties": {
+            "applied_revision_seq": {
+              "description": "Revision the proposed change landed in once accepted.",
+              "format": "int32",
+              "nullable": true,
+              "type": "integer"
+            },
             "author_kind": {
               "description": "`user` or `ai`.",
               "type": "string"
@@ -5995,6 +5972,150 @@ expression: signatures
               "type": "string"
             },
             "proposal_id": {
+              "type": "string"
+            },
+            "proposed_body": {
+              "description": "For an edit suggestion, the proposed new spec body.",
+              "nullable": true,
+              "type": "string"
+            },
+            "status": {
+              "description": "`null` = discussion; `open` | `accepted` | `rejected` = suggestion.",
+              "nullable": true,
+              "type": "string"
+            },
+            "target_section": {
+              "nullable": true,
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "proposal_id",
+            "author_kind",
+            "body",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "feedback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalFeedbackModel"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ]
+        }
+      },
+      "title": "ProposalFeedbackResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_feedback_add",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "author_kind": {
+          "description": "`user` (default) or `ai`.",
+          "nullable": true,
+          "type": "string"
+        },
+        "author_model": {
+          "description": "Model id when author_kind is `ai`.",
+          "nullable": true,
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "parent_id": {
+          "description": "Parent feedback id for a threaded reply.",
+          "nullable": true,
+          "type": "string"
+        },
+        "proposal_id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        },
+        "proposed_body": {
+          "description": "For an edit suggestion, the proposed new spec body. Accepting the\nfeedback applies it (appending a revision).",
+          "nullable": true,
+          "type": "string"
+        },
+        "status": {
+          "description": "Omit for plain discussion; set `open` to file a trackable suggestion.",
+          "nullable": true,
+          "type": "string"
+        },
+        "target_section": {
+          "description": "Optional pointer to the spec section this is about.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id",
+        "body"
+      ],
+      "title": "ProposalFeedbackAddParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "ProposalFeedbackModel": {
+          "properties": {
+            "applied_revision_seq": {
+              "description": "Revision the proposed change landed in once accepted.",
+              "format": "int32",
+              "nullable": true,
+              "type": "integer"
+            },
+            "author_kind": {
+              "description": "`user` or `ai`.",
+              "type": "string"
+            },
+            "author_model": {
+              "nullable": true,
+              "type": "string"
+            },
+            "author_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "parent_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "proposal_id": {
+              "type": "string"
+            },
+            "proposed_body": {
+              "description": "For an edit suggestion, the proposed new spec body.",
+              "nullable": true,
               "type": "string"
             },
             "status": {
@@ -6068,6 +6189,12 @@ expression: signatures
       "$defs": {
         "ProposalFeedbackModel": {
           "properties": {
+            "applied_revision_seq": {
+              "description": "Revision the proposed change landed in once accepted.",
+              "format": "int32",
+              "nullable": true,
+              "type": "integer"
+            },
             "author_kind": {
               "description": "`user` or `ai`.",
               "type": "string"
@@ -6094,6 +6221,11 @@ expression: signatures
               "type": "string"
             },
             "proposal_id": {
+              "type": "string"
+            },
+            "proposed_body": {
+              "description": "For an edit suggestion, the proposed new spec body.",
+              "nullable": true,
               "type": "string"
             },
             "status": {
@@ -6434,6 +6566,12 @@ expression: signatures
         },
         "ProposalFeedbackModel": {
           "properties": {
+            "applied_revision_seq": {
+              "description": "Revision the proposed change landed in once accepted.",
+              "format": "int32",
+              "nullable": true,
+              "type": "integer"
+            },
             "author_kind": {
               "description": "`user` or `ai`.",
               "type": "string"
@@ -6460,6 +6598,11 @@ expression: signatures
               "type": "string"
             },
             "proposal_id": {
+              "type": "string"
+            },
+            "proposed_body": {
+              "description": "For an edit suggestion, the proposed new spec body.",
+              "nullable": true,
               "type": "string"
             },
             "status": {

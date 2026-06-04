@@ -78,6 +78,8 @@ pub struct ProposalFeedbackCreateInput<'a> {
     pub target_section: Option<&'a str>,
     /// `None` = discussion; `open` | `accepted` | `rejected` = suggestion.
     pub status: Option<&'a str>,
+    /// For an edit suggestion, the proposed new spec body.
+    pub proposed_body: Option<&'a str>,
 }
 
 pub struct ProposalRepository {
@@ -326,7 +328,7 @@ impl ProposalRepository {
         Ok(sqlx::query_as!(
             ProposalFeedback,
             r#"SELECT id, proposal_id, parent_id, author_kind, author_user_id, author_model,
-                    body, target_section, status, created_at, updated_at
+                    body, target_section, status, proposed_body, applied_revision_seq, created_at, updated_at
              FROM proposal_feedback WHERE proposal_id = $1 ORDER BY created_at"#,
             proposal_id
         )
@@ -339,7 +341,7 @@ impl ProposalRepository {
         Ok(sqlx::query_as!(
             ProposalFeedback,
             r#"SELECT id, proposal_id, parent_id, author_kind, author_user_id, author_model,
-                    body, target_section, status, created_at, updated_at
+                    body, target_section, status, proposed_body, applied_revision_seq, created_at, updated_at
              FROM proposal_feedback WHERE id = $1"#,
             feedback_id
         )
@@ -356,8 +358,8 @@ impl ProposalRepository {
         let author_user_id = djinn_core::auth_context::current_user_id();
         sqlx::query!(
             "INSERT INTO proposal_feedback
-                (id, proposal_id, parent_id, author_kind, author_user_id, author_model, body, target_section, status)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                (id, proposal_id, parent_id, author_kind, author_user_id, author_model, body, target_section, status, proposed_body)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             id,
             input.proposal_id,
             input.parent_id,
@@ -366,7 +368,8 @@ impl ProposalRepository {
             input.author_model,
             input.body,
             input.target_section,
-            input.status
+            input.status,
+            input.proposed_body
         )
         .execute(self.db.pool())
         .await?;
@@ -392,6 +395,53 @@ impl ProposalRepository {
                     updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
              WHERE id = $2"#,
             status,
+            feedback_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        let feedback = self.get_feedback_required(feedback_id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_feedback_created(
+                &feedback.proposal_id,
+                &feedback,
+            ));
+        Ok(feedback)
+    }
+
+    /// Accept a feedback entry. For an edit suggestion (carries
+    /// `proposed_body`), applies the proposed body to the proposal — which
+    /// appends a revision through the normal edit path — and stamps the
+    /// feedback with the revision it landed in. Always marks it `accepted`.
+    pub async fn accept_feedback(&self, feedback_id: &str) -> Result<ProposalFeedback> {
+        self.db.ensure_initialized().await?;
+        let fb = self
+            .get_feedback(feedback_id)
+            .await?
+            .ok_or_else(|| Error::InvalidData(format!("feedback not found: {feedback_id}")))?;
+        let mut applied_seq: Option<i32> = None;
+        if let Some(proposed_body) = fb.proposed_body.as_deref() {
+            let proposal = self.get(&fb.proposal_id).await?.ok_or_else(|| {
+                Error::InvalidData(format!("proposal not found: {}", fb.proposal_id))
+            })?;
+            let updated = self
+                .update(
+                    &proposal.id,
+                    ProposalUpdateInput {
+                        title: &proposal.title,
+                        body: proposed_body,
+                        acceptance_criteria: &proposal.acceptance_criteria,
+                        status: &proposal.status,
+                        superseded_by: proposal.superseded_by.as_deref(),
+                    },
+                )
+                .await?;
+            applied_seq = Some(updated.latest_revision_seq);
+        }
+        sqlx::query!(
+            r#"UPDATE proposal_feedback SET status = 'accepted', applied_revision_seq = $1,
+                updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $2"#,
+            applied_seq,
             feedback_id
         )
         .execute(self.db.pool())
@@ -850,6 +900,7 @@ mod tests {
                 body: "what about X?",
                 target_section: None,
                 status: None,
+                proposed_body: None,
             })
             .await
             .unwrap();
@@ -865,6 +916,7 @@ mod tests {
                 body: "enforce in svc-invoice not the gateway",
                 target_section: Some("scope"),
                 status: Some("open"),
+                proposed_body: None,
             })
             .await
             .unwrap();
@@ -974,5 +1026,30 @@ mod tests {
         assert_eq!(approved.status, "approved");
         let demoted = repo.clear_signoff(&p.id, "technical", "u2").await.unwrap();
         assert_eq!(demoted.status, "in_review");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn accept_edit_suggestion_applies_body_and_appends_revision() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Edit")).await.unwrap();
+        let s = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &p.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "tweak the spec",
+                target_section: None,
+                status: Some("open"),
+                proposed_body: Some("New spec body."),
+            })
+            .await
+            .unwrap();
+        let accepted = repo.accept_feedback(&s.id).await.unwrap();
+        assert_eq!(accepted.status.as_deref(), Some("accepted"));
+        assert_eq!(accepted.applied_revision_seq, Some(2));
+        let updated = repo.get(&p.id).await.unwrap().unwrap();
+        assert_eq!(updated.body, "New spec body.");
+        assert_eq!(updated.latest_revision_seq, 2);
     }
 }

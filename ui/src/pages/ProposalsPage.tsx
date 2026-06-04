@@ -17,6 +17,7 @@ import {
 } from "@/components/proposals/proposalStatus";
 import { StatusIcon } from "@/components/proposals/StatusIcon";
 import { ProposalSignoffs } from "@/components/proposals/ProposalSignoffs";
+import { DiffView } from "@/components/proposals/DiffView";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -344,6 +345,8 @@ function ProposalDetailView({
   onDeleted: () => void;
 }) {
   const proposal = detail.proposal as Proposal;
+  const [editingBody, setEditingBody] = useState(false);
+  const [bodyDraft, setBodyDraft] = useState("");
   const untargeted = useMemo(
     () => projects.filter((p) => !detail.targets.some((t) => t.project_id === p.id)),
     [projects, detail.targets]
@@ -498,11 +501,72 @@ function ProposalDetailView({
           </div>
         )}
 
-        {/* Body */}
-        <div className="prose prose-sm max-w-none dark:prose-invert">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>
-            {proposal.body || "_No spec body yet._"}
-          </ReactMarkdown>
+        {/* Body — direct edit (Save) or float as a suggestion (Suggest) */}
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <Label className="text-xs uppercase text-muted-foreground">Spec</Label>
+            {!editingBody && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setBodyDraft(proposal.body);
+                  setEditingBody(true);
+                }}
+              >
+                Edit
+              </Button>
+            )}
+          </div>
+          {editingBody ? (
+            <div className="space-y-2">
+              <Textarea
+                value={bodyDraft}
+                onChange={(e) => setBodyDraft(e.target.value)}
+                className="min-h-[240px] font-mono text-sm"
+              />
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  onClick={() =>
+                    run(
+                      () => callMcpTool("proposal_update", { id: proposal.id, body: bodyDraft }),
+                      "Spec updated"
+                    ).then(() => setEditingBody(false))
+                  }
+                >
+                  Save
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    run(
+                      () =>
+                        callMcpTool("proposal_feedback_add", {
+                          proposal_id: proposal.id,
+                          body: "Suggested spec edit",
+                          proposed_body: bodyDraft,
+                          status: "open",
+                        }),
+                      "Suggestion submitted"
+                    ).then(() => setEditingBody(false))
+                  }
+                >
+                  Suggest
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setEditingBody(false)}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="prose prose-sm max-w-none dark:prose-invert">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {proposal.body || "_No spec body yet._"}
+              </ReactMarkdown>
+            </div>
+          )}
         </div>
 
         <Separator />
@@ -514,6 +578,7 @@ function ProposalDetailView({
         <FeedbackThread
           proposalId={proposal.id}
           feedback={detail.feedback}
+          currentBody={proposal.body}
           onChanged={onChanged}
         />
       </div>
@@ -526,15 +591,27 @@ function ProposalDetailView({
 function FeedbackThread({
   proposalId,
   feedback,
+  currentBody,
   onChanged,
 }: {
   proposalId: string;
   feedback: ProposalFeedback[];
+  currentBody: string;
   onChanged: () => void;
 }) {
   const [body, setBody] = useState("");
   const [asSuggestion, setAsSuggestion] = useState(false);
   const [posting, setPosting] = useState(false);
+
+  const accept = async (id: string) => {
+    try {
+      const res = await callMcpTool("proposal_feedback_accept", { id });
+      if (res.error) throw new Error(res.error);
+      onChanged();
+    } catch (e) {
+      showToast.error("Failed to accept", { description: (e as Error).message });
+    }
+  };
 
   const post = async () => {
     if (!body.trim()) return;
@@ -598,10 +675,16 @@ function FeedbackThread({
               <span>· {relativeTime(f.created_at)}</span>
             </div>
             <div className="whitespace-pre-wrap text-sm">{f.body}</div>
+            {f.proposed_body != null && (
+              <div className="mt-2">
+                <span className="text-xs text-muted-foreground">Proposed spec change:</span>
+                <DiffView before={currentBody} after={f.proposed_body} />
+              </div>
+            )}
             {f.status === "open" && (
               <div className="mt-2 flex gap-2">
-                <Button size="sm" variant="outline" onClick={() => resolve(f.id, "accepted")}>
-                  Accept
+                <Button size="sm" variant="outline" onClick={() => accept(f.id)}>
+                  {f.proposed_body != null ? "Accept & apply" : "Accept"}
                 </Button>
                 <Button size="sm" variant="ghost" onClick={() => resolve(f.id, "rejected")}>
                   Reject

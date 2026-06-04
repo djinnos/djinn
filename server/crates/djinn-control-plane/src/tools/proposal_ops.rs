@@ -145,6 +145,12 @@ pub struct ProposalFeedbackModel {
     /// `null` = discussion; `open` | `accepted` | `rejected` = suggestion.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// For an edit suggestion, the proposed new spec body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposed_body: Option<String>,
+    /// Revision the proposed change landed in once accepted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_revision_seq: Option<i32>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -161,6 +167,8 @@ impl From<&ProposalFeedback> for ProposalFeedbackModel {
             body: f.body.clone(),
             target_section: f.target_section.clone(),
             status: f.status.clone(),
+            proposed_body: f.proposed_body.clone(),
+            applied_revision_seq: f.applied_revision_seq,
             created_at: f.created_at.clone(),
             updated_at: f.updated_at.clone(),
         }

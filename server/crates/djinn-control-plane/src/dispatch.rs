@@ -32,9 +32,9 @@ use crate::tools::project_tools::{
     ProjectGraphExclusionsSetParams, ProjectRemoveParams, RetriggerImageBuildParams,
 };
 use crate::tools::proposal_tools::{
-    ProposalCreateParams, ProposalDeleteParams, ProposalFeedbackAddParams,
-    ProposalFeedbackResolveParams, ProposalListParams, ProposalShowParams, ProposalSignoffParams,
-    ProposalTargetParams, ProposalUpdateParams,
+    ProposalCreateParams, ProposalDeleteParams, ProposalFeedbackAcceptParams,
+    ProposalFeedbackAddParams, ProposalFeedbackResolveParams, ProposalListParams,
+    ProposalShowParams, ProposalSignoffParams, ProposalTargetParams, ProposalUpdateParams,
 };
 use crate::tools::provider_tools::{
     ModelHealthInput, ProviderCatalogInput, ProviderConnectedInput, ProviderModelLookupInput,
@@ -333,6 +333,13 @@ impl DjinnMcpServer {
                 name,
                 self.proposal_feedback_resolve(Parameters(decode_args::<
                     ProposalFeedbackResolveParams,
+                >(name, args)?))
+                    .await,
+            ),
+            "proposal_feedback_accept" => map_json(
+                name,
+                self.proposal_feedback_accept(Parameters(decode_args::<
+                    ProposalFeedbackAcceptParams,
                 >(name, args)?))
                     .await,
             ),

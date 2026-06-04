@@ -94,6 +94,11 @@ pub struct ProposalFeedback {
     pub target_section: Option<String>,
     /// `None` = discussion; `open` | `accepted` | `rejected` = suggestion.
     pub status: Option<String>,
+    /// For an "edit suggestion", the proposed new spec body. `None` for a
+    /// plain discussion/comment.
+    pub proposed_body: Option<String>,
+    /// Revision the proposed change landed in once accepted.
+    pub applied_revision_seq: Option<i32>,
     pub created_at: String,
     pub updated_at: String,
 }

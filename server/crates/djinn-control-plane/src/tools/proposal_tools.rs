@@ -184,6 +184,15 @@ pub struct ProposalFeedbackAddParams {
     pub author_kind: Option<String>,
     /// Model id when author_kind is `ai`.
     pub author_model: Option<String>,
+    /// For an edit suggestion, the proposed new spec body. Accepting the
+    /// feedback applies it (appending a revision).
+    pub proposed_body: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalFeedbackAcceptParams {
+    /// Feedback entry UUID.
+    pub id: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -550,9 +559,31 @@ impl DjinnMcpServer {
                 body: &p.body,
                 target_section: p.target_section.as_deref(),
                 status: p.status.as_deref(),
+                proposed_body: p.proposed_body.as_deref(),
             })
             .await
         {
+            Ok(f) => Json(ProposalFeedbackResponse {
+                feedback: Some((&f).into()),
+                error: None,
+            }),
+            Err(e) => Json(err_feedback(e.to_string())),
+        }
+    }
+
+    /// Accept a feedback entry, applying its proposed edit if it has one.
+    #[tool(
+        description = "Accept a feedback entry. If it's an edit suggestion (carries `proposed_body`), applies the proposed spec body — appending a revision — and marks it accepted. Otherwise just marks it accepted. Requires edit rights on the proposal."
+    )]
+    pub async fn proposal_feedback_accept(
+        &self,
+        Parameters(p): Parameters<ProposalFeedbackAcceptParams>,
+    ) -> Json<ProposalFeedbackResponse> {
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        if repo.get_feedback(&p.id).await.ok().flatten().is_none() {
+            return Json(err_feedback(format!("feedback not found: {}", p.id)));
+        }
+        match repo.accept_feedback(&p.id).await {
             Ok(f) => Json(ProposalFeedbackResponse {
                 feedback: Some((&f).into()),
                 error: None,
