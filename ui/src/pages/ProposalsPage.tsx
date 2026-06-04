@@ -204,9 +204,16 @@ function CreateProposal({
   onCancel: () => void;
   onCreated: (id: string) => void;
 }) {
+  const me = useAuthUser();
+  const caps = capsFromUser(me);
+  // External proposers always land in triage; PM/engineer/admin pick their
+  // entry state (and can jump straight to engineering review for a technical
+  // change, skipping product scoping).
+  const isProposer = !!caps && !caps.isAdmin && caps.role === "proposer";
   const [title, setTitle] = useState("");
   const [body, setBody] = useState(NEW_TEMPLATE);
   const [targets, setTargets] = useState<Set<string>>(new Set());
+  const [status, setStatus] = useState<"draft" | "in_review">("draft");
   const [saving, setSaving] = useState(false);
 
   const toggle = (id: string) =>
@@ -228,6 +235,8 @@ function CreateProposal({
         title: title.trim(),
         body,
         target_projects: Array.from(targets),
+        // Proposers are forced into triage server-side; omit status for them.
+        status: isProposer ? undefined : status,
       });
       if (res.error || !res.id) throw new Error(res.error ?? "create failed");
       showToast.success("Proposal created");
@@ -280,6 +289,36 @@ function CreateProposal({
             ))}
           </div>
         </div>
+        {isProposer ? (
+          <p className="flex items-center gap-2 text-xs text-muted-foreground">
+            <StatusIcon status="triage" />
+            This proposal goes to triage for a PM or engineer to pick up.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            <Label>Start as</Label>
+            <Select value={status} onValueChange={(v) => (v === "draft" || v === "in_review") && setStatus(v)}>
+              <SelectTrigger className="w-[200px]">
+                <span className="flex items-center gap-2">
+                  <StatusIcon status={status} />
+                  {statusLabel(status)}
+                </span>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="draft">
+                  <span className="flex items-center gap-2">
+                    <StatusIcon status="draft" /> Draft
+                  </span>
+                </SelectItem>
+                <SelectItem value="in_review">
+                  <span className="flex items-center gap-2">
+                    <StatusIcon status="in_review" /> In Review (skip scoping)
+                  </span>
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        )}
         <div className="flex gap-2">
           <Button onClick={create} disabled={saving}>
             {saving ? "Creating…" : "Create proposal"}
