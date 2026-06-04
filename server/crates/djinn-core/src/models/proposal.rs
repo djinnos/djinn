@@ -27,6 +27,9 @@ pub struct Proposal {
     pub closed_at: Option<String>,
     /// Head revision number; sign-offs anchored to an earlier seq are stale.
     pub latest_revision_seq: i32,
+    /// Participant accountable for the build once graduated (also the epic
+    /// creator, so commits attribute correctly).
+    pub build_owner_user_id: Option<String>,
 }
 
 /// An immutable snapshot of a proposal's spec at a point in time. Appended on

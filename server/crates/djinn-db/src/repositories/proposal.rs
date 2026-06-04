@@ -98,7 +98,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id
              FROM proposals WHERE id = $1"#,
             id
         )
@@ -112,7 +112,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id
              FROM proposals WHERE short_id = $1"#,
             short_id
         )
@@ -127,7 +127,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id
              FROM proposals WHERE id = $1 OR short_id = $2"#,
             id_or_short,
             id_or_short
@@ -481,7 +481,7 @@ impl ProposalRepository {
         // NOTE: dynamic SQL (WHERE + ORDER built from optional filters) — compile-time check not possible
         let sql = format!(
             r#"SELECT id, short_id, title, body, acceptance_criteria::text AS acceptance_criteria,
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id
              FROM proposals WHERE {where_sql} ORDER BY {order_sql} LIMIT {limit_ph} OFFSET {offset_ph}"#
         );
         let mut q = sqlx::query_as::<_, Proposal>(&sql);
@@ -647,6 +647,80 @@ impl ProposalRepository {
             .await?;
         }
         Ok(())
+    }
+
+    // ── Graduation ───────────────────────────────────────────────────────────
+
+    /// Distinct participants accountable for the proposal: its author plus
+    /// everyone who has signed off. The build owner must be one of these.
+    pub async fn participants(&self, proposal_id: &str) -> Result<Vec<String>> {
+        self.db.ensure_initialized().await?;
+        let mut ids: Vec<String> = sqlx::query_scalar!(
+            "SELECT DISTINCT user_id FROM proposal_signoffs WHERE proposal_id = $1",
+            proposal_id
+        )
+        .fetch_all(self.db.pool())
+        .await?;
+        if let Some(p) = self.get(proposal_id).await?
+            && let Some(author) = p.author_user_id
+            && !ids.contains(&author)
+        {
+            ids.push(author);
+        }
+        Ok(ids)
+    }
+
+    /// Link a graduated epic to the proposal. Idempotent.
+    pub async fn link_epic(
+        &self,
+        proposal_id: &str,
+        epic_id: &str,
+        project_id: &str,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            "INSERT INTO proposal_epics (proposal_id, epic_id, project_id) VALUES ($1, $2, $3)
+             ON CONFLICT (proposal_id, epic_id) DO NOTHING",
+            proposal_id,
+            epic_id,
+            project_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// `(epic_id, project_id)` pairs this proposal graduated into.
+    pub async fn graduated_epics(&self, proposal_id: &str) -> Result<Vec<(String, String)>> {
+        self.db.ensure_initialized().await?;
+        let rows = sqlx::query!(
+            "SELECT epic_id, project_id FROM proposal_epics WHERE proposal_id = $1 ORDER BY created_at",
+            proposal_id
+        )
+        .fetch_all(self.db.pool())
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.epic_id, r.project_id))
+            .collect())
+    }
+
+    /// Mark a proposal as building, recording the build owner.
+    pub async fn set_building(&self, proposal_id: &str, owner_user_id: &str) -> Result<Proposal> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            r#"UPDATE proposals SET status = 'building', build_owner_user_id = $1,
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $2"#,
+            owner_user_id,
+            proposal_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        let proposal = self.get_required(proposal_id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_updated(&proposal));
+        Ok(proposal)
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────────
@@ -1051,5 +1125,37 @@ mod tests {
         let updated = repo.get(&p.id).await.unwrap().unwrap();
         assert_eq!(updated.body, "New spec body.");
         assert_eq!(updated.latest_revision_seq, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn participants_and_graduation_linking() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proj = insert_project(&db, "svc-grad").await;
+        let p = repo.create(create_input("Grad")).await.unwrap();
+
+        repo.add_signoff(&p.id, "scoped", "user-x").await.unwrap();
+        let parts = repo.participants(&p.id).await.unwrap();
+        assert!(parts.contains(&"user-x".to_string()));
+
+        // Simulate graduation linking an epic (insert an epic row directly).
+        let epic_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query!(
+            "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, status, owner, memory_refs, auto_breakdown)
+             VALUES ($1, $2, 'gep1', 'T', '', '', '', 'open', '', '[]'::jsonb, true)",
+            epic_id,
+            proj
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        repo.link_epic(&p.id, &epic_id, &proj).await.unwrap();
+        repo.set_building(&p.id, "user-x").await.unwrap();
+
+        let graduated = repo.graduated_epics(&p.id).await.unwrap();
+        assert_eq!(graduated, vec![(epic_id, proj)]);
+        let built = repo.get(&p.id).await.unwrap().unwrap();
+        assert_eq!(built.status, "building");
+        assert_eq!(built.build_owner_user_id.as_deref(), Some("user-x"));
     }
 }

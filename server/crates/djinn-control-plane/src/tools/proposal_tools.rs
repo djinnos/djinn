@@ -5,9 +5,9 @@
 // via an editable M:N `proposal_targets` set. Discussion and suggestions share
 // one `proposal_feedback` primitive (status == null → discussion; open/
 // accepted/rejected → a trackable suggestion; author_kind == "ai" for future
-// adversarial-review findings). This layer stands beside the epic/task
-// execution engine and does NOT touch it — graduation into epics is a later
-// phase.
+// adversarial-review findings). Sign-offs gate approval, revisions/diffs track
+// edits, and `proposal_graduate` kicks an approved proposal off into one epic
+// per primary target (the existing single-repo-write execution engine).
 
 use std::borrow::Cow;
 
@@ -21,15 +21,16 @@ use crate::tools::list_response::{
     self, ListMeta, NamedListResponse, named_list_response_schema, serialize_named_list_response,
 };
 use crate::tools::proposal_ops::{
-    ProposalDeleteResponse, ProposalFeedbackResponse, ProposalModel, ProposalShowResponse,
-    ProposalSignoffModel, ProposalSingleResponse, ProposalTargetModel, ProposalTargetsResponse,
+    ProposalDeleteResponse, ProposalEpicModel, ProposalFeedbackResponse, ProposalModel,
+    ProposalShowResponse, ProposalSignoffModel, ProposalSingleResponse, ProposalTargetModel,
+    ProposalTargetsResponse,
 };
 use crate::tools::validation::{
     validate_ac_count, validate_body, validate_design, validate_feedback_status, validate_limit,
     validate_offset, validate_proposal_create_status, validate_proposal_status, validate_sort,
     validate_title,
 };
-use djinn_db::{ProjectRepository, ProposalListQuery, ProposalRepository};
+use djinn_db::{EpicRepository, ProjectRepository, ProposalListQuery, ProposalRepository};
 
 // ── List response (NamedListResponse boilerplate, mirrors EpicListResponse) ──
 
@@ -212,6 +213,15 @@ pub struct ProposalSignoffParams {
     pub kind: String,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalGraduateParams {
+    /// Proposal UUID or short_id (must be `approved`).
+    pub id: String,
+    /// Build owner — must be a participant (author or a sign-off giver).
+    /// Defaults to the kicking-off user.
+    pub owner_user_id: Option<String>,
+}
+
 // ── Tool router ──────────────────────────────────────────────────────────────
 
 #[tool_router(router = proposal_tool_router, vis = "pub")]
@@ -305,12 +315,19 @@ impl DjinnMcpServer {
                 .collect(),
             Err(e) => return Json(err_show(e.to_string())),
         };
+        let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
+        let epics =
+            match graduated_epic_models(&repo, &epic_repo, &project_repo, &proposal.id).await {
+                Ok(e) => e,
+                Err(e) => return Json(err_show(e)),
+            };
         Json(ProposalShowResponse {
             proposal: Some(ProposalModel::from(&proposal)),
             targets: Some(targets),
             feedback: Some(feedback),
             revisions: Some(revisions),
             signoffs: Some(signoffs),
+            epics: Some(epics),
             error: None,
         })
     }
@@ -733,6 +750,148 @@ impl DjinnMcpServer {
             Err(e) => Json(err_single(e.to_string())),
         }
     }
+
+    /// Kick off an approved proposal — graduate it into the execution engine.
+    #[tool(
+        description = "Kick off an approved proposal: create one epic per `primary` target project (spec body + acceptance criteria become the epic, sibling targets become read-sources), set status to `building`, and record the build owner (must be a participant — the author or a sign-off giver; defaults to the caller). Requires the proposal to be `approved` and the engineer role (or admin)."
+    )]
+    pub async fn proposal_graduate(
+        &self,
+        Parameters(p): Parameters<ProposalGraduateParams>,
+    ) -> Json<ProposalSingleResponse> {
+        // Capability: engineer/admin only.
+        match acting_caps(self.state.db()).await {
+            Ok(Some(caps)) if !caps.can_kickoff() => {
+                return Json(err_single(
+                    "kicking off a build requires the engineer role (or admin)".to_string(),
+                ));
+            }
+            Err(e) => return Json(err_single(e)),
+            _ => {}
+        }
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
+
+        let Some(proposal) = repo.resolve(&p.id).await.ok().flatten() else {
+            return Json(err_single(proposal_not_found_error(&p.id)));
+        };
+        if proposal.status != "approved" {
+            return Json(err_single(format!(
+                "proposal must be approved to kick off (current: {})",
+                proposal.status
+            )));
+        }
+
+        // Build owner must be a participant (author or sign-off giver).
+        let participants = match repo.participants(&proposal.id).await {
+            Ok(v) => v,
+            Err(e) => return Json(err_single(e.to_string())),
+        };
+        let Some(owner) = p
+            .owner_user_id
+            .clone()
+            .or_else(djinn_core::auth_context::current_user_id)
+        else {
+            return Json(err_single("a build owner is required".to_string()));
+        };
+        if !participants.is_empty() && !participants.contains(&owner) {
+            return Json(err_single(
+                "the build owner must be a participant (the author or a sign-off giver)"
+                    .to_string(),
+            ));
+        }
+
+        // Primary targets become epics; the rest become read-sources.
+        let targets = match repo.targets(&proposal.id).await {
+            Ok(t) => t,
+            Err(e) => return Json(err_single(e.to_string())),
+        };
+        let primaries: Vec<_> = targets.iter().filter(|t| t.role == "primary").collect();
+        if primaries.is_empty() {
+            return Json(err_single(
+                "no primary target project to build — add a target first".to_string(),
+            ));
+        }
+
+        let ac_lines = parse_acceptance_lines(&proposal.acceptance_criteria);
+        let description = if ac_lines.is_empty() {
+            proposal.body.clone()
+        } else {
+            format!(
+                "{}\n\n## Acceptance criteria\n{}",
+                proposal.body,
+                ac_lines
+                    .iter()
+                    .map(|c| format!("- {c}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        };
+
+        for target in &primaries {
+            let epic = match epic_repo
+                .create_for_project(
+                    &target.project_id,
+                    djinn_db::EpicCreateInput {
+                        title: &proposal.title,
+                        description: &description,
+                        emoji: "",
+                        color: "",
+                        owner: "",
+                        memory_refs: None,
+                        status: Some("open"),
+                        auto_breakdown: None,
+                        originating_adr_id: None,
+                    },
+                )
+                .await
+            {
+                Ok(e) => e,
+                Err(e) => return Json(err_single(format!("failed to create epic: {e}"))),
+            };
+            // The build owner owns the epic so commits attribute correctly.
+            let _ = epic_repo.set_created_by_user_id(&epic.id, &owner).await;
+            // Sibling target projects become read-sources (cross-repo reasoning).
+            for other in &targets {
+                if other.project_id != target.project_id {
+                    let _ = epic_repo.add_read_source(&epic.id, &other.project_id).await;
+                }
+            }
+            if let Err(e) = repo
+                .link_epic(&proposal.id, &epic.id, &target.project_id)
+                .await
+            {
+                return Json(err_single(e.to_string()));
+            }
+        }
+
+        match repo.set_building(&proposal.id, &owner).await {
+            Ok(updated) => Json(ProposalSingleResponse {
+                proposal: Some(ProposalModel::from(&updated)),
+                error: None,
+            }),
+            Err(e) => Json(err_single(e.to_string())),
+        }
+    }
+}
+
+/// Extract acceptance-criterion strings from the stored JSON (strings or
+/// `{criterion, met}` objects).
+fn parse_acceptance_lines(raw: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|item| match item {
+            serde_json::Value::String(s) => Some(s),
+            serde_json::Value::Object(o) => o
+                .get("criterion")
+                .and_then(|c| c.as_str())
+                .map(str::to_string),
+            _ => None,
+        })
+        .collect()
 }
 
 // ── Permission gates ─────────────────────────────────────────────────────────
@@ -763,8 +922,40 @@ fn err_show(error: impl Into<String>) -> ProposalShowResponse {
         feedback: None,
         revisions: None,
         signoffs: None,
+        epics: None,
         error: Some(error.into()),
     }
+}
+
+/// Resolve a proposal's graduated epics to `{epic_short_id, project_path,
+/// status}` display models.
+async fn graduated_epic_models(
+    repo: &ProposalRepository,
+    epic_repo: &EpicRepository,
+    project_repo: &ProjectRepository,
+    proposal_id: &str,
+) -> Result<Vec<ProposalEpicModel>, String> {
+    let links = repo
+        .graduated_epics(proposal_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(links.len());
+    for (epic_id, project_id) in links {
+        let Some(epic) = epic_repo.get(&epic_id).await.ok().flatten() else {
+            continue;
+        };
+        let project_path = match project_repo.get(&project_id).await {
+            Ok(Some(p)) => format!("{}/{}", p.github_owner, p.github_repo),
+            _ => project_id.clone(),
+        };
+        out.push(ProposalEpicModel {
+            epic_id,
+            epic_short_id: epic.short_id,
+            project_path,
+            status: epic.status,
+        });
+    }
+    Ok(out)
 }
 
 fn err_single(error: impl Into<String>) -> ProposalSingleResponse {

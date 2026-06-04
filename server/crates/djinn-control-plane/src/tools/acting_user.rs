@@ -46,7 +46,6 @@ impl ActingCaps {
     }
 
     /// Who may kick off a build (graduate): engineers and admins.
-    #[allow(dead_code)] // used by graduation (step 5)
     pub(crate) fn can_kickoff(&self) -> bool {
         self.is_admin || self.role == "engineer"
     }

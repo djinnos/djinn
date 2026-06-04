@@ -10,6 +10,7 @@ import { queryOptions } from "@tanstack/react-query";
 import { callMcpTool } from "@/api/mcpClient";
 import type {
   Proposal,
+  ProposalEpic,
   ProposalFeedback,
   ProposalRevision,
   ProposalSignoff,
@@ -45,6 +46,7 @@ export interface ProposalDetail {
   feedback: ProposalFeedback[];
   revisions: ProposalRevision[];
   signoffs: ProposalSignoff[];
+  epics: ProposalEpic[];
 }
 
 export function proposalDetailQueryOptions(id: string | null) {
@@ -59,6 +61,7 @@ export function proposalDetailQueryOptions(id: string | null) {
         feedback: (res.feedback ?? []) as ProposalFeedback[],
         revisions: (res.revisions ?? []) as ProposalRevision[],
         signoffs: (res.signoffs ?? []) as ProposalSignoff[],
+        epics: (res.epics ?? []) as ProposalEpic[],
       };
     },
     staleTime: 15_000,

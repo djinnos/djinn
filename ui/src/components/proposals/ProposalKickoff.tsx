@@ -1,0 +1,125 @@
+import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { callMcpTool } from "@/api/mcpClient";
+import { usersQueryOptions } from "@/api/queryOptions";
+import { userDisplayName, type OrgUser } from "@/api/users";
+import { useAuthUser } from "@/components/AuthGate";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { showToast } from "@/lib/toast";
+import { canKickoff, capsFromUser } from "@/lib/proposalPermissions";
+import type { ProposalDetail } from "@/lib/proposalQueries";
+
+/**
+ * Kick-off (graduation) control and graduated-epic list. Shown on an approved
+ * proposal for engineers/admins; once building, lists the spawned epics.
+ */
+export function ProposalKickoff({
+  detail,
+  onChanged,
+}: {
+  detail: ProposalDetail;
+  onChanged: () => void;
+}) {
+  const proposal = detail.proposal!;
+  const me = useAuthUser();
+  const caps = capsFromUser(me);
+  const usersQuery = useQuery(usersQueryOptions());
+  const nameFor = (id: string | null | undefined) => {
+    if (!id) return "unknown";
+    const u = (usersQuery.data ?? []).find((x: OrgUser) => x.id === id);
+    return u ? userDisplayName(u) : id;
+  };
+
+  const participants = useMemo(() => {
+    const ids = new Set<string>();
+    if (proposal.author_user_id) ids.add(proposal.author_user_id);
+    detail.signoffs.forEach((s) => ids.add(s.user_id));
+    return Array.from(ids);
+  }, [proposal.author_user_id, detail.signoffs]);
+
+  const [owner, setOwner] = useState<string>(
+    me?.id && participants.includes(me.id) ? me.id : (participants[0] ?? "")
+  );
+  const [busy, setBusy] = useState(false);
+
+  const kickoff = async () => {
+    setBusy(true);
+    try {
+      const res = await callMcpTool("proposal_graduate", {
+        id: proposal.id,
+        owner_user_id: owner || undefined,
+      });
+      if (res.error) throw new Error(res.error);
+      showToast.success("Build kicked off");
+      onChanged();
+    } catch (e) {
+      showToast.error("Kick-off failed", { description: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Graduated → show the spawned epics.
+  if (detail.epics.length > 0) {
+    return (
+      <div className="space-y-2 rounded-md border p-3">
+        <div className="flex items-center justify-between">
+          <Label className="text-xs uppercase text-muted-foreground">Build</Label>
+          {proposal.build_owner_user_id && (
+            <span className="text-xs text-muted-foreground">
+              owned by {nameFor(proposal.build_owner_user_id)}
+            </span>
+          )}
+        </div>
+        <ul className="space-y-1">
+          {detail.epics.map((e) => (
+            <li key={e.epic_id} className="flex items-center gap-2 text-sm">
+              <Badge variant="outline" className="font-mono">{e.epic_short_id}</Badge>
+              <span className="text-muted-foreground">{e.project_path}</span>
+              <Badge variant="secondary" className="capitalize">{e.status}</Badge>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
+
+  // Approved + kick-off capability → offer to build.
+  if (proposal.status !== "approved" || !canKickoff(caps)) return null;
+
+  return (
+    <div className="space-y-3 rounded-md border border-primary/40 bg-primary/5 p-3">
+      <Label className="text-xs uppercase text-muted-foreground">Ready to build</Label>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm">Owner</span>
+        <Select value={owner} onValueChange={(v) => typeof v === "string" && setOwner(v)}>
+          <SelectTrigger className="h-8 w-[200px] text-sm">
+            <SelectValue placeholder="Pick a participant" />
+          </SelectTrigger>
+          <SelectContent>
+            {participants.map((id) => (
+              <SelectItem key={id} value={id}>
+                {nameFor(id)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button size="sm" disabled={busy || !owner} onClick={kickoff}>
+          {busy ? "Kicking off…" : "Kick off build"}
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Creates one epic per primary target project and hands it to djinn to build.
+      </p>
+    </div>
+  );
+}

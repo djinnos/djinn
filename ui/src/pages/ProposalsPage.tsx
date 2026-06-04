@@ -17,6 +17,7 @@ import {
 } from "@/components/proposals/proposalStatus";
 import { StatusIcon } from "@/components/proposals/StatusIcon";
 import { ProposalSignoffs } from "@/components/proposals/ProposalSignoffs";
+import { ProposalKickoff } from "@/components/proposals/ProposalKickoff";
 import { DiffView } from "@/components/proposals/DiffView";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -582,6 +583,8 @@ function ProposalDetailView({
         <Separator />
 
         <ProposalSignoffs detail={detail} onChanged={onChanged} />
+
+        <ProposalKickoff detail={detail} onChanged={onChanged} />
 
         <Separator />
 

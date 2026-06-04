@@ -287,6 +287,21 @@ impl EpicRepository {
         Ok(())
     }
 
+    /// Set the epic's creator. Used by proposal graduation to attribute the
+    /// build (and therefore commits, via the task-creator → commit-author
+    /// chain) to the chosen build owner.
+    pub async fn set_created_by_user_id(&self, id: &str, user_id: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            "UPDATE epics SET created_by_user_id = $1 WHERE id = $2",
+            user_id,
+            id
+        )
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
     /// Replace the `memory_refs` JSON array on an epic.
     pub async fn update_memory_refs(&self, id: &str, memory_refs_json: &str) -> Result<Epic> {
         self.db.ensure_initialized().await?;

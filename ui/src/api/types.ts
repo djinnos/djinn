@@ -31,3 +31,4 @@ export type ProposalFeedback = ProposalShowOutputSchema.ProposalFeedbackModel;
 export type ProposalTarget = ProposalShowOutputSchema.ProposalTargetModel;
 export type ProposalRevision = ProposalShowOutputSchema.ProposalRevisionModel;
 export type ProposalSignoff = ProposalShowOutputSchema.ProposalSignoffModel;
+export type ProposalEpic = ProposalShowOutputSchema.ProposalEpicModel;

@@ -30,6 +30,18 @@ pub struct ProposalModel {
     pub closed_at: Option<String>,
     /// Head revision number (sign-offs anchored earlier are stale).
     pub latest_revision_seq: i32,
+    /// Build owner once graduated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_owner_user_id: Option<String>,
+}
+
+/// An epic this proposal graduated into.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalEpicModel {
+    pub epic_id: String,
+    pub epic_short_id: String,
+    pub project_path: String,
+    pub status: String,
 }
 
 impl From<&Proposal> for ProposalModel {
@@ -47,6 +59,7 @@ impl From<&Proposal> for ProposalModel {
             updated_at: p.updated_at.clone(),
             closed_at: p.closed_at.clone(),
             latest_revision_seq: p.latest_revision_seq,
+            build_owner_user_id: p.build_owner_user_id.clone(),
         }
     }
 }
@@ -197,6 +210,8 @@ pub struct ProposalShowResponse {
     pub revisions: Option<Vec<ProposalRevisionModel>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signoffs: Option<Vec<ProposalSignoffModel>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub epics: Option<Vec<ProposalEpicModel>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }

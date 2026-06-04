@@ -5847,6 +5847,11 @@ expression: signatures
         "body": {
           "type": "string"
         },
+        "build_owner_user_id": {
+          "description": "Build owner once graduated.",
+          "nullable": true,
+          "type": "string"
+        },
         "closed_at": {
           "nullable": true,
           "type": "string"
@@ -6275,6 +6280,117 @@ expression: signatures
     }
   },
   {
+    "name": "proposal_graduate",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Proposal UUID or short_id (must be `approved`).",
+          "type": "string"
+        },
+        "owner_user_id": {
+          "description": "Build owner — must be a participant (author or a sign-off giver).\nDefaults to the kicking-off user.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "ProposalGraduateParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "AcceptanceCriterionItem": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/AcceptanceCriterionStatus"
+            }
+          ]
+        },
+        "AcceptanceCriterionStatus": {
+          "properties": {
+            "criterion": {
+              "type": "string"
+            },
+            "met": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "criterion"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "acceptance_criteria": {
+          "description": "Structured acceptance criteria (`{criterion, met}` or plain string),\nsame shape as tasks. `met` means \"agreed during scoping\".",
+          "items": {
+            "$ref": "#/$defs/AcceptanceCriterionItem"
+          },
+          "type": "array"
+        },
+        "author_user_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "build_owner_user_id": {
+          "description": "Build owner once graduated.",
+          "nullable": true,
+          "type": "string"
+        },
+        "closed_at": {
+          "nullable": true,
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "latest_revision_seq": {
+          "description": "Head revision number (sign-offs anchored earlier are stale).",
+          "format": "int32",
+          "type": "integer"
+        },
+        "short_id": {
+          "type": "string"
+        },
+        "status": {
+          "description": "Lifecycle: draft | in_review | approved | building | done | rejected |\narchived | superseded.",
+          "type": "string"
+        },
+        "superseded_by": {
+          "nullable": true,
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "title": "ProposalSingleResponse",
+      "type": "object"
+    }
+  },
+  {
     "name": "proposal_list",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -6358,6 +6474,11 @@ expression: signatures
               "type": "string"
             },
             "body": {
+              "type": "string"
+            },
+            "build_owner_user_id": {
+              "description": "Build owner once graduated.",
+              "nullable": true,
               "type": "string"
             },
             "closed_at": {
@@ -6564,6 +6685,30 @@ expression: signatures
           ],
           "type": "object"
         },
+        "ProposalEpicModel": {
+          "description": "An epic this proposal graduated into.",
+          "properties": {
+            "epic_id": {
+              "type": "string"
+            },
+            "epic_short_id": {
+              "type": "string"
+            },
+            "project_path": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "epic_id",
+            "epic_short_id",
+            "project_path",
+            "status"
+          ],
+          "type": "object"
+        },
         "ProposalFeedbackModel": {
           "properties": {
             "applied_revision_seq": {
@@ -6642,6 +6787,11 @@ expression: signatures
               "type": "string"
             },
             "body": {
+              "type": "string"
+            },
+            "build_owner_user_id": {
+              "description": "Build owner once graduated.",
+              "nullable": true,
               "type": "string"
             },
             "closed_at": {
@@ -6793,6 +6943,13 @@ expression: signatures
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "epics": {
+          "items": {
+            "$ref": "#/$defs/ProposalEpicModel"
+          },
+          "nullable": true,
+          "type": "array"
+        },
         "error": {
           "nullable": true,
           "type": "string"
@@ -6906,6 +7063,11 @@ expression: signatures
         "body": {
           "type": "string"
         },
+        "build_owner_user_id": {
+          "description": "Build owner once graduated.",
+          "nullable": true,
+          "type": "string"
+        },
         "closed_at": {
           "nullable": true,
           "type": "string"
@@ -7010,6 +7172,11 @@ expression: signatures
           "type": "string"
         },
         "body": {
+          "type": "string"
+        },
+        "build_owner_user_id": {
+          "description": "Build owner once graduated.",
+          "nullable": true,
           "type": "string"
         },
         "closed_at": {
@@ -7164,6 +7331,11 @@ expression: signatures
           "type": "string"
         },
         "body": {
+          "type": "string"
+        },
+        "build_owner_user_id": {
+          "description": "Build owner once graduated.",
+          "nullable": true,
           "type": "string"
         },
         "closed_at": {
