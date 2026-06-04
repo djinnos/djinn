@@ -8,7 +8,6 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { callMcpTool } from "@/api/mcpClient";
 import { InlineError } from "@/components/InlineError";
 import { relativeTime } from "@/components/memory/memoryUtils";
-import { AcceptanceChecklist } from "@/components/AcceptanceChecklist";
 import {
   PROPOSAL_STATUS_KEYS,
   isArchivedLike,
@@ -410,18 +409,6 @@ function ProposalDetailView({
     }
   };
 
-  const toggleCriterion = (index: number, met: boolean) => {
-    const next = (proposal.acceptance_criteria ?? []).map((ac, i) => {
-      const criterion = typeof ac === "string" ? ac : (ac as AcceptanceCriterion).criterion;
-      const current = typeof ac === "string" ? false : Boolean((ac as AcceptanceCriterion).met);
-      return { criterion, met: i === index ? met : current };
-    });
-    run(
-      () => callMcpTool("proposal_update", { id: proposal.id, acceptance_criteria: next }),
-      met ? "Criterion agreed" : "Criterion reopened"
-    );
-  };
-
   return (
     <ScrollArea className="flex-1">
       <div className="mx-auto max-w-3xl space-y-6 p-6">
@@ -539,14 +526,17 @@ function ProposalDetailView({
           </div>
         </div>
 
-        {/* Acceptance criteria */}
+        {/* Acceptance criteria — a plain list; no "met"/agreed state. */}
         {(proposal.acceptance_criteria?.length ?? 0) > 0 && (
           <div className="space-y-2">
             <Label className="text-xs uppercase text-muted-foreground">Acceptance criteria</Label>
-            <AcceptanceChecklist
-              criteria={proposal.acceptance_criteria}
-              onToggle={toggleCriterion}
-            />
+            <ul className="list-disc space-y-1 pl-5 text-sm">
+              {proposal.acceptance_criteria.map((ac, i) => (
+                <li key={i}>
+                  {typeof ac === "string" ? ac : (ac as AcceptanceCriterion).criterion}
+                </li>
+              ))}
+            </ul>
           </div>
         )}
 
