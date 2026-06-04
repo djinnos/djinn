@@ -6,6 +6,7 @@ import remarkGfm from "remark-gfm";
 import { ArrowLeft01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { callMcpTool } from "@/api/mcpClient";
+import { AcceptanceChecklist } from "@/components/AcceptanceChecklist";
 import { InlineError } from "@/components/InlineError";
 import { relativeTime } from "@/components/memory/memoryUtils";
 import {
@@ -43,7 +44,7 @@ import {
   proposalListQueryOptions,
 } from "@/lib/proposalQueries";
 import type { Project } from "@/api/server";
-import type { AcceptanceCriterion, Proposal, ProposalFeedback } from "@/api/types";
+import type { Proposal, ProposalFeedback } from "@/api/types";
 
 // Statuses a human sets directly. `approved` is reached via sign-offs;
 // `building`/`done` via graduation.
@@ -526,17 +527,11 @@ function ProposalDetailView({
           </div>
         </div>
 
-        {/* Acceptance criteria — a plain list; no "met"/agreed state. */}
+        {/* Acceptance criteria — read-only checklist (no clickable/met state). */}
         {(proposal.acceptance_criteria?.length ?? 0) > 0 && (
           <div className="space-y-2">
             <Label className="text-xs uppercase text-muted-foreground">Acceptance criteria</Label>
-            <ul className="list-disc space-y-1 pl-5 text-sm">
-              {proposal.acceptance_criteria.map((ac, i) => (
-                <li key={i}>
-                  {typeof ac === "string" ? ac : (ac as AcceptanceCriterion).criterion}
-                </li>
-              ))}
-            </ul>
+            <AcceptanceChecklist criteria={proposal.acceptance_criteria} />
           </div>
         )}
 
