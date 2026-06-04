@@ -23,7 +23,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
@@ -141,7 +140,7 @@ function ProposalsListView() {
         </div>
       </div>
 
-      <ScrollArea className="flex-1">
+      <div className="min-h-0 flex-1 overflow-y-auto">
         {listQuery.isLoading ? (
           <div className="space-y-2 p-4">
             {[0, 1, 2].map((i) => (
@@ -188,7 +187,7 @@ function ProposalsListView() {
             ))}
           </div>
         )}
-      </ScrollArea>
+      </div>
     </div>
   );
 }
@@ -249,7 +248,7 @@ function CreateProposal({
   };
 
   return (
-    <ScrollArea className="h-full">
+    <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-2xl space-y-5 p-6">
         <h2 className="text-lg font-semibold">New proposal</h2>
         <div className="space-y-2">
@@ -328,7 +327,7 @@ function CreateProposal({
           </Button>
         </div>
       </div>
-    </ScrollArea>
+    </div>
   );
 }
 
@@ -392,8 +391,6 @@ function ProposalDetailView({
   const caps = capsFromUser(me);
   const isAuthor = !!me && proposal.author_user_id === me.id;
   const canDirectEdit = canEdit(caps, isAuthor);
-  const [editingBody, setEditingBody] = useState(false);
-  const [bodyDraft, setBodyDraft] = useState("");
   const untargeted = useMemo(
     () => projects.filter((p) => !detail.targets.some((t) => t.project_id === p.id)),
     [projects, detail.targets]
@@ -411,7 +408,7 @@ function ProposalDetailView({
   };
 
   return (
-    <ScrollArea className="flex-1">
+    <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto max-w-3xl space-y-6 p-6">
         {/* Header */}
         <div className="flex items-start justify-between gap-4">
@@ -535,74 +532,14 @@ function ProposalDetailView({
           </div>
         )}
 
-        {/* Body — direct edit (Save) or float as a suggestion (Suggest) */}
+        {/* Spec body — read-only; editing happens via AI. */}
         <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <Label className="text-xs uppercase text-muted-foreground">Spec</Label>
-            {!editingBody && (
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => {
-                  setBodyDraft(proposal.body);
-                  setEditingBody(true);
-                }}
-              >
-                Edit
-              </Button>
-            )}
+          <Label className="text-xs uppercase text-muted-foreground">Spec</Label>
+          <div className="prose prose-sm max-w-none dark:prose-invert">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {proposal.body || "_No spec body yet._"}
+            </ReactMarkdown>
           </div>
-          {editingBody ? (
-            <div className="space-y-2">
-              <Textarea
-                value={bodyDraft}
-                onChange={(e) => setBodyDraft(e.target.value)}
-                className="min-h-[240px] font-mono text-sm"
-              />
-              <div className="flex gap-2">
-                {canDirectEdit && (
-                  <Button
-                    size="sm"
-                    onClick={() =>
-                      run(
-                        () => callMcpTool("proposal_update", { id: proposal.id, body: bodyDraft }),
-                        "Spec updated"
-                      ).then(() => setEditingBody(false))
-                    }
-                  >
-                    Save
-                  </Button>
-                )}
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() =>
-                    run(
-                      () =>
-                        callMcpTool("proposal_feedback_add", {
-                          proposal_id: proposal.id,
-                          body: "Suggested spec edit",
-                          proposed_body: bodyDraft,
-                          status: "open",
-                        }),
-                      "Suggestion submitted"
-                    ).then(() => setEditingBody(false))
-                  }
-                >
-                  Suggest
-                </Button>
-                <Button size="sm" variant="ghost" onClick={() => setEditingBody(false)}>
-                  Cancel
-                </Button>
-              </div>
-            </div>
-          ) : (
-            <div className="prose prose-sm max-w-none dark:prose-invert">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {proposal.body || "_No spec body yet._"}
-              </ReactMarkdown>
-            </div>
-          )}
         </div>
 
         <Separator />
@@ -621,7 +558,7 @@ function ProposalDetailView({
           onChanged={onChanged}
         />
       </div>
-    </ScrollArea>
+    </div>
   );
 }
 
