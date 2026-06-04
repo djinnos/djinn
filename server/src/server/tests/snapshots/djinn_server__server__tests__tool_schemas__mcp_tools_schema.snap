@@ -5659,91 +5659,508 @@ expression: signatures
     }
   },
   {
-    "name": "propose_adr_accept",
+    "name": "proposal_add_target",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
-        "auto_breakdown": {
-          "description": "When creating the epic, set `auto_breakdown` to this value.\nDefaults to `true` so the normal breakdown Planner fires.",
-          "nullable": true,
-          "type": "boolean"
-        },
-        "create_epic": {
-          "description": "When `true` (default), a matching `Epic` shell is created for\n`work_shape ∈ {task, epic, spike}` ADRs.  Architectural ADRs\nnever spawn an epic regardless of this flag.",
-          "nullable": true,
-          "type": "boolean"
-        },
         "id": {
-          "description": "File stem of the proposed ADR, e.g. `\"adr-052-foo\"`.",
+          "description": "Proposal UUID or short_id.",
           "type": "string"
         },
         "project": {
-          "description": "Absolute project path.",
+          "description": "Target project: UUID or owner/repo slug (must be registered).",
           "type": "string"
         },
-        "title": {
-          "description": "Optional accepted title override. Defaults to the draft title.",
+        "role": {
+          "description": "`primary` (a write-target, default) or `reference` (read-only context).",
           "nullable": true,
           "type": "string"
         }
       },
       "required": [
-        "project",
-        "id"
+        "id",
+        "project"
       ],
-      "title": "ProposeAdrAcceptParams",
+      "title": "ProposalTargetParams",
       "type": "object"
     },
     "output_schema": {
       "$defs": {
-        "EpicModel": {
+        "ProposalTargetModel": {
           "properties": {
-            "auto_breakdown": {
-              "description": "ADR-051 Epic C — mirrors `Epic::auto_breakdown`.",
-              "type": "boolean"
+            "created_at": {
+              "type": "string"
             },
-            "closed_at": {
+            "project_id": {
+              "type": "string"
+            },
+            "project_name": {
+              "description": "Human-friendly project name, resolved by the handler.",
               "nullable": true,
               "type": "string"
             },
-            "color": {
+            "project_path": {
+              "description": "`owner/repo` slug, resolved by the handler for display chips.",
+              "nullable": true,
+              "type": "string"
+            },
+            "role": {
+              "description": "`primary` (a write-target) or `reference` (read-only context).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "project_id",
+            "role",
+            "created_at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/ProposalTargetModel"
+          },
+          "nullable": true,
+          "type": "array"
+        }
+      },
+      "title": "ProposalTargetsResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_create",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "acceptance_criteria": {
+          "description": "Acceptance-criteria lines.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "body": {
+          "description": "Markdown spec body.",
+          "nullable": true,
+          "type": "string"
+        },
+        "status": {
+          "description": "Initial status: `draft` (default), `shared`, or `ready`.",
+          "nullable": true,
+          "type": "string"
+        },
+        "target_projects": {
+          "description": "Target projects (UUIDs or owner/repo slugs) this proposal touches.\nEditable later via proposal_add_target / proposal_remove_target.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "title": "ProposalCreateParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "acceptance_criteria": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "author_user_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "closed_at": {
+          "nullable": true,
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "short_id": {
+          "type": "string"
+        },
+        "status": {
+          "description": "Lifecycle: `draft` | `shared` | `ready` | `archived` | `superseded`.",
+          "type": "string"
+        },
+        "superseded_by": {
+          "nullable": true,
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "title": "ProposalSingleResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_delete",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "ProposalDeleteParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "ok": {
+          "nullable": true,
+          "type": "boolean"
+        }
+      },
+      "title": "ProposalDeleteResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_feedback_add",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "author_kind": {
+          "description": "`user` (default) or `ai`.",
+          "nullable": true,
+          "type": "string"
+        },
+        "author_model": {
+          "description": "Model id when author_kind is `ai`.",
+          "nullable": true,
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "parent_id": {
+          "description": "Parent feedback id for a threaded reply.",
+          "nullable": true,
+          "type": "string"
+        },
+        "proposal_id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        },
+        "status": {
+          "description": "Omit for plain discussion; set `open` to file a trackable suggestion.",
+          "nullable": true,
+          "type": "string"
+        },
+        "target_section": {
+          "description": "Optional pointer to the spec section this is about.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id",
+        "body"
+      ],
+      "title": "ProposalFeedbackAddParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "ProposalFeedbackModel": {
+          "properties": {
+            "author_kind": {
+              "description": "`user` or `ai`.",
+              "type": "string"
+            },
+            "author_model": {
+              "nullable": true,
+              "type": "string"
+            },
+            "author_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "body": {
               "type": "string"
             },
             "created_at": {
               "type": "string"
             },
-            "created_by_user_id": {
-              "description": "Real user FK of the epic's creator (NULL for system/unowned epics).\nSurfaced so the board can scope epics to the owner filter, mirroring\n`TaskModel::created_by_user_id`.",
+            "id": {
+              "type": "string"
+            },
+            "parent_id": {
               "nullable": true,
               "type": "string"
             },
-            "description": {
+            "proposal_id": {
               "type": "string"
             },
-            "emoji": {
+            "status": {
+              "description": "`null` = discussion; `open` | `accepted` | `rejected` = suggestion.",
+              "nullable": true,
+              "type": "string"
+            },
+            "target_section": {
+              "nullable": true,
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "proposal_id",
+            "author_kind",
+            "body",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "feedback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalFeedbackModel"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ]
+        }
+      },
+      "title": "ProposalFeedbackResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_feedback_resolve",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Feedback entry UUID.",
+          "type": "string"
+        },
+        "status": {
+          "description": "`open` | `accepted` | `rejected`, or `none` to revert to discussion.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "status"
+      ],
+      "title": "ProposalFeedbackResolveParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "ProposalFeedbackModel": {
+          "properties": {
+            "author_kind": {
+              "description": "`user` or `ai`.",
+              "type": "string"
+            },
+            "author_model": {
+              "nullable": true,
+              "type": "string"
+            },
+            "author_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "created_at": {
               "type": "string"
             },
             "id": {
               "type": "string"
             },
-            "memory_refs": {
+            "parent_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "proposal_id": {
+              "type": "string"
+            },
+            "status": {
+              "description": "`null` = discussion; `open` | `accepted` | `rejected` = suggestion.",
+              "nullable": true,
+              "type": "string"
+            },
+            "target_section": {
+              "nullable": true,
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "proposal_id",
+            "author_kind",
+            "body",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "feedback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalFeedbackModel"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ]
+        }
+      },
+      "title": "ProposalFeedbackResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_list",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "author": {
+          "description": "Filter by author user id.",
+          "nullable": true,
+          "type": "string"
+        },
+        "limit": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "sort": {
+          "description": "Sort order: \"created_desc\" (default), \"created\", \"updated\", \"updated_desc\".",
+          "nullable": true,
+          "type": "string"
+        },
+        "status": {
+          "nullable": true,
+          "type": "string"
+        },
+        "target_project": {
+          "description": "Filter to proposals targeting this project (UUID or owner/repo slug).",
+          "nullable": true,
+          "type": "string"
+        },
+        "text": {
+          "description": "Full-text search on title and body.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "ProposalListParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "ProposalModel": {
+          "properties": {
+            "acceptance_criteria": {
               "items": {
                 "type": "string"
               },
               "type": "array"
             },
-            "originating_adr_id": {
-              "description": "ADR-051 Epic C — mirrors `Epic::originating_adr_id`.",
+            "author_user_id": {
               "nullable": true,
               "type": "string"
             },
-            "owner": {
+            "body": {
+              "type": "string"
+            },
+            "closed_at": {
+              "nullable": true,
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "id": {
               "type": "string"
             },
             "short_id": {
               "type": "string"
             },
             "status": {
+              "description": "Lifecycle: `draft` | `shared` | `ready` | `archived` | `superseded`.",
+              "type": "string"
+            },
+            "superseded_by": {
+              "nullable": true,
               "type": "string"
             },
             "title": {
@@ -5757,118 +6174,107 @@ expression: signatures
             "id",
             "short_id",
             "title",
-            "description",
-            "emoji",
-            "color",
+            "body",
+            "acceptance_criteria",
             "status",
-            "owner",
             "created_at",
-            "updated_at",
-            "memory_refs",
-            "auto_breakdown"
+            "updated_at"
           ],
           "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
-        "accepted_path": {
+        "error": {
           "nullable": true,
           "type": "string"
         },
-        "epic": {
-          "allOf": [
-            {
-              "$ref": "#/$defs/EpicModel"
-            }
-          ],
+        "has_more": {
           "nullable": true,
-          "type": "object"
+          "type": "boolean"
         },
-        "error": {
+        "limit": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "proposals": {
+          "items": {
+            "$ref": "#/$defs/ProposalModel"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "total_count": {
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        }
+      },
+      "title": "ProposalListResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_remove_target",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        },
+        "project": {
+          "description": "Target project: UUID or owner/repo slug (must be registered).",
+          "type": "string"
+        },
+        "role": {
+          "description": "`primary` (a write-target, default) or `reference` (read-only context).",
           "nullable": true,
           "type": "string"
         }
       },
       "required": [
-        "epic"
+        "id",
+        "project"
       ],
-      "title": "ProposeAdrAcceptResponse",
-      "type": "object"
-    }
-  },
-  {
-    "name": "propose_adr_list",
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "project": {
-          "default": null,
-          "description": "Absolute project path.  Omit to list proposals across every\nregistered project.  Each item in the response is tagged with\n`project_id` / `project_name` / `project_path` so the Proposals\npage can render cross-project lists without a second lookup.",
-          "nullable": true,
-          "type": "string"
-        }
-      },
-      "title": "ProposeAdrListParams",
+      "title": "ProposalTargetParams",
       "type": "object"
     },
     "output_schema": {
       "$defs": {
-        "ProposedAdr": {
-          "description": "A parsed proposed ADR.  Serialized back to the MCP client.",
+        "ProposalTargetModel": {
           "properties": {
-            "body": {
-              "description": "Raw note content. Omitted in list responses to keep them small.",
-              "nullable": true,
-              "type": "string"
-            },
-            "id": {
-              "description": "Slug — the part of the permalink after `decisions/proposed/`.\ne.g. `\"adr-052-new-pipeline\"` for permalink\n`\"decisions/proposed/adr-052-new-pipeline\"`.",
-              "type": "string"
-            },
-            "mtime": {
-              "description": "Last update timestamp on the underlying note, RFC 3339.",
-              "nullable": true,
-              "type": "string"
-            },
-            "originating_spike_id": {
-              "description": "Optional short_id of the originating spike task — frontmatter-sourced.",
-              "nullable": true,
-              "type": "string"
-            },
-            "path": {
-              "description": "Canonical permalink of the proposed-ADR note in Dolt.",
+            "created_at": {
               "type": "string"
             },
             "project_id": {
-              "description": "Djinn project UUID that owns this proposal.  Populated by the\nlist handler so cross-project aggregation can thread items back\nto their project in the UI.  Omitted when the project could not\nbe resolved from the Dolt registry.",
-              "nullable": true,
               "type": "string"
             },
             "project_name": {
-              "description": "Display name of the owning project — kept separate from\n`project_path` since the Proposals UI shows the human name in\nper-row chips.",
+              "description": "Human-friendly project name, resolved by the handler.",
               "nullable": true,
               "type": "string"
             },
             "project_path": {
-              "description": "Display name of the owning project, sourced from the Dolt\nregistry.  Used by the Proposals page to render per-row project\nchips when the \"All projects\" filter is active.",
+              "description": "`owner/repo` slug, resolved by the handler for display chips.",
               "nullable": true,
               "type": "string"
             },
-            "title": {
-              "description": "Note title (from `memory_write` `title=`).",
-              "type": "string"
-            },
-            "work_shape": {
-              "description": "Work shape hint (`\"task\"` | `\"epic\"` | `\"architectural\"` | `\"spike\"`),\nparsed from the note content's leading YAML frontmatter when present.",
-              "nullable": true,
+            "role": {
+              "description": "`primary` (a write-target) or `reference` (read-only context).",
               "type": "string"
             }
           },
           "required": [
-            "id",
-            "path",
-            "title"
+            "project_id",
+            "role",
+            "created_at"
           ],
           "type": "object"
         }
@@ -5879,168 +6285,301 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
-        "items": {
+        "targets": {
           "items": {
-            "$ref": "#/$defs/ProposedAdr"
+            "$ref": "#/$defs/ProposalTargetModel"
           },
           "nullable": true,
           "type": "array"
         }
       },
-      "title": "ProposeAdrListResponse",
+      "title": "ProposalTargetsResponse",
       "type": "object"
     }
   },
   {
-    "name": "propose_adr_reject",
+    "name": "proposal_show",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "id": {
-          "description": "File stem of the proposed ADR.",
-          "type": "string"
-        },
-        "project": {
-          "description": "Absolute project path.",
-          "type": "string"
-        },
-        "reason": {
-          "description": "Required rejection reason, persisted back to the originating spike when available.",
+          "description": "Proposal UUID or short_id.",
           "type": "string"
         }
       },
       "required": [
-        "project",
-        "id",
-        "reason"
-      ],
-      "title": "ProposeAdrRejectParams",
-      "type": "object"
-    },
-    "output_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "error": {
-          "nullable": true,
-          "type": "string"
-        },
-        "feedback_target": {
-          "nullable": true,
-          "type": "string"
-        },
-        "ok": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "ok"
-      ],
-      "title": "ProposeAdrRejectResponse",
-      "type": "object"
-    }
-  },
-  {
-    "name": "propose_adr_show",
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "id": {
-          "description": "File stem of the proposed ADR, e.g. `\"adr-052-foo\"`.",
-          "type": "string"
-        },
-        "project": {
-          "description": "Absolute project path.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "project",
         "id"
       ],
-      "title": "ProposeAdrShowParams",
+      "title": "ProposalShowParams",
       "type": "object"
     },
     "output_schema": {
       "$defs": {
-        "ProposedAdr": {
-          "description": "A parsed proposed ADR.  Serialized back to the MCP client.",
+        "ProposalFeedbackModel": {
           "properties": {
-            "body": {
-              "description": "Raw note content. Omitted in list responses to keep them small.",
+            "author_kind": {
+              "description": "`user` or `ai`.",
+              "type": "string"
+            },
+            "author_model": {
               "nullable": true,
+              "type": "string"
+            },
+            "author_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "created_at": {
               "type": "string"
             },
             "id": {
-              "description": "Slug — the part of the permalink after `decisions/proposed/`.\ne.g. `\"adr-052-new-pipeline\"` for permalink\n`\"decisions/proposed/adr-052-new-pipeline\"`.",
               "type": "string"
             },
-            "mtime": {
-              "description": "Last update timestamp on the underlying note, RFC 3339.",
+            "parent_id": {
               "nullable": true,
               "type": "string"
             },
-            "originating_spike_id": {
-              "description": "Optional short_id of the originating spike task — frontmatter-sourced.",
+            "proposal_id": {
+              "type": "string"
+            },
+            "status": {
+              "description": "`null` = discussion; `open` | `accepted` | `rejected` = suggestion.",
               "nullable": true,
               "type": "string"
             },
-            "path": {
-              "description": "Canonical permalink of the proposed-ADR note in Dolt.",
-              "type": "string"
-            },
-            "project_id": {
-              "description": "Djinn project UUID that owns this proposal.  Populated by the\nlist handler so cross-project aggregation can thread items back\nto their project in the UI.  Omitted when the project could not\nbe resolved from the Dolt registry.",
+            "target_section": {
               "nullable": true,
               "type": "string"
             },
-            "project_name": {
-              "description": "Display name of the owning project — kept separate from\n`project_path` since the Proposals UI shows the human name in\nper-row chips.",
-              "nullable": true,
-              "type": "string"
-            },
-            "project_path": {
-              "description": "Display name of the owning project, sourced from the Dolt\nregistry.  Used by the Proposals page to render per-row project\nchips when the \"All projects\" filter is active.",
-              "nullable": true,
-              "type": "string"
-            },
-            "title": {
-              "description": "Note title (from `memory_write` `title=`).",
-              "type": "string"
-            },
-            "work_shape": {
-              "description": "Work shape hint (`\"task\"` | `\"epic\"` | `\"architectural\"` | `\"spike\"`),\nparsed from the note content's leading YAML frontmatter when present.",
-              "nullable": true,
+            "updated_at": {
               "type": "string"
             }
           },
           "required": [
             "id",
-            "path",
-            "title"
+            "proposal_id",
+            "author_kind",
+            "body",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        },
+        "ProposalModel": {
+          "properties": {
+            "acceptance_criteria": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "author_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "closed_at": {
+              "nullable": true,
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "status": {
+              "description": "Lifecycle: `draft` | `shared` | `ready` | `archived` | `superseded`.",
+              "type": "string"
+            },
+            "superseded_by": {
+              "nullable": true,
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "short_id",
+            "title",
+            "body",
+            "acceptance_criteria",
+            "status",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        },
+        "ProposalTargetModel": {
+          "properties": {
+            "created_at": {
+              "type": "string"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "project_name": {
+              "description": "Human-friendly project name, resolved by the handler.",
+              "nullable": true,
+              "type": "string"
+            },
+            "project_path": {
+              "description": "`owner/repo` slug, resolved by the handler for display chips.",
+              "nullable": true,
+              "type": "string"
+            },
+            "role": {
+              "description": "`primary` (a write-target) or `reference` (read-only context).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "project_id",
+            "role",
+            "created_at"
           ],
           "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
-        "adr": {
-          "allOf": [
-            {
-              "$ref": "#/$defs/ProposedAdr"
-            }
-          ],
-          "nullable": true,
-          "type": "object"
-        },
         "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "feedback": {
+          "items": {
+            "$ref": "#/$defs/ProposalFeedbackModel"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "proposal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalModel"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ]
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/ProposalTargetModel"
+          },
+          "nullable": true,
+          "type": "array"
+        }
+      },
+      "title": "ProposalShowResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_update",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "acceptance_criteria": {
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "body": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        },
+        "status": {
+          "description": "`draft` | `shared` | `ready` | `archived` | `superseded`.",
+          "nullable": true,
+          "type": "string"
+        },
+        "superseded_by": {
+          "description": "UUID or short_id of the proposal that supersedes this one.",
+          "nullable": true,
+          "type": "string"
+        },
+        "title": {
           "nullable": true,
           "type": "string"
         }
       },
       "required": [
-        "adr"
+        "id"
       ],
-      "title": "ProposeAdrShowResponse",
+      "title": "ProposalUpdateParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "acceptance_criteria": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "author_user_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "closed_at": {
+          "nullable": true,
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "short_id": {
+          "type": "string"
+        },
+        "status": {
+          "description": "Lifecycle: `draft` | `shared` | `ready` | `archived` | `superseded`.",
+          "type": "string"
+        },
+        "superseded_by": {
+          "nullable": true,
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "title": "ProposalSingleResponse",
       "type": "object"
     }
   },

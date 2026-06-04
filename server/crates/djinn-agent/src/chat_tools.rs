@@ -666,8 +666,6 @@ mod tests {
             "agent_list",
             "agent_metrics",
             "board_reconcile",
-            "propose_adr_accept",
-            "propose_adr_reject",
             "execution_kill_task",
             "retrigger_image_build",
             "github_app_installations",

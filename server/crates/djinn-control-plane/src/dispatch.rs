@@ -32,7 +32,9 @@ use crate::tools::project_tools::{
     ProjectGraphExclusionsSetParams, ProjectRemoveParams, RetriggerImageBuildParams,
 };
 use crate::tools::proposal_tools::{
-    ProposeAdrAcceptParams, ProposeAdrListParams, ProposeAdrRejectParams, ProposeAdrShowParams,
+    ProposalCreateParams, ProposalDeleteParams, ProposalFeedbackAddParams,
+    ProposalFeedbackResolveParams, ProposalListParams, ProposalShowParams, ProposalTargetParams,
+    ProposalUpdateParams,
 };
 use crate::tools::provider_tools::{
     ModelHealthInput, ProviderCatalogInput, ProviderConnectedInput, ProviderModelLookupInput,
@@ -281,29 +283,58 @@ impl DjinnMcpServer {
                 >(name, args)?))
                     .await,
             ),
-            "propose_adr_list" => map_json(
+            "proposal_create" => map_json(
                 name,
-                self.propose_adr_list(Parameters(decode_args::<ProposeAdrListParams>(name, args)?))
+                self.proposal_create(Parameters(decode_args::<ProposalCreateParams>(name, args)?))
                     .await,
             ),
-            "propose_adr_show" => map_json(
+            "proposal_show" => map_json(
                 name,
-                self.propose_adr_show(Parameters(decode_args::<ProposeAdrShowParams>(name, args)?))
+                self.proposal_show(Parameters(decode_args::<ProposalShowParams>(name, args)?))
                     .await,
             ),
-            "propose_adr_accept" => map_json(
+            "proposal_list" => map_json(
                 name,
-                self.propose_adr_accept(Parameters(decode_args::<ProposeAdrAcceptParams>(
+                self.proposal_list(Parameters(decode_args::<ProposalListParams>(name, args)?))
+                    .await,
+            ),
+            "proposal_update" => map_json(
+                name,
+                self.proposal_update(Parameters(decode_args::<ProposalUpdateParams>(name, args)?))
+                    .await,
+            ),
+            "proposal_delete" => map_json(
+                name,
+                self.proposal_delete(Parameters(decode_args::<ProposalDeleteParams>(name, args)?))
+                    .await,
+            ),
+            "proposal_add_target" => map_json(
+                name,
+                self.proposal_add_target(Parameters(decode_args::<ProposalTargetParams>(
                     name, args,
                 )?))
                 .await,
             ),
-            "propose_adr_reject" => map_json(
+            "proposal_remove_target" => map_json(
                 name,
-                self.propose_adr_reject(Parameters(decode_args::<ProposeAdrRejectParams>(
+                self.proposal_remove_target(Parameters(decode_args::<ProposalTargetParams>(
                     name, args,
                 )?))
                 .await,
+            ),
+            "proposal_feedback_add" => map_json(
+                name,
+                self.proposal_feedback_add(Parameters(decode_args::<ProposalFeedbackAddParams>(
+                    name, args,
+                )?))
+                .await,
+            ),
+            "proposal_feedback_resolve" => map_json(
+                name,
+                self.proposal_feedback_resolve(Parameters(decode_args::<
+                    ProposalFeedbackResolveParams,
+                >(name, args)?))
+                    .await,
             ),
             "model_health" => map_json(
                 name,

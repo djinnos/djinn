@@ -73,6 +73,10 @@ pub use repositories::{
         ProjectConfig, ProjectDispatchReadiness, ProjectImage, ProjectImageStatus,
         ProjectRepository,
     },
+    proposal::{
+        ProposalCreateInput, ProposalFeedbackCreateInput, ProposalListQuery, ProposalListResult,
+        ProposalRepository, ProposalUpdateInput,
+    },
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
     session::{CreateSessionParams, SessionRepository},
     session_auth::{CreateUserAuthSession, SessionAuthRepository, UserAuthSessionRecord},

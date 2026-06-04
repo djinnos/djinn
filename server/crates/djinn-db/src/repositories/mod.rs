@@ -10,6 +10,7 @@ pub mod note;
 pub mod oauth;
 pub mod org_config;
 pub mod project;
+pub mod proposal;
 pub mod repo_graph_cache;
 pub mod session;
 pub mod session_auth;

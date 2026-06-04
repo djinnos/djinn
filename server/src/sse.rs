@@ -46,10 +46,13 @@ impl BatchAccumulator {
         match (envelope.entity_type(), envelope.action()) {
             ("task", "created" | "deleted")
             | ("epic", "created" | "deleted")
+            | ("proposal", "created" | "deleted")
+            | ("proposal_feedback", "created")
             | ("session", "dispatched" | "ended")
             | ("lifecycle", "step") => EventTier::Immediate,
             ("task", "updated")
             | ("epic", "updated")
+            | ("proposal", "updated")
             | ("agent", "updated")
             | ("project", "updated") => EventTier::Coalesced {
                 key: coalesce_key(envelope),
@@ -144,6 +147,11 @@ fn coalesce_key(envelope: &DjinnEventEnvelope) -> String {
             .map(|id| format!("{event_name}:{id}"))
             .unwrap_or(event_name),
         ("epic", "updated") => payload
+            .get("id")
+            .and_then(|id| id.as_str())
+            .map(|id| format!("{event_name}:{id}"))
+            .unwrap_or(event_name),
+        ("proposal", "updated") => payload
             .get("id")
             .and_then(|id| id.as_str())
             .map(|id| format!("{event_name}:{id}"))

@@ -206,6 +206,37 @@ pub fn validate_epic_create_status(status: Option<&str>) -> Result<Option<&str>,
     }
 }
 
+/// Validate a proposal lifecycle status:
+/// `draft` | `shared` | `ready` | `archived` | `superseded`.
+pub fn validate_proposal_status(status: &str) -> Result<(), String> {
+    match status {
+        "draft" | "shared" | "ready" | "archived" | "superseded" => Ok(()),
+        other => Err(format!(
+            "invalid proposal status: {other:?} (expected draft, shared, ready, archived, or superseded)"
+        )),
+    }
+}
+
+/// Validate an optional initial proposal status for `proposal_create`
+/// (`None` defaults to `draft` at the repository layer).
+pub fn validate_proposal_create_status(status: Option<&str>) -> Result<Option<&str>, String> {
+    match status {
+        None => Ok(None),
+        Some(s) => validate_proposal_status(s).map(|()| Some(s)),
+    }
+}
+
+/// Validate a proposal feedback resolution status:
+/// `open` | `accepted` | `rejected`.
+pub fn validate_feedback_status(status: &str) -> Result<(), String> {
+    match status {
+        "open" | "accepted" | "rejected" => Ok(()),
+        other => Err(format!(
+            "invalid feedback status: {other:?} (expected open, accepted, or rejected)"
+        )),
+    }
+}
+
 // ── Emoji helpers ────────────────────────────────────────────────────────────
 
 /// Heuristic: is this char in a common emoji range?

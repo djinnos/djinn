@@ -255,200 +255,160 @@ mod tests {
         assert!(manager.server_for_session(&session_id).await.is_none());
     }
 
-    // proposal_pipeline_regression_worktree_draft_survives_sync_and_is_listed
-    // was deleted: it exercised `sync_worktree_notes_to_canonical` and
-    // `with_worktree_root`, both removed by the db-only knowledge-base
-    // cut-over. The propose_adr_* tools now query Dolt notes with
-    // `note_type=proposed_adr` directly — see the next four tests.
-
-    /// Seed a `proposed_adr` note for the given project and return it.
-    /// Mirrors what an architect agent would do via `memory_write` with
-    /// `type=proposed_adr`: the title slug becomes the proposal id.
-    async fn seed_proposed_adr(
-        db: &Database,
-        project_id: &str,
-        title: &str,
-        content: &str,
-    ) -> djinn_memory::Note {
-        NoteRepository::new(db.clone(), EventBus::noop())
-            .create(project_id, title, content, "proposed_adr", "[]")
-            .await
-            .expect("seed proposed_adr note")
-    }
+    // The legacy propose_adr_* dispatch tests were removed with the old
+    // proposal pipeline. The global Proposals layer (project-independent
+    // `proposals` entity) replaces it — the next tests exercise its dispatch
+    // routing end to end.
 
     #[tokio::test]
-    async fn dispatch_tool_routes_propose_adr_list() {
+    async fn dispatch_tool_routes_proposal_create_show_and_target() {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
         let project = create_project(&db, std::path::Path::new("")).await;
         let server = DjinnMcpServer::new(state);
 
-        seed_proposed_adr(
-            &db,
-            &project.id,
-            "ADR 999 Routing",
-            "---\nwork_shape: epic\noriginating_spike_id: spk1\n---\n\n# ADR 999 Routing\n",
-        )
-        .await;
-
-        let response = server
-            .dispatch_tool("propose_adr_list", json!({ "project": project.slug() }))
-            .await
-            .expect("dispatch propose_adr_list");
-
-        assert_eq!(response.get("error"), None);
-        let items = response
-            .get("items")
-            .and_then(|value| value.as_array())
-            .expect("items array");
-        assert_eq!(items.len(), 1);
-        assert_eq!(
-            items[0].get("id").and_then(|value| value.as_str()),
-            Some("adr-999-routing")
-        );
-        assert_eq!(
-            items[0].get("work_shape").and_then(|value| value.as_str()),
-            Some("epic")
-        );
-        assert_eq!(
-            items[0]
-                .get("originating_spike_id")
-                .and_then(|value| value.as_str()),
-            Some("spk1")
-        );
-        assert!(
-            items[0]
-                .get("mtime")
-                .and_then(|value| value.as_str())
-                .is_some()
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_tool_routes_propose_adr_show() {
-        let db = Database::open_in_memory().unwrap();
-        let state = test_mcp_state(db.clone());
-        let project = create_project(&db, std::path::Path::new("")).await;
-        let server = DjinnMcpServer::new(state);
-
-        seed_proposed_adr(
-            &db,
-            &project.id,
-            "ADR 999 Routing",
-            "---\nwork_shape: epic\n---\n\n# ADR 999 Routing\n\nBody text\n",
-        )
-        .await;
-
-        let response = server
+        // Create a global proposal targeting the project.
+        let created = server
             .dispatch_tool(
-                "propose_adr_show",
-                json!({ "project": project.slug(), "id": "adr-999-routing" }),
-            )
-            .await
-            .expect("dispatch propose_adr_show");
-
-        assert_eq!(response.get("error"), None);
-        let adr = response
-            .get("adr")
-            .and_then(|value| value.as_object())
-            .expect("adr object");
-        assert_eq!(
-            adr.get("id").and_then(|value| value.as_str()),
-            Some("adr-999-routing")
-        );
-        assert!(
-            adr.get("body")
-                .and_then(|value| value.as_str())
-                .is_some_and(|body| body.contains("Body text"))
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_tool_routes_propose_adr_accept() {
-        let db = Database::open_in_memory().unwrap();
-        let state = test_mcp_state(db.clone());
-        let project = create_project(&db, std::path::Path::new("")).await;
-        let server = DjinnMcpServer::new(state);
-
-        seed_proposed_adr(
-            &db,
-            &project.id,
-            "ADR 999 Routing",
-            "---\nwork_shape: architectural\n---\n\n# ADR 999 Routing\n",
-        )
-        .await;
-
-        let response = server
-            .dispatch_tool(
-                "propose_adr_accept",
+                "proposal_create",
                 json!({
-                    "project": project.slug(),
-                    "id": "adr-999-routing",
-                    "create_epic": false
+                    "title": "Block invoice payments during collection",
+                    "body": "## Problem\nGateways are the wrong boundary.",
+                    "acceptance_criteria": ["Enforce centrally", "Fail open"],
+                    "target_projects": [project.slug()],
                 }),
             )
             .await
-            .expect("dispatch propose_adr_accept");
+            .expect("dispatch proposal_create");
+        assert_eq!(created.get("error"), None);
+        let id = created
+            .get("id")
+            .and_then(|v| v.as_str())
+            .expect("proposal id")
+            .to_string();
+        assert_eq!(
+            created.get("status").and_then(|v| v.as_str()),
+            Some("draft")
+        );
+        assert_eq!(
+            created
+                .get("short_id")
+                .and_then(|v| v.as_str())
+                .map(str::len),
+            Some(4)
+        );
 
-        assert_eq!(response.get("error"), None);
-        let accepted_path = response
-            .get("accepted_path")
-            .and_then(|value| value.as_str())
-            .expect("accepted path");
-        // After the cut-over, accepted_path is the new permalink (note
-        // moved from `decisions/proposed/<slug>` to `decisions/<slug>`).
-        assert_eq!(accepted_path, "decisions/adr-999-routing");
-
-        let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
-        let promoted = note_repo
-            .get_by_permalink(&project.id, "decisions/adr-999-routing")
+        // Show bundles the proposal, its targets, and (empty) feedback.
+        let shown = server
+            .dispatch_tool("proposal_show", json!({ "id": id }))
             .await
-            .unwrap()
-            .expect("accepted note exists");
-        assert_eq!(promoted.note_type, "adr");
-        assert!(
-            note_repo
-                .get_by_permalink(&project.id, "decisions/proposed/adr-999-routing")
-                .await
-                .unwrap()
-                .is_none(),
-            "old proposed permalink should no longer resolve"
+            .expect("dispatch proposal_show");
+        assert_eq!(shown.get("error"), None);
+        let targets = shown
+            .get("targets")
+            .and_then(|v| v.as_array())
+            .expect("targets array");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(
+            targets[0].get("role").and_then(|v| v.as_str()),
+            Some("primary")
+        );
+
+        // Re-target: remove the original and the list reflects it (Sam case).
+        let removed = server
+            .dispatch_tool(
+                "proposal_remove_target",
+                json!({ "id": id, "project": project.slug() }),
+            )
+            .await
+            .expect("dispatch proposal_remove_target");
+        assert_eq!(removed.get("error"), None);
+        assert_eq!(
+            removed
+                .get("targets")
+                .and_then(|v| v.as_array())
+                .map(Vec::len),
+            Some(0)
         );
     }
 
     #[tokio::test]
-    async fn dispatch_tool_routes_propose_adr_reject() {
+    async fn dispatch_tool_routes_proposal_list_and_feedback() {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
-        let project = create_project(&db, std::path::Path::new("")).await;
+        create_project(&db, std::path::Path::new("")).await;
         let server = DjinnMcpServer::new(state);
 
-        seed_proposed_adr(&db, &project.id, "ADR 999 Routing", "# ADR 999 Routing\n").await;
+        let created = server
+            .dispatch_tool("proposal_create", json!({ "title": "Feedback proposal" }))
+            .await
+            .expect("dispatch proposal_create");
+        let id = created
+            .get("id")
+            .and_then(|v| v.as_str())
+            .expect("proposal id")
+            .to_string();
 
-        let response = server
+        // Global list (no project arg) returns the proposal.
+        let listed = server
+            .dispatch_tool("proposal_list", json!({}))
+            .await
+            .expect("dispatch proposal_list");
+        assert_eq!(listed.get("total_count").and_then(|v| v.as_i64()), Some(1));
+
+        // Plain discussion (no status) + a trackable suggestion (status=open).
+        server
             .dispatch_tool(
-                "propose_adr_reject",
+                "proposal_feedback_add",
+                json!({ "proposal_id": id, "body": "what about X?" }),
+            )
+            .await
+            .expect("dispatch proposal_feedback_add (discussion)");
+        let suggestion = server
+            .dispatch_tool(
+                "proposal_feedback_add",
                 json!({
-                    "project": project.slug(),
-                    "id": "adr-999-routing",
-                    "reason": "Not aligned with current direction"
+                    "proposal_id": id,
+                    "body": "enforce in svc-invoice not the gateway",
+                    "status": "open",
+                    "author_kind": "ai",
+                    "author_model": "claude-opus-4-8",
                 }),
             )
             .await
-            .expect("dispatch propose_adr_reject");
+            .expect("dispatch proposal_feedback_add (suggestion)");
+        let feedback_id = suggestion
+            .get("feedback")
+            .and_then(|f| f.get("id"))
+            .and_then(|v| v.as_str())
+            .expect("feedback id")
+            .to_string();
 
-        assert_eq!(response.get("error"), None);
+        let resolved = server
+            .dispatch_tool(
+                "proposal_feedback_resolve",
+                json!({ "id": feedback_id, "status": "accepted" }),
+            )
+            .await
+            .expect("dispatch proposal_feedback_resolve");
         assert_eq!(
-            response.get("ok").and_then(|value| value.as_bool()),
-            Some(true)
+            resolved
+                .get("feedback")
+                .and_then(|f| f.get("status"))
+                .and_then(|v| v.as_str()),
+            Some("accepted")
         );
-        assert!(
-            NoteRepository::new(db.clone(), EventBus::noop())
-                .get_by_permalink(&project.id, "decisions/proposed/adr-999-routing")
-                .await
-                .unwrap()
-                .is_none(),
-            "rejected note should be deleted"
+
+        let shown = server
+            .dispatch_tool("proposal_show", json!({ "id": id }))
+            .await
+            .expect("dispatch proposal_show");
+        assert_eq!(
+            shown
+                .get("feedback")
+                .and_then(|v| v.as_array())
+                .map(Vec::len),
+            Some(2)
         );
     }
 

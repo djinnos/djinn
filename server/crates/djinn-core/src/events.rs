@@ -4,6 +4,8 @@ use crate::models::CustomProvider;
 use crate::models::Epic;
 use crate::models::GitSettings;
 use crate::models::Project;
+use crate::models::Proposal;
+use crate::models::ProposalFeedback;
 use crate::models::Task;
 use serde::de::DeserializeOwned;
 
@@ -97,6 +99,52 @@ impl DjinnEventEnvelope {
             action: "deleted",
             payload: serde_json::to_value(serde_json::json!({"id": id})).unwrap(),
             id: Some(id.to_string()),
+            project_id: None,
+            from_sync: false,
+        }
+    }
+    pub fn proposal_created(proposal: &Proposal) -> Self {
+        Self {
+            entity_type: "proposal",
+            action: "created",
+            payload: serde_json::to_value(proposal).unwrap(),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        }
+    }
+    pub fn proposal_updated(proposal: &Proposal) -> Self {
+        Self {
+            entity_type: "proposal",
+            action: "updated",
+            payload: serde_json::to_value(proposal).unwrap(),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        }
+    }
+    pub fn proposal_deleted(id: &str) -> Self {
+        Self {
+            entity_type: "proposal",
+            action: "deleted",
+            payload: serde_json::to_value(serde_json::json!({"id": id})).unwrap(),
+            id: Some(id.to_string()),
+            project_id: None,
+            from_sync: false,
+        }
+    }
+    /// A feedback entry (discussion or suggestion) was added to a proposal.
+    /// Carries the parent `proposal_id` so the UI can target the right detail
+    /// view without a refetch.
+    pub fn proposal_feedback_created(proposal_id: &str, feedback: &ProposalFeedback) -> Self {
+        Self {
+            entity_type: "proposal_feedback",
+            action: "created",
+            payload: serde_json::to_value(
+                serde_json::json!({"proposal_id": proposal_id, "feedback": feedback}),
+            )
+            .unwrap(),
+            id: None,
             project_id: None,
             from_sync: false,
         }

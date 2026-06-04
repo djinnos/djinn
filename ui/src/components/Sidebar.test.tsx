@@ -19,8 +19,8 @@ describe('Sidebar component', () => {
     localStorage.clear();
     vi.mocked(callMcpTool).mockReset();
     vi.mocked(callMcpTool).mockImplementation(async (toolName) => {
-      if (toolName === 'propose_adr_list') {
-        return { items: [] } as never;
+      if (toolName === 'proposal_list') {
+        return { proposals: [] } as never;
       }
 
       return {} as never;
@@ -79,13 +79,13 @@ describe('Sidebar component', () => {
     expect(screen.getByRole('button', { name: /Settings/ })).toBeInTheDocument();
   });
 
-  it('shows a Proposals badge matching the cross-project pending proposal count', async () => {
+  it('shows a Proposals badge matching the active proposal count', async () => {
     vi.mocked(callMcpTool).mockImplementation(async (toolName) => {
-      if (toolName === 'propose_adr_list') {
+      if (toolName === 'proposal_list') {
         return {
-          items: [
-            { id: 'adr-1', title: 'Draft 1', path: '/tmp/adr-1.md', project_id: 'project-a' },
-            { id: 'adr-2', title: 'Draft 2', path: '/tmp/adr-2.md', project_id: 'project-b' },
+          proposals: [
+            { id: 'p-1', short_id: 'aaaa', title: 'Draft 1', status: 'draft', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
+            { id: 'p-2', short_id: 'bbbb', title: 'Shared 2', status: 'shared', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
           ],
         } as never;
       }

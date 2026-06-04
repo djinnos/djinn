@@ -23,12 +23,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useProjectRoute } from '@/hooks/useProjectRoute';
 import { useDevcontainerWarnings } from '@/hooks/useDevcontainerWarnings';
-import { showToast } from '@/lib/toast';
-import {
-  allProjectsProposalListQueryOptions,
-  markProposalDraftNotified,
-  shouldNotifyForProposalDraft,
-} from '@/lib/pulseProposals';
+import { proposalListQueryOptions } from '@/lib/proposalQueries';
 
 interface NavItemProps {
   icon: React.ReactNode;
@@ -120,8 +115,12 @@ export function Sidebar() {
   const location = useLocation();
   const { navigateToView } = useProjectRoute();
   const user = useAuthUser();
-  const proposalsQuery = useQuery(allProjectsProposalListQueryOptions());
-  const proposalCount = proposalsQuery.data?.length ?? 0;
+  const proposalsQuery = useQuery(proposalListQueryOptions());
+  // Badge: active proposals still being worked (not archived/superseded).
+  const proposalCount =
+    proposalsQuery.data?.filter(
+      (p) => p.status !== 'archived' && p.status !== 'superseded',
+    ).length ?? 0;
   const { count: devcontainerWarningCount } = useDevcontainerWarnings();
 
   // Sync active section from URL
@@ -146,19 +145,6 @@ export function Sidebar() {
       setActiveSection('tasks');
     }
   }, [location.pathname, setActiveSection]);
-
-  useEffect(() => {
-    for (const proposal of proposalsQuery.data ?? []) {
-      if (!shouldNotifyForProposalDraft(proposal, user)) continue;
-
-      markProposalDraftNotified(proposal.id);
-      showToast.info('Architect proposal draft is ready', {
-        description: proposal.originating_spike_id
-          ? `Spike ${proposal.originating_spike_id} produced "${proposal.title || proposal.id}".`
-          : `"${proposal.title || proposal.id}" is ready for review.`,
-      });
-    }
-  }, [proposalsQuery.data, user]);
 
   return (
     <aside className="flex h-screen w-64 shrink-0 flex-col border-r bg-sidebar">

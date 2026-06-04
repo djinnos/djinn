@@ -504,6 +504,16 @@ export namespace CodeGraphInputSchema {
    */
   target?: string
   /**
+   * v10: test-file filter. `"include"` (default for `snapshot` —
+   * returns the whole graph), `"exclude"` (drop every node the graph
+   * builder marked `is_test`), or `"only"` (keep only test nodes).
+   * Test classification is the canonical `RepoGraphNode::is_test`
+   * flag (file-path convention OR SCIP `Test` role). Currently
+   * honoured by the `snapshot` op; other ops keep their existing
+   * test-handling.
+   */
+  tests?: string
+  /**
    * Destination node for `path`.
    */
   to?: string
@@ -2941,263 +2951,444 @@ export namespace ProjectRemoveOutputSchema {
 
 }
 export type ProjectRemoveOutput = ProjectRemoveOutputSchema.ProjectRemoveOutput;
-export namespace ProposeAdrAcceptInputSchema {
-  export interface ProposeAdrAcceptInput {
+export namespace ProposalAddTargetInputSchema {
+  export interface ProposalAddTargetInput {
   /**
-   * When creating the epic, set `auto_breakdown` to this value.
-   * Defaults to `true` so the normal breakdown Planner fires.
-   */
-  auto_breakdown?: boolean
-  /**
-   * When `true` (default), a matching `Epic` shell is created for
-   * `work_shape ∈ {task, epic, spike}` ADRs.  Architectural ADRs
-   * never spawn an epic regardless of this flag.
-   */
-  create_epic?: boolean
-  /**
-   * File stem of the proposed ADR, e.g. `"adr-052-foo"`.
+   * Proposal UUID or short_id.
    */
   id: string
   /**
-   * Absolute project path.
+   * Target project: UUID or owner/repo slug (must be registered).
    */
   project: string
   /**
-   * Optional accepted title override. Defaults to the draft title.
+   * `primary` (a write-target, default) or `reference` (read-only context).
    */
-  title?: string
+  role?: string
   [k: string]: any
   }
 
 }
-export type ProposeAdrAcceptInput = ProposeAdrAcceptInputSchema.ProposeAdrAcceptInput;
-export namespace ProposeAdrAcceptOutputSchema {
-  export interface ProposeAdrAcceptOutput {
-  accepted_path?: string
-  epic: EpicModel
+export type ProposalAddTargetInput = ProposalAddTargetInputSchema.ProposalAddTargetInput;
+export namespace ProposalAddTargetOutputSchema {
+  export interface ProposalAddTargetOutput {
   error?: string
+  targets?: ProposalTargetModel[]
   [k: string]: any
   }
-  export interface EpicModel {
-  /**
-   * ADR-051 Epic C — mirrors `Epic::auto_breakdown`.
-   */
-  auto_breakdown: boolean
-  closed_at?: string
-  color: string
+  export interface ProposalTargetModel {
   created_at: string
+  project_id: string
   /**
-   * Real user FK of the epic's creator (NULL for system/unowned epics).
-   * Surfaced so the board can scope epics to the owner filter, mirroring
-   * `TaskModel::created_by_user_id`.
+   * Human-friendly project name, resolved by the handler.
    */
-  created_by_user_id?: string
-  description: string
-  emoji: string
+  project_name?: string
+  /**
+   * `owner/repo` slug, resolved by the handler for display chips.
+   */
+  project_path?: string
+  /**
+   * `primary` (a write-target) or `reference` (read-only context).
+   */
+  role: string
+  [k: string]: any
+  }
+
+}
+export type ProposalAddTargetOutput = ProposalAddTargetOutputSchema.ProposalAddTargetOutput;
+export namespace ProposalCreateInputSchema {
+  export interface ProposalCreateInput {
+  /**
+   * Acceptance-criteria lines.
+   */
+  acceptance_criteria?: string[]
+  /**
+   * Markdown spec body.
+   */
+  body?: string
+  /**
+   * Initial status: `draft` (default), `shared`, or `ready`.
+   */
+  status?: string
+  /**
+   * Target projects (UUIDs or owner/repo slugs) this proposal touches.
+   * Editable later via proposal_add_target / proposal_remove_target.
+   */
+  target_projects?: string[]
+  title: string
+  [k: string]: any
+  }
+
+}
+export type ProposalCreateInput = ProposalCreateInputSchema.ProposalCreateInput;
+export namespace ProposalCreateOutputSchema {
+  export interface ProposalCreateOutput {
+  acceptance_criteria?: string[]
+  author_user_id?: string
+  body?: string
+  closed_at?: string
+  created_at?: string
+  error?: string
+  id?: string
+  short_id?: string
+  /**
+   * Lifecycle: `draft` | `shared` | `ready` | `archived` | `superseded`.
+   */
+  status?: string
+  superseded_by?: string
+  title?: string
+  updated_at?: string
+  [k: string]: any
+  }
+
+}
+export type ProposalCreateOutput = ProposalCreateOutputSchema.ProposalCreateOutput;
+export namespace ProposalDeleteInputSchema {
+  export interface ProposalDeleteInput {
+  /**
+   * Proposal UUID or short_id.
+   */
   id: string
-  memory_refs: string[]
+  [k: string]: any
+  }
+
+}
+export type ProposalDeleteInput = ProposalDeleteInputSchema.ProposalDeleteInput;
+export namespace ProposalDeleteOutputSchema {
+  export interface ProposalDeleteOutput {
+  error?: string
+  ok?: boolean
+  [k: string]: any
+  }
+
+}
+export type ProposalDeleteOutput = ProposalDeleteOutputSchema.ProposalDeleteOutput;
+export namespace ProposalFeedbackAddInputSchema {
+  export interface ProposalFeedbackAddInput {
   /**
-   * ADR-051 Epic C — mirrors `Epic::originating_adr_id`.
+   * `user` (default) or `ai`.
    */
-  originating_adr_id?: string
-  owner: string
-  short_id: string
+  author_kind?: string
+  /**
+   * Model id when author_kind is `ai`.
+   */
+  author_model?: string
+  body: string
+  /**
+   * Parent feedback id for a threaded reply.
+   */
+  parent_id?: string
+  /**
+   * Proposal UUID or short_id.
+   */
+  proposal_id: string
+  /**
+   * Omit for plain discussion; set `open` to file a trackable suggestion.
+   */
+  status?: string
+  /**
+   * Optional pointer to the spec section this is about.
+   */
+  target_section?: string
+  [k: string]: any
+  }
+
+}
+export type ProposalFeedbackAddInput = ProposalFeedbackAddInputSchema.ProposalFeedbackAddInput;
+export namespace ProposalFeedbackAddOutputSchema {
+  export interface ProposalFeedbackAddOutput {
+  error?: string
+  feedback?: (ProposalFeedbackModel | null)
+  [k: string]: any
+  }
+  export interface ProposalFeedbackModel {
+  /**
+   * `user` or `ai`.
+   */
+  author_kind: string
+  author_model?: string
+  author_user_id?: string
+  body: string
+  created_at: string
+  id: string
+  parent_id?: string
+  proposal_id: string
+  /**
+   * `null` = discussion; `open` | `accepted` | `rejected` = suggestion.
+   */
+  status?: string
+  target_section?: string
+  updated_at: string
+  [k: string]: any
+  }
+
+}
+export type ProposalFeedbackAddOutput = ProposalFeedbackAddOutputSchema.ProposalFeedbackAddOutput;
+export namespace ProposalFeedbackResolveInputSchema {
+  export interface ProposalFeedbackResolveInput {
+  /**
+   * Feedback entry UUID.
+   */
+  id: string
+  /**
+   * `open` | `accepted` | `rejected`, or `none` to revert to discussion.
+   */
   status: string
+  [k: string]: any
+  }
+
+}
+export type ProposalFeedbackResolveInput = ProposalFeedbackResolveInputSchema.ProposalFeedbackResolveInput;
+export namespace ProposalFeedbackResolveOutputSchema {
+  export interface ProposalFeedbackResolveOutput {
+  error?: string
+  feedback?: (ProposalFeedbackModel | null)
+  [k: string]: any
+  }
+  export interface ProposalFeedbackModel {
+  /**
+   * `user` or `ai`.
+   */
+  author_kind: string
+  author_model?: string
+  author_user_id?: string
+  body: string
+  created_at: string
+  id: string
+  parent_id?: string
+  proposal_id: string
+  /**
+   * `null` = discussion; `open` | `accepted` | `rejected` = suggestion.
+   */
+  status?: string
+  target_section?: string
+  updated_at: string
+  [k: string]: any
+  }
+
+}
+export type ProposalFeedbackResolveOutput = ProposalFeedbackResolveOutputSchema.ProposalFeedbackResolveOutput;
+export namespace ProposalListInputSchema {
+  export interface ProposalListInput {
+  /**
+   * Filter by author user id.
+   */
+  author?: string
+  limit?: number
+  offset?: number
+  /**
+   * Sort order: "created_desc" (default), "created", "updated", "updated_desc".
+   */
+  sort?: string
+  status?: string
+  /**
+   * Filter to proposals targeting this project (UUID or owner/repo slug).
+   */
+  target_project?: string
+  /**
+   * Full-text search on title and body.
+   */
+  text?: string
+  [k: string]: any
+  }
+
+}
+export type ProposalListInput = ProposalListInputSchema.ProposalListInput;
+export namespace ProposalListOutputSchema {
+  export interface ProposalListOutput {
+  error?: string
+  has_more?: boolean
+  limit?: number
+  offset?: number
+  proposals?: ProposalModel[]
+  total_count?: number
+  [k: string]: any
+  }
+  export interface ProposalModel {
+  acceptance_criteria: string[]
+  author_user_id?: string
+  body: string
+  closed_at?: string
+  created_at: string
+  id: string
+  short_id: string
+  /**
+   * Lifecycle: `draft` | `shared` | `ready` | `archived` | `superseded`.
+   */
+  status: string
+  superseded_by?: string
   title: string
   updated_at: string
   [k: string]: any
   }
 
 }
-export type ProposeAdrAcceptOutput = ProposeAdrAcceptOutputSchema.ProposeAdrAcceptOutput;
-export namespace ProposeAdrListInputSchema {
-  export interface ProposeAdrListInput {
+export type ProposalListOutput = ProposalListOutputSchema.ProposalListOutput;
+export namespace ProposalRemoveTargetInputSchema {
+  export interface ProposalRemoveTargetInput {
   /**
-   * Absolute project path.  Omit to list proposals across every
-   * registered project.  Each item in the response is tagged with
-   * `project_id` / `project_name` / `project_path` so the Proposals
-   * page can render cross-project lists without a second lookup.
-   */
-  project?: string
-  [k: string]: any
-  }
-
-}
-export type ProposeAdrListInput = ProposeAdrListInputSchema.ProposeAdrListInput;
-export namespace ProposeAdrListOutputSchema {
-  export interface ProposeAdrListOutput {
-  error?: string
-  items?: ProposedAdr[]
-  [k: string]: any
-  }
-  /**
-   * A parsed proposed ADR.  Serialized back to the MCP client.
-   */
-  export interface ProposedAdr {
-  /**
-   * Raw note content. Omitted in list responses to keep them small.
-   */
-  body?: string
-  /**
-   * Slug — the part of the permalink after `decisions/proposed/`.
-   * e.g. `"adr-052-new-pipeline"` for permalink
-   * `"decisions/proposed/adr-052-new-pipeline"`.
+   * Proposal UUID or short_id.
    */
   id: string
   /**
-   * Last update timestamp on the underlying note, RFC 3339.
-   */
-  mtime?: string
-  /**
-   * Optional short_id of the originating spike task — frontmatter-sourced.
-   */
-  originating_spike_id?: string
-  /**
-   * Canonical permalink of the proposed-ADR note in Dolt.
-   */
-  path: string
-  /**
-   * Djinn project UUID that owns this proposal.  Populated by the
-   * list handler so cross-project aggregation can thread items back
-   * to their project in the UI.  Omitted when the project could not
-   * be resolved from the Dolt registry.
-   */
-  project_id?: string
-  /**
-   * Display name of the owning project — kept separate from
-   * `project_path` since the Proposals UI shows the human name in
-   * per-row chips.
-   */
-  project_name?: string
-  /**
-   * Display name of the owning project, sourced from the Dolt
-   * registry.  Used by the Proposals page to render per-row project
-   * chips when the "All projects" filter is active.
-   */
-  project_path?: string
-  /**
-   * Note title (from `memory_write` `title=`).
-   */
-  title: string
-  /**
-   * Work shape hint (`"task"` | `"epic"` | `"architectural"` | `"spike"`),
-   * parsed from the note content's leading YAML frontmatter when present.
-   */
-  work_shape?: string
-  [k: string]: any
-  }
-
-}
-export type ProposeAdrListOutput = ProposeAdrListOutputSchema.ProposeAdrListOutput;
-export namespace ProposeAdrRejectInputSchema {
-  export interface ProposeAdrRejectInput {
-  /**
-   * File stem of the proposed ADR.
-   */
-  id: string
-  /**
-   * Absolute project path.
+   * Target project: UUID or owner/repo slug (must be registered).
    */
   project: string
   /**
-   * Required rejection reason, persisted back to the originating spike when available.
+   * `primary` (a write-target, default) or `reference` (read-only context).
    */
-  reason: string
+  role?: string
   [k: string]: any
   }
 
 }
-export type ProposeAdrRejectInput = ProposeAdrRejectInputSchema.ProposeAdrRejectInput;
-export namespace ProposeAdrRejectOutputSchema {
-  export interface ProposeAdrRejectOutput {
+export type ProposalRemoveTargetInput = ProposalRemoveTargetInputSchema.ProposalRemoveTargetInput;
+export namespace ProposalRemoveTargetOutputSchema {
+  export interface ProposalRemoveTargetOutput {
   error?: string
-  feedback_target?: string
-  ok: boolean
+  targets?: ProposalTargetModel[]
   [k: string]: any
   }
-
-}
-export type ProposeAdrRejectOutput = ProposeAdrRejectOutputSchema.ProposeAdrRejectOutput;
-export namespace ProposeAdrShowInputSchema {
-  export interface ProposeAdrShowInput {
+  export interface ProposalTargetModel {
+  created_at: string
+  project_id: string
   /**
-   * File stem of the proposed ADR, e.g. `"adr-052-foo"`.
-   */
-  id: string
-  /**
-   * Absolute project path.
-   */
-  project: string
-  [k: string]: any
-  }
-
-}
-export type ProposeAdrShowInput = ProposeAdrShowInputSchema.ProposeAdrShowInput;
-export namespace ProposeAdrShowOutputSchema {
-  export interface ProposeAdrShowOutput {
-  adr: ProposedAdr
-  error?: string
-  [k: string]: any
-  }
-  /**
-   * A parsed proposed ADR.  Serialized back to the MCP client.
-   */
-  export interface ProposedAdr {
-  /**
-   * Raw note content. Omitted in list responses to keep them small.
-   */
-  body?: string
-  /**
-   * Slug — the part of the permalink after `decisions/proposed/`.
-   * e.g. `"adr-052-new-pipeline"` for permalink
-   * `"decisions/proposed/adr-052-new-pipeline"`.
-   */
-  id: string
-  /**
-   * Last update timestamp on the underlying note, RFC 3339.
-   */
-  mtime?: string
-  /**
-   * Optional short_id of the originating spike task — frontmatter-sourced.
-   */
-  originating_spike_id?: string
-  /**
-   * Canonical permalink of the proposed-ADR note in Dolt.
-   */
-  path: string
-  /**
-   * Djinn project UUID that owns this proposal.  Populated by the
-   * list handler so cross-project aggregation can thread items back
-   * to their project in the UI.  Omitted when the project could not
-   * be resolved from the Dolt registry.
-   */
-  project_id?: string
-  /**
-   * Display name of the owning project — kept separate from
-   * `project_path` since the Proposals UI shows the human name in
-   * per-row chips.
+   * Human-friendly project name, resolved by the handler.
    */
   project_name?: string
   /**
-   * Display name of the owning project, sourced from the Dolt
-   * registry.  Used by the Proposals page to render per-row project
-   * chips when the "All projects" filter is active.
+   * `owner/repo` slug, resolved by the handler for display chips.
    */
   project_path?: string
   /**
-   * Note title (from `memory_write` `title=`).
+   * `primary` (a write-target) or `reference` (read-only context).
    */
-  title: string
-  /**
-   * Work shape hint (`"task"` | `"epic"` | `"architectural"` | `"spike"`),
-   * parsed from the note content's leading YAML frontmatter when present.
-   */
-  work_shape?: string
+  role: string
   [k: string]: any
   }
 
 }
-export type ProposeAdrShowOutput = ProposeAdrShowOutputSchema.ProposeAdrShowOutput;
+export type ProposalRemoveTargetOutput = ProposalRemoveTargetOutputSchema.ProposalRemoveTargetOutput;
+export namespace ProposalShowInputSchema {
+  export interface ProposalShowInput {
+  /**
+   * Proposal UUID or short_id.
+   */
+  id: string
+  [k: string]: any
+  }
+
+}
+export type ProposalShowInput = ProposalShowInputSchema.ProposalShowInput;
+export namespace ProposalShowOutputSchema {
+  export interface ProposalShowOutput {
+  error?: string
+  feedback?: ProposalFeedbackModel[]
+  proposal?: (ProposalModel | null)
+  targets?: ProposalTargetModel[]
+  [k: string]: any
+  }
+  export interface ProposalFeedbackModel {
+  /**
+   * `user` or `ai`.
+   */
+  author_kind: string
+  author_model?: string
+  author_user_id?: string
+  body: string
+  created_at: string
+  id: string
+  parent_id?: string
+  proposal_id: string
+  /**
+   * `null` = discussion; `open` | `accepted` | `rejected` = suggestion.
+   */
+  status?: string
+  target_section?: string
+  updated_at: string
+  [k: string]: any
+  }
+  export interface ProposalModel {
+  acceptance_criteria: string[]
+  author_user_id?: string
+  body: string
+  closed_at?: string
+  created_at: string
+  id: string
+  short_id: string
+  /**
+   * Lifecycle: `draft` | `shared` | `ready` | `archived` | `superseded`.
+   */
+  status: string
+  superseded_by?: string
+  title: string
+  updated_at: string
+  [k: string]: any
+  }
+  export interface ProposalTargetModel {
+  created_at: string
+  project_id: string
+  /**
+   * Human-friendly project name, resolved by the handler.
+   */
+  project_name?: string
+  /**
+   * `owner/repo` slug, resolved by the handler for display chips.
+   */
+  project_path?: string
+  /**
+   * `primary` (a write-target) or `reference` (read-only context).
+   */
+  role: string
+  [k: string]: any
+  }
+
+}
+export type ProposalShowOutput = ProposalShowOutputSchema.ProposalShowOutput;
+export namespace ProposalUpdateInputSchema {
+  export interface ProposalUpdateInput {
+  acceptance_criteria?: string[]
+  body?: string
+  /**
+   * Proposal UUID or short_id.
+   */
+  id: string
+  /**
+   * `draft` | `shared` | `ready` | `archived` | `superseded`.
+   */
+  status?: string
+  /**
+   * UUID or short_id of the proposal that supersedes this one.
+   */
+  superseded_by?: string
+  title?: string
+  [k: string]: any
+  }
+
+}
+export type ProposalUpdateInput = ProposalUpdateInputSchema.ProposalUpdateInput;
+export namespace ProposalUpdateOutputSchema {
+  export interface ProposalUpdateOutput {
+  acceptance_criteria?: string[]
+  author_user_id?: string
+  body?: string
+  closed_at?: string
+  created_at?: string
+  error?: string
+  id?: string
+  short_id?: string
+  /**
+   * Lifecycle: `draft` | `shared` | `ready` | `archived` | `superseded`.
+   */
+  status?: string
+  superseded_by?: string
+  title?: string
+  updated_at?: string
+  [k: string]: any
+  }
+
+}
+export type ProposalUpdateOutput = ProposalUpdateOutputSchema.ProposalUpdateOutput;
 export namespace ProviderCatalogInputSchema {
   export interface ProviderCatalogInput {
   /**
@@ -3230,6 +3421,16 @@ export namespace ProviderCatalogOutputSchema {
   npm: string
   oauth_keys: string[]
   oauth_supported: boolean
+  /**
+   * When set, the stored credential for this provider was rejected by the
+   * provider (a 401 during a run) and marked revoked. The provider is
+   * reported disconnected (`connected = false`, no `connection_methods`) and
+   * this human-readable reason is carried so the UI can show
+   * "Disconnected — <reason>" persistently (survives reload — it comes from
+   * the persisted `credentials.revoked_at/reason`, not a transient event).
+   * Reconnecting the provider clears it.
+   */
+  revoked_reason?: string
   [k: string]: any
   }
 
@@ -3267,6 +3468,16 @@ export namespace ProviderConnectedOutputSchema {
   npm: string
   oauth_keys: string[]
   oauth_supported: boolean
+  /**
+   * When set, the stored credential for this provider was rejected by the
+   * provider (a 401 during a run) and marked revoked. The provider is
+   * reported disconnected (`connected = false`, no `connection_methods`) and
+   * this human-readable reason is carried so the UI can show
+   * "Disconnected — <reason>" persistently (survives reload — it comes from
+   * the persisted `credentials.revoked_at/reason`, not a transient event).
+   * Reconnecting the provider clears it.
+   */
+  revoked_reason?: string
   [k: string]: any
   }
 
@@ -3285,9 +3496,50 @@ export namespace ProviderModelLookupInputSchema {
 export type ProviderModelLookupInput = ProviderModelLookupInputSchema.ProviderModelLookupInput;
 export namespace ProviderModelLookupOutputSchema {
   export interface ProviderModelLookupOutput {
+  /**
+   * G3 structured-error envelope, populated on a 404-style miss (the model id
+   * is not in the catalog). Lets the agent branch on `status == "404"` and
+   * follow the `hint` instead of re-guessing the same bad id. Absent on a hit.
+   */
+  error?: (ToolError | null)
   found: boolean
   model: ProviderModelOutput
   model_id: string
+  [k: string]: any
+  }
+  /**
+   * Structured error envelope returned to the agent in place of (or alongside) a
+   * flat error string. Serializes to a JSON object; absent fields are omitted so
+   * the wire shape stays compact.
+   */
+  export interface ToolError {
+  /**
+   * Raw upstream detail (response body, provider message) when available.
+   */
+  body?: string
+  /**
+   * Human-readable message describing what went wrong. Always present.
+   */
+  error: string
+  /**
+   * Actionable next step the agent can take to recover or disambiguate.
+   */
+  hint?: string
+  /**
+   * The logical operation that failed — typically the MCP tool name (e.g.
+   * "provider_model_lookup") or the upstream method ("GET /search/code").
+   */
+  method?: string
+  /**
+   * The resource the call targeted — a model id, repo path, PR ref, URL, etc.
+   */
+  path?: string
+  /**
+   * Status as a numeric HTTP code (e.g. "404", "422") or a coarse category
+   * (e.g. "not_found", "rate_limited", "network"). Stored as a string so a
+   * numeric HTTP status and a symbolic category share one field.
+   */
+  status?: string
   [k: string]: any
   }
   export interface ProviderModelOutput {
@@ -4577,7 +4829,7 @@ export namespace UserSettingsSetOutputSchema {
 }
 export type UserSettingsSetOutput = UserSettingsSetOutputSchema.UserSettingsSetOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_add_read_source" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "propose_adr_accept" | "propose_adr_list" | "propose_adr_reject" | "propose_adr_show" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "user_settings_get" | "user_settings_set";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_add_read_source" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "proposal_add_target" | "proposal_create" | "proposal_delete" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_list" | "proposal_remove_target" | "proposal_show" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "user_settings_get" | "user_settings_set";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -4645,10 +4897,15 @@ export interface McpToolMap {
   "project_graph_exclusions_set": { input: ProjectGraphExclusionsSetInput; output: ProjectGraphExclusionsSetOutput };
   "project_list": { input: ProjectListInput; output: ProjectListOutput };
   "project_remove": { input: ProjectRemoveInput; output: ProjectRemoveOutput };
-  "propose_adr_accept": { input: ProposeAdrAcceptInput; output: ProposeAdrAcceptOutput };
-  "propose_adr_list": { input: ProposeAdrListInput; output: ProposeAdrListOutput };
-  "propose_adr_reject": { input: ProposeAdrRejectInput; output: ProposeAdrRejectOutput };
-  "propose_adr_show": { input: ProposeAdrShowInput; output: ProposeAdrShowOutput };
+  "proposal_add_target": { input: ProposalAddTargetInput; output: ProposalAddTargetOutput };
+  "proposal_create": { input: ProposalCreateInput; output: ProposalCreateOutput };
+  "proposal_delete": { input: ProposalDeleteInput; output: ProposalDeleteOutput };
+  "proposal_feedback_add": { input: ProposalFeedbackAddInput; output: ProposalFeedbackAddOutput };
+  "proposal_feedback_resolve": { input: ProposalFeedbackResolveInput; output: ProposalFeedbackResolveOutput };
+  "proposal_list": { input: ProposalListInput; output: ProposalListOutput };
+  "proposal_remove_target": { input: ProposalRemoveTargetInput; output: ProposalRemoveTargetOutput };
+  "proposal_show": { input: ProposalShowInput; output: ProposalShowOutput };
+  "proposal_update": { input: ProposalUpdateInput; output: ProposalUpdateOutput };
   "provider_catalog": { input: ProviderCatalogInput; output: ProviderCatalogOutput };
   "provider_connected": { input: ProviderConnectedInput; output: ProviderConnectedOutput };
   "provider_model_lookup": { input: ProviderModelLookupInput; output: ProviderModelLookupOutput };

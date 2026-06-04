@@ -8,6 +8,7 @@
 import { sseStore, type SSEEvent } from "./sseStore";
 import { taskStore } from "./taskStore";
 import { epicStore } from "./epicStore";
+import { proposalStore } from "./proposalStore";
 import { projectStore } from "./projectStore";
 import {
   debounceInvalidateQueries,
@@ -17,7 +18,7 @@ import {
 import { fetchProjects } from "@/api/server";
 import { verificationStore, type StepEntry } from "./verificationStore";
 import { showToast } from "@/lib/toast";
-import type { Task, Epic } from "@/api/types";
+import type { Task, Epic, Proposal } from "@/api/types";
 
 /**
  * Unwrap SSE event payload.
@@ -83,6 +84,10 @@ let taskDeletedUnsub: (() => void) | null = null;
 let epicCreatedUnsub: (() => void) | null = null;
 let epicUpdatedUnsub: (() => void) | null = null;
 let epicDeletedUnsub: (() => void) | null = null;
+let proposalCreatedUnsub: (() => void) | null = null;
+let proposalUpdatedUnsub: (() => void) | null = null;
+let proposalDeletedUnsub: (() => void) | null = null;
+let proposalFeedbackUnsub: (() => void) | null = null;
 
 /**
  * Initialize SSE event handlers
@@ -183,6 +188,35 @@ export function initSSEEventHandlers(): () => void {
     queryClient.setQueryData(["epics"], (current: { id: string }[] | undefined) =>
       current?.filter((epic) => epic.id !== payload.id)
     );
+  });
+
+  // Proposal events — global (no project scope). The SSE payload is the raw
+  // `Proposal` model whose `acceptance_criteria` is a JSON string; normalize it
+  // to an array before storing. Queries (["proposals", ...]) are invalidated so
+  // the list + open detail re-fetch.
+  proposalCreatedUnsub = subscribe("proposal_created", (event: SSEEvent) => {
+    const proposal = normalizeSSEPayload(unwrapPayload(event.data)) as unknown as Proposal;
+    if (!proposal.id) return;
+    proposalStore.getState().addProposal(proposal);
+    debounceInvalidateQueries({ queryKey: ["proposals"] });
+  });
+
+  proposalUpdatedUnsub = subscribe("proposal_updated", (event: SSEEvent) => {
+    const proposal = normalizeSSEPayload(unwrapPayload(event.data)) as unknown as Proposal;
+    if (!proposal.id) return;
+    proposalStore.getState().updateProposal(proposal);
+    debounceInvalidateQueries({ queryKey: ["proposals"] });
+  });
+
+  proposalDeletedUnsub = subscribe("proposal_deleted", (event: SSEEvent) => {
+    const payload = unwrapPayload(event.data) as { id: string };
+    proposalStore.getState().removeProposal(payload.id);
+    debounceInvalidateQueries({ queryKey: ["proposals"] });
+  });
+
+  proposalFeedbackUnsub = subscribe("proposal_feedback_created", () => {
+    // Feedback changes only affect a proposal's detail view; re-fetch it.
+    debounceInvalidateQueries({ queryKey: ["proposals"] });
   });
 
   // Session events — update active_session on the corresponding task
@@ -406,6 +440,10 @@ export function initSSEEventHandlers(): () => void {
     epicCreatedUnsub?.();
     epicUpdatedUnsub?.();
     epicDeletedUnsub?.();
+    proposalCreatedUnsub?.();
+    proposalUpdatedUnsub?.();
+    proposalDeletedUnsub?.();
+    proposalFeedbackUnsub?.();
     projectChangedUnsub?.();
     sessionDispatchedUnsub?.();
     sessionStartedUnsub?.();
@@ -427,6 +465,10 @@ export function cleanupSSEEventHandlers(): void {
   epicCreatedUnsub?.();
   epicUpdatedUnsub?.();
   epicDeletedUnsub?.();
+  proposalCreatedUnsub?.();
+  proposalUpdatedUnsub?.();
+  proposalDeletedUnsub?.();
+  proposalFeedbackUnsub?.();
 
   taskCreatedUnsub = null;
   taskUpdatedUnsub = null;
@@ -434,5 +476,9 @@ export function cleanupSSEEventHandlers(): void {
   epicCreatedUnsub = null;
   epicUpdatedUnsub = null;
   epicDeletedUnsub = null;
+  proposalCreatedUnsub = null;
+  proposalUpdatedUnsub = null;
+  proposalDeletedUnsub = null;
+  proposalFeedbackUnsub = null;
   flushDebouncedInvalidations();
 }

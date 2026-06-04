@@ -51,6 +51,10 @@ export function useEventSource() {
     if (normalized === "epic_created") return "epic_created";
     if (normalized === "epic_updated") return "epic_updated";
     if (normalized === "epic_deleted") return "epic_deleted";
+    if (normalized === "proposal_created") return "proposal_created";
+    if (normalized === "proposal_updated") return "proposal_updated";
+    if (normalized === "proposal_deleted") return "proposal_deleted";
+    if (normalized === "proposal_feedback_created") return "proposal_feedback_created";
     if (normalized === "session_message") return "session_message";
     if (normalized === "session_dispatched") return "session_dispatched";
     if (normalized === "session_started") return "session_started";
@@ -139,6 +143,14 @@ export function useEventSource() {
           "epic_created",
           "epic_updated",
           "epic_deleted",
+          "proposal_created",
+          "proposal_updated",
+          "proposal_deleted",
+          "proposal_feedback_created",
+          "proposal.created",
+          "proposal.updated",
+          "proposal.deleted",
+          "proposal_feedback.created",
           "project_changed",
           "task.created",
           "task.updated",

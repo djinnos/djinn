@@ -5,7 +5,7 @@
  * which is stamped client-side.
  */
 
-import type { TaskListOutputSchema, TaskShowOutputSchema, EpicListOutputSchema } from "./generated/mcp-tools.gen";
+import type { TaskListOutputSchema, TaskShowOutputSchema, EpicListOutputSchema, ProposalShowOutputSchema } from "./generated/mcp-tools.gen";
 
 export type AcceptanceCriterion = TaskListOutputSchema.AcceptanceCriterionStatus;
 
@@ -22,3 +22,10 @@ export type Task = Omit<TaskShowOutputSchema.TaskShowOutput, "owner"> & {
 export type Epic = Omit<EpicListOutputSchema.EpicModel, "owner"> & {
   owner: string | null;
 };
+
+// Global proposals layer (project-independent). `acceptance_criteria` arrives
+// as a parsed array from the MCP tools; SSE sends it as a JSON string which the
+// SSE handler normalizes to an array before storing.
+export type Proposal = ProposalShowOutputSchema.ProposalModel;
+export type ProposalFeedback = ProposalShowOutputSchema.ProposalFeedbackModel;
+export type ProposalTarget = ProposalShowOutputSchema.ProposalTargetModel;
