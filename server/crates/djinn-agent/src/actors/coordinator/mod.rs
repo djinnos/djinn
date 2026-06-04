@@ -503,8 +503,12 @@ mod tests {
             "task must be released for redispatch after the zombie is reaped"
         );
         assert!(
-            !actor.health.is_available(None, "openai/gpt-5.5"),
-            "reaping a zombie must trip the model breaker so redispatch fails over"
+            actor.health.is_available(None, "openai/gpt-5.5"),
+            "reaping an infra/drift zombie must NOT trip the model breaker: the backstop \
+             fires on capacity/OOM/leak/hung-tool conditions, none of which are model \
+             evidence — tripping it disables the (often only) model for the scope and \
+             turns a transient capacity pinch into a full dispatch outage. Genuine model \
+             stalls are owned by the fast-path stall-kill and the supervisor ProviderError path."
         );
     }
 

@@ -18,6 +18,9 @@ use std::os::unix::process::CommandExt;
 use tokio::time::Duration;
 
 #[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
+
+#[cfg(unix)]
 use wait_timeout::ChildExt;
 
 /// OOM score adjustment for agent child processes.  Higher values make the
@@ -142,7 +145,33 @@ pub async fn output_with_kill(mut cmd: Command, timeout: Duration) -> io::Result
                 true
             }
         };
-        let status = child.wait()?;
+        // Reap the child. On the normal path this returns immediately. On the
+        // timed-out path the SIGKILL above usually reaps it within
+        // milliseconds — but a child stuck in uninterruptible sleep (D state),
+        // e.g. a `git` blocked on a hung network read, cannot be killed until
+        // that IO unblocks. An unbounded `wait()` there blocks this tool call
+        // FOREVER: the worker hangs, the tool heartbeat keeps the session
+        // "alive" so neither stall reaper fires, and the Pod wastes its slot
+        // until the 1h activeDeadline. Bound the post-kill reap: if the child
+        // will not die within the grace, abandon it (a zombie bounded by the
+        // Pod activeDeadline) and report a SIGKILL exit so the worker unblocks
+        // and can recover instead of hanging indefinitely.
+        const POST_KILL_REAP_GRACE: Duration = Duration::from_secs(3);
+        let status = if timed_out {
+            match child.wait_timeout(POST_KILL_REAP_GRACE)? {
+                Some(status) => status,
+                None => {
+                    tracing::warn!(
+                        pgid,
+                        "output_with_kill: child survived SIGKILL after timeout \
+                         (likely uninterruptible IO); abandoning to unblock the worker"
+                    );
+                    std::process::ExitStatus::from_raw(libc::SIGKILL)
+                }
+            }
+        } else {
+            child.wait()?
+        };
 
         // After a kill the drain threads may block forever if any subprocess
         // survived in a different process group and still holds the pipe open.
@@ -207,5 +236,28 @@ mod tests {
             .await
             .expect("process should be reaped after timeout kill");
         assert!(!out.status.success());
+    }
+
+    /// A child that ignores SIGTERM forces the SIGKILL escalation and the
+    /// bounded post-kill reap. `output_with_kill` must still return promptly —
+    /// the regression it guards is the old unbounded `child.wait()` that hung
+    /// FOREVER on a child that would not die (e.g. a `git` in uninterruptible
+    /// IO), wedging the worker and masking it from the stall reapers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timeout_returns_promptly_even_when_sigterm_ignored() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("trap '' TERM; sleep 999");
+        isolate_process_group(&mut cmd);
+
+        let started = std::time::Instant::now();
+        let out = output_with_kill(cmd, Duration::from_millis(100))
+            .await
+            .expect("must return after the timeout kill, not hang");
+        assert!(!out.status.success());
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "output_with_kill must return in bounded time after a timeout kill, got {:?}",
+            started.elapsed()
+        );
     }
 }

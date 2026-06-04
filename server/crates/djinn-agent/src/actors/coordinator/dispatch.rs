@@ -1135,19 +1135,19 @@ impl CoordinatorActor {
                 .log_activity(Some(task_id), "coordinator", "system", "comment", &payload)
                 .await;
 
-            // A zombie that outran the fast-path breaker is still a strong
-            // "this backend is bad right now" signal — trip the model breaker
-            // so redispatch fails over rather than re-hanging on the same model.
-            // Keyed to the task's creator (see the stall path) so the trip is
-            // scoped to the affected account, not global.
-            let scope = task_repo
-                .get(task_id)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|t| t.created_by_user_id);
-            self.health
-                .record_stall(scope.as_deref(), &session.model_id);
+            // Deliberately does NOT feed the model circuit-breaker. This
+            // DB-truth backstop fires on infra/drift conditions — a Pod that
+            // never scheduled (node capacity), an OOM/crash before the first
+            // heartbeat, a leaked slot, or a tool hung past the fast path — none
+            // of which are evidence the MODEL is bad. Tripping the breaker here
+            // misattributed capacity/tool failures to the provider and
+            // auto-disabled the (often only) model for the whole scope, turning
+            // a transient capacity pinch into a full dispatch outage (every task
+            // for that user deferred with "no eligible model"). Genuine provider
+            // stalls/errors are still caught where they belong: the fast-path
+            // stall-kill (`detect_and_handle_stalls`) and the supervisor's typed
+            // ProviderError path (Throttle/Failure/AuthInvalid) both feed the
+            // breaker on real model evidence.
 
             // Forcibly reclaim the (likely leaked) slot so the reopened task is
             // not rejected with `SessionAlreadyActive` on redispatch.
