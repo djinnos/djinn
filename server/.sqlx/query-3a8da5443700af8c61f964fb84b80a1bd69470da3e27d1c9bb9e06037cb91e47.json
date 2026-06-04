@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM proposal_signoffs WHERE proposal_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3a8da5443700af8c61f964fb84b80a1bd69470da3e27d1c9bb9e06037cb91e47"
+}

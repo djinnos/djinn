@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, proposal_id, parent_id, author_kind, author_user_id, author_model,\n                    body, target_section, status, created_at, updated_at\n             FROM proposal_feedback WHERE id = $1",
+  "query": "SELECT id, github_id, github_login, github_name, github_avatar_url,\n                      is_member_of_org AS \"is_member_of_org!: bool\",\n                      is_admin AS \"is_admin!: bool\", role,\n                      last_seen_at, created_at\n               FROM users WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -10,52 +10,47 @@
       },
       {
         "ordinal": 1,
-        "name": "proposal_id",
-        "type_info": "Varchar"
+        "name": "github_id",
+        "type_info": "Int8"
       },
       {
         "ordinal": 2,
-        "name": "parent_id",
+        "name": "github_login",
         "type_info": "Varchar"
       },
       {
         "ordinal": 3,
-        "name": "author_kind",
+        "name": "github_name",
         "type_info": "Varchar"
       },
       {
         "ordinal": 4,
-        "name": "author_user_id",
-        "type_info": "Varchar"
-      },
-      {
-        "ordinal": 5,
-        "name": "author_model",
-        "type_info": "Varchar"
-      },
-      {
-        "ordinal": 6,
-        "name": "body",
+        "name": "github_avatar_url",
         "type_info": "Text"
       },
       {
+        "ordinal": 5,
+        "name": "is_member_of_org!: bool",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
+        "name": "is_admin!: bool",
+        "type_info": "Bool"
+      },
+      {
         "ordinal": 7,
-        "name": "target_section",
+        "name": "role",
         "type_info": "Varchar"
       },
       {
         "ordinal": 8,
-        "name": "status",
+        "name": "last_seen_at",
         "type_info": "Varchar"
       },
       {
         "ordinal": 9,
         "name": "created_at",
-        "type_info": "Varchar"
-      },
-      {
-        "ordinal": 10,
-        "name": "updated_at",
         "type_info": "Varchar"
       }
     ],
@@ -67,16 +62,15 @@
     "nullable": [
       false,
       false,
-      true,
       false,
       true,
       true,
       false,
-      true,
-      true,
       false,
+      false,
+      true,
       false
     ]
   },
-  "hash": "bc8c0fb32e9e6a7a8a2855d54753dd629d034dc7869a99d2fef82007b15ab7b7"
+  "hash": "9c002c8d1ec4572b29ed367004a9a8aec522c806a857c98e45cb6b918127c039"
 }

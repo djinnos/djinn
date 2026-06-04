@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, proposal_id, parent_id, author_kind, author_user_id, author_model,\n                    body, target_section, status, created_at, updated_at\n             FROM proposal_feedback WHERE proposal_id = $1 ORDER BY created_at",
+  "query": "SELECT id, proposal_id, parent_id, author_kind, author_user_id, author_model,\n                    body, target_section, status, proposed_body, applied_revision_seq, created_at, updated_at\n             FROM proposal_feedback WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -50,11 +50,21 @@
       },
       {
         "ordinal": 9,
+        "name": "proposed_body",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "applied_revision_seq",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 11,
         "name": "created_at",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 10,
+        "ordinal": 12,
         "name": "updated_at",
         "type_info": "Varchar"
       }
@@ -74,9 +84,11 @@
       false,
       true,
       true,
+      true,
+      true,
       false,
       false
     ]
   },
-  "hash": "ed67f6c6be4c050920669194989cfde2f68503cf17ee5467d3dc147fa23a7592"
+  "hash": "ad3f084258ffa8b73d94eb128e2cec366d9aaa5ca8e39212ec70ab203ffbac97"
 }

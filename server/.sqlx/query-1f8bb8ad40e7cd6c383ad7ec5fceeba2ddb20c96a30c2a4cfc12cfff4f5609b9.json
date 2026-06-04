@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE proposal_feedback SET status = 'accepted', applied_revision_seq = $1,\n                updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')\n             WHERE id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1f8bb8ad40e7cd6c383ad7ec5fceeba2ddb20c96a30c2a4cfc12cfff4f5609b9"
+}
