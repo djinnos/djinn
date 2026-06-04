@@ -30,6 +30,23 @@ pub struct LandlockSandbox;
 impl Sandbox for LandlockSandbox {
     fn apply(&self, worktree_path: &Path, cmd: &mut std::process::Command) -> Result<()> {
         use std::os::unix::process::CommandExt;
+
+        // Redirect temp to a Landlock-writable, disk-backed dir. The K8s task-run
+        // Pod sets TMPDIR=/workspace (job.rs) so the host supervisor's TempDir
+        // lands on the big writable `/workspace` emptyDir — but that's the PVC
+        // mount ROOT, and the rules below grant the agent write access only to
+        // its worktree SUBDIR (`/workspace/<project>`). So any sandboxed tool
+        // that honors `$TMPDIR` — go's git codehost (`go-codehost-*`), cargo/cc
+        // linker scratch, etc. — was creating temp files directly under
+        // `/workspace` and hitting `permission denied`. Point sandboxed commands
+        // at `/var/tmp`, which is already in the writable allowlist (the
+        // `/var/tmp` rule below requires it to exist). `GOTMPDIR` is unset in the
+        // image, so Go falls back to `$TMPDIR` — this covers it without a
+        // Go-specific knob. The supervisor's own TempDir is unaffected: it is not
+        // spawned through this sandbox, so it keeps using the `/workspace`
+        // emptyDir for large mirror clones.
+        cmd.env("TMPDIR", "/var/tmp");
+
         let worktree = worktree_path.to_path_buf();
         let git_meta = git_metadata_dir(worktree_path);
 
@@ -165,4 +182,35 @@ fn apply_policy(
     ruleset.restrict_self()?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::{OsStr, OsString};
+
+    /// The task-run Pod inherits `TMPDIR=/workspace` (the read-only PVC mount
+    /// root). The sandbox must override it to a Landlock-writable dir, or every
+    /// sandboxed tool that honors `$TMPDIR` (go codehost, cargo/cc linker) hits
+    /// `permission denied` writing temp under `/workspace`.
+    #[test]
+    fn apply_redirects_tmpdir_to_var_tmp() {
+        let mut cmd = std::process::Command::new("true");
+        cmd.env("TMPDIR", "/workspace");
+
+        LandlockSandbox
+            .apply(Path::new("/tmp"), &mut cmd)
+            .expect("apply should succeed");
+
+        let tmpdir = cmd
+            .get_envs()
+            .find(|(k, _)| *k == OsStr::new("TMPDIR"))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_owned());
+        assert_eq!(
+            tmpdir,
+            Some(OsString::from("/var/tmp")),
+            "sandboxed commands must use a Landlock-writable TMPDIR, not the inherited /workspace"
+        );
+    }
 }
