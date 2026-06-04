@@ -363,10 +363,6 @@ function ProposalDetailRoute({ id }: { id: string }) {
           detail={detailQuery.data}
           projects={projects}
           onChanged={invalidate}
-          onDeleted={() => {
-            invalidate();
-            navigate("/proposals");
-          }}
         />
       ) : (
         <p className="p-10 text-center text-sm text-muted-foreground">Proposal not found.</p>
@@ -379,12 +375,10 @@ function ProposalDetailView({
   detail,
   projects,
   onChanged,
-  onDeleted,
 }: {
   detail: ProposalDetailData;
   projects: Project[];
   onChanged: () => void;
-  onDeleted: () => void;
 }) {
   const proposal = detail.proposal as Proposal;
   const me = useAuthUser();
@@ -448,22 +442,6 @@ function ProposalDetailView({
                 ))}
               </SelectContent>
             </Select>
-            {(isAuthor || caps?.isAdmin) && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  if (confirm("Delete this proposal? This cannot be undone.")) {
-                    run(
-                      () => callMcpTool("proposal_delete", { id: proposal.id }),
-                      "Proposal deleted"
-                    ).then(onDeleted);
-                  }
-                }}
-              >
-                Delete
-              </Button>
-            )}
           </div>
         </div>
 
