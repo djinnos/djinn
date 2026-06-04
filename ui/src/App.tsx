@@ -54,6 +54,7 @@ function MainLayout() {
             <Route path="/code-graph" element={<CodeGraphPage />} />
             <Route path="/pulse" element={<Navigate to="/code-graph" replace />} />
             <Route path="/proposals" element={<ProposalsPage />} />
+            <Route path="/proposals/:id" element={<ProposalsPage />} />
             <Route path="/metrics" element={<Navigate to="/agents" replace />} />
 
             {/* Task session (global) */}

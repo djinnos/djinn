@@ -2997,11 +2997,13 @@ export namespace ProposalAddTargetOutputSchema {
 }
 export type ProposalAddTargetOutput = ProposalAddTargetOutputSchema.ProposalAddTargetOutput;
 export namespace ProposalCreateInputSchema {
+  export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
+
   export interface ProposalCreateInput {
   /**
-   * Acceptance-criteria lines.
+   * Acceptance criteria: plain strings or `{criterion, met}` objects.
    */
-  acceptance_criteria?: string[]
+  acceptance_criteria?: AcceptanceCriterionItem[]
   /**
    * Markdown spec body.
    */
@@ -3018,12 +3020,23 @@ export namespace ProposalCreateInputSchema {
   title: string
   [k: string]: any
   }
+  export interface AcceptanceCriterionStatus {
+  criterion: string
+  met?: boolean
+  [k: string]: any
+  }
 
 }
 export type ProposalCreateInput = ProposalCreateInputSchema.ProposalCreateInput;
 export namespace ProposalCreateOutputSchema {
+  export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
+
   export interface ProposalCreateOutput {
-  acceptance_criteria?: string[]
+  /**
+   * Structured acceptance criteria (`{criterion, met}` or plain string),
+   * same shape as tasks. `met` means "agreed during scoping".
+   */
+  acceptance_criteria?: AcceptanceCriterionItem[]
   author_user_id?: string
   body?: string
   closed_at?: string
@@ -3032,12 +3045,18 @@ export namespace ProposalCreateOutputSchema {
   id?: string
   short_id?: string
   /**
-   * Lifecycle: `draft` | `shared` | `ready` | `archived` | `superseded`.
+   * Lifecycle: draft | in_review | approved | building | done | rejected |
+   * archived | superseded.
    */
   status?: string
   superseded_by?: string
   title?: string
   updated_at?: string
+  [k: string]: any
+  }
+  export interface AcceptanceCriterionStatus {
+  criterion: string
+  met?: boolean
   [k: string]: any
   }
 
@@ -3195,6 +3214,8 @@ export namespace ProposalListInputSchema {
 }
 export type ProposalListInput = ProposalListInputSchema.ProposalListInput;
 export namespace ProposalListOutputSchema {
+  export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
+
   export interface ProposalListOutput {
   error?: string
   has_more?: boolean
@@ -3205,7 +3226,11 @@ export namespace ProposalListOutputSchema {
   [k: string]: any
   }
   export interface ProposalModel {
-  acceptance_criteria: string[]
+  /**
+   * Structured acceptance criteria (`{criterion, met}` or plain string),
+   * same shape as tasks. `met` means "agreed during scoping".
+   */
+  acceptance_criteria: AcceptanceCriterionItem[]
   author_user_id?: string
   body: string
   closed_at?: string
@@ -3213,12 +3238,18 @@ export namespace ProposalListOutputSchema {
   id: string
   short_id: string
   /**
-   * Lifecycle: `draft` | `shared` | `ready` | `archived` | `superseded`.
+   * Lifecycle: draft | in_review | approved | building | done | rejected |
+   * archived | superseded.
    */
   status: string
   superseded_by?: string
   title: string
   updated_at: string
+  [k: string]: any
+  }
+  export interface AcceptanceCriterionStatus {
+  criterion: string
+  met?: boolean
   [k: string]: any
   }
 
@@ -3281,6 +3312,8 @@ export namespace ProposalShowInputSchema {
 }
 export type ProposalShowInput = ProposalShowInputSchema.ProposalShowInput;
 export namespace ProposalShowOutputSchema {
+  export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
+
   export interface ProposalShowOutput {
   error?: string
   feedback?: ProposalFeedbackModel[]
@@ -3309,7 +3342,11 @@ export namespace ProposalShowOutputSchema {
   [k: string]: any
   }
   export interface ProposalModel {
-  acceptance_criteria: string[]
+  /**
+   * Structured acceptance criteria (`{criterion, met}` or plain string),
+   * same shape as tasks. `met` means "agreed during scoping".
+   */
+  acceptance_criteria: AcceptanceCriterionItem[]
   author_user_id?: string
   body: string
   closed_at?: string
@@ -3317,12 +3354,18 @@ export namespace ProposalShowOutputSchema {
   id: string
   short_id: string
   /**
-   * Lifecycle: `draft` | `shared` | `ready` | `archived` | `superseded`.
+   * Lifecycle: draft | in_review | approved | building | done | rejected |
+   * archived | superseded.
    */
   status: string
   superseded_by?: string
   title: string
   updated_at: string
+  [k: string]: any
+  }
+  export interface AcceptanceCriterionStatus {
+  criterion: string
+  met?: boolean
   [k: string]: any
   }
   export interface ProposalTargetModel {
@@ -3346,15 +3389,20 @@ export namespace ProposalShowOutputSchema {
 }
 export type ProposalShowOutput = ProposalShowOutputSchema.ProposalShowOutput;
 export namespace ProposalUpdateInputSchema {
+  export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
+
   export interface ProposalUpdateInput {
-  acceptance_criteria?: string[]
+  /**
+   * Acceptance criteria: plain strings or `{criterion, met}` objects.
+   */
+  acceptance_criteria?: AcceptanceCriterionItem[]
   body?: string
   /**
    * Proposal UUID or short_id.
    */
   id: string
   /**
-   * `draft` | `shared` | `ready` | `archived` | `superseded`.
+   * draft | in_review | approved | building | done | rejected | archived | superseded.
    */
   status?: string
   /**
@@ -3364,12 +3412,23 @@ export namespace ProposalUpdateInputSchema {
   title?: string
   [k: string]: any
   }
+  export interface AcceptanceCriterionStatus {
+  criterion: string
+  met?: boolean
+  [k: string]: any
+  }
 
 }
 export type ProposalUpdateInput = ProposalUpdateInputSchema.ProposalUpdateInput;
 export namespace ProposalUpdateOutputSchema {
+  export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
+
   export interface ProposalUpdateOutput {
-  acceptance_criteria?: string[]
+  /**
+   * Structured acceptance criteria (`{criterion, met}` or plain string),
+   * same shape as tasks. `met` means "agreed during scoping".
+   */
+  acceptance_criteria?: AcceptanceCriterionItem[]
   author_user_id?: string
   body?: string
   closed_at?: string
@@ -3378,12 +3437,18 @@ export namespace ProposalUpdateOutputSchema {
   id?: string
   short_id?: string
   /**
-   * Lifecycle: `draft` | `shared` | `ready` | `archived` | `superseded`.
+   * Lifecycle: draft | in_review | approved | building | done | rejected |
+   * archived | superseded.
    */
   status?: string
   superseded_by?: string
   title?: string
   updated_at?: string
+  [k: string]: any
+  }
+  export interface AcceptanceCriterionStatus {
+  criterion: string
+  met?: boolean
   [k: string]: any
   }
 

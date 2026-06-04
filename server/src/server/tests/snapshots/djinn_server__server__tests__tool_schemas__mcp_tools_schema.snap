@@ -5738,12 +5738,39 @@ expression: signatures
   {
     "name": "proposal_create",
     "input_schema": {
+      "$defs": {
+        "AcceptanceCriterionItem": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/AcceptanceCriterionStatus"
+            }
+          ]
+        },
+        "AcceptanceCriterionStatus": {
+          "properties": {
+            "criterion": {
+              "type": "string"
+            },
+            "met": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "criterion"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "acceptance_criteria": {
-          "description": "Acceptance-criteria lines.",
+          "description": "Acceptance criteria: plain strings or `{criterion, met}` objects.",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/AcceptanceCriterionItem"
           },
           "nullable": true,
           "type": "array"
@@ -5777,11 +5804,39 @@ expression: signatures
       "type": "object"
     },
     "output_schema": {
+      "$defs": {
+        "AcceptanceCriterionItem": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/AcceptanceCriterionStatus"
+            }
+          ]
+        },
+        "AcceptanceCriterionStatus": {
+          "properties": {
+            "criterion": {
+              "type": "string"
+            },
+            "met": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "criterion"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "acceptance_criteria": {
+          "description": "Structured acceptance criteria (`{criterion, met}` or plain string),\nsame shape as tasks. `met` means \"agreed during scoping\".",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/AcceptanceCriterionItem"
           },
           "type": "array"
         },
@@ -5810,7 +5865,7 @@ expression: signatures
           "type": "string"
         },
         "status": {
-          "description": "Lifecycle: `draft` | `shared` | `ready` | `archived` | `superseded`.",
+          "description": "Lifecycle: draft | in_review | approved | building | done | rejected |\narchived | superseded.",
           "type": "string"
         },
         "superseded_by": {
@@ -6127,11 +6182,37 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "AcceptanceCriterionItem": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/AcceptanceCriterionStatus"
+            }
+          ]
+        },
+        "AcceptanceCriterionStatus": {
+          "properties": {
+            "criterion": {
+              "type": "string"
+            },
+            "met": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "criterion"
+          ],
+          "type": "object"
+        },
         "ProposalModel": {
           "properties": {
             "acceptance_criteria": {
+              "description": "Structured acceptance criteria (`{criterion, met}` or plain string),\nsame shape as tasks. `met` means \"agreed during scoping\".",
               "items": {
-                "type": "string"
+                "$ref": "#/$defs/AcceptanceCriterionItem"
               },
               "type": "array"
             },
@@ -6156,7 +6237,7 @@ expression: signatures
               "type": "string"
             },
             "status": {
-              "description": "Lifecycle: `draft` | `shared` | `ready` | `archived` | `superseded`.",
+              "description": "Lifecycle: draft | in_review | approved | building | done | rejected |\narchived | superseded.",
               "type": "string"
             },
             "superseded_by": {
@@ -6315,6 +6396,31 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "AcceptanceCriterionItem": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/AcceptanceCriterionStatus"
+            }
+          ]
+        },
+        "AcceptanceCriterionStatus": {
+          "properties": {
+            "criterion": {
+              "type": "string"
+            },
+            "met": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "criterion"
+          ],
+          "type": "object"
+        },
         "ProposalFeedbackModel": {
           "properties": {
             "author_kind": {
@@ -6371,8 +6477,9 @@ expression: signatures
         "ProposalModel": {
           "properties": {
             "acceptance_criteria": {
+              "description": "Structured acceptance criteria (`{criterion, met}` or plain string),\nsame shape as tasks. `met` means \"agreed during scoping\".",
               "items": {
-                "type": "string"
+                "$ref": "#/$defs/AcceptanceCriterionItem"
               },
               "type": "array"
             },
@@ -6397,7 +6504,7 @@ expression: signatures
               "type": "string"
             },
             "status": {
-              "description": "Lifecycle: `draft` | `shared` | `ready` | `archived` | `superseded`.",
+              "description": "Lifecycle: draft | in_review | approved | building | done | rejected |\narchived | superseded.",
               "type": "string"
             },
             "superseded_by": {
@@ -6493,11 +6600,39 @@ expression: signatures
   {
     "name": "proposal_update",
     "input_schema": {
+      "$defs": {
+        "AcceptanceCriterionItem": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/AcceptanceCriterionStatus"
+            }
+          ]
+        },
+        "AcceptanceCriterionStatus": {
+          "properties": {
+            "criterion": {
+              "type": "string"
+            },
+            "met": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "criterion"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "acceptance_criteria": {
+          "description": "Acceptance criteria: plain strings or `{criterion, met}` objects.",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/AcceptanceCriterionItem"
           },
           "nullable": true,
           "type": "array"
@@ -6511,7 +6646,7 @@ expression: signatures
           "type": "string"
         },
         "status": {
-          "description": "`draft` | `shared` | `ready` | `archived` | `superseded`.",
+          "description": "draft | in_review | approved | building | done | rejected | archived | superseded.",
           "nullable": true,
           "type": "string"
         },
@@ -6532,11 +6667,39 @@ expression: signatures
       "type": "object"
     },
     "output_schema": {
+      "$defs": {
+        "AcceptanceCriterionItem": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/AcceptanceCriterionStatus"
+            }
+          ]
+        },
+        "AcceptanceCriterionStatus": {
+          "properties": {
+            "criterion": {
+              "type": "string"
+            },
+            "met": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "criterion"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "acceptance_criteria": {
+          "description": "Structured acceptance criteria (`{criterion, met}` or plain string),\nsame shape as tasks. `met` means \"agreed during scoping\".",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/AcceptanceCriterionItem"
           },
           "type": "array"
         },
@@ -6565,7 +6728,7 @@ expression: signatures
           "type": "string"
         },
         "status": {
-          "description": "Lifecycle: `draft` | `shared` | `ready` | `archived` | `superseded`.",
+          "description": "Lifecycle: draft | in_review | approved | building | done | rejected |\narchived | superseded.",
           "type": "string"
         },
         "superseded_by": {

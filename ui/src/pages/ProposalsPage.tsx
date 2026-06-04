@@ -1,10 +1,21 @@
 import { useMemo, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { ArrowLeft01Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { callMcpTool } from "@/api/mcpClient";
 import { InlineError } from "@/components/InlineError";
 import { relativeTime } from "@/components/memory/memoryUtils";
+import { AcceptanceChecklist } from "@/components/AcceptanceChecklist";
+import {
+  PROPOSAL_STATUS_KEYS,
+  isArchivedLike,
+  statusLabel,
+  type ProposalStatus,
+} from "@/components/proposals/proposalStatus";
+import { StatusIcon } from "@/components/proposals/StatusIcon";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -20,7 +31,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { showToast } from "@/lib/toast";
 import { useProjects } from "@/stores/useProjectStore";
 import {
@@ -29,10 +39,17 @@ import {
   proposalListQueryOptions,
 } from "@/lib/proposalQueries";
 import type { Project } from "@/api/server";
-import type { Proposal, ProposalFeedback } from "@/api/types";
+import type { AcceptanceCriterion, Proposal, ProposalFeedback } from "@/api/types";
 
-const STATUSES = ["draft", "shared", "ready", "archived", "superseded"] as const;
-const FILTER_TABS = ["all", "draft", "shared", "ready", "archived"] as const;
+// Statuses a human sets directly. building/done are reached via graduation.
+const MANUAL_STATUSES: ProposalStatus[] = [
+  "draft",
+  "in_review",
+  "approved",
+  "rejected",
+  "archived",
+  "superseded",
+];
 
 const NEW_TEMPLATE = `## Problem
 What's broken or missing, and who it hurts.
@@ -47,153 +64,130 @@ Which projects/areas this touches.
 Things still to decide.
 `;
 
-function statusVariant(status: string): "default" | "secondary" | "outline" {
-  switch (status) {
-    case "ready":
-      return "default";
-    case "shared":
-      return "secondary";
-    default:
-      return "outline";
-  }
+export function ProposalsPage() {
+  const { id } = useParams<{ id?: string }>();
+  if (id) return <ProposalDetailRoute id={id} />;
+  return <ProposalsListView />;
 }
 
-export function ProposalsPage() {
-  const queryClient = useQueryClient();
-  const projects = useProjects();
+// ── List ─────────────────────────────────────────────────────────────────────
 
-  const [filter, setFilter] = useState<(typeof FILTER_TABS)[number]>("all");
+function ProposalsListView() {
+  const navigate = useNavigate();
   const [search, setSearch] = useState("");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [showArchived, setShowArchived] = useState(false);
   const [creating, setCreating] = useState(false);
+  const projects = useProjects();
+  const queryClient = useQueryClient();
 
   const listQuery = useQuery(
-    proposalListQueryOptions({
-      status: filter === "all" ? undefined : filter,
-      text: search.trim() || undefined,
-    })
+    proposalListQueryOptions({ text: search.trim() || undefined })
   );
 
-  const detailQuery = useQuery(proposalDetailQueryOptions(selectedId));
+  const groups = useMemo(() => {
+    const visible = (listQuery.data ?? []).filter(
+      (p) => showArchived || !isArchivedLike(p.status)
+    );
+    return PROPOSAL_STATUS_KEYS.map((status) => ({
+      status,
+      items: visible
+        .filter((p) => p.status === status)
+        .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1)),
+    })).filter((g) => g.items.length > 0);
+  }, [listQuery.data, showArchived]);
 
-  const invalidate = () =>
-    queryClient.invalidateQueries({ queryKey: ["proposals"] });
-
-  const proposals = listQuery.data ?? [];
+  if (creating) {
+    return (
+      <CreateProposal
+        projects={projects}
+        onCancel={() => setCreating(false)}
+        onCreated={(newId) => {
+          setCreating(false);
+          queryClient.invalidateQueries({ queryKey: ["proposals"] });
+          navigate(`/proposals/${newId}`);
+        }}
+      />
+    );
+  }
 
   return (
-    <div className="flex h-full min-h-0">
-      {/* ── List ───────────────────────────────────────────────────────── */}
-      <div className="flex w-[380px] shrink-0 flex-col border-r">
-        <div className="space-y-3 border-b p-4">
-          <div className="flex items-center justify-between">
-            <h1 className="text-lg font-semibold">Proposals</h1>
-            <Button size="sm" onClick={() => { setCreating(true); setSelectedId(null); }}>
-              New
-            </Button>
-          </div>
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex items-center justify-between gap-4 border-b p-4">
+        <h1 className="text-lg font-semibold">Proposals</h1>
+        <div className="flex items-center gap-3">
           <Input
             placeholder="Search proposals…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
+            className="w-64"
           />
-          <Tabs value={filter} onValueChange={(v) => setFilter(v as typeof filter)}>
-            <TabsList className="w-full">
-              {FILTER_TABS.map((t) => (
-                <TabsTrigger key={t} value={t} className="flex-1 text-xs capitalize">
-                  {t}
-                </TabsTrigger>
-              ))}
-            </TabsList>
-          </Tabs>
+          <label className="flex items-center gap-1.5 whitespace-nowrap text-sm text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={showArchived}
+              onChange={(e) => setShowArchived(e.target.checked)}
+            />
+            Show archived
+          </label>
+          <Button size="sm" onClick={() => setCreating(true)}>
+            New
+          </Button>
         </div>
-
-        <ScrollArea className="flex-1">
-          {listQuery.isLoading ? (
-            <div className="space-y-2 p-4">
-              {[0, 1, 2].map((i) => (
-                <Skeleton key={i} className="h-16 w-full" />
-              ))}
-            </div>
-          ) : listQuery.isError ? (
-            <div className="p-4">
-              <InlineError message={(listQuery.error as Error).message} />
-            </div>
-          ) : proposals.length === 0 ? (
-            <p className="p-6 text-center text-sm text-muted-foreground">
-              No proposals yet. Create one to get a scope out.
-            </p>
-          ) : (
-            <ul className="divide-y">
-              {proposals.map((p) => (
-                <li key={p.id}>
-                  <button
-                    onClick={() => { setSelectedId(p.id); setCreating(false); }}
-                    className={`w-full px-4 py-3 text-left hover:bg-muted/50 ${
-                      selectedId === p.id ? "bg-muted" : ""
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="truncate text-sm font-medium">{p.title}</span>
-                      <Badge variant={statusVariant(p.status)} className="shrink-0 capitalize">
-                        {p.status}
-                      </Badge>
-                    </div>
-                    <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
-                      <span className="font-mono">{p.short_id}</span>
-                      <span>·</span>
-                      <span>{relativeTime(p.updated_at)}</span>
-                    </div>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </ScrollArea>
       </div>
 
-      {/* ── Detail / Create ────────────────────────────────────────────── */}
-      <div className="min-w-0 flex-1">
-        {creating ? (
-          <CreateProposal
-            projects={projects}
-            onCancel={() => setCreating(false)}
-            onCreated={(id) => {
-              setCreating(false);
-              setSelectedId(id);
-              invalidate();
-            }}
-          />
-        ) : !selectedId ? (
-          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-            Select a proposal or create a new one.
+      <ScrollArea className="flex-1">
+        {listQuery.isLoading ? (
+          <div className="space-y-2 p-4">
+            {[0, 1, 2].map((i) => (
+              <Skeleton key={i} className="h-10 w-full" />
+            ))}
           </div>
-        ) : detailQuery.isLoading ? (
-          <div className="space-y-4 p-6">
-            <Skeleton className="h-8 w-2/3" />
-            <Skeleton className="h-40 w-full" />
+        ) : listQuery.isError ? (
+          <div className="p-4">
+            <InlineError message={(listQuery.error as Error).message} />
           </div>
-        ) : detailQuery.isError ? (
-          <div className="p-6">
-            <InlineError message={(detailQuery.error as Error).message} />
+        ) : groups.length === 0 ? (
+          <p className="p-10 text-center text-sm text-muted-foreground">
+            No proposals yet. Create one to get a scope out.
+          </p>
+        ) : (
+          <div className="pb-10">
+            {groups.map((g) => (
+              <section key={g.status}>
+                <div className="flex items-center gap-2 bg-muted/40 px-4 py-1.5 text-xs font-medium text-muted-foreground">
+                  <StatusIcon status={g.status} />
+                  <span>{statusLabel(g.status)}</span>
+                  <span className="text-muted-foreground/60">{g.items.length}</span>
+                </div>
+                <ul>
+                  {g.items.map((p) => (
+                    <li key={p.id}>
+                      <button
+                        onClick={() => navigate(`/proposals/${p.id}`)}
+                        className="flex w-full items-center gap-3 border-b border-border/40 px-4 py-2.5 text-left hover:bg-muted/40"
+                      >
+                        <StatusIcon status={p.status} />
+                        <span className="min-w-0 flex-1 truncate text-sm">{p.title}</span>
+                        <span className="hidden shrink-0 font-mono text-xs text-muted-foreground sm:inline">
+                          {p.short_id}
+                        </span>
+                        <span className="shrink-0 text-xs text-muted-foreground">
+                          {relativeTime(p.updated_at)}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ))}
           </div>
-        ) : detailQuery.data?.proposal ? (
-          <ProposalDetailView
-            detail={detailQuery.data}
-            projects={projects}
-            onChanged={invalidate}
-            onDeleted={() => {
-              setSelectedId(null);
-              invalidate();
-            }}
-          />
-        ) : null}
-      </div>
+        )}
+      </ScrollArea>
     </div>
   );
 }
 
-// ── Create form ──────────────────────────────────────────────────────────────
+// ── Create ───────────────────────────────────────────────────────────────────
 
 function CreateProposal({
   projects,
@@ -233,9 +227,7 @@ function CreateProposal({
       showToast.success("Proposal created");
       onCreated(res.id as string);
     } catch (e) {
-      showToast.error("Failed to create proposal", {
-        description: (e as Error).message,
-      });
+      showToast.error("Failed to create proposal", { description: (e as Error).message });
     } finally {
       setSaving(false);
     }
@@ -295,7 +287,49 @@ function CreateProposal({
   );
 }
 
-// ── Detail ───────────────────────────────────────────────────────────────────
+// ── Detail route ─────────────────────────────────────────────────────────────
+
+function ProposalDetailRoute({ id }: { id: string }) {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const projects = useProjects();
+  const detailQuery = useQuery(proposalDetailQueryOptions(id));
+
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: ["proposals"] });
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex items-center gap-2 border-b px-4 py-2">
+        <Button variant="ghost" size="sm" onClick={() => navigate("/proposals")} className="gap-1.5">
+          <HugeiconsIcon icon={ArrowLeft01Icon} size={16} />
+          Proposals
+        </Button>
+      </div>
+      {detailQuery.isLoading ? (
+        <div className="space-y-4 p-6">
+          <Skeleton className="h-8 w-2/3" />
+          <Skeleton className="h-40 w-full" />
+        </div>
+      ) : detailQuery.isError ? (
+        <div className="p-6">
+          <InlineError message={(detailQuery.error as Error).message} />
+        </div>
+      ) : detailQuery.data?.proposal ? (
+        <ProposalDetailView
+          detail={detailQuery.data}
+          projects={projects}
+          onChanged={invalidate}
+          onDeleted={() => {
+            invalidate();
+            navigate("/proposals");
+          }}
+        />
+      ) : (
+        <p className="p-10 text-center text-sm text-muted-foreground">Proposal not found.</p>
+      )}
+    </div>
+  );
+}
 
 function ProposalDetailView({
   detail,
@@ -325,8 +359,20 @@ function ProposalDetailView({
     }
   };
 
+  const toggleCriterion = (index: number, met: boolean) => {
+    const next = (proposal.acceptance_criteria ?? []).map((ac, i) => {
+      const criterion = typeof ac === "string" ? ac : (ac as AcceptanceCriterion).criterion;
+      const current = typeof ac === "string" ? false : Boolean((ac as AcceptanceCriterion).met);
+      return { criterion, met: i === index ? met : current };
+    });
+    run(
+      () => callMcpTool("proposal_update", { id: proposal.id, acceptance_criteria: next }),
+      met ? "Criterion agreed" : "Criterion reopened"
+    );
+  };
+
   return (
-    <ScrollArea className="h-full">
+    <ScrollArea className="flex-1">
       <div className="mx-auto max-w-3xl space-y-6 p-6">
         {/* Header */}
         <div className="flex items-start justify-between gap-4">
@@ -345,17 +391,23 @@ function ProposalDetailView({
                 typeof status === "string" &&
                 run(
                   () => callMcpTool("proposal_update", { id: proposal.id, status }),
-                  `Status → ${status}`
+                  `Status → ${statusLabel(status)}`
                 )
               }
             >
-              <SelectTrigger className="w-[140px] capitalize">
-                <SelectValue />
+              <SelectTrigger className="w-[150px]">
+                <span className="flex items-center gap-2">
+                  <StatusIcon status={proposal.status} />
+                  <SelectValue />
+                </span>
               </SelectTrigger>
               <SelectContent>
-                {STATUSES.map((s) => (
-                  <SelectItem key={s} value={s} className="capitalize">
-                    {s}
+                {MANUAL_STATUSES.map((s) => (
+                  <SelectItem key={s} value={s}>
+                    <span className="flex items-center gap-2">
+                      <StatusIcon status={s} />
+                      {statusLabel(s)}
+                    </span>
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -390,9 +442,7 @@ function ProposalDetailView({
                 className="flex items-center gap-1 rounded-full border px-3 py-1 text-xs"
               >
                 {t.project_name ?? t.project_path ?? t.project_id}
-                {t.role === "reference" && (
-                  <span className="text-muted-foreground">(ref)</span>
-                )}
+                {t.role === "reference" && <span className="text-muted-foreground">(ref)</span>}
                 <button
                   className="ml-1 text-muted-foreground hover:text-destructive"
                   onClick={() =>
@@ -416,11 +466,7 @@ function ProposalDetailView({
                 onValueChange={(pid) =>
                   typeof pid === "string" &&
                   run(
-                    () =>
-                      callMcpTool("proposal_add_target", {
-                        id: proposal.id,
-                        project: pid,
-                      }),
+                    () => callMcpTool("proposal_add_target", { id: proposal.id, project: pid }),
                     "Target added"
                   )
                 }
@@ -441,21 +487,18 @@ function ProposalDetailView({
         </div>
 
         {/* Acceptance criteria */}
-        {proposal.acceptance_criteria.length > 0 && (
+        {(proposal.acceptance_criteria?.length ?? 0) > 0 && (
           <div className="space-y-2">
-            <Label className="text-xs uppercase text-muted-foreground">
-              Acceptance criteria
-            </Label>
-            <ul className="list-inside list-disc space-y-1 text-sm">
-              {proposal.acceptance_criteria.map((ac, i) => (
-                <li key={i}>{ac}</li>
-              ))}
-            </ul>
+            <Label className="text-xs uppercase text-muted-foreground">Acceptance criteria</Label>
+            <AcceptanceChecklist
+              criteria={proposal.acceptance_criteria}
+              onToggle={toggleCriterion}
+            />
           </div>
         )}
 
         {/* Body */}
-        <div className="prose prose-sm dark:prose-invert max-w-none">
+        <div className="prose prose-sm max-w-none dark:prose-invert">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>
             {proposal.body || "_No spec body yet._"}
           </ReactMarkdown>
@@ -463,7 +506,6 @@ function ProposalDetailView({
 
         <Separator />
 
-        {/* Feedback */}
         <FeedbackThread
           proposalId={proposal.id}
           feedback={detail.feedback}
@@ -523,9 +565,7 @@ function FeedbackThread({
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <Label className="text-xs uppercase text-muted-foreground">
-          Discussion &amp; suggestions
-        </Label>
+        <Label className="text-xs uppercase text-muted-foreground">Discussion &amp; suggestions</Label>
         {openCount > 0 && <Badge variant="secondary">{openCount} open</Badge>}
       </div>
 

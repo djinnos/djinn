@@ -15,6 +15,7 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use serde::{Deserialize, Serialize};
 
 use crate::server::DjinnMcpServer;
+use crate::tools::epic_ops::AcceptanceCriterionItem;
 use crate::tools::list_response::{
     self, ListMeta, NamedListResponse, named_list_response_schema, serialize_named_list_response,
 };
@@ -108,8 +109,8 @@ pub struct ProposalCreateParams {
     pub title: String,
     /// Markdown spec body.
     pub body: Option<String>,
-    /// Acceptance-criteria lines.
-    pub acceptance_criteria: Option<Vec<String>>,
+    /// Acceptance criteria: plain strings or `{criterion, met}` objects.
+    pub acceptance_criteria: Option<Vec<AcceptanceCriterionItem>>,
     /// Target projects (UUIDs or owner/repo slugs) this proposal touches.
     /// Editable later via proposal_add_target / proposal_remove_target.
     pub target_projects: Option<Vec<String>>,
@@ -144,8 +145,9 @@ pub struct ProposalUpdateParams {
     pub id: String,
     pub title: Option<String>,
     pub body: Option<String>,
-    pub acceptance_criteria: Option<Vec<String>>,
-    /// `draft` | `shared` | `ready` | `archived` | `superseded`.
+    /// Acceptance criteria: plain strings or `{criterion, met}` objects.
+    pub acceptance_criteria: Option<Vec<AcceptanceCriterionItem>>,
+    /// draft | in_review | approved | building | done | rejected | archived | superseded.
     pub status: Option<String>,
     /// UUID or short_id of the proposal that supersedes this one.
     pub superseded_by: Option<String>,

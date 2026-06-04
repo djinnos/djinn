@@ -206,23 +206,42 @@ pub fn validate_epic_create_status(status: Option<&str>) -> Result<Option<&str>,
     }
 }
 
-/// Validate a proposal lifecycle status:
-/// `draft` | `shared` | `ready` | `archived` | `superseded`.
+/// Valid proposal lifecycle statuses:
+/// `draft` → `in_review` → `approved` → `building` → `done`, plus the
+/// off-ramps `rejected` / `archived` / `superseded`.
+pub const PROPOSAL_STATUSES: &[&str] = &[
+    "draft",
+    "in_review",
+    "approved",
+    "building",
+    "done",
+    "rejected",
+    "archived",
+    "superseded",
+];
+
+/// Validate a proposal lifecycle status.
 pub fn validate_proposal_status(status: &str) -> Result<(), String> {
-    match status {
-        "draft" | "shared" | "ready" | "archived" | "superseded" => Ok(()),
-        other => Err(format!(
-            "invalid proposal status: {other:?} (expected draft, shared, ready, archived, or superseded)"
-        )),
+    if PROPOSAL_STATUSES.contains(&status) {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid proposal status: {status:?} (expected one of {})",
+            PROPOSAL_STATUSES.join(", ")
+        ))
     }
 }
 
 /// Validate an optional initial proposal status for `proposal_create`
-/// (`None` defaults to `draft` at the repository layer).
+/// (`None` defaults to `draft`). Only the early hand-authored states are
+/// allowed at creation; `building`/`done` are reached via the lifecycle.
 pub fn validate_proposal_create_status(status: Option<&str>) -> Result<Option<&str>, String> {
     match status {
         None => Ok(None),
-        Some(s) => validate_proposal_status(s).map(|()| Some(s)),
+        Some(s @ ("draft" | "in_review")) => Ok(Some(s)),
+        Some(other) => Err(format!(
+            "invalid initial proposal status: {other:?} (expected draft or in_review)"
+        )),
     }
 }
 

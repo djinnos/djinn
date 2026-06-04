@@ -85,7 +85,7 @@ describe('Sidebar component', () => {
         return {
           proposals: [
             { id: 'p-1', short_id: 'aaaa', title: 'Draft 1', status: 'draft', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
-            { id: 'p-2', short_id: 'bbbb', title: 'Shared 2', status: 'shared', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
+            { id: 'p-2', short_id: 'bbbb', title: 'In Review 2', status: 'in_review', acceptance_criteria: [], body: '', created_at: '', updated_at: '' },
           ],
         } as never;
       }

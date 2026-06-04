@@ -176,7 +176,7 @@ impl ProposalRepository {
         sqlx::query!(
             r#"UPDATE proposals SET title = $1, body = $2, acceptance_criteria = $3, status = $4,
                     superseded_by = $5,
-                    closed_at = CASE WHEN $6 IN ('archived', 'superseded')
+                    closed_at = CASE WHEN $6 IN ('done', 'rejected', 'archived', 'superseded')
                         THEN COALESCE(closed_at, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
                         ELSE NULL END,
                     updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')

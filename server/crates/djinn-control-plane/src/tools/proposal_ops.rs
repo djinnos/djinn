@@ -2,6 +2,7 @@
 // `epic_ops.rs`: thin serializable views over the `djinn-core` models with
 // JSON-array fields expanded to `Vec<String>`.
 
+use crate::tools::epic_ops::AcceptanceCriterionItem;
 use djinn_core::models::{Proposal, ProposalFeedback, ProposalTarget};
 use serde::{Deserialize, Serialize};
 
@@ -11,8 +12,11 @@ pub struct ProposalModel {
     pub short_id: String,
     pub title: String,
     pub body: String,
-    pub acceptance_criteria: Vec<String>,
-    /// Lifecycle: `draft` | `shared` | `ready` | `archived` | `superseded`.
+    /// Structured acceptance criteria (`{criterion, met}` or plain string),
+    /// same shape as tasks. `met` means "agreed during scoping".
+    pub acceptance_criteria: Vec<AcceptanceCriterionItem>,
+    /// Lifecycle: draft | in_review | approved | building | done | rejected |
+    /// archived | superseded.
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author_user_id: Option<String>,
@@ -31,7 +35,7 @@ impl From<&Proposal> for ProposalModel {
             short_id: p.short_id.clone(),
             title: p.title.clone(),
             body: p.body.clone(),
-            acceptance_criteria: parse_string_array(&p.acceptance_criteria),
+            acceptance_criteria: parse_acceptance_criteria(&p.acceptance_criteria),
             status: p.status.clone(),
             author_user_id: p.author_user_id.clone(),
             superseded_by: p.superseded_by.clone(),
@@ -154,6 +158,19 @@ pub struct ProposalDeleteResponse {
     pub error: Option<String>,
 }
 
-pub(crate) fn parse_string_array(raw: &str) -> Vec<String> {
-    serde_json::from_str(raw).unwrap_or_default()
+/// Parse the stored acceptance-criteria JSON array into structured items,
+/// accepting both plain strings and `{criterion, met}` objects (same
+/// tolerance as the task layer).
+fn parse_acceptance_criteria(raw: &str) -> Vec<AcceptanceCriterionItem> {
+    let parsed = serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    parsed
+        .into_iter()
+        .map(|item| {
+            serde_json::from_value::<AcceptanceCriterionItem>(item.clone())
+                .unwrap_or_else(|_| AcceptanceCriterionItem::Text(item.to_string()))
+        })
+        .collect()
 }
