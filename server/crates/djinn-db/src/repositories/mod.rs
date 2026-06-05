@@ -4,6 +4,7 @@ pub mod commit_file_changes;
 pub mod epic;
 pub mod events;
 pub mod git_settings;
+pub mod image;
 pub mod init;
 pub mod models;
 pub mod note;
