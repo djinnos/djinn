@@ -385,7 +385,6 @@ function FeedbackThread({
   onChanged: () => void;
 }) {
   const [body, setBody] = useState("");
-  const [asSuggestion, setAsSuggestion] = useState(false);
   const [posting, setPosting] = useState(false);
 
   const accept = async (id: string) => {
@@ -402,10 +401,13 @@ function FeedbackThread({
     if (!body.trim()) return;
     setPosting(true);
     try {
+      // Every human comment is trackable (open) — it can be accepted or
+      // resolved. Concrete spec changes (a diff to apply) come from an agent
+      // via chat / the djinn MCP, which attaches a proposed_body.
       const res = await callMcpTool("proposal_feedback_add", {
         proposal_id: proposalId,
         body: body.trim(),
-        status: asSuggestion ? "open" : undefined,
+        status: "open",
       });
       if (res.error) throw new Error(res.error);
       setBody("");
@@ -484,22 +486,18 @@ function FeedbackThread({
         <Textarea
           value={body}
           onChange={(e) => setBody(e.target.value)}
-          placeholder={asSuggestion ? "Propose a change…" : "Add to the discussion…"}
+          placeholder="Add to the discussion…"
           className="min-h-[80px]"
         />
         <div className="flex items-center gap-3">
           <Button onClick={post} disabled={posting || !body.trim()}>
-            {asSuggestion ? "Suggest" : "Comment"}
+            Comment
           </Button>
-          <label className="flex items-center gap-1.5 text-sm text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={asSuggestion}
-              onChange={(e) => setAsSuggestion(e.target.checked)}
-            />
-            As a trackable suggestion
-          </label>
         </div>
+        <p className="text-xs text-muted-foreground">
+          To propose a concrete spec change, ask in chat or via the djinn MCP — an
+          agent can draft a diff you can review and apply here.
+        </p>
       </div>
     </div>
   );

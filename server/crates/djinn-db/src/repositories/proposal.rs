@@ -254,6 +254,11 @@ impl ProposalRepository {
                 .await?;
         }
 
+        // Re-evaluate the approval gate after any status/spec change. Sign-offs
+        // can already be present when a proposal *enters* in_review (e.g. signed
+        // while in draft, or promoted via the status dropdown); add_signoff only
+        // reconciles at sign-off time, so without this the gate would never fire.
+        self.reconcile_approval(id).await?;
         let proposal = self.get_required(id).await?;
         self.events
             .send(DjinnEventEnvelope::proposal_updated(&proposal));

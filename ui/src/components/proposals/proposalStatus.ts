@@ -33,9 +33,20 @@ export const PROPOSAL_STATUS_META: Record<ProposalStatus, StatusMeta> = {
   archived: { label: "Archived", order: 8, dot: "bg-muted-foreground/40", terminal: true },
 };
 
-export const PROPOSAL_STATUS_KEYS = (
-  Object.keys(PROPOSAL_STATUS_META) as ProposalStatus[]
-).sort((a, b) => PROPOSAL_STATUS_META[a].order - PROPOSAL_STATUS_META[b].order);
+// Display order, most-advanced first: the groups at the top are the ones that
+// have moved furthest down the lifecycle. Off-ramp / dead states (rejected,
+// superseded, archived) stay pinned at the bottom rather than above active work.
+export const PROPOSAL_STATUS_KEYS: ProposalStatus[] = [
+  "done",
+  "building",
+  "approved",
+  "in_review",
+  "draft",
+  "triage",
+  "rejected",
+  "superseded",
+  "archived",
+];
 
 export function statusLabel(status: string): string {
   return PROPOSAL_STATUS_META[status as ProposalStatus]?.label ?? status;

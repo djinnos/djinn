@@ -580,7 +580,7 @@ impl DjinnMcpServer {
 
     /// Add a feedback entry (discussion or suggestion) to a proposal.
     #[tool(
-        description = "Add feedback to a proposal. Omit `status` for plain discussion; set `status=open` to file a trackable suggestion (resolve later with proposal_feedback_resolve). `author_kind` is `user` (default) or `ai` (set `author_model` for AI). `parent_id` threads a reply."
+        description = "Add feedback to a proposal. Omit `status` for plain discussion; set `status=open` to file a trackable suggestion (resolve later with proposal_feedback_resolve). To propose a concrete spec change, set `proposed_body` to the full revised body — the UI renders a diff against the current spec and proposal_feedback_accept applies it as a new revision. `author_kind` is `user` (default) or `ai` (set `author_model` for AI). `parent_id` threads a reply."
     )]
     pub async fn proposal_feedback_add(
         &self,
