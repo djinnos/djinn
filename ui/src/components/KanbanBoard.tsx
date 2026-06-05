@@ -234,7 +234,7 @@ export function KanbanBoard({
       columnMap.set(epicKey, existing);
     }
 
-    // Seed empty open/drafting epics into the Open column so they're visible on the board
+    // Seed empty open epics into the Open column so they are visible on the board
     const epicIdsWithTasks = new Set<string>();
     for (const columnMap of byColumn.values()) {
       for (const epicKey of columnMap.keys()) {
@@ -246,7 +246,7 @@ export function KanbanBoard({
       const visibleEpicIds =
         epicFilters.length > 0 ? new Set(epicFilters) : null;
       for (const [epicId, epic] of epics) {
-        if (epic.status !== "open" && epic.status !== "drafting") continue;
+        if (epic.status !== "open") continue;
         if (epicIdsWithTasks.has(epicId)) continue;
         if (visibleEpicIds && !visibleEpicIds.has(epicId)) continue;
         // Scope empty epic shells to the owner filter the same way tasks are:
@@ -352,10 +352,7 @@ export function KanbanBoard({
                             key={epicKey}
                             size="sm"
                             className={cn(
-                              "gap-0 cursor-pointer py-3 ring-white/[0.04]",
-                              epic?.status === "drafting"
-                                ? "border-amber-500/15 bg-zinc-900/60"
-                                : "bg-zinc-900",
+                              "gap-0 cursor-pointer py-3 bg-zinc-900 ring-white/[0.04]",
                             )}
                             onClick={() => toggleEpic(column.key, epicKey)}
                           >
@@ -368,11 +365,6 @@ export function KanbanBoard({
                                   <span className="truncate">
                                     {getEpicTitle(epic, firstTaskEpicId)}
                                   </span>
-                                  {epic?.status === "drafting" && (
-                                    <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-300">
-                                      Drafting
-                                    </span>
-                                  )}
                                 </span>
                                 <HugeiconsIcon
                                   icon={

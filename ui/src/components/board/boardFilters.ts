@@ -28,7 +28,6 @@ export const ISSUE_TYPES = [
 
 export const EPIC_STATUS_GROUPS: Array<{ key: string; label: string }> = [
   { key: "open", label: "Open" },
-  { key: "drafting", label: "Drafting" },
   { key: "closed", label: "Closed" },
 ];
 

@@ -345,12 +345,12 @@ pub async fn epic_update(
 
     let status = request.status.as_deref().unwrap_or(&epic.status);
     match status {
-        "drafting" | "open" | "closed" => {}
+        "open" | "closed" => {}
         other => {
             return EpicSingleResponse {
                 epic: None,
                 error: Some(format!(
-                    "invalid epic status: {other} (expected drafting, open, or closed)"
+                    "invalid epic status: {other} (expected open or closed)"
                 )),
             };
         }

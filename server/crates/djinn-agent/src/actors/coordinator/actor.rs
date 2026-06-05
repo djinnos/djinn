@@ -497,15 +497,15 @@ impl CoordinatorActor {
                 self.handle_task_outcome_activity(&envelope).await;
             }
             // Epic created → create a planning task for the Planner (wave 1),
-            // but only if the epic is already open (not drafting).
+            // gated to `open` epics with auto_breakdown enabled.
             ("epic", "created") => {
                 let Some(epic) = envelope.parse_payload::<djinn_core::models::Epic>() else {
                     return;
                 };
                 self.maybe_create_planning_task(&epic).await;
             }
-            // Epic updated → if the epic is now open, create a planning task.
-            // This handles the drafting→open promotion path.
+            // Epic updated → if the epic is now open, create a planning task
+            // (e.g. a reopened epic, or a re-emitted epic.updated).
             ("epic", "updated") => {
                 let Some(epic) = envelope.parse_payload::<djinn_core::models::Epic>() else {
                     return;

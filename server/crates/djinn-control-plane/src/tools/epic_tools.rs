@@ -137,13 +137,12 @@ pub struct EpicCreateParams {
     pub owner: Option<String>,
     /// Memory reference URLs for this epic (e.g. ADR paths).
     pub memory_refs: Option<Vec<String>>,
-    /// Initial status: "proposed", "drafting" (default), or "open".
-    /// Proposed epics (ADR-051 Epic C) are architect-drafted shells
-    /// that never trigger auto-dispatch until explicitly accepted.
+    /// Initial status: only "open" (the default). Epics are open → closed;
+    /// pre-execution drafting lives in proposals now.
     pub status: Option<String>,
-    /// ADR-051 Epic C — when `false`, the coordinator will NOT
-    /// auto-dispatch a breakdown Planner when this epic is created.
-    /// Defaults to `true` (preserving the existing behaviour).
+    /// When `false`, the coordinator will NOT auto-dispatch a breakdown
+    /// Planner when this epic is created — the way to stage an epic without
+    /// running it (replaces the old `drafting` status). Defaults to `true`.
     pub auto_breakdown: Option<bool>,
     /// ADR-051 Epic C — slug of the accepted ADR that spawned this
     /// epic.  Threaded into the breakdown Planner's session context
@@ -191,7 +190,7 @@ pub struct EpicUpdateParams {
     pub owner: Option<String>,
     /// Memory reference URLs for this epic (e.g. ADR paths).
     pub memory_refs: Option<Vec<String>>,
-    /// Target lifecycle status: "drafting", "open", or "closed".
+    /// Target lifecycle status: "open" or "closed".
     pub status: Option<String>,
 }
 
@@ -454,7 +453,7 @@ impl DjinnMcpServer {
 
     /// Update allowed fields of an epic.
     #[tool(
-        description = "Update allowed fields of an epic (title, description, emoji, color, owner, status). Accepts epic UUID or short_id. Status can be \"drafting\", \"open\", or \"closed\"."
+        description = "Update allowed fields of an epic (title, description, emoji, color, owner, status). Accepts epic UUID or short_id. Status can be \"open\" or \"closed\"."
     )]
     pub async fn epic_update(
         &self,

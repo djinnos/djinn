@@ -63,8 +63,8 @@ export function toGraphData(
   // Add epic groups
   for (const [epicId, epic] of epics) {
     const epicTasks = tasksByEpic.get(epicId) || [];
-    // Skip epics with no tasks unless they are open or drafting
-    if (epicTasks.length === 0 && epic.status !== "open" && epic.status !== "drafting") continue;
+    // Skip epics with no tasks unless they are open
+    if (epicTasks.length === 0 && epic.status !== "open") continue;
 
     result.push({
       id: epicId,

@@ -22,13 +22,10 @@ impl CoordinatorActor {
     /// Called when an epic is created.  Creates the first planning task
     /// unless one already exists for the epic (idempotent).
     pub(super) async fn maybe_create_planning_task(&mut self, epic: &djinn_core::models::Epic) {
-        // Only create planning tasks for epics that are fully open.
-        // Drafting epics are still being refined by the user; closed epics
-        // are done.  ADR-051 Epic C adds `proposed` for architect-drafted
-        // epic shells that must NEVER trigger auto-dispatch until they are
-        // explicitly accepted via `propose_adr_accept` (which promotes the
-        // epic to `open`).  The promotion from drafting→open / proposed→open
-        // is handled separately via the epic_updated event path.
+        // Only create planning tasks for `open` epics (closed epics are done).
+        // Epics are open → closed now; staging without auto-dispatch is done
+        // via `auto_breakdown = false` (checked separately), and pre-execution
+        // refinement lives in proposals.
         if epic.status != "open" {
             tracing::debug!(
                 epic_id = %epic.short_id,
@@ -63,8 +60,8 @@ impl CoordinatorActor {
                 // zero worker tasks ran).
                 //
                 // `maybe_create_planning_task` is for an epic's FIRST wave only
-                // (epic created / drafting→open / proposed→open promotion).
-                // Once any worker task exists the epic has already been
+                // (epic created open). Once any worker task exists the epic has
+                // already been
                 // decomposed; subsequent waves are owned exclusively by the
                 // batch-completion rule (`on_task_closed`, all workers closed).
                 // So bail if any non-planning worker task already exists,
@@ -424,86 +421,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn drafting_epic_creation_does_not_trigger_planning_task() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(256);
-
-        let project = test_helpers::create_test_project(&db).await;
-        let epic_repo = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-        let _handle = spawn_coordinator_with_planner(&db, &tx);
-        tokio::task::yield_now().await;
-
-        let epic = epic_repo
-            .create_for_project(
-                &project.id,
-                djinn_db::EpicCreateInput {
-                    title: "Drafting Epic",
-                    description: "",
-                    emoji: "",
-                    color: "",
-                    owner: "",
-                    memory_refs: None,
-                    status: Some("drafting"),
-                    auto_breakdown: None,
-                    originating_adr_id: None,
-                },
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-        let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
-        let planning_count = tasks
-            .iter()
-            .filter(|t| matches!(t.issue_type.as_str(), "planning" | "decomposition"))
-            .count();
-        assert_eq!(planning_count, 0);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn proposed_epic_creation_does_not_trigger_planning_task() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(256);
-
-        let project = test_helpers::create_test_project(&db).await;
-        let epic_repo = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-        let _handle = spawn_coordinator_with_planner(&db, &tx);
-        tokio::task::yield_now().await;
-
-        let epic = epic_repo
-            .create_for_project(
-                &project.id,
-                djinn_db::EpicCreateInput {
-                    title: "Proposed Epic",
-                    description: "",
-                    emoji: "",
-                    color: "",
-                    owner: "",
-                    memory_refs: None,
-                    status: Some("proposed"),
-                    auto_breakdown: None,
-                    originating_adr_id: Some("adr-999-test"),
-                },
-            )
-            .await
-            .unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-        let tasks = task_repo.list_by_epic(&epic.id).await.unwrap();
-        let planning_count = tasks
-            .iter()
-            .filter(|t| matches!(t.issue_type.as_str(), "planning" | "decomposition"))
-            .count();
-        assert_eq!(planning_count, 0);
-        assert_eq!(epic.status, "proposed");
-        assert_eq!(epic.originating_adr_id.as_deref(), Some("adr-999-test"));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn open_epic_with_auto_breakdown_false_skips_dispatch() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
@@ -544,7 +461,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn drafting_to_open_promotion_triggers_planning_task() {
+    async fn closed_to_open_promotion_triggers_planning_task() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
 
@@ -563,7 +480,7 @@ mod tests {
                     color: "",
                     owner: "",
                     memory_refs: None,
-                    status: Some("drafting"),
+                    status: Some("closed"),
                     auto_breakdown: None,
                     originating_adr_id: None,
                 },
@@ -580,7 +497,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn drafting_to_open_promotion_does_not_duplicate_planning_task() {
+    async fn closed_to_open_promotion_does_not_duplicate_planning_task() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
 
@@ -599,7 +516,7 @@ mod tests {
                     color: "",
                     owner: "",
                     memory_refs: None,
-                    status: Some("drafting"),
+                    status: Some("closed"),
                     auto_breakdown: None,
                     originating_adr_id: None,
                 },

@@ -28,7 +28,7 @@ const draftEpic: Epic = {
   id: "epic-draft",
   title: "Epic Draft",
   description: "",
-  status: "drafting",
+  status: "open",
   owner: null,
   priority: 2,
   issue_type: "epic",
@@ -216,7 +216,7 @@ describe("KanbanBoard", () => {
     expect(screen.getAllByText("No tasks")).toHaveLength(4);
   });
 
-  it("shows drafting epics in the Open column with an empty state when they have no tasks", () => {
+  it("shows empty open epics in the Open column when they have no tasks", () => {
     render(
       <KanbanBoard
         tasks={[]}
@@ -234,7 +234,6 @@ describe("KanbanBoard", () => {
 
     expect(within(openCol).getByText("Epic Alpha")).toBeInTheDocument();
     expect(within(openCol).getByText("Epic Draft")).toBeInTheDocument();
-    expect(within(openCol).getByText("Drafting")).toBeInTheDocument();
     expect(within(openCol).getAllByText("No tasks yet")).toHaveLength(2);
   });
 });

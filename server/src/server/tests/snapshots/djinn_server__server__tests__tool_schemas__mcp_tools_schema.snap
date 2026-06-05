@@ -1410,7 +1410,7 @@ expression: signatures
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "auto_breakdown": {
-          "description": "ADR-051 Epic C — when `false`, the coordinator will NOT\nauto-dispatch a breakdown Planner when this epic is created.\nDefaults to `true` (preserving the existing behaviour).",
+          "description": "When `false`, the coordinator will NOT auto-dispatch a breakdown\nPlanner when this epic is created — the way to stage an epic without\nrunning it (replaces the old `drafting` status). Defaults to `true`.",
           "nullable": true,
           "type": "boolean"
         },
@@ -1456,7 +1456,7 @@ expression: signatures
           "type": "array"
         },
         "status": {
-          "description": "Initial status: \"proposed\", \"drafting\" (default), or \"open\".\nProposed epics (ADR-051 Epic C) are architect-drafted shells\nthat never trigger auto-dispatch until explicitly accepted.",
+          "description": "Initial status: only \"open\" (the default). Epics are open → closed;\npre-execution drafting lives in proposals now.",
           "nullable": true,
           "type": "string"
         },
@@ -2263,7 +2263,7 @@ expression: signatures
           "type": "string"
         },
         "status": {
-          "description": "Target lifecycle status: \"drafting\", \"open\", or \"closed\".",
+          "description": "Target lifecycle status: \"open\" or \"closed\".",
           "nullable": true,
           "type": "string"
         },

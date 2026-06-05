@@ -790,9 +790,9 @@ export type EpicCountOutput = EpicCountOutputSchema.EpicCountOutput;
 export namespace EpicCreateInputSchema {
   export interface EpicCreateInput {
   /**
-   * ADR-051 Epic C — when `false`, the coordinator will NOT
-   * auto-dispatch a breakdown Planner when this epic is created.
-   * Defaults to `true` (preserving the existing behaviour).
+   * When `false`, the coordinator will NOT auto-dispatch a breakdown
+   * Planner when this epic is created — the way to stage an epic without
+   * running it (replaces the old `drafting` status). Defaults to `true`.
    */
   auto_breakdown?: boolean
   color?: string
@@ -822,9 +822,8 @@ export namespace EpicCreateInputSchema {
    */
   read_sources?: string[]
   /**
-   * Initial status: "proposed", "drafting" (default), or "open".
-   * Proposed epics (ADR-051 Epic C) are architect-drafted shells
-   * that never trigger auto-dispatch until explicitly accepted.
+   * Initial status: only "open" (the default). Epics are open → closed;
+   * pre-execution drafting lives in proposals now.
    */
   status?: string
   title: string
@@ -1213,7 +1212,7 @@ export namespace EpicUpdateInputSchema {
    */
   project: string
   /**
-   * Target lifecycle status: "drafting", "open", or "closed".
+   * Target lifecycle status: "open" or "closed".
    */
   status?: string
   title?: string

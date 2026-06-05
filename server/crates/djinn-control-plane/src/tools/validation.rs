@@ -190,19 +190,15 @@ pub fn validate_task_create_status(status: Option<&str>) -> Result<Option<&str>,
     }
 }
 
-/// Validate initial epic status for epic_create: "proposed", "drafting" (default), or "open".
-///
-/// `proposed` (ADR-051 Epic C) is the lane for architect-drafted epic
-/// shells that must never trigger auto-dispatch until explicitly accepted.
+/// Validate initial epic status for epic_create. Epics are `open` (default) →
+/// `closed`; the old `drafting`/`proposed` staging states are gone (that
+/// pre-execution flow lives in proposals now). Pass `auto_breakdown=false` to
+/// create an epic without auto-dispatching the planner.
 pub fn validate_epic_create_status(status: Option<&str>) -> Result<Option<&str>, String> {
     match status {
         None => Ok(None),
-        Some("proposed") => Ok(Some("proposed")),
-        Some("drafting") => Ok(Some("drafting")),
         Some("open") => Ok(Some("open")),
-        Some(other) => Err(format!(
-            "invalid epic status: {other:?} (expected proposed, drafting, or open)"
-        )),
+        Some(other) => Err(format!("invalid epic status: {other:?} (expected open)")),
     }
 }
 
@@ -427,18 +423,11 @@ mod tests {
     fn epic_create_status_validation() {
         assert_eq!(validate_epic_create_status(None).unwrap(), None);
         assert_eq!(
-            validate_epic_create_status(Some("drafting")).unwrap(),
-            Some("drafting")
-        );
-        assert_eq!(
             validate_epic_create_status(Some("open")).unwrap(),
             Some("open")
         );
-        assert_eq!(
-            validate_epic_create_status(Some("proposed")).unwrap(),
-            Some("proposed")
-        );
+        assert!(validate_epic_create_status(Some("drafting")).is_err());
+        assert!(validate_epic_create_status(Some("proposed")).is_err());
         assert!(validate_epic_create_status(Some("closed")).is_err());
-        assert!(validate_epic_create_status(Some("invalid")).is_err());
     }
 }

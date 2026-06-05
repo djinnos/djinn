@@ -69,7 +69,7 @@ pub(crate) fn tool_epic_create() -> RmcpTool {
                 "color": {"type": "string", "description": "Optional color tag for the epic"},
                 "owner": {"type": "string", "description": "Optional owner"},
                 "memory_refs": {"type": "array", "items": {"type": "string"}, "description": "Memory reference URLs (e.g. ADR permalinks) to attach to the epic"},
-                "status": {"type": "string", "description": "Initial status: 'drafting' (default) or 'open'"}
+                "status": {"type": "string", "description": "Initial status: 'open' (default)"}
             }
         }),
     )
