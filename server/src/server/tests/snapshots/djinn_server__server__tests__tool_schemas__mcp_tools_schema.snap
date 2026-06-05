@@ -3193,6 +3193,14 @@ expression: signatures
       "$defs": {
         "ImageDto": {
           "properties": {
+            "allowed_presets": {
+              "default": [],
+              "description": "Service-preset ids tasks using this image may request (Phase C capability).",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "config": {
               "$ref": "#/$defs/ObjectJson",
               "description": "The image's EnvironmentConfig (build fields)."
@@ -3246,6 +3254,52 @@ expression: signatures
         "images"
       ],
       "title": "ImageListResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "image_set_allowed_presets",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Image id.",
+          "type": "string"
+        },
+        "preset_ids": {
+          "description": "Service-preset ids this image's tasks may request (full replacement).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "preset_ids"
+      ],
+      "title": "ImageSetAllowedPresetsParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ImageMutateResponse",
       "type": "object"
     }
   },
@@ -8983,6 +9037,67 @@ expression: signatures
         "services"
       ],
       "title": "ServiceListResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "service_preset_list",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "ServicePresetListParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "ServicePresetDto": {
+          "properties": {
+            "conn_env_var": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "image": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "service_type": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "service_type",
+            "image",
+            "conn_env_var"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "presets": {
+          "items": {
+            "$ref": "#/$defs/ServicePresetDto"
+          },
+          "type": "array"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "presets"
+      ],
+      "title": "ServicePresetListResponse",
       "type": "object"
     }
   },

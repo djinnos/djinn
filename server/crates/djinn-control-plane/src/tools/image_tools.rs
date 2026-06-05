@@ -27,6 +27,9 @@ pub struct ImageDto {
     pub status: String,
     /// The image's EnvironmentConfig (build fields).
     pub config: ObjectJson,
+    /// Service-preset ids tasks using this image may request (Phase C capability).
+    #[serde(default)]
+    pub allowed_presets: Vec<String>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -72,6 +75,14 @@ pub struct ImageDeleteParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct ImageSetAllowedPresetsParams {
+    /// Image id.
+    pub id: String,
+    /// Service-preset ids this image's tasks may request (full replacement).
+    pub preset_ids: Vec<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct ProjectSetImageParams {
     /// Project UUID or `owner/repo` slug.
     pub project: String,
@@ -101,9 +112,11 @@ impl DjinnMcpServer {
         let repo = ImageRepository::new(self.state.db().clone());
         match repo.list().await {
             Ok(rows) => {
-                let images = rows
-                    .into_iter()
-                    .map(|i| ImageDto {
+                let mut images = Vec::with_capacity(rows.len());
+                for i in rows {
+                    let allowed_presets =
+                        repo.list_allowed_presets(&i.id).await.unwrap_or_default();
+                    images.push(ImageDto {
                         id: i.id,
                         name: i.name,
                         description: i.description,
@@ -112,8 +125,9 @@ impl DjinnMcpServer {
                             serde_json::from_str::<serde_json::Value>(&i.config)
                                 .unwrap_or_else(|_| serde_json::json!({})),
                         ),
-                    })
-                    .collect();
+                        allowed_presets,
+                    });
+                }
                 Json(ImageListResponse {
                     status: "ok".into(),
                     error: None,
@@ -256,6 +270,28 @@ impl DjinnMcpServer {
                 error: Some(format!(
                     "delete failed (is a project still using it?): {e}"
                 )),
+                id: None,
+            }),
+        }
+    }
+
+    #[tool(
+        description = "Set which backing-service presets this image's tasks may request (full replacement). The capability gate for on-demand services."
+    )]
+    pub async fn image_set_allowed_presets(
+        &self,
+        Parameters(input): Parameters<ImageSetAllowedPresetsParams>,
+    ) -> Json<ImageMutateResponse> {
+        let repo = ImageRepository::new(self.state.db().clone());
+        match repo.set_allowed_presets(&input.id, &input.preset_ids).await {
+            Ok(()) => Json(ImageMutateResponse {
+                status: "ok".into(),
+                error: None,
+                id: Some(input.id),
+            }),
+            Err(e) => Json(ImageMutateResponse {
+                status: "error".into(),
+                error: Some(format!("set allowed presets: {e}")),
                 id: None,
             }),
         }

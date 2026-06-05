@@ -124,8 +124,58 @@ fn err_req(msg: impl Into<String>) -> Json<ServiceRequestResponse> {
     })
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct ServicePresetListParams {}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ServicePresetDto {
+    pub id: String,
+    pub name: String,
+    pub service_type: String,
+    pub image: String,
+    pub conn_env_var: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ServicePresetListResponse {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub presets: Vec<ServicePresetDto>,
+}
+
 #[tool_router(router = service_tool_router, vis = "pub")]
 impl DjinnMcpServer {
+    #[tool(
+        description = "List the available backing-service presets (Postgres/Redis/RabbitMQ) that an image can allow."
+    )]
+    pub async fn service_preset_list(
+        &self,
+        Parameters(_): Parameters<ServicePresetListParams>,
+    ) -> Json<ServicePresetListResponse> {
+        match ServicePresetRepository::new(self.state.db().clone()).list().await {
+            Ok(rows) => Json(ServicePresetListResponse {
+                status: "ok".into(),
+                error: None,
+                presets: rows
+                    .into_iter()
+                    .map(|p| ServicePresetDto {
+                        id: p.id,
+                        name: p.name,
+                        service_type: p.service_type,
+                        image: p.image,
+                        conn_env_var: p.conn_env_var,
+                    })
+                    .collect(),
+            }),
+            Err(e) => Json(ServicePresetListResponse {
+                status: "error".into(),
+                error: Some(format!("db error: {e}")),
+                presets: Vec::new(),
+            }),
+        }
+    }
+
     #[tool(
         description = "Request an on-demand backing service (Postgres/Redis/RabbitMQ) for this task's test run. Returns a connection string + the env var to export. Idempotent per service-type. Requires the project's selected image to allow the preset."
     )]
