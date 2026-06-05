@@ -122,6 +122,17 @@ enum Cmd {
         /// Project id (matches `projects.id`). Positional.
         project_id: String,
     },
+
+    /// Run a one-shot verification "test" for a candidate rule set and exit.
+    /// Reads the `verification_test_runs` row, runs the candidate commands in
+    /// this project image against the cloned default branch, and writes
+    /// pass/fail + per-command output back to the row. Dispatched by
+    /// `build_verification_test_job` in `djinn-k8s` — this is what gates
+    /// "save verification rules" so a broken rule can't disrupt live tasks.
+    VerifyTest {
+        /// `verification_test_runs.id` (positional).
+        test_id: String,
+    },
 }
 
 /// Arguments for the `task-run` subcommand.
@@ -236,6 +247,7 @@ async fn run() -> Result<()> {
     match cli.cmd {
         Cmd::TaskRun(args) => run_task_run(args).await,
         Cmd::WarmGraph { project_id } => run_warm_graph(&project_id).await,
+        Cmd::VerifyTest { test_id } => run_verify_test(&test_id).await,
     }
 }
 
@@ -658,6 +670,84 @@ async fn run_warm_graph(project_id: &str) -> Result<()> {
     )
     .await
     .with_context(|| format!("run_warm_graph_command({project_id})"))
+}
+
+/// Run a one-shot verification test: execute the candidate rule set's commands
+/// in this project image against the cloned default branch (at
+/// `DJINN_PROJECT_ROOT`), then write the outcome back to the
+/// `verification_test_runs` row. Dispatched by `build_verification_test_job`.
+///
+/// Faithful to real verification: it reuses [`verify_commit`], which runs the
+/// `lifecycle.pre_verification` setup hooks then the commands, so a `passed`
+/// here means the same pipeline that gates tasks would pass. A synthetic commit
+/// id keeps this off the real verification cache.
+async fn run_verify_test(test_id: &str) -> Result<()> {
+    let db = bootstrap_warm_database().await?;
+    let repo = djinn_db::VerificationTestRepository::new(db.clone());
+
+    let run = repo
+        .get(test_id)
+        .await
+        .with_context(|| format!("load verification_test_run {test_id}"))?
+        .ok_or_else(|| anyhow::anyhow!("verification_test_run {test_id} not found"))?;
+    let _ = repo.mark_running(test_id).await;
+
+    // A test runs every command the candidate rule set would run (dedup,
+    // order-preserving) against the current default branch — a fresh clone
+    // diffs to nothing, so per-file scoping doesn't apply here.
+    let rules: Vec<djinn_stack::environment::VerificationRule> =
+        serde_json::from_str(&run.candidate_rules).unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    let mut commands: Vec<String> = Vec::new();
+    for rule in &rules {
+        for cmd in &rule.commands {
+            if seen.insert(cmd.clone()) {
+                commands.push(cmd.clone());
+            }
+        }
+    }
+
+    let project_root = std::env::var("DJINN_PROJECT_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/workspace"));
+
+    // Synthetic commit id so verify_commit's pass-cache never collides with a
+    // real task verification (which keys on the real commit + scoped commands).
+    let synthetic_commit = format!("verify-test-{test_id}");
+
+    let outcome = djinn_agent::verification::service::verify_commit(
+        &run.project_id,
+        &synthetic_commit,
+        &project_root,
+        &db,
+        &commands,
+    )
+    .await;
+
+    match outcome {
+        Ok(result) => {
+            let mut all = result.setup_results;
+            all.extend(result.verification_results);
+            let results_json = serde_json::to_string(&all).unwrap_or_else(|_| "[]".to_string());
+            let status = if result.passed {
+                djinn_db::VerificationTestStatus::PASSED
+            } else {
+                djinn_db::VerificationTestStatus::FAILED
+            };
+            repo.complete(test_id, status, &results_json, None)
+                .await
+                .with_context(|| format!("write verification_test_run {test_id} result"))?;
+            tracing::info!(test_id, passed = result.passed, "verification test complete");
+        }
+        Err(e) => {
+            let msg = format!("{e:#}");
+            let _ = repo
+                .complete(test_id, djinn_db::VerificationTestStatus::ERROR, "[]", Some(&msg))
+                .await;
+            tracing::warn!(test_id, error = %msg, "verification test errored");
+        }
+    }
+    Ok(())
 }
 
 /// Replicates `AppState::minimal_for_warm_only`'s DB resolution — the

@@ -278,7 +278,7 @@ pub(crate) fn sanitize_id(raw: &str) -> String {
 
 /// Short form of a uuid v7 used as the Job-name disambiguator (full uuid
 /// overruns DNS label budgets when combined with project id + prefix).
-fn short_uuid(id: &Uuid) -> String {
+pub(crate) fn short_uuid(id: &Uuid) -> String {
     let full = id.simple().to_string();
     full[..12.min(full.len())].to_string()
 }
