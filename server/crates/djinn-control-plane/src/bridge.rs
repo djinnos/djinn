@@ -173,6 +173,12 @@ pub trait RuntimeOps: Send + Sync {
     ) -> Result<ProvisionedService, String>;
     /// Tear down a provisioned backing service (best-effort).
     async fn release_backing_service(&self, instance_id: &str) -> Result<(), String>;
+    /// Delete a closed task's branch on the local mirror and the GitHub remote
+    /// (which auto-closes any PR still open on that head). Best-effort: errors
+    /// are logged, never surfaced. Used by `proposal_stop_build`'s abort cascade
+    /// to clean up branches/PRs of force-closed tasks. A no-op on runtimes
+    /// without a mirror manager.
+    async fn cleanup_task_branches(&self, task_id: &str);
 }
 
 // ── Git ─────────────────────────────────────────────────────────────────────────

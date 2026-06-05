@@ -230,6 +230,12 @@ impl McpState {
     pub async fn release_backing_service(&self, instance_id: &str) -> Result<(), String> {
         self.runtime.release_backing_service(instance_id).await
     }
+
+    /// Best-effort: delete a force-closed task's branch on the local mirror and
+    /// the GitHub remote (closing any open PR). Used by the abort cascade.
+    pub async fn cleanup_task_branches(&self, task_id: &str) {
+        self.runtime.cleanup_task_branches(task_id).await;
+    }
 }
 
 // ── Stub impls for test builds ─────────────────────────────────────────────────
@@ -321,6 +327,7 @@ pub mod stubs {
         async fn release_backing_service(&self, _: &str) -> Result<(), String> {
             Ok(())
         }
+        async fn cleanup_task_branches(&self, _: &str) {}
     }
 
     pub struct StubGitOps;

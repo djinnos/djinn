@@ -34,7 +34,7 @@ pub(crate) mod sandbox;
 pub mod skills;
 pub mod supervisor;
 pub(crate) mod supervisor_impl;
-pub(crate) mod task_merge;
+pub mod task_merge;
 pub(crate) mod truncate;
 pub mod warmer;
 

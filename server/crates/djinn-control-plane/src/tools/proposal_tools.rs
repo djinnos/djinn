@@ -225,6 +225,41 @@ pub struct ProposalGraduateParams {
     pub owner_user_id: Option<String>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalStopBuildParams {
+    /// Proposal UUID or short_id (must be `building`).
+    pub id: String,
+    /// `abort` (tear the build down and revert to `approved`), `freeze` (hold
+    /// the build's tasks out of dispatch, leaving epics/tasks/branches in
+    /// place), or `unfreeze` (resume a frozen build).
+    pub mode: String,
+    /// Why the build is being stopped. Recorded as the force-close reason on
+    /// each torn-down task. Required for `abort`.
+    pub reason: Option<String>,
+    /// When true on `abort`, compute and return the blast radius (epics, open
+    /// tasks, running sessions) WITHOUT mutating anything.
+    pub preview: Option<bool>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct ProposalStopBuildResponse {
+    pub ok: bool,
+    pub mode: String,
+    pub proposal_id: Option<String>,
+    /// Resulting proposal status (`approved` after a non-preview abort,
+    /// `building` after freeze/unfreeze/preview).
+    pub status: Option<String>,
+    /// `true` when this was a dry-run that did not mutate anything.
+    pub preview: bool,
+    /// Epics torn down (abort) or that would be (preview).
+    pub epics_closed: u32,
+    /// Worker tasks force-closed (abort) or open right now (preview).
+    pub tasks_closed: u32,
+    /// Running worker sessions killed (abort) or live now (preview).
+    pub sessions_killed: u32,
+    pub error: Option<String>,
+}
+
 // ── Tool router ──────────────────────────────────────────────────────────────
 
 #[tool_router(router = proposal_tool_router, vis = "pub")]
@@ -887,6 +922,9 @@ impl DjinnMcpServer {
         // which inherit the session user) to the build owner so commits resolve
         // to a real GitHub account.
         let _ = task_repo.set_created_by_user_id(&task.id, &owner).await;
+        // Record the breakdown task so a later proposal_stop_build can find and
+        // force-close it (it has no epic, so it is not in proposal_epics).
+        let _ = repo.set_breakdown_task(&proposal.id, &task.id).await;
 
         match repo.set_building(&proposal.id, &owner).await {
             Ok(updated) => Json(ProposalSingleResponse {
@@ -895,6 +933,223 @@ impl DjinnMcpServer {
             }),
             Err(e) => Json(err_single(e.to_string())),
         }
+    }
+
+    /// Stop an in-flight proposal build — the inverse of `proposal_graduate`.
+    #[tool(
+        description = "Stop an in-flight proposal build (mode: abort | freeze | unfreeze). `freeze` holds the build's tasks out of dispatch while leaving epics/tasks/branches in place; `unfreeze` resumes. `abort` tears the build down — kills running workers, force-closes every task (deleting branches so GitHub auto-closes their PRs), closes the epics, unlinks them, and reverts the proposal to `approved` so it can be edited and re-graduated. Pass preview=true with mode=abort for a read-only blast-radius (epics, open tasks, running sessions) without mutating. Requires the proposal to be `building` and the engineer role (or admin)."
+    )]
+    pub async fn proposal_stop_build(
+        &self,
+        Parameters(p): Parameters<ProposalStopBuildParams>,
+    ) -> Json<ProposalStopBuildResponse> {
+        let err = |msg: String| {
+            Json(ProposalStopBuildResponse {
+                ok: false,
+                mode: String::new(),
+                proposal_id: None,
+                status: None,
+                preview: false,
+                epics_closed: 0,
+                tasks_closed: 0,
+                sessions_killed: 0,
+                error: Some(msg),
+            })
+        };
+
+        // Capability: engineer/admin only (same gate as graduate — this is the
+        // inverse build-control operation).
+        match acting_caps(self.state.db()).await {
+            Ok(Some(caps)) if !caps.can_kickoff() => {
+                return err("stopping a build requires the engineer role (or admin)".to_string());
+            }
+            Err(e) => return err(e),
+            _ => {}
+        }
+
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        let Some(proposal) = repo.resolve(&p.id).await.ok().flatten() else {
+            return err(proposal_not_found_error(&p.id));
+        };
+
+        match p.mode.as_str() {
+            "freeze" | "unfreeze" => {
+                if proposal.status != "building" {
+                    return err(format!(
+                        "only a building proposal can be {}d (current: {})",
+                        p.mode, proposal.status
+                    ));
+                }
+                let frozen = p.mode == "freeze";
+                match repo.set_frozen(&proposal.id, frozen).await {
+                    Ok(updated) => Json(ProposalStopBuildResponse {
+                        ok: true,
+                        mode: p.mode,
+                        proposal_id: Some(updated.id),
+                        status: Some(updated.status),
+                        preview: false,
+                        epics_closed: 0,
+                        tasks_closed: 0,
+                        sessions_killed: 0,
+                        error: None,
+                    }),
+                    Err(e) => err(e.to_string()),
+                }
+            }
+            "abort" => {
+                if proposal.status != "building" {
+                    return err(format!(
+                        "only a building proposal can be aborted (current: {})",
+                        proposal.status
+                    ));
+                }
+                let preview = p.preview.unwrap_or(false);
+                let reason = p.reason.as_deref().unwrap_or("proposal build aborted");
+                self.abort_proposal_build(&repo, &proposal, reason, preview)
+                    .await
+            }
+            other => err(format!(
+                "unknown mode '{other}' — expected abort | freeze | unfreeze"
+            )),
+        }
+    }
+}
+
+// ── Build teardown (abort cascade) ───────────────────────────────────────────
+
+impl DjinnMcpServer {
+    /// Tear down a graduated build and revert the proposal to `approved`.
+    ///
+    /// Composes the existing teardown primitives, all idempotent and
+    /// best-effort on side-effects: kill the running worker (pool), force-close
+    /// each open task (`ForceClose` is exempt from the blocker guard, so order
+    /// is irrelevant) and clean its branch/PR, close each graduated epic, unlink
+    /// them so a re-graduation starts clean, and revert the proposal to
+    /// `approved`. A `preview` returns the blast radius without mutating.
+    async fn abort_proposal_build(
+        &self,
+        repo: &ProposalRepository,
+        proposal: &djinn_core::models::Proposal,
+        reason: &str,
+        preview: bool,
+    ) -> Json<ProposalStopBuildResponse> {
+        use djinn_core::models::TransitionAction;
+
+        let abort_err = |msg: String| {
+            Json(ProposalStopBuildResponse {
+                ok: false,
+                mode: "abort".to_string(),
+                proposal_id: Some(proposal.id.clone()),
+                status: None,
+                preview: false,
+                epics_closed: 0,
+                tasks_closed: 0,
+                sessions_killed: 0,
+                error: Some(msg),
+            })
+        };
+
+        let task_repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
+        let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
+        let pool = self.state.pool().await;
+
+        let graduated = match repo.graduated_epics(&proposal.id).await {
+            Ok(v) => v,
+            Err(e) => return abort_err(e.to_string()),
+        };
+
+        // Every non-closed task across the graduated epics, plus the breakdown
+        // task (which has no epic, so it is not in proposal_epics).
+        let mut open_tasks: Vec<djinn_core::models::Task> = Vec::new();
+        for (epic_id, _project_id) in &graduated {
+            if let Ok(tasks) = task_repo.list_by_epic(epic_id).await {
+                open_tasks.extend(tasks.into_iter().filter(|t| t.status != "closed"));
+            }
+        }
+        if let Some(breakdown_id) = &proposal.build_breakdown_task_id
+            && let Ok(Some(task)) = task_repo.resolve(breakdown_id).await
+            && task.status != "closed"
+        {
+            open_tasks.push(task);
+        }
+
+        // Count live worker sessions (used by both preview and the kill count).
+        let mut live_sessions = 0u32;
+        if let Some(pool) = pool.as_ref() {
+            for t in &open_tasks {
+                if pool.has_session(&t.id).await.unwrap_or(false) {
+                    live_sessions += 1;
+                }
+            }
+        }
+
+        if preview {
+            return Json(ProposalStopBuildResponse {
+                ok: true,
+                mode: "abort".to_string(),
+                proposal_id: Some(proposal.id.clone()),
+                status: Some(proposal.status.clone()),
+                preview: true,
+                epics_closed: graduated.len() as u32,
+                tasks_closed: open_tasks.len() as u32,
+                sessions_killed: live_sessions,
+                error: None,
+            });
+        }
+
+        // Act. Kill the live worker (graceful), force-close the task, clean its
+        // branch/PR. Best-effort throughout: a failed kill/cleanup is logged by
+        // the underlying primitive and the next reaper backstops it.
+        let mut sessions_killed = 0u32;
+        let mut tasks_closed = 0u32;
+        for t in &open_tasks {
+            if let Some(pool) = pool.as_ref()
+                && pool.has_session(&t.id).await.unwrap_or(false)
+            {
+                let _ = pool.kill_session(&t.id).await;
+                sessions_killed += 1;
+            }
+            if task_repo
+                .transition(
+                    &t.id,
+                    TransitionAction::ForceClose,
+                    "system",
+                    "system",
+                    Some(reason),
+                    None,
+                )
+                .await
+                .is_ok()
+            {
+                tasks_closed += 1;
+                self.state.cleanup_task_branches(&t.id).await;
+            }
+        }
+
+        let mut epics_closed = 0u32;
+        for (epic_id, _project_id) in &graduated {
+            if epic_repo.close(epic_id).await.is_ok() {
+                epics_closed += 1;
+            }
+        }
+
+        let _ = repo.unlink_epics(&proposal.id).await;
+        let status = match repo.revert_to_approved(&proposal.id).await {
+            Ok(updated) => updated.status,
+            Err(e) => return abort_err(e.to_string()),
+        };
+
+        Json(ProposalStopBuildResponse {
+            ok: true,
+            mode: "abort".to_string(),
+            proposal_id: Some(proposal.id.clone()),
+            status: Some(status),
+            preview: false,
+            epics_closed,
+            tasks_closed,
+            sessions_killed,
+            error: None,
+        })
     }
 }
 
@@ -996,5 +1251,222 @@ async fn finish_targets(
             error: None,
         }),
         Err(e) => Json(err_targets(e)),
+    }
+}
+
+#[cfg(test)]
+mod stop_build_tests {
+    use super::*;
+    use crate::server::DjinnMcpServer;
+    use crate::state::stubs::test_mcp_state;
+    use djinn_core::events::EventBus;
+    use djinn_db::{
+        Database, EpicCreateInput, EpicRepository, ProjectRepository, ProposalCreateInput,
+    };
+
+    /// A `building` proposal: one graduated epic with two open worker tasks,
+    /// plus a recorded breakdown task. The slot pool is the test stub (no live
+    /// sessions), so the cascade exercises the DB-observable teardown.
+    async fn building_proposal() -> (DjinnMcpServer, Database, String, String, Vec<String>, String) {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let bus = EventBus::noop();
+        let project = ProjectRepository::new(db.clone(), bus.clone())
+            .create("svc-stop", "test", "svc-stop")
+            .await
+            .unwrap();
+
+        let prepo = ProposalRepository::new(db.clone(), bus.clone());
+        let proposal = prepo
+            .create(ProposalCreateInput {
+                title: "Stop me",
+                body: "",
+                acceptance_criteria: None,
+                status: None,
+            })
+            .await
+            .unwrap();
+
+        let epic = EpicRepository::new(db.clone(), bus.clone())
+            .create_for_project(
+                &project.id,
+                EpicCreateInput {
+                    title: "E",
+                    description: "",
+                    emoji: "",
+                    color: "",
+                    owner: "",
+                    memory_refs: None,
+                    status: None,
+                    auto_breakdown: Some(false),
+                    originating_adr_id: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let trepo = TaskRepository::new(db.clone(), bus.clone());
+        let mut task_ids = Vec::new();
+        for i in 0..2 {
+            let t = trepo
+                .create_in_project(
+                    &project.id,
+                    Some(&epic.id),
+                    &format!("t{i}"),
+                    "",
+                    "",
+                    "task",
+                    0,
+                    "",
+                    Some("open"),
+                    Some("[\"do\"]"),
+                )
+                .await
+                .unwrap();
+            task_ids.push(t.id);
+        }
+        let breakdown = trepo
+            .create_in_project(
+                &project.id,
+                None,
+                "breakdown",
+                "",
+                "",
+                "epic_breakdown",
+                0,
+                "planner",
+                Some("open"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        prepo
+            .link_epic(&proposal.id, &epic.id, &project.id)
+            .await
+            .unwrap();
+        prepo
+            .set_breakdown_task(&proposal.id, &breakdown.id)
+            .await
+            .unwrap();
+        prepo.set_building(&proposal.id, "owner").await.unwrap();
+
+        (
+            DjinnMcpServer::new(test_mcp_state(db.clone())),
+            db,
+            proposal.id,
+            epic.id,
+            task_ids,
+            breakdown.id,
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn freeze_and_unfreeze_toggle_the_flag() {
+        let (server, db, pid, _e, _t, _b) = building_proposal().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+
+        let r = server
+            .proposal_stop_build(Parameters(ProposalStopBuildParams {
+                id: pid.clone(),
+                mode: "freeze".into(),
+                reason: None,
+                preview: None,
+            }))
+            .await
+            .0;
+        assert!(r.ok);
+        assert!(repo.get(&pid).await.unwrap().unwrap().build_frozen);
+
+        let r = server
+            .proposal_stop_build(Parameters(ProposalStopBuildParams {
+                id: pid.clone(),
+                mode: "unfreeze".into(),
+                reason: None,
+                preview: None,
+            }))
+            .await
+            .0;
+        assert!(r.ok);
+        assert!(!repo.get(&pid).await.unwrap().unwrap().build_frozen);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn preview_reports_blast_radius_without_mutating() {
+        let (server, db, pid, epic_id, _t, _b) = building_proposal().await;
+        let r = server
+            .proposal_stop_build(Parameters(ProposalStopBuildParams {
+                id: pid.clone(),
+                mode: "abort".into(),
+                reason: None,
+                preview: Some(true),
+            }))
+            .await
+            .0;
+        assert!(r.ok);
+        assert!(r.preview);
+        assert_eq!(r.epics_closed, 1);
+        assert_eq!(r.tasks_closed, 3, "2 worker tasks + 1 breakdown task");
+
+        // Nothing was mutated.
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        assert_eq!(repo.get(&pid).await.unwrap().unwrap().status, "building");
+        let epic = EpicRepository::new(db.clone(), EventBus::noop())
+            .get(&epic_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(epic.status, "open");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn abort_tears_down_and_reverts_to_approved() {
+        let (server, db, pid, epic_id, task_ids, breakdown_id) = building_proposal().await;
+        let r = server
+            .proposal_stop_build(Parameters(ProposalStopBuildParams {
+                id: pid.clone(),
+                mode: "abort".into(),
+                reason: Some("changed my mind".into()),
+                preview: Some(false),
+            }))
+            .await
+            .0;
+        assert!(r.ok, "abort failed: {:?}", r.error);
+        assert_eq!(r.status.as_deref(), Some("approved"));
+        assert_eq!(r.epics_closed, 1);
+        assert_eq!(r.tasks_closed, 3);
+
+        let bus = EventBus::noop();
+        let prepo = ProposalRepository::new(db.clone(), bus.clone());
+        let p = prepo.get(&pid).await.unwrap().unwrap();
+        assert_eq!(p.status, "approved");
+        assert!(p.build_owner_user_id.is_none());
+        assert!(p.build_breakdown_task_id.is_none());
+        assert!(prepo.graduated_epics(&pid).await.unwrap().is_empty());
+
+        let epic = EpicRepository::new(db.clone(), bus.clone())
+            .get(&epic_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(epic.status, "closed");
+
+        let trepo = TaskRepository::new(db.clone(), bus.clone());
+        for tid in task_ids.iter().chain(std::iter::once(&breakdown_id)) {
+            let t = trepo.get(tid).await.unwrap().unwrap();
+            assert_eq!(t.status, "closed", "task {tid} should be force-closed");
+        }
+
+        // A second abort is rejected — the proposal is no longer building.
+        let r2 = server
+            .proposal_stop_build(Parameters(ProposalStopBuildParams {
+                id: pid,
+                mode: "abort".into(),
+                reason: Some("again".into()),
+                preview: Some(false),
+            }))
+            .await
+            .0;
+        assert!(!r2.ok);
     }
 }

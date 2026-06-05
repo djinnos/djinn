@@ -131,7 +131,7 @@ pub(crate) async fn interrupt_paused_worker_session(task_id: &str, app_state: &A
 ///   ref via API also closes any PR still open on that head — exactly the
 ///   behavior we want for lead-supersede force-closes where the PR was
 ///   left open as garbage.
-pub(crate) async fn cleanup_task_branches_post_close(
+pub async fn cleanup_task_branches_post_close(
     task_id: &str,
     db: &djinn_db::Database,
     event_bus: &djinn_core::events::EventBus,
