@@ -9,6 +9,7 @@ import { callMcpTool } from "@/api/mcpClient";
 import { usersQueryOptions } from "@/api/queryOptions";
 import { userDisplayName, type OrgUser } from "@/api/users";
 import { AcceptanceChecklist } from "@/components/AcceptanceChecklist";
+import { AcceptanceProgressBadge } from "@/components/AcceptanceProgressBadge";
 import { UserAvatar } from "@/components/UserAvatar";
 import { CopyButton } from "@/components/CopyButton";
 import { InlineError } from "@/components/InlineError";
@@ -165,6 +166,10 @@ function ProposalsListView() {
                       >
                         <StatusIcon status={p.status} />
                         <span className="min-w-0 flex-1 truncate text-sm">{p.title}</span>
+                        <AcceptanceProgressBadge
+                          criteria={p.acceptance_criteria}
+                          className="shrink-0"
+                        />
                         <span className="hidden shrink-0 font-mono text-xs text-muted-foreground sm:inline">
                           {p.short_id}
                         </span>

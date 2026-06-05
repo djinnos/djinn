@@ -137,6 +137,15 @@ pub(super) struct ProposalCompleteParams {
 }
 
 #[derive(Deserialize)]
+pub(super) struct ProposalAcSetParams {
+    pub id: String,
+    /// Full acceptance-criteria list in order; entries may be bare
+    /// `{"met": bool}` (criterion text is merged from the current proposal) or
+    /// `{"criterion": "...", "met": bool}`.
+    pub acceptance_criteria: Vec<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
 pub(super) struct EpicTasksParams {
     pub id: String,
     pub limit: Option<i64>,

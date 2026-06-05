@@ -454,6 +454,19 @@ pub(crate) async fn call_proposal_complete(
             proposal.short_id, proposal.status
         ));
     }
+    // Completing a proposal asserts every acceptance criterion is satisfied —
+    // flip them all to met=true so the proposal reads N/N (the by-index merge
+    // preserves each criterion's text).
+    let existing: Vec<serde_json::Value> =
+        serde_json::from_str(&proposal.acceptance_criteria).unwrap_or_default();
+    if !existing.is_empty() {
+        let all_met: Vec<serde_json::Value> =
+            existing.iter().map(|_| serde_json::json!({ "met": true })).collect();
+        let ac_json = merge_acceptance_criteria(&proposal.acceptance_criteria, &all_met);
+        let _ = proposal_repo
+            .set_acceptance_criteria(&proposal.id, &ac_json)
+            .await;
+    }
     let updated = proposal_repo
         .set_done(&proposal.id)
         .await
@@ -471,6 +484,39 @@ pub(crate) async fn call_proposal_complete(
         "id": updated.id,
         "short_id": updated.short_id,
         "status": updated.status,
+    }))
+}
+
+/// Reconcile a proposal's acceptance-criteria `met` flags (Planner Workflow E).
+/// Lightweight status annotation — does NOT bump a spec revision or clear
+/// sign-offs. Mirrors `task_update_ac`: the incoming list is merged by index
+/// against the current criteria, preserving each criterion's text.
+pub(crate) async fn call_proposal_ac_set(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: ProposalAcSetParams = parse_args(arguments)?;
+    let proposal_repo = ProposalRepository::new(state.db.clone(), state.event_bus.clone());
+    let Some(proposal) = proposal_repo.resolve(&p.id).await.ok().flatten() else {
+        return Err(format!("proposal not found: {}", p.id));
+    };
+    let ac_json = merge_acceptance_criteria(&proposal.acceptance_criteria, &p.acceptance_criteria);
+    let updated = proposal_repo
+        .set_acceptance_criteria(&proposal.id, &ac_json)
+        .await
+        .map_err(|e| e.to_string())?;
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_str(&updated.acceptance_criteria).unwrap_or_default();
+    let met = parsed
+        .iter()
+        .filter(|c| c.get("met").and_then(serde_json::Value::as_bool).unwrap_or(false))
+        .count();
+    Ok(serde_json::json!({
+        "ok": true,
+        "id": updated.id,
+        "short_id": updated.short_id,
+        "met": met,
+        "total": parsed.len(),
     }))
 }
 

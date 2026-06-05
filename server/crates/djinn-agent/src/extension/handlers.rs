@@ -67,9 +67,9 @@ use task_admin::{
 };
 use task_epic::{
     call_epic_blocked_list, call_epic_blockers_list, call_epic_close, call_epic_create,
-    call_proposal_complete, call_proposal_show, call_request_lead, call_request_planner,
-    call_task_activity_list, call_task_comment_add, call_task_create, call_task_list,
-    call_task_show, call_task_update, call_task_update_ac,
+    call_proposal_ac_set, call_proposal_complete, call_proposal_show, call_request_lead,
+    call_request_planner, call_task_activity_list, call_task_comment_add, call_task_create,
+    call_task_list, call_task_show, call_task_update, call_task_update_ac,
 };
 pub(crate) use task_epic::{call_epic_show, call_epic_tasks, call_epic_update};
 pub(crate) use workspace::{
@@ -191,6 +191,7 @@ where
         }
         "proposal_show" => call_proposal_show(state, &call.arguments).await,
         "proposal_complete" => call_proposal_complete(state, &call.arguments).await,
+        "proposal_ac_set" => call_proposal_ac_set(state, &call.arguments).await,
         "memory_read" => call_memory_read(state, &call.arguments, &project_ref).await,
         "memory_search" => {
             call_memory_search(state, &call.arguments, session_task_id, &project_ref).await

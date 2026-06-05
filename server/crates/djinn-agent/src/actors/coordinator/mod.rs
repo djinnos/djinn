@@ -328,6 +328,7 @@ mod tests {
             consolidation_runner: Arc::new(consolidation::DbConsolidationRunner::new(db.clone())),
             last_stale_sweep: StdInstant::now(),
             last_auto_dispatch_sweep: StdInstant::now(),
+            last_proposal_review_sweep: StdInstant::now(),
             last_graph_refresh: StdInstant::now(),
             graph_warmer: None,
             mirror: None,

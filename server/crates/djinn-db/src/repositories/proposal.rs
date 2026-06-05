@@ -871,6 +871,65 @@ impl ProposalRepository {
         Ok(proposal)
     }
 
+    /// Overwrite the acceptance-criteria JSON in place — a lightweight status
+    /// annotation (the Planner ticking `met` flags as epics land), NOT a spec
+    /// edit. Unlike [`Self::update`], this does NOT bump `latest_revision_seq`
+    /// or clear sign-offs; `ac_json` must be a JSON array string of
+    /// `{criterion, met}` objects (callers merge against the current criteria
+    /// to preserve the `criterion` text).
+    pub async fn set_acceptance_criteria(
+        &self,
+        proposal_id: &str,
+        ac_json: &str,
+    ) -> Result<Proposal> {
+        self.db.ensure_initialized().await?;
+        let acceptance_criteria: serde_json::Value =
+            serde_json::from_str(ac_json).map_err(|e| {
+                Error::InvalidData(format!(
+                    "invalid json for proposals.acceptance_criteria: {e}"
+                ))
+            })?;
+        sqlx::query!(
+            r#"UPDATE proposals SET acceptance_criteria = $1,
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $2"#,
+            acceptance_criteria,
+            proposal_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        let proposal = self.get_required(proposal_id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_updated(&proposal));
+        Ok(proposal)
+    }
+
+    /// `building` proposals whose build has fully drained — at least one
+    /// graduated epic, and every graduated epic closed — for the coordinator's
+    /// backfill sweep. Catches proposals whose epics closed before the review
+    /// rule existed (or whose `epic.updated` event was missed), which would
+    /// otherwise sit in `building` forever with no closeout review.
+    pub async fn drained_building_proposals(&self) -> Result<Vec<Proposal>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            Proposal,
+            r#"SELECT id, short_id, title, body,
+                    acceptance_criteria::text AS "acceptance_criteria!",
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id, build_frozen, build_breakdown_task_id
+             FROM proposals p
+             WHERE p.status = 'building'
+               AND EXISTS (SELECT 1 FROM proposal_epics pe WHERE pe.proposal_id = p.id)
+               AND NOT EXISTS (
+                   SELECT 1 FROM proposal_epics pe
+                   JOIN epics e ON e.id = pe.epic_id
+                   WHERE pe.proposal_id = p.id AND e.status <> 'closed'
+               )
+             ORDER BY p.updated_at"#
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
     // ── Internal helpers ─────────────────────────────────────────────────────
 
     async fn get_required(&self, id: &str) -> Result<Proposal> {
@@ -1393,6 +1452,84 @@ mod tests {
         let repo = ProposalRepository::new(test_db(), EventBus::noop());
         let p = repo.create(create_input("No epics")).await.unwrap();
         assert!(!repo.all_graduated_epics_closed(&p.id).await.unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_acceptance_criteria_is_a_status_annotation_not_a_spec_edit() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo
+            .create(ProposalCreateInput {
+                title: "AC",
+                body: "",
+                acceptance_criteria: Some(
+                    r#"[{"criterion":"a","met":false},{"criterion":"b","met":false}]"#,
+                ),
+                status: None,
+            })
+            .await
+            .unwrap();
+        // A sign-off anchored to the head revision.
+        repo.add_signoff(&p.id, "scoped", "u1").await.unwrap();
+        let seq_before = repo.get(&p.id).await.unwrap().unwrap().latest_revision_seq;
+
+        // Mark the first criterion met.
+        let updated = repo
+            .set_acceptance_criteria(
+                &p.id,
+                r#"[{"criterion":"a","met":true},{"criterion":"b","met":false}]"#,
+            )
+            .await
+            .unwrap();
+
+        // Unlike update(): no new revision and the sign-off survives.
+        assert_eq!(updated.latest_revision_seq, seq_before);
+        assert_eq!(repo.signoffs(&p.id).await.unwrap().len(), 1);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&updated.acceptance_criteria).unwrap();
+        assert_eq!(parsed[0]["met"], serde_json::json!(true));
+        assert_eq!(parsed[1]["met"], serde_json::json!(false));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drained_building_proposals_only_returns_fully_closed_builds() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proj = insert_project(&db, "svc-drain").await;
+
+        // p1: building, one epic still OPEN → not drained.
+        let p1 = repo.create(create_input("p1")).await.unwrap();
+        let e1 = insert_epic(&db, &proj, "dr01").await;
+        repo.link_epic(&p1.id, &e1, &proj).await.unwrap();
+        repo.set_building(&p1.id, "u").await.unwrap();
+
+        // p2: building, every epic CLOSED → drained.
+        let p2 = repo.create(create_input("p2")).await.unwrap();
+        let e2 = insert_epic(&db, &proj, "dr02").await;
+        repo.link_epic(&p2.id, &e2, &proj).await.unwrap();
+        repo.set_building(&p2.id, "u").await.unwrap();
+        close_epic(&db, &e2).await;
+
+        // p3: building, no graduated epics → not drained.
+        let p3 = repo.create(create_input("p3")).await.unwrap();
+        repo.set_building(&p3.id, "u").await.unwrap();
+
+        // p4: NOT building (draft) with a closed epic → not drained.
+        let p4 = repo.create(create_input("p4")).await.unwrap();
+        let e4 = insert_epic(&db, &proj, "dr04").await;
+        repo.link_epic(&p4.id, &e4, &proj).await.unwrap();
+        close_epic(&db, &e4).await;
+
+        let ids: Vec<String> = repo
+            .drained_building_proposals()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert!(ids.contains(&p2.id), "building + all epics closed is drained");
+        assert!(!ids.contains(&p1.id), "an open epic means not drained");
+        assert!(!ids.contains(&p3.id), "no graduated epics means not drained");
+        assert!(!ids.contains(&p4.id), "non-building is never drained");
     }
 
     /// Helper: insert an open `task` row under an epic and return its id.

@@ -2,6 +2,7 @@ import type { Epic, Task } from "@/api/types";
 import { getAgentAvatar } from "@/lib/agentIdentity";
 
 import { TaskIdLabel } from "@/components/TaskIdLabel";
+import { AcceptanceProgressBadge } from "@/components/AcceptanceProgressBadge";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   AlertDiamondIcon,
@@ -10,11 +11,6 @@ import {
   LowSignalIcon,
   MediumSignalIcon,
   NoSignalIcon,
-  Progress01Icon,
-  Progress02Icon,
-  Progress03Icon,
-  Progress04Icon,
-  Tick01Icon,
   UnavailableIcon,
   LinkSquare02Icon,
   GitMergeIcon,
@@ -159,15 +155,6 @@ function agentAvatar(agentType?: string): string {
   return getAgentAvatar(agentType);
 }
 
-function acProgressIcon(met: number, total: number) {
-  if (met === total) return Tick01Icon;
-  if (met === 0) return Progress01Icon;
-  const pct = met / total;
-  if (pct <= 0.25) return Progress02Icon;
-  if (pct <= 0.5) return Progress03Icon;
-  return Progress04Icon;
-}
-
 function ProjectBadge({ projectId }: { projectId?: string }) {
   const isAll = useIsAllProjects();
   if (!isAll || !projectId) return null;
@@ -183,14 +170,15 @@ function ProjectBadge({ projectId }: { projectId?: string }) {
 export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
   const [now, setNow] = useState(() => Date.now());
 
+  const startedAt = task.active_session?.started_at;
   const runningSessionStartMs = useMemo(() => {
-    if (!task.active_session?.started_at) {
+    if (!startedAt) {
       return null;
     }
 
-    const parsed = Date.parse(task.active_session.started_at);
+    const parsed = Date.parse(startedAt);
     return Number.isNaN(parsed) ? null : parsed;
-  }, [task.active_session?.started_at]);
+  }, [startedAt]);
 
   useEffect(() => {
     if (!runningSessionStartMs) {
@@ -271,19 +259,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
           )}
 
           {/* Acceptance criteria progress */}
-          {acTotal > 0 && (
-            <span className={cn(
-              "inline-flex items-center gap-0.5 rounded px-1 py-px text-[10px] font-medium",
-              acMet === acTotal
-                ? "bg-emerald-500/15 text-emerald-400"
-                : acMet === 0
-                  ? "bg-zinc-500/10 text-muted-foreground"
-                  : "bg-amber-500/15 text-amber-400"
-            )}>
-              <HugeiconsIcon icon={acProgressIcon(acMet, acTotal)} size={10} className="shrink-0" />
-              {acMet}/{acTotal}
-            </span>
-          )}
+          <AcceptanceProgressBadge criteria={ac} />
 
           {/* Blocker badge */}
           {hasBlockers && (

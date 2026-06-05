@@ -187,21 +187,22 @@ impl CoordinatorActor {
     }
 
     /// Called when an epic transitions to `closed`. If that epic was graduated
-    /// from a proposal and every graduated epic of that proposal is now closed,
-    /// dispatch a Planner to review the finished build and decide whether to
-    /// mark the proposal `done` or spawn another round of epics.
+    /// from a `building` proposal, dispatch a Planner (Workflow E) to reconcile
+    /// the proposal's acceptance criteria against what has landed and decide
+    /// whether to complete it or spawn more epics.
     ///
-    /// The proposal stays `building` throughout; this is idempotent — a review
-    /// task is created at most once per outstanding completion (deduplicated by
-    /// [`Self::open_proposal_review_task_exists`]), so re-emitted `epic.updated`
-    /// events do not stack duplicate reviews.
-    pub(super) async fn maybe_review_completed_proposal(&self, epic: &djinn_core::models::Epic) {
+    /// Fires on EVERY graduated-epic close (incremental), not only when the last
+    /// one closes — so AC progress reflects work as it lands. Deduplicated by
+    /// [`Self::open_proposal_review_task_exists`], so concurrent / re-emitted
+    /// `epic.updated` events do not stack duplicate reviews.
+    pub(super) async fn maybe_review_proposal_on_epic_close(
+        &self,
+        epic: &djinn_core::models::Epic,
+    ) {
         let repo = ProposalRepository::new(
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         );
-
-        // Is this epic part of a proposal that is still building?
         let proposal = match repo.proposal_for_epic(&epic.id).await {
             Ok(Some(p)) => p,
             Ok(None) => return,
@@ -213,27 +214,61 @@ impl CoordinatorActor {
         if proposal.status != "building" {
             return;
         }
+        self.dispatch_proposal_review(&repo, &proposal, Some(&epic.project_id), "epic_close")
+            .await;
+    }
 
-        // Only fire once the whole proposal is drained.
-        match repo.all_graduated_epics_closed(&proposal.id).await {
-            Ok(true) => {}
-            Ok(false) => return,
+    /// Backfill sweep: dispatch a closeout review for any `building` proposal
+    /// whose graduated epics have all closed but which has no open review task.
+    /// Catches proposals drained before the review rule existed (or whose
+    /// `epic.updated` was missed) so they don't sit in `building` forever.
+    pub(super) async fn sweep_proposals_needing_review(&self) {
+        let repo = ProposalRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let drained = match repo.drained_building_proposals().await {
+            Ok(v) => v,
             Err(e) => {
-                tracing::warn!(proposal_id = %proposal.id, error = %e, "CoordinatorActor: all_graduated_epics_closed check failed");
+                tracing::warn!(error = %e, "CoordinatorActor: drained_building_proposals query failed");
                 return;
             }
+        };
+        for proposal in &drained {
+            // No fallback project — a proposal with no primary target can't host
+            // a review task; dispatch_proposal_review logs and skips it.
+            self.dispatch_proposal_review(&repo, proposal, None, "backfill_sweep")
+                .await;
         }
+    }
 
-        // Home project for the review task = the proposal's first `primary`
-        // target (where graduation also lands the breakdown task), falling back
-        // to the closing epic's project if targets are unavailable.
+    /// Dispatch a single proposal-review Planner task (Workflow E) for a
+    /// `building` proposal, unless one is already open. Shared by the
+    /// per-epic-close trigger and the backfill sweep.
+    ///
+    /// `fallback_project_id` is the home project used only when the proposal has
+    /// no resolvable `primary` target (the event path passes the closing epic's
+    /// project; the sweep passes `None`).
+    pub(super) async fn dispatch_proposal_review(
+        &self,
+        repo: &ProposalRepository,
+        proposal: &djinn_core::models::Proposal,
+        fallback_project_id: Option<&str>,
+        trigger: &str,
+    ) {
+        // Home project = the proposal's first `primary` target (where graduation
+        // lands the breakdown task), falling back to the provided project.
         let home_project_id = match repo.targets(&proposal.id).await {
             Ok(targets) => targets
                 .iter()
                 .find(|t| t.role == "primary")
                 .map(|t| t.project_id.clone())
-                .unwrap_or_else(|| epic.project_id.clone()),
-            Err(_) => epic.project_id.clone(),
+                .or_else(|| fallback_project_id.map(str::to_string)),
+            Err(_) => fallback_project_id.map(str::to_string),
+        };
+        let Some(home_project_id) = home_project_id else {
+            tracing::warn!(proposal_id = %proposal.id, "CoordinatorActor: no home project for proposal review — skipping");
+            return;
         };
 
         let task_repo = self.task_repo();
@@ -251,20 +286,23 @@ impl CoordinatorActor {
             proposal.short_id, proposal.title
         );
         let design = format!(
-            "All epics graduated from proposal `{}` ({}) are now closed.\n\n\
-             Call `proposal_show(id=\"{}\")` for the spec + acceptance criteria, then review what \
-             the closed epics delivered against it. Decide ONE of:\n\
-             - The proposal is satisfied → call `proposal_complete(id=\"{}\", summary=\"…\")` to \
-               mark it done.\n\
-             - Work remains → create the additional epic(s) with `epic_create(..., proposal_id=\"{}\")` \
-               and `submit_grooming(...)`. The proposal stays building and you will be re-dispatched \
-               once those epics close.\n\n\
+            "An epic graduated from proposal `{}` ({}) just closed.\n\n\
+             Call `proposal_show(id=\"{}\")` for the spec + acceptance criteria, then review what the \
+             closed epics delivered and reconcile each acceptance criterion:\n\
+             - For every criterion the landed work now satisfies, mark it met via \
+               `proposal_ac_set(id=\"{}\", acceptance_criteria=[…])` — send the full list in order, \
+               each entry `{{\"met\": true|false}}`; cite the evidence in your summary.\n\
+             - If EVERY criterion is now met → call `proposal_complete(id=\"{}\", summary=\"…\")`.\n\
+             - If gaps remain and all epics are closed → create the additional epic(s) with \
+               `epic_create(..., proposal_id=\"{}\")`, then `submit_grooming(...)`.\n\
+             - Otherwise (gaps remain but work is still in flight) just record the AC progress and \
+               stop; you will be re-dispatched as further epics close.\n\n\
              This task has no `epic_id` — that is expected (you operate one level above epics).",
-            proposal.short_id, proposal.id, proposal.id, proposal.id, proposal.id,
+            proposal.short_id, proposal.id, proposal.id, proposal.id, proposal.id, proposal.id,
         );
         let ac = serde_json::json!([
-            {"criterion": "Proposal spec read via proposal_show and the closed epics' delivery reviewed against the acceptance criteria", "met": false},
-            {"criterion": "Decision recorded: proposal_complete called, OR additional epics created (epic_create with proposal_id) and submit_grooming called", "met": false},
+            {"criterion": "Proposal spec read and the closed epics' delivery reconciled against each acceptance criterion (met flags updated via proposal_ac_set)", "met": false},
+            {"criterion": "Outcome recorded: proposal_complete when all criteria met, OR additional epics created, OR progress saved with work still in flight", "met": false},
         ])
         .to_string();
 
@@ -293,7 +331,8 @@ impl CoordinatorActor {
                     proposal_id = %proposal.id,
                     proposal_short_id = %proposal.short_id,
                     task_short_id = %task.short_id,
-                    "CoordinatorActor: all graduated epics closed — dispatched proposal review task"
+                    trigger,
+                    "CoordinatorActor: dispatched proposal review task"
                 );
             }
             Err(e) => {
@@ -543,6 +582,56 @@ mod tests {
         ))
     }
 
+    /// Build a `CoordinatorActor` directly (not spawned) so a test can drive an
+    /// individual method like `sweep_proposals_needing_review` deterministically.
+    fn make_coordinator_actor(
+        db: &Database,
+        tx: &broadcast::Sender<DjinnEventEnvelope>,
+    ) -> CoordinatorActor {
+        use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle};
+        use crate::roles::RoleRegistry;
+        use djinn_provider::catalog::health::HealthTracker;
+
+        let cancel = CancellationToken::new();
+        let ctx = test_helpers::agent_context_from_db(db.clone(), cancel.clone());
+        let pool = SlotPoolHandle::spawn(
+            ctx,
+            cancel.clone(),
+            SlotPoolConfig {
+                models: vec![ModelSlotConfig {
+                    model_id: DEFAULT_MODEL_ID.to_owned(),
+                    max_slots: 1,
+                    roles: ["worker"].into_iter().map(ToOwned::to_owned).collect(),
+                }],
+                role_priorities: HashMap::new(),
+            },
+        );
+        let (status_tx, _) = tokio::sync::watch::channel(SharedCoordinatorState {
+            dispatched: 0,
+            recovered: 0,
+            epic_throughput: HashMap::new(),
+            pr_errors: HashMap::new(),
+            rate_limited_until: None,
+        });
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        CoordinatorActor::new(
+            CoordinatorDeps::new(
+                tx.clone(),
+                cancel,
+                db.clone(),
+                pool,
+                djinn_provider::catalog::CatalogService::new(),
+                HealthTracker::new(),
+                Arc::new(RoleRegistry::new()),
+                VerificationTracker::default(),
+                crate::lsp::LspManager::new(),
+            ),
+            receiver,
+            sender,
+            status_tx,
+        )
+    }
+
     async fn make_epic(
         db: &Database,
         project_id: &str,
@@ -623,7 +712,7 @@ mod tests {
         project_id: &str,
         proposal_short_id: &str,
     ) -> usize {
-        let marker = format!("Review completed proposal {proposal_short_id}:");
+        let marker = format!("{PROPOSAL_REVIEW_TITLE_PREFIX} {proposal_short_id}:");
         task_repo
             .list_by_project(project_id)
             .await
@@ -1043,10 +1132,10 @@ mod tests {
         );
     }
 
-    // ── Proposal closeout: review Planner when all graduated epics close ──────
+    // ── Proposal review: incremental on epic close + backfill sweep ───────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn proposal_review_dispatched_when_all_graduated_epics_close() {
+    async fn proposal_review_dispatched_incrementally_on_each_epic_close() {
         use djinn_db::{ProposalCreateInput, ProposalRepository};
 
         let db = test_helpers::create_test_db();
@@ -1087,34 +1176,94 @@ mod tests {
 
         let _handle = spawn_coordinator(&db, &tx);
 
-        // Closing the first epic must NOT fire — the proposal isn't drained yet.
+        // Incremental: closing the FIRST epic already dispatches a review (so AC
+        // progress can be reconciled as work lands), not only when all close.
         epic_repo.close(&e1.id).await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-        assert_eq!(
-            review_task_count(&task_repo, &project.id, &proposal.short_id).await,
-            0,
-            "review must not fire while a graduated epic is still open"
-        );
-
-        // Closing the last epic drains the proposal → exactly one review task.
-        epic_repo.close(&e2.id).await.unwrap();
         assert_review_task_count(
             &task_repo,
             &project.id,
             &proposal.short_id,
             1,
-            "all graduated epics closed should dispatch one proposal review task",
+            "closing a graduated epic should dispatch one proposal review task",
         )
         .await;
 
-        // A re-emitted epic.updated(closed) must not stack a duplicate review.
-        let closed_e2 = epic_repo.get(&e2.id).await.unwrap().unwrap();
-        let _ = tx.send(DjinnEventEnvelope::epic_updated(&closed_e2));
+        // While that review is still open, neither a re-emitted close nor the
+        // second epic closing stacks a duplicate (dedup: one open review).
+        let closed_e1 = epic_repo.get(&e1.id).await.unwrap().unwrap();
+        let _ = tx.send(DjinnEventEnvelope::epic_updated(&closed_e1));
+        epic_repo.close(&e2.id).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         assert_eq!(
             review_task_count(&task_repo, &project.id, &proposal.short_id).await,
             1,
-            "re-emitted epic.updated must not create a duplicate review task"
+            "an open review must not be duplicated by further epic closes"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sweep_dispatches_review_for_drained_building_proposal() {
+        use djinn_db::{ProposalCreateInput, ProposalRepository};
+
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = test_helpers::create_test_project(&db).await;
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let epic_repo = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let proposal_repo = ProposalRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+        // Build a drained building proposal WITHOUT a running coordinator, so no
+        // event-driven review is created — mimicking a proposal whose epic closed
+        // before the rule existed (e.g. `xoxg`).
+        let proposal = proposal_repo
+            .create(ProposalCreateInput {
+                title: "Stranded",
+                body: "",
+                acceptance_criteria: None,
+                status: None,
+            })
+            .await
+            .unwrap();
+        proposal_repo
+            .add_target(&proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+        let e1 = make_epic(&db, &project.id, &tx).await;
+        proposal_repo
+            .link_epic(&proposal.id, &e1.id, &project.id)
+            .await
+            .unwrap();
+        proposal_repo
+            .set_building(&proposal.id, "user-x")
+            .await
+            .unwrap();
+        epic_repo.close(&e1.id).await.unwrap();
+
+        assert_eq!(
+            review_task_count(&task_repo, &project.id, &proposal.short_id).await,
+            0,
+            "precondition: no review task exists yet"
+        );
+
+        // The backfill sweep finds the drained proposal and dispatches a review.
+        let mut actor = make_coordinator_actor(&db, &tx);
+        actor.sweep_proposals_needing_review().await;
+        assert_review_task_count(
+            &task_repo,
+            &project.id,
+            &proposal.short_id,
+            1,
+            "backfill sweep should dispatch a review for the drained proposal",
+        )
+        .await;
+
+        // Idempotent: a second sweep does not stack a duplicate.
+        actor.sweep_proposals_needing_review().await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            review_task_count(&task_repo, &project.id, &proposal.short_id).await,
+            1,
+            "sweep must not duplicate an already-open review"
         );
     }
 

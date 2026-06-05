@@ -198,6 +198,31 @@ pub(crate) fn tool_proposal_complete() -> RmcpTool {
     )
 }
 
+pub(crate) fn tool_proposal_ac_set() -> RmcpTool {
+    RmcpTool::new(
+        "proposal_ac_set".to_string(),
+        "Reconcile a proposal's acceptance-criteria `met` flags (Planner Workflow E) as graduated epics land. Send the FULL list in order — one entry per criterion, each `{\"met\": true|false}` (criterion text is preserved automatically). A status annotation only: it does not edit the spec, bump a revision, or clear sign-offs. Returns {met, total}.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id", "acceptance_criteria"],
+            "properties": {
+                "id": {"type": "string", "description": "Proposal UUID or short ID"},
+                "acceptance_criteria": {
+                    "type": "array",
+                    "description": "Full criteria list in the same order as proposal_show; each entry {\"met\": bool} (optionally with \"criterion\").",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "criterion": {"type": "string"},
+                            "met": {"type": "boolean"}
+                        }
+                    }
+                }
+            }
+        }),
+    )
+}
+
 pub(crate) fn tool_task_list() -> RmcpTool {
     RmcpTool::new(
         "task_list".to_string(),

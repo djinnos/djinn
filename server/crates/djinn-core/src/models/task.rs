@@ -75,11 +75,12 @@ impl IssueType {
 pub const PRIORITY_CRITICAL: i64 = -1;
 
 /// Title prefix marking a Planner `epic_breakdown` task as a proposal *review*
-/// (dispatched when every graduated epic of a `building` proposal has closed)
-/// rather than the initial proposal decomposition. The coordinator stamps it
-/// onto the task title; the Planner role selects the review prompt from it.
-/// Single source of truth so the producer and consumer never drift.
-pub const PROPOSAL_REVIEW_TITLE_PREFIX: &str = "Review completed proposal";
+/// (dispatched when a graduated epic of a `building` proposal closes, to
+/// reconcile acceptance criteria) rather than the initial proposal
+/// decomposition. The coordinator stamps it onto the task title; the Planner
+/// role selects the review prompt from it. Single source of truth so the
+/// producer and consumer never drift.
+pub const PROPOSAL_REVIEW_TITLE_PREFIX: &str = "Review proposal";
 
 // ── close_reason literals ─────────────────────────────────────────────────────
 //

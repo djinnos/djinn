@@ -81,6 +81,9 @@ pub(super) struct CoordinatorActor {
     pub(super) last_stale_sweep: StdInstant,
     /// ADR-051 §7 — timestamp of the last auto-dispatch safety-net sweep.
     pub(super) last_auto_dispatch_sweep: StdInstant,
+    /// Timestamp of the last proposal-review backfill sweep (dispatches a
+    /// closeout review for drained `building` proposals lacking one).
+    pub(super) last_proposal_review_sweep: StdInstant,
     /// ADR-051 §3 — timestamp of the last proactive canonical-graph
     /// staleness refresh sweep (see `GRAPH_REFRESH_INTERVAL`).
     pub(super) last_graph_refresh: StdInstant,
@@ -221,6 +224,7 @@ impl CoordinatorActor {
                 .unwrap_or_else(|| Arc::new(DbConsolidationRunner::new(db.clone()))),
             last_stale_sweep: StdInstant::now(),
             last_auto_dispatch_sweep: StdInstant::now(),
+            last_proposal_review_sweep: StdInstant::now(),
             last_graph_refresh: StdInstant::now(),
             graph_warmer,
             mirror,
@@ -353,6 +357,10 @@ impl CoordinatorActor {
                     if self.last_auto_dispatch_sweep.elapsed() >= AUTO_DISPATCH_SWEEP_INTERVAL {
                         self.sweep_stale_auto_dispatches().await;
                         self.last_auto_dispatch_sweep = StdInstant::now();
+                    }
+                    if self.last_proposal_review_sweep.elapsed() >= STALE_SWEEP_INTERVAL {
+                        self.sweep_proposals_needing_review().await;
+                        self.last_proposal_review_sweep = StdInstant::now();
                     }
                     if self.last_graph_refresh.elapsed() >= GRAPH_REFRESH_INTERVAL {
                         self.refresh_canonical_graphs_if_stale().await;
@@ -516,15 +524,15 @@ impl CoordinatorActor {
             }
             // Epic updated → if the epic is now open, create a planning task
             // (e.g. a reopened epic, or a re-emitted epic.updated). If the epic
-            // is now closed and belongs to a proposal whose every graduated
-            // epic is closed, dispatch a Planner to review/close the proposal.
+            // is now closed and belongs to a `building` proposal, dispatch a
+            // Planner to reconcile that proposal's acceptance criteria.
             ("epic", "updated") => {
                 let Some(epic) = envelope.parse_payload::<djinn_core::models::Epic>() else {
                     return;
                 };
                 self.maybe_create_planning_task(&epic).await;
                 if epic.status == "closed" {
-                    self.maybe_review_completed_proposal(&epic).await;
+                    self.maybe_review_proposal_on_epic_close(&epic).await;
                 }
             }
             // ADR-051 §7 — exit recheck.  When a planner session ends, look

@@ -1,32 +1,33 @@
-## Workflow E: Proposal Closeout Review
+## Workflow E: Proposal AC Reconciliation
 
-You have been dispatched on an `epic_breakdown` task because **every epic graduated from a proposal has now closed**. The proposal is still in `building`. Your job is to look at what was actually delivered and decide whether the proposal is *done* — then record that decision and stop. You operate one level *above* epics; there is **no `epic_id`** on this task, which is expected.
+You have been dispatched on an `epic_breakdown` task because **an epic graduated from a proposal just closed**. The proposal is still in `building`. Your job is to look at what was actually delivered, **check off the acceptance criteria the landed work now satisfies**, and decide whether the proposal is done. You operate one level *above* epics; there is **no `epic_id`** on this task, which is expected.
 
 Your task `design` contains the proposal id.
 
 ### E1. Read the proposal and what it became
 
-1. Call `proposal_show(id="<proposal-id-from-design>")`. Read the `title`, `body`, and especially `acceptance_criteria` — these are the bar the build must clear.
+1. Call `proposal_show(id="<proposal-id-from-design>")`. Read the `title`, `body`, `acceptance_criteria` (each has a `met` flag), and `status`.
 2. Review what the closed epics delivered. The targets are directly readable:
-   - `read(project="owner/repo", file_path="...")` and `code_search(query="...", project="owner/repo")` against any target repo's default branch (where merged work now lives).
+   - `read(project="owner/repo", file_path="...")` and `code_search(query="...", project="owner/repo")` against any target repo's default branch (where merged work lives).
    - For the home project you also have `code_graph` and `build_context`.
 
-### E2. Judge against the acceptance criteria
+### E2. Reconcile the acceptance criteria
 
-For each acceptance criterion, decide whether the merged work actually satisfies it. Be concrete — point at the code/files that fulfil it. A criterion that nothing addresses is a gap.
+Go through the acceptance criteria **in order**. For each one, decide whether the merged work now satisfies it — be concrete, point at the code/files that fulfil it. A criterion nothing addresses yet stays unmet.
 
-### E3. Decide — do exactly ONE
+Record your judgment with **one** call:
 
-- **The proposal is satisfied** (every acceptance criterion is met by delivered work):
-  call `proposal_complete(id="<proposal-id>", summary="<what shipped and how it meets the spec>")`.
-  This marks the proposal `done`. You are finished.
+```
+proposal_ac_set(id="<proposal-id>", acceptance_criteria=[{"met": true}, {"met": false}, …])
+```
 
-- **Work remains** (one or more criteria are unmet, or follow-on work is required):
-  create the additional epic(s) with `epic_create(..., proposal_id="<proposal-id>")` — set
-  `read_sources`/`blocked_by` as in Workflow D — then call `submit_grooming(summary="...")`.
-  The proposal stays `building`; once these new epics close you will be re-dispatched to review again.
+- Send the **full list, in the same order** as `proposal_show` returned them — one entry per criterion. You may send bare `{"met": true|false}` objects; the criterion text is preserved automatically.
+- Only flip a criterion to `met: true` when delivered, merged work actually satisfies it. Cite the evidence in your final summary.
 
-Do **not** do both, and do **not** leave the task without doing one of them: if you neither complete
-the proposal nor create new epics, the proposal will sit in `building` with nothing driving it forward.
+### E3. Decide the outcome — exactly ONE
 
-Do NOT create worker tasks here, and do NOT set `next_patrol_minutes`.
+- **Every criterion is now met** → call `proposal_complete(id="<proposal-id>", summary="<what shipped and how it meets the spec>")`. This marks the proposal `done` (and confirms all criteria met). You are finished.
+- **Gaps remain and all epics are closed** (no more work is queued) → create the follow-on epic(s) with `epic_create(..., proposal_id="<proposal-id>")` (set `read_sources`/`blocked_by` as in Workflow D), then `submit_grooming(summary="...")`. The proposal stays `building` and you'll be re-dispatched as those epics close.
+- **Gaps remain but work is still in flight** (other graduated epics are still open) → you've already recorded AC progress in E2; just `submit_grooming(summary="reconciled ACs; N/M met, waiting on open epics")` and stop. You'll be re-dispatched as each epic closes.
+
+Do **not** complete a proposal with unmet criteria, and do **not** create epics for work that's already queued under still-open epics. Do NOT create worker tasks here, and do NOT set `next_patrol_minutes`.
