@@ -46,6 +46,10 @@ pub use repositories::{
     events::EventsRepository,
     git_settings::GitSettingsRepository,
     image::{Image, ImageRepository, ImageStatus},
+    service::{
+        ServiceInstance, ServiceInstanceRepository, ServiceInstanceStatus, ServicePolicyRepository,
+        ServicePreset, ServicePresetRepository,
+    },
     models::ModelsRepository,
     note::{
         CONTRADICTION, ConsolidatedNoteProvenance, ConsolidationCandidateEdge,

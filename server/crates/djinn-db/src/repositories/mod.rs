@@ -15,6 +15,7 @@ pub mod proposal;
 pub mod repo_graph_cache;
 pub mod session;
 pub mod session_auth;
+pub mod service;
 pub mod session_message;
 pub mod settings;
 pub mod task;

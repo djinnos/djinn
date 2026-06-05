@@ -199,6 +199,51 @@ impl ImageRepository {
         Ok(())
     }
 
+    // ── allowed service presets (capability; junction table, migration 47) ──
+
+    /// Preset ids this image's tasks may request.
+    pub async fn list_allowed_presets(&self, image_id: &str) -> Result<Vec<String>> {
+        self.db.ensure_initialized().await?;
+        let rows = sqlx::query("SELECT preset_id FROM image_allowed_presets WHERE image_id = $1")
+            .bind(image_id)
+            .fetch_all(self.db.pool())
+            .await?;
+        Ok(rows.iter().map(|r| r.get::<String, _>("preset_id")).collect())
+    }
+
+    /// Replace the image's allowed-preset set wholesale.
+    pub async fn set_allowed_presets(&self, image_id: &str, preset_ids: &[String]) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        let mut tx = self.db.pool().begin().await?;
+        sqlx::query("DELETE FROM image_allowed_presets WHERE image_id = $1")
+            .bind(image_id)
+            .execute(&mut *tx)
+            .await?;
+        for preset_id in preset_ids {
+            sqlx::query(
+                "INSERT INTO image_allowed_presets (image_id, preset_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            )
+            .bind(image_id)
+            .bind(preset_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn is_preset_allowed(&self, image_id: &str, preset_id: &str) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        let row = sqlx::query(
+            "SELECT 1 AS ok FROM image_allowed_presets WHERE image_id = $1 AND preset_id = $2",
+        )
+        .bind(image_id)
+        .bind(preset_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+        Ok(row.is_some())
+    }
+
     // ── project ↔ image selection ───────────────────────────────────────────
 
     /// Assign (or clear, with `None`) a project's selected catalog image.
