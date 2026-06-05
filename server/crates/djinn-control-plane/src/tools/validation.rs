@@ -303,7 +303,10 @@ mod tests {
             validate_title("Read-consistency &amp; DB pool routing").unwrap(),
             "Read-consistency & DB pool routing"
         );
-        assert_eq!(validate_title("a &lt;b&gt; &quot;c&quot;").unwrap(), "a <b> \"c\"");
+        assert_eq!(
+            validate_title("a &lt;b&gt; &quot;c&quot;").unwrap(),
+            "a <b> \"c\""
+        );
         assert_eq!(validate_title("&amp;lt;").unwrap(), "&lt;");
     }
 
