@@ -12,6 +12,7 @@ import { MemoryPage } from "@/pages/MemoryPage";
 import { CodeGraphPage } from "@/pages/CodeGraphPage";
 import { ProposalsPage } from "@/pages/ProposalsPage";
 import { RepositoriesPage } from "@/pages/RepositoriesPage";
+import { ImagesPage } from "@/pages/ImagesPage";
 import { ProjectEnvironmentPage } from "@/pages/ProjectEnvironmentPage";
 import { UsersPage } from "@/pages/UsersPage";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
@@ -62,6 +63,9 @@ function MainLayout() {
 
             {/* Repositories */}
             <Route path="/repositories" element={<RepositoriesPage />} />
+
+            {/* Image catalog */}
+            <Route path="/images" element={<ImagesPage />} />
 
             {/* Per-project pages */}
             <Route path="/projects/:id/environment" element={<ProjectEnvironmentPage />} />

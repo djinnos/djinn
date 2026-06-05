@@ -45,6 +45,8 @@ import {
 import { useProjects } from "@/stores/useProjectStore";
 import { showToast } from "@/lib/toast";
 import { EnvironmentConfigForm } from "@/components/environmentConfig/EnvironmentConfigForm";
+import { ProjectImagePicker } from "@/components/images/ProjectImagePicker";
+import { VerificationEditor } from "@/components/verification/VerificationEditor";
 
 export function ProjectEnvironmentPage() {
   const { id: projectId } = useParams<{ id: string }>();
@@ -58,7 +60,7 @@ export function ProjectEnvironmentPage() {
   const [seeded, setSeeded] = useState<boolean>(true);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [mode, setMode] = useState<"form" | "raw">("form");
+  const [mode, setMode] = useState<"form" | "raw" | "verification">("form");
 
   const load = useCallback(async () => {
     if (!projectId) return;
@@ -87,11 +89,8 @@ export function ProjectEnvironmentPage() {
   // keep the user on the raw pane via the `disabled` flag below).
   const handleModeChange = (next: string) => {
     if (next === mode) return;
-    if (next === "raw" && config) {
-      setRawText(JSON.stringify(config, null, 2));
-      setRawError(null);
-    }
-    if (next === "form") {
+    // Leaving the raw pane for the form pane requires a valid parse first.
+    if (mode === "raw" && next === "form") {
       const parsed = tryParseRaw(rawText);
       if (parsed.ok) {
         setConfig(normalizeConfig(parsed.value));
@@ -101,7 +100,11 @@ export function ProjectEnvironmentPage() {
         return;
       }
     }
-    setMode(next as "form" | "raw");
+    if (next === "raw" && config) {
+      setRawText(JSON.stringify(config, null, 2));
+      setRawError(null);
+    }
+    setMode(next as "form" | "raw" | "verification");
   };
 
   const handleFormChange = useCallback((next: EnvironmentConfig) => {
@@ -216,31 +219,36 @@ export function ProjectEnvironmentPage() {
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <ResetFromDetectionButton onConfirm={handleResetFromDetection} />
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-8 gap-1.5 text-xs"
-            onClick={() => void load()}
-            disabled={saving}
-          >
-            <HugeiconsIcon icon={RefreshIcon} size={14} />
-            Reload
-          </Button>
-          <Button
-            size="sm"
-            className="h-8 gap-1.5 text-xs"
-            onClick={() => void handleSave()}
-            disabled={saving || (mode === "raw" && rawError !== null)}
-          >
-            {saving ? (
-              <HugeiconsIcon icon={Loading02Icon} size={14} className="animate-spin" />
-            ) : (
-              <HugeiconsIcon icon={FloppyDiskIcon} size={14} />
-            )}
-            {saving ? "Saving…" : "Save"}
-          </Button>
+        <div className="flex items-center gap-3">
+          <ProjectImagePicker projectId={projectId} />
+          {mode !== "verification" && (
+            <div className="flex items-center gap-2">
+              <ResetFromDetectionButton onConfirm={handleResetFromDetection} />
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 gap-1.5 text-xs"
+                onClick={() => void load()}
+                disabled={saving}
+              >
+                <HugeiconsIcon icon={RefreshIcon} size={14} />
+                Reload
+              </Button>
+              <Button
+                size="sm"
+                className="h-8 gap-1.5 text-xs"
+                onClick={() => void handleSave()}
+                disabled={saving || (mode === "raw" && rawError !== null)}
+              >
+                {saving ? (
+                  <HugeiconsIcon icon={Loading02Icon} size={14} className="animate-spin" />
+                ) : (
+                  <HugeiconsIcon icon={FloppyDiskIcon} size={14} />
+                )}
+                {saving ? "Saving…" : "Save"}
+              </Button>
+            </div>
+          )}
         </div>
       </header>
 
@@ -269,6 +277,7 @@ export function ProjectEnvironmentPage() {
             <TabsList className="w-fit">
               <TabsTrigger value="form">Form</TabsTrigger>
               <TabsTrigger value="raw">Raw JSON</TabsTrigger>
+              <TabsTrigger value="verification">Verification</TabsTrigger>
             </TabsList>
             <TabsContent value="form" className="mt-4">
               <EnvironmentConfigForm config={config} onChange={handleFormChange} />
@@ -289,6 +298,9 @@ export function ProjectEnvironmentPage() {
                   </p>
                 )}
               </div>
+            </TabsContent>
+            <TabsContent value="verification" className="mt-4">
+              <VerificationEditor projectId={projectId} />
             </TabsContent>
           </Tabs>
         </div>

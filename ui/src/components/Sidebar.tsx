@@ -14,6 +14,7 @@ import {
   Idea01Icon,
   ConnectIcon,
   GithubIcon,
+  CubeIcon,
   UserGroupIcon,
 } from '@hugeicons/core-free-icons';
 import { HugeiconsIcon } from '@hugeicons/react';
@@ -137,6 +138,8 @@ export function Sidebar() {
       setActiveSection('proposals');
     } else if (location.pathname.startsWith('/repositories')) {
       setActiveSection('repositories');
+    } else if (location.pathname.startsWith('/images')) {
+      setActiveSection('images');
     } else if (location.pathname.startsWith('/users')) {
       setActiveSection('users');
     } else if (location.pathname.startsWith('/settings')) {
@@ -206,6 +209,12 @@ export function Sidebar() {
           warningLabel="need devcontainer setup"
           isActive={activeSection === 'repositories'}
           onClick={() => navigate('/repositories')}
+        />
+        <NavItem
+          icon={<HugeiconsIcon icon={CubeIcon} className="h-4 w-4" />}
+          label="Images"
+          isActive={activeSection === 'images'}
+          onClick={() => navigate('/images')}
         />
       </nav>
 
