@@ -24,7 +24,7 @@ type IconObj = typeof CheckmarkCircle02Icon;
 const STATUS_ICONS: Record<ProposalStatus, { icon: IconObj; className: string }> = {
   triage: { icon: DashedLineCircleIcon, className: "text-muted-foreground" },
   draft: { icon: Progress01Icon, className: "text-amber-500" },
-  in_review: { icon: Progress02Icon, className: "text-amber-500" },
+  in_review: { icon: Progress02Icon, className: "text-yellow-400" },
   approved: { icon: Progress03Icon, className: "text-blue-500" },
   building: { icon: Progress04Icon, className: "text-purple-500" },
   done: { icon: CheckmarkCircle02Icon, className: "text-green-500" },
