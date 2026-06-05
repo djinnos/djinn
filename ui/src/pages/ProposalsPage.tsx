@@ -21,6 +21,7 @@ import {
 import { StatusIcon } from "@/components/proposals/StatusIcon";
 import { ProposalSignoffs } from "@/components/proposals/ProposalSignoffs";
 import { ProposalKickoff } from "@/components/proposals/ProposalKickoff";
+import { ProposalHistory } from "@/components/proposals/ProposalHistory";
 import { DiffView } from "@/components/proposals/DiffView";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -372,6 +373,8 @@ function ProposalDetailView({
           </div>
         </div>
 
+        <ProposalHistory detail={detail} />
+
         <Separator />
 
         <ProposalSignoffs detail={detail} onChanged={onChanged} />
@@ -427,13 +430,13 @@ function FeedbackThread({
     if (!body.trim()) return;
     setPosting(true);
     try {
-      // Every human comment is trackable (open) — it can be accepted or
-      // resolved. Concrete spec changes (a diff to apply) come from an agent
-      // via chat / the djinn MCP, which attaches a proposed_body.
+      // A plain discussion comment — no status, so it isn't accept/rejectable.
+      // Trackable suggestions (status="open") and concrete spec changes (a diff
+      // to apply, with proposed_body) come from an agent via chat / the djinn
+      // MCP, not from this comment box.
       const res = await callMcpTool("proposal_feedback_add", {
         proposal_id: proposalId,
         body: body.trim(),
-        status: "open",
       });
       if (res.error) throw new Error(res.error);
       setBody("");
