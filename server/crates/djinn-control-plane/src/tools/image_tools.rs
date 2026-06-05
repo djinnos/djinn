@@ -102,8 +102,32 @@ fn parse_validated_config(
     Ok(cfg)
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct ToolchainVersionsParams {}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ToolchainVersionsResponse {
+    pub status: String,
+    /// Available versions per language (rust/node/python/go/java/ruby/dotnet/clang),
+    /// fetched live from upstream (cached) with static fallback.
+    pub versions: std::collections::BTreeMap<String, Vec<String>>,
+}
+
 #[tool_router(router = image_tool_router, vis = "pub")]
 impl DjinnMcpServer {
+    #[tool(
+        description = "List available toolchain versions per language for the image version selectors (live from upstream, cached)."
+    )]
+    pub async fn toolchain_versions(
+        &self,
+        Parameters(_): Parameters<ToolchainVersionsParams>,
+    ) -> Json<ToolchainVersionsResponse> {
+        Json(ToolchainVersionsResponse {
+            status: "ok".into(),
+            versions: crate::toolchain_versions::fetch_toolchain_versions().await,
+        })
+    }
+
     #[tool(description = "List registered catalog images (name, status, config).")]
     pub async fn image_list(
         &self,

@@ -10989,6 +10989,38 @@ expression: signatures
     }
   },
   {
+    "name": "toolchain_versions",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "ToolchainVersionsParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "versions": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "description": "Available versions per language (rust/node/python/go/java/ruby/dotnet/clang),\nfetched live from upstream (cached) with static fallback.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "status",
+        "versions"
+      ],
+      "title": "ToolchainVersionsResponse",
+      "type": "object"
+    }
+  },
+  {
     "name": "user_settings_get",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",

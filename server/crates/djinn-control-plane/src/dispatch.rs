@@ -16,7 +16,7 @@ use crate::tools::epic_tools::{
 };
 use crate::tools::image_tools::{
     ImageCreateParams, ImageDeleteParams, ImageListParams, ImageSetAllowedPresetsParams,
-    ImageUpdateParams, ProjectSetImageParams,
+    ImageUpdateParams, ProjectSetImageParams, ToolchainVersionsParams,
 };
 use crate::tools::service_tools::{
     ServiceListParams, ServicePresetListParams, ServiceReleaseParams, ServiceRequestParams,
@@ -330,6 +330,13 @@ impl DjinnMcpServer {
                 self.project_verification_test_status(Parameters(decode_args::<
                     ProjectVerificationTestStatusParams,
                 >(name, args)?))
+                    .await,
+            ),
+            "toolchain_versions" => map_json(
+                name,
+                self.toolchain_versions(Parameters(decode_args::<ToolchainVersionsParams>(
+                    name, args,
+                )?))
                     .await,
             ),
             "image_list" => map_json(

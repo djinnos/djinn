@@ -5,6 +5,7 @@ pub mod dispatch;
 pub mod process;
 pub mod server;
 pub mod state;
+pub mod toolchain_versions;
 pub mod tools;
 
 #[cfg(any(test, feature = "test-support"))]
