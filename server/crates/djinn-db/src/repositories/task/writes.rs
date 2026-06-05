@@ -36,6 +36,7 @@ impl TaskRepository {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
         epic_id: &str,
