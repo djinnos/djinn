@@ -1246,7 +1246,7 @@ mod tests {
         );
 
         // The backfill sweep finds the drained proposal and dispatches a review.
-        let mut actor = make_coordinator_actor(&db, &tx);
+        let actor = make_coordinator_actor(&db, &tx);
         actor.sweep_proposals_needing_review().await;
         assert_review_task_count(
             &task_repo,
