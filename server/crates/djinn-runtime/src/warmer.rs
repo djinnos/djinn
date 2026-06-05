@@ -51,6 +51,26 @@ pub trait GraphWarmerService: Send + Sync {
         ttl: Duration,
         timeout: Duration,
     ) -> Result<(), WarmerError>;
+
+    /// Dispatch a one-shot verification "test" run for a candidate rule set in
+    /// the project's image, writing pass/fail + per-command output to the
+    /// `verification_test_runs` row identified by `test_id`. Fire-and-forget:
+    /// returns once the Job is created, not once it finishes (poll the row).
+    ///
+    /// Default impl errors — only a backend that owns a kube client + runtime
+    /// config (the `K8sGraphWarmer`) can dispatch the Job. The MCP layer calls
+    /// this through the `RuntimeOps` bridge. (Lives on this trait because the
+    /// K8s warmer is the one persistent handle that already owns the one-shot
+    /// Job dispatcher + project-image resolution.)
+    async fn dispatch_verification_test(
+        &self,
+        _test_id: &str,
+        _project_id: &str,
+    ) -> Result<(), WarmerError> {
+        Err(WarmerError::Backend(
+            "verification test dispatch requires the kubernetes runtime".to_string(),
+        ))
+    }
 }
 
 /// Errors surfaced by a [`GraphWarmerService`] implementation.

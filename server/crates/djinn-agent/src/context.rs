@@ -240,6 +240,16 @@ impl bridge::RuntimeOps for AgentRuntimeOps {
         // Slot-pool/coordinator reconfiguration is owned by the server-side
         // AppState impl. No-op for the agent-internal runtime.
     }
+    async fn dispatch_verification_test(
+        &self,
+        _test_id: &str,
+        _project_id: &str,
+    ) -> Result<(), String> {
+        // Verification-test dispatch is owned by the server-side AppState impl
+        // (it routes to the K8s graph warmer). The agent-internal runtime has
+        // no kube client.
+        Err("dispatch_verification_test not supported on the agent-internal runtime".to_string())
+    }
 }
 
 /// Fallback `RepoGraphOps` implementation used when `AgentContext` is built

@@ -123,6 +123,14 @@ pub trait RuntimeOps: Send + Sync {
     /// trigger a dispatch pass. Fire-and-forget; a no-op on runtimes without a
     /// live coordinator/pool.
     async fn apply_user_model_change(&self);
+    /// Dispatch a one-shot verification-test Job for `test_id` in `project_id`'s
+    /// image (the worker writes the outcome to `verification_test_runs`). Routes
+    /// to the K8s graph warmer; errors on runtimes without a kube client.
+    async fn dispatch_verification_test(
+        &self,
+        test_id: &str,
+        project_id: &str,
+    ) -> Result<(), String>;
 }
 
 // ── Git ─────────────────────────────────────────────────────────────────────────

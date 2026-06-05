@@ -141,6 +141,9 @@ impl RuntimeOps for StubRuntime {
     }
     async fn trigger_mirror_refresh(&self, _project_id: &str) {}
     async fn apply_user_model_change(&self) {}
+    async fn dispatch_verification_test(&self, _test_id: &str, _project_id: &str) -> Result<(), String> {
+        Err("stub: RuntimeOps::dispatch_verification_test not implemented".into())
+    }
 }
 
 /// GitOps stub. `git_actor` is effectively a read that creates a handle; it

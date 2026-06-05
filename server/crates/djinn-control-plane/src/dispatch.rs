@@ -31,7 +31,8 @@ use crate::tools::project_tools::{
     ProjectConfigSetParams, ProjectEnvironmentConfigGetParams, ProjectEnvironmentConfigResetParams,
     ProjectEnvironmentConfigSetParams, ProjectGraphExclusionsGetParams,
     ProjectGraphExclusionsSetParams, ProjectRemoveParams, ProjectVerificationGetParams,
-    ProjectVerificationSetParams, RetriggerImageBuildParams,
+    ProjectVerificationSetParams, ProjectVerificationTestParams,
+    ProjectVerificationTestStatusParams, RetriggerImageBuildParams,
 };
 use crate::tools::proposal_tools::{
     ProposalCreateParams, ProposalDeleteParams, ProposalFeedbackAcceptParams,
@@ -307,6 +308,20 @@ impl DjinnMcpServer {
                 name,
                 self.project_verification_set(Parameters(decode_args::<
                     ProjectVerificationSetParams,
+                >(name, args)?))
+                    .await,
+            ),
+            "project_verification_test" => map_json(
+                name,
+                self.project_verification_test(Parameters(decode_args::<
+                    ProjectVerificationTestParams,
+                >(name, args)?))
+                    .await,
+            ),
+            "project_verification_test_status" => map_json(
+                name,
+                self.project_verification_test_status(Parameters(decode_args::<
+                    ProjectVerificationTestStatusParams,
                 >(name, args)?))
                     .await,
             ),

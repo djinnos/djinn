@@ -304,6 +304,31 @@ async fn discover_mirror_main_tip(project_id: &str) -> Option<String> {
 
 #[async_trait]
 impl GraphWarmerService for K8sGraphWarmer {
+    async fn dispatch_verification_test(
+        &self,
+        test_id: &str,
+        project_id: &str,
+    ) -> Result<(), WarmerError> {
+        // The test must run in the project's image (that's where the toolchain
+        // lives) — so the image must be built + ready first.
+        let image_tag = self.resolve_project_image_tag(project_id).await.ok_or_else(|| {
+            WarmerError::Backend(format!(
+                "project {project_id} has no ready image — build the image before testing verification"
+            ))
+        })?;
+        let job = crate::verification_test_job::build_verification_test_job(
+            &self.config,
+            project_id,
+            &image_tag,
+            test_id,
+        );
+        self.dispatcher
+            .dispatch(&self.config.namespace, job)
+            .await
+            .map(|_| ())
+            .map_err(WarmerError::Backend)
+    }
+
     async fn trigger(&self, project_id: &str) {
         {
             let guard = self.in_flight.lock().await;

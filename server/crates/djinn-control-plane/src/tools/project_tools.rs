@@ -356,6 +356,55 @@ pub struct ProjectVerificationSetParams {
     /// Full replacement set of verification rules (glob `match_pattern` +
     /// shell `commands`). Validated server-side before persisting.
     pub rules: Vec<djinn_stack::environment::VerificationRule>,
+    /// Id from a prior `project_verification_test` whose run PASSED, proving
+    /// these exact rules work. REQUIRED when `rules` is non-empty (the save is
+    /// rejected otherwise, so a broken rule can't disrupt live tasks); an empty
+    /// rule set needs no test.
+    #[serde(default)]
+    pub test_id: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ProjectVerificationTestParams {
+    /// Project UUID or `owner/repo` slug.
+    pub project: String,
+    /// Candidate verification rules to test (not saved). Their commands run in
+    /// the project's image against the default branch.
+    pub rules: Vec<djinn_stack::environment::VerificationRule>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ProjectVerificationTestResponse {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Poll `project_verification_test_status` with this id for the result,
+    /// then pass it to `project_verification_set` once it has passed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_id: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ProjectVerificationTestStatusParams {
+    /// The `test_id` returned by `project_verification_test`.
+    pub test_id: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ProjectVerificationTestStatusResponse {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Test-run lifecycle: pending | running | passed | failed | error.
+    pub run_status: String,
+    /// True once `run_status == "passed"`.
+    pub passed: bool,
+    /// Per-command results as a JSON array string
+    /// (`[{name,command,exit_code,stdout,stderr,duration_ms}]`).
+    pub results_json: String,
+    /// Populated when the run itself errored (couldn't dispatch/clone/etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_error: Option<String>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -1605,6 +1654,69 @@ impl DjinnMcpServer {
                 });
             }
         };
+
+        // Safety gate: a non-empty rule set must be proven to PASS in the
+        // project image before it can be saved — a broken rule fails
+        // verification on every in-flight task. An empty rule set runs no
+        // verification, so it's always safe and skips the gate.
+        if !verification.rules.is_empty() {
+            let test_id = match input.test_id.as_deref() {
+                Some(t) if !t.trim().is_empty() => t,
+                _ => {
+                    return Json(ProjectVerificationSetResponse {
+                        status: "error".into(),
+                        error: Some(
+                            "verification rules must be tested before saving: call \
+                             project_verification_test, then pass its test_id once it has passed"
+                                .into(),
+                        ),
+                    });
+                }
+            };
+            let test_repo = djinn_db::VerificationTestRepository::new(self.state.db().clone());
+            let run = match test_repo.get(test_id).await {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    return Json(ProjectVerificationSetResponse {
+                        status: "error".into(),
+                        error: Some(format!("unknown test_id: {test_id}")),
+                    });
+                }
+                Err(err) => {
+                    return Json(ProjectVerificationSetResponse {
+                        status: "error".into(),
+                        error: Some(format!("db error: {err}")),
+                    });
+                }
+            };
+            if run.project_id != project_id {
+                return Json(ProjectVerificationSetResponse {
+                    status: "error".into(),
+                    error: Some("test_id belongs to a different project".into()),
+                });
+            }
+            if run.status != djinn_db::VerificationTestStatus::PASSED {
+                return Json(ProjectVerificationSetResponse {
+                    status: "error".into(),
+                    error: Some(format!(
+                        "verification test has not passed (status: {}); fix the commands and re-test",
+                        run.status
+                    )),
+                });
+            }
+            let tested: Vec<djinn_stack::environment::VerificationRule> =
+                serde_json::from_str(&run.candidate_rules).unwrap_or_default();
+            if tested != verification.rules {
+                return Json(ProjectVerificationSetResponse {
+                    status: "error".into(),
+                    error: Some(
+                        "the rules being saved differ from the tested rules; re-test before saving"
+                            .into(),
+                    ),
+                });
+            }
+        }
+
         let rules_json = match serde_json::to_string(&verification.rules) {
             Ok(j) => j,
             Err(err) => {
@@ -1628,6 +1740,145 @@ impl DjinnMcpServer {
             status: "ok".into(),
             error: None,
         })
+    }
+
+    /// Run a one-shot test of candidate verification rules in the project's
+    /// image (against the default branch), so the UI/API can prove they pass
+    /// before saving. Returns a `test_id`; poll `project_verification_test_status`.
+    #[tool(
+        description = "Test candidate verification rules in the project image (one-shot Job): returns a test_id to poll via project_verification_test_status. Required before saving non-empty rules so a broken rule can't disrupt live tasks."
+    )]
+    pub async fn project_verification_test(
+        &self,
+        Parameters(input): Parameters<ProjectVerificationTestParams>,
+    ) -> Json<ProjectVerificationTestResponse> {
+        let verification = djinn_stack::environment::Verification { rules: input.rules };
+        if let Err(err) = verification.validate() {
+            return Json(ProjectVerificationTestResponse {
+                status: "error".into(),
+                error: Some(format!("validate: {err}")),
+                test_id: None,
+            });
+        }
+        if verification.rules.is_empty() {
+            return Json(ProjectVerificationTestResponse {
+                status: "error".into(),
+                error: Some("no rules to test (an empty rule set can be saved directly)".into()),
+                test_id: None,
+            });
+        }
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+        let project_id = match repo.resolve(&input.project).await {
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                return Json(ProjectVerificationTestResponse {
+                    status: "error".into(),
+                    error: Some(format!("project not found: {}", input.project)),
+                    test_id: None,
+                });
+            }
+            Err(err) => {
+                return Json(ProjectVerificationTestResponse {
+                    status: "error".into(),
+                    error: Some(format!("db error: {err}")),
+                    test_id: None,
+                });
+            }
+        };
+        let canonical = match serde_json::to_string(&verification.rules) {
+            Ok(j) => j,
+            Err(err) => {
+                return Json(ProjectVerificationTestResponse {
+                    status: "error".into(),
+                    error: Some(format!("serialize rules: {err}")),
+                    test_id: None,
+                });
+            }
+        };
+        // Non-crypto fingerprint (no sha2 dep) — the save-gate matches on the
+        // stored candidate_rules anyway, so collisions are irrelevant.
+        let rules_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            canonical.hash(&mut h);
+            format!("{:016x}", h.finish())
+        };
+        let test_id = uuid::Uuid::now_v7().to_string();
+        let test_repo = djinn_db::VerificationTestRepository::new(self.state.db().clone());
+        if let Err(err) = test_repo
+            .create(&test_id, &project_id, &rules_hash, &canonical)
+            .await
+        {
+            return Json(ProjectVerificationTestResponse {
+                status: "error".into(),
+                error: Some(format!("create test run: {err}")),
+                test_id: None,
+            });
+        }
+        // Dispatch the one-shot Job (project image → clone → run candidate
+        // commands → write outcome to the row). On dispatch failure, mark the
+        // row errored so a poller sees a terminal state.
+        if let Err(err) = self
+            .state
+            .dispatch_verification_test(&test_id, &project_id)
+            .await
+        {
+            let _ = test_repo
+                .complete(
+                    &test_id,
+                    djinn_db::VerificationTestStatus::ERROR,
+                    "[]",
+                    Some(&err),
+                )
+                .await;
+            return Json(ProjectVerificationTestResponse {
+                status: "error".into(),
+                error: Some(format!("dispatch: {err}")),
+                test_id: Some(test_id),
+            });
+        }
+        Json(ProjectVerificationTestResponse {
+            status: "ok".into(),
+            error: None,
+            test_id: Some(test_id),
+        })
+    }
+
+    /// Poll the outcome of a `project_verification_test` run.
+    #[tool(
+        description = "Poll a verification test run by test_id: returns run_status (pending|running|passed|failed|error), passed, and per-command results (results_json)."
+    )]
+    pub async fn project_verification_test_status(
+        &self,
+        Parameters(input): Parameters<ProjectVerificationTestStatusParams>,
+    ) -> Json<ProjectVerificationTestStatusResponse> {
+        let test_repo = djinn_db::VerificationTestRepository::new(self.state.db().clone());
+        match test_repo.get(&input.test_id).await {
+            Ok(Some(run)) => Json(ProjectVerificationTestStatusResponse {
+                status: "ok".into(),
+                error: None,
+                passed: run.status == djinn_db::VerificationTestStatus::PASSED,
+                run_status: run.status,
+                results_json: run.results,
+                run_error: run.error,
+            }),
+            Ok(None) => Json(ProjectVerificationTestStatusResponse {
+                status: "error".into(),
+                error: Some(format!("unknown test_id: {}", input.test_id)),
+                run_status: String::new(),
+                passed: false,
+                results_json: "[]".into(),
+                run_error: None,
+            }),
+            Err(err) => Json(ProjectVerificationTestStatusResponse {
+                status: "error".into(),
+                error: Some(format!("db error: {err}")),
+                run_status: String::new(),
+                passed: false,
+                results_json: "[]".into(),
+                run_error: None,
+            }),
+        }
     }
 }
 

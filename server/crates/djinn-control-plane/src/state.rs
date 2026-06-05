@@ -201,6 +201,16 @@ impl McpState {
     pub async fn trigger_mirror_refresh(&self, project_id: &str) {
         self.runtime.trigger_mirror_refresh(project_id).await;
     }
+
+    pub async fn dispatch_verification_test(
+        &self,
+        test_id: &str,
+        project_id: &str,
+    ) -> Result<(), String> {
+        self.runtime
+            .dispatch_verification_test(test_id, project_id)
+            .await
+    }
 }
 
 // ── Stub impls for test builds ─────────────────────────────────────────────────
@@ -276,6 +286,9 @@ pub mod stubs {
         }
         async fn trigger_mirror_refresh(&self, _: &str) {}
         async fn apply_user_model_change(&self) {}
+        async fn dispatch_verification_test(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     pub struct StubGitOps;

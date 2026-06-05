@@ -55,6 +55,9 @@ mod tests {
         }
         async fn trigger_mirror_refresh(&self, _: &str) {}
         async fn apply_user_model_change(&self) {}
+        async fn dispatch_verification_test(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     #[async_trait::async_trait]
@@ -84,6 +87,9 @@ mod tests {
         }
         async fn trigger_mirror_refresh(&self, _: &str) {}
         async fn apply_user_model_change(&self) {}
+        async fn dispatch_verification_test(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     fn event_bus_for(tx: &broadcast::Sender<DjinnEventEnvelope>) -> EventBus {

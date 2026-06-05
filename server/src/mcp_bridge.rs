@@ -449,6 +449,20 @@ impl RuntimeOps for AppState {
         AppState::apply_user_model_change(self).await;
     }
 
+    async fn dispatch_verification_test(
+        &self,
+        test_id: &str,
+        project_id: &str,
+    ) -> Result<(), String> {
+        // The K8s graph warmer owns the one-shot Job dispatcher + project-image
+        // resolution; the in-process warmer's default impl errors (no kube).
+        self.graph_warmer()
+            .await
+            .dispatch_verification_test(test_id, project_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn persist_model_health_state(&self) {
         AppState::persist_model_health_state(self).await;
     }
