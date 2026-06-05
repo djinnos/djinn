@@ -10,6 +10,14 @@ import { useAuthUser } from '@/components/AuthGate';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { showToast } from '@/lib/toast';
 import { relativeTime } from '@/components/memory/memoryUtils';
 
 /**
@@ -72,7 +80,23 @@ function UserRow({ user }: { user: OrgUser }) {
   const isSelf = me?.id === user.id;
   const queryClient = useQueryClient();
   const role = user.role ?? 'proposer';
-  const canManageRole = !!me?.isAdmin && !user.is_service;
+  // Admins manage others' roles — not their own, not the service user.
+  const canManageRole = !!me?.isAdmin && !user.is_service && !isSelf;
+
+  const changeRole = async (newRole: string) => {
+    const key = ['users', 'list'] as const;
+    const prev = queryClient.getQueryData<OrgUser[]>(key);
+    // Optimistic: reflect immediately so the Select doesn't snap back.
+    queryClient.setQueryData<OrgUser[]>(key, (old) =>
+      old?.map((u) => (u.id === user.id ? { ...u, role: newRole } : u)),
+    );
+    try {
+      await setUserRole(user.id, newRole);
+    } catch (err) {
+      queryClient.setQueryData(key, prev);
+      showToast.error('Failed to set role', { description: (err as Error).message });
+    }
+  };
 
   return (
     <li className="flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3">
@@ -109,23 +133,16 @@ function UserRow({ user }: { user: OrgUser }) {
       </div>
 
       {canManageRole && (
-        <select
-          value={role}
-          onChange={async (e) => {
-            try {
-              await setUserRole(user.id, e.target.value);
-              queryClient.invalidateQueries({ queryKey: ['users'] });
-            } catch (err) {
-              console.error('Failed to set role', err);
-            }
-          }}
-          className="shrink-0 rounded-md border bg-background px-2 py-1 text-xs"
-          title="Proposal role"
-        >
-          <option value="proposer">Proposer</option>
-          <option value="pm">PM</option>
-          <option value="engineer">Engineer</option>
-        </select>
+        <Select value={role} onValueChange={(v) => typeof v === 'string' && changeRole(v)}>
+          <SelectTrigger className="h-8 w-[130px] shrink-0 text-xs" title="Proposal role">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="proposer">Proposer</SelectItem>
+            <SelectItem value="pm">PM</SelectItem>
+            <SelectItem value="engineer">Engineer</SelectItem>
+          </SelectContent>
+        </Select>
       )}
 
       {!user.is_service && user.last_seen_at && (
