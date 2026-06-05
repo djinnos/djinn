@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
-use djinn_git::run_git_command;
+use djinn_git::{run_git_command, run_git_command_with_timeout};
 use tempfile::TempDir;
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -327,6 +328,31 @@ impl MirrorManager {
         Ok(before != after)
     }
 
+    /// Run git housekeeping (`gc`) on the bare mirror to reclaim disk.
+    ///
+    /// Every mirror fetch already runs `--prune`, so refs to branches deleted
+    /// upstream are dropped — but their *objects* linger until a `gc`, which
+    /// we never ran. With djinn's branch-per-task churn (create → PR → merge →
+    /// delete), that unreferenced-object pile is the dominant source of mirror
+    /// bloat. This repacks and drops it.
+    ///
+    /// Held under the same per-project lock as `fetch_mirror` / `ensure_mirror`
+    /// so it never races a concurrent fetch or ephemeral clone. A generous
+    /// prune expiry (`2.weeks.ago`) leaves a safety window for any in-flight
+    /// `--shared` ephemeral clone that borrows objects via alternates.
+    pub async fn gc(&self, project_id: &str) -> Result<(), MirrorError> {
+        let mirror = self.mirror_path(project_id);
+        if !mirror.exists() {
+            return Err(MirrorError::Missing(project_id.to_string()));
+        }
+        let lock = self.lock_for(project_id).await;
+        let _held = lock.lock().await;
+        debug!(project_id, "git gc (mirror)");
+        git_gc(&mirror)
+            .await
+            .map_err(|e| git_err_to_mirror("git gc (mirror)", e))
+    }
+
     /// Hardlinked local clone of the mirror, returned as a [`Workspace`].
     ///
     /// Uses `git clone --local --shared file://{mirror}` — object db is
@@ -398,6 +424,41 @@ async fn unset_config_key(mirror: &Path, key: &str) -> Result<(), MirrorError> {
     }
 }
 
+/// Ceiling for a single `git gc` run. Repacking a large, long-churned repo
+/// can take a while; the daily maintenance cadence means a slow gc never
+/// piles up, and the bounded timeout stops a wedged gc from holding the
+/// per-project lock forever.
+const GC_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
+/// `git gc` a repo (bare mirror or working clone): prune now-unreferenced
+/// objects left behind by branches deleted upstream, then repack.
+///
+/// `git worktree prune` runs first to clear any stale worktree administrative
+/// entries so their once-referenced objects also become collectable. A
+/// generous `--prune=2.weeks.ago` expiry keeps very recent loose objects so a
+/// concurrent borrower (e.g. a `--shared` ephemeral clone) is never starved
+/// mid-operation. Process priority is already lowered by the git runner.
+pub async fn git_gc(repo: &Path) -> Result<(), djinn_git::GitError> {
+    // Best-effort worktree prune; a repo with no worktrees still succeeds.
+    let _ = run_git_command_with_timeout(
+        repo.to_path_buf(),
+        vec!["worktree".into(), "prune".into()],
+        GC_TIMEOUT,
+    )
+    .await;
+    run_git_command_with_timeout(
+        repo.to_path_buf(),
+        vec![
+            "gc".into(),
+            "--prune=2.weeks.ago".into(),
+            "--quiet".into(),
+        ],
+        GC_TIMEOUT,
+    )
+    .await
+    .map(|_| ())
+}
+
 async fn snapshot_refs(mirror: &Path) -> Result<String, MirrorError> {
     let out = run_git_command(
         mirror.to_path_buf(),
@@ -413,5 +474,36 @@ async fn snapshot_refs(mirror: &Path) -> Result<String, MirrorError> {
             code: 1, stdout, ..
         }) if stdout.is_empty() => Ok(String::new()),
         Err(e) => Err(git_err_to_mirror("git show-ref", e)),
+    }
+}
+
+#[cfg(test)]
+mod gc_tests {
+    use super::*;
+
+    /// `git_gc` succeeds on a real bare mirror (the worktree-prune + gc
+    /// sequence is a valid no-op on an empty repo) — guards the command shape.
+    #[tokio::test]
+    async fn git_gc_succeeds_on_bare_repo() {
+        let dir = TempDir::new().unwrap();
+        run_git_command(
+            dir.path().to_path_buf(),
+            vec!["init".into(), "--bare".into(), "--quiet".into()],
+        )
+        .await
+        .expect("git init --bare");
+
+        git_gc(dir.path()).await.expect("git_gc on bare repo");
+    }
+
+    /// `MirrorManager::gc` errors `Missing` (not a git failure) when the
+    /// project has no mirror on disk yet — the maintenance loop treats that as
+    /// "nothing to gc", never a hard error.
+    #[tokio::test]
+    async fn mirror_gc_missing_when_absent() {
+        let root = TempDir::new().unwrap();
+        let mgr = MirrorManager::new(root.path().to_path_buf());
+        let err = mgr.gc("does-not-exist").await.unwrap_err();
+        assert!(matches!(err, MirrorError::Missing(_)));
     }
 }

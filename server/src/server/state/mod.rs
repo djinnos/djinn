@@ -1251,6 +1251,13 @@ impl AppState {
         );
         crate::mirror_fetcher::spawn(self.clone());
 
+        // Periodic `git gc` over every project's mirror + working clone. Both
+        // fetch with `--prune` but never reclaim the objects behind deleted
+        // task branches, so the on-disk stores grow without bound — this is
+        // the missing `git gc`. Leader-only, slow cadence; never competes with
+        // dispatch.
+        crate::git_maintenance::spawn(self.clone());
+
         // One-time recovery sweep: backfill post-session knowledge extraction
         // over completed task-runs whose sessions were never extracted. Opt-in
         // via `DJINN_BACKFILL_EXTRACTION`; idempotent (skips already-extracted

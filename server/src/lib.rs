@@ -6,6 +6,7 @@ pub mod events;
 pub mod leadership;
 pub mod logging;
 mod mcp_bridge;
+pub mod git_maintenance;
 pub mod memory_fs;
 pub mod memory_mount;
 pub mod mirror_fetcher;
