@@ -5,11 +5,11 @@ FROM debian:trixie-slim
 COPY scripts/ /tmp/djinn-scripts/
 RUN chmod -R 0755 /tmp/djinn-scripts
 RUN /tmp/djinn-scripts/base-debian.sh
-ENV PATH=/opt/djinn/bin:/usr/local/cargo/bin:/opt/node/bin:/usr/local/go/bin:/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ENV PATH=/opt/djinn/bin:/usr/local/cargo/bin:/opt/node/bin:/usr/local/go/bin:/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/cache/go/bin
 ENV HOME=/home/djinn
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
 ENV GOPATH=/go GOROOT=/usr/local/go
-ENV GOMODCACHE=/cache/go/mod GOCACHE=/cache/go/build
+ENV GOMODCACHE=/cache/go/mod GOCACHE=/cache/go/build GOBIN=/cache/go/bin
 RUN APT_PACKAGES="postgresql-client" /tmp/djinn-scripts/install-system.sh
 COPY --from=djinn/agent-worker:sha256-golden /usr/local/bin/djinn-agent-worker /opt/djinn/bin/djinn-agent-worker
 RUN /tmp/djinn-scripts/install-agent-worker.sh

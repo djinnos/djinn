@@ -171,7 +171,12 @@ fn emit_base(df: &mut String, _config: &EnvironmentConfig) {
 // over missing dirs, rustup ignores RUSTUP_HOME if Rust isn't installed.
 // Listing everything unconditionally keeps the emitter simple and the
 // generated hash stable across language toggles.
-const IMAGE_PATH: &str = "/opt/djinn/bin:/usr/local/cargo/bin:/opt/node/bin:/usr/local/go/bin:/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+// `/cache/go/bin` is the runtime GOBIN (see GOBIN note in emit_path). It is
+// listed LAST on purpose: tools the agent `go install`s land on the persistent
+// per-project /cache PVC, so keeping that dir lowest-priority means a binary
+// left there by a prior task-run can never shadow a baked toolchain or system
+// binary earlier on PATH.
+const IMAGE_PATH: &str = "/opt/djinn/bin:/usr/local/cargo/bin:/opt/node/bin:/usr/local/go/bin:/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/cache/go/bin";
 
 fn emit_path(df: &mut String) {
     writeln!(df, "ENV PATH={IMAGE_PATH}").unwrap();
@@ -213,8 +218,20 @@ fn emit_path(df: &mut String) {
     // djinn-owned (EFS access point uid 10001), persistent across task-runs,
     // and explicitly write-allowed in the sandbox (see djinn-agent
     // sandbox/linux.rs). go creates these dirs at runtime on the writable PVC.
+    // GOBIN follows the same logic: its default ($GOPATH/bin = /go/bin) is
+    // root-owned and outside the sandbox allowlist, so a runtime `go install`
+    // (e.g. the agent pulling a CLI tool, or a repo's `go install` codegen step)
+    // fails with "cannot write /go/bin". Point it at the writable /cache PVC so
+    // installed binaries land somewhere the non-root djinn user can write and
+    // that IMAGE_PATH already lists. Build-time installs that must stay in the
+    // image layer (scip-go) set GOBIN=/go/bin explicitly on the command line, so
+    // this runtime default does not divert them onto the PVC-shadowed path.
     writeln!(df, "ENV GOPATH=/go GOROOT=/usr/local/go").unwrap();
-    writeln!(df, "ENV GOMODCACHE=/cache/go/mod GOCACHE=/cache/go/build").unwrap();
+    writeln!(
+        df,
+        "ENV GOMODCACHE=/cache/go/mod GOCACHE=/cache/go/build GOBIN=/cache/go/bin"
+    )
+    .unwrap();
 }
 
 fn emit_system_packages(df: &mut String, config: &EnvironmentConfig) {
