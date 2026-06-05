@@ -90,6 +90,32 @@ pub trait LspOps: Send + Sync {
 // ── Runtime ─────────────────────────────────────────────────────────────────────
 // Server-level operations that don't fit neatly into the other trait groups.
 
+/// Request to provision an on-demand backing service (Phase C). Mirrors
+/// `djinn_runtime::BackingServiceRequest` with primitive fields (control-plane
+/// doesn't depend on djinn-runtime); AppState maps it across.
+#[derive(Clone, Debug)]
+pub struct ProvisionServiceRequest {
+    pub instance_id: String,
+    pub task_run_id: String,
+    pub service_type: String,
+    pub image: String,
+    pub port: i32,
+    pub env: Vec<(String, String)>,
+    pub cpu_request: String,
+    pub memory_request: String,
+    pub cpu_limit: String,
+    pub memory_limit: String,
+    pub conn_template: String,
+}
+
+/// What `provision_backing_service` returns.
+#[derive(Clone, Debug)]
+pub struct ProvisionedService {
+    pub pod_name: String,
+    pub service_name: String,
+    pub conn_string: String,
+}
+
 #[async_trait]
 pub trait RuntimeOps: Send + Sync {
     async fn apply_settings(
@@ -131,6 +157,14 @@ pub trait RuntimeOps: Send + Sync {
         test_id: &str,
         project_id: &str,
     ) -> Result<(), String>;
+    /// Provision an on-demand backing service (Pod + ClusterIP Service owned by
+    /// the task-run Job). Routes to the K8s graph warmer; errors without kube.
+    async fn provision_backing_service(
+        &self,
+        req: ProvisionServiceRequest,
+    ) -> Result<ProvisionedService, String>;
+    /// Tear down a provisioned backing service (best-effort).
+    async fn release_backing_service(&self, instance_id: &str) -> Result<(), String>;
 }
 
 // ── Git ─────────────────────────────────────────────────────────────────────────

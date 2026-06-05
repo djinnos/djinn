@@ -58,6 +58,15 @@ mod tests {
         async fn dispatch_verification_test(&self, _: &str, _: &str) -> Result<(), String> {
             Ok(())
         }
+        async fn provision_backing_service(
+            &self,
+            _: crate::bridge::ProvisionServiceRequest,
+        ) -> Result<crate::bridge::ProvisionedService, String> {
+            Err("stub".into())
+        }
+        async fn release_backing_service(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     #[async_trait::async_trait]
@@ -88,6 +97,15 @@ mod tests {
         async fn trigger_mirror_refresh(&self, _: &str) {}
         async fn apply_user_model_change(&self) {}
         async fn dispatch_verification_test(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn provision_backing_service(
+            &self,
+            _: crate::bridge::ProvisionServiceRequest,
+        ) -> Result<crate::bridge::ProvisionedService, String> {
+            Err("stub".into())
+        }
+        async fn release_backing_service(&self, _: &str) -> Result<(), String> {
             Ok(())
         }
     }

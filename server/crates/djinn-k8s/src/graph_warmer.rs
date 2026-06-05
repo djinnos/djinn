@@ -29,9 +29,11 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use djinn_db::{Database, ProjectImageStatus, ProjectRepository, RepoGraphCacheRepository};
-use djinn_runtime::{GraphWarmerService, WarmerError};
+use djinn_runtime::{BackingServiceConn, BackingServiceRequest, GraphWarmerService, WarmerError};
 use k8s_openapi::api::batch::v1::Job;
-use kube::api::{Api, PostParams};
+use k8s_openapi::api::core::v1::{Pod, Service};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+use kube::api::{Api, DeleteParams, PostParams};
 use tokio::sync::{Mutex, Notify};
 use tracing::{debug, info, warn};
 
@@ -172,6 +174,10 @@ pub struct K8sGraphWarmer {
     dispatcher: Arc<dyn WarmJobDispatcher>,
     watcher: Arc<dyn WarmJobWatcher>,
     in_flight: Arc<Mutex<HashMap<String, Arc<Notify>>>>,
+    /// Live kube client for Pod/Service/Job ops that the (Job-only) dispatcher
+    /// abstraction doesn't cover — e.g. backing-service provisioning. `None`
+    /// under the test/mock-dispatcher path (those ops then error/no-op).
+    client: Option<kube::Client>,
 }
 
 impl K8sGraphWarmer {
@@ -179,8 +185,10 @@ impl K8sGraphWarmer {
     /// path).
     pub fn new(client: kube::Client, config: KubernetesConfig, db: Database) -> Self {
         let dispatcher = Arc::new(KubeClientDispatcher::new(client.clone()));
-        let watcher = Arc::new(KubeClientJobWatcher::new(client));
-        Self::with_dispatcher(config, db, dispatcher, watcher)
+        let watcher = Arc::new(KubeClientJobWatcher::new(client.clone()));
+        let mut w = Self::with_dispatcher(config, db, dispatcher, watcher);
+        w.client = Some(client);
+        w
     }
 
     /// Construct a warmer with a caller-supplied dispatcher and watcher.
@@ -197,6 +205,7 @@ impl K8sGraphWarmer {
             dispatcher,
             watcher,
             in_flight: Arc::new(Mutex::new(HashMap::new())),
+            client: None,
         }
     }
 
@@ -219,6 +228,22 @@ impl K8sGraphWarmer {
                 );
                 None
             }
+        }
+    }
+
+    /// Best-effort ownerReference to a task-run Job (`djinn-taskrun-<id>`) so a
+    /// provisioned backing service is garbage-collected when the task ends.
+    /// `None` if the Job can't be found — the label/TTL reaper is the backstop.
+    async fn task_run_owner_ref(&self, task_run_id: &str) -> Option<OwnerReference> {
+        let client = self.client.clone()?;
+        let job_name = format!("djinn-taskrun-{task_run_id}");
+        let jobs: Api<Job> = Api::namespaced(client, &self.config.namespace);
+        match jobs.get(&job_name).await {
+            Ok(job) => job
+                .metadata
+                .uid
+                .map(|uid| crate::secret::job_owner_reference(&job_name, &uid)),
+            Err(_) => None,
         }
     }
 
@@ -327,6 +352,79 @@ impl GraphWarmerService for K8sGraphWarmer {
             .await
             .map(|_| ())
             .map_err(WarmerError::Backend)
+    }
+
+    async fn provision_backing_service(
+        &self,
+        req: BackingServiceRequest,
+    ) -> Result<BackingServiceConn, WarmerError> {
+        let spec = crate::backing_service::BackingServiceSpec {
+            service_type: req.service_type.clone(),
+            image: req.image.clone(),
+            port: req.port,
+            env: req.env.clone(),
+            cpu_request: req.cpu_request.clone(),
+            memory_request: req.memory_request.clone(),
+            cpu_limit: req.cpu_limit.clone(),
+            memory_limit: req.memory_limit.clone(),
+        };
+        let client = self.client.clone().ok_or_else(|| {
+            WarmerError::Backend("backing-service provisioning requires a live kube client".to_string())
+        })?;
+        // ownerRef the task-run Job so the Pod + Service GC with the task.
+        let owner = self.task_run_owner_ref(&req.task_run_id).await;
+        let ns = self.config.namespace.clone();
+        let svc = crate::backing_service::build_backing_service_service(
+            &self.config,
+            &spec,
+            &req.instance_id,
+            &req.task_run_id,
+            owner.clone(),
+        );
+        let pod = crate::backing_service::build_backing_service_pod(
+            &self.config,
+            &spec,
+            &req.instance_id,
+            &req.task_run_id,
+            owner,
+        );
+        Api::<Service>::namespaced(client.clone(), &ns)
+            .create(&PostParams::default(), &svc)
+            .await
+            .map_err(|e| WarmerError::Backend(format!("create service: {e}")))?;
+        Api::<Pod>::namespaced(client.clone(), &ns)
+            .create(&PostParams::default(), &pod)
+            .await
+            .map_err(|e| WarmerError::Backend(format!("create pod: {e}")))?;
+        let (pod_name, service_name) =
+            crate::backing_service::backing_service_names(&req.instance_id);
+        let conn_string = crate::backing_service::render_conn_string(
+            &req.conn_template,
+            &self.config,
+            &req.instance_id,
+            req.port,
+        );
+        Ok(BackingServiceConn {
+            pod_name,
+            service_name,
+            conn_string,
+        })
+    }
+
+    async fn release_backing_service(&self, instance_id: &str) -> Result<(), WarmerError> {
+        let (pod_name, service_name) =
+            crate::backing_service::backing_service_names(instance_id);
+        let Some(client) = self.client.clone() else {
+            return Ok(());
+        };
+        let ns = self.config.namespace.clone();
+        let _ = Api::<Pod>::namespaced(client.clone(), &ns)
+            .delete(&pod_name, &DeleteParams::default())
+            .await;
+        let _ = Api::<Service>::namespaced(client.clone(), &ns)
+            .delete(&service_name, &DeleteParams::default())
+            .await;
+        Ok(())
     }
 
     async fn trigger(&self, project_id: &str) {

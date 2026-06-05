@@ -38,7 +38,7 @@ pub use spec::{
     role_sequence,
 };
 pub use stream::{BiStream, StreamEvent, StreamFrame};
-pub use warmer::{GraphWarmerService, WarmerError};
+pub use warmer::{BackingServiceConn, BackingServiceRequest, GraphWarmerService, WarmerError};
 pub use wire::{ControlMsg, MAX_FRAME_BYTES, WorkerEvent, WorkspaceRef, read_frame, write_frame};
 
 #[cfg(any(test, feature = "test-runtime"))]

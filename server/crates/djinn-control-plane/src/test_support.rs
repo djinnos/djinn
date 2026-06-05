@@ -144,6 +144,15 @@ impl RuntimeOps for StubRuntime {
     async fn dispatch_verification_test(&self, _test_id: &str, _project_id: &str) -> Result<(), String> {
         Err("stub: RuntimeOps::dispatch_verification_test not implemented".into())
     }
+    async fn provision_backing_service(
+        &self,
+        _req: crate::bridge::ProvisionServiceRequest,
+    ) -> Result<crate::bridge::ProvisionedService, String> {
+        Err("stub: RuntimeOps::provision_backing_service not implemented".into())
+    }
+    async fn release_backing_service(&self, _instance_id: &str) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// GitOps stub. `git_actor` is effectively a read that creates a handle; it

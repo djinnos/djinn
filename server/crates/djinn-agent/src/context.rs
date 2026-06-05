@@ -250,6 +250,15 @@ impl bridge::RuntimeOps for AgentRuntimeOps {
         // no kube client.
         Err("dispatch_verification_test not supported on the agent-internal runtime".to_string())
     }
+    async fn provision_backing_service(
+        &self,
+        _req: djinn_control_plane::bridge::ProvisionServiceRequest,
+    ) -> Result<djinn_control_plane::bridge::ProvisionedService, String> {
+        Err("provision_backing_service not supported on the agent-internal runtime".to_string())
+    }
+    async fn release_backing_service(&self, _instance_id: &str) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Fallback `RepoGraphOps` implementation used when `AgentContext` is built

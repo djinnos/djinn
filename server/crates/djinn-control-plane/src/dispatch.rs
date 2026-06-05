@@ -17,6 +17,9 @@ use crate::tools::epic_tools::{
 use crate::tools::image_tools::{
     ImageCreateParams, ImageDeleteParams, ImageListParams, ImageUpdateParams, ProjectSetImageParams,
 };
+use crate::tools::service_tools::{
+    ServiceListParams, ServiceReleaseParams, ServiceRequestParams,
+};
 use crate::tools::execution_tools::{ExecutionKillTaskParams, SessionForTaskParams};
 use crate::tools::github_app_tools::{GithubAppInstallUrlParams, GithubAppInstallationsParams};
 use crate::tools::github_tools::{GithubFetchFileParams, GithubSearchParams};
@@ -351,6 +354,21 @@ impl DjinnMcpServer {
             "project_set_image" => map_json(
                 name,
                 self.project_set_image(Parameters(decode_args::<ProjectSetImageParams>(name, args)?))
+                    .await,
+            ),
+            "service_request" => map_json(
+                name,
+                self.service_request(Parameters(decode_args::<ServiceRequestParams>(name, args)?))
+                    .await,
+            ),
+            "service_list" => map_json(
+                name,
+                self.service_list(Parameters(decode_args::<ServiceListParams>(name, args)?))
+                    .await,
+            ),
+            "service_release" => map_json(
+                name,
+                self.service_release(Parameters(decode_args::<ServiceReleaseParams>(name, args)?))
                     .await,
             ),
             "proposal_create" => map_json(

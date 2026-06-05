@@ -47,8 +47,9 @@ CREATE TABLE IF NOT EXISTS service_instances (
     status       VARCHAR(32) NOT NULL,  -- requested | provisioning | ready | failed | released
     pod_name     VARCHAR(255) NULL,
     service_name VARCHAR(255) NULL,
-    secret_ref   VARCHAR(255) NULL,     -- conn info as a task-scoped secret
+    secret_ref   VARCHAR(255) NULL,     -- reserved: conn info as a task-scoped secret
     conn_env_var VARCHAR(128) NULL,
+    conn_string  VARCHAR(512) NULL,     -- rendered connection string (for idempotent re-request)
     error        TEXT         NULL,
     created_at   VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
     ready_at     VARCHAR(64)  NULL,

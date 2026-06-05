@@ -16,10 +16,10 @@ use djinn_control_plane::bridge::{
     DiffTouchesResult, EdgeCategory, EdgeEntry, GitOps, GraphNeighbor, GraphStatus, HotPathHit,
     HotspotEntry, ImpactEntry, ImpactResult, LspOps, LspWarning, MetricsAtResult, ModelPoolStatus,
     NeighborsResult, OrphanEntry, PagerankTier, PathHop, PathResult, PoolStatus, ProcessRef,
-    ProjectCtx, RankedNode, RefactorCandidate, RelatedSymbol, RepoGraphOps, ResolveOutcome,
-    RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding, SlotPoolOps, SnapshotEdge,
-    SnapshotNode, SnapshotPayload, SymbolAtHit, SymbolContext, SymbolDescription, SymbolNode,
-    TouchedSymbol,
+    ProjectCtx, ProvisionServiceRequest, ProvisionedService, RankedNode, RefactorCandidate,
+    RelatedSymbol, RepoGraphOps, ResolveOutcome, RunningTaskInfo, RuntimeOps, SearchHit,
+    SemanticQueryEmbedding, SlotPoolOps, SnapshotEdge, SnapshotNode, SnapshotPayload, SymbolAtHit,
+    SymbolContext, SymbolDescription, SymbolNode, TouchedSymbol,
 };
 use djinn_git::{GitActorHandle, GitError};
 
@@ -459,6 +459,44 @@ impl RuntimeOps for AppState {
         self.graph_warmer()
             .await
             .dispatch_verification_test(test_id, project_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn provision_backing_service(
+        &self,
+        req: ProvisionServiceRequest,
+    ) -> Result<ProvisionedService, String> {
+        let rt_req = djinn_runtime::BackingServiceRequest {
+            instance_id: req.instance_id,
+            task_run_id: req.task_run_id,
+            service_type: req.service_type,
+            image: req.image,
+            port: req.port,
+            env: req.env,
+            cpu_request: req.cpu_request,
+            memory_request: req.memory_request,
+            cpu_limit: req.cpu_limit,
+            memory_limit: req.memory_limit,
+            conn_template: req.conn_template,
+        };
+        let conn = self
+            .graph_warmer()
+            .await
+            .provision_backing_service(rt_req)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(ProvisionedService {
+            pod_name: conn.pod_name,
+            service_name: conn.service_name,
+            conn_string: conn.conn_string,
+        })
+    }
+
+    async fn release_backing_service(&self, instance_id: &str) -> Result<(), String> {
+        self.graph_warmer()
+            .await
+            .release_backing_service(instance_id)
             .await
             .map_err(|e| e.to_string())
     }

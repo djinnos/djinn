@@ -86,6 +86,7 @@ pub struct ServiceInstance {
     pub service_name: Option<String>,
     pub secret_ref: Option<String>,
     pub conn_env_var: Option<String>,
+    pub conn_string: Option<String>,
     pub error: Option<String>,
 }
 
@@ -101,12 +102,13 @@ fn map_instance(r: &sqlx::postgres::PgRow) -> ServiceInstance {
         service_name: r.get("service_name"),
         secret_ref: r.get("secret_ref"),
         conn_env_var: r.get("conn_env_var"),
+        conn_string: r.get("conn_string"),
         error: r.get("error"),
     }
 }
 
 const INSTANCE_COLS: &str = r#"id, task_run_id, project_id, preset_id, service_type, status,
-    pod_name, service_name, secret_ref, conn_env_var, error"#;
+    pod_name, service_name, secret_ref, conn_env_var, conn_string, error"#;
 
 pub struct ServiceInstanceRepository {
     db: Database,
@@ -162,6 +164,7 @@ impl ServiceInstanceRepository {
         Ok(row.as_ref().map(map_instance))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn mark_ready(
         &self,
         id: &str,
@@ -169,12 +172,13 @@ impl ServiceInstanceRepository {
         service_name: &str,
         secret_ref: Option<&str>,
         conn_env_var: &str,
+        conn_string: &str,
     ) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query(
             r#"UPDATE service_instances
                   SET status = 'ready', pod_name = $2, service_name = $3, secret_ref = $4,
-                      conn_env_var = $5,
+                      conn_env_var = $5, conn_string = $6,
                       ready_at = to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                 WHERE id = $1"#,
         )
@@ -183,6 +187,7 @@ impl ServiceInstanceRepository {
         .bind(service_name)
         .bind(secret_ref)
         .bind(conn_env_var)
+        .bind(conn_string)
         .execute(self.db.pool())
         .await?;
         Ok(())
@@ -300,7 +305,7 @@ mod tests {
             .unwrap();
         assert!(!created_b, "second claim for same (task,type) returns existing");
         assert_eq!(a.id, b.id);
-        repo.mark_ready(&a.id, "pod-x", "svc-x", None, "TEST_POSTGRES_URL")
+        repo.mark_ready(&a.id, "pod-x", "svc-x", None, "TEST_POSTGRES_URL", "postgres://x")
             .await
             .unwrap();
         assert_eq!(repo.get(&a.id).await.unwrap().unwrap().status, "ready");
