@@ -3,14 +3,10 @@
  * shared by the board filter header. Logic + state live in `boardFilters`.
  */
 import { useMemo, useState } from "react";
-import { type OrgUser, userDisplayName } from "@/api/users";
 import type { Epic, Project } from "@/api/types";
 import { HugeiconsIcon } from "@hugeicons/react";
-import {
-  ArrowDown01Icon,
-  Robot01Icon,
-  Tick02Icon,
-} from "@hugeicons/core-free-icons";
+import { ArrowDown01Icon, Tick02Icon } from "@hugeicons/core-free-icons";
+import { UserAvatar } from "@/components/UserAvatar";
 import { cn } from "@/lib/utils";
 import {
   ModelSelector as SelectorRoot,
@@ -25,29 +21,7 @@ import {
 import { EPIC_STATUS_GROUPS, getEpicEmoji } from "./boardFilters";
 
 /** Small round avatar for an owner-filter option. */
-export function OwnerAvatar({ user }: { user?: OrgUser }) {
-  if (!user) {
-    return (
-      <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
-        <HugeiconsIcon icon={Robot01Icon} className="size-3" />
-      </span>
-    );
-  }
-  if (user.github_avatar_url) {
-    return (
-      <img
-        src={user.github_avatar_url}
-        alt=""
-        className="size-5 shrink-0 rounded-full"
-      />
-    );
-  }
-  return (
-    <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-medium text-foreground">
-      {userDisplayName(user).charAt(0).toUpperCase()}
-    </span>
-  );
-}
+export const OwnerAvatar = UserAvatar;
 
 export function ProjectFilter({
   projects,

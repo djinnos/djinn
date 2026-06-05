@@ -4,6 +4,7 @@ import { callMcpTool } from "@/api/mcpClient";
 import { usersQueryOptions } from "@/api/queryOptions";
 import { userDisplayName, type OrgUser } from "@/api/users";
 import { useAuthUser } from "@/components/AuthGate";
+import { UserAvatar } from "@/components/UserAvatar";
 import { DiffView } from "@/components/proposals/DiffView";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -28,8 +29,10 @@ export function ProposalSignoffs({
   const me = useAuthUser();
   const caps = capsFromUser(me);
   const usersQuery = useQuery(usersQueryOptions());
+  const userFor = (userId: string) =>
+    (usersQuery.data ?? []).find((x: OrgUser) => x.id === userId);
   const nameFor = (userId: string) => {
-    const u = (usersQuery.data ?? []).find((x: OrgUser) => x.id === userId);
+    const u = userFor(userId);
     return u ? userDisplayName(u) : userId;
   };
 
@@ -88,8 +91,9 @@ export function ProposalSignoffs({
                   <Badge
                     key={s.user_id}
                     variant={s.stale ? "outline" : "default"}
-                    className="gap-1"
+                    className="gap-1.5 pl-1"
                   >
+                    <UserAvatar user={userFor(s.user_id)} className="size-4" />
                     {nameFor(s.user_id)}
                     {s.stale && <span className="text-amber-500">stale</span>}
                   </Badge>

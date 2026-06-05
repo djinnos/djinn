@@ -618,9 +618,11 @@ impl ProposalRepository {
         Ok(updated)
     }
 
-    /// Auto-advance `in_review → approved` when both a scoped and a technical
-    /// sign-off exist at the head revision; auto-demote `approved → in_review`
-    /// when that's no longer true.
+    /// Drive the status off the sign-off state. A `draft` auto-advances to
+    /// `in_review` on its first fresh sign-off (the act of signing *is* the
+    /// request for review), and any state reaches `approved` once both a scoped
+    /// and a technical sign-off are fresh at the head revision. An `approved`
+    /// proposal auto-demotes back to `in_review` when that's no longer true.
     async fn reconcile_approval(&self, proposal_id: &str) -> Result<()> {
         let proposal = match self.get(proposal_id).await? {
             Some(p) => p,
@@ -635,7 +637,10 @@ impl ProposalRepository {
         .fetch_one(self.db.pool())
         .await?;
         let both = fresh == 2;
+        let any = fresh >= 1;
         let new_status = match proposal.status.as_str() {
+            "draft" if both => Some("approved"),
+            "draft" if any => Some("in_review"),
             "in_review" if both => Some("approved"),
             "approved" if !both => Some("in_review"),
             _ => None,
@@ -1095,6 +1100,26 @@ mod tests {
         assert_eq!(edited.latest_revision_seq, 2);
         assert_eq!(repo.revisions(&p.id).await.unwrap().len(), 2);
         assert!(repo.signoffs(&p.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn signing_off_advances_a_draft_without_a_manual_status_change() {
+        // Regression: a draft used to ignore sign-offs entirely — the gate only
+        // fired from in_review, so a draft with both fresh sign-offs sat in
+        // draft until someone manually bumped it. Signing the scope now requests
+        // review, and both fresh sign-offs approve straight from draft.
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Draft gate")).await.unwrap();
+        assert_eq!(p.status, "draft");
+
+        let after_scoped = repo.add_signoff(&p.id, "scoped", "user-a").await.unwrap();
+        assert_eq!(after_scoped.status, "in_review");
+
+        let after_tech = repo
+            .add_signoff(&p.id, "technical", "user-b")
+            .await
+            .unwrap();
+        assert_eq!(after_tech.status, "approved");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -6,7 +6,10 @@ import remarkGfm from "remark-gfm";
 import { ArrowLeft01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { callMcpTool } from "@/api/mcpClient";
+import { usersQueryOptions } from "@/api/queryOptions";
+import { userDisplayName, type OrgUser } from "@/api/users";
 import { AcceptanceChecklist } from "@/components/AcceptanceChecklist";
+import { UserAvatar } from "@/components/UserAvatar";
 import { InlineError } from "@/components/InlineError";
 import { relativeTime } from "@/components/memory/memoryUtils";
 import {
@@ -73,6 +76,9 @@ function ProposalsListView() {
   const listQuery = useQuery(
     proposalListQueryOptions({ text: search.trim() || undefined })
   );
+  const usersQuery = useQuery(usersQueryOptions());
+  const userFor = (id?: string | null) =>
+    id ? (usersQuery.data ?? []).find((u: OrgUser) => u.id === id) : undefined;
 
   const groups = useMemo(() => {
     const visible = (listQuery.data ?? []).filter(
@@ -147,6 +153,10 @@ function ProposalsListView() {
                         <span className="shrink-0 text-xs text-muted-foreground">
                           {relativeTime(p.updated_at)}
                         </span>
+                        <UserAvatar
+                          user={userFor(p.author_user_id)}
+                          className="size-5"
+                        />
                       </button>
                     </li>
                   ))}
@@ -212,6 +222,10 @@ function ProposalDetailView({
   const proposal = detail.proposal as Proposal;
   const me = useAuthUser();
   const caps = capsFromUser(me);
+  const usersQuery = useQuery(usersQueryOptions());
+  const authorUser = (usersQuery.data ?? []).find(
+    (u: OrgUser) => u.id === proposal.author_user_id
+  );
   const isAuthor = !!me && proposal.author_user_id === me.id;
   const canDirectEdit = canEdit(caps, isAuthor);
   const untargeted = useMemo(
@@ -237,8 +251,17 @@ function ProposalDetailView({
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
             <h2 className="text-xl font-semibold">{proposal.title}</h2>
-            <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
               <span className="font-mono">{proposal.short_id}</span>
+              {proposal.author_user_id && (
+                <>
+                  <span>·</span>
+                  <span className="flex items-center gap-1.5">
+                    <UserAvatar user={authorUser} className="size-4" />
+                    {authorUser ? userDisplayName(authorUser) : "unknown"}
+                  </span>
+                </>
+              )}
               <span>·</span>
               <span>updated {relativeTime(proposal.updated_at)}</span>
             </div>
@@ -386,6 +409,9 @@ function FeedbackThread({
 }) {
   const [body, setBody] = useState("");
   const [posting, setPosting] = useState(false);
+  const usersQuery = useQuery(usersQueryOptions());
+  const userFor = (id?: string | null) =>
+    id ? (usersQuery.data ?? []).find((u: OrgUser) => u.id === id) : undefined;
 
   const accept = async (id: string) => {
     try {
@@ -447,9 +473,19 @@ function FeedbackThread({
         {feedback.map((f) => (
           <div key={f.id} className="rounded-md border p-3">
             <div className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
-              <Badge variant={f.author_kind === "ai" ? "secondary" : "outline"}>
-                {f.author_kind === "ai" ? (f.author_model ?? "ai") : "user"}
-              </Badge>
+              {f.author_kind === "ai" ? (
+                <Badge variant="secondary">{f.author_model ?? "ai"}</Badge>
+              ) : (
+                <span className="flex items-center gap-1.5">
+                  <UserAvatar user={userFor(f.author_user_id)} className="size-4" />
+                  <span className="font-medium text-foreground">
+                    {(() => {
+                      const u = userFor(f.author_user_id);
+                      return u ? userDisplayName(u) : "user";
+                    })()}
+                  </span>
+                </span>
+              )}
               {f.status && (
                 <Badge
                   variant={f.status === "accepted" ? "default" : "outline"}

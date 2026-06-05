@@ -4,6 +4,7 @@ import { callMcpTool } from "@/api/mcpClient";
 import { usersQueryOptions } from "@/api/queryOptions";
 import { userDisplayName, type OrgUser } from "@/api/users";
 import { useAuthUser } from "@/components/AuthGate";
+import { UserAvatar } from "@/components/UserAvatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -33,9 +34,11 @@ export function ProposalKickoff({
   const me = useAuthUser();
   const caps = capsFromUser(me);
   const usersQuery = useQuery(usersQueryOptions());
+  const userFor = (id: string | null | undefined) =>
+    id ? (usersQuery.data ?? []).find((x: OrgUser) => x.id === id) : undefined;
   const nameFor = (id: string | null | undefined) => {
     if (!id) return "unknown";
-    const u = (usersQuery.data ?? []).find((x: OrgUser) => x.id === id);
+    const u = userFor(id);
     return u ? userDisplayName(u) : id;
   };
 
@@ -75,8 +78,10 @@ export function ProposalKickoff({
         <div className="flex items-center justify-between">
           <Label className="text-xs uppercase text-muted-foreground">Build</Label>
           {proposal.build_owner_user_id && (
-            <span className="text-xs text-muted-foreground">
-              owned by {nameFor(proposal.build_owner_user_id)}
+            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              owned by
+              <UserAvatar user={userFor(proposal.build_owner_user_id)} className="size-4" />
+              {nameFor(proposal.build_owner_user_id)}
             </span>
           )}
         </div>
@@ -107,13 +112,21 @@ export function ProposalKickoff({
                 programmatically, so Radix never captures the selected item's
                 text and SelectValue would otherwise fall back to the raw id. */}
             <SelectValue placeholder="Pick a participant">
-              {owner ? nameFor(owner) : undefined}
+              {owner ? (
+                <span className="flex items-center gap-2">
+                  <UserAvatar user={userFor(owner)} className="size-4" />
+                  {nameFor(owner)}
+                </span>
+              ) : undefined}
             </SelectValue>
           </SelectTrigger>
           <SelectContent>
             {participants.map((id) => (
               <SelectItem key={id} value={id}>
-                {nameFor(id)}
+                <span className="flex items-center gap-2">
+                  <UserAvatar user={userFor(id)} className="size-4" />
+                  {nameFor(id)}
+                </span>
               </SelectItem>
             ))}
           </SelectContent>
