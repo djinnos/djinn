@@ -16,9 +16,14 @@ apt-get install -y --no-install-recommends \
     curl \
     git \
     gnupg \
+    libatomic1 \
     tini \
     unzip \
     xz-utils
+# libatomic1: the prebuilt Node binaries (v26+) dynamically link libatomic.so.1,
+# which trixie-slim does not ship — without it `node` dies at startup with
+# "error while loading shared libraries: libatomic.so.1" (exit 127) and the
+# Node image build fails. Tiny runtime lib, harmless for the other languages.
 # Native build deps baked in by default so a project's test/build can link
 # common `-sys` crates without each project having to list them in
 # `system_packages`:
