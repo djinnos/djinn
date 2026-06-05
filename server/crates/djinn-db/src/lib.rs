@@ -92,6 +92,7 @@ pub use repositories::{
     user_settings::UserSettingsRepository,
     verification::VerificationRepository,
     verification_cache::{CachedVerification, VerificationCacheRepository},
+    verification_test::{VerificationTestRepository, VerificationTestRun, VerificationTestStatus},
     verification_result::{
         VerificationResultRepository, VerificationStepInsert, VerificationStepRow,
     },
