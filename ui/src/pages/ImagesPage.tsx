@@ -32,8 +32,10 @@ import { EmptyState } from "@/components/EmptyState";
 import {
   deleteImage,
   listImages,
+  listServicePresets,
   type CatalogImage,
   type ImageBuildStatus,
+  type ServicePreset,
 } from "@/api/images";
 import { ImageEditorDialog } from "@/components/images/ImageEditorDialog";
 import { listEnabledLanguages } from "@/components/images/imageSummary";
@@ -129,6 +131,7 @@ function DeleteImageButton({
 
 export function ImagesPage() {
   const [images, setImages] = useState<CatalogImage[]>([]);
+  const [presetsById, setPresetsById] = useState<Record<string, ServicePreset>>({});
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<CatalogImage | null>(null);
@@ -136,7 +139,12 @@ export function ImagesPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setImages(await listImages());
+      const [loadedImages, presets] = await Promise.all([
+        listImages(),
+        listServicePresets(),
+      ]);
+      setImages(loadedImages);
+      setPresetsById(Object.fromEntries(presets.map((p) => [p.id, p])));
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to load images";
       showToast.error("Could not load images", { description: message });
@@ -197,6 +205,7 @@ export function ImagesPage() {
                   <tr className="border-b text-xs uppercase tracking-wide text-muted-foreground">
                     <th className="px-4 py-2.5 font-medium">Name</th>
                     <th className="px-4 py-2.5 font-medium">Languages</th>
+                    <th className="px-4 py-2.5 font-medium">Services</th>
                     <th className="px-4 py-2.5 font-medium">Status</th>
                     <th className="px-4 py-2.5 text-right font-medium">Actions</th>
                   </tr>
@@ -229,6 +238,23 @@ export function ImagesPage() {
                         <span className="text-xs text-muted-foreground">
                           {listEnabledLanguages(image.config) || "—"}
                         </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        {image.allowedPresets.length === 0 ? (
+                          <span className="text-xs text-muted-foreground">—</span>
+                        ) : (
+                          <div className="flex flex-wrap gap-1">
+                            {image.allowedPresets.map((presetId) => (
+                              <Badge
+                                key={presetId}
+                                variant="outline"
+                                className="text-xs font-normal"
+                              >
+                                {presetsById[presetId]?.name ?? presetId}
+                              </Badge>
+                            ))}
+                          </div>
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         <StatusBadge status={image.status} />

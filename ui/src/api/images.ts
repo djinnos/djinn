@@ -24,6 +24,17 @@ export interface CatalogImage {
   description?: string;
   status: ImageBuildStatus;
   config: EnvironmentConfig;
+  /** Service-preset ids this image's tasks may request on demand. */
+  allowedPresets: string[];
+}
+
+/** A fixed backing-service preset from the catalog (users do not create these). */
+export interface ServicePreset {
+  id: string;
+  name: string;
+  serviceType: string;
+  image: string;
+  connEnvVar: string;
 }
 
 export interface MutationResult {
@@ -44,7 +55,38 @@ export async function listImages(): Promise<CatalogImage[]> {
     description: img.description,
     status: img.status,
     config: normalizeConfig(img.config),
+    allowedPresets: img.allowed_presets ?? [],
   }));
+}
+
+/** List the fixed catalog of backing-service presets (Postgres/Redis/RabbitMQ). */
+export async function listServicePresets(): Promise<ServicePreset[]> {
+  const response = await callMcpTool("service_preset_list", {});
+  if (response.status !== "ok") {
+    throw new Error(response.error ?? "Failed to load service presets");
+  }
+  return (response.presets ?? []).map((preset) => ({
+    id: preset.id,
+    name: preset.name,
+    serviceType: preset.service_type,
+    image: preset.image,
+    connEnvVar: preset.conn_env_var,
+  }));
+}
+
+/** Replace the full set of service presets an image's tasks may request. */
+export async function setImageAllowedPresets(
+  id: string,
+  presetIds: string[],
+): Promise<MutationResult> {
+  const response = await callMcpTool("image_set_allowed_presets", {
+    id,
+    preset_ids: presetIds,
+  });
+  if (response.status !== "ok") {
+    return { ok: false, error: response.error ?? "set allowed presets failed" };
+  }
+  return { ok: true, id: response.id };
 }
 
 /** Register a new catalog image. */

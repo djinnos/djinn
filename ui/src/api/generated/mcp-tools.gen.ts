@@ -1819,6 +1819,10 @@ export namespace ImageListOutputSchema {
   [k: string]: any
   }
   export interface ImageDto {
+  /**
+   * Service-preset ids tasks using this image may request (Phase C capability).
+   */
+  allowed_presets?: string[]
   config: ObjectJson
   description?: string
   id: string
@@ -1838,6 +1842,31 @@ export namespace ImageListOutputSchema {
 
 }
 export type ImageListOutput = ImageListOutputSchema.ImageListOutput;
+export namespace ImageSetAllowedPresetsInputSchema {
+  export interface ImageSetAllowedPresetsInput {
+  /**
+   * Image id.
+   */
+  id: string
+  /**
+   * Service-preset ids this image's tasks may request (full replacement).
+   */
+  preset_ids: string[]
+  [k: string]: any
+  }
+
+}
+export type ImageSetAllowedPresetsInput = ImageSetAllowedPresetsInputSchema.ImageSetAllowedPresetsInput;
+export namespace ImageSetAllowedPresetsOutputSchema {
+  export interface ImageSetAllowedPresetsOutput {
+  error?: string
+  id?: string
+  status: string
+  [k: string]: any
+  }
+
+}
+export type ImageSetAllowedPresetsOutput = ImageSetAllowedPresetsOutputSchema.ImageSetAllowedPresetsOutput;
 export namespace ImageUpdateInputSchema {
   export interface ImageUpdateInput {
   config: ObjectJson
@@ -4556,6 +4585,112 @@ export namespace RetriggerImageBuildOutputSchema {
 
 }
 export type RetriggerImageBuildOutput = RetriggerImageBuildOutputSchema.RetriggerImageBuildOutput;
+export namespace ServiceListInputSchema {
+  export interface ServiceListInput {
+  task: string
+  [k: string]: any
+  }
+
+}
+export type ServiceListInput = ServiceListInputSchema.ServiceListInput;
+export namespace ServiceListOutputSchema {
+  export interface ServiceListOutput {
+  error?: string
+  services: ServiceInstanceDto[]
+  status: string
+  [k: string]: any
+  }
+  export interface ServiceInstanceDto {
+  conn_string?: string
+  env_var?: string
+  service_type: string
+  status: string
+  [k: string]: any
+  }
+
+}
+export type ServiceListOutput = ServiceListOutputSchema.ServiceListOutput;
+export namespace ServicePresetListInputSchema {
+  export interface ServicePresetListInput {
+  [k: string]: any
+  }
+
+}
+export type ServicePresetListInput = ServicePresetListInputSchema.ServicePresetListInput;
+export namespace ServicePresetListOutputSchema {
+  export interface ServicePresetListOutput {
+  error?: string
+  presets: ServicePresetDto[]
+  status: string
+  [k: string]: any
+  }
+  export interface ServicePresetDto {
+  conn_env_var: string
+  id: string
+  image: string
+  name: string
+  service_type: string
+  [k: string]: any
+  }
+
+}
+export type ServicePresetListOutput = ServicePresetListOutputSchema.ServicePresetListOutput;
+export namespace ServiceReleaseInputSchema {
+  export interface ServiceReleaseInput {
+  /**
+   * Release only this service type; omit to release all for the task.
+   */
+  service_type?: string
+  task: string
+  [k: string]: any
+  }
+
+}
+export type ServiceReleaseInput = ServiceReleaseInputSchema.ServiceReleaseInput;
+export namespace ServiceReleaseOutputSchema {
+  export interface ServiceReleaseOutput {
+  error?: string
+  released: number
+  status: string
+  [k: string]: any
+  }
+
+}
+export type ServiceReleaseOutput = ServiceReleaseOutputSchema.ServiceReleaseOutput;
+export namespace ServiceRequestInputSchema {
+  export interface ServiceRequestInput {
+  /**
+   * Preset to request: a preset id (e.g. `preset-postgres-18`), service type
+   * (`postgres`/`redis`/`rabbitmq`), or preset name.
+   */
+  preset: string
+  /**
+   * Task UUID or short_id this service is for (its current run owns the pod).
+   */
+  task: string
+  [k: string]: any
+  }
+
+}
+export type ServiceRequestInput = ServiceRequestInputSchema.ServiceRequestInput;
+export namespace ServiceRequestOutputSchema {
+  export interface ServiceRequestOutput {
+  /**
+   * Connection string to use (also set this in the named env var for tests).
+   */
+  conn_string?: string
+  /**
+   * Env var convention for this service (e.g. TEST_POSTGRES_URL / REDIS_URL / AMQP_URL).
+   */
+  env_var?: string
+  error?: string
+  service_type?: string
+  status: string
+  [k: string]: any
+  }
+
+}
+export type ServiceRequestOutput = ServiceRequestOutputSchema.ServiceRequestOutput;
 export namespace SessionActiveInputSchema {
   export interface SessionActiveInput {
   /**
@@ -5605,7 +5740,7 @@ export namespace UserSettingsSetOutputSchema {
 }
 export type UserSettingsSetOutput = UserSettingsSetOutputSchema.UserSettingsSetOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "project_verification_get" | "project_verification_set" | "project_verification_test" | "project_verification_test_status" | "proposal_add_target" | "proposal_create" | "proposal_delete" | "proposal_feedback_accept" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_list" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "user_settings_get" | "user_settings_set";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_allowed_presets" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "project_verification_get" | "project_verification_set" | "project_verification_test" | "project_verification_test_status" | "proposal_add_target" | "proposal_create" | "proposal_delete" | "proposal_feedback_accept" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_list" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_list" | "service_preset_list" | "service_release" | "service_request" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "user_settings_get" | "user_settings_set";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -5644,6 +5779,7 @@ export interface McpToolMap {
   "image_create": { input: ImageCreateInput; output: ImageCreateOutput };
   "image_delete": { input: ImageDeleteInput; output: ImageDeleteOutput };
   "image_list": { input: ImageListInput; output: ImageListOutput };
+  "image_set_allowed_presets": { input: ImageSetAllowedPresetsInput; output: ImageSetAllowedPresetsOutput };
   "image_update": { input: ImageUpdateInput; output: ImageUpdateOutput };
   "memory_associations": { input: MemoryAssociationsInput; output: MemoryAssociationsOutput };
   "memory_broken_links": { input: MemoryBrokenLinksInput; output: MemoryBrokenLinksOutput };
@@ -5706,6 +5842,10 @@ export interface McpToolMap {
   "provider_remove": { input: ProviderRemoveInput; output: ProviderRemoveOutput };
   "provider_validate": { input: ProviderValidateInput; output: ProviderValidateOutput };
   "retrigger_image_build": { input: RetriggerImageBuildInput; output: RetriggerImageBuildOutput };
+  "service_list": { input: ServiceListInput; output: ServiceListOutput };
+  "service_preset_list": { input: ServicePresetListInput; output: ServicePresetListOutput };
+  "service_release": { input: ServiceReleaseInput; output: ServiceReleaseOutput };
+  "service_request": { input: ServiceRequestInput; output: ServiceRequestOutput };
   "session_active": { input: SessionActiveInput; output: SessionActiveOutput };
   "session_for_task": { input: SessionForTaskInput; output: SessionForTaskOutput };
   "session_list": { input: SessionListInput; output: SessionListOutput };

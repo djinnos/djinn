@@ -22,12 +22,20 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   type EnvironmentConfig,
   normalizeConfig,
 } from "@/api/environmentConfig";
-import { createImage, updateImage, type CatalogImage } from "@/api/images";
+import {
+  createImage,
+  updateImage,
+  listServicePresets,
+  setImageAllowedPresets,
+  type CatalogImage,
+  type ServicePreset,
+} from "@/api/images";
 import { ImageConfigEditor } from "@/components/images/ImageConfigEditor";
 import { showToast } from "@/lib/toast";
 
@@ -52,6 +60,26 @@ export function ImageEditorDialog({ open, onOpenChange, image, onSaved }: Props)
   const [rawError, setRawError] = useState<string | null>(null);
   const [mode, setMode] = useState<"form" | "raw">("form");
   const [saving, setSaving] = useState(false);
+  const [presets, setPresets] = useState<ServicePreset[]>([]);
+  const [selectedPresets, setSelectedPresets] = useState<string[]>([]);
+
+  // Load the fixed service-preset catalog once the dialog is opened.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void listServicePresets()
+      .then((list) => {
+        if (!cancelled) setPresets(list);
+      })
+      .catch((err) => {
+        const message =
+          err instanceof Error ? err.message : "Failed to load service presets";
+        showToast.error("Could not load service presets", { description: message });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
 
   // Reseed local state whenever the dialog opens (or the target image
   // changes) so create and edit don't leak each other's fields.
@@ -64,7 +92,14 @@ export function ImageEditorDialog({ open, onOpenChange, image, onSaved }: Props)
     setRawText(JSON.stringify(seed, null, 2));
     setRawError(null);
     setMode("form");
+    setSelectedPresets(image?.allowedPresets ?? []);
   }, [open, image]);
+
+  const togglePreset = (id: string, checked: boolean) => {
+    setSelectedPresets((prev) =>
+      checked ? [...new Set([...prev, id])] : prev.filter((p) => p !== id),
+    );
+  };
 
   const handleModeChange = (next: string) => {
     if (next === mode) return;
@@ -134,6 +169,15 @@ export function ImageEditorDialog({ open, onOpenChange, image, onSaved }: Props)
           description: result.error,
         });
         return;
+      }
+      const imageId = isEdit && image ? image.id : result.id;
+      if (imageId) {
+        const presetResult = await setImageAllowedPresets(imageId, selectedPresets);
+        if (!presetResult.ok) {
+          showToast.error("Saved image, but allowed services failed to update", {
+            description: presetResult.error,
+          });
+        }
       }
       showToast.success(isEdit ? "Image updated" : "Image created");
       await onSaved();
@@ -207,6 +251,38 @@ export function ImageEditorDialog({ open, onOpenChange, image, onSaved }: Props)
               </div>
             </TabsContent>
           </Tabs>
+
+          <div className="flex flex-col gap-2">
+            <div className="flex flex-col gap-0.5">
+              <Label className="text-sm font-medium">Allowed services</Label>
+              <p className="text-xs text-muted-foreground">
+                Projects using this image may request these services on demand during tests.
+              </p>
+            </div>
+            {presets.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No service presets available.</p>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {presets.map((preset) => (
+                  <div
+                    key={preset.id}
+                    className="flex items-center justify-between gap-2 rounded-md border bg-background/30 px-3 py-2.5"
+                  >
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium">{preset.name}</div>
+                      <div className="truncate text-xs text-muted-foreground">
+                        {preset.serviceType}
+                      </div>
+                    </div>
+                    <Switch
+                      checked={selectedPresets.includes(preset.id)}
+                      onCheckedChange={(v) => togglePreset(preset.id, v)}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
 
         <DialogFooter>
