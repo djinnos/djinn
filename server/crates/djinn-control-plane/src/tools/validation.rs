@@ -3,9 +3,23 @@
 // Each function returns `Result<T, String>` where `Err` is a human-readable
 // message suitable for returning as a JSON `{ "error": ... }` response.
 
-/// Trim and validate a title: 1–200 chars.
+/// Decode the handful of HTML entities that LLM-authored plain text routinely
+/// over-escapes (e.g. a title arriving as `A &amp; B`). `&amp;` is decoded last
+/// so `&amp;lt;` round-trips to `&lt;` rather than `<`.
+fn decode_html_entities(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+/// Trim and validate a title: 1–200 chars. Titles are plain text, so HTML
+/// entities (an LLM over-escaping artifact) are decoded to their literal form.
 pub fn validate_title(s: &str) -> Result<String, String> {
-    let trimmed = s.trim().to_owned();
+    let trimmed = decode_html_entities(s.trim()).trim().to_owned();
     if trimmed.is_empty() {
         return Err("title must not be empty".into());
     }
@@ -284,6 +298,13 @@ mod tests {
         assert!(validate_title("x").is_ok());
         assert!(validate_title(&"x".repeat(200)).is_ok());
         assert!(validate_title(&"x".repeat(201)).is_err());
+        // HTML entities from over-escaped LLM output are decoded.
+        assert_eq!(
+            validate_title("Read-consistency &amp; DB pool routing").unwrap(),
+            "Read-consistency & DB pool routing"
+        );
+        assert_eq!(validate_title("a &lt;b&gt; &quot;c&quot;").unwrap(), "a <b> \"c\"");
+        assert_eq!(validate_title("&amp;lt;").unwrap(), "&lt;");
     }
 
     #[test]
