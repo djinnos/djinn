@@ -167,7 +167,8 @@ impl DjinnMcpServer {
                 + Self::graph_tool_router()
                 + Self::pr_review_tool_router()
                 + Self::github_tool_router()
-                + Self::github_app_tool_router(),
+                + Self::github_app_tool_router()
+                + Self::image_tool_router(),
         }
     }
 

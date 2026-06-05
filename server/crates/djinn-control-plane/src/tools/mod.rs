@@ -8,6 +8,7 @@ pub mod github_app_tools;
 pub mod github_tools;
 pub mod graph_exclusions;
 pub mod graph_tools;
+pub mod image_tools;
 pub mod json_object;
 pub mod list_response;
 pub mod memory_tools;

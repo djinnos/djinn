@@ -212,6 +212,17 @@ impl ImageRepository {
         Ok(())
     }
 
+    /// Project ids currently assigned this image (for re-applying config on
+    /// an image edit).
+    pub async fn projects_using(&self, image_id: &str) -> Result<Vec<String>> {
+        self.db.ensure_initialized().await?;
+        let rows = sqlx::query("SELECT id FROM projects WHERE selected_image_id = $1")
+            .bind(image_id)
+            .fetch_all(self.db.pool())
+            .await?;
+        Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
+    }
+
     /// Resolve a project's selected catalog image. Returns `None` when the
     /// project has no selection (→ per-project build fallback). Two-step (read
     /// the FK, then fetch the image) to avoid `id`/`name` column ambiguity in a

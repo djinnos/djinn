@@ -3092,6 +3092,220 @@ expression: signatures
     }
   },
   {
+    "name": "image_create",
+    "input_schema": {
+      "$defs": {
+        "ObjectJson": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "config": {
+          "$ref": "#/$defs/ObjectJson",
+          "description": "The image's EnvironmentConfig (languages+versions, system_packages,\nbuild env, post_build hooks). Validated server-side."
+        },
+        "description": {
+          "default": null,
+          "nullable": true,
+          "type": "string"
+        },
+        "name": {
+          "description": "Unique display name (e.g. \"Go\", \"Rust\", \"Node\").",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "config"
+      ],
+      "title": "ImageCreateParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ImageMutateResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "image_delete",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "ImageDeleteParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ImageMutateResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "image_list",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "ImageListParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "ImageDto": {
+          "properties": {
+            "config": {
+              "$ref": "#/$defs/ObjectJson",
+              "description": "The image's EnvironmentConfig (build fields)."
+            },
+            "description": {
+              "nullable": true,
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "status": {
+              "description": "Build status of the image's own config: none | building | ready | failed.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "status",
+            "config"
+          ],
+          "type": "object"
+        },
+        "ObjectJson": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "images": {
+          "items": {
+            "$ref": "#/$defs/ImageDto"
+          },
+          "type": "array"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "images"
+      ],
+      "title": "ImageListResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "image_update",
+    "input_schema": {
+      "$defs": {
+        "ObjectJson": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "config": {
+          "$ref": "#/$defs/ObjectJson"
+        },
+        "description": {
+          "default": null,
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "config"
+      ],
+      "title": "ImageUpdateParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ImageMutateResponse",
+      "type": "object"
+    }
+  },
+  {
     "name": "memory_associations",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -5815,6 +6029,50 @@ expression: signatures
     }
   },
   {
+    "name": "project_set_image",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "image_id": {
+          "default": null,
+          "description": "Image id to assign, or null/omit to clear the assignment (the project\nkeeps its current environment config).",
+          "nullable": true,
+          "type": "string"
+        },
+        "project": {
+          "description": "Project UUID or `owner/repo` slug.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "title": "ProjectSetImageParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ImageMutateResponse",
+      "type": "object"
+    }
+  },
+  {
     "name": "project_verification_get",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -7101,10 +7359,18 @@ expression: signatures
         "ProposalEpicModel": {
           "description": "An epic this proposal graduated into.",
           "properties": {
+            "epic_emoji": {
+              "description": "Epic emoji, for display alongside the title.",
+              "type": "string"
+            },
             "epic_id": {
               "type": "string"
             },
             "epic_short_id": {
+              "type": "string"
+            },
+            "epic_title": {
+              "description": "Epic title, for display alongside the short id.",
               "type": "string"
             },
             "project_path": {
@@ -7117,6 +7383,8 @@ expression: signatures
           "required": [
             "epic_id",
             "epic_short_id",
+            "epic_title",
+            "epic_emoji",
             "project_path",
             "status"
           ],

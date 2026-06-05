@@ -14,6 +14,9 @@ use crate::tools::epic_tools::{
     EpicListParams, EpicReadSourceParams, EpicReopenParams, EpicShowParams, EpicTasksParams,
     EpicUpdateParams,
 };
+use crate::tools::image_tools::{
+    ImageCreateParams, ImageDeleteParams, ImageListParams, ImageUpdateParams, ProjectSetImageParams,
+};
 use crate::tools::execution_tools::{ExecutionKillTaskParams, SessionForTaskParams};
 use crate::tools::github_app_tools::{GithubAppInstallUrlParams, GithubAppInstallationsParams};
 use crate::tools::github_tools::{GithubFetchFileParams, GithubSearchParams};
@@ -323,6 +326,31 @@ impl DjinnMcpServer {
                 self.project_verification_test_status(Parameters(decode_args::<
                     ProjectVerificationTestStatusParams,
                 >(name, args)?))
+                    .await,
+            ),
+            "image_list" => map_json(
+                name,
+                self.image_list(Parameters(decode_args::<ImageListParams>(name, args)?))
+                    .await,
+            ),
+            "image_create" => map_json(
+                name,
+                self.image_create(Parameters(decode_args::<ImageCreateParams>(name, args)?))
+                    .await,
+            ),
+            "image_update" => map_json(
+                name,
+                self.image_update(Parameters(decode_args::<ImageUpdateParams>(name, args)?))
+                    .await,
+            ),
+            "image_delete" => map_json(
+                name,
+                self.image_delete(Parameters(decode_args::<ImageDeleteParams>(name, args)?))
+                    .await,
+            ),
+            "project_set_image" => map_json(
+                name,
+                self.project_set_image(Parameters(decode_args::<ProjectSetImageParams>(name, args)?))
                     .await,
             ),
             "proposal_create" => map_json(
