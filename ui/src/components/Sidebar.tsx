@@ -169,6 +169,13 @@ export function Sidebar() {
           onClick={() => navigateToView('chat')}
         />
         <NavItem
+          icon={<HugeiconsIcon icon={Idea01Icon} className="h-4 w-4" />}
+          label="Proposals"
+          badgeCount={proposalCount}
+          isActive={activeSection === 'proposals'}
+          onClick={() => navigateToView('proposals')}
+        />
+        <NavItem
           icon={<HugeiconsIcon icon={KanbanIcon} className="h-4 w-4" />}
           label="Tasks"
           isActive={activeSection === 'tasks'}
@@ -179,13 +186,6 @@ export function Sidebar() {
           label="Code Graph"
           isActive={activeSection === 'code-graph'}
           onClick={() => navigateToView('code-graph')}
-        />
-        <NavItem
-          icon={<HugeiconsIcon icon={Idea01Icon} className="h-4 w-4" />}
-          label="Proposals"
-          badgeCount={proposalCount}
-          isActive={activeSection === 'proposals'}
-          onClick={() => navigateToView('proposals')}
         />
         <NavItem
           icon={<HugeiconsIcon icon={Robot01Icon} className="h-4 w-4" />}

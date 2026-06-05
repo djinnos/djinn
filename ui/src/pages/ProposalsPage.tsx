@@ -25,6 +25,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
@@ -56,19 +57,6 @@ const MANUAL_STATUSES: ProposalStatus[] = [
   "superseded",
 ];
 
-const NEW_TEMPLATE = `## Problem
-What's broken or missing, and who it hurts.
-
-## Proposed change
-What we want to do about it.
-
-## Scope
-Which projects/areas this touches.
-
-## Open questions
-Things still to decide.
-`;
-
 export function ProposalsPage() {
   const { id } = useParams<{ id?: string }>();
   if (id) return <ProposalDetailRoute id={id} />;
@@ -81,9 +69,6 @@ function ProposalsListView() {
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [showArchived, setShowArchived] = useState(false);
-  const [creating, setCreating] = useState(false);
-  const projects = useProjects();
-  const queryClient = useQueryClient();
 
   const listQuery = useQuery(
     proposalListQueryOptions({ text: search.trim() || undefined })
@@ -101,20 +86,6 @@ function ProposalsListView() {
     })).filter((g) => g.items.length > 0);
   }, [listQuery.data, showArchived]);
 
-  if (creating) {
-    return (
-      <CreateProposal
-        projects={projects}
-        onCancel={() => setCreating(false)}
-        onCreated={(newId) => {
-          setCreating(false);
-          queryClient.invalidateQueries({ queryKey: ["proposals"] });
-          navigate(`/proposals/${newId}`);
-        }}
-      />
-    );
-  }
-
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center justify-between gap-4 border-b p-4">
@@ -126,17 +97,14 @@ function ProposalsListView() {
             onChange={(e) => setSearch(e.target.value)}
             className="w-64"
           />
-          <label className="flex items-center gap-1.5 whitespace-nowrap text-sm text-muted-foreground">
-            <input
-              type="checkbox"
+          <label className="flex items-center gap-2 whitespace-nowrap text-sm text-muted-foreground">
+            <Switch
               checked={showArchived}
-              onChange={(e) => setShowArchived(e.target.checked)}
+              onCheckedChange={setShowArchived}
+              aria-label="Show archived"
             />
             Show archived
           </label>
-          <Button size="sm" onClick={() => setCreating(true)}>
-            New
-          </Button>
         </div>
       </div>
 
@@ -153,7 +121,7 @@ function ProposalsListView() {
           </div>
         ) : groups.length === 0 ? (
           <p className="p-10 text-center text-sm text-muted-foreground">
-            No proposals yet. Create one to get a scope out.
+            No proposals yet.
           </p>
         ) : (
           <div className="pb-10">
@@ -187,145 +155,6 @@ function ProposalsListView() {
             ))}
           </div>
         )}
-      </div>
-    </div>
-  );
-}
-
-// ── Create ───────────────────────────────────────────────────────────────────
-
-function CreateProposal({
-  projects,
-  onCancel,
-  onCreated,
-}: {
-  projects: Project[];
-  onCancel: () => void;
-  onCreated: (id: string) => void;
-}) {
-  const me = useAuthUser();
-  const caps = capsFromUser(me);
-  // External proposers always land in triage; PM/engineer/admin pick their
-  // entry state (and can jump straight to engineering review for a technical
-  // change, skipping product scoping).
-  const isProposer = !!caps && !caps.isAdmin && caps.role === "proposer";
-  const [title, setTitle] = useState("");
-  const [body, setBody] = useState(NEW_TEMPLATE);
-  const [targets, setTargets] = useState<Set<string>>(new Set());
-  const [status, setStatus] = useState<"draft" | "in_review">("draft");
-  const [saving, setSaving] = useState(false);
-
-  const toggle = (id: string) =>
-    setTargets((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-
-  const create = async () => {
-    if (!title.trim()) {
-      showToast.error("Title is required");
-      return;
-    }
-    setSaving(true);
-    try {
-      const res = await callMcpTool("proposal_create", {
-        title: title.trim(),
-        body,
-        target_projects: Array.from(targets),
-        // Proposers are forced into triage server-side; omit status for them.
-        status: isProposer ? undefined : status,
-      });
-      if (res.error || !res.id) throw new Error(res.error ?? "create failed");
-      showToast.success("Proposal created");
-      onCreated(res.id as string);
-    } catch (e) {
-      showToast.error("Failed to create proposal", { description: (e as Error).message });
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="h-full overflow-y-auto">
-      <div className="mx-auto max-w-2xl space-y-5 p-6">
-        <h2 className="text-lg font-semibold">New proposal</h2>
-        <div className="space-y-2">
-          <Label htmlFor="np-title">Title</Label>
-          <Input
-            id="np-title"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="Short, action-oriented title"
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="np-body">Spec</Label>
-          <Textarea
-            id="np-body"
-            value={body}
-            onChange={(e) => setBody(e.target.value)}
-            className="min-h-[260px] font-mono text-sm"
-          />
-        </div>
-        <div className="space-y-2">
-          <Label>Target projects</Label>
-          <div className="flex flex-wrap gap-2">
-            {projects.map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                onClick={() => toggle(p.id)}
-                className={`rounded-full border px-3 py-1 text-xs ${
-                  targets.has(p.id)
-                    ? "border-primary bg-primary/10 text-primary"
-                    : "text-muted-foreground"
-                }`}
-              >
-                {p.name}
-              </button>
-            ))}
-          </div>
-        </div>
-        {isProposer ? (
-          <p className="flex items-center gap-2 text-xs text-muted-foreground">
-            <StatusIcon status="triage" />
-            This proposal goes to triage for a PM or engineer to pick up.
-          </p>
-        ) : (
-          <div className="space-y-2">
-            <Label>Start as</Label>
-            <Select value={status} onValueChange={(v) => (v === "draft" || v === "in_review") && setStatus(v)}>
-              <SelectTrigger className="w-[200px]">
-                <span className="flex items-center gap-2">
-                  <StatusIcon status={status} />
-                  {statusLabel(status)}
-                </span>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="draft">
-                  <span className="flex items-center gap-2">
-                    <StatusIcon status="draft" /> Draft
-                  </span>
-                </SelectItem>
-                <SelectItem value="in_review">
-                  <span className="flex items-center gap-2">
-                    <StatusIcon status="in_review" /> In Review (skip scoping)
-                  </span>
-                </SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-        )}
-        <div className="flex gap-2">
-          <Button onClick={create} disabled={saving}>
-            {saving ? "Creating…" : "Create proposal"}
-          </Button>
-          <Button variant="ghost" onClick={onCancel}>
-            Cancel
-          </Button>
-        </div>
       </div>
     </div>
   );
