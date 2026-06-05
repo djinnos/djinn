@@ -97,7 +97,7 @@ export function ProjectImagePicker({ projectId }: { projectId: string }) {
           )}
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value={NONE}>None (use project config)</SelectItem>
+          <SelectItem value={NONE}>None (no catalog image)</SelectItem>
           {images.map((image) => (
             <SelectItem key={image.id} value={image.id}>
               {image.name}
@@ -106,7 +106,7 @@ export function ProjectImagePicker({ projectId }: { projectId: string }) {
         </SelectContent>
       </Select>
       <p className="text-[11px] text-muted-foreground">
-        Adopt a shared preset, or keep this project's own environment config.
+        Adopt a shared catalog image for this project's runtime environment.
       </p>
     </div>
   );

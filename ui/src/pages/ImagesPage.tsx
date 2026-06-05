@@ -3,10 +3,11 @@
  *
  * Lists the shared image catalog (the `images` table): reusable
  * `EnvironmentConfig` presets a project can adopt instead of authoring its
- * own. Create/edit via ImageEditorDialog; delete with a confirm (the
+ * own. Create/edit navigate to the full-page ImageEditorPage; delete with a confirm (the
  * server rejects deleting an image a project still uses).
  */
 import { useCallback, useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   CubeIcon,
@@ -37,7 +38,6 @@ import {
   type ImageBuildStatus,
   type ServicePreset,
 } from "@/api/images";
-import { ImageEditorDialog } from "@/components/images/ImageEditorDialog";
 import { listEnabledLanguages } from "@/components/images/imageSummary";
 import { showToast } from "@/lib/toast";
 
@@ -130,11 +130,10 @@ function DeleteImageButton({
 }
 
 export function ImagesPage() {
+  const navigate = useNavigate();
   const [images, setImages] = useState<CatalogImage[]>([]);
   const [presetsById, setPresetsById] = useState<Record<string, ServicePreset>>({});
   const [loading, setLoading] = useState(true);
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [editing, setEditing] = useState<CatalogImage | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -157,14 +156,8 @@ export function ImagesPage() {
     void load();
   }, [load]);
 
-  const openCreate = () => {
-    setEditing(null);
-    setDialogOpen(true);
-  };
-  const openEdit = (image: CatalogImage) => {
-    setEditing(image);
-    setDialogOpen(true);
-  };
+  const openCreate = () => navigate("/images/new");
+  const openEdit = (image: CatalogImage) => navigate(`/images/${image.id}/edit`);
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
@@ -280,13 +273,6 @@ export function ImagesPage() {
           )}
         </div>
       </div>
-
-      <ImageEditorDialog
-        open={dialogOpen}
-        onOpenChange={setDialogOpen}
-        image={editing}
-        onSaved={load}
-      />
     </div>
   );
 }

@@ -1,52 +1,61 @@
 /**
  * ProjectEnvironmentPage — `/projects/:id/environment`.
  *
- * Edits `projects.environment_config` for a single project. Two panes:
- *   1. Form editor — driven by the EnvironmentConfig shape.
- *   2. Raw JSON editor — Monaco-less textarea fallback with parse errors.
+ * A project's environment is driven by a CATALOG IMAGE (languages /
+ * system_packages / env all live on the image now), not per-project config.
+ * This page therefore exposes:
+ *   1. A catalog-image picker (the primary control, in the header).
+ *   2. A Verification tab (project-scoped rules via VerificationEditor).
+ *   3. A Code-graph workspaces editor (per-project SCIP path→language map),
+ *      persisted into `environment_config.workspaces`.
  *
- * Saves call `project_environment_config_set`; server-side validation
- * (shell-injection guards, workspace uniqueness) surfaces back through
- * the MCP response.
+ * The old per-project Form / Raw JSON language+package editors are gone.
  */
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   ArrowLeft02Icon,
+  Delete02Icon,
   Loading02Icon,
   FloppyDiskIcon,
+  PlusSignIcon,
   RefreshIcon,
-  FileValidationIcon,
 } from "@hugeicons/core-free-icons";
 
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from "@/components/ui/alert-dialog";
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   type EnvironmentConfig,
+  type Workspace,
+  LANGUAGE_KEYS,
   fetchEnvironmentConfig,
-  normalizeConfig,
-  pruneOrphanLanguages,
-  resetEnvironmentConfig,
   saveEnvironmentConfig,
 } from "@/api/environmentConfig";
 import { useProjects } from "@/stores/useProjectStore";
 import { showToast } from "@/lib/toast";
-import { EnvironmentConfigForm } from "@/components/environmentConfig/EnvironmentConfigForm";
 import { ProjectImagePicker } from "@/components/images/ProjectImagePicker";
 import { VerificationEditor } from "@/components/verification/VerificationEditor";
+
+const LANGUAGE_LABELS: Record<string, string> = {
+  rust: "Rust",
+  node: "Node",
+  python: "Python",
+  go: "Go",
+  java: "Java",
+  ruby: "Ruby",
+  dotnet: ".NET",
+  clang: "Clang",
+};
 
 export function ProjectEnvironmentPage() {
   const { id: projectId } = useParams<{ id: string }>();
@@ -55,22 +64,18 @@ export function ProjectEnvironmentPage() {
   const project = projects.find((p) => p.id === projectId);
 
   const [config, setConfig] = useState<EnvironmentConfig | null>(null);
-  const [rawText, setRawText] = useState<string>("");
-  const [rawError, setRawError] = useState<string | null>(null);
-  const [seeded, setSeeded] = useState<boolean>(true);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [mode, setMode] = useState<"form" | "raw" | "verification">("form");
+  const [mode, setMode] = useState<"verification" | "workspaces">("verification");
 
   const load = useCallback(async () => {
     if (!projectId) return;
     setLoading(true);
     try {
-      const { config: fetched, seeded } = await fetchEnvironmentConfig(projectId);
+      const { config: fetched } = await fetchEnvironmentConfig(projectId);
       setConfig(fetched);
-      setRawText(JSON.stringify(fetched, null, 2));
-      setRawError(null);
-      setSeeded(seeded);
+      setWorkspaces(fetched.workspaces);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to load environment config";
       showToast.error("Could not load environment config", { description: message });
@@ -83,102 +88,22 @@ export function ProjectEnvironmentPage() {
     void load();
   }, [load]);
 
-  // When the user switches panes, sync state in whichever direction makes
-  // sense. Form → raw: serialize the current form state. Raw → form:
-  // require a valid parse first (we surface the parse error inline and
-  // keep the user on the raw pane via the `disabled` flag below).
-  const handleModeChange = (next: string) => {
-    if (next === mode) return;
-    // Leaving the raw pane for the form pane requires a valid parse first.
-    if (mode === "raw" && next === "form") {
-      const parsed = tryParseRaw(rawText);
-      if (parsed.ok) {
-        setConfig(normalizeConfig(parsed.value));
-        setRawError(null);
-      } else {
-        setRawError(parsed.error);
-        return;
-      }
-    }
-    if (next === "raw" && config) {
-      setRawText(JSON.stringify(config, null, 2));
-      setRawError(null);
-    }
-    setMode(next as "form" | "raw" | "verification");
-  };
-
-  const handleFormChange = useCallback((next: EnvironmentConfig) => {
-    setConfig(next);
-    setRawText(JSON.stringify(next, null, 2));
-  }, []);
-
-  const handleRawChange = (next: string) => {
-    setRawText(next);
-    const parsed = tryParseRaw(next);
-    if (parsed.ok) {
-      setRawError(null);
-      setConfig(normalizeConfig(parsed.value));
-    } else {
-      setRawError(parsed.error);
-    }
-  };
-
-  const handleSave = async () => {
+  const handleSaveWorkspaces = async () => {
     if (!projectId || !config) return;
-    // If user is in raw mode, make sure what we send is exactly what they
-    // see (they may have hand-edited keys the form doesn't know about) —
-    // raw is the escape hatch, so it skips language pruning. Form mode
-    // reconciles languages to the workspace list, clearing any orphan left
-    // behind by an earlier workspace removal.
-    let toSave: unknown;
-    if (mode === "raw") {
-      const parsed = tryParseRaw(rawText);
-      if (!parsed.ok) {
-        showToast.error("Cannot save — JSON is invalid", { description: parsed.error });
-        return;
-      }
-      toSave = parsed.value;
-    } else {
-      toSave = pruneOrphanLanguages(config);
-    }
+    // Send the existing config with only `workspaces` changed.
+    const toSave: EnvironmentConfig = { ...config, workspaces };
     setSaving(true);
     try {
-      const response = await saveEnvironmentConfig(projectId, toSave as EnvironmentConfig);
+      const response = await saveEnvironmentConfig(projectId, toSave);
       if (!response.ok) {
         showToast.error("Save failed", { description: response.error });
         return;
       }
-      showToast.success("Environment config saved", {
-        description: "Image will rebuild on the next mirror-fetch tick.",
-      });
+      showToast.success("Workspaces saved");
       await load();
     } catch (err) {
       const message = err instanceof Error ? err.message : "Save failed";
       showToast.error("Save failed", { description: message });
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleResetFromDetection = async () => {
-    if (!projectId) return;
-    setSaving(true);
-    try {
-      const result = await resetEnvironmentConfig(projectId);
-      if (!result.ok || !result.config) {
-        showToast.error("Reset failed", { description: result.error });
-        return;
-      }
-      setConfig(result.config);
-      setRawText(JSON.stringify(result.config, null, 2));
-      setRawError(null);
-      setSeeded(true);
-      showToast.success("Config reset to auto-detected", {
-        description: "Image will rebuild on the next mirror-fetch tick.",
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Reset failed";
-      showToast.error("Reset failed", { description: message });
     } finally {
       setSaving(false);
     }
@@ -211,19 +136,19 @@ export function ProjectEnvironmentPage() {
           </Button>
           <div>
             <h1 className="text-lg font-semibold">
-              Environment config
+              Environment
               {project?.name ? <span className="text-muted-foreground"> · {project.name}</span> : null}
             </h1>
             <p className="text-xs text-muted-foreground">
-              Controls the per-project runtime image + warm/task Pod environment. Saving triggers a rebuild.
+              A project's runtime image comes from a shared catalog image. Verification and code-graph
+              workspaces stay per-project.
             </p>
           </div>
         </div>
         <div className="flex items-center gap-3">
           <ProjectImagePicker projectId={projectId} />
-          {mode !== "verification" && (
+          {mode === "workspaces" && (
             <div className="flex items-center gap-2">
-              <ResetFromDetectionButton onConfirm={handleResetFromDetection} />
               <Button
                 variant="outline"
                 size="sm"
@@ -237,8 +162,8 @@ export function ProjectEnvironmentPage() {
               <Button
                 size="sm"
                 className="h-8 gap-1.5 text-xs"
-                onClick={() => void handleSave()}
-                disabled={saving || (mode === "raw" && rawError !== null)}
+                onClick={() => void handleSaveWorkspaces()}
+                disabled={saving}
               >
                 {saving ? (
                   <HugeiconsIcon icon={Loading02Icon} size={14} className="animate-spin" />
@@ -254,53 +179,20 @@ export function ProjectEnvironmentPage() {
 
       <div className="flex-1 overflow-y-auto px-6 py-6">
         <div className="mx-auto flex max-w-4xl flex-col gap-4">
-          {!seeded && (
-            <Banner
-              tone="warn"
-              title="Config not yet auto-detected"
-              description="This project's environment_config is still empty. It will be populated on the next server restart from the detected stack. You can also author the config directly here."
-            />
-          )}
-          {config.source === "auto-detected" && seeded && (
-            <Banner
-              tone="info"
-              title="Auto-detected config"
-              description="This config was generated from the detected stack. Saving any change marks it as user-edited and stops future auto-reseeds."
-            />
-          )}
-
           <Tabs
             value={mode}
-            onValueChange={(v) => typeof v === "string" && handleModeChange(v)}
+            onValueChange={(v) => typeof v === "string" && setMode(v as "verification" | "workspaces")}
             className="flex flex-col"
           >
             <TabsList className="w-fit">
-              <TabsTrigger value="form">Form</TabsTrigger>
-              <TabsTrigger value="raw">Raw JSON</TabsTrigger>
               <TabsTrigger value="verification">Verification</TabsTrigger>
+              <TabsTrigger value="workspaces">Workspaces</TabsTrigger>
             </TabsList>
-            <TabsContent value="form" className="mt-4">
-              <EnvironmentConfigForm config={config} onChange={handleFormChange} />
-            </TabsContent>
-            <TabsContent value="raw" className="mt-4">
-              <div className="flex flex-col gap-2">
-                <Textarea
-                  value={rawText}
-                  onChange={(e) => handleRawChange(e.target.value)}
-                  className="min-h-[480px] font-mono text-xs"
-                  spellCheck={false}
-                />
-                {rawError ? (
-                  <p className="text-xs text-destructive">{rawError}</p>
-                ) : (
-                  <p className="text-xs text-muted-foreground">
-                    JSON is valid. Server-side validation still runs on save.
-                  </p>
-                )}
-              </div>
-            </TabsContent>
             <TabsContent value="verification" className="mt-4">
               <VerificationEditor projectId={projectId} />
+            </TabsContent>
+            <TabsContent value="workspaces" className="mt-4">
+              <WorkspacesEditor workspaces={workspaces} onChange={setWorkspaces} />
             </TabsContent>
           </Tabs>
         </div>
@@ -309,18 +201,101 @@ export function ProjectEnvironmentPage() {
   );
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────
+// ── Workspaces editor ─────────────────────────────────────────────────────
 
-type ParseResult<T> = { ok: true; value: T } | { ok: false; error: string };
+function WorkspacesEditor({
+  workspaces,
+  onChange,
+}: {
+  workspaces: Workspace[];
+  onChange: (next: Workspace[]) => void;
+}) {
+  const updateAt = (idx: number, patch: Partial<Workspace>) => {
+    const next = workspaces.slice();
+    next[idx] = { ...next[idx], ...patch };
+    onChange(next);
+  };
+  const remove = (idx: number) => {
+    const next = workspaces.slice();
+    next.splice(idx, 1);
+    onChange(next);
+  };
+  const add = () => {
+    onChange([...workspaces, { root: "", language: "rust" }]);
+  };
 
-function tryParseRaw(text: string): ParseResult<unknown> {
-  try {
-    return { ok: true, value: JSON.parse(text) };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "invalid JSON";
-    return { ok: false, error: message };
-  }
+  return (
+    <section className="flex flex-col gap-3">
+      <div>
+        <h3 className="text-sm font-semibold">Code-graph workspaces (optional)</h3>
+        <p className="text-xs text-muted-foreground">
+          Per-project SCIP path→language hints for the code graph. Each row maps a directory to the
+          language its indexer should run for.
+        </p>
+      </div>
+      <div className="flex flex-col gap-2">
+        {workspaces.length === 0 && (
+          <p className="text-xs text-muted-foreground">No workspaces configured.</p>
+        )}
+        {workspaces.map((ws, idx) => (
+          <div
+            key={idx}
+            className="flex items-end gap-2 rounded-md border bg-background/30 px-3 py-2.5"
+          >
+            <div className="flex flex-1 flex-col gap-1">
+              <Label className="text-xs text-muted-foreground">Root</Label>
+              <Input
+                value={ws.root}
+                onChange={(e) => updateAt(idx, { root: e.target.value })}
+                placeholder="server/ (empty = repo root)"
+                className="font-mono text-xs"
+              />
+            </div>
+            <div className="flex w-44 flex-col gap-1">
+              <Label className="text-xs text-muted-foreground">Language</Label>
+              <Select
+                value={ws.language}
+                onValueChange={(v) => typeof v === "string" && updateAt(idx, { language: v })}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {LANGUAGE_KEYS.map((lang) => (
+                    <SelectItem key={lang} value={lang}>
+                      {LANGUAGE_LABELS[lang] ?? lang}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-9 w-9 p-0 text-muted-foreground hover:text-red-400"
+              onClick={() => remove(idx)}
+            >
+              <HugeiconsIcon icon={Delete02Icon} size={14} />
+            </Button>
+          </div>
+        ))}
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="w-fit gap-1.5 text-xs"
+          onClick={add}
+        >
+          <HugeiconsIcon icon={PlusSignIcon} size={12} />
+          Add workspace
+        </Button>
+      </div>
+    </section>
+  );
 }
+
+// ── Helpers ─────────────────────────────────────────────────────────────
 
 function EmptyState({ message }: { message: string }) {
   return (
@@ -329,67 +304,3 @@ function EmptyState({ message }: { message: string }) {
     </div>
   );
 }
-
-function Banner({
-  tone,
-  title,
-  description,
-}: {
-  tone: "info" | "warn";
-  title: string;
-  description: string;
-}) {
-  const ring = tone === "warn" ? "ring-amber-500/40 bg-amber-500/5" : "ring-sky-500/40 bg-sky-500/5";
-  const iconColor = tone === "warn" ? "text-amber-300" : "text-sky-300";
-  const titleColor = tone === "warn" ? "text-amber-200" : "text-sky-200";
-  return (
-    <div className={`flex items-start gap-3 rounded-lg px-4 py-3 ring-1 ${ring}`}>
-      <HugeiconsIcon icon={FileValidationIcon} className={`mt-0.5 size-4 shrink-0 ${iconColor}`} />
-      <div className="flex flex-col gap-0.5">
-        <span className={`text-sm font-medium ${titleColor}`}>{title}</span>
-        <span className="text-xs text-muted-foreground">{description}</span>
-      </div>
-    </div>
-  );
-}
-
-function ResetFromDetectionButton({ onConfirm }: { onConfirm: () => void | Promise<void> }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <AlertDialog open={open} onOpenChange={setOpen}>
-      <AlertDialogTrigger
-        render={
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 gap-1.5 text-xs text-muted-foreground"
-            type="button"
-          >
-            Reset from auto-detection
-          </Button>
-        }
-      />
-      <AlertDialogContent size="sm">
-        <AlertDialogHeader>
-          <AlertDialogTitle>Reset to auto-detected config?</AlertDialogTitle>
-          <AlertDialogDescription>
-            This discards every change made in this editor and repopulates the config from the detected
-            stack. Any custom lifecycle hooks, env vars, or verification rules will be lost.
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction
-            onClick={() => {
-              void onConfirm();
-              setOpen(false);
-            }}
-          >
-            Reset
-          </AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
-  );
-}
-

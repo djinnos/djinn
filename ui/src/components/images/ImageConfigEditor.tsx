@@ -9,6 +9,8 @@
  * "custom" escape hatch (a free-text Input). Multi-language images are
  * allowed: enable as many languages as you want.
  */
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Delete02Icon, PlusSignIcon } from "@hugeicons/core-free-icons";
 
@@ -29,6 +31,7 @@ import {
   type LanguageKey,
   type Languages,
 } from "@/api/environmentConfig";
+import { listToolchainVersions } from "@/api/images";
 
 interface Props {
   config: EnvironmentConfig;
@@ -69,6 +72,19 @@ const LANG_SPECS: Record<"rust" | "node" | "python" | "go", LangSpec> = {
 };
 
 /**
+ * Shared, one-shot fetch of the live per-language version lists. Falls back
+ * to the static `LANG_SPECS` presets while loading or on error.
+ */
+function useToolchainVersions() {
+  return useQuery({
+    queryKey: ["toolchain-versions"],
+    queryFn: listToolchainVersions,
+    staleTime: 5 * 60 * 1000,
+    retry: 1,
+  });
+}
+
+/**
  * Build a `languages.X` block. The block shape differs per language
  * (Rust uses `default_toolchain`, the rest `default_version`); the union
  * type can't be indexed by a dynamic key, so we build the single-field
@@ -100,6 +116,13 @@ export function ImageConfigEditor({ config, onChange }: Props) {
 // ── Languages ─────────────────────────────────────────────────────────────
 
 function LanguagesSection({ config, onChange }: Props) {
+  const versionsQuery = useToolchainVersions();
+
+  const presetsFor = (lang: keyof typeof LANG_SPECS): string[] => {
+    const live = versionsQuery.data?.[lang];
+    return live && live.length > 0 ? live : LANG_SPECS[lang].presets;
+  };
+
   const setLanguage = (lang: keyof typeof LANG_SPECS, enabled: boolean) => {
     // A union-keyed write demands the intersection of all value types, so go
     // through a Record view to assign the single-language block.
@@ -142,7 +165,7 @@ function LanguagesSection({ config, onChange }: Props) {
                 <div className="border-t border-border/40 px-3 py-3">
                   <VersionSelector
                     label={spec.field === "default_toolchain" ? "Toolchain" : "Version"}
-                    presets={spec.presets}
+                    presets={presetsFor(lang as keyof typeof LANG_SPECS)}
                     value={readVersion(config, lang as keyof typeof LANG_SPECS)}
                     onChange={(v) => setVersion(lang as keyof typeof LANG_SPECS, v)}
                   />
@@ -167,8 +190,14 @@ function VersionSelector({
   value: string;
   onChange: (v: string) => void;
 }) {
-  const isPreset = presets.includes(value);
-  const selectValue = isPreset ? value : CUSTOM;
+  // If the stored value isn't in the fetched/static preset list, treat it
+  // as custom: show it as the selected value AND reveal the text input.
+  const valueIsPreset = presets.includes(value);
+  // Explicit custom toggle, so picking "Custom…" reveals the input even
+  // when the current value happens to coincide with a preset.
+  const [customMode, setCustomMode] = useState(!valueIsPreset);
+  const showCustom = customMode || !valueIsPreset;
+  const selectValue = showCustom ? CUSTOM : value;
 
   return (
     <div className="flex flex-col gap-2">
@@ -178,9 +207,12 @@ function VersionSelector({
           value={selectValue}
           onValueChange={(v) => {
             if (typeof v !== "string") return;
-            // Switching to "custom" keeps the current value as the seed so
-            // the input isn't blanked out.
-            onChange(v === CUSTOM ? value : v);
+            if (v === CUSTOM) {
+              setCustomMode(true);
+              return;
+            }
+            setCustomMode(false);
+            onChange(v);
           }}
         >
           <SelectTrigger className="w-[160px]">
@@ -192,10 +224,10 @@ function VersionSelector({
                 {preset}
               </SelectItem>
             ))}
-            <SelectItem value={CUSTOM}>custom…</SelectItem>
+            <SelectItem value={CUSTOM}>Custom…</SelectItem>
           </SelectContent>
         </Select>
-        {!isPreset && (
+        {showCustom && (
           <Input
             value={value}
             onChange={(e) => onChange(e.target.value)}

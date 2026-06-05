@@ -43,6 +43,47 @@ export interface MutationResult {
   id?: string;
 }
 
+/**
+ * Per-language available toolchain versions, fetched live from upstream
+ * (cached, with a static fallback) by the `toolchain_versions` MCP tool.
+ */
+export interface ToolchainVersions {
+  [language: string]: string[];
+}
+
+/**
+ * Fetch the curated/live version lists for each toolchain. Throws on a
+ * non-ok status so the caller (react-query) can fall back to a static list.
+ */
+export async function listToolchainVersions(): Promise<ToolchainVersions> {
+  const response = await callMcpTool("toolchain_versions", {});
+  if (response.status !== "ok") {
+    throw new Error(response.error ?? "Failed to load toolchain versions");
+  }
+  return (response.versions ?? {}) as ToolchainVersions;
+}
+
+/**
+ * Strip image-config fields the catalog backend rejects before sending:
+ *  - `null`/`undefined` `languages.*` entries (a disabled language); the
+ *    image-builder emits an install block for ANY present key, so an
+ *    explicit null would still try to install.
+ *  - any `verification` key — verification lives in the dedicated
+ *    `project_verifications` table now, not in `EnvironmentConfig`, and the
+ *    server 400s on the unknown field.
+ *
+ * Returns a shallow copy; never mutates the caller's config.
+ */
+export function sanitizeImageConfig(config: EnvironmentConfig): EnvironmentConfig {
+  const { ...rest } = config as EnvironmentConfig & { verification?: unknown };
+  delete (rest as { verification?: unknown }).verification;
+  const languages: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(rest.languages ?? {})) {
+    if (value != null) languages[key] = value;
+  }
+  return { ...rest, languages: languages as EnvironmentConfig["languages"] };
+}
+
 /** List every registered catalog image. */
 export async function listImages(): Promise<CatalogImage[]> {
   const response = await callMcpTool("image_list", {});
@@ -98,7 +139,7 @@ export async function createImage(input: {
   const response = await callMcpTool("image_create", {
     name: input.name,
     description: input.description,
-    config: input.config as unknown as Record<string, unknown>,
+    config: sanitizeImageConfig(input.config) as unknown as Record<string, unknown>,
   });
   if (response.status !== "ok") {
     return { ok: false, error: response.error ?? "create failed" };
@@ -117,7 +158,7 @@ export async function updateImage(input: {
     id: input.id,
     name: input.name,
     description: input.description,
-    config: input.config as unknown as Record<string, unknown>,
+    config: sanitizeImageConfig(input.config) as unknown as Record<string, unknown>,
   });
   if (response.status !== "ok") {
     return { ok: false, error: response.error ?? "update failed" };

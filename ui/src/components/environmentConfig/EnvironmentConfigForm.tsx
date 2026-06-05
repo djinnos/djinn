@@ -50,7 +50,6 @@ export function EnvironmentConfigForm({ config, onChange }: Props) {
       <SystemPackagesSection config={config} onChange={onChange} />
       <EnvVarsSection config={config} onChange={onChange} />
       <LifecycleSection config={config} onChange={onChange} />
-      <VerificationSection config={config} onChange={onChange} />
     </div>
   );
 }
@@ -456,95 +455,6 @@ function LifecycleSection({ config, onChange }: Props) {
           />
         </TabsContent>
       </Tabs>
-    </Section>
-  );
-}
-
-// ── Verification ────────────────────────────────────────────────────────
-
-function VerificationSection({ config, onChange }: Props) {
-  const updateRules = (next: EnvironmentConfig["verification"]["rules"]) => {
-    onChange({ ...config, verification: { ...config.verification, rules: next } });
-  };
-  const addRule = () => {
-    updateRules([...config.verification.rules, { match_pattern: "", commands: [""] }]);
-  };
-
-  return (
-    <Section
-      title="Verification"
-      description="Commands that prove a task-run succeeded. Rules match on changed files via glob; commands run in the verification Pod. Prep commands live under Lifecycle → pre_verification."
-    >
-      <div className="flex flex-col gap-6">
-        <div>
-          <div className="flex flex-col gap-2">
-            {config.verification.rules.length === 0 && (
-              <p className="text-xs text-muted-foreground">No verification rules configured.</p>
-            )}
-            {config.verification.rules.map((rule, idx) => (
-              <div key={idx} className="rounded-md border bg-background/30 p-3">
-                <div className="flex items-center justify-between gap-2 pb-2">
-                  <div className="flex flex-1 flex-col gap-1">
-                    <Label className="text-xs text-muted-foreground">Match pattern (glob)</Label>
-                    <Input
-                      value={rule.match_pattern}
-                      onChange={(e) => {
-                        const next = config.verification.rules.slice();
-                        next[idx] = { ...rule, match_pattern: e.target.value };
-                        updateRules(next);
-                      }}
-                      placeholder="src/**/*.rs"
-                      className="font-mono text-xs"
-                    />
-                  </div>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 gap-1 self-end px-2 text-muted-foreground hover:text-red-400"
-                    onClick={() => {
-                      const next = config.verification.rules.slice();
-                      next.splice(idx, 1);
-                      updateRules(next);
-                    }}
-                  >
-                    <HugeiconsIcon icon={Delete02Icon} size={14} />
-                  </Button>
-                </div>
-                <div>
-                  <Label className="text-xs text-muted-foreground">Commands (one per line)</Label>
-                  <Textarea
-                    value={rule.commands.join("\n")}
-                    onChange={(e) => {
-                      const next = config.verification.rules.slice();
-                      next[idx] = {
-                        ...rule,
-                        commands: e.target.value
-                          .split("\n")
-                          .map((s) => s.trim())
-                          .filter(Boolean),
-                      };
-                      updateRules(next);
-                    }}
-                    placeholder="cargo test"
-                    className="mt-1 min-h-[60px] font-mono text-xs"
-                  />
-                </div>
-              </div>
-            ))}
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="w-fit gap-1.5 text-xs"
-              onClick={addRule}
-            >
-              <HugeiconsIcon icon={PlusSignIcon} size={12} />
-              Add rule
-            </Button>
-          </div>
-        </div>
-      </div>
     </Section>
   );
 }

@@ -13,6 +13,7 @@ import { CodeGraphPage } from "@/pages/CodeGraphPage";
 import { ProposalsPage } from "@/pages/ProposalsPage";
 import { RepositoriesPage } from "@/pages/RepositoriesPage";
 import { ImagesPage } from "@/pages/ImagesPage";
+import { ImageEditorPage } from "@/pages/ImageEditorPage";
 import { ProjectEnvironmentPage } from "@/pages/ProjectEnvironmentPage";
 import { UsersPage } from "@/pages/UsersPage";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
@@ -66,6 +67,8 @@ function MainLayout() {
 
             {/* Image catalog */}
             <Route path="/images" element={<ImagesPage />} />
+            <Route path="/images/new" element={<ImageEditorPage />} />
+            <Route path="/images/:id/edit" element={<ImageEditorPage />} />
 
             {/* Per-project pages */}
             <Route path="/projects/:id/environment" element={<ProjectEnvironmentPage />} />

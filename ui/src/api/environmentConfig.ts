@@ -100,7 +100,6 @@ export interface EnvironmentConfig {
   system_packages: string[];
   env: Record<string, string>;
   lifecycle: LifecycleHooks;
-  verification: Verification;
 }
 
 /**
@@ -117,7 +116,6 @@ export function normalizeConfig(
 ): EnvironmentConfig {
   const obj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const lifecycle = (obj.lifecycle ?? {}) as Record<string, unknown>;
-  const verification = (obj.verification ?? {}) as Partial<Verification>;
   const env = (obj.env ?? {}) as Record<string, string>;
   const systemPackages = Array.isArray(obj.system_packages)
     ? (obj.system_packages as string[])
@@ -146,9 +144,6 @@ export function normalizeConfig(
       pre_verification: Array.isArray(lifecycle.pre_verification)
         ? (lifecycle.pre_verification as HookCommand[])
         : [],
-    },
-    verification: {
-      rules: Array.isArray(verification.rules) ? verification.rules : [],
     },
   };
 }

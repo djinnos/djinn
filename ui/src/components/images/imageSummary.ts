@@ -20,7 +20,7 @@ const LANGUAGE_LABELS: Record<LanguageKey, string> = {
 
 /** Comma-joined display labels of the languages an image enables. */
 export function listEnabledLanguages(config: EnvironmentConfig): string {
-  return LANGUAGE_KEYS.filter((key) => config.languages[key] !== undefined)
+  return LANGUAGE_KEYS.filter((key) => config.languages[key] != null)
     .map((key) => LANGUAGE_LABELS[key])
     .join(", ");
 }

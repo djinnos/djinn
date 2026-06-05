@@ -1,23 +1,21 @@
 /**
- * ImageEditorDialog — create or edit a catalog image.
+ * ImageEditorPage — full-page create/edit flow for a catalog image.
  *
- * Two panes mirror ProjectEnvironmentPage: a Form editor (name,
- * description, ImageConfigEditor) and a Raw JSON escape hatch for the
- * config. On save it calls `image_create` / `image_update` and surfaces
- * server-side validation errors via toast.
+ * Routes: `/images/new` and `/images/:id/edit`. Replaces the old cramped
+ * ImageEditorDialog with a full-width layout: name/description, a Form /
+ * Raw JSON tab pair (reusing ImageConfigEditor), and the allowed-services
+ * picker. On save it calls `image_create` / `image_update` +
+ * `image_set_allowed_presets`, then navigates back to `/images`.
  */
 import { useEffect, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Loading02Icon } from "@hugeicons/core-free-icons";
-
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  ArrowLeft02Icon,
+  FloppyDiskIcon,
+  Loading02Icon,
+} from "@hugeicons/core-free-icons";
+
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -31,73 +29,75 @@ import {
 import {
   createImage,
   updateImage,
+  listImages,
   listServicePresets,
   setImageAllowedPresets,
-  type CatalogImage,
   type ServicePreset,
 } from "@/api/images";
 import { ImageConfigEditor } from "@/components/images/ImageConfigEditor";
 import { showToast } from "@/lib/toast";
 
-interface Props {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  /** When set, the dialog edits this image; otherwise it creates a new one. */
-  image?: CatalogImage | null;
-  onSaved: () => void | Promise<void>;
-}
-
 function emptyConfig(): EnvironmentConfig {
   return normalizeConfig({ schema_version: 1, source: "user-edited" });
 }
 
-export function ImageEditorDialog({ open, onOpenChange, image, onSaved }: Props) {
-  const isEdit = Boolean(image);
+export function ImageEditorPage() {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const isEdit = Boolean(id);
+
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [config, setConfig] = useState<EnvironmentConfig>(emptyConfig);
-  const [rawText, setRawText] = useState("");
+  const [rawText, setRawText] = useState(() => JSON.stringify(emptyConfig(), null, 2));
   const [rawError, setRawError] = useState<string | null>(null);
   const [mode, setMode] = useState<"form" | "raw">("form");
   const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(isEdit);
   const [presets, setPresets] = useState<ServicePreset[]>([]);
   const [selectedPresets, setSelectedPresets] = useState<string[]>([]);
 
-  // Load the fixed service-preset catalog once the dialog is opened.
+  // Load the fixed service-preset catalog + (when editing) the target image.
   useEffect(() => {
-    if (!open) return;
     let cancelled = false;
-    void listServicePresets()
-      .then((list) => {
-        if (!cancelled) setPresets(list);
-      })
-      .catch((err) => {
-        const message =
-          err instanceof Error ? err.message : "Failed to load service presets";
-        showToast.error("Could not load service presets", { description: message });
-      });
+    void (async () => {
+      try {
+        const [presetList, images] = await Promise.all([
+          listServicePresets(),
+          isEdit ? listImages() : Promise.resolve([]),
+        ]);
+        if (cancelled) return;
+        setPresets(presetList);
+        if (isEdit) {
+          const image = images.find((img) => img.id === id);
+          if (!image) {
+            showToast.error("Image not found");
+            navigate("/images");
+            return;
+          }
+          const seed = image.config;
+          setName(image.name);
+          setDescription(image.description ?? "");
+          setConfig(seed);
+          setRawText(JSON.stringify(seed, null, 2));
+          setSelectedPresets(image.allowedPresets);
+        }
+      } catch (err) {
+        if (cancelled) return;
+        const message = err instanceof Error ? err.message : "Failed to load";
+        showToast.error("Could not load image editor", { description: message });
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, [open]);
+  }, [id, isEdit, navigate]);
 
-  // Reseed local state whenever the dialog opens (or the target image
-  // changes) so create and edit don't leak each other's fields.
-  useEffect(() => {
-    if (!open) return;
-    const seed = image ? image.config : emptyConfig();
-    setName(image?.name ?? "");
-    setDescription(image?.description ?? "");
-    setConfig(seed);
-    setRawText(JSON.stringify(seed, null, 2));
-    setRawError(null);
-    setMode("form");
-    setSelectedPresets(image?.allowedPresets ?? []);
-  }, [open, image]);
-
-  const togglePreset = (id: string, checked: boolean) => {
+  const togglePreset = (presetId: string, checked: boolean) => {
     setSelectedPresets((prev) =>
-      checked ? [...new Set([...prev, id])] : prev.filter((p) => p !== id),
+      checked ? [...new Set([...prev, presetId])] : prev.filter((p) => p !== presetId),
     );
   };
 
@@ -148,29 +148,30 @@ export function ImageEditorDialog({ open, onOpenChange, image, onSaved }: Props)
         showToast.error("Cannot save — JSON is invalid", { description: parsed.error });
         return;
       }
-      toSave = parsed.value as EnvironmentConfig;
+      toSave = normalizeConfig(parsed.value);
     }
     setSaving(true);
     try {
-      const result = isEdit && image
-        ? await updateImage({
-            id: image.id,
-            name: trimmedName,
-            description: description.trim() || undefined,
-            config: toSave,
-          })
-        : await createImage({
-            name: trimmedName,
-            description: description.trim() || undefined,
-            config: toSave,
-          });
+      const result =
+        isEdit && id
+          ? await updateImage({
+              id,
+              name: trimmedName,
+              description: description.trim() || undefined,
+              config: toSave,
+            })
+          : await createImage({
+              name: trimmedName,
+              description: description.trim() || undefined,
+              config: toSave,
+            });
       if (!result.ok) {
         showToast.error(isEdit ? "Update failed" : "Create failed", {
           description: result.error,
         });
         return;
       }
-      const imageId = isEdit && image ? image.id : result.id;
+      const imageId = isEdit && id ? id : result.id;
       if (imageId) {
         const presetResult = await setImageAllowedPresets(imageId, selectedPresets);
         if (!presetResult.ok) {
@@ -180,8 +181,7 @@ export function ImageEditorDialog({ open, onOpenChange, image, onSaved }: Props)
         }
       }
       showToast.success(isEdit ? "Image updated" : "Image created");
-      await onSaved();
-      onOpenChange(false);
+      navigate("/images");
     } catch (err) {
       const message = err instanceof Error ? err.message : "Save failed";
       showToast.error("Save failed", { description: message });
@@ -190,20 +190,57 @@ export function ImageEditorDialog({ open, onOpenChange, image, onSaved }: Props)
     }
   };
 
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>{isEdit ? "Edit image" : "New image"}</DialogTitle>
-          <DialogDescription>
-            A reusable environment preset (languages + versions, system packages, build env)
-            that any project can adopt.
-          </DialogDescription>
-        </DialogHeader>
+  if (loading) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <HugeiconsIcon
+          icon={Loading02Icon}
+          className="size-5 animate-spin text-muted-foreground"
+        />
+      </div>
+    );
+  }
 
-        <div className="flex max-h-[60vh] flex-col gap-4 overflow-y-auto pr-1">
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-            <div className="flex flex-col gap-1">
+  return (
+    <div className="flex h-full flex-col overflow-hidden">
+      <header className="flex items-center justify-between gap-3 border-b px-6 py-4">
+        <div className="flex items-center gap-3">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-8 gap-1.5 px-2 text-xs"
+            onClick={() => navigate("/images")}
+          >
+            <HugeiconsIcon icon={ArrowLeft02Icon} size={14} />
+            Back
+          </Button>
+          <div>
+            <h1 className="text-lg font-semibold">{isEdit ? "Edit image" : "New image"}</h1>
+            <p className="text-xs text-muted-foreground">
+              A reusable environment preset (languages + versions, system packages, build env)
+              that any project can adopt.
+            </p>
+          </div>
+        </div>
+        <Button
+          size="sm"
+          className="h-8 gap-1.5 text-xs"
+          onClick={() => void handleSave()}
+          disabled={saving || (mode === "raw" && rawError !== null)}
+        >
+          {saving ? (
+            <HugeiconsIcon icon={Loading02Icon} size={14} className="animate-spin" />
+          ) : (
+            <HugeiconsIcon icon={FloppyDiskIcon} size={14} />
+          )}
+          {saving ? "Saving…" : isEdit ? "Save changes" : "Create image"}
+        </Button>
+      </header>
+
+      <div className="flex-1 overflow-y-auto px-6 py-6">
+        <div className="mx-auto flex max-w-5xl flex-col gap-6">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <div className="flex flex-col gap-1.5">
               <Label className="text-xs text-muted-foreground">Name</Label>
               <Input
                 value={name}
@@ -211,7 +248,7 @@ export function ImageEditorDialog({ open, onOpenChange, image, onSaved }: Props)
                 placeholder="Rust"
               />
             </div>
-            <div className="flex flex-col gap-1">
+            <div className="flex flex-col gap-1.5">
               <Label className="text-xs text-muted-foreground">Description</Label>
               <Input
                 value={description}
@@ -238,7 +275,7 @@ export function ImageEditorDialog({ open, onOpenChange, image, onSaved }: Props)
                 <Textarea
                   value={rawText}
                   onChange={(e) => handleRawChange(e.target.value)}
-                  className="min-h-[320px] font-mono text-xs"
+                  className="min-h-[480px] font-mono text-xs"
                   spellCheck={false}
                 />
                 {rawError ? (
@@ -252,7 +289,7 @@ export function ImageEditorDialog({ open, onOpenChange, image, onSaved }: Props)
             </TabsContent>
           </Tabs>
 
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-3">
             <div className="flex flex-col gap-0.5">
               <Label className="text-sm font-medium">Allowed services</Label>
               <p className="text-xs text-muted-foreground">
@@ -262,7 +299,7 @@ export function ImageEditorDialog({ open, onOpenChange, image, onSaved }: Props)
             {presets.length === 0 ? (
               <p className="text-xs text-muted-foreground">No service presets available.</p>
             ) : (
-              <div className="flex flex-col gap-2">
+              <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
                 {presets.map((preset) => (
                   <div
                     key={preset.id}
@@ -284,23 +321,8 @@ export function ImageEditorDialog({ open, onOpenChange, image, onSaved }: Props)
             )}
           </div>
         </div>
-
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
-            Cancel
-          </Button>
-          <Button
-            onClick={() => void handleSave()}
-            disabled={saving || (mode === "raw" && rawError !== null)}
-          >
-            {saving && (
-              <HugeiconsIcon icon={Loading02Icon} size={14} className="animate-spin" />
-            )}
-            {saving ? "Saving…" : isEdit ? "Save changes" : "Create image"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      </div>
+    </div>
   );
 }
 
