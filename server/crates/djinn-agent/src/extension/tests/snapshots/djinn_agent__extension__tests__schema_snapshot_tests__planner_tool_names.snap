@@ -29,6 +29,7 @@ expression: names
   "epic_close",
   "epic_create",
   "proposal_show",
+  "proposal_complete",
   "epic_blockers_list",
   "epic_blocked_list",
   "task_transition",

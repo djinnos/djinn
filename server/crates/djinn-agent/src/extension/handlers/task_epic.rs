@@ -437,6 +437,43 @@ pub(crate) async fn call_proposal_show(
     }))
 }
 
+pub(crate) async fn call_proposal_complete(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: ProposalCompleteParams = parse_args(arguments)?;
+    let proposal_repo = ProposalRepository::new(state.db.clone(), state.event_bus.clone());
+    let Some(proposal) = proposal_repo.resolve(&p.id).await.ok().flatten() else {
+        return Err(format!("proposal not found: {}", p.id));
+    };
+    // Only a building proposal can be completed via this path. (A done/archived
+    // proposal is already terminal; refuse rather than silently re-stamp.)
+    if proposal.status != "building" {
+        return Err(format!(
+            "proposal {} is `{}`, not `building` — only a building proposal can be completed",
+            proposal.short_id, proposal.status
+        ));
+    }
+    let updated = proposal_repo
+        .set_done(&proposal.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(summary) = p.summary.as_deref().filter(|s| !s.trim().is_empty()) {
+        tracing::info!(
+            proposal_id = %updated.id,
+            proposal_short_id = %updated.short_id,
+            summary,
+            "proposal_complete: marked proposal done"
+        );
+    }
+    Ok(serde_json::json!({
+        "ok": true,
+        "id": updated.id,
+        "short_id": updated.short_id,
+        "status": updated.status,
+    }))
+}
+
 pub(crate) async fn call_epic_tasks(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,

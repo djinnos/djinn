@@ -505,12 +505,17 @@ impl CoordinatorActor {
                 self.maybe_create_planning_task(&epic).await;
             }
             // Epic updated → if the epic is now open, create a planning task
-            // (e.g. a reopened epic, or a re-emitted epic.updated).
+            // (e.g. a reopened epic, or a re-emitted epic.updated). If the epic
+            // is now closed and belongs to a proposal whose every graduated
+            // epic is closed, dispatch a Planner to review/close the proposal.
             ("epic", "updated") => {
                 let Some(epic) = envelope.parse_payload::<djinn_core::models::Epic>() else {
                     return;
                 };
                 self.maybe_create_planning_task(&epic).await;
+                if epic.status == "closed" {
+                    self.maybe_review_completed_proposal(&epic).await;
+                }
             }
             // ADR-051 §7 — exit recheck.  When a planner session ends, look
             // up the epic its task was attached to and recheck whether an

@@ -733,6 +733,62 @@ impl ProposalRepository {
         Ok(proposal)
     }
 
+    /// The proposal a graduated epic belongs to, if any. Reverse of
+    /// [`Self::link_epic`] — used by the coordinator to decide whether closing
+    /// an epic completes its parent proposal.
+    pub async fn proposal_for_epic(&self, epic_id: &str) -> Result<Option<Proposal>> {
+        self.db.ensure_initialized().await?;
+        let row = sqlx::query!(
+            "SELECT proposal_id FROM proposal_epics WHERE epic_id = $1 LIMIT 1",
+            epic_id
+        )
+        .fetch_optional(self.db.pool())
+        .await?;
+        match row {
+            Some(r) => self.get(&r.proposal_id).await,
+            None => Ok(None),
+        }
+    }
+
+    /// `true` when the proposal has graduated at least one epic AND every
+    /// graduated epic is closed. `false` for a proposal with no graduated
+    /// epics (nothing has been built yet, so there is nothing to complete).
+    pub async fn all_graduated_epics_closed(&self, proposal_id: &str) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        let row = sqlx::query!(
+            r#"SELECT
+                    COUNT(*) AS "total!: i64",
+                    COUNT(*) FILTER (WHERE e.status <> 'closed') AS "open!: i64"
+               FROM proposal_epics pe
+               JOIN epics e ON e.id = pe.epic_id
+               WHERE pe.proposal_id = $1"#,
+            proposal_id
+        )
+        .fetch_one(self.db.pool())
+        .await?;
+        Ok(row.total > 0 && row.open == 0)
+    }
+
+    /// Mark a proposal `done` (terminal). Stamps `closed_at` if not already set.
+    /// Used by the Planner's `proposal_complete` tool after reviewing the
+    /// finished build.
+    pub async fn set_done(&self, proposal_id: &str) -> Result<Proposal> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            r#"UPDATE proposals SET status = 'done',
+                    closed_at = COALESCE(closed_at, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')),
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $1"#,
+            proposal_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        let proposal = self.get_required(proposal_id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_updated(&proposal));
+        Ok(proposal)
+    }
+
     // ── Internal helpers ─────────────────────────────────────────────────────
 
     async fn get_required(&self, id: &str) -> Result<Proposal> {
@@ -1191,5 +1247,69 @@ mod tests {
         let built = repo.get(&p.id).await.unwrap().unwrap();
         assert_eq!(built.status, "building");
         assert_eq!(built.build_owner_user_id.as_deref(), Some("user-x"));
+    }
+
+    /// Helper: insert an open epic row and return its id.
+    async fn insert_epic(db: &Database, project_id: &str, short_id: &str) -> String {
+        let epic_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query!(
+            "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, status, owner, memory_refs, auto_breakdown)
+             VALUES ($1, $2, $3, 'T', '', '', '', 'open', '', '[]'::jsonb, true)",
+            epic_id,
+            project_id,
+            short_id
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        epic_id
+    }
+
+    async fn close_epic(db: &Database, epic_id: &str) {
+        sqlx::query!("UPDATE epics SET status = 'closed' WHERE id = $1", epic_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_completion_lifecycle() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proj = insert_project(&db, "svc-done").await;
+        let p = repo.create(create_input("Closeout")).await.unwrap();
+
+        let e1 = insert_epic(&db, &proj, "ce01").await;
+        let e2 = insert_epic(&db, &proj, "ce02").await;
+        repo.link_epic(&p.id, &e1, &proj).await.unwrap();
+        repo.link_epic(&p.id, &e2, &proj).await.unwrap();
+        repo.set_building(&p.id, "user-x").await.unwrap();
+
+        // Reverse lookup resolves the parent proposal.
+        assert_eq!(
+            repo.proposal_for_epic(&e1).await.unwrap().unwrap().id,
+            p.id
+        );
+        assert!(repo.proposal_for_epic("no-such-epic").await.unwrap().is_none());
+
+        // Not complete while any graduated epic is open.
+        assert!(!repo.all_graduated_epics_closed(&p.id).await.unwrap());
+        close_epic(&db, &e1).await;
+        assert!(!repo.all_graduated_epics_closed(&p.id).await.unwrap());
+        close_epic(&db, &e2).await;
+        assert!(repo.all_graduated_epics_closed(&p.id).await.unwrap());
+
+        // set_done is terminal and stamps closed_at.
+        let done = repo.set_done(&p.id).await.unwrap();
+        assert_eq!(done.status, "done");
+        assert!(done.closed_at.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn all_graduated_epics_closed_is_false_without_epics() {
+        // A proposal that has graduated nothing yet is not "complete".
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("No epics")).await.unwrap();
+        assert!(!repo.all_graduated_epics_closed(&p.id).await.unwrap());
     }
 }

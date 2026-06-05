@@ -74,6 +74,13 @@ impl IssueType {
 /// MCP tools reject -1, so only the coordinator/system can set this.
 pub const PRIORITY_CRITICAL: i64 = -1;
 
+/// Title prefix marking a Planner `epic_breakdown` task as a proposal *review*
+/// (dispatched when every graduated epic of a `building` proposal has closed)
+/// rather than the initial proposal decomposition. The coordinator stamps it
+/// onto the task title; the Planner role selects the review prompt from it.
+/// Single source of truth so the producer and consumer never drift.
+pub const PROPOSAL_REVIEW_TITLE_PREFIX: &str = "Review completed proposal";
+
 // ── close_reason literals ─────────────────────────────────────────────────────
 //
 // `close_reason` is a free-form `Option<String>` column (no DB enum) so these

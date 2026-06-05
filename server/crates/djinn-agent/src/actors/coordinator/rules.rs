@@ -9,8 +9,8 @@
 use super::reentrance::{DispatchEvent, should_auto_dispatch_planner};
 use super::*;
 use djinn_core::models::IssueType;
-use djinn_core::models::task::PRIORITY_CRITICAL;
-use djinn_db::EpicRepository;
+use djinn_core::models::task::{PRIORITY_CRITICAL, PROPOSAL_REVIEW_TITLE_PREFIX};
+use djinn_db::{EpicRepository, ProposalRepository};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -183,6 +183,146 @@ impl CoordinatorActor {
                     "CoordinatorActor: auto-dispatch suppressed by reentrance guard"
                 );
             }
+        }
+    }
+
+    /// Called when an epic transitions to `closed`. If that epic was graduated
+    /// from a proposal and every graduated epic of that proposal is now closed,
+    /// dispatch a Planner to review the finished build and decide whether to
+    /// mark the proposal `done` or spawn another round of epics.
+    ///
+    /// The proposal stays `building` throughout; this is idempotent — a review
+    /// task is created at most once per outstanding completion (deduplicated by
+    /// [`Self::open_proposal_review_task_exists`]), so re-emitted `epic.updated`
+    /// events do not stack duplicate reviews.
+    pub(super) async fn maybe_review_completed_proposal(&self, epic: &djinn_core::models::Epic) {
+        let repo = ProposalRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+
+        // Is this epic part of a proposal that is still building?
+        let proposal = match repo.proposal_for_epic(&epic.id).await {
+            Ok(Some(p)) => p,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(epic_id = %epic.id, error = %e, "CoordinatorActor: proposal_for_epic lookup failed");
+                return;
+            }
+        };
+        if proposal.status != "building" {
+            return;
+        }
+
+        // Only fire once the whole proposal is drained.
+        match repo.all_graduated_epics_closed(&proposal.id).await {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(e) => {
+                tracing::warn!(proposal_id = %proposal.id, error = %e, "CoordinatorActor: all_graduated_epics_closed check failed");
+                return;
+            }
+        }
+
+        // Home project for the review task = the proposal's first `primary`
+        // target (where graduation also lands the breakdown task), falling back
+        // to the closing epic's project if targets are unavailable.
+        let home_project_id = match repo.targets(&proposal.id).await {
+            Ok(targets) => targets
+                .iter()
+                .find(|t| t.role == "primary")
+                .map(|t| t.project_id.clone())
+                .unwrap_or_else(|| epic.project_id.clone()),
+            Err(_) => epic.project_id.clone(),
+        };
+
+        let task_repo = self.task_repo();
+
+        // Dedup: don't stack a second review while one is still open.
+        if self
+            .open_proposal_review_task_exists(&task_repo, &home_project_id, &proposal.short_id)
+            .await
+        {
+            return;
+        }
+
+        let title = format!(
+            "{PROPOSAL_REVIEW_TITLE_PREFIX} {}: {}",
+            proposal.short_id, proposal.title
+        );
+        let design = format!(
+            "All epics graduated from proposal `{}` ({}) are now closed.\n\n\
+             Call `proposal_show(id=\"{}\")` for the spec + acceptance criteria, then review what \
+             the closed epics delivered against it. Decide ONE of:\n\
+             - The proposal is satisfied → call `proposal_complete(id=\"{}\", summary=\"…\")` to \
+               mark it done.\n\
+             - Work remains → create the additional epic(s) with `epic_create(..., proposal_id=\"{}\")` \
+               and `submit_grooming(...)`. The proposal stays building and you will be re-dispatched \
+               once those epics close.\n\n\
+             This task has no `epic_id` — that is expected (you operate one level above epics).",
+            proposal.short_id, proposal.id, proposal.id, proposal.id, proposal.id,
+        );
+        let ac = serde_json::json!([
+            {"criterion": "Proposal spec read via proposal_show and the closed epics' delivery reviewed against the acceptance criteria", "met": false},
+            {"criterion": "Decision recorded: proposal_complete called, OR additional epics created (epic_create with proposal_id) and submit_grooming called", "met": false},
+        ])
+        .to_string();
+
+        match task_repo
+            .create_in_project(
+                &home_project_id,
+                None,
+                &title,
+                &design,
+                &design,
+                IssueType::EpicBreakdown.as_str(),
+                PRIORITY_CRITICAL,
+                "planner",
+                Some("open"),
+                Some(&ac),
+            )
+            .await
+        {
+            Ok(task) => {
+                // Attribute to the build owner so any new epics/commits resolve
+                // to a real account (mirrors graduation).
+                if let Some(owner) = proposal.build_owner_user_id.as_deref() {
+                    let _ = task_repo.set_created_by_user_id(&task.id, owner).await;
+                }
+                tracing::info!(
+                    proposal_id = %proposal.id,
+                    proposal_short_id = %proposal.short_id,
+                    task_short_id = %task.short_id,
+                    "CoordinatorActor: all graduated epics closed — dispatched proposal review task"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    proposal_id = %proposal.id,
+                    error = %e,
+                    "CoordinatorActor: failed to create proposal review task"
+                );
+            }
+        }
+    }
+
+    /// `true` if an open proposal-review `epic_breakdown` task already exists in
+    /// the home project for this proposal (matched by the review title marker +
+    /// the proposal's short_id). Mirrors [`Self::open_planning_task_exists`].
+    pub(super) async fn open_proposal_review_task_exists(
+        &self,
+        task_repo: &djinn_db::TaskRepository,
+        home_project_id: &str,
+        proposal_short_id: &str,
+    ) -> bool {
+        let marker = format!("{PROPOSAL_REVIEW_TITLE_PREFIX} {proposal_short_id}:");
+        match task_repo.list_by_project(home_project_id).await {
+            Ok(tasks) => tasks.iter().any(|t| {
+                t.issue_type.as_str() == "epic_breakdown"
+                    && t.status != "closed"
+                    && t.title.starts_with(&marker)
+            }),
+            Err(_) => false,
         }
     }
 
@@ -474,6 +614,47 @@ mod tests {
                     && t.status != "closed"
             })
             .count()
+    }
+
+    /// Count of open proposal-review (`epic_breakdown`) tasks for a proposal in
+    /// the given project, matched the same way the coordinator dedups them.
+    async fn review_task_count(
+        task_repo: &TaskRepository,
+        project_id: &str,
+        proposal_short_id: &str,
+    ) -> usize {
+        let marker = format!("Review completed proposal {proposal_short_id}:");
+        task_repo
+            .list_by_project(project_id)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|t| {
+                t.issue_type.as_str() == "epic_breakdown"
+                    && t.status != "closed"
+                    && t.title.starts_with(&marker)
+            })
+            .count()
+    }
+
+    async fn assert_review_task_count(
+        task_repo: &TaskRepository,
+        project_id: &str,
+        proposal_short_id: &str,
+        expected: usize,
+        message: &str,
+    ) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let count = review_task_count(task_repo, project_id, proposal_short_id).await;
+            if count == expected {
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                assert_eq!(count, expected, "{message}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
     }
 
     async fn assert_planning_task_count(
@@ -859,6 +1040,119 @@ mod tests {
             planning_count(&tasks),
             0,
             "reentrance guard must suppress new planning task while planner is active"
+        );
+    }
+
+    // ── Proposal closeout: review Planner when all graduated epics close ──────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_review_dispatched_when_all_graduated_epics_close() {
+        use djinn_db::{ProposalCreateInput, ProposalRepository};
+
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = test_helpers::create_test_project(&db).await;
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let epic_repo = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let proposal_repo = ProposalRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+        // A building proposal targeting `project`, with two graduated epics.
+        let proposal = proposal_repo
+            .create(ProposalCreateInput {
+                title: "Closeout",
+                body: "",
+                acceptance_criteria: None,
+                status: None,
+            })
+            .await
+            .unwrap();
+        proposal_repo
+            .add_target(&proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+        let e1 = make_epic(&db, &project.id, &tx).await;
+        let e2 = make_epic(&db, &project.id, &tx).await;
+        proposal_repo
+            .link_epic(&proposal.id, &e1.id, &project.id)
+            .await
+            .unwrap();
+        proposal_repo
+            .link_epic(&proposal.id, &e2.id, &project.id)
+            .await
+            .unwrap();
+        proposal_repo
+            .set_building(&proposal.id, "user-x")
+            .await
+            .unwrap();
+
+        let _handle = spawn_coordinator(&db, &tx);
+
+        // Closing the first epic must NOT fire — the proposal isn't drained yet.
+        epic_repo.close(&e1.id).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert_eq!(
+            review_task_count(&task_repo, &project.id, &proposal.short_id).await,
+            0,
+            "review must not fire while a graduated epic is still open"
+        );
+
+        // Closing the last epic drains the proposal → exactly one review task.
+        epic_repo.close(&e2.id).await.unwrap();
+        assert_review_task_count(
+            &task_repo,
+            &project.id,
+            &proposal.short_id,
+            1,
+            "all graduated epics closed should dispatch one proposal review task",
+        )
+        .await;
+
+        // A re-emitted epic.updated(closed) must not stack a duplicate review.
+        let closed_e2 = epic_repo.get(&e2.id).await.unwrap().unwrap();
+        let _ = tx.send(DjinnEventEnvelope::epic_updated(&closed_e2));
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert_eq!(
+            review_task_count(&task_repo, &project.id, &proposal.short_id).await,
+            1,
+            "re-emitted epic.updated must not create a duplicate review task"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_review_not_dispatched_when_not_building() {
+        use djinn_db::{ProposalCreateInput, ProposalRepository};
+
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let project = test_helpers::create_test_project(&db).await;
+        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let epic_repo = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let proposal_repo = ProposalRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+        // Proposal stays in draft (never graduated) but happens to have a linked
+        // epic. Closing it must not trigger a review.
+        let proposal = proposal_repo
+            .create(ProposalCreateInput {
+                title: "Draft",
+                body: "",
+                acceptance_criteria: None,
+                status: None,
+            })
+            .await
+            .unwrap();
+        let e1 = make_epic(&db, &project.id, &tx).await;
+        proposal_repo
+            .link_epic(&proposal.id, &e1.id, &project.id)
+            .await
+            .unwrap();
+
+        let _handle = spawn_coordinator(&db, &tx);
+        epic_repo.close(&e1.id).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert_eq!(
+            review_task_count(&task_repo, &project.id, &proposal.short_id).await,
+            0,
+            "a non-building proposal must not trigger a closeout review"
         );
     }
 }

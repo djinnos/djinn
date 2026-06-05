@@ -22,11 +22,22 @@ const PLANNER_PATROL: &str = include_str!("../prompts/planner/patrol.md");
 const PLANNER_DECOMPOSITION: &str = include_str!("../prompts/planner/decomposition.md");
 const PLANNER_INTERVENTION: &str = include_str!("../prompts/planner/intervention.md");
 const PLANNER_PROPOSAL: &str = include_str!("../prompts/planner/proposal.md");
+const PLANNER_PROPOSAL_REVIEW: &str = include_str!("../prompts/planner/proposal_review.md");
 
 /// Select the Planner workflow section for this dispatch. Mirrors the planner
 /// arms of [`crate::roles::flow_for_task_dispatch`] — keep them in sync.
 fn planner_mode_section(task: &Task, _ctx: &TaskContext) -> &'static str {
     match task.issue_type.as_str() {
+        // `epic_breakdown` splits by title: the coordinator stamps the
+        // review-marker prefix when all graduated epics of a proposal close
+        // (Workflow E), otherwise it's the initial decomposition (Workflow D).
+        "epic_breakdown"
+            if task
+                .title
+                .starts_with(djinn_core::models::task::PROPOSAL_REVIEW_TITLE_PREFIX) =>
+        {
+            PLANNER_PROPOSAL_REVIEW
+        }
         "epic_breakdown" => PLANNER_PROPOSAL,
         "planning" | "decomposition" => PLANNER_DECOMPOSITION,
         // Review tasks split by whether they are the periodic board patrol or a

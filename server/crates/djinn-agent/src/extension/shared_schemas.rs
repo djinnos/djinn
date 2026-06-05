@@ -183,6 +183,21 @@ pub(crate) fn tool_proposal_show() -> RmcpTool {
     )
 }
 
+pub(crate) fn tool_proposal_complete() -> RmcpTool {
+    RmcpTool::new(
+        "proposal_complete".to_string(),
+        "Mark a `building` proposal as `done` (Planner Workflow E). Call this only after reviewing a proposal whose every graduated epic has closed and confirming the delivered work meets the acceptance criteria. If work remains instead, create more epics with epic_create(proposal_id=...) rather than completing.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Proposal UUID or short ID"},
+                "summary": {"type": "string", "description": "Short note on what shipped and how it satisfies the spec (recorded in logs)."}
+            }
+        }),
+    )
+}
+
 pub(crate) fn tool_task_list() -> RmcpTool {
     RmcpTool::new(
         "task_list".to_string(),

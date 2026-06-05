@@ -794,6 +794,8 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
     // repos.
     tool_values.push(serialize_tool(shared_schemas::tool_epic_create(), false));
     tool_values.push(serialize_tool(shared_schemas::tool_proposal_show(), true));
+    // Proposal closeout (Mode E): mark a building proposal done once its epics close.
+    tool_values.push(serialize_tool(shared_schemas::tool_proposal_complete(), true));
     tool_values.push(serialize_tool(
         shared_schemas::tool_epic_blockers_list(),
         true,

@@ -130,6 +130,13 @@ pub(super) struct ProposalShowParams {
 }
 
 #[derive(Deserialize)]
+pub(super) struct ProposalCompleteParams {
+    pub id: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub(super) struct EpicTasksParams {
     pub id: String,
     pub limit: Option<i64>,
