@@ -16,7 +16,8 @@ pub struct Proposal {
     /// JSON array of acceptance-criteria strings (stored as JSONB, surfaced as
     /// text — parse with [`crate::models::parse_json_array`]).
     pub acceptance_criteria: String,
-    /// Lifecycle: `draft` | `shared` | `ready` | `archived` | `superseded`.
+    /// Lifecycle: `triage` | `draft` | `in_review` | `approved` | `building` |
+    /// `done` | `rejected` | `archived` | `superseded`.
     pub status: String,
     /// Real user FK of the author (NULL for system/agent-authored proposals).
     pub author_user_id: Option<String>,
@@ -30,6 +31,13 @@ pub struct Proposal {
     /// Participant accountable for the build once graduated (also the epic
     /// creator, so commits attribute correctly).
     pub build_owner_user_id: Option<String>,
+    /// When `true`, the build is frozen: the proposal stays `building` but its
+    /// graduated epics' tasks are held out of dispatch. Cleared to resume.
+    pub build_frozen: bool,
+    /// The `epic_breakdown` task created at graduation (1:1 with a build
+    /// generation). Set on graduate, cleared on stop. Lets a stop find and
+    /// force-close the breakdown task even before it has produced epics.
+    pub build_breakdown_task_id: Option<String>,
 }
 
 /// An immutable snapshot of a proposal's spec at a point in time. Appended on

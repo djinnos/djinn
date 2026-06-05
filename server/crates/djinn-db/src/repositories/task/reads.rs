@@ -49,8 +49,10 @@ impl TaskRepository {
         self.list_by_status_filtered(status, false).await
     }
 
-    /// Like `list_by_status`, but when `exclude_blocked` is true, omits tasks
-    /// that have unresolved blockers (blocking tasks not yet closed).
+    /// Like `list_by_status`, but when `exclude_blocked` is true, narrows to the
+    /// dispatch-readiness view: omits tasks that have unresolved blockers AND
+    /// tasks belonging to a frozen proposal build. (UI listings pass `false`, so
+    /// frozen tasks stay visible there — only dispatch holds them.)
     pub async fn list_by_status_filtered(
         &self,
         status: &str,
@@ -58,7 +60,8 @@ impl TaskRepository {
     ) -> Result<Vec<Task>> {
         self.db.ensure_initialized().await?;
         let blocker_filter = if exclude_blocked {
-            "AND NOT EXISTS (SELECT 1 FROM blockers b JOIN tasks bt ON b.blocking_task_id = bt.id WHERE b.task_id = tasks.id AND bt.status != 'closed')"
+            "AND NOT EXISTS (SELECT 1 FROM blockers b JOIN tasks bt ON b.blocking_task_id = bt.id WHERE b.task_id = tasks.id AND bt.status != 'closed')
+             AND NOT EXISTS (SELECT 1 FROM proposal_epics pe JOIN proposals p ON p.id = pe.proposal_id WHERE pe.epic_id = tasks.epic_id AND p.build_frozen = true)"
         } else {
             ""
         };

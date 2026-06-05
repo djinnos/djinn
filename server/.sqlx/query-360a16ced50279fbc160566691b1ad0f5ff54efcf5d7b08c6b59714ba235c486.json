@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, short_id, title, body,\n                    acceptance_criteria::text AS \"acceptance_criteria!\",\n                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id\n             FROM proposals WHERE id = $1 OR short_id = $2",
+  "query": "SELECT id, short_id, title, body,\n                    acceptance_criteria::text AS \"acceptance_criteria!\",\n                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id, build_frozen, build_breakdown_task_id\n             FROM proposals WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -67,11 +67,20 @@
         "ordinal": 12,
         "name": "build_owner_user_id",
         "type_info": "Varchar"
+      },
+      {
+        "ordinal": 13,
+        "name": "build_frozen",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 14,
+        "name": "build_breakdown_task_id",
+        "type_info": "Varchar"
       }
     ],
     "parameters": {
       "Left": [
-        "Text",
         "Text"
       ]
     },
@@ -88,8 +97,10 @@
       false,
       true,
       false,
+      true,
+      false,
       true
     ]
   },
-  "hash": "82b839fc4105bf7a51da9cf8126db1807e9a9c7eb28a4634206db33706e6af82"
+  "hash": "360a16ced50279fbc160566691b1ad0f5ff54efcf5d7b08c6b59714ba235c486"
 }
