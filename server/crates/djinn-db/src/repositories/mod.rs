@@ -21,6 +21,7 @@ pub mod task_run;
 pub mod test_support;
 pub mod user;
 pub mod user_settings;
+pub mod verification;
 pub mod verification_cache;
 pub mod verification_result;
 

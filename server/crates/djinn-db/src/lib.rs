@@ -90,6 +90,7 @@ pub use repositories::{
     task_run::{CreateTaskRunParams, TaskRunRepository},
     user::{User, UserRepository},
     user_settings::UserSettingsRepository,
+    verification::VerificationRepository,
     verification_cache::{CachedVerification, VerificationCacheRepository},
     verification_result::{
         VerificationResultRepository, VerificationStepInsert, VerificationStepRow,

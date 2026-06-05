@@ -1,4 +1,4 @@
-//! Contract tests for `memory_*` + `propose_adr_*` MCP tools (worktree-free).
+//! Contract tests for `memory_*` MCP tools (worktree-free).
 //!
 //! Migrated from `server/src/mcp_contract_tests/memory_tools/contract_tests.rs`.
 //! Four worktree-header tests (`mcp_memory_write_edit_delete_use_worktree_root_header_for_file_ops`,
@@ -297,52 +297,6 @@ async fn mcp_memory_move_changes_folder_title_and_permalink() {
     assert_eq!(moved["title"], "Moved Title");
     assert_eq!(moved["folder"], "research");
     assert_ne!(moved["permalink"], created["permalink"]);
-}
-
-#[tokio::test]
-async fn mcp_memory_move_can_recover_proposed_adr_and_make_it_visible_to_proposal_list() {
-    let harness = McpTestHarness::new().await;
-    let (proj, _dir) = common::create_test_project_with_dir(harness.db()).await;
-    let project = proj.slug();
-
-    let created = harness
-        .call_tool(
-            "memory_write",
-            json!({
-                "project": project,
-                "title": "Recover Me",
-                "content": "---\nwork_shape: epic\n---\n\n# Recover Me\n",
-                "type": "adr"
-            }),
-        )
-        .await
-        .expect("memory_write should dispatch");
-
-    let moved = harness
-        .call_tool(
-            "memory_move",
-            json!({
-                "project": project,
-                "identifier": created["permalink"],
-                "type": "proposed_adr"
-            }),
-        )
-        .await
-        .expect("memory_move should dispatch");
-
-    assert_eq!(moved["note_type"], "proposed_adr");
-    assert_eq!(moved["folder"], "decisions/proposed");
-
-    let proposals = harness
-        .call_tool("propose_adr_list", json!({"project": project}))
-        .await
-        .expect("propose_adr_list should dispatch");
-
-    assert!(
-        proposals["items"]
-            .as_array()
-            .is_some_and(|items| { items.iter().any(|item| item["title"] == "Recover Me") })
-    );
 }
 
 #[tokio::test]

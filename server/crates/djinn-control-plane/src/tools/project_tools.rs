@@ -333,6 +333,38 @@ pub struct ProjectEnvironmentConfigResetResponse {
     pub config: Option<ObjectJson>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct ProjectVerificationGetParams {
+    /// Project UUID or `owner/repo` slug.
+    pub project: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ProjectVerificationGetResponse {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Verification rules from the `project_verifications` table (migration
+    /// 44). Empty when the project has none.
+    pub rules: Vec<djinn_stack::environment::VerificationRule>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ProjectVerificationSetParams {
+    /// Project UUID or `owner/repo` slug.
+    pub project: String,
+    /// Full replacement set of verification rules (glob `match_pattern` +
+    /// shell `commands`). Validated server-side before persisting.
+    pub rules: Vec<djinn_stack::environment::VerificationRule>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ProjectVerificationSetResponse {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Serialize, JsonSchema)]
 pub struct ProjectConfigResponse {
     pub status: String,
@@ -1481,6 +1513,120 @@ impl DjinnMcpServer {
             status: "ok".into(),
             error: None,
             config: json,
+        })
+    }
+
+    /// Read a project's verification rules from the `project_verifications`
+    /// table (migration 44 — verification left `environment_config` so that
+    /// editing a verify command no longer rebuilds the image).
+    #[tool(
+        description = "Read a project's verification rules (glob match_pattern + shell commands). Returns an empty list when none are configured."
+    )]
+    pub async fn project_verification_get(
+        &self,
+        Parameters(input): Parameters<ProjectVerificationGetParams>,
+    ) -> Json<ProjectVerificationGetResponse> {
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+        let project_id = match repo.resolve(&input.project).await {
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                return Json(ProjectVerificationGetResponse {
+                    status: "error".into(),
+                    error: Some(format!("project not found: {}", input.project)),
+                    rules: Vec::new(),
+                });
+            }
+            Err(err) => {
+                return Json(ProjectVerificationGetResponse {
+                    status: "error".into(),
+                    error: Some(format!("db error: {err}")),
+                    rules: Vec::new(),
+                });
+            }
+        };
+        let vrepo = djinn_db::VerificationRepository::new(self.state.db().clone());
+        match vrepo.get_rules(&project_id).await {
+            Ok(Some(raw)) => match serde_json::from_str(&raw) {
+                Ok(rules) => Json(ProjectVerificationGetResponse {
+                    status: "ok".into(),
+                    error: None,
+                    rules,
+                }),
+                Err(err) => Json(ProjectVerificationGetResponse {
+                    status: "error".into(),
+                    error: Some(format!("parse rules: {err}")),
+                    rules: Vec::new(),
+                }),
+            },
+            Ok(None) => Json(ProjectVerificationGetResponse {
+                status: "ok".into(),
+                error: None,
+                rules: Vec::new(),
+            }),
+            Err(err) => Json(ProjectVerificationGetResponse {
+                status: "error".into(),
+                error: Some(format!("db error: {err}")),
+                rules: Vec::new(),
+            }),
+        }
+    }
+
+    /// Replace a project's verification rules (full replacement). Validated
+    /// server-side, then persisted to the `project_verifications` table. Does
+    /// NOT touch the image — verification is decoupled from the image build
+    /// (migration 44), so this never triggers a rebuild.
+    #[tool(
+        description = "Validate + persist a project's verification rules (full replacement). Does not rebuild the image."
+    )]
+    pub async fn project_verification_set(
+        &self,
+        Parameters(input): Parameters<ProjectVerificationSetParams>,
+    ) -> Json<ProjectVerificationSetResponse> {
+        let verification = djinn_stack::environment::Verification { rules: input.rules };
+        if let Err(err) = verification.validate() {
+            return Json(ProjectVerificationSetResponse {
+                status: "error".into(),
+                error: Some(format!("validate: {err}")),
+            });
+        }
+        let repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+        let project_id = match repo.resolve(&input.project).await {
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                return Json(ProjectVerificationSetResponse {
+                    status: "error".into(),
+                    error: Some(format!("project not found: {}", input.project)),
+                });
+            }
+            Err(err) => {
+                return Json(ProjectVerificationSetResponse {
+                    status: "error".into(),
+                    error: Some(format!("db error: {err}")),
+                });
+            }
+        };
+        let rules_json = match serde_json::to_string(&verification.rules) {
+            Ok(j) => j,
+            Err(err) => {
+                return Json(ProjectVerificationSetResponse {
+                    status: "error".into(),
+                    error: Some(format!("serialize rules: {err}")),
+                });
+            }
+        };
+        let vrepo = djinn_db::VerificationRepository::new(self.state.db().clone());
+        if let Err(err) = vrepo
+            .set_rules(&project_id, &rules_json, "user_edited")
+            .await
+        {
+            return Json(ProjectVerificationSetResponse {
+                status: "error".into(),
+                error: Some(format!("persist: {err}")),
+            });
+        }
+        Json(ProjectVerificationSetResponse {
+            status: "ok".into(),
+            error: None,
         })
     }
 }

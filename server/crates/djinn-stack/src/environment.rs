@@ -1211,8 +1211,10 @@ mod tests {
     #[test]
     fn config_no_longer_serializes_a_verification_key() {
         let json = serde_json::to_string(&EnvironmentConfig::empty()).unwrap();
+        // Match the top-level key specifically — `lifecycle.pre_verification`
+        // legitimately contains the substring "verification".
         assert!(
-            !json.contains("verification"),
+            !json.contains("\"verification\""),
             "verification moved out of EnvironmentConfig; got: {json}"
         );
     }

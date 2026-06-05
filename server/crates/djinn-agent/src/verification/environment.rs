@@ -26,8 +26,8 @@
 
 use std::path::Path;
 
-use djinn_db::{Database, ProjectRepository};
-use djinn_stack::environment::{EnvironmentConfig, Verification};
+use djinn_db::{Database, ProjectRepository, VerificationRepository};
+use djinn_stack::environment::{EnvironmentConfig, Verification, VerificationRule};
 
 /// Resolve a project id from a workspace path (exact or fuzzy prefix match).
 ///
@@ -142,23 +142,49 @@ pub async fn environment_config_for_path(db: &Database, worktree_path: &Path) ->
     }
 }
 
-/// Fetch + deserialize the `environment_config.verification` block for a
-/// project id. Thin wrapper over [`environment_config_for_project_id`]; kept
-/// for call-site readability on the verification pipeline.
+/// Fetch the verification rules for a project from the `project_verifications`
+/// table (migration 44 — verification moved out of `environment_config`).
+///
+/// Every edge case — missing row, malformed rules JSON, DB error — degrades to
+/// an empty [`Verification`] (the "no rules / vacuous pass" behaviour), logged
+/// at `warn` so misconfiguration is visible without blocking the task.
 pub async fn verification_for_project_id(db: &Database, project_id: &str) -> Verification {
-    environment_config_for_project_id(db, project_id)
+    let raw = match VerificationRepository::new(db.clone())
+        .get_rules(project_id)
         .await
-        .verification
+    {
+        Ok(Some(raw)) => raw,
+        Ok(None) => return Verification::default(),
+        Err(e) => {
+            tracing::warn!(
+                project_id = %project_id,
+                error = %e,
+                "verification::environment: failed to fetch verification rules; using empty verification config"
+            );
+            return Verification::default();
+        }
+    };
+    match serde_json::from_str::<Vec<VerificationRule>>(&raw) {
+        Ok(rules) => Verification { rules },
+        Err(e) => {
+            tracing::warn!(
+                project_id = %project_id,
+                error = %e,
+                "verification::environment: failed to deserialize verification rules; using empty verification config"
+            );
+            Verification::default()
+        }
+    }
 }
 
-/// Fetch + deserialize the `environment_config.verification` block for a
-/// workspace path. Convenience wrapper over [`verification_for_project_id`]
-/// for the verification pipeline which only has a path to the ephemeral
-/// mirror clone, not a project id.
+/// Fetch the verification rules for a workspace path. Convenience wrapper over
+/// [`verification_for_project_id`] for the verification pipeline which only has
+/// a path to the ephemeral mirror clone, not a project id.
 pub async fn verification_for_path(db: &Database, worktree_path: &Path) -> Verification {
-    environment_config_for_path(db, worktree_path)
-        .await
-        .verification
+    match resolve_project_id_for_path(db, worktree_path).await {
+        Some(id) => verification_for_project_id(db, &id).await,
+        None => Verification::default(),
+    }
 }
 
 /// Convert a [`djinn_stack::environment::HookCommand`] list (the canonical
@@ -247,19 +273,19 @@ mod tests {
         Database::open_in_memory().expect("in-memory db")
     }
 
-    async fn seed_project_with_config(db: &Database, id: &str, config_json: &str) {
+    async fn seed_project(db: &Database, id: &str, slug: &str) {
         db.ensure_initialized().await.unwrap();
-        let repo = ProjectRepository::new(db.clone(), EventBus::noop());
-        repo.create_with_id(id, &format!("p-{id}"), "test", id)
+        ProjectRepository::new(db.clone(), EventBus::noop())
+            .create_with_id(id, &format!("p-{id}"), "test", slug)
             .await
             .unwrap();
-        repo.set_environment_config(id, config_json).await.unwrap();
     }
 
-    fn minimal_cfg_json_with_rules(rules: Vec<VerificationRule>) -> String {
-        let mut cfg = EnvironmentConfig::empty();
-        cfg.verification.rules = rules;
-        serde_json::to_string(&cfg).unwrap()
+    async fn set_rules(db: &Database, id: &str, rules: Vec<VerificationRule>) {
+        djinn_db::VerificationRepository::new(db.clone())
+            .set_rules(id, &serde_json::to_string(&rules).unwrap(), "user_edited")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -271,15 +297,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_schema_version_returns_empty_verification() {
+    async fn project_without_rules_returns_empty_verification() {
         let db = test_db();
-        // After create_with_id, the DEFAULT environment_config is '{}', which
-        // deserializes to schema_version = 0. That's the pre-reseed sentinel.
-        db.ensure_initialized().await.unwrap();
-        ProjectRepository::new(db.clone(), EventBus::noop())
-            .create_with_id("p1", "p1", "test", "p1")
-            .await
-            .unwrap();
+        seed_project(&db, "p1", "p1").await;
         let v = verification_for_project_id(&db, "p1").await;
         assert!(v.rules.is_empty());
     }
@@ -287,23 +307,20 @@ mod tests {
     #[tokio::test]
     async fn returns_parsed_verification_rules() {
         let db = test_db();
-        let rules = vec![VerificationRule {
-            match_pattern: "crates/**".into(),
-            commands: vec!["cargo test".into()],
-        }];
-        seed_project_with_config(&db, "p1", &minimal_cfg_json_with_rules(rules)).await;
+        seed_project(&db, "p1", "p1").await;
+        set_rules(
+            &db,
+            "p1",
+            vec![VerificationRule {
+                match_pattern: "crates/**".into(),
+                commands: vec!["cargo test".into()],
+            }],
+        )
+        .await;
         let v = verification_for_project_id(&db, "p1").await;
         assert_eq!(v.rules.len(), 1);
         assert_eq!(v.rules[0].match_pattern, "crates/**");
         assert_eq!(v.rules[0].commands, vec!["cargo test"]);
-    }
-
-    #[tokio::test]
-    async fn malformed_config_returns_empty_verification() {
-        let db = test_db();
-        seed_project_with_config(&db, "p1", "{not valid json").await;
-        let v = verification_for_project_id(&db, "p1").await;
-        assert!(v.rules.is_empty());
     }
 
     #[test]
@@ -346,18 +363,16 @@ mod tests {
     #[tokio::test]
     async fn verification_for_path_resolves_by_fuzzy_prefix() {
         let db = test_db();
-        db.ensure_initialized().await.unwrap();
-        let repo = ProjectRepository::new(db.clone(), EventBus::noop());
-        repo.create_with_id("p1", "p1", "test", "fuzzy-proj")
-            .await
-            .unwrap();
-        let rules = vec![VerificationRule {
-            match_pattern: "**".into(),
-            commands: vec!["cargo test".into()],
-        }];
-        repo.set_environment_config("p1", &minimal_cfg_json_with_rules(rules))
-            .await
-            .unwrap();
+        seed_project(&db, "p1", "fuzzy-proj").await;
+        set_rules(
+            &db,
+            "p1",
+            vec![VerificationRule {
+                match_pattern: "**".into(),
+                commands: vec!["cargo test".into()],
+            }],
+        )
+        .await;
 
         // A subdirectory under the project path should resolve by walking
         // ancestors until `{owner}/{repo}` matches a registered project.

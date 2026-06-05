@@ -302,22 +302,31 @@ pub(crate) async fn execute_stage(
     .await;
 
     // ── Setup commands + verification context ────────────────────────────────
-    // Pre-verification hooks come from `lifecycle.pre_verification`,
-    // rules from `verification.rules`. Missing / malformed configs degrade
-    // to empty lists (see `verification::environment`). Phase 6d routes the
-    // DB lookup through `SupervisorServices` so the worker (Phase 7) gets
-    // it via RPC without opening its own DB pool.
+    // Pre-verification hooks come from `lifecycle.pre_verification` (via the
+    // SupervisorServices RPC). Verification rules moved out of
+    // `environment_config` into the `project_verifications` table (migration
+    // 44), so they're fetched directly via `agent_context.db` — the same
+    // direct-DB path the verification *executor* uses
+    // (`actors::slot::verification`), and consistent with the
+    // `ProjectRepository` already built from `agent_context.db` above. Missing
+    // / malformed configs degrade to empty lists (see `verification::environment`).
     let env_config = services
         .get_environment_config(task.project_id.clone())
         .await
         .map_err(|e| StageError::Setup(format!("env_config: {e}")))?;
+    let verification_rules = crate::verification::environment::verification_for_project_id(
+        &agent_context.db,
+        &task.project_id,
+    )
+    .await
+    .rules;
     let SetupAndVerificationContext {
         prompt_setup_commands,
         prompt_verification_commands,
         prompt_verification_rules,
     } = match resolve_setup_and_verification_context(
         env_config.lifecycle.pre_verification,
-        env_config.verification.rules,
+        verification_rules,
         role_verification_command.as_deref(),
         worktree_path,
         &task.id,

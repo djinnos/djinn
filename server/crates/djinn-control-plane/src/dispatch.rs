@@ -10,8 +10,9 @@ use crate::tools::credential_tools::{
     CredentialDeleteInput, CredentialListInput, CredentialSetInput,
 };
 use crate::tools::epic_tools::{
-    EpicCloseParams, EpicCountParams, EpicCreateParams, EpicDeleteParams, EpicListParams,
-    EpicReadSourceParams, EpicReopenParams, EpicShowParams, EpicTasksParams, EpicUpdateParams,
+    EpicBlockersParams, EpicCloseParams, EpicCountParams, EpicCreateParams, EpicDeleteParams,
+    EpicListParams, EpicReadSourceParams, EpicReopenParams, EpicShowParams, EpicTasksParams,
+    EpicUpdateParams,
 };
 use crate::tools::execution_tools::{ExecutionKillTaskParams, SessionForTaskParams};
 use crate::tools::github_app_tools::{GithubAppInstallUrlParams, GithubAppInstallationsParams};
@@ -29,7 +30,8 @@ use crate::tools::project_tools::{
     ProjectAddFromGithubParams, ProjectBranchesParams, ProjectConfigGetParams,
     ProjectConfigSetParams, ProjectEnvironmentConfigGetParams, ProjectEnvironmentConfigResetParams,
     ProjectEnvironmentConfigSetParams, ProjectGraphExclusionsGetParams,
-    ProjectGraphExclusionsSetParams, ProjectRemoveParams, RetriggerImageBuildParams,
+    ProjectGraphExclusionsSetParams, ProjectRemoveParams, ProjectVerificationGetParams,
+    ProjectVerificationSetParams, RetriggerImageBuildParams,
 };
 use crate::tools::proposal_tools::{
     ProposalCreateParams, ProposalDeleteParams, ProposalFeedbackAcceptParams,
@@ -167,6 +169,16 @@ impl DjinnMcpServer {
                 self.epic_delete(Parameters(decode_args::<EpicDeleteParams>(name, args)?))
                     .await,
             ),
+            "epic_blockers_list" => map_json(
+                name,
+                self.epic_blockers_list(Parameters(decode_args::<EpicBlockersParams>(name, args)?))
+                    .await,
+            ),
+            "epic_blocked_list" => map_json(
+                name,
+                self.epic_blocked_list(Parameters(decode_args::<EpicBlockersParams>(name, args)?))
+                    .await,
+            ),
             "epic_tasks" => map_json(
                 name,
                 self.epic_tasks(Parameters(decode_args::<EpicTasksParams>(name, args)?))
@@ -281,6 +293,20 @@ impl DjinnMcpServer {
                 name,
                 self.project_environment_config_reset(Parameters(decode_args::<
                     ProjectEnvironmentConfigResetParams,
+                >(name, args)?))
+                    .await,
+            ),
+            "project_verification_get" => map_json(
+                name,
+                self.project_verification_get(Parameters(decode_args::<
+                    ProjectVerificationGetParams,
+                >(name, args)?))
+                    .await,
+            ),
+            "project_verification_set" => map_json(
+                name,
+                self.project_verification_set(Parameters(decode_args::<
+                    ProjectVerificationSetParams,
                 >(name, args)?))
                     .await,
             ),
