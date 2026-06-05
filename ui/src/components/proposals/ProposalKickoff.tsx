@@ -103,7 +103,12 @@ export function ProposalKickoff({
         <span className="text-sm">Owner</span>
         <Select value={owner} onValueChange={(v) => typeof v === "string" && setOwner(v)}>
           <SelectTrigger className="h-8 w-[200px] text-sm">
-            <SelectValue placeholder="Pick a participant" />
+            {/* Render the resolved name explicitly: `owner` is set
+                programmatically, so Radix never captures the selected item's
+                text and SelectValue would otherwise fall back to the raw id. */}
+            <SelectValue placeholder="Pick a participant">
+              {owner ? nameFor(owner) : undefined}
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             {participants.map((id) => (
