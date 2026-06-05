@@ -461,14 +461,27 @@ pub(crate) async fn execute_stage(
     conversation.push(Message::user(initial_user_message));
 
     // ── Run the reply loop ───────────────────────────────────────────────────
-    let (reply_result, final_output, tokens_in, tokens_out) = run_reply_loop(
+    //
+    // Scope the whole loop under `SESSION_USER_ID = task creator` so every
+    // entity the agent creates via a tool call (epics from the proposal-
+    // decomposition planner, tasks from a wave planner, memory notes) inherits
+    // the right owner via `auth_context::current_user_id()` — and therefore
+    // dispatches under that owner's model/credentials. Without this the worker
+    // pod runs outside any user scope: `current_user_id()` is `None`, so
+    // `epic_create` stamped NULL and downstream wave-planner tasks fell back to
+    // the automation user (losing both attribution and the build owner's model
+    // the user picked at kickoff). The host already scopes credential
+    // resolution this way (supervisor_runner.rs); this extends the same
+    // identity to in-pod tool execution.
+    let project_path_str = worktree_path.display().to_string();
+    let reply_loop_fut = run_reply_loop(
         ReplyLoopContext {
             provider: provider_ref,
             tools: &tools,
             task_id: &task.id,
             task_short_id: &task.short_id,
             session_id: &session_id,
-            project_path: &worktree_path.display().to_string(),
+            project_path: &project_path_str,
             worktree_path,
             role_name,
             finalize_tool_names: role.config().finalize_tool_names,
@@ -484,8 +497,11 @@ pub(crate) async fn execute_stage(
         },
         &mut conversation,
         false,
-    )
-    .await;
+    );
+    let (reply_result, final_output, tokens_in, tokens_out) =
+        djinn_core::auth_context::SESSION_USER_ID
+            .scope(task.created_by_user_id.clone(), reply_loop_fut)
+            .await;
 
     // ── Finalize session ─────────────────────────────────────────────────────
     let session_status = if reply_result.is_ok() {
