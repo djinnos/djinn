@@ -136,7 +136,7 @@ export function ProposalKickoff({
         </Button>
       </div>
       <p className="text-xs text-muted-foreground">
-        Creates one epic per primary target project and hands it to djinn to build.
+        Hands the proposal to djinn's planner, which breaks it down into epics across the target repos and builds it.
       </p>
     </div>
   );

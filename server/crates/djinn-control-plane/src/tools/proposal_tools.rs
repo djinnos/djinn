@@ -764,7 +764,7 @@ impl DjinnMcpServer {
 
     /// Kick off an approved proposal — graduate it into the execution engine.
     #[tool(
-        description = "Kick off an approved proposal: create one epic per `primary` target project (spec body + acceptance criteria become the epic, sibling targets become read-sources), set status to `building`, and record the build owner (must be a participant — the author or a sign-off giver; defaults to the caller). Requires the proposal to be `approved` and the engineer role (or admin)."
+        description = "Kick off an approved proposal: hand it to the Planner (a single `epic_breakdown` task on the first primary target) which reads the spec + target repos and breaks it down into epics across the targets, set status to `building`, and record the build owner (must be a participant — the author or a sign-off giver; defaults to the caller). Requires the proposal to be `approved` and the engineer role (or admin)."
     )]
     pub async fn proposal_graduate(
         &self,

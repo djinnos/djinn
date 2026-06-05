@@ -82,7 +82,15 @@ pub fn compute_environment_hash(config: &EnvironmentConfig, agent_worker_ref: &s
     // The two script edits already move script_sha, but the HOME ENV line is a
     // hardcoded const here too, so bump the salt to document + guarantee the
     // rebuild.
-    hasher.update(b"env-config/v6\0");
+    //
+    // v6→v7: `verification` left `EnvironmentConfig` (it now lives in the
+    // `project_verifications` table — verification edits no longer rebuild the
+    // image). Removing the field already changes `config_json` for every
+    // existing row, but bump the salt to document the decoupling and guarantee
+    // the one-time rebuild. The hash is now build-only: it covers languages,
+    // workspaces, system_packages, env, lifecycle, and the script/worker refs —
+    // not the runtime-only verification rules.
+    hasher.update(b"env-config/v7\0");
     hasher.update(config_json.as_bytes());
     hasher.update([0u8]);
     hasher.update(script_sha.as_bytes());

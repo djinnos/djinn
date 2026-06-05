@@ -112,8 +112,6 @@ pub struct EnvironmentConfig {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub lifecycle: LifecycleHooks,
-    #[serde(default)]
-    pub verification: Verification,
     /// Per-agent-role MCP server defaults. Moved here from the pre-cut-over
     /// `.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role
     /// name (e.g. `"worker"`, `"chat"`) or `"*"` for the fallback applied to
@@ -141,7 +139,6 @@ impl EnvironmentConfig {
             system_packages: Vec::new(),
             env: BTreeMap::new(),
             lifecycle: LifecycleHooks::default(),
-            verification: Verification::default(),
             agent_mcp_defaults: BTreeMap::new(),
             global_skills: Vec::new(),
         }
@@ -156,8 +153,11 @@ impl EnvironmentConfig {
     /// * `languages.*` — one entry per language detected in the stack.
     /// * `workspaces` — one entry per `StackWorkspace`, with
     ///   toolchain/version routed to the right field per language.
-    /// * `verification.rules` — safe default rules for Rust / Go workspaces.
     /// * `env`, `system_packages`, `lifecycle` — empty.
+    ///
+    /// Verification rules are no longer part of this config — they live in the
+    /// `project_verifications` table now. Seed them via
+    /// [`default_verification_rules`].
     pub fn from_stack(stack: &crate::schema::Stack) -> Self {
         let mut cfg = Self::empty();
         cfg.source = ConfigSource::AutoDetected;
@@ -276,18 +276,6 @@ impl EnvironmentConfig {
             })
             .collect();
 
-        // Auto-populate verification rules per detected workspace using
-        // language-primitive commands that succeed without project-
-        // specific configuration. Node/Python/Java/Ruby/Dotnet/Clang
-        // are skipped because their verification surface depends on
-        // package.json scripts / pyproject extras / pom targets that
-        // the user has to wire explicitly. Rust + Go have a safe default.
-        cfg.verification.rules = stack
-            .workspaces
-            .iter()
-            .filter_map(|ws| default_verification_rule(&ws.language, &ws.root))
-            .collect();
-
         cfg
     }
 
@@ -309,7 +297,6 @@ impl EnvironmentConfig {
         validate_package_list("system_packages", &self.system_packages)?;
         validate_env(&self.env)?;
         self.lifecycle.validate()?;
-        self.verification.validate()?;
         Ok(())
     }
 }
@@ -781,7 +768,7 @@ pub struct Verification {
 }
 
 impl Verification {
-    fn validate(&self) -> EnvResult<()> {
+    pub fn validate(&self) -> EnvResult<()> {
         if self.rules.len() > MAX_VERIFICATION_RULES {
             return Err(EnvironmentConfigError::ListTooLong {
                 field: "verification.rules".into(),
@@ -872,6 +859,20 @@ fn default_verification_rule(language: &str, root: &str) -> Option<VerificationR
         }
         _ => None,
     }
+}
+
+/// Safe default verification rules for a freshly-detected stack — one rule per
+/// workspace whose language has a language-primitive command set (Rust, Go).
+/// Extracted from `from_stack` when verification moved out of
+/// `EnvironmentConfig` into its own `project_verifications` store; the boot
+/// reseed hook and the on-demand reset path seed the verification table with
+/// the output.
+pub fn default_verification_rules(stack: &crate::schema::Stack) -> Vec<VerificationRule> {
+    stack
+        .workspaces
+        .iter()
+        .filter_map(|ws| default_verification_rule(&ws.language, &ws.root))
+        .collect()
 }
 
 // ---- string validators --------------------------------------------------
@@ -1193,16 +1194,54 @@ mod tests {
 
     #[test]
     fn verification_rule_with_empty_commands_rejected() {
-        let mut cfg = valid_minimal();
-        cfg.verification.rules = vec![VerificationRule {
-            match_pattern: "**".to_owned(),
-            commands: vec![],
-        }];
-        let err = cfg.validate().unwrap_err();
+        // Verification now validates standalone (it left EnvironmentConfig).
+        let v = Verification {
+            rules: vec![VerificationRule {
+                match_pattern: "**".to_owned(),
+                commands: vec![],
+            }],
+        };
+        let err = v.validate().unwrap_err();
         assert!(matches!(
             err,
             EnvironmentConfigError::EmptyVerificationCommands { .. }
         ));
+    }
+
+    #[test]
+    fn config_no_longer_serializes_a_verification_key() {
+        let json = serde_json::to_string(&EnvironmentConfig::empty()).unwrap();
+        assert!(
+            !json.contains("verification"),
+            "verification moved out of EnvironmentConfig; got: {json}"
+        );
+    }
+
+    #[test]
+    fn default_verification_rules_seeds_rust_and_go_only() {
+        let mut stack = crate::schema::Stack::empty();
+        stack.workspaces = vec![
+            crate::schema::StackWorkspace {
+                root: "".into(),
+                language: "rust".into(),
+                toolchain: None,
+                package_manager: None,
+            },
+            crate::schema::StackWorkspace {
+                root: "svc".into(),
+                language: "go".into(),
+                toolchain: None,
+                package_manager: None,
+            },
+            crate::schema::StackWorkspace {
+                root: "web".into(),
+                language: "node".into(),
+                toolchain: None,
+                package_manager: Some("pnpm".into()),
+            },
+        ];
+        // Rust + Go get a safe default; Node does not.
+        assert_eq!(default_verification_rules(&stack).len(), 2);
     }
 
     #[test]
@@ -1367,8 +1406,7 @@ mod tests {
             ],
             "system_packages": ["postgresql-client"],
             "env": {"RUST_LOG": "info"},
-            "lifecycle": {"post_build": [], "pre_anything": [], "pre_task": [], "pre_verification": []},
-            "verification": {"rules": []}
+            "lifecycle": {"post_build": [], "pre_anything": [], "pre_task": [], "pre_verification": []}
         }"#;
         let cfg: EnvironmentConfig = serde_json::from_str(raw).unwrap();
         cfg.validate().unwrap();
