@@ -28,17 +28,15 @@ const MAX_TURNS: u32 = 1000;
 
 /// Resolve the effective step cap for this reply loop.
 ///
-/// Defaults to [`MAX_TURNS`]. Overridable via `DJINN_REPLY_LOOP_MAX_TURNS` so
-/// the graceful wind-down path (G9) can be exercised with a small cap in tests
-/// without driving a thousand mock turns. Values `<= 1` are clamped to `2`
-/// because the wind-down consumes one of the permitted turns — a cap of 1 would
-/// leave no room to do any real work before winding down.
-fn effective_max_turns() -> u32 {
-    std::env::var("DJINN_REPLY_LOOP_MAX_TURNS")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .map(|v| v.max(2))
-        .unwrap_or(MAX_TURNS)
+/// Defaults to [`MAX_TURNS`]. An explicit `override` (set on
+/// [`ReplyLoopContext::max_turns_override`]) takes precedence so the graceful
+/// wind-down path (G9) can be exercised with a small cap in tests without
+/// driving a thousand mock turns — and without mutating a process-global env
+/// var that races concurrent tests. Values `<= 1` are clamped to `2` because
+/// the wind-down consumes one of the permitted turns — a cap of 1 would leave
+/// no room to do any real work before winding down.
+fn effective_max_turns(override_value: Option<u32>) -> u32 {
+    override_value.map(|v| v.max(2)).unwrap_or(MAX_TURNS)
 }
 
 /// Persist a single conversation message to `session_messages`, best-effort.
@@ -135,6 +133,11 @@ pub(crate) struct ReplyLoopContext<'a> {
     pub active_skill_names: &'a [String],
     /// MCP server names connected in this session (for Langfuse metadata).
     pub active_mcp_server_names: &'a [String],
+    /// Optional override for the per-session step cap (defaults to
+    /// [`MAX_TURNS`]). Used by tests to exercise the graceful wind-down (G9)
+    /// path with a tiny cap without driving a thousand mock turns. Production
+    /// callers pass `None`.
+    pub max_turns_override: Option<u32>,
 }
 
 /// Djinn-native reply loop. Drives an `LlmProvider` stream, dispatches tool
@@ -167,6 +170,7 @@ pub(crate) async fn run_reply_loop(
         mcp_registry,
         active_skill_names,
         active_mcp_server_names,
+        max_turns_override,
     } = ctx;
 
     let tool_metadata = tool_concurrency_safety(tools);
@@ -294,7 +298,7 @@ pub(crate) async fn run_reply_loop(
         let mut last_assistant_text = String::new();
 
         let mut turns: u32 = 0;
-        let max_turns = effective_max_turns();
+        let max_turns = effective_max_turns(max_turns_override);
         // G9: graceful step-cap wind-down. When the loop reaches the final
         // permitted turn we inject a one-shot directive asking the agent to
         // summarize work done + what remains, then allow EXACTLY ONE more turn
@@ -1151,6 +1155,7 @@ mod tests {
                 mcp_registry: None,
                 active_skill_names: &[],
                 active_mcp_server_names: &[],
+                max_turns_override: None,
             },
             &mut conv,
             false,
@@ -1241,6 +1246,7 @@ mod tests {
                 mcp_registry: None,
                 active_skill_names: &[],
                 active_mcp_server_names: &[],
+                max_turns_override: None,
             },
             &mut conv,
             false,
@@ -1381,6 +1387,7 @@ mod tests {
                 mcp_registry: None,
                 active_skill_names: &[],
                 active_mcp_server_names: &[],
+                max_turns_override: None,
             },
             &mut conv,
             false,
@@ -1605,6 +1612,7 @@ mod tests {
                 mcp_registry: None,
                 active_skill_names: &[],
                 active_mcp_server_names: &[],
+                max_turns_override: None,
             },
             &mut conv,
             false,
@@ -1665,6 +1673,7 @@ mod tests {
                 mcp_registry: None,
                 active_skill_names: &[],
                 active_mcp_server_names: &[],
+                max_turns_override: None,
             },
             &mut conv,
             false,
@@ -1737,6 +1746,7 @@ mod tests {
                 mcp_registry: None,
                 active_skill_names: &[],
                 active_mcp_server_names: &[],
+                max_turns_override: None,
             },
             &mut conv,
             false,
@@ -1834,6 +1844,7 @@ mod tests {
                 mcp_registry: None,
                 active_skill_names: &[],
                 active_mcp_server_names: &[],
+                max_turns_override: None,
             },
             &mut conv,
             false,
@@ -1882,9 +1893,9 @@ mod tests {
     /// captured before the loop ends gracefully (Ok).
     #[tokio::test]
     async fn max_step_cap_injects_wind_down_and_ends_gracefully() {
-        // Cap the loop at 3 turns so we don't drive 1000 mock turns.
-        unsafe { std::env::set_var("DJINN_REPLY_LOOP_MAX_TURNS", "3") };
-
+        // Cap the loop at 3 turns so we don't drive 1000 mock turns. Passed
+        // explicitly via `max_turns_override` rather than a process-global env
+        // var so concurrent tests can't race each other's cap.
         let tools = vec![dummy_tool_schema("submit_work")];
 
         // Turns 1..=3: tool calls keep the loop running up to the cap.
@@ -1927,13 +1938,12 @@ mod tests {
                 mcp_registry: None,
                 active_skill_names: &[],
                 active_mcp_server_names: &[],
+                max_turns_override: Some(3),
             },
             &mut conv,
             false,
         )
         .await;
-
-        unsafe { std::env::remove_var("DJINN_REPLY_LOOP_MAX_TURNS") };
 
         assert!(
             result.is_ok(),
@@ -1974,8 +1984,8 @@ mod tests {
     /// back to the existing hard-error behavior after exactly one extra turn.
     #[tokio::test]
     async fn max_step_wind_down_ignored_falls_back_to_hard_error() {
-        unsafe { std::env::set_var("DJINN_REPLY_LOOP_MAX_TURNS", "3") };
-
+        // Cap explicitly via `max_turns_override` (no process-global env var,
+        // which would race concurrent tests).
         let tools = vec![dummy_tool_schema("submit_work")];
 
         // Turns 1..=3 fill the cap; turn 4 (wind-down) is ALSO a tool call →
@@ -2015,13 +2025,12 @@ mod tests {
                 mcp_registry: None,
                 active_skill_names: &[],
                 active_mcp_server_names: &[],
+                max_turns_override: Some(3),
             },
             &mut conv,
             false,
         )
         .await;
-
-        unsafe { std::env::remove_var("DJINN_REPLY_LOOP_MAX_TURNS") };
 
         assert!(
             result.is_err(),

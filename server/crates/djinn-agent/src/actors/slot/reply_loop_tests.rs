@@ -84,6 +84,7 @@ async fn run_with_provider(
             mcp_registry: None,
             active_skill_names: &[],
             active_mcp_server_names: &[],
+            max_turns_override: None,
         },
         conversation,
         false,

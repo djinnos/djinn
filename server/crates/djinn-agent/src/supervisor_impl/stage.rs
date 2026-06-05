@@ -494,6 +494,7 @@ pub(crate) async fn execute_stage(
             mcp_registry: mcp_registry.as_ref(),
             active_skill_names: &effective_skills,
             active_mcp_server_names: &effective_mcp_servers,
+            max_turns_override: None,
         },
         &mut conversation,
         false,
