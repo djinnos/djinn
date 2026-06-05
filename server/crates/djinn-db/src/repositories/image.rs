@@ -339,46 +339,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_dispatch_image_applies_catalog_precedence() {
-        use crate::repositories::project::ProjectImage;
+    async fn resolve_dispatch_image_is_catalog_only() {
         let db = Database::open_in_memory().unwrap();
         seed_project(&db, "p1").await;
         let images = ImageRepository::new(db.clone());
         let projects = ProjectRepository::new(db.clone(), EventBus::noop());
 
-        // No catalog image + no per-project image → not ready (tag None).
+        // Unknown project → None.
+        assert!(projects.resolve_dispatch_image("nope").await.unwrap().is_none());
+
+        // No catalog image assigned → project exists but is NOT dispatchable
+        // (projects no longer build a bespoke image — they need a catalog one).
         let d = projects.resolve_dispatch_image("p1").await.unwrap().unwrap();
         assert_eq!(d.from_catalog, None);
         assert!(d.pull_ref().is_none());
 
-        // Give the project its own ready per-project image.
-        projects
-            .set_project_image(
-                "p1",
-                &ProjectImage {
-                    tag: Some("reg/djinn-project-p1:hash".into()),
-                    hash: Some("hash".into()),
-                    status: "ready".into(),
-                    last_error: None,
-                },
-            )
-            .await
-            .unwrap();
-        let d = projects.resolve_dispatch_image("p1").await.unwrap().unwrap();
-        assert_eq!(d.from_catalog, None);
-        assert_eq!(d.pull_ref().as_deref(), Some("reg/djinn-project-p1:hash"));
-
-        // Assign a catalog image that is NOT ready yet — it takes precedence,
-        // and because it isn't ready the project is NOT dispatchable (no
-        // silent fall-back to the still-ready per-project image).
+        // Assign a catalog image that is NOT ready yet → not dispatchable.
         images.create("i1", "Rust", None, "{}").await.unwrap();
         images.set_project_image("p1", Some("i1")).await.unwrap();
         let d = projects.resolve_dispatch_image("p1").await.unwrap().unwrap();
         assert_eq!(d.from_catalog.as_deref(), Some("i1"));
-        assert!(
-            d.pull_ref().is_none(),
-            "catalog image not ready ⇒ project not dispatchable, no per-project fallback"
-        );
+        assert!(d.pull_ref().is_none(), "catalog image not ready ⇒ not dispatchable");
 
         // Mark the catalog image ready with a digest → digest-pinned pull ref.
         images
@@ -393,11 +374,11 @@ mod tests {
             "ready catalog image with a digest dispatches on the digest-pinned ref"
         );
 
-        // Clearing the selection reverts to the per-project image.
+        // Clearing the selection → back to not-dispatchable (needs setup).
         images.set_project_image("p1", None).await.unwrap();
         let d = projects.resolve_dispatch_image("p1").await.unwrap().unwrap();
         assert_eq!(d.from_catalog, None);
-        assert_eq!(d.pull_ref().as_deref(), Some("reg/djinn-project-p1:hash"));
+        assert!(d.pull_ref().is_none());
     }
 
     #[tokio::test]

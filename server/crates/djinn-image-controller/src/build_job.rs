@@ -73,14 +73,16 @@ impl BuildSubject {
         }
     }
 
-    /// Kind-prefixed, DNS-safe segment used in k8s resource names (Job +
-    /// ConfigMap) and the image-tag repository. Prefixing keeps the project
-    /// and image namespaces from ever colliding even if ids overlapped.
+    /// DNS-safe segment used in k8s resource names (Job + ConfigMap) and the
+    /// registry cache repo. The raw uuid only — NO kind prefix: a Job name
+    /// (`djinn-build-<id>-<hash>`) becomes the auto-injected `job-name` pod
+    /// label, which is capped at 63 chars, and `djinn-build-` + a 36-char
+    /// uuid + `-` + a 12-char hash already lands at 61. An `img-`/`proj-`
+    /// prefix would overflow it. Project and image ids are both distinct
+    /// uuidv7s, so the bare id never collides across the two namespaces; the
+    /// correlator label ([`Self::label`]) is what tells them apart.
     pub fn resource_segment(&self) -> String {
-        match self {
-            Self::Project(id) => sanitize_id(id),
-            Self::Image(id) => sanitize_id(&format!("img-{id}")),
-        }
+        sanitize_id(self.id())
     }
 
     /// The image-tag repository segment: `djinn-project-<id>` for projects,
@@ -636,11 +638,30 @@ mod tests {
         // The label VALUE round-trips the raw id (DB key) losslessly.
         assert_eq!(proj.label().1, "019e51db-proj");
         assert_eq!(img.label().1, "019e9907-img");
-        // Resource + tag segments are kind-prefixed so the two namespaces
-        // can never collide on a shared registry / in k8s resource names.
-        assert_eq!(img.resource_segment(), "img-019e9907-img");
+        // Resource segment is the bare id (no kind prefix) to fit the 63-char
+        // job-name label budget; the tag REPO segment is kind-prefixed so the
+        // registry namespaces stay distinct.
+        assert_eq!(img.resource_segment(), "019e9907-img");
+        assert_eq!(proj.resource_segment(), "019e51db-proj");
         assert_eq!(proj.tag_repo_segment(), "djinn-project-019e51db-proj");
         assert_eq!(img.tag_repo_segment(), "djinn-image-019e9907-img");
+    }
+
+    #[test]
+    fn catalog_build_job_name_fits_dns_label_budget() {
+        // Regression: an `img-`-prefixed segment overflowed the auto-injected
+        // `job-name` pod label (>63 chars) and every catalog build 422'd.
+        let cfg = test_cfg();
+        let ctx = test_build_context();
+        let job = build_image_build_job(
+            &cfg,
+            &BuildSubject::image("019e9907-3685-7041-a7b7-246adf24c2d0"),
+            "6812838f6587",
+            "reg/djinn-image-019e9907-3685-7041-a7b7-246adf24c2d0:6812838f6587",
+            &ctx,
+        );
+        let name = job.metadata.name.as_deref().unwrap();
+        assert!(name.len() <= 63, "job name {} is {} chars", name, name.len());
     }
 
     #[test]
@@ -657,7 +678,7 @@ mod tests {
         let labels = job.metadata.labels.as_ref().unwrap();
         assert_eq!(labels.get(LABEL_IMAGE_ID).map(String::as_str), Some("img-1"));
         assert!(!labels.contains_key(LABEL_PROJECT_ID));
-        assert_eq!(job.metadata.name.as_deref(), Some("djinn-build-img-img-1-abc123"));
+        assert_eq!(job.metadata.name.as_deref(), Some("djinn-build-img-1-abc123"));
     }
 
     #[test]
@@ -677,8 +698,7 @@ mod tests {
             .unwrap()[2];
         assert!(script.contains("--metadata-file"), "script:\n{script}");
         assert!(script.contains("DJINN_IMAGE_DIGEST="), "script:\n{script}");
-        // Cache is keyed by the kind-prefixed subject segment so project and
-        // image caches don't clobber each other.
-        assert!(script.contains("/cache/img-img-1"), "script:\n{script}");
+        // Cache is keyed by the (bare) subject id.
+        assert!(script.contains("/cache/img-1"), "script:\n{script}");
     }
 }

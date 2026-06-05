@@ -26,6 +26,7 @@ interface ImageStatusBadgeProps {
 }
 
 type BadgeState =
+  | { kind: "needs_image" }
   | { kind: "building"; status: DevcontainerStatus }
   | { kind: "failed"; status: DevcontainerStatus }
   | { kind: "warming"; status: DevcontainerStatus }
@@ -34,6 +35,11 @@ type BadgeState =
 
 function deriveState(status: DevcontainerStatus | null): BadgeState {
   if (!status) return { kind: "unknown" };
+  // A project with no catalog image assigned can't build/dispatch — surface
+  // the setup state ahead of any build/warm status (migration 46 cut-over).
+  if (status.needs_image) {
+    return { kind: "needs_image" };
+  }
   if (status.image_status === "building") {
     return { kind: "building", status };
   }
@@ -56,6 +62,8 @@ interface BadgeDescriptor {
 
 function describeBadge(state: BadgeState): BadgeDescriptor | null {
   switch (state.kind) {
+    case "needs_image":
+      return { tone: "warn", label: "Needs image", pulse: false };
     case "building":
       return { tone: "info", label: "Building", pulse: true };
     case "warming":
@@ -208,6 +216,30 @@ function StatusDetail({
   if (state.kind === "ready" || state.kind === "unknown") return null;
 
   const label = projectName ? ` for ${projectName}` : "";
+
+  // "Needs image" is a setup state, not a build state — render its own panel
+  // (it carries no DevcontainerStatus payload).
+  if (state.kind === "needs_image") {
+    return (
+      <div className="flex items-start gap-2.5">
+        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-amber-500/20">
+          <HugeiconsIcon icon={Alert02Icon} className="size-3.5 text-amber-300" />
+        </div>
+        <div className="flex min-w-0 flex-col gap-0.5">
+          <h3 className="text-sm font-semibold text-amber-200">
+            No catalog image{label}
+          </h3>
+          <p className="text-xs text-muted-foreground">
+            This project has no runtime image. Open its{" "}
+            <span className="font-medium text-foreground">Environment</span> page
+            (the gear icon) and assign a shared catalog image — tasks can&rsquo;t
+            build or dispatch until one is set.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   const isError = state.kind === "failed";
   const isInfo = state.kind === "building" || state.kind === "warming";
 
@@ -217,14 +249,14 @@ function StatusDetail({
 
   const title =
     state.kind === "building"
-      ? `Building project image${label}`
+      ? `Building catalog image${label}`
       : state.kind === "warming"
       ? `Warming code graph${label}`
       : `Image build failed${label}`;
 
   const description =
     state.kind === "building"
-      ? "The per-project image is being built in the cluster. This usually takes 1–3 minutes on first build; cached layers make subsequent rebuilds much faster."
+      ? "The shared catalog image this project uses is being built in the cluster. This usually takes 1–3 minutes on first build; cached layers make subsequent rebuilds much faster, and every project on this image shares the result."
       : state.kind === "warming"
       ? "The image is ready. Djinn is now indexing the project's code graph inside that image — task dispatch stays paused until the first warm completes."
       : state.status.image_last_error

@@ -1,6 +1,5 @@
 ---
 source: src/server/tests/tool_schemas.rs
-assertion_line: 265
 expression: signatures
 ---
 [
@@ -2584,17 +2583,22 @@ expression: signatures
           "type": "string"
         },
         "image_status": {
-          "description": "One of `none | building | ready | failed`.",
+          "description": "One of `none | building | ready | failed`. Reflects the project's\nassigned **catalog** image (migration 46) — projects no longer build a\nbespoke per-project image.",
           "type": "string"
         },
         "image_tag": {
           "description": "Content-addressable image tag from the last successful build, or\n`None` when no build has completed.",
           "nullable": true,
           "type": "string"
+        },
+        "needs_image": {
+          "description": "`true` when the project has no catalog image assigned yet — it needs\nsetup (pick an image) before it can build/dispatch. The UI surfaces\nthis as a distinct \"Needs image\" state rather than a build status.",
+          "type": "boolean"
         }
       },
       "required": [
         "image_status",
+        "needs_image",
         "graph_warm_status"
       ],
       "title": "GetProjectDevcontainerStatusResponse",

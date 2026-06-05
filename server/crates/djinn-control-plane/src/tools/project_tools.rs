@@ -11,7 +11,7 @@ use djinn_core::auth_context::current_user_token;
 use djinn_core::models::Project;
 use djinn_core::paths::project_dir;
 use djinn_db::{
-    OrgConfigRepository, ProjectConfig, ProjectImage, ProjectImageStatus, ProjectRepository,
+    OrgConfigRepository, ProjectConfig, ProjectImageStatus, ProjectRepository,
     RepoGraphCacheRepository,
 };
 use djinn_stack::Stack;
@@ -248,8 +248,14 @@ pub struct GetProjectDevcontainerStatusResponse {
     /// `None` when no build has completed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_tag: Option<String>,
-    /// One of `none | building | ready | failed`.
+    /// One of `none | building | ready | failed`. Reflects the project's
+    /// assigned **catalog** image (migration 46) — projects no longer build a
+    /// bespoke per-project image.
     pub image_status: String,
+    /// `true` when the project has no catalog image assigned yet — it needs
+    /// setup (pick an image) before it can build/dispatch. The UI surfaces
+    /// this as a distinct "Needs image" state rather than a build status.
+    pub needs_image: bool,
     /// Human-readable error from the most recent failed build, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_last_error: Option<String>,
@@ -535,6 +541,7 @@ fn error_response(
     GetProjectDevcontainerStatusResponse {
         image_tag: None,
         image_status,
+        needs_image: false,
         image_last_error,
         graph_warmed_at: None,
         graph_warm_status,
@@ -1287,9 +1294,18 @@ impl DjinnMcpServer {
             ));
         }
 
-        let image = match repo.get_project_image(&input.project).await {
-            Ok(Some(img)) => img,
-            Ok(None) => ProjectImage::none(),
+        // Catalog-aware (migration 46): the badge reflects the project's
+        // assigned catalog image, not the legacy per-project columns. A
+        // project with no catalog image resolves to `none` + `needs_image`.
+        let dispatch = match repo.resolve_dispatch_image(&input.project).await {
+            Ok(Some(d)) => d,
+            Ok(None) => {
+                return Json(error_response(
+                    ProjectImageStatus::NONE.to_string(),
+                    None,
+                    "project not found".to_string(),
+                ));
+            }
             Err(err) => {
                 return Json(error_response(
                     ProjectImageStatus::NONE.to_string(),
@@ -1298,6 +1314,9 @@ impl DjinnMcpServer {
                 ));
             }
         };
+        let needs_image = dispatch.from_catalog.is_none();
+        // Prefer the digest-pinned ref the runtime actually uses, else the tag.
+        let image_tag = dispatch.pull_ref().or(dispatch.tag);
 
         // Graph-warm status: derived from the dispatch-readiness row so the
         // banner can surface a distinct progress row alongside image state.
@@ -1325,12 +1344,13 @@ impl DjinnMcpServer {
                 .map(|row| row.built_at),
         };
 
-        let graph_warm_status = derive_graph_warm_status(&image.status, &graph_warmed_at);
+        let graph_warm_status = derive_graph_warm_status(&dispatch.status, &graph_warmed_at);
 
         Json(GetProjectDevcontainerStatusResponse {
-            image_tag: image.tag,
-            image_status: image.status,
-            image_last_error: image.last_error,
+            image_tag,
+            image_status: dispatch.status,
+            needs_image,
+            image_last_error: dispatch.last_error,
             graph_warmed_at,
             graph_warm_status,
             error: None,

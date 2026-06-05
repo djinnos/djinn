@@ -1411,7 +1411,9 @@ export namespace GetProjectDevcontainerStatusOutputSchema {
    */
   image_last_error?: string
   /**
-   * One of `none | building | ready | failed`.
+   * One of `none | building | ready | failed`. Reflects the project's
+   * assigned **catalog** image (migration 46) — projects no longer build a
+   * bespoke per-project image.
    */
   image_status: string
   /**
@@ -1419,6 +1421,12 @@ export namespace GetProjectDevcontainerStatusOutputSchema {
    * `None` when no build has completed.
    */
   image_tag?: string
+  /**
+   * `true` when the project has no catalog image assigned yet — it needs
+   * setup (pick an image) before it can build/dispatch. The UI surfaces
+   * this as a distinct "Needs image" state rather than a build status.
+   */
+  needs_image: boolean
   [k: string]: any
   }
 

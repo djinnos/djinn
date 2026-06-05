@@ -798,75 +798,69 @@ impl ProjectRepository {
         }))
     }
 
-    /// Resolve the image a task-run / warm Pod must use for a project,
-    /// applying catalog-image precedence (migration 46).
+    /// Resolve the image a task-run / warm Pod must use for a project.
     ///
-    /// Precedence — single source of truth for every dispatch + warm path:
+    /// Catalog images are the **only** source of a runtime image (migration
+    /// 46) — projects no longer build a bespoke per-project image:
     ///
     /// * If the project selected a catalog image (`selected_image_id` set),
-    ///   that shared image is authoritative — the resolver returns the
-    ///   catalog image's status/tag/digest and **never** falls back to the
-    ///   project's own `image_*` columns. A project on a catalog image does
-    ///   not build (or dispatch against) a bespoke per-project image.
-    /// * Otherwise the project's own per-project build (`image_*` columns)
-    ///   is authoritative.
+    ///   the resolver returns that shared image's status/tag/digest.
+    /// * Otherwise the project has no image and is **not dispatchable** — it
+    ///   needs a catalog image assigned (`tag = None`, `from_catalog = None`).
+    ///   There is no fallback to the legacy per-project `image_*` columns.
     ///
     /// Returns `Ok(None)` only when the project id is unknown. A resolved
     /// image that isn't `ready` comes back with `tag = None` so the caller
-    /// hard-fails (task dispatch) or skips (warm) — there is no silent
-    /// downgrade to a different image.
+    /// hard-fails (task dispatch) or skips (warm) — never a silent downgrade.
     ///
     /// Non-macro `sqlx::query` form (like [`ImageRepository`]) so the
     /// migration-46 columns don't require regenerating the offline cache.
     pub async fn resolve_dispatch_image(&self, project_id: &str) -> Result<Option<DispatchImage>> {
         self.db.ensure_initialized().await?;
-        let row = sqlx::query(
-            "SELECT selected_image_id, image_tag, image_status, image_last_error
-               FROM projects WHERE id = $1",
-        )
-        .bind(project_id)
-        .fetch_optional(self.db.pool())
-        .await?;
+        let row = sqlx::query("SELECT selected_image_id FROM projects WHERE id = $1")
+            .bind(project_id)
+            .fetch_optional(self.db.pool())
+            .await?;
         let Some(row) = row else {
             return Ok(None);
         };
         let selected_image_id: Option<String> = row.get("selected_image_id");
 
-        if let Some(image_id) = selected_image_id {
-            // Catalog image is authoritative — no per-project fallback.
-            let img = sqlx::query(
-                "SELECT tag, registry_digest, status, last_error FROM images WHERE id = $1",
-            )
-            .bind(&image_id)
-            .fetch_optional(self.db.pool())
-            .await?;
-            return Ok(Some(match img {
-                Some(i) => DispatchImage {
-                    tag: i.get("tag"),
-                    status: i.get("status"),
-                    digest: i.get("registry_digest"),
-                    from_catalog: Some(image_id),
-                    last_error: i.get("last_error"),
-                },
-                // FK RESTRICT makes a dangling selection impossible in
-                // practice; treat it as "not ready" rather than panicking
-                // or silently using the bespoke image.
-                None => DispatchImage {
-                    tag: None,
-                    status: ProjectImageStatus::NONE.to_string(),
-                    digest: None,
-                    from_catalog: Some(image_id),
-                    last_error: None,
-                },
+        let Some(image_id) = selected_image_id else {
+            // No catalog image assigned → the project needs setup. Not
+            // dispatchable; no bespoke-image fallback any more.
+            return Ok(Some(DispatchImage {
+                tag: None,
+                status: ProjectImageStatus::NONE.to_string(),
+                digest: None,
+                from_catalog: None,
+                last_error: None,
             }));
-        }
+        };
 
-        Ok(Some(DispatchImage {
-            tag: row.get("image_tag"),
-            status: row.get("image_status"),
-            digest: None,
-            from_catalog: None,
-            last_error: row.get("image_last_error"),
+        let img = sqlx::query(
+            "SELECT tag, registry_digest, status, last_error FROM images WHERE id = $1",
+        )
+        .bind(&image_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+        Ok(Some(match img {
+            Some(i) => DispatchImage {
+                tag: i.get("tag"),
+                status: i.get("status"),
+                digest: i.get("registry_digest"),
+                from_catalog: Some(image_id),
+                last_error: i.get("last_error"),
+            },
+            // FK RESTRICT makes a dangling selection impossible in practice;
+            // treat it as "not ready" rather than panicking.
+            None => DispatchImage {
+                tag: None,
+                status: ProjectImageStatus::NONE.to_string(),
+                digest: None,
+                from_catalog: Some(image_id),
+                last_error: None,
+            },
         }))
     }
 

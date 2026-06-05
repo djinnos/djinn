@@ -33,10 +33,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use djinn_db::{
-    Database, Image, ImageRepository, ImageStatus, ProjectImage, ProjectImageStatus,
-    ProjectRepository,
-};
+use djinn_db::{Database, Image, ImageRepository, ImageStatus, ProjectRepository};
 use djinn_image_builder::{
     AgentWorkerImage, BuildContext, compute_environment_hash, generate_dockerfile,
 };
@@ -50,7 +47,6 @@ use tracing::{debug, info, warn};
 use crate::build_job::{
     BuildSubject, LABEL_BUILD, build_context_config_map_name_for,
     build_image_build_context_config_map, build_image_build_job, build_job_owner_reference,
-    sanitize_id,
 };
 use crate::config::ImageControllerConfig;
 
@@ -112,146 +108,30 @@ impl ImageController {
 
     /// Reconcile one project's image state.
     ///
-    /// A project that selected a catalog image (migration 46) does NOT build
-    /// its own bespoke image — it shares the catalog image. For those we
-    /// reconcile the shared image instead and return, so the mirror-fetch
-    /// tick keeps a project's catalog image building/retrying without ever
-    /// producing a redundant per-project build.
+    /// Projects no longer build a bespoke per-project image — they run on a
+    /// shared **catalog** image (migration 46). If the project has selected
+    /// one, reconcile that shared image; otherwise there is nothing to build
+    /// (the project needs a catalog image assigned before it can dispatch).
     pub async fn enqueue(&self, project_id: &str) -> Result<()> {
-        let repo = ProjectRepository::new(self.db.clone(), djinn_core::events::EventBus::noop());
-
         let image_repo = ImageRepository::new(self.db.clone());
-        if let Some(image) = image_repo.resolve_for_project(project_id).await? {
-            debug!(
-                project_id,
-                image_id = %image.id,
-                "image_controller: project uses catalog image — reconciling shared image, skipping per-project build"
-            );
-            return self.enqueue_image(image.id.clone(), &image_repo, image).await;
-        }
-
-        let raw = match repo.get_environment_config(project_id).await? {
-            Some(s) => s,
+        match image_repo.resolve_for_project(project_id).await? {
+            Some(image) => {
+                debug!(
+                    project_id,
+                    image_id = %image.id,
+                    "image_controller: reconciling project's shared catalog image"
+                );
+                self.enqueue_image(image.id.clone(), &image_repo, image).await
+            }
             None => {
                 debug!(
                     project_id,
-                    "image_controller: project row missing — skipping"
+                    "image_controller: no catalog image assigned — nothing to build \
+                     (projects do not build bespoke images)"
                 );
-                return Ok(());
-            }
-        };
-
-        // The migration-10 default is the "needs reseed" sentinel — the
-        // P5 boot reseed hook handles those on next server boot. The
-        // controller is a no-op for un-seeded rows; once the hook runs
-        // every project has a real config and the next tick builds.
-        if raw.trim() == "{}" || raw.trim().is_empty() {
-            debug!(
-                project_id,
-                "image_controller: environment_config empty (pre-reseed) — skipping"
-            );
-            return Ok(());
-        }
-
-        let cfg: EnvironmentConfig =
-            serde_json::from_str(&raw).map_err(|e| ImageControllerError::ConfigParse {
-                project_id: project_id.to_string(),
-                reason: e.to_string(),
-            })?;
-
-        if cfg.schema_version == 0 {
-            debug!(
-                project_id,
-                "image_controller: environment_config schema_version=0 (reseed pending) — skipping"
-            );
-            return Ok(());
-        }
-
-        cfg.validate()
-            .map_err(|source| ImageControllerError::ConfigInvalid {
-                project_id: project_id.to_string(),
-                source,
-            })?;
-
-        let agent_worker_ref = self.config.agent_worker_image.clone();
-        let new_hash = compute_environment_hash(&cfg, &agent_worker_ref);
-
-        let current = repo.get_project_image(project_id).await?;
-        let current_hash = current.as_ref().and_then(|r| r.hash.clone());
-        let current_status = current.as_ref().map(|r| r.status.as_str()).unwrap_or("");
-        if current_hash.as_deref() == Some(new_hash.as_str())
-            && current_status == ProjectImageStatus::READY
-        {
-            debug!(
-                project_id,
-                hash = %short_hash(&new_hash),
-                "image_controller: environment hash unchanged and image ready — skipping"
-            );
-            return Ok(());
-        }
-        debug!(
-            project_id,
-            hash = %short_hash(&new_hash),
-            status = %current_status,
-            "image_controller: enqueueing build (hash mismatch or image not ready)"
-        );
-
-        {
-            let mut guard = self.in_flight.lock().await;
-            if !guard.insert(project_id.to_string()) {
-                debug!(
-                    project_id,
-                    "image_controller: build already in flight — coalescing"
-                );
-                return Ok(());
+                Ok(())
             }
         }
-
-        // Cluster-wide concurrency cap. Count the build Jobs we own that
-        // are still running/pending (label-selected, terminal Jobs
-        // excluded) — *excluding* this project's own Jobs so re-reconciling
-        // an already-dispatched project (status flips, Failed-Job cleanup)
-        // is never starved. If we're already at the cap, DEFER: skip
-        // creating a new Job and leave the project's image state untouched
-        // so the next reconcile tick re-evaluates it once a slot frees.
-        // This is the real guard against the mass-rebuild herd that can
-        // starve the single shared buildkitd into a liveness-kill crash
-        // loop. The previous Job already exists / already terminal paths
-        // inside `submit_build_job` stay reachable because we exclude this
-        // project from the count.
-        let cap = self.config.max_concurrent;
-        let active = self
-            .count_active_build_jobs(Some(&sanitize_id(project_id)))
-            .await
-            .unwrap_or_else(|e| {
-                // A failed list shouldn't wedge the whole pipeline; log and
-                // treat as "no other builds active" so we don't deadlock on
-                // a transient API error. The per-project in-flight guard +
-                // hash check still prevent duplicate work.
-                warn!(
-                    project_id,
-                    error = %e,
-                    "image_controller: failed to count active build Jobs — proceeding without cap this tick"
-                );
-                0
-            });
-        if build_slots_available(cap, active) == 0 {
-            debug!(
-                project_id,
-                active,
-                cap = cap.max(1),
-                "image_controller: at max concurrent builds — deferring to a later reconcile tick"
-            );
-            self.in_flight.lock().await.remove(project_id);
-            return Ok(());
-        }
-
-        let outcome = self
-            .submit_build_job(&repo, project_id, &cfg, &new_hash, current.as_ref())
-            .await;
-
-        self.in_flight.lock().await.remove(project_id);
-        outcome
     }
 
     /// Count build Jobs the controller owns that are still in flight
@@ -259,61 +139,15 @@ impl ImageController {
     /// controller's namespace.
     ///
     /// Selected by the [`LABEL_BUILD`] label every build Job carries.
-    /// When `exclude_project` is `Some`, Jobs whose
-    /// `djinn.app/project-id` label matches are NOT counted — the caller
-    /// uses this to avoid counting the project it's about to (re)reconcile
-    /// against its own cap.
-    async fn count_active_build_jobs(&self, exclude_project: Option<&str>) -> Result<usize> {
+    /// When `exclude_subject` is `Some`, Jobs whose project-id or image-id
+    /// correlator label matches are NOT counted — the caller uses this to
+    /// avoid counting the image it's about to (re)reconcile against its own
+    /// cap.
+    async fn count_active_build_jobs(&self, exclude_subject: Option<&str>) -> Result<usize> {
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.config.namespace);
         let lp = ListParams::default().labels(&format!("{LABEL_BUILD}=true"));
         let list = jobs.list(&lp).await?;
-        Ok(count_active_jobs(&list.items, exclude_project))
-    }
-
-    async fn submit_build_job(
-        &self,
-        repo: &ProjectRepository,
-        project_id: &str,
-        cfg: &EnvironmentConfig,
-        new_hash: &str,
-        previous: Option<&ProjectImage>,
-    ) -> Result<()> {
-        let subject = BuildSubject::project(project_id);
-        let hash_prefix = &new_hash[..HASH_TAG_PREFIX_LEN.min(new_hash.len())];
-        let image_tag = format_image_tag(&self.config.registry_host, project_id, hash_prefix);
-
-        match self
-            .dispatch_build_job(&subject, cfg, new_hash, &image_tag)
-            .await?
-        {
-            // The existing Job already Succeeded — reconcile to Ready inline
-            // (the watcher's transition event already fired and won't repeat).
-            BuildDispatch::AlreadySucceeded => {
-                let image = ProjectImage {
-                    tag: Some(image_tag),
-                    hash: Some(new_hash.to_string()),
-                    status: ProjectImageStatus::READY.into(),
-                    last_error: None,
-                };
-                repo.set_project_image(project_id, &image).await?;
-            }
-            // A Failed Job was cleared; leave state untouched so the next
-            // reconcile tick recreates a fresh Job.
-            BuildDispatch::FailedCleared => {}
-            // A fresh Job is running (or an existing non-terminal one) — mark
-            // building, preserving any prior-ready tag for the runtime to use
-            // while the new build is in flight.
-            BuildDispatch::Building => {
-                let image = ProjectImage {
-                    tag: previous.and_then(|p| p.tag.clone()),
-                    hash: Some(new_hash.to_string()),
-                    status: ProjectImageStatus::BUILDING.into(),
-                    last_error: None,
-                };
-                repo.set_project_image(project_id, &image).await?;
-            }
-        }
-        Ok(())
+        Ok(count_active_jobs(&list.items, exclude_subject))
     }
 
     /// Subject-generic k8s build dispatch shared by the per-project and

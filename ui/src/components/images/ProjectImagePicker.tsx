@@ -18,7 +18,6 @@ import {
   SelectContent,
   SelectItem,
   SelectTrigger,
-  SelectValue,
 } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { listImages, setProjectImage, type CatalogImage } from "@/api/images";
@@ -87,6 +86,15 @@ export function ProjectImagePicker({
     }
   };
 
+  // Resolve the selected image's display name ourselves rather than relying on
+  // <SelectValue>, which falls back to rendering the raw id when the matching
+  // <SelectItem> isn't mounted yet (catalog still loading / async value sync).
+  const selectedLabel = loading
+    ? "Loading…"
+    : value === NONE
+      ? "None"
+      : (images.find((i) => i.id === value)?.name ?? "Selected image");
+
   return (
     <div className="flex flex-col gap-1.5">
       <Label className="text-xs text-muted-foreground">Catalog image</Label>
@@ -104,7 +112,9 @@ export function ProjectImagePicker({
               Updating…
             </span>
           ) : (
-            <SelectValue placeholder="None" />
+            <span className={value === NONE ? "text-muted-foreground" : undefined}>
+              {selectedLabel}
+            </span>
           )}
         </SelectTrigger>
         <SelectContent>

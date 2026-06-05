@@ -43,6 +43,11 @@ export interface GetProjectStackResponse {
 export interface DevcontainerStatus {
   image_tag?: string | null;
   image_status: "none" | "building" | "ready" | "failed" | string;
+  /**
+   * `true` when the project has no catalog image assigned yet — it needs
+   * setup before it can build/dispatch. Surfaced as a "Needs image" state.
+   */
+  needs_image?: boolean;
   image_last_error?: string | null;
   /**
    * ISO-8601 UTC timestamp of the last successful canonical-graph warm
