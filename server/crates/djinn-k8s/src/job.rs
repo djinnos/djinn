@@ -403,6 +403,29 @@ fn build_task_run_env(
         "CARGO_TARGET_DIR",
         &format!("{CACHE_MOUNT_DIR}/cargo-target/{project_id}"),
     ));
+
+    // Route sccache's disk cache to the persistent /cache PVC. Repos routinely
+    // pin `rustc-wrapper = "sccache"` in .cargo/config.toml (e.g. the platform
+    // repo, which also sets CARGO_INCREMENTAL=0 as sccache requires). cargo
+    // then invokes sccache regardless of any env var — but without SCCACHE_DIR
+    // sccache falls back to $HOME/.cache/sccache (/home/djinn/.cache/sccache),
+    // which is (1) ephemeral, lost when the Pod dies, so it caches nothing
+    // across runs, and (2) NOT in the Landlock allowlist (only $HOME/.cache/djinn
+    // is), so the sandboxed sccache server is denied write there. Pointing it at
+    // /cache fixes both: the PVC is persistent, djinn-owned (uid 10001), and
+    // already in the sandbox allowlist (djinn-agent sandbox/linux.rs).
+    //
+    // Namespaced per project (like CARGO_TARGET_DIR, not CARGO_HOME): sccache's
+    // local disk cache is not safe for multiple concurrent server processes
+    // sharing one directory, and task-run Pods share the /cache PVC, so a single
+    // /cache/sccache would risk multi-writer corruption across projects.
+    env.push(env_var(
+        "SCCACHE_DIR",
+        &format!("{CACHE_MOUNT_DIR}/sccache/{project_id}"),
+    ));
+    // Default is 10G, which evicts fast on a large workspace; give sccache more
+    // headroom on the shared PVC.
+    env.push(env_var("SCCACHE_CACHE_SIZE", "20G"));
     env
 }
 
@@ -766,6 +789,12 @@ mod tests {
             Some("/cache/cargo-target/proj-xyz"),
             "target dir must be namespaced per project to avoid cross-workspace collisions"
         );
+        assert_eq!(
+            envs.get("SCCACHE_DIR").copied(),
+            Some("/cache/sccache/proj-xyz"),
+            "sccache dir must be on the PVC and namespaced per project (no multi-writer corruption)"
+        );
+        assert_eq!(envs.get("SCCACHE_CACHE_SIZE").copied(), Some("20G"));
     }
 
     /// When the operator has configured nodeSelector + tolerations (typical

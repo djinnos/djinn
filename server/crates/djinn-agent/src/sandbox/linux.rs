@@ -155,12 +155,14 @@ fn apply_policy(
         ruleset = ruleset.add_rule(PathBeneath::new(fd, full_access))?;
     }
 
-    // Shared cross-task cache PVC (`/cache`). The base runtime image points
-    // every toolchain's cache here — CARGO_HOME=/cache/cargo,
-    // RUSTUP_HOME=/cache/rustup, SCCACHE_DIR=/cache/sccache, PNPM_STORE_DIR,
-    // PIP_CACHE_DIR, and GOPATH/GOMODCACHE=/cache/go — so build/test commands
-    // need write access to populate them (`go mod download` → /cache/go/mod,
-    // cargo registry → /cache/cargo, etc.). Only present in the K8s task-run
+    // Shared cross-task cache PVC (`/cache`). The K8s task-run Pod env
+    // (djinn-k8s/src/job.rs) routes the toolchain caches here at runtime —
+    // CARGO_HOME=/cache/cargo, CARGO_TARGET_DIR=/cache/cargo-target/<project>,
+    // SCCACHE_DIR=/cache/sccache/<project> — and the image bakes the Go cache
+    // (GOMODCACHE/GOCACHE) onto /cache too — so build/test commands need write
+    // access to populate them (`go mod download` → /cache/go/mod, cargo
+    // registry → /cache/cargo, sccache → /cache/sccache, etc.). Only present
+    // in the K8s task-run
     // Pod (the PVC mount); a no-op elsewhere since the open fails. Guarded:
     // if the dir is absent we silently skip, same as the scratch dir above.
     if let Ok(fd) = PathFd::new("/cache") {
