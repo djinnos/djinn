@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 use djinn_image_builder::{AgentWorkerImage, BuildContext, generate_dockerfile};
 use djinn_image_controller::ImageControllerConfig;
 use djinn_image_controller::build_job::{
-    COMPONENT_IMAGE_BUILD, LABEL_BUILD, LABEL_COMPONENT, LABEL_IMAGE_HASH, LABEL_PROJECT_ID,
-    build_image_build_job,
+    BuildSubject, COMPONENT_IMAGE_BUILD, LABEL_BUILD, LABEL_COMPONENT, LABEL_IMAGE_HASH,
+    LABEL_PROJECT_ID, build_image_build_job,
 };
 use djinn_image_controller::controller::format_image_tag;
 use djinn_image_controller::watcher::__test_handle_event;
@@ -30,7 +30,13 @@ fn build_job_labels_and_envs_match_plan() {
     let cfg = ImageControllerConfig::for_testing();
     let tag = format_image_tag(&cfg.registry_host, "proj-abc", "1a2b3c4d5e6f");
     let ctx = test_build_context();
-    let job = build_image_build_job(&cfg, "proj-abc", "1a2b3c4d5e6f", &tag, &ctx);
+    let job = build_image_build_job(
+        &cfg,
+        &BuildSubject::project("proj-abc"),
+        "1a2b3c4d5e6f",
+        &tag,
+        &ctx,
+    );
 
     let labels = job.metadata.labels.as_ref().expect("labels present");
     assert_eq!(labels.get(LABEL_COMPONENT).unwrap(), COMPONENT_IMAGE_BUILD);
