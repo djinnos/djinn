@@ -20,6 +20,7 @@ import {
   type Project,
 } from '@/api/server';
 import { showToast } from '@/lib/toast';
+import { useProjects } from '@/stores/useProjectStore';
 
 interface Props {
   open: boolean;
@@ -68,18 +69,33 @@ export function AddProjectFromGithubDialog({ open, onOpenChange, onAdded }: Prop
     staleTime: 30_000,
   });
 
-  const repos: GithubRepoEntry[] = reposQuery.data ?? [];
+  const repos: GithubRepoEntry[] = useMemo(
+    () => reposQuery.data ?? [],
+    [reposQuery.data],
+  );
+
+  // Repos already cloned into this deployment — hide them from the picker so
+  // the list only shows what can actually be added.
+  const projects = useProjects();
+  const addedSlugs = useMemo(
+    () =>
+      new Set(
+        projects.map((p) => `${p.github_owner}/${p.github_repo}`.toLowerCase()),
+      ),
+    [projects],
+  );
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return repos;
-    // Match names only — we no longer render descriptions, so folding
-    // them into the filter would produce "phantom" matches (a row shows
-    // up even though nothing on screen contains the query).
-    return repos.filter((r) =>
-      `${r.owner}/${r.repo}`.toLowerCase().includes(q),
-    );
-  }, [repos, query]);
+    return repos.filter((r) => {
+      const slug = `${r.owner}/${r.repo}`.toLowerCase();
+      if (addedSlugs.has(slug)) return false;
+      // Match names only — we no longer render descriptions, so folding
+      // them into the filter would produce "phantom" matches (a row shows
+      // up even though nothing on screen contains the query).
+      return !q || slug.includes(q);
+    });
+  }, [repos, query, addedSlugs]);
 
   const handleAdd = async (entry: GithubRepoEntry) => {
     const key = `${entry.owner}/${entry.repo}`;
@@ -179,7 +195,9 @@ export function AddProjectFromGithubDialog({ open, onOpenChange, onAdded }: Prop
               <ul className="divide-y">
                 {filtered.length === 0 ? (
                   <li className="px-3 py-4 text-sm text-muted-foreground">
-                    No repositories match.
+                    {query.trim()
+                      ? 'No repositories match.'
+                      : 'All accessible repositories have already been added.'}
                   </li>
                 ) : (
                   filtered.map((r) => {
