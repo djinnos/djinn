@@ -11,6 +11,23 @@ vi.mock("@/hooks/useExecutionControl", () => ({
   useExecutionControl: () => ({ busy: false, killTask: vi.fn() }),
 }));
 
+vi.mock("@/api/users", async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return {
+    ...actual,
+    fetchUsers: vi.fn(async () => [
+      {
+        id: "user-alice",
+        github_login: "alice",
+        github_name: "Alice",
+        github_avatar_url: null,
+        is_member_of_org: true,
+        is_admin: false,
+      },
+    ]),
+  };
+});
+
 vi.mock("@/stores/useProjectStore", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
   return {
@@ -20,7 +37,7 @@ vi.mock("@/stores/useProjectStore", async (importOriginal) => {
 });
 
 describe("TaskDetailPanel", () => {
-  it("renders full metadata including AC list", () => {
+  it("renders full metadata including AC list", async () => {
     const task = {
       ...mockTaskA,
       short_id: "tsk1",
@@ -29,7 +46,7 @@ describe("TaskDetailPanel", () => {
       design: "Design section content",
       status: "in_progress",
       priority: 2,
-      owner: "alice",
+      created_by_user_id: "user-alice",
       labels: ["frontend"],
       acceptance_criteria: [
         { criterion: "criterion met", met: true },
@@ -44,7 +61,7 @@ describe("TaskDetailPanel", () => {
     expect(screen.getByText(/in flight — coding/i)).toBeInTheDocument();
     expect(screen.getByText(/p2/i)).toBeInTheDocument();
     expect(screen.getByText(/epic one/i)).toBeInTheDocument();
-    expect(screen.getByText(/alice/i)).toBeInTheDocument();
+    expect(await screen.findByText(/alice/i)).toBeInTheDocument();
     expect(screen.getByText(task.description)).toBeInTheDocument();
     expect(screen.getByText(task.design)).toBeInTheDocument();
     expect(screen.getByText(task.acceptance_criteria[0].criterion)).toBeInTheDocument();

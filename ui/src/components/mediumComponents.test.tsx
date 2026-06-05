@@ -39,7 +39,7 @@ describe('AgentConfig', () => {
     );
 
     const root = container.firstElementChild as HTMLElement;
-    expect(within(root).getByRole('heading', { name: 'Models' })).toBeInTheDocument();
+    expect(within(root).getByRole('heading', { name: 'Your models' })).toBeInTheDocument();
 
     expect(within(root).getByRole('button', { name: /Add Model/i })).toBeInTheDocument();
 
