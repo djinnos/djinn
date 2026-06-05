@@ -1011,6 +1011,18 @@ impl CoordinatorActor {
         };
         let task_repo = self.task_repo();
         for epic in epics {
+            // Wave-1 self-heal. A worker-pod agent (the proposal-decomposition
+            // planner, Mode D) creates epics whose `epic.created` event may not
+            // reach this host coordinator (RPC boundary); without a backstop
+            // such an epic — zero tasks — would never break down, since
+            // `epic_is_eligible_for_next_wave` only covers epics that already
+            // had a wave. `maybe_create_planning_task` is the wave-1 entry and
+            // is fully guarded (bails if any worker/planning task already
+            // exists, if the epic has unresolved epic-blockers, or if a planner
+            // is already active on it), so calling it here is an idempotent,
+            // loop-safe backstop that self-heals within one sweep interval.
+            self.maybe_create_planning_task(&epic).await;
+
             if !self
                 .epic_is_eligible_for_next_wave(&task_repo, &epic.id)
                 .await

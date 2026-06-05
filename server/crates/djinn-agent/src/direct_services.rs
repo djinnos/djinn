@@ -438,6 +438,12 @@ fn intern_envelope(wire: SerializableDjinnEvent) -> Result<DjinnEventEnvelope, (
         ("task", "updated") => ("task", "updated"),
         ("task", "created") => ("task", "created"),
         ("task", "deleted") => ("task", "deleted"),
+        // Epics created/updated by a worker-pod agent (the proposal-decomposition
+        // planner, Mode D) must reach the host coordinator so wave-1 breakdown
+        // fires immediately. Without these arms the events were dropped at the
+        // RPC boundary and epics only broke down on the 15-min stale sweep.
+        ("epic", "created") => ("epic", "created"),
+        ("epic", "updated") => ("epic", "updated"),
         _ => return Err((entity_type, action)),
     };
     // `payload` crosses the wire as an opaque JSON string — bincode can't
@@ -460,6 +466,25 @@ fn intern_envelope(wire: SerializableDjinnEvent) -> Result<DjinnEventEnvelope, (
 #[cfg(test)]
 mod tests {
     use super::{SerializableDjinnEvent, intern_envelope};
+
+    #[test]
+    fn intern_envelope_forwards_worker_epic_events() {
+        // Regression: worker-pod (Mode D) epic creates/updates must cross the
+        // RPC boundary so the host coordinator fires wave-1 breakdown.
+        for action in ["created", "updated"] {
+            let wire = SerializableDjinnEvent {
+                entity_type: "epic".into(),
+                action: action.into(),
+                payload: serde_json::json!({"id": "e1", "status": "open"}).to_string(),
+                id: Some("e1".into()),
+                project_id: Some("p1".into()),
+            };
+            let env = intern_envelope(wire).expect("epic events must be whitelisted");
+            assert_eq!(env.entity_type, "epic");
+            assert_eq!(env.action, action);
+            assert_eq!(env.payload["status"], "open");
+        }
+    }
 
     #[test]
     fn intern_envelope_session_message_keeps_static_strs() {

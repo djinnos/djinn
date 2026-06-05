@@ -10,6 +10,7 @@ import { usersQueryOptions } from "@/api/queryOptions";
 import { userDisplayName, type OrgUser } from "@/api/users";
 import { AcceptanceChecklist } from "@/components/AcceptanceChecklist";
 import { UserAvatar } from "@/components/UserAvatar";
+import { CopyButton } from "@/components/CopyButton";
 import { InlineError } from "@/components/InlineError";
 import { relativeTime } from "@/components/memory/memoryUtils";
 import {
@@ -49,6 +50,22 @@ import {
 } from "@/lib/proposalQueries";
 import type { Project } from "@/api/server";
 import type { Proposal, ProposalFeedback } from "@/api/types";
+
+/** Render a full proposal as markdown — title + spec + acceptance criteria —
+ * so it can be copied into an AI to discuss. */
+function proposalAsMarkdown(proposal: Proposal): string {
+  const ac = (proposal.acceptance_criteria ?? []).map((c) => {
+    const item = typeof c === "string" ? { criterion: c, met: false } : c;
+    return `- [${item.met ? "x" : " "}] ${item.criterion}`;
+  });
+  return [
+    `# ${proposal.title}`,
+    proposal.body?.trim() || "_No spec body yet._",
+    ac.length ? `## Acceptance criteria\n${ac.join("\n")}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
 
 // Statuses a human sets directly. `approved` is reached via sign-offs;
 // `building`/`done` via graduation.
@@ -365,7 +382,13 @@ function ProposalDetailView({
 
         {/* Spec body — read-only; editing happens via AI. */}
         <div className="space-y-2">
-          <Label className="text-xs uppercase text-muted-foreground">Spec</Label>
+          <div className="flex items-center justify-between">
+            <Label className="text-xs uppercase text-muted-foreground">Spec</Label>
+            <CopyButton
+              text={proposalAsMarkdown(proposal)}
+              label="Copy proposal (title + spec + acceptance criteria)"
+            />
+          </div>
           <div className="prose prose-sm max-w-none dark:prose-invert">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>
               {proposal.body || "_No spec body yet._"}
@@ -499,8 +522,11 @@ function FeedbackThread({
               )}
               {f.target_section && <span>· {f.target_section}</span>}
               <span>· {relativeTime(f.created_at)}</span>
+              <CopyButton text={f.body} label="Copy comment" className="ml-auto" />
             </div>
-            <div className="whitespace-pre-wrap text-sm">{f.body}</div>
+            <div className="prose prose-sm max-w-none dark:prose-invert">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{f.body}</ReactMarkdown>
+            </div>
             {f.proposed_body != null && (
               <div className="mt-2">
                 <span className="text-xs text-muted-foreground">Proposed spec change:</span>
