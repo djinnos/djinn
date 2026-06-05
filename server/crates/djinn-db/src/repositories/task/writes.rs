@@ -21,6 +21,21 @@ fn parse_json_array_column(column: &str, raw: &str) -> Result<serde_json::Value>
 
 impl TaskRepository {
     #[allow(clippy::too_many_arguments)]
+    /// Set the task's creator. Used by proposal graduation so the
+    /// `epic_breakdown` task (and the epics the planner spawns from it, which
+    /// inherit the session user) attribute to the chosen build owner.
+    pub async fn set_created_by_user_id(&self, id: &str, user_id: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            "UPDATE tasks SET created_by_user_id = $1 WHERE id = $2",
+            user_id,
+            id
+        )
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
     pub async fn create(
         &self,
         epic_id: &str,

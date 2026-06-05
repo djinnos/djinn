@@ -810,7 +810,9 @@ impl TaskRunSupervisor {
                         //   other                         → no transition
                         if role_kind == RoleKind::Planner {
                             let action = match task.issue_type.as_str() {
-                                "planning" | "decomposition" | "review" => Some("close"),
+                                "planning" | "decomposition" | "review" | "epic_breakdown" => {
+                                    Some("close")
+                                }
                                 _ => None,
                             };
                             if let Some(action) = action
@@ -839,7 +841,9 @@ impl TaskRunSupervisor {
                         // routing as PlannerExecute.
                         if role_kind == RoleKind::Planner {
                             let action = match task.issue_type.as_str() {
-                                "planning" | "decomposition" | "review" => Some("close"),
+                                "planning" | "decomposition" | "review" | "epic_breakdown" => {
+                                    Some("close")
+                                }
                                 _ => None,
                             };
                             if let Some(action) = action

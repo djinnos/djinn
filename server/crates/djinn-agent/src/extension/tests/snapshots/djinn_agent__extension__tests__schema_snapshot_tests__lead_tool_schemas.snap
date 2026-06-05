@@ -579,7 +579,7 @@ expression: tool_schemas_lead()
   },
   {
     "name": "epic_update",
-    "description": "Update epic fields (title/description) and accept memory ref delta args for planner workflows.",
+    "description": "Update epic fields (title/description/status), memory ref deltas, and epic dependencies (blocked_by) for planner workflows.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -610,6 +610,20 @@ expression: tool_schemas_lead()
           "items": {
             "type": "string"
           }
+        },
+        "blocked_by_add": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Epics (UUIDs or short_ids) that must close before this epic's breakdown auto-dispatches."
+        },
+        "blocked_by_remove": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Epic dependencies to remove."
         }
       }
     },

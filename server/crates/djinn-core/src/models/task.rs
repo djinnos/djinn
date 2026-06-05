@@ -23,6 +23,11 @@ pub enum IssueType {
     Planning,
     /// Architecture/code review — simple lifecycle, routed to Architect.
     Review,
+    /// Proposal decomposition — simple lifecycle, routed to Planner.
+    /// One per graduated proposal: the Planner reads the proposal spec and the
+    /// target repos and creates the epics (with cross-repo dependencies). Has
+    /// no `epic_id` (it operates one level above epics).
+    EpicBreakdown,
 }
 
 impl IssueType {
@@ -35,6 +40,7 @@ impl IssueType {
             Self::Research => "research",
             Self::Planning => "planning",
             Self::Review => "review",
+            Self::EpicBreakdown => "epic_breakdown",
         }
     }
 
@@ -49,6 +55,7 @@ impl IssueType {
             // Backward compat: existing DB rows may still say "decomposition".
             "decomposition" => Ok(Self::Planning),
             "review" => Ok(Self::Review),
+            "epic_breakdown" => Ok(Self::EpicBreakdown),
             other => Err(Error::Internal(format!("unknown issue_type: {other}"))),
         }
     }
@@ -58,7 +65,7 @@ impl IssueType {
     pub fn uses_simple_lifecycle(&self) -> bool {
         matches!(
             self,
-            Self::Spike | Self::Research | Self::Planning | Self::Review
+            Self::Spike | Self::Research | Self::Planning | Self::Review | Self::EpicBreakdown
         )
     }
 }

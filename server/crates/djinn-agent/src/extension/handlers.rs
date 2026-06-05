@@ -32,7 +32,10 @@ use djinn_control_plane::tools::task_tools::{
     create_task as shared_create_task, transition_task as shared_transition_task,
     update_task as shared_update_task,
 };
-use djinn_db::{AgentRepository, EpicRepository, SessionRepository, TaskRepository};
+use djinn_db::{
+    AgentRepository, EpicRepository, ProjectRepository, ProposalRepository, SessionRepository,
+    TaskRepository,
+};
 use djinn_provider::github_api::GitHubApiClient;
 
 use super::fuzzy::fuzzy_replace;
@@ -63,7 +66,8 @@ use task_admin::{
     call_task_kill_session, call_task_reset_counters, call_task_transition,
 };
 use task_epic::{
-    call_epic_close, call_request_lead, call_request_planner, call_task_activity_list,
+    call_epic_blocked_list, call_epic_blockers_list, call_epic_close, call_epic_create,
+    call_proposal_show, call_request_lead, call_request_planner, call_task_activity_list,
     call_task_comment_add, call_task_create, call_task_list, call_task_show, call_task_update,
     call_task_update_ac,
 };
@@ -173,9 +177,17 @@ where
         "task_blocked_list" => call_task_blocked_list(state, &call.arguments).await,
         "task_activity_list" => call_task_activity_list(state, &call.arguments).await,
         "epic_show" => call_epic_show(state, &call.arguments, project_id.as_deref()).await,
+        "epic_create" => call_epic_create(state, &call.arguments, project_id.as_deref()).await,
         "epic_update" => call_epic_update(state, &call.arguments, project_id.as_deref()).await,
         "epic_tasks" => call_epic_tasks(state, &call.arguments, project_id.as_deref()).await,
         "epic_close" => call_epic_close(state, &call.arguments, project_id.as_deref()).await,
+        "epic_blockers_list" => {
+            call_epic_blockers_list(state, &call.arguments, project_id.as_deref()).await
+        }
+        "epic_blocked_list" => {
+            call_epic_blocked_list(state, &call.arguments, project_id.as_deref()).await
+        }
+        "proposal_show" => call_proposal_show(state, &call.arguments).await,
         "memory_read" => call_memory_read(state, &call.arguments, &project_ref).await,
         "memory_search" => {
             call_memory_search(state, &call.arguments, session_task_id, &project_ref).await

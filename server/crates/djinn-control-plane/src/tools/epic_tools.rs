@@ -99,6 +99,24 @@ pub struct EpicReadSourcesResponse {
     pub error: Option<String>,
 }
 
+/// A single epic-dependency reference returned by the blocker-listing tools.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct EpicBlockerItem {
+    pub epic_id: String,
+    pub short_id: String,
+    pub title: String,
+    pub status: String,
+}
+
+/// Response for the epic-dependency listing tools.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct EpicBlockersResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blockers: Option<Vec<EpicBlockerItem>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 fn epic_not_found_error(id: &str) -> String {
     format!("epic not found: {id}")
 }
@@ -154,6 +172,10 @@ pub struct EpicCreateParams {
     /// e.g. migrating code FROM project A INTO this epic's project, pass
     /// `read_sources: ["owner/A"]`.
     pub read_sources: Option<Vec<String>>,
+    /// When this epic is created as part of decomposing a graduated proposal
+    /// (Planner Mode D), pass the proposal UUID or short_id to record the
+    /// `proposal → epic` link so the proposal can track what it became.
+    pub proposal_id: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -192,6 +214,20 @@ pub struct EpicUpdateParams {
     pub memory_refs: Option<Vec<String>>,
     /// Target lifecycle status: "open" or "closed".
     pub status: Option<String>,
+    /// Epic dependencies: epics (UUIDs or short_ids) that must CLOSE before
+    /// this epic's wave-1 breakdown auto-dispatches. May reference epics in
+    /// other projects (cross-repo ordering). Cycles are rejected.
+    pub blocked_by_add: Option<Vec<String>>,
+    /// Epic dependencies to remove (UUIDs or short_ids).
+    pub blocked_by_remove: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct EpicBlockersParams {
+    /// The epic's project (UUID or owner/repo slug).
+    pub project: String,
+    /// Epic UUID or short_id.
+    pub id: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -364,6 +400,20 @@ impl DjinnMcpServer {
                         }
                     }
                 }
+                // Record the proposal → epic link when this epic is a product of
+                // proposal decomposition (Planner Mode D). Best-effort: an
+                // unresolvable proposal ref does not fail epic creation.
+                if let Some(proposal_ref) = &p.proposal_id {
+                    let proposal_repo = djinn_db::ProposalRepository::new(
+                        self.state.db().clone(),
+                        self.state.event_bus(),
+                    );
+                    if let Ok(Some(proposal)) = proposal_repo.resolve(proposal_ref).await {
+                        let _ = proposal_repo
+                            .link_epic(&proposal.id, &epic.id, &epic.project_id)
+                            .await;
+                    }
+                }
                 Json(EpicSingleResponse {
                     epic: Some(EpicModel::from(&epic)),
                     error: None,
@@ -453,7 +503,7 @@ impl DjinnMcpServer {
 
     /// Update allowed fields of an epic.
     #[tool(
-        description = "Update allowed fields of an epic (title, description, emoji, color, owner, status). Accepts epic UUID or short_id. Status can be \"open\" or \"closed\"."
+        description = "Update allowed fields of an epic (title, description, emoji, color, owner, status). Accepts epic UUID or short_id. Status can be \"open\" or \"closed\". Use `blocked_by_add`/`blocked_by_remove` to set epic dependencies (epics that must close before this epic's breakdown runs) — these may reference epics in other projects for cross-repo ordering."
     )]
     pub async fn epic_update(
         &self,
@@ -469,6 +519,52 @@ impl DjinnMcpServer {
             }
         };
         let repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
+
+        // Apply epic-dependency edits first (cross-project: resolve globally so
+        // a blocker can live in another repo).
+        if p.blocked_by_add.is_some() || p.blocked_by_remove.is_some() {
+            let Some(target) = repo
+                .resolve_in_project(&project_id, &p.id)
+                .await
+                .ok()
+                .flatten()
+            else {
+                return Json(EpicSingleResponse {
+                    epic: None,
+                    error: Some(epic_not_found_error(&p.id)),
+                });
+            };
+            let mut add_ids = Vec::new();
+            for r in p.blocked_by_add.clone().unwrap_or_default() {
+                match repo.resolve(&r).await {
+                    Ok(Some(e)) => add_ids.push(e.id),
+                    _ => {
+                        return Json(EpicSingleResponse {
+                            epic: None,
+                            error: Some(format!("blocker epic not found: {r}")),
+                        });
+                    }
+                }
+            }
+            // Tolerate unresolved refs on removal so stale edges can be cleared.
+            let mut remove_ids = Vec::new();
+            for r in p.blocked_by_remove.clone().unwrap_or_default() {
+                match repo.resolve(&r).await {
+                    Ok(Some(e)) => remove_ids.push(e.id),
+                    _ => remove_ids.push(r),
+                }
+            }
+            if let Err(e) = repo
+                .update_blockers_atomic(&target.id, &add_ids, &remove_ids)
+                .await
+            {
+                return Json(EpicSingleResponse {
+                    epic: None,
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+
         Json(
             crate::tools::epic_ops::epic_update(
                 &repo,
@@ -487,6 +583,106 @@ impl DjinnMcpServer {
             )
             .await,
         )
+    }
+
+    /// List the epics that block a given epic.
+    #[tool(
+        description = "List the epics that BLOCK a given epic (its dependencies — epics that must close before this epic's breakdown auto-dispatches). Accepts epic UUID or short_id. Returns {blockers:[{epic_id, short_id, title, status}]}."
+    )]
+    pub async fn epic_blockers_list(
+        &self,
+        Parameters(p): Parameters<EpicBlockersParams>,
+    ) -> Json<EpicBlockersResponse> {
+        let project_id = match self.resolve_project_id(&p.project).await {
+            Ok(id) => id,
+            Err(e) => {
+                return Json(EpicBlockersResponse {
+                    blockers: None,
+                    error: Some(e),
+                });
+            }
+        };
+        let repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
+        let Some(epic) = repo
+            .resolve_in_project(&project_id, &p.id)
+            .await
+            .ok()
+            .flatten()
+        else {
+            return Json(EpicBlockersResponse {
+                blockers: None,
+                error: Some(epic_not_found_error(&p.id)),
+            });
+        };
+        match repo.list_blockers(&epic.id).await {
+            Ok(refs) => Json(EpicBlockersResponse {
+                blockers: Some(
+                    refs.into_iter()
+                        .map(|b| EpicBlockerItem {
+                            epic_id: b.epic_id,
+                            short_id: b.short_id,
+                            title: b.title,
+                            status: b.status,
+                        })
+                        .collect(),
+                ),
+                error: None,
+            }),
+            Err(e) => Json(EpicBlockersResponse {
+                blockers: None,
+                error: Some(e.to_string()),
+            }),
+        }
+    }
+
+    /// List the epics blocked BY a given epic.
+    #[tool(
+        description = "List the epics blocked BY a given epic (its dependents — epics whose breakdown waits on this one). Accepts epic UUID or short_id. Returns {blockers:[{epic_id, short_id, title, status}]}."
+    )]
+    pub async fn epic_blocked_list(
+        &self,
+        Parameters(p): Parameters<EpicBlockersParams>,
+    ) -> Json<EpicBlockersResponse> {
+        let project_id = match self.resolve_project_id(&p.project).await {
+            Ok(id) => id,
+            Err(e) => {
+                return Json(EpicBlockersResponse {
+                    blockers: None,
+                    error: Some(e),
+                });
+            }
+        };
+        let repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
+        let Some(epic) = repo
+            .resolve_in_project(&project_id, &p.id)
+            .await
+            .ok()
+            .flatten()
+        else {
+            return Json(EpicBlockersResponse {
+                blockers: None,
+                error: Some(epic_not_found_error(&p.id)),
+            });
+        };
+        match repo.list_blocked_by(&epic.id).await {
+            Ok(refs) => Json(EpicBlockersResponse {
+                blockers: Some(
+                    refs.into_iter()
+                        .map(|b| EpicBlockerItem {
+                            epic_id: b.epic_id,
+                            short_id: b.short_id,
+                            title: b.title,
+                            status: b.status,
+                        })
+                        .collect(),
+                ),
+                error: None,
+            }),
+            Err(e) => Json(EpicBlockersResponse {
+                blockers: None,
+                error: Some(e.to_string()),
+            }),
+        }
     }
 
     /// Close an epic.

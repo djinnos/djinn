@@ -91,6 +91,42 @@ pub(super) struct EpicUpdateParams {
     pub status: Option<String>,
     pub memory_refs_add: Option<Vec<String>>,
     pub memory_refs_remove: Option<Vec<String>>,
+    /// Epic dependencies (UUIDs or short_ids; may be cross-project) that must
+    /// close before this epic's breakdown auto-dispatches.
+    pub blocked_by_add: Option<Vec<String>>,
+    pub blocked_by_remove: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct EpicCreateParams {
+    pub title: String,
+    pub description: Option<String>,
+    pub memory_refs: Option<Vec<String>>,
+    pub auto_breakdown: Option<bool>,
+    /// Other registered projects (UUIDs or owner/repo slugs) this epic's tasks
+    /// may READ while writing only to its own project.
+    pub read_sources: Option<Vec<String>>,
+    /// Proposal (UUID or short_id) this epic is being decomposed from — records
+    /// the proposal → epic link (Planner Mode D).
+    pub proposal_id: Option<String>,
+    /// Target project for the epic (UUID or owner/repo slug). When omitted the
+    /// epic is created on the session's resolved project. Mode D sets this per
+    /// target so a single breakdown run can create epics across repos.
+    pub project: Option<String>,
+    /// Epics (UUIDs or short_ids; may be cross-project) that must close before
+    /// this epic's breakdown auto-dispatches. Mode D uses this to sequence the
+    /// epics it creates (e.g. a consumer epic blocked on a schema epic).
+    pub blocked_by: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct EpicBlockersParams {
+    pub id: String,
+}
+
+#[derive(Deserialize)]
+pub(super) struct ProposalShowParams {
+    pub id: String,
 }
 
 #[derive(Deserialize)]

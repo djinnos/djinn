@@ -30,7 +30,9 @@ use crate::tools::validation::{
     validate_offset, validate_proposal_create_status, validate_proposal_status, validate_sort,
     validate_title,
 };
-use djinn_db::{EpicRepository, ProjectRepository, ProposalListQuery, ProposalRepository};
+use djinn_db::{
+    EpicRepository, ProjectRepository, ProposalListQuery, ProposalRepository, TaskRepository,
+};
 
 // ── List response (NamedListResponse boilerplate, mirrors EpicListResponse) ──
 
@@ -779,7 +781,8 @@ impl DjinnMcpServer {
             _ => {}
         }
         let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
-        let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
+        let task_repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
+        let project_repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
 
         let Some(proposal) = repo.resolve(&p.id).await.ok().flatten() else {
             return Json(err_single(proposal_not_found_error(&p.id)));
@@ -810,69 +813,80 @@ impl DjinnMcpServer {
             ));
         }
 
-        // Primary targets become epics; the rest become read-sources.
+        // At least one primary target is required — that is where the build
+        // writes. The proposal-decomposition Planner reads the spec + targets
+        // and creates the epics itself (cut over from the old mechanical
+        // one-epic-per-primary fan-out).
         let targets = match repo.targets(&proposal.id).await {
             Ok(t) => t,
             Err(e) => return Json(err_single(e.to_string())),
         };
         let primaries: Vec<_> = targets.iter().filter(|t| t.role == "primary").collect();
-        if primaries.is_empty() {
+        let Some(home_target) = primaries.first() else {
             return Json(err_single(
                 "no primary target project to build — add a target first".to_string(),
             ));
-        }
-
-        let ac_lines = parse_acceptance_lines(&proposal.acceptance_criteria);
-        let description = if ac_lines.is_empty() {
-            proposal.body.clone()
-        } else {
-            format!(
-                "{}\n\n## Acceptance criteria\n{}",
-                proposal.body,
-                ac_lines
-                    .iter()
-                    .map(|c| format!("- {c}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            )
         };
+        let home_project_id = home_target.project_id.clone();
 
-        for target in &primaries {
-            let epic = match epic_repo
-                .create_for_project(
-                    &target.project_id,
-                    djinn_db::EpicCreateInput {
-                        title: &proposal.title,
-                        description: &description,
-                        emoji: "",
-                        color: "",
-                        owner: "",
-                        memory_refs: None,
-                        status: Some("open"),
-                        auto_breakdown: None,
-                        originating_adr_id: None,
-                    },
-                )
-                .await
-            {
-                Ok(e) => e,
-                Err(e) => return Json(err_single(format!("failed to create epic: {e}"))),
+        // A human-readable target list for the breakdown task's design.
+        let mut target_lines = Vec::with_capacity(targets.len());
+        for t in &targets {
+            let slug = match project_repo.get(&t.project_id).await {
+                Ok(Some(proj)) => format!("{}/{}", proj.github_owner, proj.github_repo),
+                _ => t.project_id.clone(),
             };
-            // The build owner owns the epic so commits attribute correctly.
-            let _ = epic_repo.set_created_by_user_id(&epic.id, &owner).await;
-            // Sibling target projects become read-sources (cross-repo reasoning).
-            for other in &targets {
-                if other.project_id != target.project_id {
-                    let _ = epic_repo.add_read_source(&epic.id, &other.project_id).await;
-                }
-            }
-            if let Err(e) = repo
-                .link_epic(&proposal.id, &epic.id, &target.project_id)
-                .await
-            {
-                return Json(err_single(e.to_string()));
-            }
+            target_lines.push(format!("- {slug} ({})", t.role));
         }
+
+        let design = format!(
+            "Decompose proposal `{}` ({}) into epics.\n\n\
+             Call `proposal_show(id=\"{}\")` for the full spec, acceptance \
+             criteria, and targets, then follow Workflow D (Proposal \
+             Decomposition). Create one or more epics per `primary` target with \
+             `epic_create(..., proposal_id=\"{}\")`, attach `reference` targets \
+             as read-sources, and sequence cross-repo work with `blocked_by`. Do \
+             NOT create worker tasks — each epic runs its own wave Planner.\n\n\
+             Targets:\n{}",
+            proposal.short_id,
+            proposal.id,
+            proposal.id,
+            proposal.id,
+            target_lines.join("\n"),
+        );
+
+        let ac = serde_json::json!([
+            {"criterion": "Proposal read via proposal_show and target repos surveyed", "met": false},
+            {"criterion": "One or more epics created per primary target (epic_create with proposal_id), with read_sources and blocked_by set for cross-repo ordering", "met": false},
+            {"criterion": "submit_grooming called to finalize the breakdown", "met": false},
+        ])
+        .to_string();
+
+        let title = format!("Break down proposal: {}", proposal.title);
+        let task = match task_repo
+            .create_in_project(
+                &home_project_id,
+                None,
+                &title,
+                &design,
+                &design,
+                "epic_breakdown",
+                djinn_core::models::task::PRIORITY_CRITICAL,
+                "planner",
+                Some("open"),
+                Some(&ac),
+            )
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                return Json(err_single(format!("failed to create breakdown task: {e}")));
+            }
+        };
+        // Attribute the breakdown task (and the epics the Planner spawns from it,
+        // which inherit the session user) to the build owner so commits resolve
+        // to a real GitHub account.
+        let _ = task_repo.set_created_by_user_id(&task.id, &owner).await;
 
         match repo.set_building(&proposal.id, &owner).await {
             Ok(updated) => Json(ProposalSingleResponse {
@@ -882,25 +896,6 @@ impl DjinnMcpServer {
             Err(e) => Json(err_single(e.to_string())),
         }
     }
-}
-
-/// Extract acceptance-criterion strings from the stored JSON (strings or
-/// `{criterion, met}` objects).
-fn parse_acceptance_lines(raw: &str) -> Vec<String> {
-    serde_json::from_str::<serde_json::Value>(raw)
-        .ok()
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|item| match item {
-            serde_json::Value::String(s) => Some(s),
-            serde_json::Value::Object(o) => o
-                .get("criterion")
-                .and_then(|c| c.as_str())
-                .map(str::to_string),
-            _ => None,
-        })
-        .collect()
 }
 
 // ── Permission gates ─────────────────────────────────────────────────────────

@@ -40,8 +40,8 @@ pub use repositories::{
         derive_pair_events, derive_pair_events_into,
     },
     epic::{
-        EpicCountQuery, EpicCreateInput, EpicListQuery, EpicListResult, EpicRepository,
-        EpicTaskCounts, EpicUpdateInput,
+        EpicBlockerRef, EpicCountQuery, EpicCreateInput, EpicListQuery, EpicListResult,
+        EpicRepository, EpicTaskCounts, EpicUpdateInput,
     },
     events::EventsRepository,
     git_settings::GitSettingsRepository,

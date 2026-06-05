@@ -707,6 +707,80 @@ export namespace EpicAddReadSourceOutputSchema {
 
 }
 export type EpicAddReadSourceOutput = EpicAddReadSourceOutputSchema.EpicAddReadSourceOutput;
+export namespace EpicBlockedListInputSchema {
+  export interface EpicBlockedListInput {
+  /**
+   * Epic UUID or short_id.
+   */
+  id: string
+  /**
+   * The epic's project (UUID or owner/repo slug).
+   */
+  project: string
+  [k: string]: any
+  }
+
+}
+export type EpicBlockedListInput = EpicBlockedListInputSchema.EpicBlockedListInput;
+export namespace EpicBlockedListOutputSchema {
+  /**
+   * Response for the epic-dependency listing tools.
+   */
+  export interface EpicBlockedListOutput {
+  blockers?: EpicBlockerItem[]
+  error?: string
+  [k: string]: any
+  }
+  /**
+   * A single epic-dependency reference returned by the blocker-listing tools.
+   */
+  export interface EpicBlockerItem {
+  epic_id: string
+  short_id: string
+  status: string
+  title: string
+  [k: string]: any
+  }
+
+}
+export type EpicBlockedListOutput = EpicBlockedListOutputSchema.EpicBlockedListOutput;
+export namespace EpicBlockersListInputSchema {
+  export interface EpicBlockersListInput {
+  /**
+   * Epic UUID or short_id.
+   */
+  id: string
+  /**
+   * The epic's project (UUID or owner/repo slug).
+   */
+  project: string
+  [k: string]: any
+  }
+
+}
+export type EpicBlockersListInput = EpicBlockersListInputSchema.EpicBlockersListInput;
+export namespace EpicBlockersListOutputSchema {
+  /**
+   * Response for the epic-dependency listing tools.
+   */
+  export interface EpicBlockersListOutput {
+  blockers?: EpicBlockerItem[]
+  error?: string
+  [k: string]: any
+  }
+  /**
+   * A single epic-dependency reference returned by the blocker-listing tools.
+   */
+  export interface EpicBlockerItem {
+  epic_id: string
+  short_id: string
+  status: string
+  title: string
+  [k: string]: any
+  }
+
+}
+export type EpicBlockersListOutput = EpicBlockersListOutputSchema.EpicBlockersListOutput;
 export namespace EpicCloseInputSchema {
   export interface EpicCloseInput {
   /**
@@ -813,6 +887,12 @@ export namespace EpicCreateInputSchema {
    * Absolute project path.
    */
   project: string
+  /**
+   * When this epic is created as part of decomposing a graduated proposal
+   * (Planner Mode D), pass the proposal UUID or short_id to record the
+   * `proposal → epic` link so the proposal can track what it became.
+   */
+  proposal_id?: string
   /**
    * Read-only multi-repo: other registered projects (UUIDs or
    * owner/repo slugs) this epic's tasks may READ while still writing
@@ -1195,6 +1275,16 @@ export namespace EpicTasksOutputSchema {
 export type EpicTasksOutput = EpicTasksOutputSchema.EpicTasksOutput;
 export namespace EpicUpdateInputSchema {
   export interface EpicUpdateInput {
+  /**
+   * Epic dependencies: epics (UUIDs or short_ids) that must CLOSE before
+   * this epic's wave-1 breakdown auto-dispatches. May reference epics in
+   * other projects (cross-repo ordering). Cycles are rejected.
+   */
+  blocked_by_add?: string[]
+  /**
+   * Epic dependencies to remove (UUIDs or short_ids).
+   */
+  blocked_by_remove?: string[]
   color?: string
   description?: string
   emoji?: string
@@ -5215,7 +5305,7 @@ export namespace UserSettingsSetOutputSchema {
 }
 export type UserSettingsSetOutput = UserSettingsSetOutputSchema.UserSettingsSetOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_add_read_source" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "proposal_add_target" | "proposal_create" | "proposal_delete" | "proposal_feedback_accept" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_list" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "user_settings_get" | "user_settings_set";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "proposal_add_target" | "proposal_create" | "proposal_delete" | "proposal_feedback_accept" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_list" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "user_settings_get" | "user_settings_set";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -5230,6 +5320,8 @@ export interface McpToolMap {
   "credential_list": { input: CredentialListInput; output: CredentialListOutput };
   "credential_set": { input: CredentialSetInput; output: CredentialSetOutput };
   "epic_add_read_source": { input: EpicAddReadSourceInput; output: EpicAddReadSourceOutput };
+  "epic_blocked_list": { input: EpicBlockedListInput; output: EpicBlockedListOutput };
+  "epic_blockers_list": { input: EpicBlockersListInput; output: EpicBlockersListOutput };
   "epic_close": { input: EpicCloseInput; output: EpicCloseOutput };
   "epic_count": { input: EpicCountInput; output: EpicCountOutput };
   "epic_create": { input: EpicCreateInput; output: EpicCreateOutput };

@@ -23,4 +23,5 @@ pub(crate) const ARCHITECT_CONFIG: RoleConfig = RoleConfig {
     tool_schemas: extension::tool_schemas_architect,
     initial_message: crate::prompts::ARCHITECT_TEMPLATE,
     finalize_tool_names: &["submit_work"],
+    mode_section: None,
 };

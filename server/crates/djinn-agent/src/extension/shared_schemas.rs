@@ -58,18 +58,19 @@ pub(crate) fn shared_lead_tool_schemas() -> Vec<serde_json::Value> {
 pub(crate) fn tool_epic_create() -> RmcpTool {
     RmcpTool::new(
         "epic_create".to_string(),
-        "Create a new epic (top-level grouping entity). Use to open a new strategic thread of work — typically when an Architect health sweep or chat planning session identifies a gap that needs its own delivery container. Returns the created epic.".to_string(),
+        "Create a new epic (top-level grouping entity). Use to open a new strategic thread of work — e.g. when decomposing a graduated proposal (Planner Mode D) or when a health sweep identifies a gap that needs its own delivery container. Returns the created epic.".to_string(),
         object!({
             "type": "object",
             "required": ["title"],
             "properties": {
                 "title": {"type": "string", "description": "Epic title"},
                 "description": {"type": "string", "description": "Epic description / problem statement"},
-                "emoji": {"type": "string", "description": "Optional emoji for the epic"},
-                "color": {"type": "string", "description": "Optional color tag for the epic"},
-                "owner": {"type": "string", "description": "Optional owner"},
                 "memory_refs": {"type": "array", "items": {"type": "string"}, "description": "Memory reference URLs (e.g. ADR permalinks) to attach to the epic"},
-                "status": {"type": "string", "description": "Initial status: 'open' (default)"}
+                "auto_breakdown": {"type": "boolean", "description": "When false, the coordinator will NOT auto-dispatch a breakdown Planner for this epic (stage it without running). Defaults true."},
+                "project": {"type": "string", "description": "Target project (UUID or owner/repo slug) to create the epic on. Omit to use the current session's project. Set this to create an epic on a SIBLING repo when decomposing a multi-repo proposal."},
+                "read_sources": {"type": "array", "items": {"type": "string"}, "description": "Other registered projects (UUIDs or owner/repo slugs) this epic's tasks may READ while writing only to its own project (cross-repo context)."},
+                "proposal_id": {"type": "string", "description": "Proposal (UUID or short_id) this epic is decomposed from — records the proposal→epic link (Mode D)."},
+                "blocked_by": {"type": "array", "items": {"type": "string"}, "description": "Epics (UUIDs or short_ids; may be in other repos) that must CLOSE before this epic's breakdown auto-dispatches. Use to sequence epics — e.g. a consumer epic blocked on a schema epic."}
             }
         }),
     )
@@ -106,7 +107,7 @@ pub(crate) fn tool_epic_show() -> RmcpTool {
 pub(crate) fn tool_epic_update() -> RmcpTool {
     RmcpTool::new(
         "epic_update".to_string(),
-        "Update epic fields (title/description) and accept memory ref delta args for planner workflows.".to_string(),
+        "Update epic fields (title/description/status), memory ref deltas, and epic dependencies (blocked_by) for planner workflows.".to_string(),
         object!({
             "type": "object",
             "required": ["id"],
@@ -116,7 +117,9 @@ pub(crate) fn tool_epic_update() -> RmcpTool {
                 "description": {"type": "string"},
                 "status": {"type": "string"},
                 "memory_refs_add": {"type": "array", "items": {"type": "string"}},
-                "memory_refs_remove": {"type": "array", "items": {"type": "string"}}
+                "memory_refs_remove": {"type": "array", "items": {"type": "string"}},
+                "blocked_by_add": {"type": "array", "items": {"type": "string"}, "description": "Epics (UUIDs or short_ids) that must close before this epic's breakdown auto-dispatches."},
+                "blocked_by_remove": {"type": "array", "items": {"type": "string"}, "description": "Epic dependencies to remove."}
             }
         }),
     )
@@ -133,6 +136,48 @@ pub(crate) fn tool_epic_tasks() -> RmcpTool {
                 "id": {"type": "string", "description": "Epic UUID or short ID"},
                 "limit": {"type": "integer"},
                 "offset": {"type": "integer"}
+            }
+        }),
+    )
+}
+
+pub(crate) fn tool_epic_blockers_list() -> RmcpTool {
+    RmcpTool::new(
+        "epic_blockers_list".to_string(),
+        "List the epics that BLOCK a given epic (its dependencies — they must close before this epic's breakdown auto-dispatches).".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Epic UUID or short ID"}
+            }
+        }),
+    )
+}
+
+pub(crate) fn tool_epic_blocked_list() -> RmcpTool {
+    RmcpTool::new(
+        "epic_blocked_list".to_string(),
+        "List the epics blocked BY a given epic (its dependents — epics whose breakdown waits on this one).".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Epic UUID or short ID"}
+            }
+        }),
+    )
+}
+
+pub(crate) fn tool_proposal_show() -> RmcpTool {
+    RmcpTool::new(
+        "proposal_show".to_string(),
+        "Show a graduated proposal's spec for decomposition (Planner Mode D): title, body, status, acceptance_criteria, and targets (each with project slug + role of `primary`/`reference`). Use this first when dispatched on an `epic_breakdown` task.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Proposal UUID or short ID"}
             }
         }),
     )

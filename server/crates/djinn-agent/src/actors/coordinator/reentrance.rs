@@ -20,7 +20,7 @@ use djinn_core::events::EventBus;
 use djinn_core::models::task::{
     CLOSE_REASON_DUPLICATE, CLOSE_REASON_RESHAPE, CLOSE_REASON_SUPERSEDED,
 };
-use djinn_db::{Database, SessionRepository};
+use djinn_db::{Database, EpicRepository, SessionRepository};
 
 /// Which auto-dispatch event triggered the check.
 #[derive(Debug, Clone, Copy)]
@@ -77,6 +77,33 @@ pub(super) async fn should_auto_dispatch_planner(db: &Database, event: DispatchE
             "ADR-051 §7: skip auto-dispatch — auto_breakdown=false",
         );
         return false;
+    }
+
+    // 2b. Epic-blocker gate (EpicCreated only). A proposal-decomposition
+    // planner can sequence the epics it creates via epic-level `blocked_by`;
+    // suppress wave-1 until every blocking epic closes. The close path
+    // (`EpicRepository::emit_unblocked_epics`) re-emits `epic.updated` for the
+    // dependents, which re-drives this check once the blockers are gone.
+    if let DispatchEvent::EpicCreated { .. } = event {
+        let epic_repo = EpicRepository::new(db.clone(), EventBus::noop());
+        match epic_repo.has_unresolved_blockers(epic_id).await {
+            Ok(true) => {
+                tracing::debug!(
+                    epic_id,
+                    "epic dependencies: skip auto-dispatch — unresolved epic blockers",
+                );
+                return false;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                // Fail open: don't stall the board on a blocker-lookup error.
+                tracing::warn!(
+                    epic_id,
+                    error = %e,
+                    "epic dependencies: blocker lookup failed, allowing dispatch",
+                );
+            }
+        }
     }
 
     // 3. Active-session guard (both paths).
@@ -228,6 +255,50 @@ mod tests {
         )
         .await;
         assert!(!allowed, "auto_breakdown=false must skip");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unresolved_epic_blocker_skips_then_allows_dispatch() {
+        let db = test_helpers::create_test_db();
+        let project = test_helpers::create_test_project(&db).await;
+        let epic_repo = EpicRepository::new(db.clone(), EventBus::noop());
+        let blocker = make_epic(&db, &project.id).await;
+        let dependent = make_epic(&db, &project.id).await;
+
+        // dependent is blocked by blocker.
+        epic_repo
+            .add_blocker(&dependent.id, &blocker.id)
+            .await
+            .unwrap();
+
+        let allowed = should_auto_dispatch_planner(
+            &db,
+            DispatchEvent::EpicCreated {
+                epic_id: &dependent.id,
+                auto_breakdown: true,
+            },
+        )
+        .await;
+        assert!(
+            !allowed,
+            "unresolved epic blocker must skip wave-1 dispatch"
+        );
+
+        // Closing the blocker unblocks the dependent.
+        epic_repo.close(&blocker.id).await.unwrap();
+
+        let allowed_after = should_auto_dispatch_planner(
+            &db,
+            DispatchEvent::EpicCreated {
+                epic_id: &dependent.id,
+                auto_breakdown: true,
+            },
+        )
+        .await;
+        assert!(
+            allowed_after,
+            "closing the last blocker must allow wave-1 dispatch"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

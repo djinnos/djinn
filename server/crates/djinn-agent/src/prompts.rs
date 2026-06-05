@@ -142,6 +142,16 @@ pub(crate) fn render_prompt_for_role(
     let mut out = format!("{BASE_TEMPLATE}\n{role_template}");
     out = out.replace("{{role_name}}", role_name);
 
+    // Mode-specific section: the dispatcher (code, not the LLM) selects which
+    // workflow this stage runs and we inject ONLY that section. Single-mode
+    // roles leave `mode_section` None and have no `{{role_mode_section}}`
+    // placeholder, so this is a harmless no-op for them.
+    let mode_section = config
+        .mode_section
+        .map(|select| select(task, ctx))
+        .unwrap_or("");
+    out = out.replace("{{role_mode_section}}", mode_section);
+
     // Dynamic tools section from role schemas
     let tools_md = format_tools_section(&(config.tool_schemas)());
     out = out.replace("{{tools_section}}", &tools_md);
@@ -564,12 +574,46 @@ mod tests {
         assert!(prompt.contains("- [x] Tests pass"));
         assert!(prompt.contains("/home/user/project"));
         assert!(prompt.contains("/home/user/project/.djinn/worktrees/t123"));
-        assert!(prompt.contains("issue_type` is `research`"));
         assert!(prompt.contains("memory_write"));
         assert!(prompt.contains("memory_edit"));
-        assert!(prompt.contains("Originated from task task-123"));
+        // A plain `task` runs the implement flow — no research/spike section.
+        assert!(!prompt.contains("Research Deliverable"));
         // No un-substituted placeholders
         assert!(!prompt.contains("{{"));
+    }
+
+    /// The dispatcher injects the research workflow ONLY for research tasks —
+    /// the model never has to detect its mode.
+    #[test]
+    fn worker_research_mode_injects_research_section() {
+        let mut task = make_task();
+        task.issue_type = "research".into();
+        let ctx = make_ctx();
+        let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+        assert!(
+            prompt.contains("Research Deliverable"),
+            "research task should inject the research workflow section"
+        );
+        assert!(prompt.contains("Originated from task task-123"));
+        assert!(!prompt.contains("{{"));
+    }
+
+    /// Conflict context selects the merge-resolution workflow regardless of
+    /// issue_type, and a plain task without conflict context never sees it.
+    #[test]
+    fn worker_conflict_mode_injects_conflict_section() {
+        let task = make_task();
+        let with_conflict = TaskContext {
+            conflict_files: Some("- src/main.rs".into()),
+            ..make_ctx()
+        };
+        let prompt = render_prompt(AgentType::Worker, &task, &with_conflict);
+        assert!(prompt.contains("Merge Conflict — Resolve This First"));
+        assert!(prompt.contains("src/main.rs"));
+
+        let no_conflict = render_prompt(AgentType::Worker, &task, &make_ctx());
+        assert!(!no_conflict.contains("Merge Conflict — Resolve This First"));
     }
 
     #[test]
@@ -855,7 +899,9 @@ mod tests {
     /// prompt side.
     #[test]
     fn planner_patrol_prompt_contains_memory_health_review() {
-        let task = make_task();
+        let mut task = make_task();
+        task.issue_type = "review".into();
+        task.title = "Board patrol".into();
         let ctx = make_ctx();
         let prompt = render_prompt(AgentType::Planner, &task, &ctx);
 
@@ -908,7 +954,9 @@ mod tests {
     /// traceability, which this test also asserts below.
     #[test]
     fn planner_patrol_prompt_contains_contradiction_review() {
-        let task = make_task();
+        let mut task = make_task();
+        task.issue_type = "review".into();
+        task.title = "Board patrol".into();
         let ctx = make_ctx();
         let prompt = render_prompt(AgentType::Planner, &task, &ctx);
 

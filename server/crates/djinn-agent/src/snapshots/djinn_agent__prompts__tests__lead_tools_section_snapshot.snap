@@ -21,7 +21,7 @@ expression: section
 - `task_update(id, acceptance_criteria?, blocked_by_add?, blocked_by_remove?, description?, design?, epic_id?, memory_refs_add?, memory_refs_remove?, owner?, priority?, status?, title?)` — Update task fields and manage blocker relationships. Use blocked_by_add/blocked_by_remove to enforce task sequencing — a task with unresolved blockers will not be dispatched.
 - `task_blocked_list(id)` — List tasks that are blocked by the given task. Use before decomposing to check downstream dependents.
 - `epic_show(id)` — Show details for an epic by UUID or short ID.
-- `epic_update(id, description?, memory_refs_add?, memory_refs_remove?, status?, title?)` — Update epic fields (title/description) and accept memory ref delta args for planner workflows.
+- `epic_update(id, blocked_by_add?, blocked_by_remove?, description?, memory_refs_add?, memory_refs_remove?, status?, title?)` — Update epic fields (title/description/status), memory ref deltas, and epic dependencies (blocked_by) for planner workflows.
 - `epic_tasks(id, limit?, offset?)` — List tasks for an epic with pagination.
 - `epic_close(id)` — Close an epic. Use when all work is complete and no further waves are needed.
 - `task_delete_branch(id)` — Delete the task's git branch, worktree, and paused session so the next worker starts with a clean slate.

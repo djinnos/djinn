@@ -16,6 +16,29 @@ impl AgentRole for PlannerRole {
     }
 }
 
+// Mode workflow sections — exactly one is injected at `{{role_mode_section}}`
+// based on the dispatched task. The LLM no longer "detects" its mode.
+const PLANNER_PATROL: &str = include_str!("../prompts/planner/patrol.md");
+const PLANNER_DECOMPOSITION: &str = include_str!("../prompts/planner/decomposition.md");
+const PLANNER_INTERVENTION: &str = include_str!("../prompts/planner/intervention.md");
+const PLANNER_PROPOSAL: &str = include_str!("../prompts/planner/proposal.md");
+
+/// Select the Planner workflow section for this dispatch. Mirrors the planner
+/// arms of [`crate::roles::flow_for_task_dispatch`] — keep them in sync.
+fn planner_mode_section(task: &Task, _ctx: &TaskContext) -> &'static str {
+    match task.issue_type.as_str() {
+        "epic_breakdown" => PLANNER_PROPOSAL,
+        "planning" | "decomposition" => PLANNER_DECOMPOSITION,
+        // Review tasks split by whether they are the periodic board patrol or a
+        // targeted escalation/stuck-task intervention.
+        "review" if task.title.to_lowercase().contains("patrol") => PLANNER_PATROL,
+        "review" => PLANNER_INTERVENTION,
+        // Planner only ever runs these issue types; default to decomposition as
+        // the safe catch-all rather than leaving the section empty.
+        _ => PLANNER_DECOMPOSITION,
+    }
+}
+
 pub(crate) const PLANNER_CONFIG: RoleConfig = RoleConfig {
     name: "planner",
     display_name: "Planner",
@@ -23,4 +46,5 @@ pub(crate) const PLANNER_CONFIG: RoleConfig = RoleConfig {
     tool_schemas: extension::tool_schemas_planner,
     initial_message: crate::prompts::PLANNER_TEMPLATE,
     finalize_tool_names: &["submit_grooming"],
+    mode_section: Some(planner_mode_section),
 };

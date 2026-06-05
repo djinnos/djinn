@@ -19,6 +19,15 @@ pub struct EpicTaskCounts {
     pub closed_count: i64,
 }
 
+/// Minimal epic reference returned by epic-blocker listing queries.
+#[derive(Debug, sqlx::FromRow)]
+pub struct EpicBlockerRef {
+    pub epic_id: String,
+    pub short_id: String,
+    pub title: String,
+    pub status: String,
+}
+
 /// Filters and pagination for [`EpicRepository::list_filtered`].
 pub struct EpicListQuery {
     pub project_id: Option<String>,
@@ -274,6 +283,9 @@ impl EpicRepository {
         .await?;
 
         self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+        // Re-drive wave-1 for any epics that were blocked by this one and are
+        // now fully unblocked (mirror of task `emit_unblocked_tasks`).
+        self.emit_unblocked_epics(id).await?;
         Ok(epic)
     }
 
@@ -392,6 +404,257 @@ impl EpicRepository {
             Some(epic_id) => self.read_sources(epic_id).await,
             None => Ok(Vec::new()),
         }
+    }
+
+    // ── Epic dependencies (mirror of task `blockers`) ────────────────────────
+
+    /// Add an epic-blocker relationship: `epic_id` is blocked by `blocking_id`.
+    /// Rejects self-loops and cycles (recursive CTE over the blocking graph).
+    /// Idempotent on duplicate edges.
+    pub async fn add_blocker(&self, epic_id: &str, blocking_id: &str) -> Result<()> {
+        if epic_id == blocking_id {
+            return Err(Error::Internal("epic cannot block itself".into()));
+        }
+        self.db.ensure_initialized().await?;
+
+        let epic_id_owned = epic_id.to_owned();
+        let blocking_id_owned = blocking_id.to_owned();
+        crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let epic_id = epic_id_owned.clone();
+                let blocking_id = blocking_id_owned.clone();
+                async move {
+                    let mut tx = self.db.pool().begin().await?;
+                    let would_cycle = sqlx::query_scalar!(
+                        r#"WITH RECURSIVE reach(id) AS (
+                             SELECT epic_id FROM epic_blockers WHERE blocking_epic_id = $1
+                             UNION
+                             SELECT b.epic_id FROM epic_blockers b JOIN reach r ON b.blocking_epic_id = r.id
+                         )
+                         SELECT EXISTS(SELECT 1 FROM reach WHERE id = $2) AS "exists!: bool""#,
+                        epic_id,
+                        blocking_id
+                    )
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    if would_cycle {
+                        return Err(Error::Internal(
+                            "would create circular epic blocker dependency".into(),
+                        ));
+                    }
+                    let result = sqlx::query!(
+                        "INSERT INTO epic_blockers (epic_id, blocking_epic_id) VALUES ($1, $2)",
+                        epic_id,
+                        blocking_id
+                    )
+                    .execute(&mut *tx)
+                    .await;
+                    match result {
+                        Ok(_) => {}
+                        Err(sqlx::Error::Database(ref e)) if e.is_unique_violation() => {}
+                        Err(e) => {
+                            return Err(Error::Internal(format!(
+                                "failed to add epic blocker {blocking_id} → {epic_id}: {e}"
+                            )));
+                        }
+                    }
+                    tx.commit().await?;
+                    Ok::<_, crate::Error>(())
+                }
+            },
+        )
+        .await?;
+
+        if let Some(epic) = self.get(epic_id).await? {
+            self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+        }
+        if let Some(epic) = self.get(blocking_id).await? {
+            self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+        }
+        Ok(())
+    }
+
+    /// Remove an epic-blocker relationship. Idempotent.
+    pub async fn remove_blocker(&self, epic_id: &str, blocking_id: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            "DELETE FROM epic_blockers WHERE epic_id = $1 AND blocking_epic_id = $2",
+            epic_id,
+            blocking_id
+        )
+        .execute(self.db.pool())
+        .await?;
+
+        if let Some(epic) = self.get(epic_id).await? {
+            self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+        }
+        if let Some(epic) = self.get(blocking_id).await? {
+            self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+        }
+        Ok(())
+    }
+
+    /// Atomically apply a batch of epic-blocker additions and removals in a
+    /// single transaction (mirror of [`TaskRepository::update_blockers_atomic`]).
+    pub async fn update_blockers_atomic(
+        &self,
+        epic_id: &str,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        let epic_id_owned = epic_id.to_owned();
+        crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let epic_id = epic_id_owned.clone();
+                async move {
+                    let mut tx = self.db.pool().begin().await?;
+                    for blocking_id in remove {
+                        sqlx::query!(
+                            "DELETE FROM epic_blockers WHERE epic_id = $1 AND blocking_epic_id = $2",
+                            epic_id,
+                            blocking_id
+                        )
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                    for blocking_id in add {
+                        if &epic_id == blocking_id {
+                            return Err(Error::Internal("epic cannot block itself".into()));
+                        }
+                        let would_cycle = sqlx::query_scalar!(
+                            r#"WITH RECURSIVE reach(id) AS (
+                                 SELECT epic_id FROM epic_blockers WHERE blocking_epic_id = $1
+                                 UNION
+                                 SELECT b.epic_id FROM epic_blockers b JOIN reach r ON b.blocking_epic_id = r.id
+                             )
+                             SELECT EXISTS(SELECT 1 FROM reach WHERE id = $2) AS "exists!: bool""#,
+                            epic_id,
+                            blocking_id
+                        )
+                        .fetch_one(&mut *tx)
+                        .await?;
+                        if would_cycle {
+                            return Err(Error::Internal(
+                                "would create circular epic blocker dependency".into(),
+                            ));
+                        }
+                        let result = sqlx::query!(
+                            "INSERT INTO epic_blockers (epic_id, blocking_epic_id) VALUES ($1, $2)",
+                            epic_id,
+                            blocking_id
+                        )
+                        .execute(&mut *tx)
+                        .await;
+                        match result {
+                            Ok(_) => {}
+                            Err(sqlx::Error::Database(ref e)) if e.is_unique_violation() => {}
+                            Err(e) => {
+                                return Err(Error::Internal(format!(
+                                    "failed to add epic blocker {blocking_id} → {epic_id}: {e}"
+                                )));
+                            }
+                        }
+                    }
+                    tx.commit().await?;
+                    Ok::<_, crate::Error>(())
+                }
+            },
+        )
+        .await?;
+
+        let mut notified = std::collections::HashSet::new();
+        notified.insert(epic_id.to_owned());
+        for id in add.iter().chain(remove.iter()) {
+            notified.insert(id.clone());
+        }
+        for id in &notified {
+            if let Some(epic) = self.get(id).await? {
+                self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+            }
+        }
+        Ok(())
+    }
+
+    /// List epics blocking `epic_id`.
+    pub async fn list_blockers(&self, epic_id: &str) -> Result<Vec<EpicBlockerRef>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            EpicBlockerRef,
+            r#"SELECT e.id AS epic_id, e.short_id, e.title, e.status AS "status!"
+             FROM epic_blockers b
+             JOIN epics e ON e.id = b.blocking_epic_id
+             WHERE b.epic_id = $1
+             ORDER BY e.created_at"#,
+            epic_id
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// List epics blocked BY `blocking_epic_id`.
+    pub async fn list_blocked_by(&self, blocking_epic_id: &str) -> Result<Vec<EpicBlockerRef>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            EpicBlockerRef,
+            r#"SELECT e.id AS epic_id, e.short_id, e.title, e.status AS "status!"
+             FROM epic_blockers b
+             JOIN epics e ON e.id = b.epic_id
+             WHERE b.blocking_epic_id = $1
+             ORDER BY e.created_at"#,
+            blocking_epic_id
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// True iff `epic_id` has at least one blocking epic that is not yet closed.
+    /// Used by the coordinator to gate wave-1 auto-dispatch.
+    pub async fn has_unresolved_blockers(&self, epic_id: &str) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_scalar!(
+            r#"SELECT EXISTS(
+                 SELECT 1 FROM epic_blockers b
+                 JOIN epics be ON be.id = b.blocking_epic_id
+                 WHERE b.epic_id = $1 AND be.status != 'closed'
+             ) AS "exists!: bool""#,
+            epic_id
+        )
+        .fetch_one(self.db.pool())
+        .await?)
+    }
+
+    /// Emit `epic.updated` for epics that were blocked by `closed_epic_id` and
+    /// are now fully unblocked (all blockers closed) and still open. This
+    /// re-drives the coordinator's wave-1 path for the dependent epics.
+    pub async fn emit_unblocked_epics(&self, closed_epic_id: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        let unblocked: Vec<Epic> = sqlx::query_as!(
+            Epic,
+            r#"SELECT e.id, e.project_id, e.short_id, e.title, e.description, e.emoji, e.color,
+                    e.status AS "status!", e.owner, e.created_at, e.updated_at, e.closed_at,
+                    e.memory_refs::text AS "memory_refs!", e.auto_breakdown AS "auto_breakdown!: bool",
+                    e.originating_adr_id, e.created_by_user_id
+             FROM epic_blockers b
+             JOIN epics e ON e.id = b.epic_id
+             WHERE b.blocking_epic_id = $1
+               AND e.status = 'open'
+               AND NOT EXISTS (
+                   SELECT 1 FROM epic_blockers b2
+                   JOIN epics be ON be.id = b2.blocking_epic_id
+                   WHERE b2.epic_id = e.id AND be.status != 'closed'
+               )"#,
+            closed_epic_id
+        )
+        .fetch_all(self.db.pool())
+        .await?;
+
+        for epic in unblocked {
+            self.events.send(DjinnEventEnvelope::epic_updated(&epic));
+        }
+        Ok(())
     }
 
     // ── New methods (ADR-003) ────────────────────────────────────────────────

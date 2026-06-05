@@ -1251,6 +1251,140 @@ expression: signatures
     }
   },
   {
+    "name": "epic_blocked_list",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Epic UUID or short_id.",
+          "type": "string"
+        },
+        "project": {
+          "description": "The epic's project (UUID or owner/repo slug).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "id"
+      ],
+      "title": "EpicBlockersParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "EpicBlockerItem": {
+          "description": "A single epic-dependency reference returned by the blocker-listing tools.",
+          "properties": {
+            "epic_id": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "epic_id",
+            "short_id",
+            "title",
+            "status"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Response for the epic-dependency listing tools.",
+      "properties": {
+        "blockers": {
+          "items": {
+            "$ref": "#/$defs/EpicBlockerItem"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "EpicBlockersResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "epic_blockers_list",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Epic UUID or short_id.",
+          "type": "string"
+        },
+        "project": {
+          "description": "The epic's project (UUID or owner/repo slug).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project",
+        "id"
+      ],
+      "title": "EpicBlockersParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "EpicBlockerItem": {
+          "description": "A single epic-dependency reference returned by the blocker-listing tools.",
+          "properties": {
+            "epic_id": {
+              "type": "string"
+            },
+            "short_id": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "epic_id",
+            "short_id",
+            "title",
+            "status"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Response for the epic-dependency listing tools.",
+      "properties": {
+        "blockers": {
+          "items": {
+            "$ref": "#/$defs/EpicBlockerItem"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "EpicBlockersResponse",
+      "type": "object"
+    }
+  },
+  {
     "name": "epic_close",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1445,6 +1579,11 @@ expression: signatures
         },
         "project": {
           "description": "Absolute project path.",
+          "type": "string"
+        },
+        "proposal_id": {
+          "description": "When this epic is created as part of decomposing a graduated proposal\n(Planner Mode D), pass the proposal UUID or short_id to record the\n`proposal → epic` link so the proposal can track what it became.",
+          "nullable": true,
           "type": "string"
         },
         "read_sources": {
@@ -2230,6 +2369,22 @@ expression: signatures
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "blocked_by_add": {
+          "description": "Epic dependencies: epics (UUIDs or short_ids) that must CLOSE before\nthis epic's wave-1 breakdown auto-dispatches. May reference epics in\nother projects (cross-repo ordering). Cycles are rejected.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "blocked_by_remove": {
+          "description": "Epic dependencies to remove (UUIDs or short_ids).",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
+        },
         "color": {
           "nullable": true,
           "type": "string"

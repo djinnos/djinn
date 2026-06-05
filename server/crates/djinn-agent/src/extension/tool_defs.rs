@@ -802,6 +802,23 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
     for value in shared_schemas::shared_lead_tool_schemas() {
         tool_values.push(value);
     }
+    // Proposal decomposition (Mode D): create epics across the proposal's
+    // targets, sequence them with dependencies, and read the proposal + sibling
+    // repos.
+    tool_values.push(serialize_tool(shared_schemas::tool_epic_create(), false));
+    tool_values.push(serialize_tool(shared_schemas::tool_proposal_show(), true));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_epic_blockers_list(),
+        true,
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_epic_blocked_list(),
+        true,
+    ));
+    // Sibling-repo read (no local read-source authz needed) — same tools the
+    // Architect uses to survey other repos before deciding the epic shape.
+    tool_values.push(serialize_tool(tool_github_search(), true));
+    tool_values.push(serialize_tool(tool_github_fetch_file(), true));
     tool_values.push(serialize_tool(
         shared_schemas::tool_task_transition(),
         false,

@@ -30,6 +30,16 @@ pub(crate) struct RoleConfig {
     /// The first entry is the primary finalize tool; additional entries are
     /// alternate exit paths (e.g. `request_lead` for workers).
     pub(crate) finalize_tool_names: &'static [&'static str],
+    /// Mode selector: given the task + render context, return the single
+    /// mode-specific prompt section to inject at `{{role_mode_section}}`.
+    /// `None` for single-mode roles (their template has no placeholder).
+    ///
+    /// This is how the *dispatcher* (code, not the LLM) picks the workflow:
+    /// instead of the prompt asking the model to "detect your mode", the
+    /// builder injects only the relevant mode's instructions. Keep each
+    /// selector in lockstep with [`flow_for_task_dispatch`] /
+    /// [`role_for_task_dispatch`].
+    pub(crate) mode_section: Option<fn(&Task, &TaskContext) -> &'static str>,
 }
 
 pub(crate) fn config_for(agent_type: AgentType) -> &'static RoleConfig {
@@ -142,7 +152,10 @@ pub(crate) fn role_for_task_dispatch(
 
     // Issue-type-specific routing takes priority over status-based routing.
     match task.issue_type.as_str() {
-        "planning" | "decomposition" => return role_impl_for(AgentType::Planner),
+        // `epic_breakdown` is proposal decomposition — Planner Mode D.
+        "planning" | "decomposition" | "epic_breakdown" => {
+            return role_impl_for(AgentType::Planner);
+        }
         // ADR-051 §1 + §8: review tasks are Planner-owned (patrol +
         // lead escalation ceiling).  Previously this routed to Architect
         // per ADR-034 before the split.
@@ -190,8 +203,11 @@ pub(crate) fn flow_for_task_dispatch(
     // matching `role_for_task_dispatch`.
     match task.issue_type.as_str() {
         "spike" => return SupervisorFlow::Spike,
-        // Simple-lifecycle types — planner-only flow.
-        "planning" | "decomposition" | "review" => return SupervisorFlow::Planning,
+        // Simple-lifecycle types — planner-only flow. `epic_breakdown` is the
+        // proposal-decomposition planner (Mode D).
+        "planning" | "decomposition" | "review" | "epic_breakdown" => {
+            return SupervisorFlow::Planning;
+        }
         _ => {}
     }
 
@@ -348,7 +364,10 @@ fn planner_review_dispatch_rule() -> DispatchRule {
 /// backward compatibility with existing DB rows.
 fn planning_claims(task: &Task, _ctx: &DispatchContext) -> bool {
     matches!(task.status.as_str(), "open" | "in_progress")
-        && matches!(task.issue_type.as_str(), "planning" | "decomposition")
+        && matches!(
+            task.issue_type.as_str(),
+            "planning" | "decomposition" | "epic_breakdown"
+        )
 }
 
 fn planning_dispatch_rule() -> DispatchRule {
@@ -367,7 +386,7 @@ fn worker_claims(task: &Task, _ctx: &DispatchContext) -> bool {
         "needs_task_review" | "in_task_review" | "needs_lead_intervention" | "in_lead_intervention"
     ) && !matches!(
         task.issue_type.as_str(),
-        "spike" | "review" | "planning" | "decomposition"
+        "spike" | "review" | "planning" | "decomposition" | "epic_breakdown"
     )
 }
 

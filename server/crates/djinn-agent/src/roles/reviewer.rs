@@ -23,4 +23,5 @@ pub(crate) const REVIEWER_CONFIG: RoleConfig = RoleConfig {
     tool_schemas: extension::tool_schemas_reviewer,
     initial_message: crate::prompts::REVIEWER_TEMPLATE,
     finalize_tool_names: &["submit_review", "request_lead"],
+    mode_section: None,
 };

@@ -628,7 +628,7 @@ expression: tool_schemas_planner()
   },
   {
     "name": "epic_update",
-    "description": "Update epic fields (title/description) and accept memory ref delta args for planner workflows.",
+    "description": "Update epic fields (title/description/status), memory ref deltas, and epic dependencies (blocked_by) for planner workflows.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -659,6 +659,20 @@ expression: tool_schemas_planner()
           "items": {
             "type": "string"
           }
+        },
+        "blocked_by_add": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Epics (UUIDs or short_ids) that must close before this epic's breakdown auto-dispatches."
+        },
+        "blocked_by_remove": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Epic dependencies to remove."
         }
       }
     },
@@ -703,6 +717,174 @@ expression: tool_schemas_planner()
       }
     },
     "concurrent_safe": false
+  },
+  {
+    "name": "epic_create",
+    "description": "Create a new epic (top-level grouping entity). Use to open a new strategic thread of work — e.g. when decomposing a graduated proposal (Planner Mode D) or when a health sweep identifies a gap that needs its own delivery container. Returns the created epic.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "title"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Epic title"
+        },
+        "description": {
+          "type": "string",
+          "description": "Epic description / problem statement"
+        },
+        "memory_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Memory reference URLs (e.g. ADR permalinks) to attach to the epic"
+        },
+        "auto_breakdown": {
+          "type": "boolean",
+          "description": "When false, the coordinator will NOT auto-dispatch a breakdown Planner for this epic (stage it without running). Defaults true."
+        },
+        "project": {
+          "type": "string",
+          "description": "Target project (UUID or owner/repo slug) to create the epic on. Omit to use the current session's project. Set this to create an epic on a SIBLING repo when decomposing a multi-repo proposal."
+        },
+        "read_sources": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Other registered projects (UUIDs or owner/repo slugs) this epic's tasks may READ while writing only to its own project (cross-repo context)."
+        },
+        "proposal_id": {
+          "type": "string",
+          "description": "Proposal (UUID or short_id) this epic is decomposed from — records the proposal→epic link (Mode D)."
+        },
+        "blocked_by": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Epics (UUIDs or short_ids; may be in other repos) that must CLOSE before this epic's breakdown auto-dispatches. Use to sequence epics — e.g. a consumer epic blocked on a schema epic."
+        }
+      }
+    },
+    "concurrent_safe": false
+  },
+  {
+    "name": "proposal_show",
+    "description": "Show a graduated proposal's spec for decomposition (Planner Mode D): title, body, status, acceptance_criteria, and targets (each with project slug + role of `primary`/`reference`). Use this first when dispatched on an `epic_breakdown` task.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Proposal UUID or short ID"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "epic_blockers_list",
+    "description": "List the epics that BLOCK a given epic (its dependencies — they must close before this epic's breakdown auto-dispatches).",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Epic UUID or short ID"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "epic_blocked_list",
+    "description": "List the epics blocked BY a given epic (its dependents — epics whose breakdown waits on this one).",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Epic UUID or short ID"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "github_search",
+    "description": "Search GitHub code across public repositories using the GitHub Code Search API. Returns compact, navigable matches with snippets, file paths, URLs, and metadata. Each result has a result_id for reference. Use github_fetch_file to inspect the full file of a promising result.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "query"
+      ],
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search query. Supports GitHub code search syntax."
+        },
+        "language": {
+          "type": "string",
+          "description": "Programming language filter (e.g. \"Rust\", \"Python\", \"TypeScript\")"
+        },
+        "repo": {
+          "type": "string",
+          "description": "Repository filter in \"owner/repo\" format (e.g. \"tokio-rs/tokio\")"
+        },
+        "path": {
+          "type": "string",
+          "description": "Path filter to search within specific directories (e.g. \"src/\")"
+        }
+      }
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "github_fetch_file",
+    "description": "Fetch the full contents of a file from a public GitHub repository. Use after github_search to inspect a promising result. Supports optional start_line/end_line for reading specific sections of large files.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "repo",
+        "path"
+      ],
+      "properties": {
+        "repo": {
+          "type": "string",
+          "description": "Repository in \"owner/repo\" format (e.g. \"tokio-rs/tokio\")"
+        },
+        "path": {
+          "type": "string",
+          "description": "File path within the repository (e.g. \"src/lib.rs\")"
+        },
+        "ref": {
+          "type": "string",
+          "description": "Branch, tag, or commit SHA (default: default branch)"
+        },
+        "start_line": {
+          "type": "integer",
+          "description": "First line to return (1-based, inclusive)"
+        },
+        "end_line": {
+          "type": "integer",
+          "description": "Last line to return (1-based, inclusive)"
+        }
+      }
+    },
+    "concurrent_safe": true
   },
   {
     "name": "task_transition",

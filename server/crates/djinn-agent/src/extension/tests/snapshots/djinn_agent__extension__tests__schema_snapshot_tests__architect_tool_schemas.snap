@@ -974,7 +974,7 @@ expression: tool_schemas_architect()
   },
   {
     "name": "epic_update",
-    "description": "Update epic fields (title/description) and accept memory ref delta args for planner workflows.",
+    "description": "Update epic fields (title/description/status), memory ref deltas, and epic dependencies (blocked_by) for planner workflows.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -1005,6 +1005,20 @@ expression: tool_schemas_architect()
           "items": {
             "type": "string"
           }
+        },
+        "blocked_by_add": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Epics (UUIDs or short_ids) that must close before this epic's breakdown auto-dispatches."
+        },
+        "blocked_by_remove": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Epic dependencies to remove."
         }
       }
     },
@@ -1052,7 +1066,7 @@ expression: tool_schemas_architect()
   },
   {
     "name": "epic_create",
-    "description": "Create a new epic (top-level grouping entity). Use to open a new strategic thread of work — typically when an Architect health sweep or chat planning session identifies a gap that needs its own delivery container. Returns the created epic.",
+    "description": "Create a new epic (top-level grouping entity). Use to open a new strategic thread of work — e.g. when decomposing a graduated proposal (Planner Mode D) or when a health sweep identifies a gap that needs its own delivery container. Returns the created epic.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -1067,18 +1081,6 @@ expression: tool_schemas_architect()
           "type": "string",
           "description": "Epic description / problem statement"
         },
-        "emoji": {
-          "type": "string",
-          "description": "Optional emoji for the epic"
-        },
-        "color": {
-          "type": "string",
-          "description": "Optional color tag for the epic"
-        },
-        "owner": {
-          "type": "string",
-          "description": "Optional owner"
-        },
         "memory_refs": {
           "type": "array",
           "items": {
@@ -1086,9 +1088,31 @@ expression: tool_schemas_architect()
           },
           "description": "Memory reference URLs (e.g. ADR permalinks) to attach to the epic"
         },
-        "status": {
+        "auto_breakdown": {
+          "type": "boolean",
+          "description": "When false, the coordinator will NOT auto-dispatch a breakdown Planner for this epic (stage it without running). Defaults true."
+        },
+        "project": {
           "type": "string",
-          "description": "Initial status: 'drafting' (default) or 'open'"
+          "description": "Target project (UUID or owner/repo slug) to create the epic on. Omit to use the current session's project. Set this to create an epic on a SIBLING repo when decomposing a multi-repo proposal."
+        },
+        "read_sources": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Other registered projects (UUIDs or owner/repo slugs) this epic's tasks may READ while writing only to its own project (cross-repo context)."
+        },
+        "proposal_id": {
+          "type": "string",
+          "description": "Proposal (UUID or short_id) this epic is decomposed from — records the proposal→epic link (Mode D)."
+        },
+        "blocked_by": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Epics (UUIDs or short_ids; may be in other repos) that must CLOSE before this epic's breakdown auto-dispatches. Use to sequence epics — e.g. a consumer epic blocked on a schema epic."
         }
       }
     },

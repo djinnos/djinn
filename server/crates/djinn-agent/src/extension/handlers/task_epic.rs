@@ -197,6 +197,40 @@ pub(crate) async fn call_epic_update(
         None => resolve_project_id_for_agent_tools(state, arguments).await?,
     };
     let repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
+
+    // Apply epic-dependency edits first (resolve blockers globally so they can
+    // live in another repo). The target epic is resolved within the session
+    // project; cross-project dependencies are set at creation via epic_create.
+    if p.blocked_by_add.is_some() || p.blocked_by_remove.is_some() {
+        if let Some(target) = repo
+            .resolve_in_project(&project_id, &p.id)
+            .await
+            .ok()
+            .flatten()
+        {
+            let mut add_ids = Vec::new();
+            for r in p.blocked_by_add.clone().unwrap_or_default() {
+                if let Ok(Some(e)) = repo.resolve(&r).await {
+                    add_ids.push(e.id);
+                } else {
+                    return Err(format!("blocker epic not found: {r}"));
+                }
+            }
+            let mut remove_ids = Vec::new();
+            for r in p.blocked_by_remove.clone().unwrap_or_default() {
+                match repo.resolve(&r).await {
+                    Ok(Some(e)) => remove_ids.push(e.id),
+                    _ => remove_ids.push(r),
+                }
+            }
+            repo.update_blockers_atomic(&target.id, &add_ids, &remove_ids)
+                .await
+                .map_err(|e| e.to_string())?;
+        } else {
+            return Err(format!("epic not found: {}", p.id));
+        }
+    }
+
     let response = djinn_control_plane::tools::epic_ops::epic_update_with_delta(
         &repo,
         &project_id,
@@ -215,6 +249,192 @@ pub(crate) async fn call_epic_update(
     )
     .await;
     serde_json::to_value(response).map_err(|e| e.to_string())
+}
+
+pub(crate) async fn call_epic_create(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    resolved_project_id: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let p: EpicCreateParams = parse_args(arguments)?;
+    if p.title.trim().is_empty() {
+        return Err("epic title is required".to_string());
+    }
+    let project_repo = ProjectRepository::new(state.db.clone(), state.event_bus.clone());
+    // Mode D may target a sibling repo via `project`; otherwise use the
+    // session's resolved project.
+    let project_id = if let Some(proj) = p.project.as_deref().filter(|s| !s.is_empty()) {
+        match project_repo.resolve(proj).await {
+            Ok(Some(id)) => id,
+            _ => return Err(format!("project not found: {proj}")),
+        }
+    } else {
+        match resolved_project_id {
+            Some(id) => id.to_string(),
+            None => resolve_project_id_for_agent_tools(state, arguments).await?,
+        }
+    };
+
+    let epic_repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
+    let memory_refs_json = p
+        .memory_refs
+        .as_ref()
+        .map(|r| serde_json::to_string(r).unwrap_or_else(|_| "[]".to_string()));
+    let epic = epic_repo
+        .create_for_project(
+            &project_id,
+            djinn_db::EpicCreateInput {
+                title: &p.title,
+                description: p.description.as_deref().unwrap_or(""),
+                emoji: "",
+                color: "",
+                owner: "",
+                memory_refs: memory_refs_json.as_deref(),
+                status: Some("open"),
+                auto_breakdown: p.auto_breakdown,
+                originating_adr_id: None,
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Seed read sources (cross-repo read context).
+    if let Some(sources) = &p.read_sources {
+        for src in sources {
+            if let Ok(Some(src_id)) = project_repo.resolve(src).await
+                && src_id != epic.project_id
+            {
+                let _ = epic_repo.add_read_source(&epic.id, &src_id).await;
+            }
+        }
+    }
+
+    // Wire epic dependencies (resolved globally for cross-repo ordering).
+    if let Some(blockers) = &p.blocked_by {
+        for b in blockers {
+            match epic_repo.resolve(b).await {
+                Ok(Some(be)) => {
+                    epic_repo
+                        .add_blocker(&epic.id, &be.id)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+                _ => return Err(format!("blocker epic not found: {b}")),
+            }
+        }
+    }
+
+    // Record the proposal → epic link (Planner Mode D).
+    if let Some(pref) = &p.proposal_id {
+        let proposal_repo = ProposalRepository::new(state.db.clone(), state.event_bus.clone());
+        if let Ok(Some(prop)) = proposal_repo.resolve(pref).await {
+            let _ = proposal_repo
+                .link_epic(&prop.id, &epic.id, &epic.project_id)
+                .await;
+        }
+    }
+
+    serde_json::to_value(djinn_control_plane::tools::epic_ops::EpicModel::from(&epic))
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) async fn call_epic_blockers_list(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    resolved_project_id: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let p: EpicBlockersParams = parse_args(arguments)?;
+    let project_id = match resolved_project_id {
+        Some(id) => id.to_string(),
+        None => resolve_project_id_for_agent_tools(state, arguments).await?,
+    };
+    let repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
+    let Some(epic) = repo
+        .resolve_in_project(&project_id, &p.id)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return Err(format!("epic not found: {}", p.id));
+    };
+    let refs = repo
+        .list_blockers(&epic.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "blockers": refs.iter().map(|b| serde_json::json!({
+            "epic_id": b.epic_id, "short_id": b.short_id, "title": b.title, "status": b.status,
+        })).collect::<Vec<_>>()
+    }))
+}
+
+pub(crate) async fn call_epic_blocked_list(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    resolved_project_id: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let p: EpicBlockersParams = parse_args(arguments)?;
+    let project_id = match resolved_project_id {
+        Some(id) => id.to_string(),
+        None => resolve_project_id_for_agent_tools(state, arguments).await?,
+    };
+    let repo = EpicRepository::new(state.db.clone(), state.event_bus.clone());
+    let Some(epic) = repo
+        .resolve_in_project(&project_id, &p.id)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return Err(format!("epic not found: {}", p.id));
+    };
+    let refs = repo
+        .list_blocked_by(&epic.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "blockers": refs.iter().map(|b| serde_json::json!({
+            "epic_id": b.epic_id, "short_id": b.short_id, "title": b.title, "status": b.status,
+        })).collect::<Vec<_>>()
+    }))
+}
+
+pub(crate) async fn call_proposal_show(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: ProposalShowParams = parse_args(arguments)?;
+    let proposal_repo = ProposalRepository::new(state.db.clone(), state.event_bus.clone());
+    let Some(proposal) = proposal_repo.resolve(&p.id).await.ok().flatten() else {
+        return Err(format!("proposal not found: {}", p.id));
+    };
+    let targets = proposal_repo
+        .targets(&proposal.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let project_repo = ProjectRepository::new(state.db.clone(), state.event_bus.clone());
+    let mut target_json = Vec::with_capacity(targets.len());
+    for t in &targets {
+        let slug = match project_repo.get(&t.project_id).await {
+            Ok(Some(proj)) => format!("{}/{}", proj.github_owner, proj.github_repo),
+            _ => t.project_id.clone(),
+        };
+        target_json.push(serde_json::json!({
+            "project_id": t.project_id,
+            "project": slug,
+            "role": t.role,
+        }));
+    }
+    let acceptance: serde_json::Value =
+        serde_json::from_str(&proposal.acceptance_criteria).unwrap_or(serde_json::json!([]));
+    Ok(serde_json::json!({
+        "id": proposal.id,
+        "short_id": proposal.short_id,
+        "title": proposal.title,
+        "body": proposal.body,
+        "status": proposal.status,
+        "acceptance_criteria": acceptance,
+        "targets": target_json,
+    }))
 }
 
 pub(crate) async fn call_epic_tasks(

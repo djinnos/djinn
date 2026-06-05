@@ -23,4 +23,5 @@ pub(crate) const LEAD_CONFIG: RoleConfig = RoleConfig {
     tool_schemas: extension::tool_schemas_lead,
     initial_message: crate::prompts::LEAD_TEMPLATE,
     finalize_tool_names: &["submit_decision"],
+    mode_section: None,
 };
