@@ -65,7 +65,6 @@ use std::sync::Arc;
 
 use djinn_core::models::{SessionStatus, Task};
 use djinn_db::ProjectRepository;
-use djinn_git::run_git_command;
 use djinn_runtime::spec::{RoleKind, TaskRunSpec};
 use djinn_supervisor::{StageError, StageOutcome, SupervisorServices};
 use djinn_workspace::Workspace;
@@ -151,25 +150,20 @@ fn classify_provider_failure(err: &anyhow::Error) -> Option<ProviderFailureClass
     }
 }
 
-/// Read-only multi-repo: clone each of the epic's read-source projects
-/// read-only into a gitignored dir inside the worktree and resolve their
-/// slugs/names, so the prompt can advertise them and the agent's
-/// worktree-scoped file tools can read them. Best-effort: a missing
-/// mirror or clone failure just drops the on-disk path (slug-based
-/// `code_graph` / `memory_*` access still works). The clones are excluded
-/// from git so the task's auto-commit never captures them.
-async fn materialize_read_sources(
+/// Read-only multi-repo: resolve the epic's read-source projects to slugs/names
+/// so the prompt can flag them as specifically relevant. We no longer clone
+/// them eagerly — the agent reads any registered repo on demand via
+/// `read(project=…)` / `code_search`, and `shell(project=…)` lazily checks one
+/// out only when it actually needs a working tree.
+async fn advertise_read_sources(
     spec: &TaskRunSpec,
     agent_context: &AgentContext,
-    worktree_path: &std::path::Path,
 ) -> Vec<ReadSourceInfo> {
     if spec.read_source_project_ids.is_empty() {
         return Vec::new();
     }
     let project_repo =
         ProjectRepository::new(agent_context.db.clone(), agent_context.event_bus.clone());
-    add_git_exclude(worktree_path, ".djinn/read-sources/").await;
-    let dest_root = worktree_path.join(".djinn/read-sources");
     let mut out = Vec::new();
     for pid in &spec.read_source_project_ids {
         let project = match project_repo.get(pid).await {
@@ -179,88 +173,12 @@ async fn materialize_read_sources(
                 continue;
             }
         };
-        let slug = format!("{}/{}", project.github_owner, project.github_repo);
-        // Resolve the read-source mirror against DJINN_MIRROR_ROOT (the mirror
-        // PVC, mounted at /mirror on the K8s worker — same root the worker uses
-        // for the PRIMARY workspace via MirrorManager) when set, falling back to
-        // the DJINN_HOME-based default for host/in-process layouts. The bare
-        // `mirror_path_for` only consults DJINN_HOME/$HOME (~/.djinn/mirrors),
-        // which is absent in the worker Pod (DJINN_HOME unset, mirrors at
-        // /mirror) — so it ALWAYS missed and every read source silently fell
-        // back to "slug only", leaving the agent without the read-source code on
-        // disk. Matches `MirrorManager::mirror_path` (`<root>/<pid>.git`).
-        let mirror = std::env::var_os("DJINN_MIRROR_ROOT")
-            .map(|root| std::path::PathBuf::from(root).join(format!("{pid}.git")))
-            .unwrap_or_else(|| djinn_workspace::mirror_path_for(pid));
-        let mut path = None;
-        let dest = dest_root.join(pid);
-        if dest.join(".git").exists() {
-            // A prior stage in this same run already materialized the
-            // read-source into the shared worktree. The supervisor drives every
-            // role (worker → reviewer → …) against ONE worktree and calls this
-            // per stage; a plain re-clone 128s on the non-empty dest and drops
-            // the source to "slug only" for every stage after the first (the
-            // reviewer/PR stages then lose the read-source code on disk). The
-            // mirror is immutable for the run, so reuse the existing clone.
-            path = Some(dest.display().to_string());
-        } else if mirror.exists() {
-            // Clear any partial leftover (a clone that died mid-copy leaves a
-            // non-empty, `.git`-less dir that would also 128) before cloning.
-            let _ = tokio::fs::remove_dir_all(&dest).await;
-            match run_git_command(
-                worktree_path.to_path_buf(),
-                vec![
-                    "clone".into(),
-                    "--local".into(),
-                    "--shared".into(),
-                    mirror.display().to_string(),
-                    dest.display().to_string(),
-                ],
-            )
-            .await
-            {
-                Ok(_) => path = Some(dest.display().to_string()),
-                Err(e) => tracing::warn!(
-                    read_source = %slug,
-                    error = %e,
-                    "read-source clone failed; advertising slug only"
-                ),
-            }
-        } else {
-            tracing::warn!(
-                read_source = %slug,
-                "read-source mirror not present on worker; advertising slug only"
-            );
-        }
         out.push(ReadSourceInfo {
-            slug,
+            slug: format!("{}/{}", project.github_owner, project.github_repo),
             name: project.name.clone(),
-            path,
         });
     }
     out
-}
-
-/// Best-effort append of a pattern to the worktree's `.git/info/exclude`
-/// so the read-source clones never enter the task's commits.
-async fn add_git_exclude(worktree_path: &std::path::Path, pattern: &str) {
-    let exclude = worktree_path.join(".git/info/exclude");
-    let existing = tokio::fs::read_to_string(&exclude)
-        .await
-        .unwrap_or_default();
-    if existing.lines().any(|l| l.trim() == pattern) {
-        return;
-    }
-    if let Some(parent) = exclude.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    let mut content = existing;
-    if !content.is_empty() && !content.ends_with('\n') {
-        content.push('\n');
-    }
-    content.push_str(pattern);
-    content.push('\n');
-    let _ = tokio::fs::write(&exclude, content).await;
 }
 
 /// Execute one role stage against the shared workspace.
@@ -430,7 +348,7 @@ pub(crate) async fn execute_stage(
     // Read-only multi-repo: materialize + resolve the epic's read-source
     // projects so the prompt can advertise them (and check out their files
     // read-only for direct inspection during a migration).
-    let read_sources = materialize_read_sources(spec, agent_context, worktree_path).await;
+    let read_sources = advertise_read_sources(spec, agent_context).await;
     let PromptContext { system_prompt, .. } = build_prompt_context(PromptContextInputs {
         task,
         runtime_role: runtime_role.as_ref(),

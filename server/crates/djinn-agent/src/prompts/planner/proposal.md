@@ -13,9 +13,11 @@ Your task `design` contains the proposal id. There is **no `epic_id`** on this t
 
 ### D2. Survey the target repos
 
-Before deciding the epic shape, ground yourself in the actual code:
-- For the **home** project (this task's project) you have full read access: use `code_graph`, `read`, `shell`, and `build_context`.
-- For **sibling** target/reference repos use `github_search(query=..., repo="owner/repo")` and `github_fetch_file(...)` to inspect structure without a local checkout.
+Before deciding the epic shape, ground yourself in the actual code. Every target repo is directly readable:
+- **Read any file in any target**: `read(project="owner/repo", file_path="...")` — served from that repo's default branch.
+- **Search within a target or across ALL repos**: `code_search(query="...", project="owner/repo")`, or omit `project` to search every registered repo at once (e.g. find all callers of an interface the proposal touches).
+- **Run shell/build on a target**: `shell(project="owner/repo", command="...")` when you need grep pipelines, `find`, etc.
+- For the **home** project (this task's project) you also have `code_graph` and `build_context`.
 - Read any ADRs/notes the proposal references via `memory_read` / `memory_search`.
 
 ### D3. Design the epic set

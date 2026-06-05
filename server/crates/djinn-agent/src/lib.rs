@@ -27,6 +27,7 @@ pub(crate) mod output_parser;
 pub mod output_stash;
 pub(crate) mod patch;
 pub mod prompts;
+pub mod repo_access;
 pub mod roles;
 pub mod runtime_bridge;
 pub(crate) mod sandbox;

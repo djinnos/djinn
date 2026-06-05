@@ -72,7 +72,9 @@ use task_epic::{
     call_task_update_ac,
 };
 pub(crate) use task_epic::{call_epic_show, call_epic_tasks, call_epic_update};
-pub(crate) use workspace::{call_apply_patch, call_edit, call_read, call_shell, call_write};
+pub(crate) use workspace::{
+    call_apply_patch, call_code_search, call_edit, call_read, call_shell, call_write,
+};
 
 // Central tool-call dispatch: each arg is a distinct collaborator/context the
 // handlers need; a bag struct would only relocate the same fields.
@@ -231,12 +233,13 @@ where
         }
         "shell" => {
             let root = state.working_root_for(worktree_path);
-            call_shell(&call.arguments, &root).await
+            call_shell(state, &call.arguments, &root).await
         }
         "read" => {
             let root = state.working_root_for(worktree_path);
             call_read(state, &call.arguments, &root).await
         }
+        "code_search" => call_code_search(state, &call.arguments).await,
         "skill_read" => {
             let root = state.working_root_for(worktree_path);
             call_skill_read(&call.arguments, &root).await
@@ -265,14 +268,6 @@ where
         "github_search" => {
             services
                 .tool_github_search(
-                    project_id.clone(),
-                    call.arguments.clone().unwrap_or_default(),
-                )
-                .await
-        }
-        "github_fetch_file" => {
-            services
-                .tool_github_fetch_file(
                     project_id.clone(),
                     call.arguments.clone().unwrap_or_default(),
                 )

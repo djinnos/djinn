@@ -1,11 +1,38 @@
 use super::*;
 
 pub(crate) async fn call_shell(
+    state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
 ) -> Result<serde_json::Value, String> {
     let p: ShellParams = parse_args(arguments)?;
     let timeout_ms = p.timeout_ms.unwrap_or(120_000).max(1000);
+
+    // Cross-repo shell: when `project` names a DIFFERENT registered project,
+    // lazily check that repo out (read-only, cached per run) into the worktree
+    // and run there. The sandbox root stays the task worktree, so the checkout
+    // (under `.djinn/read-sources/`) is reachable while writes can't escape.
+    let run_dir: std::path::PathBuf =
+        if let Some(proj) = p.project.as_deref().filter(|s| !s.is_empty()) {
+            let repo = ProjectRepository::new(state.db.clone(), state.event_bus.clone());
+            match repo.resolve(proj).await.map_err(|e| e.to_string())? {
+                Some(pid) if state.default_project_id.as_deref() != Some(pid.as_str()) => {
+                    let git_ref = repo
+                        .get_default_branch(&pid)
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| "HEAD".to_string());
+                    let dest = worktree_path.join(".djinn/read-sources").join(&pid);
+                    append_git_exclude(worktree_path, ".djinn/read-sources/").await;
+                    crate::repo_access::ensure_worktree(&pid, &git_ref, &dest).await?;
+                    dest
+                }
+                _ => worktree_path.to_path_buf(),
+            }
+        } else {
+            worktree_path.to_path_buf()
+        };
 
     let mut cmd = if cfg!(windows) {
         let mut c = std::process::Command::new("cmd");
@@ -21,7 +48,7 @@ pub(crate) async fn call_shell(
         .apply(worktree_path, &mut cmd)
         .map_err(|e| e.to_string())?;
 
-    cmd.current_dir(worktree_path)
+    cmd.current_dir(&run_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -38,8 +65,57 @@ pub(crate) async fn call_shell(
         "exit_code": output.status.code(),
         "stdout": stdout,
         "stderr": stderr,
-        "workdir": worktree_path,
+        "workdir": run_dir.display().to_string(),
     }))
+}
+
+/// Best-effort append of a pattern to the worktree's `.git/info/exclude` so a
+/// lazily checked-out sibling repo never enters the task's commits.
+async fn append_git_exclude(worktree_path: &Path, pattern: &str) {
+    let exclude = worktree_path.join(".git/info/exclude");
+    let existing = tokio::fs::read_to_string(&exclude)
+        .await
+        .unwrap_or_default();
+    if existing.lines().any(|l| l.trim() == pattern.trim()) {
+        return;
+    }
+    if let Some(parent) = exclude.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let mut body = existing;
+    if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str(pattern);
+    body.push('\n');
+    let _ = tokio::fs::write(&exclude, body).await;
+}
+
+/// Format an in-memory file body as a numbered, paginated window matching the
+/// shape `call_read` returns from the worktree path. Used for mirror-backed
+/// cross-repo reads (the whole blob is already in memory from `git show`).
+fn numbered_window(content: &str, offset: usize, limit: usize, path: &str) -> serde_json::Value {
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    let start = offset.min(total);
+    let end = start.saturating_add(limit).min(total);
+    let mut numbered = String::new();
+    for (i, line) in lines[start..end].iter().enumerate() {
+        let line_no = start + i + 1;
+        let mut l = (*line).to_string();
+        if l.chars().count() > 2000 {
+            l = l.chars().take(2000).collect();
+        }
+        numbered.push_str(&format!("{:>6}\t{}\n", line_no, l));
+    }
+    serde_json::json!({
+        "path": path,
+        "offset": start,
+        "limit": limit,
+        "total_lines": total,
+        "has_more": end < total,
+        "content": numbered,
+    })
 }
 
 /// Hard byte budget for a single `call_read` scan. We never read more than
@@ -57,6 +133,32 @@ pub(crate) async fn call_read(
     use tokio::io::AsyncBufReadExt;
 
     let p: ReadParams = parse_args(arguments)?;
+
+    // Cross-repo read: when `project` names a DIFFERENT registered project than
+    // the task's own, serve read-only from that repo's bare mirror (no clone).
+    // The task's own project keeps reading the live worktree (your branch).
+    if let Some(proj) = p.project.as_deref().filter(|s| !s.is_empty()) {
+        let repo = ProjectRepository::new(state.db.clone(), state.event_bus.clone());
+        let resolved = repo.resolve(proj).await.map_err(|e| e.to_string())?;
+        match resolved {
+            Some(pid) if state.default_project_id.as_deref() != Some(pid.as_str()) => {
+                let git_ref = repo
+                    .get_default_branch(&pid)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "HEAD".to_string());
+                let content = crate::repo_access::read_file(&pid, &git_ref, &p.file_path).await?;
+                let offset = p.offset.unwrap_or(0);
+                let limit = p.limit.unwrap_or(2000).min(2000);
+                return Ok(numbered_window(&content, offset, limit, &p.file_path));
+            }
+            // Same as the task project (or unresolvable → fall through to the
+            // worktree path so the existing not-found suggestions still apply).
+            _ => {}
+        }
+    }
+
     let path = resolve_path(&p.file_path, worktree_path);
 
     let file = tokio::fs::File::open(&path).await.map_err(|e| {
@@ -459,6 +561,100 @@ pub(crate) async fn call_apply_patch(
     let response =
         maybe_append_pitfall_hint(response, state, worktree_path, project_id, &touched_rel).await;
     Ok(response)
+}
+
+/// Cross-repo code search via `git grep` against bare mirrors (zero clones).
+/// `project` scopes to one repo; omitted (or `"*"`) fans out across ALL
+/// registered projects — the org-wide "who calls this?" case.
+pub(crate) async fn call_code_search(
+    state: &AgentContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: CodeSearchParams = parse_args(arguments)?;
+    if p.query.trim().is_empty() {
+        return Err("code_search requires a non-empty query".to_string());
+    }
+    let max = p.max_results.unwrap_or(100).min(500);
+    let ignore_case = p.ignore_case.unwrap_or(false);
+    let repo = ProjectRepository::new(state.db.clone(), state.event_bus.clone());
+
+    // Resolve the target project set.
+    let all = p
+        .project
+        .as_deref()
+        .map(|s| s.trim())
+        .is_none_or(|s| s.is_empty() || s == "*");
+    let projects: Vec<(String, String)> = if all {
+        repo.list()
+            .await
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|proj| {
+                (
+                    proj.id,
+                    format!("{}/{}", proj.github_owner, proj.github_repo),
+                )
+            })
+            .collect()
+    } else {
+        let proj = p.project.as_deref().unwrap();
+        match repo.resolve(proj).await.map_err(|e| e.to_string())? {
+            Some(id) => {
+                let slug = repo
+                    .get(&id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|x| format!("{}/{}", x.github_owner, x.github_repo))
+                    .unwrap_or_else(|| id.clone());
+                vec![(id, slug)]
+            }
+            None => return Err(format!("project not found: {proj}")),
+        }
+    };
+
+    let mut groups = Vec::new();
+    let mut skipped = Vec::new();
+    let mut total = 0usize;
+    for (pid, slug) in projects {
+        if !crate::repo_access::mirror_exists(&pid) {
+            skipped.push(slug);
+            continue;
+        }
+        let git_ref = repo
+            .get_default_branch(&pid)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "HEAD".to_string());
+        match crate::repo_access::grep(
+            &pid,
+            &git_ref,
+            &p.query,
+            p.path.as_deref(),
+            ignore_case,
+            max,
+        )
+        .await
+        {
+            Ok(hits) if hits.is_empty() => {}
+            Ok(hits) => {
+                total += hits.len();
+                groups.push(serde_json::json!({ "project": slug, "matches": hits }));
+            }
+            Err(e) => {
+                tracing::warn!(project = %slug, error = %e, "code_search: grep failed; skipping");
+                skipped.push(slug);
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "total_matches": total,
+        "results": groups,
+        "skipped": skipped,
+        "truncated_per_project_at": max,
+    }))
 }
 
 /// F2: best-effort just-in-time pitfall hint. On the FIRST write/edit/

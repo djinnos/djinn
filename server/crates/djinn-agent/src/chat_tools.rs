@@ -119,12 +119,13 @@ fn serialize_chat_tool(tool: RmcpTool, concurrent_safe: bool) -> serde_json::Val
 /// keeps it).  See module-level docs + ADR-050 amendment.
 pub fn chat_extension_tool_schemas() -> Vec<serde_json::Value> {
     use crate::extension::tool_defs::{
-        tool_code_graph, tool_github_search, tool_output_grep, tool_output_view,
+        tool_code_graph, tool_code_search, tool_github_search, tool_output_grep, tool_output_view,
         tool_pr_review_context,
     };
     vec![
         serialize_chat_tool(tool_chat_shell(), false),
         serialize_chat_tool(tool_chat_read(), true),
+        serialize_chat_tool(tool_code_search(), true),
         serialize_chat_tool(tool_code_graph(), true),
         serialize_chat_tool(tool_pr_review_context(), true),
         serialize_chat_tool(tool_github_search(), true),
@@ -142,6 +143,7 @@ pub fn chat_extension_tool_schemas() -> Vec<serde_json::Value> {
 const CHAT_EXTENSION_TOOLS: &[&str] = &[
     "shell",
     "read",
+    "code_search",
     "code_graph",
     "pr_review_context",
     "github_search",
@@ -475,6 +477,10 @@ pub async fn dispatch_chat_tool<'a>(
             let resolved = require_project(name, &project_arg, resolve).await?;
             call_chat_read(state, &resolved.clone_path, &arguments).await
         }
+        // Cross-repo / org-wide code search. Served straight from the bare
+        // mirrors (git grep) — no per-project clone, and `project` is optional
+        // (omit to fan out across every registered repo).
+        "code_search" => crate::extension::handlers::call_code_search(state, &arguments).await,
         "code_graph" => {
             let resolved = require_project(name, &project_arg, resolve).await?;
             let clone_path_str = resolved.clone_path.to_string_lossy().into_owned();
@@ -538,6 +544,7 @@ mod tests {
         let expected: BTreeSet<String> = [
             "shell",
             "read",
+            "code_search",
             "code_graph",
             "pr_review_context",
             "github_search",

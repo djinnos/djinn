@@ -179,7 +179,7 @@ expression: tool_schemas_architect()
   },
   {
     "name": "read",
-    "description": "Read a file with line numbers and pagination. Rejects binary files.",
+    "description": "Read a file with line numbers and pagination. Rejects binary files. Pass `project` (UUID or owner/repo slug) to read a file from ANOTHER registered repo — served read-only from its default branch (no checkout); omit it to read your task worktree.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -193,11 +193,48 @@ expression: tool_schemas_architect()
         "limit": {
           "type": "integer",
           "minimum": 1
+        },
+        "project": {
+          "type": "string",
+          "description": "Other registered project to read from (UUID or owner/repo slug). Omit for your own task repo."
         }
       },
       "required": [
         "file_path"
       ]
+    },
+    "concurrent_safe": true
+  },
+  {
+    "name": "code_search",
+    "description": "Search code across registered repos with `git grep` (basic regex). Pass `project` (UUID or owner/repo slug) to search one repo, or omit it (or pass \"*\") to search ALL registered projects at once — e.g. find every caller of a gRPC service org-wide. Served from each repo's default branch (no checkout). For your own task repo's working tree (your uncommitted changes), use shell grep instead.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "query"
+      ],
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Pattern (basic regex, like git grep)"
+        },
+        "project": {
+          "type": "string",
+          "description": "Limit to one project (UUID or owner/repo slug). Omit or \"*\" = all registered projects."
+        },
+        "path": {
+          "type": "string",
+          "description": "Optional pathspec to scope the search (e.g. crates/ or *.rs)"
+        },
+        "ignore_case": {
+          "type": "boolean",
+          "description": "Case-insensitive match"
+        },
+        "max_results": {
+          "type": "integer",
+          "description": "Max hits per project (default 100)"
+        }
+      }
     },
     "concurrent_safe": true
   },
@@ -713,40 +750,6 @@ expression: tool_schemas_architect()
         "path": {
           "type": "string",
           "description": "Path filter to search within specific directories (e.g. \"src/\")"
-        }
-      }
-    },
-    "concurrent_safe": true
-  },
-  {
-    "name": "github_fetch_file",
-    "description": "Fetch the full contents of a file from a public GitHub repository. Use after github_search to inspect a promising result. Supports optional start_line/end_line for reading specific sections of large files.",
-    "inputSchema": {
-      "type": "object",
-      "required": [
-        "repo",
-        "path"
-      ],
-      "properties": {
-        "repo": {
-          "type": "string",
-          "description": "Repository in \"owner/repo\" format (e.g. \"tokio-rs/tokio\")"
-        },
-        "path": {
-          "type": "string",
-          "description": "File path within the repository (e.g. \"src/lib.rs\")"
-        },
-        "ref": {
-          "type": "string",
-          "description": "Branch, tag, or commit SHA (default: default branch)"
-        },
-        "start_line": {
-          "type": "integer",
-          "description": "First line to return (1-based, inclusive)"
-        },
-        "end_line": {
-          "type": "integer",
-          "description": "Last line to return (1-based, inclusive)"
         }
       }
     },

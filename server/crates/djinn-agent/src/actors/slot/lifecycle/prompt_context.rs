@@ -92,48 +92,36 @@ pub(crate) struct PromptContext {
     pub prompt_verification_rules: Option<String>,
 }
 
-/// A read-only project an epic grants the task access to (read-only
-/// multi-repo). `path` is the on-disk read-only checkout inside the
-/// worktree when the project's mirror was available on the worker;
-/// `None` means only the slug-based DB tools (`code_graph` / `memory_*`)
-/// can reach it.
+/// A sibling project flagged as relevant to this task (read-only multi-repo).
+/// Reached on demand via `read(project=…)` / `code_search` / `shell(project=…)`
+/// — no eager checkout.
 #[derive(Debug, Clone)]
 pub(crate) struct ReadSourceInfo {
     pub slug: String,
     pub name: String,
-    pub path: Option<String>,
 }
 
-/// Append a "read-only repositories" section to the assembled system
-/// prompt. Tells the agent which OTHER registered projects it may read
-/// (and how) while keeping all writes pinned to the task's own project.
-/// No-op when the task has no read sources.
+/// Append a "related repositories" section to the assembled system prompt.
+/// Tells the agent which OTHER registered projects are relevant and how to read
+/// them, while keeping all writes pinned to the task's own project. No-op when
+/// the task has no flagged read sources.
 fn append_read_sources_prompt(prompt: &str, read_sources: &[ReadSourceInfo]) -> String {
     if read_sources.is_empty() {
         return prompt.to_string();
     }
     let mut s = String::from(prompt);
-    s.push_str("\n\n## Additional read-only repositories\n");
+    s.push_str("\n\n## Related repositories (read-only)\n");
     s.push_str(
-        "This task's epic grants READ access to the other registered projects below \
-         (e.g. to migrate code from them). You MUST NOT write to, commit to, or open a \
-         PR against them — every write goes to THIS task's own project only.\n\n",
+        "These sibling repos are flagged as relevant to this task. Read any file with \
+         `read(project=\"<slug>\", file_path=...)`, search them with \
+         `code_search(query=..., project=\"<slug>\")` (omit `project` to search ALL \
+         registered repos at once), and for full shell/build use \
+         `shell(project=\"<slug>\", ...)`. You can reach ANY registered repo this way — \
+         these are just the ones called out as relevant. You MUST NOT write to, commit \
+         to, or open a PR against them — every write goes to THIS task's own project.\n\n",
     );
     for rs in read_sources {
-        match &rs.path {
-            Some(path) => s.push_str(&format!(
-                "- **{}** ({}): query its dependency graph & notes by passing \
-                 `project=\"{}\"` to `code_graph` / `memory_*`; its files are checked out \
-                 read-only at `{}` for direct inspection.\n",
-                rs.slug, rs.name, rs.slug, path,
-            )),
-            None => s.push_str(&format!(
-                "- **{}** ({}): query its dependency graph & notes by passing \
-                 `project=\"{}\"` to `code_graph` / `memory_*` (a raw file checkout is not \
-                 available on this worker).\n",
-                rs.slug, rs.name, rs.slug,
-            )),
-        }
+        s.push_str(&format!("- **{}** ({})\n", rs.slug, rs.name));
     }
     s
 }

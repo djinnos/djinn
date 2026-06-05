@@ -76,15 +76,34 @@ pub(crate) fn tool_shell() -> RmcpTool {
 pub(crate) fn tool_read() -> RmcpTool {
     RmcpTool::new(
         "read".to_string(),
-        "Read a file with line numbers and pagination. Rejects binary files.".to_string(),
+        "Read a file with line numbers and pagination. Rejects binary files. Pass `project` (UUID or owner/repo slug) to read a file from ANOTHER registered repo — served read-only from its default branch (no checkout); omit it to read your task worktree.".to_string(),
         object!({
             "type": "object",
             "properties": {
                 "file_path": { "type": "string" },
                 "offset": { "type": "integer", "minimum": 0 },
-                "limit": { "type": "integer", "minimum": 1 }
+                "limit": { "type": "integer", "minimum": 1 },
+                "project": { "type": "string", "description": "Other registered project to read from (UUID or owner/repo slug). Omit for your own task repo." }
             },
             "required": ["file_path"]
+        }),
+    )
+}
+
+pub(crate) fn tool_code_search() -> RmcpTool {
+    RmcpTool::new(
+        "code_search".to_string(),
+        "Search code across registered repos with `git grep` (basic regex). Pass `project` (UUID or owner/repo slug) to search one repo, or omit it (or pass \"*\") to search ALL registered projects at once — e.g. find every caller of a gRPC service org-wide. Served from each repo's default branch (no checkout). For your own task repo's working tree (your uncommitted changes), use shell grep instead.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": {"type": "string", "description": "Pattern (basic regex, like git grep)"},
+                "project": {"type": "string", "description": "Limit to one project (UUID or owner/repo slug). Omit or \"*\" = all registered projects."},
+                "path": {"type": "string", "description": "Optional pathspec to scope the search (e.g. crates/ or *.rs)"},
+                "ignore_case": {"type": "boolean", "description": "Case-insensitive match"},
+                "max_results": {"type": "integer", "description": "Max hits per project (default 100)"}
+            }
         }),
     )
 }
@@ -666,41 +685,9 @@ pub(crate) fn tool_github_search() -> RmcpTool {
     )
 }
 
-pub(crate) fn tool_github_fetch_file() -> RmcpTool {
-    RmcpTool::new(
-        "github_fetch_file".to_string(),
-        "Fetch the full contents of a file from a public GitHub repository. \
-         Use after github_search to inspect a promising result. Supports \
-         optional start_line/end_line for reading specific sections of large files."
-            .to_string(),
-        object!({
-            "type": "object",
-            "required": ["repo", "path"],
-            "properties": {
-                "repo": {
-                    "type": "string",
-                    "description": "Repository in \"owner/repo\" format (e.g. \"tokio-rs/tokio\")"
-                },
-                "path": {
-                    "type": "string",
-                    "description": "File path within the repository (e.g. \"src/lib.rs\")"
-                },
-                "ref": {
-                    "type": "string",
-                    "description": "Branch, tag, or commit SHA (default: default branch)"
-                },
-                "start_line": {
-                    "type": "integer",
-                    "description": "First line to return (1-based, inclusive)"
-                },
-                "end_line": {
-                    "type": "integer",
-                    "description": "Last line to return (1-based, inclusive)"
-                }
-            }
-        }),
-    )
-}
+// `github_fetch_file` retired: reading our own repos goes through
+// `read(project=…)` (mirror-backed, full local file), and `github_search`
+// remains for external-ecosystem snippets.
 
 // ─── Schema aggregation ────────────────────────────────────────────────────
 
@@ -708,6 +695,7 @@ fn base_tool_schemas() -> Vec<serde_json::Value> {
     let mut tool_values = shared_schemas::shared_base_tool_schemas();
     tool_values.push(serialize_tool(tool_shell(), false));
     tool_values.push(serialize_tool(tool_read(), true));
+    tool_values.push(serialize_tool(tool_code_search(), true));
     tool_values.push(serialize_tool(tool_skill_read(), true));
     tool_values.push(serialize_tool(tool_lsp(), true));
     // NOTE: `tool_code_graph()` is intentionally NOT in the base schema set.
@@ -716,7 +704,6 @@ fn base_tool_schemas() -> Vec<serde_json::Value> {
     // see it. The architect's role-specific schema function appends it directly.
     tool_values.push(serialize_tool(tool_ci_job_log(), true));
     tool_values.push(serialize_tool(tool_github_search(), true));
-    tool_values.push(serialize_tool(tool_github_fetch_file(), true));
     tool_values.push(serialize_tool(tool_output_view(), true));
     tool_values.push(serialize_tool(tool_output_grep(), true));
     tool_values
@@ -815,10 +802,8 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
         shared_schemas::tool_epic_blocked_list(),
         true,
     ));
-    // Sibling-repo read (no local read-source authz needed) — same tools the
-    // Architect uses to survey other repos before deciding the epic shape.
-    tool_values.push(serialize_tool(tool_github_search(), true));
-    tool_values.push(serialize_tool(tool_github_fetch_file(), true));
+    // Sibling-repo survey for Mode D uses the base `read(project=…)` and
+    // `code_search` tools (mirror-backed, full local repos) — no github_* needed.
     tool_values.push(serialize_tool(
         shared_schemas::tool_task_transition(),
         false,

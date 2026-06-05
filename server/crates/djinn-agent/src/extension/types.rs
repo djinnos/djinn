@@ -231,6 +231,11 @@ pub(super) struct AgentAmendPromptParams {
 pub(super) struct ShellParams {
     pub command: String,
     pub timeout_ms: Option<u64>,
+    /// Run against another registered project (UUID or owner/repo slug) instead
+    /// of the task worktree. That repo is lazily checked out read-only from its
+    /// bare mirror (default branch) on first use and cached for the run. Writes
+    /// there are discarded — only your task project is committed.
+    pub project: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -257,6 +262,24 @@ pub(super) struct ReadParams {
     pub file_path: String,
     pub offset: Option<usize>,
     pub limit: Option<usize>,
+    /// Read from another registered project (UUID or owner/repo slug) instead
+    /// of the task worktree. Served read-only from that repo's bare mirror at
+    /// its default branch — no working clone.
+    pub project: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct CodeSearchParams {
+    /// Search pattern (basic regex, like `git grep`).
+    pub query: String,
+    /// Limit to one registered project (UUID or owner/repo slug). Omit (or
+    /// pass "*") to search ALL registered projects.
+    pub project: Option<String>,
+    /// Optional pathspec to scope the search (e.g. `crates/` or `*.rs`).
+    pub path: Option<String>,
+    pub ignore_case: Option<bool>,
+    /// Max hits per project (default 100).
+    pub max_results: Option<usize>,
 }
 
 // ── Lead-only tool params ───────────────────────────────────────────────────
