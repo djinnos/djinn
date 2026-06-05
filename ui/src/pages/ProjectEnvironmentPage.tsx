@@ -65,6 +65,7 @@ export function ProjectEnvironmentPage() {
 
   const [config, setConfig] = useState<EnvironmentConfig | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [mode, setMode] = useState<"verification" | "workspaces">("verification");
@@ -73,9 +74,11 @@ export function ProjectEnvironmentPage() {
     if (!projectId) return;
     setLoading(true);
     try {
-      const { config: fetched } = await fetchEnvironmentConfig(projectId);
+      const { config: fetched, selectedImageId: imageId } =
+        await fetchEnvironmentConfig(projectId);
       setConfig(fetched);
       setWorkspaces(fetched.workspaces);
+      setSelectedImageId(imageId);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to load environment config";
       showToast.error("Could not load environment config", { description: message });
@@ -146,7 +149,7 @@ export function ProjectEnvironmentPage() {
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <ProjectImagePicker projectId={projectId} />
+          <ProjectImagePicker projectId={projectId} initialImageId={selectedImageId} />
           {mode === "workspaces" && (
             <div className="flex items-center gap-2">
               <Button

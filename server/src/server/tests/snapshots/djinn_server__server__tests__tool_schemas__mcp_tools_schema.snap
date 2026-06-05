@@ -5749,6 +5749,15 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "selected_image_id": {
+          "description": "The catalog image this project is assigned to, if any (for the picker).",
+          "nullable": true,
+          "type": "string"
+        },
+        "selected_image_name": {
+          "nullable": true,
+          "type": "string"
+        },
         "status": {
           "type": "string"
         }

@@ -191,9 +191,12 @@ export function pruneOrphanLanguages(config: EnvironmentConfig): EnvironmentConf
  * `column_default_parses_to_empty_with_schema_version_zero` test is the
  * canonical reference).
  */
-export async function fetchEnvironmentConfig(
-  projectId: string,
-): Promise<{ config: EnvironmentConfig; seeded: boolean }> {
+export async function fetchEnvironmentConfig(projectId: string): Promise<{
+  config: EnvironmentConfig;
+  seeded: boolean;
+  selectedImageId: string | null;
+  selectedImageName: string | null;
+}> {
   const response = await callMcpTool("project_environment_config_get", {
     project: projectId,
   });
@@ -202,7 +205,12 @@ export async function fetchEnvironmentConfig(
   }
   const raw = (response.config ?? {}) as Record<string, unknown>;
   const seeded = typeof raw.schema_version === "number" && raw.schema_version >= 1;
-  return { config: normalizeConfig(raw), seeded };
+  return {
+    config: normalizeConfig(raw),
+    seeded,
+    selectedImageId: response.selected_image_id ?? null,
+    selectedImageName: response.selected_image_name ?? null,
+  };
 }
 
 export interface SaveResult {

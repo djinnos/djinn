@@ -44,12 +44,11 @@ fn cache() -> &'static Cache {
 /// Return available versions per language. Cached (TTL); fetches upstream on a
 /// cold/stale cache, falling back to static lists per source on error.
 pub async fn fetch_toolchain_versions() -> BTreeMap<String, Vec<String>> {
-    if let Ok(guard) = cache().lock() {
-        if let Some((at, map)) = guard.as_ref() {
-            if at.elapsed() < TTL {
-                return map.clone();
-            }
-        }
+    if let Ok(guard) = cache().lock()
+        && let Some((at, map)) = guard.as_ref()
+        && at.elapsed() < TTL
+    {
+        return map.clone();
     }
 
     let client = reqwest::Client::builder()

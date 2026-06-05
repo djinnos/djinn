@@ -5,9 +5,9 @@
  * assignment (the project keeps its own environment config). Calls
  * `project_set_image`.
  *
- * The `project_list` payload doesn't expose the project's current
- * image_id, so the picker tracks the selection locally and starts at
- * "None" until the user picks one.
+ * `initialImageId` (from `project_environment_config_get`) pre-selects the
+ * project's currently-assigned image; the picker tracks subsequent changes
+ * locally.
  */
 import { useEffect, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -26,11 +26,22 @@ import { showToast } from "@/lib/toast";
 
 const NONE = "__none__";
 
-export function ProjectImagePicker({ projectId }: { projectId: string }) {
+export function ProjectImagePicker({
+  projectId,
+  initialImageId = null,
+}: {
+  projectId: string;
+  initialImageId?: string | null;
+}) {
   const [images, setImages] = useState<CatalogImage[]>([]);
-  const [value, setValue] = useState<string>(NONE);
+  const [value, setValue] = useState<string>(initialImageId ?? NONE);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+
+  // Sync when the parent resolves the assigned image (async load).
+  useEffect(() => {
+    setValue(initialImageId ?? NONE);
+  }, [initialImageId]);
 
   useEffect(() => {
     let active = true;

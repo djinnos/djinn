@@ -2988,6 +2988,11 @@ export namespace ProjectEnvironmentConfigGetOutputSchema {
    */
   config?: (ObjectJson | null)
   error?: string
+  /**
+   * The catalog image this project is assigned to, if any (for the picker).
+   */
+  selected_image_id?: string
+  selected_image_name?: string
   status: string
   [k: string]: any
   }

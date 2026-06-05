@@ -298,6 +298,11 @@ pub struct ProjectEnvironmentConfigGetResponse {
     /// Empty object `{}` when the row hasn't been reseeded yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<ObjectJson>,
+    /// The catalog image this project is assigned to, if any (for the picker).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_image_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_image_name: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1401,21 +1406,34 @@ impl DjinnMcpServer {
             Ok(Some(raw)) => {
                 let parsed = serde_json::from_str::<serde_json::Value>(&raw)
                     .unwrap_or(serde_json::json!({}));
+                // Surface the assigned catalog image so the UI picker can
+                // pre-select it by name.
+                let selected = djinn_db::ImageRepository::new(self.state.db().clone())
+                    .resolve_for_project(&input.project)
+                    .await
+                    .ok()
+                    .flatten();
                 Json(ProjectEnvironmentConfigGetResponse {
                     status: "ok".into(),
                     error: None,
                     config: Some(ObjectJson::from(parsed)),
+                    selected_image_id: selected.as_ref().map(|i| i.id.clone()),
+                    selected_image_name: selected.map(|i| i.name),
                 })
             }
             Ok(None) => Json(ProjectEnvironmentConfigGetResponse {
                 status: "error".into(),
                 error: Some(format!("project not found: {}", input.project)),
                 config: None,
+                selected_image_id: None,
+                selected_image_name: None,
             }),
             Err(err) => Json(ProjectEnvironmentConfigGetResponse {
                 status: "error".into(),
                 error: Some(format!("db error: {err}")),
                 config: None,
+                selected_image_id: None,
+                selected_image_name: None,
             }),
         }
     }
