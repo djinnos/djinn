@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { callMcpTool } from "@/api/mcpClient";
 import { usersQueryOptions } from "@/api/queryOptions";
@@ -31,6 +32,7 @@ export function ProposalKickoff({
   onChanged: () => void;
 }) {
   const proposal = detail.proposal!;
+  const navigate = useNavigate();
   const me = useAuthUser();
   const caps = capsFromUser(me);
   const usersQuery = useQuery(usersQueryOptions());
@@ -87,10 +89,21 @@ export function ProposalKickoff({
         </div>
         <ul className="space-y-1">
           {detail.epics.map((e) => (
-            <li key={e.epic_id} className="flex items-center gap-2 text-sm">
-              <Badge variant="outline" className="font-mono">{e.epic_short_id}</Badge>
-              <span className="text-muted-foreground">{e.project_path}</span>
-              <Badge variant="secondary" className="capitalize">{e.status}</Badge>
+            <li key={e.epic_id}>
+              <button
+                type="button"
+                onClick={() => navigate(`/tasks?epic=${encodeURIComponent(e.epic_id)}`)}
+                className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left text-sm hover:bg-muted/50"
+                title="View this epic and its tasks on the board"
+              >
+                <Badge variant="outline" className="font-mono">{e.epic_short_id}</Badge>
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <span className="shrink-0 leading-none">{e.epic_emoji || "📌"}</span>
+                  <span className="truncate font-medium">{e.epic_title}</span>
+                </span>
+                <span className="shrink-0 text-muted-foreground">{e.project_path}</span>
+                <Badge variant="secondary" className="capitalize">{e.status}</Badge>
+              </button>
             </li>
           ))}
         </ul>

@@ -40,6 +40,10 @@ pub struct ProposalModel {
 pub struct ProposalEpicModel {
     pub epic_id: String,
     pub epic_short_id: String,
+    /// Epic title, for display alongside the short id.
+    pub epic_title: String,
+    /// Epic emoji, for display alongside the title.
+    pub epic_emoji: String,
     pub project_path: String,
     pub status: String,
 }

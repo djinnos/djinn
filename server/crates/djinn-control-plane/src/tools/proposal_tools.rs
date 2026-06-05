@@ -955,6 +955,8 @@ async fn graduated_epic_models(
         out.push(ProposalEpicModel {
             epic_id,
             epic_short_id: epic.short_id,
+            epic_title: epic.title,
+            epic_emoji: epic.emoji,
             project_path,
             status: epic.status,
         });
