@@ -41,7 +41,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
-use djinn_db::{Database, ProjectImageStatus, ProjectRepository};
+use djinn_db::{Database, ProjectRepository};
 use djinn_runtime::wire::ControlMsg;
 use djinn_runtime::{
     BiStream, ResolvedCredentials, RoleKind, RunHandle, RuntimeError, SessionRuntime, StreamEvent,
@@ -270,18 +270,20 @@ impl SessionRuntime for KubernetesRuntime {
             )
         })?;
         let repo = ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
-        let image_row = repo
-            .get_project_image(&spec.project_id)
+        // Catalog-image precedence (migration 46): a project on a shared
+        // catalog image dispatches against that image's pull ref; otherwise
+        // it uses its own per-project build. The resolver is the single
+        // source of truth — no silent fallback if the resolved image isn't
+        // ready yet (hard-fail, exactly as the per-project path always did).
+        let dispatch_image = repo
+            .resolve_dispatch_image(&spec.project_id)
             .await
             .map_err(|e| {
-                RuntimeError::Prepare(format!("get_project_image({}): {e}", spec.project_id))
+                RuntimeError::Prepare(format!("resolve_dispatch_image({}): {e}", spec.project_id))
             })?;
-        let project_image_tag = match image_row {
-            Some(row) if row.status == ProjectImageStatus::READY => match row.tag {
-                Some(tag) if !tag.is_empty() => tag,
-                _ => return Err(RuntimeError::DevcontainerMissing(spec.project_id.clone())),
-            },
-            _ => return Err(RuntimeError::DevcontainerMissing(spec.project_id.clone())),
+        let project_image_tag = match dispatch_image.as_ref().and_then(|d| d.pull_ref()) {
+            Some(pull_ref) => pull_ref,
+            None => return Err(RuntimeError::DevcontainerMissing(spec.project_id.clone())),
         };
 
         // 0. Reserve the registry slot BEFORE creating the Job.  This closes

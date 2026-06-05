@@ -199,11 +199,22 @@ impl DjinnMcpServer {
             .create(&id, &input.name, input.description.as_deref(), &config_json)
             .await
         {
-            Ok(()) => Json(ImageMutateResponse {
-                status: "ok".into(),
-                error: None,
-                id: Some(id),
-            }),
+            Ok(()) => {
+                // Build the shared image immediately so the catalog badge
+                // reaches `ready` without waiting for a project to be assigned.
+                if let Err(e) = self.state.enqueue_image_build(&id).await {
+                    tracing::warn!(
+                        image_id = %id,
+                        error = %e,
+                        "image_create: enqueue build failed; next reconcile tick will retry"
+                    );
+                }
+                Json(ImageMutateResponse {
+                    status: "ok".into(),
+                    error: None,
+                    id: Some(id),
+                })
+            }
             Err(e) => Json(ImageMutateResponse {
                 status: "error".into(),
                 error: Some(format!("create: {e}")),
@@ -250,18 +261,22 @@ impl DjinnMcpServer {
                 id: None,
             });
         }
-        // Fan out the new config to assigned projects so they rebuild.
+        // `update` reset the image's build state (status→none, hash/tag
+        // cleared). Rebuild the single shared image once...
+        if let Err(e) = self.state.enqueue_image_build(&input.id).await {
+            tracing::warn!(
+                image_id = %input.id,
+                error = %e,
+                "image_update: enqueue shared image rebuild failed; next tick will retry"
+            );
+        }
+        // ...then re-warm every project on it, since the runtime image their
+        // canonical graph indexes against has changed. (No config fan-out —
+        // the config lives on the image, not copied into each project.)
         match repo.projects_using(&input.id).await {
             Ok(projects) => {
                 for project_id in projects {
-                    if let Err(e) = self.state.apply_environment_config(&project_id, &cfg).await {
-                        tracing::warn!(
-                            project_id = %project_id,
-                            image_id = %input.id,
-                            error = %e,
-                            "image_update: re-apply to assigned project failed"
-                        );
-                    }
+                    self.state.trigger_graph_warm(&project_id).await;
                 }
             }
             Err(e) => {
@@ -382,19 +397,19 @@ impl DjinnMcpServer {
                 });
             }
         };
-        let mut cfg: djinn_stack::environment::EnvironmentConfig =
-            match serde_json::from_str(&image.config) {
-                Ok(c) => c,
-                Err(e) => {
-                    return Json(ImageMutateResponse {
-                        status: "error".into(),
-                        error: Some(format!("image config parse: {e}")),
-                        id: None,
-                    });
-                }
-            };
-        // Mark user-edited so the boot reseed never clobbers an applied image.
-        cfg.source = djinn_stack::environment::ConfigSource::UserEdited;
+        // The image must hold a parseable EnvironmentConfig — validate the
+        // selection up front, but do NOT copy it into the project. A
+        // catalogued project shares the catalog image; it does not build (or
+        // dispatch against) its own per-project image (migration 46).
+        if let Err(e) = serde_json::from_str::<djinn_stack::environment::EnvironmentConfig>(
+            &image.config,
+        ) {
+            return Json(ImageMutateResponse {
+                status: "error".into(),
+                error: Some(format!("image config parse: {e}")),
+                id: None,
+            });
+        }
 
         if let Err(e) = image_repo.set_project_image(&project_id, Some(image_id)).await {
             return Json(ImageMutateResponse {
@@ -403,15 +418,21 @@ impl DjinnMcpServer {
                 id: None,
             });
         }
-        // Apply the image's config — reuses the live build/dispatch pipeline
-        // (writes environment_config + nulls image_hash → next tick rebuilds).
-        if let Err(e) = self.state.apply_environment_config(&project_id, &cfg).await {
+
+        // Ensure the shared image is built (idempotent — no-op if already
+        // ready) so this project can dispatch against it.
+        if let Err(e) = self.state.enqueue_image_build(image_id).await {
             return Json(ImageMutateResponse {
                 status: "error".into(),
-                error: Some(format!("apply image config: {e}")),
+                error: Some(format!("enqueue image build: {e}")),
                 id: None,
             });
         }
+        // Warm this project's canonical graph against the (shared) image. If
+        // the image isn't ready yet this no-ops; the build watcher re-fires
+        // the warm for every assigned project once the image goes ready.
+        self.state.trigger_graph_warm(&project_id).await;
+
         Json(ImageMutateResponse {
             status: "ok".into(),
             error: None,

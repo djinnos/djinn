@@ -33,7 +33,10 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use djinn_db::{Database, ProjectImage, ProjectImageStatus, ProjectRepository};
+use djinn_db::{
+    Database, Image, ImageRepository, ImageStatus, ProjectImage, ProjectImageStatus,
+    ProjectRepository,
+};
 use djinn_image_builder::{
     AgentWorkerImage, BuildContext, compute_environment_hash, generate_dockerfile,
 };
@@ -45,8 +48,9 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::build_job::{
-    LABEL_BUILD, build_context_config_map_name, build_image_build_context_config_map,
-    build_image_build_job, build_job_owner_reference, sanitize_id,
+    BuildSubject, LABEL_BUILD, build_context_config_map_name_for,
+    build_image_build_context_config_map, build_image_build_job, build_job_owner_reference,
+    sanitize_id,
 };
 use crate::config::ImageControllerConfig;
 
@@ -107,8 +111,24 @@ impl ImageController {
     }
 
     /// Reconcile one project's image state.
+    ///
+    /// A project that selected a catalog image (migration 46) does NOT build
+    /// its own bespoke image — it shares the catalog image. For those we
+    /// reconcile the shared image instead and return, so the mirror-fetch
+    /// tick keeps a project's catalog image building/retrying without ever
+    /// producing a redundant per-project build.
     pub async fn enqueue(&self, project_id: &str) -> Result<()> {
         let repo = ProjectRepository::new(self.db.clone(), djinn_core::events::EventBus::noop());
+
+        let image_repo = ImageRepository::new(self.db.clone());
+        if let Some(image) = image_repo.resolve_for_project(project_id).await? {
+            debug!(
+                project_id,
+                image_id = %image.id,
+                "image_controller: project uses catalog image — reconciling shared image, skipping per-project build"
+            );
+            return self.enqueue_image(image.id.clone(), &image_repo, image).await;
+        }
 
         let raw = match repo.get_environment_config(project_id).await? {
             Some(s) => s,
@@ -258,8 +278,58 @@ impl ImageController {
         new_hash: &str,
         previous: Option<&ProjectImage>,
     ) -> Result<()> {
+        let subject = BuildSubject::project(project_id);
         let hash_prefix = &new_hash[..HASH_TAG_PREFIX_LEN.min(new_hash.len())];
         let image_tag = format_image_tag(&self.config.registry_host, project_id, hash_prefix);
+
+        match self
+            .dispatch_build_job(&subject, cfg, new_hash, &image_tag)
+            .await?
+        {
+            // The existing Job already Succeeded — reconcile to Ready inline
+            // (the watcher's transition event already fired and won't repeat).
+            BuildDispatch::AlreadySucceeded => {
+                let image = ProjectImage {
+                    tag: Some(image_tag),
+                    hash: Some(new_hash.to_string()),
+                    status: ProjectImageStatus::READY.into(),
+                    last_error: None,
+                };
+                repo.set_project_image(project_id, &image).await?;
+            }
+            // A Failed Job was cleared; leave state untouched so the next
+            // reconcile tick recreates a fresh Job.
+            BuildDispatch::FailedCleared => {}
+            // A fresh Job is running (or an existing non-terminal one) — mark
+            // building, preserving any prior-ready tag for the runtime to use
+            // while the new build is in flight.
+            BuildDispatch::Building => {
+                let image = ProjectImage {
+                    tag: previous.and_then(|p| p.tag.clone()),
+                    hash: Some(new_hash.to_string()),
+                    status: ProjectImageStatus::BUILDING.into(),
+                    last_error: None,
+                };
+                repo.set_project_image(project_id, &image).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Subject-generic k8s build dispatch shared by the per-project and
+    /// catalog-image paths: generate the Dockerfile, upsert the build-context
+    /// ConfigMap, then create (or reconcile) the buildctl Job. Returns what
+    /// the caller should persist — the project/image status write differs by
+    /// subject but the cluster mechanics are identical.
+    async fn dispatch_build_job(
+        &self,
+        subject: &BuildSubject,
+        cfg: &EnvironmentConfig,
+        new_hash: &str,
+        image_tag: &str,
+    ) -> Result<BuildDispatch> {
+        let subject_id = subject.id().to_string();
+        let hash_prefix = &new_hash[..HASH_TAG_PREFIX_LEN.min(new_hash.len())];
 
         let (repo_ref, tag_ref) = split_image_ref(&self.config.agent_worker_image);
         let agent_worker_image = AgentWorkerImage::new(repo_ref, tag_ref);
@@ -267,32 +337,25 @@ impl ImageController {
         // 1. Generate the Dockerfile + script bundle.
         let build_context = generate_dockerfile(cfg, &agent_worker_image).map_err(|source| {
             ImageControllerError::Dockerfile {
-                project_id: project_id.to_string(),
+                project_id: subject_id.clone(),
                 source,
             }
         })?;
 
         // 2. Create the build-context ConfigMap *before* the Job so the
         // Pod's volume mount is satisfiable at startup. The CM is
-        // per-build (per hash) so two different hashes never share
-        // content.
-        self.upsert_build_context_cm(project_id, hash_prefix, &build_context)
+        // per-build (per hash) so two different hashes never share content.
+        self.upsert_build_context_cm(subject, hash_prefix, &build_context)
             .await?;
 
         // 3. Create the Job.
-        let job = build_image_build_job(
-            &self.config,
-            project_id,
-            hash_prefix,
-            &image_tag,
-            &build_context,
-        );
+        let job = build_image_build_job(&self.config, subject, hash_prefix, image_tag, &build_context);
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.config.namespace);
         let job_name = job
             .metadata
             .name
             .clone()
-            .unwrap_or_else(|| format!("djinn-build-{project_id}-{hash_prefix}"));
+            .unwrap_or_else(|| format!("djinn-build-{}-{hash_prefix}", subject.resource_segment()));
 
         let existing = jobs.get_opt(&job_name).await?;
         let existing = match existing {
@@ -308,7 +371,7 @@ impl ImageController {
                 // tick will find no Job and create a fresh one with
                 // buildkitd now warm.
                 info!(
-                    project_id,
+                    subject = %subject_id,
                     hash = %hash_prefix,
                     job = %job_name,
                     namespace = %self.config.namespace,
@@ -316,14 +379,14 @@ impl ImageController {
                 );
                 if let Err(e) = jobs.delete(&job_name, &DeleteParams::background()).await {
                     warn!(
-                        project_id,
+                        subject = %subject_id,
                         hash = %hash_prefix,
                         job = %job_name,
                         error = %e,
                         "image_controller: failed to delete Failed build Job — will retry on next reconcile"
                     );
                 }
-                return Ok(());
+                return Ok(BuildDispatch::FailedCleared);
             }
             other => other,
         };
@@ -332,32 +395,24 @@ impl ImageController {
             Some(existing) => {
                 // If the existing Job already Succeeded, the watcher's
                 // state-change event already flipped status to Ready —
-                // and falling through to set status=Building below would
+                // and falling through to mark Building below would
                 // overwrite that, never to be re-flipped (watcher only
                 // fires on Job state transitions, which already happened).
                 // That's the "status stuck at building" loop we
                 // reproduced when a retrigger nulls hash AFTER a Job
-                // completed. Detect it here and reconcile status to
-                // Ready inline.
+                // completed. Signal the caller to reconcile to Ready.
                 if is_job_succeeded(&existing) {
                     info!(
-                        project_id,
+                        subject = %subject_id,
                         hash = %hash_prefix,
                         job = %job_name,
                         namespace = %self.config.namespace,
                         "image_controller: build Job already Succeeded — reconciling status to Ready (watcher already fired)"
                     );
-                    let image = ProjectImage {
-                        tag: Some(image_tag.clone()),
-                        hash: Some(new_hash.to_string()),
-                        status: ProjectImageStatus::READY.into(),
-                        last_error: None,
-                    };
-                    repo.set_project_image(project_id, &image).await?;
-                    return Ok(());
+                    return Ok(BuildDispatch::AlreadySucceeded);
                 }
                 info!(
-                    project_id,
+                    subject = %subject_id,
                     hash = %hash_prefix,
                     job = %job_name,
                     namespace = %self.config.namespace,
@@ -368,7 +423,7 @@ impl ImageController {
             None => {
                 let created = jobs.create(&PostParams::default(), &job).await?;
                 info!(
-                    project_id,
+                    subject = %subject_id,
                     hash = %hash_prefix,
                     job = %created.metadata.name.as_deref().unwrap_or_default(),
                     namespace = %self.config.namespace,
@@ -380,17 +435,123 @@ impl ImageController {
 
         // 4. Back-fill OwnerReference on the CM so it GCs with the Job.
         if let Some(owner) = build_job_owner_reference(&created_job) {
-            self.set_context_cm_owner(project_id, hash_prefix, owner)
+            self.set_context_cm_owner(subject, hash_prefix, owner)
                 .await?;
         }
 
-        let image = ProjectImage {
-            tag: previous.and_then(|p| p.tag.clone()),
-            hash: Some(new_hash.to_string()),
-            status: ProjectImageStatus::BUILDING.into(),
-            last_error: None,
-        };
-        repo.set_project_image(project_id, &image).await?;
+        Ok(BuildDispatch::Building)
+    }
+
+    /// Reconcile every catalog image (migration 46). Driven by the periodic
+    /// mirror tick so an image whose first build was deferred at the
+    /// concurrency cap, failed, or never had a project assigned still gets
+    /// (re)built. [`Self::enqueue_image`] self-gates on the content hash, so
+    /// already-ready, up-to-date images are a cheap no-op.
+    pub async fn reconcile_catalog_images(&self) -> Result<()> {
+        let image_repo = ImageRepository::new(self.db.clone());
+        for image in image_repo.list().await? {
+            let id = image.id.clone();
+            if let Err(e) = self.enqueue_image(id.clone(), &image_repo, image).await {
+                warn!(
+                    image_id = %id,
+                    error = %e,
+                    "image_controller: catalog image reconcile failed"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Reconcile one catalog image's build state (migration 46) — the shared
+    /// "build once, every assigned project uses it" path. Mirrors
+    /// [`Self::enqueue`] but reads/writes the `images` row. `image` is the
+    /// already-fetched row (callers have it in hand); `image_repo` is reused
+    /// to avoid re-opening it.
+    pub async fn enqueue_image(
+        &self,
+        image_id: String,
+        image_repo: &ImageRepository,
+        image: Image,
+    ) -> Result<()> {
+        let cfg: EnvironmentConfig = serde_json::from_str(&image.config).map_err(|e| {
+            ImageControllerError::ConfigParse {
+                project_id: image_id.clone(),
+                reason: e.to_string(),
+            }
+        })?;
+        cfg.validate()
+            .map_err(|source| ImageControllerError::ConfigInvalid {
+                project_id: image_id.clone(),
+                source,
+            })?;
+
+        let agent_worker_ref = self.config.agent_worker_image.clone();
+        let new_hash = compute_environment_hash(&cfg, &agent_worker_ref);
+
+        if image.config_hash.as_deref() == Some(new_hash.as_str())
+            && image.status == ImageStatus::READY
+        {
+            debug!(
+                image_id = %image_id,
+                hash = %short_hash(&new_hash),
+                "image_controller: catalog image hash unchanged and ready — skipping"
+            );
+            return Ok(());
+        }
+
+        let subject = BuildSubject::image(&image_id);
+
+        {
+            let mut guard = self.in_flight.lock().await;
+            if !guard.insert(subject.resource_segment()) {
+                debug!(
+                    image_id = %image_id,
+                    "image_controller: catalog image build already in flight — coalescing"
+                );
+                return Ok(());
+            }
+        }
+
+        // Shared cluster-wide concurrency cap (counts project + image builds
+        // alike via LABEL_BUILD). Exclude this image's own Jobs so re-reconcile
+        // is never starved.
+        let cap = self.config.max_concurrent;
+        let active = self
+            .count_active_build_jobs(Some(&subject.label().1))
+            .await
+            .unwrap_or(0);
+        if build_slots_available(cap, active) == 0 {
+            debug!(
+                image_id = %image_id,
+                active,
+                cap = cap.max(1),
+                "image_controller: at max concurrent builds — deferring catalog image to a later tick"
+            );
+            self.in_flight.lock().await.remove(&subject.resource_segment());
+            return Ok(());
+        }
+
+        let hash_prefix = &new_hash[..HASH_TAG_PREFIX_LEN.min(new_hash.len())];
+        let image_tag = format_catalog_image_tag(&self.config.registry_host, &image_id, hash_prefix);
+
+        let outcome = self
+            .dispatch_build_job(&subject, &cfg, &new_hash, &image_tag)
+            .await;
+
+        self.in_flight.lock().await.remove(&subject.resource_segment());
+
+        match outcome? {
+            BuildDispatch::AlreadySucceeded => {
+                // Watcher already fired; reconcile to ready inline. Digest is
+                // captured by the watcher on the live success event — here we
+                // only have the tag, which is content-addressed + immutable.
+                image_repo.mark_ready(&image_id, &image_tag, None).await?;
+            }
+            BuildDispatch::FailedCleared => {}
+            BuildDispatch::Building => {
+                image_repo.mark_building(&image_id, &new_hash).await?;
+            }
+        }
         Ok(())
     }
 
@@ -454,17 +615,17 @@ impl ImageController {
 
     async fn upsert_build_context_cm(
         &self,
-        project_id: &str,
+        subject: &BuildSubject,
         hash_prefix: &str,
         ctx: &BuildContext,
     ) -> Result<()> {
         let cms: Api<ConfigMap> = Api::namespaced(self.client.clone(), &self.config.namespace);
-        let cm = build_image_build_context_config_map(&self.config, project_id, hash_prefix, ctx);
-        let name = build_context_config_map_name(project_id, hash_prefix);
+        let cm = build_image_build_context_config_map(&self.config, subject, hash_prefix, ctx);
+        let name = build_context_config_map_name_for(subject, hash_prefix);
         let params = PatchParams::apply("djinn-image-controller").force();
         cms.patch(&name, &params, &Patch::Apply(&cm)).await?;
         debug!(
-            project_id,
+            subject = %subject.id(),
             hash = %hash_prefix,
             cm = %name,
             "image_controller: build-context ConfigMap applied"
@@ -474,12 +635,12 @@ impl ImageController {
 
     async fn set_context_cm_owner(
         &self,
-        project_id: &str,
+        subject: &BuildSubject,
         hash_prefix: &str,
         owner: k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference,
     ) -> Result<()> {
         let cms: Api<ConfigMap> = Api::namespaced(self.client.clone(), &self.config.namespace);
-        let name = build_context_config_map_name(project_id, hash_prefix);
+        let name = build_context_config_map_name_for(subject, hash_prefix);
         let patch = serde_json::json!({
             "metadata": { "ownerReferences": [owner] }
         });
@@ -487,6 +648,17 @@ impl ImageController {
         cms.patch(&name, &params, &Patch::Merge(&patch)).await?;
         Ok(())
     }
+}
+
+/// What [`ImageController::dispatch_build_job`] did, so the project / catalog
+/// callers can persist the right status without duplicating the k8s logic.
+enum BuildDispatch {
+    /// A fresh (or still-running) Job is in flight — mark `building`.
+    Building,
+    /// The existing Job already Succeeded — reconcile to `ready` inline.
+    AlreadySucceeded,
+    /// A terminal Failed Job was deleted — leave state for the next tick.
+    FailedCleared,
 }
 
 /// Split an image ref of the form `repo:tag` or `repo@sha256:...` into
@@ -508,12 +680,24 @@ fn split_image_ref(full: &str) -> (String, String) {
     (full.to_string(), "latest".to_string())
 }
 
-/// Build the content-addressable image tag.
+/// Build the content-addressable per-project image tag.
 pub fn format_image_tag(registry: &str, project_id: &str, hash_prefix: &str) -> String {
     format!(
-        "{}/djinn-project-{}:{}",
+        "{}/{}:{}",
         registry.trim_end_matches('/'),
-        sanitize_id(project_id),
+        BuildSubject::project(project_id).tag_repo_segment(),
+        hash_prefix
+    )
+}
+
+/// Build the content-addressable shared catalog-image tag
+/// (`<reg>/djinn-image-<id>:<hash>`). Two projects on the same catalog
+/// image resolve the same hash → the same tag → one build, shared.
+pub fn format_catalog_image_tag(registry: &str, image_id: &str, hash_prefix: &str) -> String {
+    format!(
+        "{}/{}:{}",
+        registry.trim_end_matches('/'),
+        BuildSubject::image(image_id).tag_repo_segment(),
         hash_prefix
     )
 }
@@ -583,16 +767,22 @@ fn is_job_active(job: &Job) -> bool {
 /// excluding any whose `djinn.app/project-id` label equals
 /// `exclude_project`. Pure so the cap arithmetic is unit-testable
 /// without a live API server.
-fn count_active_jobs(jobs: &[Job], exclude_project: Option<&str>) -> usize {
+fn count_active_jobs(jobs: &[Job], exclude_subject: Option<&str>) -> usize {
     jobs.iter()
         .filter(|job| {
-            if let Some(exclude) = exclude_project {
-                let proj = job
-                    .metadata
-                    .labels
-                    .as_ref()
-                    .and_then(|l| l.get(crate::build_job::LABEL_PROJECT_ID));
-                if proj.map(String::as_str) == Some(exclude) {
+            if let Some(exclude) = exclude_subject {
+                // A build Job carries exactly one of the two correlator
+                // labels (project-id for per-project builds, image-id for
+                // catalog builds). Exclude the caller's own subject under
+                // whichever label it uses so re-reconcile isn't starved.
+                let labels = job.metadata.labels.as_ref();
+                let subject = labels
+                    .and_then(|l| {
+                        l.get(crate::build_job::LABEL_PROJECT_ID)
+                            .or_else(|| l.get(crate::build_job::LABEL_IMAGE_ID))
+                    })
+                    .map(String::as_str);
+                if subject == Some(exclude) {
                     return false;
                 }
             }

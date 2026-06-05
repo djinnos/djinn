@@ -75,7 +75,7 @@ pub use repositories::{
     },
     org_config::{NewOrgConfig, OrgConfig, OrgConfigRepository},
     project::{
-        ProjectConfig, ProjectDispatchReadiness, ProjectImage, ProjectImageStatus,
+        DispatchImage, ProjectConfig, ProjectDispatchReadiness, ProjectImage, ProjectImageStatus,
         ProjectRepository,
     },
     proposal::{

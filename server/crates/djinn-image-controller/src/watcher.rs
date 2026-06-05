@@ -49,7 +49,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
-use djinn_db::{Database, ProjectImage, ProjectImageStatus, ProjectRepository};
+use djinn_db::{Database, ImageRepository, ProjectImage, ProjectImageStatus, ProjectRepository};
 use djinn_runtime::GraphWarmerService;
 use futures::StreamExt;
 use k8s_openapi::api::batch::v1::Job;
@@ -60,9 +60,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::build_job::{LABEL_BUILD, LABEL_IMAGE_HASH, LABEL_PROJECT_ID};
+use crate::build_job::{LABEL_BUILD, LABEL_IMAGE_HASH, LABEL_IMAGE_ID, LABEL_PROJECT_ID};
 use crate::config::ImageControllerConfig;
-use crate::controller::format_image_tag;
+use crate::controller::{format_catalog_image_tag, format_image_tag};
 
 /// Soft cap on the in-memory "already reconciled" set. Prevents the
 /// watcher from growing unbounded across very long uptimes.  When the
@@ -129,6 +129,7 @@ async fn run_loop(
 
     let mut seen: HashSet<String> = HashSet::new();
     let repo = ProjectRepository::new(db.clone(), event_bus.clone());
+    let image_repo = ImageRepository::new(db.clone());
 
     info!(
         namespace = %config.namespace,
@@ -151,6 +152,7 @@ async fn run_loop(
                             handle_event(
                                 &config,
                                 &repo,
+                                &image_repo,
                                 &event_bus,
                                 Some(&client),
                                 graph_warmer.as_ref(),
@@ -190,12 +192,15 @@ pub async fn __test_handle_event(
     ev: watcher::Event<Job>,
 ) {
     let repo = ProjectRepository::new(db.clone(), event_bus.clone());
-    handle_event(config, &repo, event_bus, None, None, seen, ev).await;
+    let image_repo = ImageRepository::new(db.clone());
+    handle_event(config, &repo, &image_repo, event_bus, None, None, seen, ev).await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_event(
     config: &ImageControllerConfig,
     repo: &ProjectRepository,
+    image_repo: &ImageRepository,
     event_bus: &EventBus,
     client: Option<&kube::Client>,
     graph_warmer: Option<&Arc<dyn GraphWarmerService>>,
@@ -213,6 +218,29 @@ async fn handle_event(
     };
 
     let labels = job.metadata.labels.as_ref().cloned().unwrap_or_default();
+
+    // A catalog-image build (migration 46) carries LABEL_IMAGE_ID instead of
+    // LABEL_PROJECT_ID. Branch to the shared-image reconcile path: it writes
+    // the `images` row, not a `projects` row, and fans graph warming out to
+    // every project using the image.
+    if let Some(image_id) = labels.get(LABEL_IMAGE_ID).cloned() {
+        handle_image_event(
+            config,
+            image_repo,
+            repo,
+            event_bus,
+            client,
+            graph_warmer,
+            seen,
+            &job,
+            &image_id,
+            &labels,
+            outcome,
+        )
+        .await;
+        return;
+    }
+
     let Some(project_id) = labels.get(LABEL_PROJECT_ID).cloned() else {
         warn!(
             job = ?job.metadata.name,
@@ -299,6 +327,189 @@ async fn handle_event(
         seen.clear();
     }
     seen.insert(dedupe_key);
+}
+
+/// Reconcile a finished catalog-image build (migration 46): flip the
+/// `images` row, capture the pushed manifest digest, and — on success —
+/// trigger a graph warm for every project assigned this shared image so
+/// their dispatch gate clears.
+#[allow(clippy::too_many_arguments)]
+async fn handle_image_event(
+    config: &ImageControllerConfig,
+    image_repo: &ImageRepository,
+    project_repo: &ProjectRepository,
+    event_bus: &EventBus,
+    client: Option<&kube::Client>,
+    graph_warmer: Option<&Arc<dyn GraphWarmerService>>,
+    seen: &mut HashSet<String>,
+    job: &Job,
+    image_id: &str,
+    labels: &BTreeMap<String, String>,
+    outcome: JobOutcome,
+) {
+    let Some(hash_prefix) = labels.get(LABEL_IMAGE_HASH).cloned() else {
+        warn!(
+            job = ?job.metadata.name,
+            image_id,
+            "image_build_watcher: catalog Job missing djinn.app/image-hash label; skipping"
+        );
+        return;
+    };
+    let job_name = job
+        .metadata
+        .name
+        .clone()
+        .unwrap_or_else(|| "<unknown>".into());
+    let job_uid = job.metadata.uid.clone().unwrap_or_else(|| job_name.clone());
+    let dedupe_key = format!(
+        "image:{image_id}:{hash_prefix}:{}:{}",
+        outcome.kind_str(),
+        job_uid
+    );
+    if seen.contains(&dedupe_key) {
+        debug!(
+            image_id,
+            hash = %hash_prefix,
+            outcome = outcome.kind_str(),
+            "image_build_watcher: catalog image already reconciled; skipping"
+        );
+        return;
+    }
+
+    match outcome {
+        JobOutcome::Succeeded => {
+            let image_tag = format_catalog_image_tag(&config.registry_host, image_id, &hash_prefix);
+            // The pushed manifest digest is emitted on a sentinel log line by
+            // the build script; capture it for digest-pinned dispatch. Tag is
+            // already content-addressed, so a missing digest is non-fatal.
+            let digest = match client {
+                Some(c) => fetch_image_digest(c, &config.namespace, &job_name).await,
+                None => None,
+            };
+            if let Err(e) = image_repo
+                .mark_ready(image_id, &image_tag, digest.as_deref())
+                .await
+            {
+                warn!(
+                    image_id,
+                    hash = %hash_prefix,
+                    job = %job_name,
+                    error = %e,
+                    "image_build_watcher: images.mark_ready failed"
+                );
+                return;
+            }
+            info!(
+                image_id,
+                hash = %hash_prefix,
+                job = %job_name,
+                image_tag = %image_tag,
+                digest = ?digest,
+                "image_build_watcher: catalog image build succeeded — flipped images.status to ready"
+            );
+            event_bus.send(image_catalog_event(
+                "ready",
+                image_id,
+                Some(&image_tag),
+                Some(&hash_prefix),
+                None,
+                &job_name,
+            ));
+
+            // Fan graph warming out to every project on this shared image so
+            // their per-project canonical graph (which runs inside the now-
+            // ready image) is built and the dispatch gate clears.
+            if let Some(warmer) = graph_warmer {
+                match image_repo.projects_using(image_id).await {
+                    Ok(project_ids) => {
+                        for project_id in project_ids {
+                            warmer.trigger(&project_id).await;
+                            debug!(
+                                image_id,
+                                project_id,
+                                "image_build_watcher: graph warm triggered for project on shared image"
+                            );
+                        }
+                    }
+                    Err(e) => warn!(
+                        image_id,
+                        error = %e,
+                        "image_build_watcher: projects_using lookup failed; skipping warm fan-out"
+                    ),
+                }
+            }
+            // Keep `project_repo` in the signature meaningful even when the
+            // warmer is absent (dev mode) — no project-row writes for catalog
+            // builds, the warm fan-out above is the only project-side effect.
+            let _ = project_repo;
+        }
+        JobOutcome::Failed => {
+            let header = format!("catalog image build Job {job_name} failed");
+            let last_error = match client {
+                Some(c) => match fetch_job_pod_logs(c, &config.namespace, &job_name).await {
+                    Ok(Some(log_tail)) => format!("{header}:\n{log_tail}"),
+                    _ => format!("{header}; see kubectl logs job/{job_name}"),
+                },
+                None => format!("{header}; see kubectl logs job/{job_name}"),
+            };
+            if let Err(e) = image_repo.mark_failed(image_id, &last_error).await {
+                warn!(
+                    image_id,
+                    hash = %hash_prefix,
+                    job = %job_name,
+                    error = %e,
+                    "image_build_watcher: images.mark_failed failed"
+                );
+                return;
+            }
+            warn!(
+                image_id,
+                hash = %hash_prefix,
+                job = %job_name,
+                "image_build_watcher: catalog image build Job failed — flipped images.status to failed"
+            );
+            event_bus.send(image_catalog_event(
+                "build_failed",
+                image_id,
+                None,
+                Some(&hash_prefix),
+                Some(&last_error),
+                &job_name,
+            ));
+        }
+    }
+
+    if seen.len() >= DEDUPE_CAP {
+        seen.clear();
+    }
+    seen.insert(dedupe_key);
+}
+
+/// Parse the build Pod's logs for the `DJINN_IMAGE_DIGEST=sha256:...`
+/// sentinel the build script emits via `--metadata-file`. Returns `None`
+/// when logs are unavailable or no digest was captured — dispatch falls
+/// back to the immutable content-addressed tag.
+async fn fetch_image_digest(
+    client: &kube::Client,
+    namespace: &str,
+    job_name: &str,
+) -> Option<String> {
+    let logs = fetch_job_pod_logs(client, namespace, job_name)
+        .await
+        .ok()
+        .flatten()?;
+    parse_digest_sentinel(&logs)
+}
+
+/// Extract the `sha256:...` digest from a `DJINN_IMAGE_DIGEST=` sentinel
+/// line. Pure for unit-testing.
+fn parse_digest_sentinel(logs: &str) -> Option<String> {
+    logs.lines()
+        .rev()
+        .find_map(|line| line.trim().strip_prefix("DJINN_IMAGE_DIGEST="))
+        .map(str::trim)
+        .filter(|d| d.starts_with("sha256:") && d.len() > "sha256:".len())
+        .map(String::from)
 }
 
 async fn apply_success(
@@ -530,6 +741,38 @@ fn classify(job: &Job) -> Option<JobOutcome> {
     None
 }
 
+/// Build the SSE envelope for a catalog-image (migration 46) build
+/// transition. `entity_type = "image"` so the UI's Images view can patch
+/// the badge live; `action = "ready" | "build_failed"`.
+fn image_catalog_event(
+    action_suffix: &'static str,
+    image_id: &str,
+    image_tag: Option<&str>,
+    hash_prefix: Option<&str>,
+    error: Option<&str>,
+    job_name: &str,
+) -> DjinnEventEnvelope {
+    let action: &'static str = match action_suffix {
+        "ready" => "ready",
+        "build_failed" => "build_failed",
+        _ => "updated",
+    };
+    DjinnEventEnvelope {
+        entity_type: "image",
+        action,
+        payload: serde_json::json!({
+            "image_id": image_id,
+            "image_tag": image_tag,
+            "image_hash": hash_prefix,
+            "last_error": error,
+            "job": job_name,
+        }),
+        id: Some(image_id.to_string()),
+        project_id: None,
+        from_sync: false,
+    }
+}
+
 /// Build the `DjinnEventEnvelope` the UI (PR 6) subscribes to.
 fn image_status_event(
     action_suffix: &'static str,
@@ -666,6 +909,46 @@ mod tests {
         let t = truncate_from_end(s, 5);
         assert_eq!(t.chars().count(), 6); // 5 + '…'
         assert!(t.starts_with('…'));
+    }
+
+    #[test]
+    fn parse_digest_sentinel_extracts_last_sha256() {
+        let logs = "waiting for buildkitd...\n\
+            buildkitd reachable\n\
+            pushing manifest\n\
+            DJINN_IMAGE_DIGEST=sha256:deadbeefcafef00d\n";
+        assert_eq!(
+            parse_digest_sentinel(logs),
+            Some("sha256:deadbeefcafef00d".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_digest_sentinel_none_when_absent_or_empty() {
+        assert_eq!(parse_digest_sentinel("no digest here\n"), None);
+        // An empty capture (build produced no digest) is rejected.
+        assert_eq!(parse_digest_sentinel("DJINN_IMAGE_DIGEST=\n"), None);
+        // Non-sha256 value rejected.
+        assert_eq!(parse_digest_sentinel("DJINN_IMAGE_DIGEST=garbage\n"), None);
+    }
+
+    #[test]
+    fn image_catalog_event_ready_shape() {
+        let ev = image_catalog_event(
+            "ready",
+            "img-1",
+            Some("reg/djinn-image-img-1:abc123"),
+            Some("abc123"),
+            None,
+            "djinn-build-img-img-1-abc123",
+        );
+        assert_eq!(ev.entity_type, "image");
+        assert_eq!(ev.action, "ready");
+        assert_eq!(ev.id.as_deref(), Some("img-1"));
+        assert_eq!(
+            ev.payload.get("image_tag").and_then(|v| v.as_str()),
+            Some("reg/djinn-image-img-1:abc123")
+        );
     }
 
     #[test]

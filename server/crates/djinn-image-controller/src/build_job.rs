@@ -25,10 +25,73 @@ use crate::config::ImageControllerConfig;
 pub const LABEL_COMPONENT: &str = "djinn.app/component";
 pub const LABEL_BUILD: &str = "djinn.app/build";
 pub const LABEL_PROJECT_ID: &str = "djinn.app/project-id";
+/// Present on catalog-image build Jobs (migration 46). Mutually exclusive
+/// with [`LABEL_PROJECT_ID`]: the watcher branches on which one is set to
+/// decide whether to reconcile the `projects` row or the `images` row.
+pub const LABEL_IMAGE_ID: &str = "djinn.app/image-id";
 pub const LABEL_IMAGE_HASH: &str = "djinn.app/image-hash";
 
 /// Value written to [`LABEL_COMPONENT`] on build resources.
 pub const COMPONENT_IMAGE_BUILD: &str = "image-build";
+
+/// What a build Job builds: a project's bespoke per-project image, or a
+/// shared catalog image (migration 46). The build mechanics are identical
+/// — same Dockerfile generator, same buildctl Job — only the identity
+/// (image tag, resource names, correlator label, cache repo) differs.
+#[derive(Clone, Debug)]
+pub enum BuildSubject {
+    /// A project's own per-project image, keyed by project id.
+    Project(String),
+    /// A shared catalog image, keyed by image id.
+    Image(String),
+}
+
+impl BuildSubject {
+    pub fn project(id: &str) -> Self {
+        Self::Project(id.to_string())
+    }
+
+    pub fn image(id: &str) -> Self {
+        Self::Image(id.to_string())
+    }
+
+    /// The raw id (project id or image id). This is what the correlator
+    /// label carries so the watcher round-trips it back to the DB key.
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Project(id) | Self::Image(id) => id,
+        }
+    }
+
+    /// The correlator label `(key, value)` written on the Job. Value is the
+    /// sanitized raw id (sanitize is a no-op for the uuid keys we use, so it
+    /// round-trips losslessly to the DB primary key).
+    pub fn label(&self) -> (&'static str, String) {
+        match self {
+            Self::Project(id) => (LABEL_PROJECT_ID, sanitize_id(id)),
+            Self::Image(id) => (LABEL_IMAGE_ID, sanitize_id(id)),
+        }
+    }
+
+    /// Kind-prefixed, DNS-safe segment used in k8s resource names (Job +
+    /// ConfigMap) and the image-tag repository. Prefixing keeps the project
+    /// and image namespaces from ever colliding even if ids overlapped.
+    pub fn resource_segment(&self) -> String {
+        match self {
+            Self::Project(id) => sanitize_id(id),
+            Self::Image(id) => sanitize_id(&format!("img-{id}")),
+        }
+    }
+
+    /// The image-tag repository segment: `djinn-project-<id>` for projects,
+    /// `djinn-image-<id>` for catalog images.
+    pub fn tag_repo_segment(&self) -> String {
+        match self {
+            Self::Project(id) => format!("djinn-project-{}", sanitize_id(id)),
+            Self::Image(id) => format!("djinn-image-{}", sanitize_id(id)),
+        }
+    }
+}
 
 /// Where the build-context ConfigMap is mounted inside the builder Pod.
 /// `buildctl --local context=<here> --local dockerfile=<here>` reads the
@@ -59,14 +122,15 @@ const BUILD_TTL_AFTER_FINISH: i32 = 600;
 const DOCKERFILE_KEY: &str = "Dockerfile";
 
 /// Returns the stable name of a build-context ConfigMap for a given
-/// project + hash. Stable per (project, hash) — two concurrent builds
+/// subject + hash. Stable per (subject, hash) — two concurrent builds
 /// at the same hash share the same CM.
+pub fn build_context_config_map_name_for(subject: &BuildSubject, hash_prefix: &str) -> String {
+    format!("djinn-build-ctx-{}-{}", subject.resource_segment(), hash_prefix)
+}
+
+/// Project-keyed convenience wrapper over [`build_context_config_map_name_for`].
 pub fn build_context_config_map_name(project_id: &str, hash_prefix: &str) -> String {
-    format!(
-        "djinn-build-ctx-{}-{}",
-        sanitize_id(project_id),
-        hash_prefix
-    )
+    build_context_config_map_name_for(&BuildSubject::project(project_id), hash_prefix)
 }
 
 /// Build the ConfigMap carrying the generated Dockerfile + install
@@ -77,16 +141,17 @@ pub fn build_context_config_map_name(project_id: &str, hash_prefix: &str) -> Str
 /// list — each entry is `("scripts/<name>.sh", body)`.
 pub fn build_image_build_context_config_map(
     config: &ImageControllerConfig,
-    project_id: &str,
+    subject: &BuildSubject,
     hash_prefix: &str,
     build_context: &BuildContext,
 ) -> ConfigMap {
-    let name = build_context_config_map_name(project_id, hash_prefix);
+    let name = build_context_config_map_name_for(subject, hash_prefix);
 
     let mut labels = BTreeMap::new();
     labels.insert(LABEL_COMPONENT.into(), COMPONENT_IMAGE_BUILD.into());
     labels.insert(LABEL_BUILD.into(), "true".into());
-    labels.insert(LABEL_PROJECT_ID.into(), sanitize_id(project_id));
+    let (subject_label_key, subject_label_value) = subject.label();
+    labels.insert(subject_label_key.into(), subject_label_value);
     labels.insert(LABEL_IMAGE_HASH.into(), hash_prefix.into());
 
     // Data keys cannot contain `/`; we map each script path like
@@ -152,18 +217,20 @@ fn script_key_for_path(path: &str) -> String {
 /// [`build_image_build_context_config_map`] created first.
 ///
 /// `image_tag` is the full content-addressable tag
-/// (`<reg>/djinn-project-<id>:<hash>`); the builder writes to that tag
-/// and exports cache to `<reg>/cache/<id>`.
+/// (`<reg>/djinn-project-<id>:<hash>` or `<reg>/djinn-image-<id>:<hash>`);
+/// the builder writes to that tag and exports cache to
+/// `<reg>/cache/<subject-segment>`.
 pub fn build_image_build_job(
     config: &ImageControllerConfig,
-    project_id: &str,
+    subject: &BuildSubject,
     hash_prefix: &str,
     image_tag: &str,
     build_context: &BuildContext,
 ) -> Job {
-    let labels = job_labels(project_id, hash_prefix);
-    let job_name = format!("djinn-build-{}-{}", sanitize_id(project_id), hash_prefix);
-    let cm_name = build_context_config_map_name(project_id, hash_prefix);
+    let labels = job_labels(subject, hash_prefix);
+    let subject_segment = subject.resource_segment();
+    let job_name = format!("djinn-build-{}-{}", subject_segment, hash_prefix);
+    let cm_name = build_context_config_map_name_for(subject, hash_prefix);
 
     // buildctl talks to the shared in-cluster buildkitd over gRPC. The
     // `--local` flags point the build context + dockerfile at the
@@ -204,21 +271,28 @@ for i in $(seq 1 60); do
     sleep 2
 done
 
-exec buildctl \
+buildctl \
     --addr "$BUILDCTL_ADDR" \
     build \
     --frontend dockerfile.v0 \
     --local context={ctx_dir} \
     --local dockerfile={ctx_dir} \
     --output type=image,name="$IMAGE_TAG",push=true,oci-mediatypes=true \
-    --export-cache type=registry,ref={registry}/cache/{project_id},mode=max,image-manifest=true,oci-mediatypes=true \
-    --import-cache type=registry,ref={registry}/cache/{project_id}
+    --metadata-file /tmp/buildmeta.json \
+    --export-cache type=registry,ref={registry}/cache/{cache_segment},mode=max,image-manifest=true,oci-mediatypes=true \
+    --import-cache type=registry,ref={registry}/cache/{cache_segment}
+
+# Emit the pushed image's immutable manifest digest on a deterministic
+# sentinel line so the build watcher can capture images.registry_digest
+# from the Pod logs (--metadata-file writes the containerimage.digest field).
+DIGEST=$(grep -o '"containerimage.digest"[^,}}]*' /tmp/buildmeta.json | grep -o 'sha256:[a-f0-9]\+' || true)
+echo "DJINN_IMAGE_DIGEST=${{DIGEST}}"
 "#,
         auth_dir = REGISTRY_AUTH_MOUNT_DIR,
         docker_config = DOCKER_CONFIG_MOUNT_DIR,
         ctx_dir = BUILD_CONTEXT_MOUNT_DIR,
         registry = config.registry_host,
-        project_id = project_id,
+        cache_segment = subject_segment,
     );
 
     let container = Container {
@@ -227,7 +301,7 @@ exec buildctl \
         env: Some(vec![
             env_var("BUILDCTL_ADDR", &config.buildkitd_host),
             env_var("REGISTRY_HOST", &config.registry_host),
-            env_var("PROJECT_ID", project_id),
+            env_var("SUBJECT_ID", subject.id()),
             env_var("IMAGE_TAG", image_tag),
         ]),
         volume_mounts: Some(vec![
@@ -352,11 +426,12 @@ pub fn build_job_owner_reference(job: &Job) -> Option<OwnerReference> {
     })
 }
 
-fn job_labels(project_id: &str, hash_prefix: &str) -> BTreeMap<String, String> {
+fn job_labels(subject: &BuildSubject, hash_prefix: &str) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
     labels.insert(LABEL_COMPONENT.into(), COMPONENT_IMAGE_BUILD.into());
     labels.insert(LABEL_BUILD.into(), "true".into());
-    labels.insert(LABEL_PROJECT_ID.into(), sanitize_id(project_id));
+    let (subject_label_key, subject_label_value) = subject.label();
+    labels.insert(subject_label_key.into(), subject_label_value);
     labels.insert(LABEL_IMAGE_HASH.into(), hash_prefix.to_string());
     labels
 }
@@ -414,7 +489,12 @@ mod tests {
     #[test]
     fn context_config_map_carries_dockerfile_and_scripts() {
         let ctx = test_build_context();
-        let cm = build_image_build_context_config_map(&test_cfg(), "proj-xyz", "abc123", &ctx);
+        let cm = build_image_build_context_config_map(
+            &test_cfg(),
+            &BuildSubject::project("proj-xyz"),
+            "abc123",
+            &ctx,
+        );
         let data = cm.data.expect("data");
         assert!(data.contains_key(DOCKERFILE_KEY));
         // Every script ends up as a separate key, sanitised.
@@ -428,7 +508,7 @@ mod tests {
     fn builds_job_targets_buildctl_not_devcontainer() {
         let cfg = test_cfg();
         let ctx = test_build_context();
-        let job = build_image_build_job(&cfg, "p", "abc123def456", "reg/p:abc123", &ctx);
+        let job = build_image_build_job(&cfg, &BuildSubject::project("p"), "abc123def456", "reg/p:abc123", &ctx);
         let script = &job
             .spec
             .as_ref()
@@ -465,7 +545,7 @@ mod tests {
     fn builds_job_mounts_build_context_cm_via_items() {
         let cfg = test_cfg();
         let ctx = test_build_context();
-        let job = build_image_build_job(&cfg, "proj-xyz", "abc123", "reg/p:abc123", &ctx);
+        let job = build_image_build_job(&cfg, &BuildSubject::project("proj-xyz"), "abc123", "reg/p:abc123", &ctx);
         let pod = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         let volumes = pod.volumes.as_ref().unwrap();
         let ctx_vol = volumes
@@ -499,7 +579,7 @@ mod tests {
         let mut cfg = test_cfg();
         cfg.build_service_account = "custom-build-sa".into();
         let ctx = test_build_context();
-        let job = build_image_build_job(&cfg, "p", "abc123", "reg/p:abc123", &ctx);
+        let job = build_image_build_job(&cfg, &BuildSubject::project("p"), "abc123", "reg/p:abc123", &ctx);
         let pod = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         assert_eq!(pod.service_account_name.as_deref(), Some("custom-build-sa"));
     }
@@ -508,7 +588,7 @@ mod tests {
     fn builds_job_does_not_mount_mirror_pvc() {
         let cfg = test_cfg();
         let ctx = test_build_context();
-        let job = build_image_build_job(&cfg, "p", "abc123", "reg/p:abc123", &ctx);
+        let job = build_image_build_job(&cfg, &BuildSubject::project("p"), "abc123", "reg/p:abc123", &ctx);
         let pod = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         let volumes = pod.volumes.as_ref().unwrap();
         assert!(
@@ -521,7 +601,7 @@ mod tests {
     fn job_has_backoff_limit_and_ttl_set() {
         let cfg = test_cfg();
         let ctx = test_build_context();
-        let job = build_image_build_job(&cfg, "p", "abc123", "reg/p:abc123", &ctx);
+        let job = build_image_build_job(&cfg, &BuildSubject::project("p"), "abc123", "reg/p:abc123", &ctx);
         let spec = job.spec.as_ref().unwrap();
         assert_eq!(spec.backoff_limit, Some(1));
         assert_eq!(
@@ -544,5 +624,61 @@ mod tests {
             script_key_for_path("scripts/install-rust.sh"),
             "scripts-install-rust.sh"
         );
+    }
+
+    #[test]
+    fn build_subject_distinguishes_project_and_image_namespaces() {
+        let proj = BuildSubject::project("019e51db-proj");
+        let img = BuildSubject::image("019e9907-img");
+        // Correlator label keys differ so the watcher can branch.
+        assert_eq!(proj.label().0, LABEL_PROJECT_ID);
+        assert_eq!(img.label().0, LABEL_IMAGE_ID);
+        // The label VALUE round-trips the raw id (DB key) losslessly.
+        assert_eq!(proj.label().1, "019e51db-proj");
+        assert_eq!(img.label().1, "019e9907-img");
+        // Resource + tag segments are kind-prefixed so the two namespaces
+        // can never collide on a shared registry / in k8s resource names.
+        assert_eq!(img.resource_segment(), "img-019e9907-img");
+        assert_eq!(proj.tag_repo_segment(), "djinn-project-019e51db-proj");
+        assert_eq!(img.tag_repo_segment(), "djinn-image-019e9907-img");
+    }
+
+    #[test]
+    fn catalog_build_job_carries_image_label_not_project_label() {
+        let cfg = test_cfg();
+        let ctx = test_build_context();
+        let job = build_image_build_job(
+            &cfg,
+            &BuildSubject::image("img-1"),
+            "abc123",
+            "reg/djinn-image-img-1:abc123",
+            &ctx,
+        );
+        let labels = job.metadata.labels.as_ref().unwrap();
+        assert_eq!(labels.get(LABEL_IMAGE_ID).map(String::as_str), Some("img-1"));
+        assert!(!labels.contains_key(LABEL_PROJECT_ID));
+        assert_eq!(job.metadata.name.as_deref(), Some("djinn-build-img-img-1-abc123"));
+    }
+
+    #[test]
+    fn catalog_build_script_emits_digest_sentinel() {
+        let cfg = test_cfg();
+        let ctx = test_build_context();
+        let job = build_image_build_job(
+            &cfg,
+            &BuildSubject::image("img-1"),
+            "abc123",
+            "reg/djinn-image-img-1:abc123",
+            &ctx,
+        );
+        let script = &job.spec.as_ref().unwrap().template.spec.as_ref().unwrap().containers[0]
+            .command
+            .as_ref()
+            .unwrap()[2];
+        assert!(script.contains("--metadata-file"), "script:\n{script}");
+        assert!(script.contains("DJINN_IMAGE_DIGEST="), "script:\n{script}");
+        // Cache is keyed by the kind-prefixed subject segment so project and
+        // image caches don't clobber each other.
+        assert!(script.contains("/cache/img-img-1"), "script:\n{script}");
     }
 }

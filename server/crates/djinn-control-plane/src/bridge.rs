@@ -157,6 +157,14 @@ pub trait RuntimeOps: Send + Sync {
         test_id: &str,
         project_id: &str,
     ) -> Result<(), String>;
+    /// Reconcile a catalog image's build (migration 46): build the shared
+    /// image once so every assigned project can use it. A no-op on runtimes
+    /// without an image controller (dev mode).
+    async fn enqueue_image_build(&self, image_id: &str) -> Result<(), String>;
+    /// Trigger a canonical-graph warm for a project out-of-band (e.g. right
+    /// after assigning it a catalog image). Fire-and-forget; a no-op without
+    /// a live graph warmer.
+    async fn trigger_graph_warm(&self, project_id: &str);
     /// Provision an on-demand backing service (Pod + ClusterIP Service owned by
     /// the task-run Job). Routes to the K8s graph warmer; errors without kube.
     async fn provision_backing_service(

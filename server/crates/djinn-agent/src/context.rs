@@ -236,6 +236,16 @@ impl bridge::RuntimeOps for AgentRuntimeOps {
         // the server-side AppState impl does. No-op here; the server's
         // periodic mirror-fetch tick still covers this project.
     }
+    async fn enqueue_image_build(&self, _image_id: &str) -> Result<(), String> {
+        // Catalog image builds are owned by the server-side AppState impl
+        // (it owns the ImageController + kube client). No-op for the
+        // agent-internal runtime; the server's reconcile tick covers it.
+        Ok(())
+    }
+    async fn trigger_graph_warm(&self, _project_id: &str) {
+        // Graph warming is owned by the server-side AppState impl (it owns
+        // the K8s graph warmer). No-op for the agent-internal runtime.
+    }
     async fn apply_user_model_change(&self) {
         // Slot-pool/coordinator reconfiguration is owned by the server-side
         // AppState impl. No-op for the agent-internal runtime.

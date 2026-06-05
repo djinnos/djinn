@@ -40,8 +40,11 @@ pub mod reseed;
 pub mod types;
 pub mod watcher;
 
+pub use build_job::{BuildSubject, LABEL_IMAGE_ID, LABEL_PROJECT_ID};
 pub use config::ImageControllerConfig;
-pub use controller::{ImageController, ImageControllerError, format_image_tag};
+pub use controller::{
+    ImageController, ImageControllerError, format_catalog_image_tag, format_image_tag,
+};
 pub use reseed::{ReseedStats, reseed_empty_configs, reseed_empty_configs_arc};
 pub use types::{BuildRequest, BuildStatus, ProjectImageView};
 pub use watcher::ImageBuildWatcher;

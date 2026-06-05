@@ -1,5 +1,6 @@
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::Project;
+use sqlx::Row;
 
 use crate::Result;
 use crate::database::Database;
@@ -797,6 +798,78 @@ impl ProjectRepository {
         }))
     }
 
+    /// Resolve the image a task-run / warm Pod must use for a project,
+    /// applying catalog-image precedence (migration 46).
+    ///
+    /// Precedence — single source of truth for every dispatch + warm path:
+    ///
+    /// * If the project selected a catalog image (`selected_image_id` set),
+    ///   that shared image is authoritative — the resolver returns the
+    ///   catalog image's status/tag/digest and **never** falls back to the
+    ///   project's own `image_*` columns. A project on a catalog image does
+    ///   not build (or dispatch against) a bespoke per-project image.
+    /// * Otherwise the project's own per-project build (`image_*` columns)
+    ///   is authoritative.
+    ///
+    /// Returns `Ok(None)` only when the project id is unknown. A resolved
+    /// image that isn't `ready` comes back with `tag = None` so the caller
+    /// hard-fails (task dispatch) or skips (warm) — there is no silent
+    /// downgrade to a different image.
+    ///
+    /// Non-macro `sqlx::query` form (like [`ImageRepository`]) so the
+    /// migration-46 columns don't require regenerating the offline cache.
+    pub async fn resolve_dispatch_image(&self, project_id: &str) -> Result<Option<DispatchImage>> {
+        self.db.ensure_initialized().await?;
+        let row = sqlx::query(
+            "SELECT selected_image_id, image_tag, image_status, image_last_error
+               FROM projects WHERE id = $1",
+        )
+        .bind(project_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let selected_image_id: Option<String> = row.get("selected_image_id");
+
+        if let Some(image_id) = selected_image_id {
+            // Catalog image is authoritative — no per-project fallback.
+            let img = sqlx::query(
+                "SELECT tag, registry_digest, status, last_error FROM images WHERE id = $1",
+            )
+            .bind(&image_id)
+            .fetch_optional(self.db.pool())
+            .await?;
+            return Ok(Some(match img {
+                Some(i) => DispatchImage {
+                    tag: i.get("tag"),
+                    status: i.get("status"),
+                    digest: i.get("registry_digest"),
+                    from_catalog: Some(image_id),
+                    last_error: i.get("last_error"),
+                },
+                // FK RESTRICT makes a dangling selection impossible in
+                // practice; treat it as "not ready" rather than panicking
+                // or silently using the bespoke image.
+                None => DispatchImage {
+                    tag: None,
+                    status: ProjectImageStatus::NONE.to_string(),
+                    digest: None,
+                    from_catalog: Some(image_id),
+                    last_error: None,
+                },
+            }));
+        }
+
+        Ok(Some(DispatchImage {
+            tag: row.get("image_tag"),
+            status: row.get("image_status"),
+            digest: None,
+            from_catalog: None,
+            last_error: row.get("image_last_error"),
+        }))
+    }
+
     /// Flip only the `image_status` column (e.g. transitioning a previously-
     /// `ready` project into `building` while retaining the existing tag/hash
     /// until the new Job lands).
@@ -859,6 +932,53 @@ pub struct ProjectImage {
     pub hash: Option<String>,
     pub status: String,
     pub last_error: Option<String>,
+}
+
+/// The image a task-run / warm Pod should use for a project after catalog
+/// precedence is applied — see [`ProjectRepository::resolve_dispatch_image`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DispatchImage {
+    /// The `ready` tag to pull, or `None` when the resolved image isn't
+    /// built yet (caller hard-fails task dispatch / skips warming).
+    pub tag: Option<String>,
+    /// Resolved image status: `none` | `building` | `ready` | `failed`.
+    pub status: String,
+    /// Immutable registry digest of the resolved image, when captured.
+    pub digest: Option<String>,
+    /// `Some(image_id)` when the project resolved to a shared catalog image;
+    /// `None` when it uses its own per-project build.
+    pub from_catalog: Option<String>,
+    /// Last build error of the resolved image, surfaced in UI banners.
+    pub last_error: Option<String>,
+}
+
+impl DispatchImage {
+    /// The pull ref a Pod should use: the immutable `tag@digest` when a
+    /// digest was captured, else the content-addressed tag. Returns `None`
+    /// until the image is `ready`.
+    pub fn pull_ref(&self) -> Option<String> {
+        let tag = self.tag.as_deref().filter(|t| !t.is_empty())?;
+        if self.status != ProjectImageStatus::READY {
+            return None;
+        }
+        match self.digest.as_deref().filter(|d| !d.is_empty()) {
+            // `repo:tag@sha256:...` is a valid OCI ref accepted by every
+            // registry/runtime and pins the exact manifest.
+            Some(digest) => Some(format!("{}@{}", strip_tag_suffix(tag), digest)),
+            None => Some(tag.to_string()),
+        }
+    }
+}
+
+/// Strip a `:tag` suffix from an image ref so a digest can be appended,
+/// leaving any `host:port/` registry prefix intact (only a `:` after the
+/// last `/` is a tag separator).
+fn strip_tag_suffix(image_ref: &str) -> &str {
+    let last_slash = image_ref.rfind('/').map(|i| i + 1).unwrap_or(0);
+    match image_ref[last_slash..].find(':') {
+        Some(rel) => &image_ref[..last_slash + rel],
+        None => image_ref,
+    }
 }
 
 impl ProjectImage {

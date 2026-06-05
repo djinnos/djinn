@@ -556,6 +556,36 @@ impl RuntimeOps for AppState {
             }
         });
     }
+
+    async fn enqueue_image_build(&self, image_id: &str) -> Result<(), String> {
+        // No controller in dev mode (no kube client) — the badge stays
+        // `none` locally, which is correct: nothing builds images locally.
+        let Some(controller) = self.image_controller().await else {
+            return Ok(());
+        };
+        let image_repo = djinn_db::ImageRepository::new(self.db().clone());
+        let image = image_repo
+            .get(image_id)
+            .await
+            .map_err(|e| format!("get image {image_id}: {e}"))?
+            .ok_or_else(|| format!("image not found: {image_id}"))?;
+        controller
+            .enqueue_image(image_id.to_string(), &image_repo, image)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn trigger_graph_warm(&self, project_id: &str) {
+        // Fire-and-forget: the warm Job dispatch + watch can take a while and
+        // the caller (image assignment) wants a snappy response. The warmer's
+        // own freshness gate + single-flight guard make this cheap if nothing
+        // changed or the image isn't ready yet.
+        let warmer = self.graph_warmer().await;
+        let project_id = project_id.to_string();
+        tokio::spawn(async move {
+            warmer.trigger(&project_id).await;
+        });
+    }
 }
 
 #[async_trait]

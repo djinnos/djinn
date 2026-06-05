@@ -75,6 +75,16 @@ async fn run_tick(state: &AppState) -> anyhow::Result<()> {
         }
     }
 
+    // Reconcile shared catalog images (migration 46) once per tick so a
+    // build that was deferred at the concurrency cap, failed, or whose image
+    // has no assigned project yet still converges to `ready`. Self-gated on
+    // the content hash, so steady-state ticks are cheap.
+    if let Some(controller) = state.image_controller().await
+        && let Err(err) = controller.reconcile_catalog_images().await
+    {
+        tracing::warn!(error = %err, "catalog image reconcile failed");
+    }
+
     Ok(())
 }
 

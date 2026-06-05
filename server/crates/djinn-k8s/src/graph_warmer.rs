@@ -28,7 +28,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use djinn_db::{Database, ProjectImageStatus, ProjectRepository, RepoGraphCacheRepository};
+use djinn_db::{Database, ProjectRepository, RepoGraphCacheRepository};
 use djinn_runtime::{BackingServiceConn, BackingServiceRequest, GraphWarmerService, WarmerError};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{Pod, Service};
@@ -209,22 +209,20 @@ impl K8sGraphWarmer {
         }
     }
 
-    /// Try to resolve the per-project image tag from `projects.image_tag`.
-    /// Returns `None` when the project has no ready image — the caller
-    /// logs + skips the Job.
+    /// Resolve the image the warm Job should run in, honouring catalog-image
+    /// precedence (migration 46): a project on a shared catalog image warms
+    /// inside that image; otherwise its own per-project build. Returns `None`
+    /// when the resolved image isn't ready yet — the caller logs + skips.
     async fn resolve_project_image_tag(&self, project_id: &str) -> Option<String> {
         let repo = ProjectRepository::new(self.db.clone(), djinn_core::events::EventBus::noop());
-        match repo.get_project_image(project_id).await {
-            Ok(Some(img)) => match (img.status.as_str(), img.tag) {
-                (s, Some(tag)) if s == ProjectImageStatus::READY && !tag.is_empty() => Some(tag),
-                _ => None,
-            },
+        match repo.resolve_dispatch_image(project_id).await {
+            Ok(Some(img)) => img.pull_ref(),
             Ok(None) => None,
             Err(e) => {
                 warn!(
                     project_id,
                     error = %e,
-                    "K8sGraphWarmer: get_project_image failed"
+                    "K8sGraphWarmer: resolve_dispatch_image failed"
                 );
                 None
             }
@@ -656,7 +654,7 @@ mod tests {
     /// for the primary-key slot and mints its own uuid). Tests key their
     /// `trigger` / `await_fresh` calls on this returned id.
     async fn seed_project_with_ready_image(db: &Database, name: &str) -> String {
-        use djinn_db::ProjectImage;
+        use djinn_db::{ProjectImage, ProjectImageStatus};
         let repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let project = repo
             .create(name, "test", name)

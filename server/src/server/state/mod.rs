@@ -1259,9 +1259,7 @@ impl AppState {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
         {
-            tracing::info!(
-                "DJINN_BACKFILL_EXTRACTION set — spawning one-time extraction backfill"
-            );
+            tracing::info!("DJINN_BACKFILL_EXTRACTION set — spawning one-time extraction backfill");
             let ctx = self.agent_context();
             tokio::spawn(async move {
                 djinn_agent::run_extraction_backfill(ctx).await;

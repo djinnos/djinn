@@ -54,6 +54,10 @@ mod tests {
             Ok(())
         }
         async fn trigger_mirror_refresh(&self, _: &str) {}
+        async fn enqueue_image_build(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn trigger_graph_warm(&self, _: &str) {}
         async fn apply_user_model_change(&self) {}
         async fn dispatch_verification_test(&self, _: &str, _: &str) -> Result<(), String> {
             Ok(())
@@ -95,6 +99,10 @@ mod tests {
             Ok(())
         }
         async fn trigger_mirror_refresh(&self, _: &str) {}
+        async fn enqueue_image_build(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn trigger_graph_warm(&self, _: &str) {}
         async fn apply_user_model_change(&self) {}
         async fn dispatch_verification_test(&self, _: &str, _: &str) -> Result<(), String> {
             Ok(())

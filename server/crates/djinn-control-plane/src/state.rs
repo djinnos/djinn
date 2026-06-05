@@ -202,6 +202,14 @@ impl McpState {
         self.runtime.trigger_mirror_refresh(project_id).await;
     }
 
+    pub async fn enqueue_image_build(&self, image_id: &str) -> Result<(), String> {
+        self.runtime.enqueue_image_build(image_id).await
+    }
+
+    pub async fn trigger_graph_warm(&self, project_id: &str) {
+        self.runtime.trigger_graph_warm(project_id).await;
+    }
+
     pub async fn dispatch_verification_test(
         &self,
         test_id: &str,
@@ -296,6 +304,10 @@ pub mod stubs {
             Ok(())
         }
         async fn trigger_mirror_refresh(&self, _: &str) {}
+        async fn enqueue_image_build(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn trigger_graph_warm(&self, _: &str) {}
         async fn apply_user_model_change(&self) {}
         async fn dispatch_verification_test(&self, _: &str, _: &str) -> Result<(), String> {
             Ok(())

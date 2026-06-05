@@ -140,6 +140,10 @@ impl RuntimeOps for StubRuntime {
         Err("stub: RuntimeOps::apply_environment_config not implemented".into())
     }
     async fn trigger_mirror_refresh(&self, _project_id: &str) {}
+    async fn enqueue_image_build(&self, _image_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+    async fn trigger_graph_warm(&self, _project_id: &str) {}
     async fn apply_user_model_change(&self) {}
     async fn dispatch_verification_test(&self, _test_id: &str, _project_id: &str) -> Result<(), String> {
         Err("stub: RuntimeOps::dispatch_verification_test not implemented".into())

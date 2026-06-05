@@ -194,9 +194,13 @@ async fn async_main() {
     let leader_state = state.clone();
     let leader_cancel = cancel.clone();
     tokio::spawn(async move {
-        djinn_server::leadership::run_with_leadership(lock_dsn, leader_cancel, move || async move {
-            leader_state.become_leader().await;
-        })
+        djinn_server::leadership::run_with_leadership(
+            lock_dsn,
+            leader_cancel,
+            move || async move {
+                leader_state.become_leader().await;
+            },
+        )
         .await;
     });
 
