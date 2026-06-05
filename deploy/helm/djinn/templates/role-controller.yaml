@@ -11,12 +11,18 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "patch", "delete"]
+  # `create` is needed for on-demand backing-service Pods (Phase C); the rest
+  # for task-run/warm Pod lifecycle.
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch", "delete"]
+    verbs: ["create", "get", "list", "watch", "delete"]
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get", "list"]
+  # On-demand backing-service ClusterIP Services (Phase C).
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create", "get", "list", "watch", "delete"]
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create", "get", "list", "watch", "patch", "delete"]
