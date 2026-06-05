@@ -501,6 +501,17 @@ impl RuntimeOps for AppState {
             .map_err(|e| e.to_string())
     }
 
+    async fn cleanup_task_branches(&self, task_id: &str) {
+        let mirror = self.mirror();
+        djinn_agent::task_merge::cleanup_task_branches_post_close(
+            task_id,
+            self.db(),
+            &self.event_bus(),
+            Some(mirror.as_ref()),
+        )
+        .await;
+    }
+
     async fn persist_model_health_state(&self) {
         AppState::persist_model_health_state(self).await;
     }

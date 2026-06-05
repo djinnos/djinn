@@ -71,6 +71,7 @@ mod tests {
         async fn release_backing_service(&self, _: &str) -> Result<(), String> {
             Ok(())
         }
+        async fn cleanup_task_branches(&self, _: &str) {}
     }
 
     #[async_trait::async_trait]
@@ -116,6 +117,7 @@ mod tests {
         async fn release_backing_service(&self, _: &str) -> Result<(), String> {
             Ok(())
         }
+        async fn cleanup_task_branches(&self, _: &str) {}
     }
 
     fn event_bus_for(tx: &broadcast::Sender<DjinnEventEnvelope>) -> EventBus {

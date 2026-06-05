@@ -724,6 +724,16 @@ pub(super) fn build_ready_where(
                 AND bt.status != 'closed'
          )"
         .to_owned(),
+        // Hold every task belonging to a frozen proposal build out of dispatch.
+        // `t.epic_id` is NULL for the epic_breakdown task and any epic-less task,
+        // so `pe.epic_id = t.epic_id` yields no match and they stay dispatchable.
+        "NOT EXISTS (
+             SELECT 1 FROM proposal_epics pe
+             JOIN proposals p ON p.id = pe.proposal_id
+             WHERE pe.epic_id = t.epic_id
+                AND p.build_frozen = true
+         )"
+        .to_owned(),
     ];
     let mut params: Vec<SqlParam> = Vec::new();
 
@@ -854,6 +864,90 @@ mod ready_projection_tests {
             Some(user_id.as_str()),
             "list_ready must SELECT created_by_user_id, not default it to None"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn frozen_proposal_build_holds_its_epic_tasks_from_dispatch() {
+        use crate::repositories::proposal::{ProposalCreateInput, ProposalRepository};
+
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let project_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query!(
+            "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
+            project_id,
+            "p",
+            "test",
+            format!("frozen-{project_id}"),
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let repo = TaskRepository::new(db.clone(), EventBus::noop());
+        let prepo = ProposalRepository::new(db.clone(), EventBus::noop());
+
+        // A proposal graduated into one epic, with a task under that epic.
+        let proposal = prepo
+            .create(ProposalCreateInput {
+                title: "Frozen",
+                body: "",
+                acceptance_criteria: None,
+                status: None,
+            })
+            .await
+            .unwrap();
+        let epic_id = uuid::Uuid::now_v7().to_string();
+        sqlx::query!(
+            "INSERT INTO epics (id, project_id, short_id, title, description, emoji, color, status, owner, memory_refs, auto_breakdown)
+             VALUES ($1, $2, 'fz01', 'T', '', '', '', 'open', '', '[]'::jsonb, true)",
+            epic_id,
+            project_id
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        prepo.link_epic(&proposal.id, &epic_id, &project_id).await.unwrap();
+
+        let epic_task = repo
+            .create_in_project(&project_id, Some(&epic_id), "under epic", "", "", "task", 0, "", None, None)
+            .await
+            .unwrap()
+            .id;
+        // An epic-less task (mirrors the epic_breakdown task: epic_id IS NULL).
+        let loose_task = repo
+            .create_in_project(&project_id, None, "no epic", "", "", "task", 0, "", None, None)
+            .await
+            .unwrap()
+            .id;
+
+        async fn ready_ids(repo: &TaskRepository, project_id: &str) -> Vec<String> {
+            repo.list_ready(ReadyQuery {
+                project_id: Some(project_id.to_owned()),
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect()
+        }
+
+        // Not frozen: both dispatchable.
+        let before = ready_ids(&repo, &project_id).await;
+        assert!(before.contains(&epic_task));
+        assert!(before.contains(&loose_task));
+
+        // Frozen: the epic's task is held; the epic-less task is unaffected.
+        prepo.set_frozen(&proposal.id, true).await.unwrap();
+        let frozen = ready_ids(&repo, &project_id).await;
+        assert!(!frozen.contains(&epic_task), "frozen build's epic task must be held from dispatch");
+        assert!(frozen.contains(&loose_task), "epic-less task (epic_id NULL) must stay dispatchable");
+
+        // Un-freezing re-admits it.
+        prepo.set_frozen(&proposal.id, false).await.unwrap();
+        assert!(ready_ids(&repo, &project_id).await.contains(&epic_task));
     }
 
     /// Same projection gap, second query path: `list_by_status_filtered`

@@ -98,7 +98,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id, build_frozen, build_breakdown_task_id
              FROM proposals WHERE id = $1"#,
             id
         )
@@ -112,7 +112,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id, build_frozen, build_breakdown_task_id
              FROM proposals WHERE short_id = $1"#,
             short_id
         )
@@ -127,7 +127,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id, build_frozen, build_breakdown_task_id
              FROM proposals WHERE id = $1 OR short_id = $2"#,
             id_or_short,
             id_or_short
@@ -199,6 +199,20 @@ impl ProposalRepository {
         let content_changed = input.title != current.title
             || input.body != current.body
             || acceptance_criteria != current_ac;
+
+        // A `building` proposal is being actively decomposed/built against the
+        // current spec — editing it would silently stale the sign-offs while
+        // `reconcile_approval` (which has no `building` arm) leaves the status
+        // stuck on `building`. Force the operator to stop the build first
+        // (proposal_stop_build → approved), then edit. Status-only updates
+        // (e.g. set_done) stay allowed.
+        if content_changed && current.status == "building" {
+            return Err(Error::InvalidData(
+                "cannot edit the spec of a proposal while it is building — \
+                 stop the build first (proposal_stop_build), then edit"
+                    .to_owned(),
+            ));
+        }
 
         // Stale/hard rule: editing the spec of an *approved* proposal reverts it
         // to in_review and clears its sign-offs (you changed an approved spec).
@@ -486,7 +500,7 @@ impl ProposalRepository {
         // NOTE: dynamic SQL (WHERE + ORDER built from optional filters) — compile-time check not possible
         let sql = format!(
             r#"SELECT id, short_id, title, body, acceptance_criteria::text AS acceptance_criteria,
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id, build_frozen, build_breakdown_task_id
              FROM proposals WHERE {where_sql} ORDER BY {order_sql} LIMIT {limit_ph} OFFSET {offset_ph}"#
         );
         let mut q = sqlx::query_as::<_, Proposal>(&sql);
@@ -713,6 +727,74 @@ impl ProposalRepository {
             .into_iter()
             .map(|r| (r.epic_id, r.project_id))
             .collect())
+    }
+
+    /// Drop every graduated-epic link for a proposal. The missing counterpart
+    /// to [`Self::link_epic`] (which only ever inserts): an aborted build must
+    /// unlink its epics so a later re-graduation starts from a clean set
+    /// instead of accumulating closed epics from prior generations.
+    pub async fn unlink_epics(&self, proposal_id: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            "DELETE FROM proposal_epics WHERE proposal_id = $1",
+            proposal_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Record the `epic_breakdown` task created at graduation.
+    pub async fn set_breakdown_task(&self, proposal_id: &str, task_id: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            "UPDATE proposals SET build_breakdown_task_id = $1 WHERE id = $2",
+            task_id,
+            proposal_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Freeze or un-freeze a build. Frozen builds stay `building` but their
+    /// epics' tasks are held out of dispatch (see `build_ready_where`).
+    pub async fn set_frozen(&self, proposal_id: &str, frozen: bool) -> Result<Proposal> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            r#"UPDATE proposals SET build_frozen = $1,
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $2"#,
+            frozen,
+            proposal_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        let proposal = self.get_required(proposal_id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_updated(&proposal));
+        Ok(proposal)
+    }
+
+    /// Explicit inverse of [`Self::set_building`]: revert an aborted build back
+    /// to `approved` so it is immediately re-graduate-able. Clears the build
+    /// owner, the breakdown-task link, and any freeze. (Epics are unlinked
+    /// separately via [`Self::unlink_epics`].)
+    pub async fn revert_to_approved(&self, proposal_id: &str) -> Result<Proposal> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            r#"UPDATE proposals SET status = 'approved', build_owner_user_id = NULL,
+                    build_breakdown_task_id = NULL, build_frozen = false,
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $1"#,
+            proposal_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        let proposal = self.get_required(proposal_id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_updated(&proposal));
+        Ok(proposal)
     }
 
     /// Mark a proposal as building, recording the build owner.
@@ -1311,5 +1393,142 @@ mod tests {
         let repo = ProposalRepository::new(test_db(), EventBus::noop());
         let p = repo.create(create_input("No epics")).await.unwrap();
         assert!(!repo.all_graduated_epics_closed(&p.id).await.unwrap());
+    }
+
+    /// Helper: insert an open `task` row under an epic and return its id.
+    async fn insert_task(db: &Database, project_id: &str, epic_id: &str, short_id: &str) -> String {
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query!(
+            "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
+                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
+             VALUES ($1, $2, $3, $4, 'T', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+            id,
+            project_id,
+            short_id,
+            epic_id
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        id
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_rejects_spec_edit_while_building_but_allows_status_only() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proj = insert_project(&db, "svc-editguard").await;
+        let p = repo.create(create_input("Guarded")).await.unwrap();
+        let epic = insert_epic(&db, &proj, "eg01").await;
+        repo.link_epic(&p.id, &epic, &proj).await.unwrap();
+        repo.set_building(&p.id, "user-x").await.unwrap();
+
+        // A material edit while building is rejected.
+        let err = repo
+            .update(&p.id, update_input("Guarded v2", "new body", "[]", "building"))
+            .await;
+        assert!(err.is_err(), "spec edit while building must be rejected");
+
+        // The spec is unchanged.
+        let still = repo.get(&p.id).await.unwrap().unwrap();
+        assert_eq!(still.title, "Guarded");
+        assert_eq!(still.status, "building");
+
+        // A status-only update (no spec change) is still allowed — e.g. set_done.
+        let done = repo.set_done(&p.id).await.unwrap();
+        assert_eq!(done.status, "done");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unlink_epics_clears_only_the_target_proposal() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proj = insert_project(&db, "svc-unlink").await;
+        let p1 = repo.create(create_input("P1")).await.unwrap();
+        let p2 = repo.create(create_input("P2")).await.unwrap();
+        let e1 = insert_epic(&db, &proj, "ul01").await;
+        let e2 = insert_epic(&db, &proj, "ul02").await;
+        repo.link_epic(&p1.id, &e1, &proj).await.unwrap();
+        repo.link_epic(&p2.id, &e2, &proj).await.unwrap();
+
+        repo.unlink_epics(&p1.id).await.unwrap();
+
+        assert!(repo.graduated_epics(&p1.id).await.unwrap().is_empty());
+        // p2's link is untouched.
+        assert_eq!(
+            repo.graduated_epics(&p2.id).await.unwrap(),
+            vec![(e2, proj)]
+        );
+        // Idempotent: a second unlink on an already-empty proposal is a no-op.
+        repo.unlink_epics(&p1.id).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_frozen_round_trips() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Freeze")).await.unwrap();
+        assert!(!p.build_frozen);
+        let frozen = repo.set_frozen(&p.id, true).await.unwrap();
+        assert!(frozen.build_frozen);
+        assert!(repo.get(&p.id).await.unwrap().unwrap().build_frozen);
+        let thawed = repo.set_frozen(&p.id, false).await.unwrap();
+        assert!(!thawed.build_frozen);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn revert_to_approved_clears_all_build_state() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proj = insert_project(&db, "svc-revert").await;
+        let p = repo.create(create_input("Revert")).await.unwrap();
+        let epic = insert_epic(&db, &proj, "rv01").await;
+        let task = insert_task(&db, &proj, &epic, "rv01t").await;
+
+        repo.link_epic(&p.id, &epic, &proj).await.unwrap();
+        repo.set_building(&p.id, "user-x").await.unwrap();
+        repo.set_breakdown_task(&p.id, &task).await.unwrap();
+        repo.set_frozen(&p.id, true).await.unwrap();
+        let mid = repo.get(&p.id).await.unwrap().unwrap();
+        assert_eq!(mid.status, "building");
+        assert_eq!(mid.build_breakdown_task_id.as_deref(), Some(task.as_str()));
+        assert!(mid.build_frozen);
+
+        let reverted = repo.revert_to_approved(&p.id).await.unwrap();
+        assert_eq!(reverted.status, "approved");
+        assert!(reverted.build_owner_user_id.is_none());
+        assert!(reverted.build_breakdown_task_id.is_none());
+        assert!(!reverted.build_frozen);
+        // Epics are unlinked separately, not by revert.
+        assert_eq!(repo.graduated_epics(&p.id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn breakdown_task_link_survives_task_delete_as_null() {
+        // ON DELETE SET NULL: hard-deleting the breakdown task nulls the link
+        // rather than orphaning a dangling id or blocking the delete.
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proj = insert_project(&db, "svc-bd").await;
+        let p = repo.create(create_input("Breakdown")).await.unwrap();
+        let epic = insert_epic(&db, &proj, "bd01").await;
+        let task = insert_task(&db, &proj, &epic, "bd01t").await;
+        repo.set_breakdown_task(&p.id, &task).await.unwrap();
+        assert_eq!(
+            repo.get(&p.id).await.unwrap().unwrap().build_breakdown_task_id.as_deref(),
+            Some(task.as_str())
+        );
+
+        sqlx::query!("DELETE FROM tasks WHERE id = $1", task)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        assert!(
+            repo.get(&p.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .build_breakdown_task_id
+                .is_none()
+        );
     }
 }

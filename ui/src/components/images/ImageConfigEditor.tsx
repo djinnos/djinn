@@ -64,11 +64,15 @@ interface LangSpec {
   default: string;
 }
 
+// Static fallbacks shown until the live `toolchain_versions` query resolves.
+// Keep roughly in sync with the server's `fallback()` in
+// djinn-control-plane/src/toolchain_versions.rs so the first paint doesn't
+// misclassify a current version as "custom".
 const LANG_SPECS: Record<"rust" | "node" | "python" | "go", LangSpec> = {
   rust: { field: "default_toolchain", presets: ["stable", "beta", "nightly"], default: "stable" },
-  node: { field: "default_version", presets: ["lts", "22", "20"], default: "lts" },
-  python: { field: "default_version", presets: ["3.13", "3.12"], default: "3.13" },
-  go: { field: "default_version", presets: ["1.23", "1.22"], default: "1.23" },
+  node: { field: "default_version", presets: ["lts", "24", "22", "20"], default: "lts" },
+  python: { field: "default_version", presets: ["3.13", "3.12", "3.11"], default: "3.13" },
+  go: { field: "default_version", presets: ["1.26", "1.25", "1.24"], default: "1.26" },
 };
 
 /**
@@ -151,7 +155,10 @@ function LanguagesSection({ config, onChange }: Props) {
       <div className="flex flex-col gap-3">
         {EDITABLE_LANGUAGES.map((lang) => {
           const spec = LANG_SPECS[lang as keyof typeof LANG_SPECS];
-          const enabled = config.languages[lang] !== undefined;
+          // The backend serializes a disabled language as an explicit `null`
+          // (not an absent key), so test against null — `null !== undefined`
+          // would read every disabled language as enabled.
+          const enabled = config.languages[lang] != null;
           return (
             <div key={lang} className="rounded-md border bg-background/30">
               <div className="flex items-center justify-between gap-2 px-3 py-2.5">
@@ -194,8 +201,13 @@ function VersionSelector({
   // as custom: show it as the selected value AND reveal the text input.
   const valueIsPreset = presets.includes(value);
   // Explicit custom toggle, so picking "Custom…" reveals the input even
-  // when the current value happens to coincide with a preset.
-  const [customMode, setCustomMode] = useState(!valueIsPreset);
+  // when the current value happens to coincide with a preset. Initialized
+  // to `false` (NOT `!valueIsPreset`): the live `presets` arrive a tick
+  // after mount, so seeding from the first render's stale fallback list
+  // would wrongly latch a valid version (e.g. Go 1.26) into custom mode
+  // forever. Deriving `showCustom` from `valueIsPreset` self-corrects once
+  // the real list loads.
+  const [customMode, setCustomMode] = useState(false);
   const showCustom = customMode || !valueIsPreset;
   const selectValue = showCustom ? CUSTOM : value;
 

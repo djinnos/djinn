@@ -269,6 +269,11 @@ impl bridge::RuntimeOps for AgentRuntimeOps {
     async fn release_backing_service(&self, _instance_id: &str) -> Result<(), String> {
         Ok(())
     }
+    async fn cleanup_task_branches(&self, _task_id: &str) {
+        // Branch/PR cleanup needs the mirror manager, which the agent-internal
+        // runtime doesn't own — only the server-side AppState impl does. The
+        // abort cascade is only invoked server-side, so this is a no-op here.
+    }
 }
 
 /// Fallback `RepoGraphOps` implementation used when `AgentContext` is built
