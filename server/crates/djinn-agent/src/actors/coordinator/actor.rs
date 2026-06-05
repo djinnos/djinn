@@ -139,6 +139,15 @@ pub(super) struct CoordinatorActor {
     ///   * SHA change (a new push invalidated GitHub's queue entry)
     ///   * Merge-queue rejection (`PrCiFailed` reopens the task)
     pub(super) delegated_to_github: HashMap<String, String>,
+    /// task_id → head SHA for which we already auto-resolved the PR's review
+    /// conversations. Suppresses re-querying GitHub's review threads on every
+    /// 30s observe tick when a DIFFERENT protection rule (e.g. an outstanding
+    /// CODEOWNERS review) keeps `mergeStateStatus == BLOCKED` after the
+    /// conversations are already resolved. Stale entries are harmless: a new
+    /// push bumps the SHA and we re-resolve once on the new commit. Cleared
+    /// alongside the other per-SHA caches on merge / close / conflict / SHA
+    /// change.
+    pub(super) conversations_resolved: HashMap<String, String>,
     /// SESSION IDs for which a stall-kill has already been issued.  Prevents
     /// repeated kill + activity-log spam while the async lifecycle cleanup
     /// is still in progress (the DB session record stays `running` until
@@ -225,6 +234,7 @@ impl CoordinatorActor {
             merge_fail_count: HashMap::new(),
             auto_approve_attempted: HashMap::new(),
             delegated_to_github: HashMap::new(),
+            conversations_resolved: HashMap::new(),
             stall_killed: HashSet::new(),
             last_idle_consolidation: None,
             idle_consolidation_cancel: None,

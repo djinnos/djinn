@@ -407,6 +407,7 @@ impl CoordinatorActor {
                 self.pr_status_cache.remove(&task.id);
                 self.merge_fail_count.remove(&task.id);
                 self.delegated_to_github.remove(&task.id);
+                self.conversations_resolved.remove(&task.id);
                 continue;
             }
 
@@ -426,6 +427,7 @@ impl CoordinatorActor {
                 self.pr_status_cache.remove(&task.id);
                 self.merge_fail_count.remove(&task.id);
                 self.delegated_to_github.remove(&task.id);
+                self.conversations_resolved.remove(&task.id);
                 continue;
             }
 
@@ -552,6 +554,7 @@ impl CoordinatorActor {
                 self.pr_status_cache.remove(&task.id);
                 self.merge_fail_count.remove(&task.id);
                 self.delegated_to_github.remove(&task.id);
+                self.conversations_resolved.remove(&task.id);
                 continue;
             }
 
@@ -603,6 +606,7 @@ impl CoordinatorActor {
                         self.pr_status_cache.remove(&task.id);
                         self.merge_fail_count.remove(&task.id);
                         self.delegated_to_github.remove(&task.id);
+                        self.conversations_resolved.remove(&task.id);
                         continue;
                     }
                     // else: only advisory checks failed — treat as green and
@@ -639,6 +643,7 @@ impl CoordinatorActor {
                 self.pr_status_cache.remove(&task.id);
                 self.merge_fail_count.remove(&task.id);
                 self.delegated_to_github.remove(&task.id);
+                self.conversations_resolved.remove(&task.id);
                 continue;
             }
 
@@ -694,6 +699,7 @@ impl CoordinatorActor {
                         self.pr_status_cache.remove(&task.id);
                         self.merge_fail_count.remove(&task.id);
                         self.delegated_to_github.remove(&task.id);
+                        self.conversations_resolved.remove(&task.id);
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -837,14 +843,20 @@ impl CoordinatorActor {
                     &owner,
                     &repo,
                     pull_number,
+                    has_approved,
+                    &current_sha,
                 )
                 .await;
                 continue;
             }
             // SHA moved since we last delegated — drop the stale entry so a
-            // fresh enqueue attempt fires below.
+            // fresh enqueue attempt fires below. Drop the conversation-resolved
+            // marker too: the new commit may have new review threads, and the
+            // SHA-keyed guard would otherwise hold the old SHA harmlessly, but
+            // clearing keeps the map tidy.
             if self.delegated_to_github.contains_key(&task.id) {
                 self.delegated_to_github.remove(&task.id);
+                self.conversations_resolved.remove(&task.id);
             }
 
             // Either approved or no reviews — attempt squash merge.
@@ -897,8 +909,50 @@ impl CoordinatorActor {
                                 // Enqueue failed (PR not ready: missing
                                 // approval, failing checks, etc.). Don't
                                 // mark delegated — next tick re-checks
-                                // upstream gates and tries again. Bump
-                                // merge_fail_count so the cache-invalidate
+                                // upstream gates and tries again.
+                                //
+                                // One concrete cause on merge-queue repos with
+                                // the "conversation must be resolved" rule is
+                                // unresolved review threads: `enqueuePullRequest`
+                                // rejects the PR much like the direct-merge 405
+                                // does. Unlike that REST path the rejection comes
+                                // back as a GraphQL error (no "405" to match on),
+                                // so we don't string-sniff it — instead, on an
+                                // APPROVED PR (CI already gated green above), we
+                                // resolve any leftover threads directly. Same
+                                // policy as the auto-merge + direct-merge paths;
+                                // harmless if conversations weren't the blocker
+                                // (the resolve list comes back empty). The
+                                // SHA-keyed `conversations_resolved` guard stops
+                                // us re-resolving every tick when a different gate
+                                // keeps enqueue failing.
+                                if has_approved
+                                    && self.conversations_resolved.get(&task.id)
+                                        != Some(&current_sha)
+                                    && let Some(resolved) = self
+                                        .resolve_unresolved_conversations(
+                                            gh_client,
+                                            &owner,
+                                            &repo,
+                                            pull_number,
+                                            &task.short_id,
+                                        )
+                                        .await
+                                {
+                                    self.conversations_resolved
+                                        .insert(task.id.clone(), current_sha.clone());
+                                    if resolved > 0 {
+                                        tracing::info!(
+                                            task_id = %task.short_id,
+                                            pr = pull_number,
+                                            resolved,
+                                            "PR poller: approved PR rejected from merge queue on unresolved conversations — resolved threads, will retry enqueue next tick"
+                                        );
+                                        self.merge_fail_count.remove(&task.id);
+                                        continue;
+                                    }
+                                }
+                                // Bump merge_fail_count so the cache-invalidate
                                 // threshold still kicks in on persistent
                                 // failure.
                                 let count =
@@ -935,49 +989,35 @@ impl CoordinatorActor {
                     // the next tick re-attempt the merge. Only do this when the
                     // PR is approved — otherwise this rule is a legitimate gate.
                     if has_approved && is_conversation_resolution_block(&e) {
-                        match gh_client
-                            .list_unresolved_review_thread_ids(&owner, &repo, pull_number)
+                        match self
+                            .resolve_unresolved_conversations(
+                                gh_client,
+                                &owner,
+                                &repo,
+                                pull_number,
+                                &task.short_id,
+                            )
                             .await
                         {
-                            Ok(ids) if !ids.is_empty() => {
-                                let mut resolved = 0;
-                                for tid in &ids {
-                                    match gh_client.resolve_review_thread(tid).await {
-                                        Ok(()) => resolved += 1,
-                                        Err(re) => tracing::warn!(
-                                            task_id = %task.short_id,
-                                            pr = pull_number,
-                                            thread = %tid,
-                                            error = %re,
-                                            "PR poller: resolve_review_thread failed"
-                                        ),
-                                    }
-                                }
+                            // Resolved at least one thread → idempotent and
+                            // converging. Reset the fail count and retry the
+                            // merge next tick.
+                            Some(resolved) if resolved > 0 => {
                                 tracing::info!(
                                     task_id = %task.short_id,
                                     pr = pull_number,
                                     resolved,
-                                    total = ids.len(),
                                     "PR poller: approved PR blocked on unresolved conversations — resolved threads, will retry merge next tick"
                                 );
-                                // Re-resolving is idempotent (resolved threads
-                                // won't reappear), so this converges. Reset the
-                                // fail count and retry next tick.
                                 self.merge_fail_count.remove(&task.id);
                                 continue;
                             }
-                            // No unresolved threads yet GitHub still blocked, or
-                            // we couldn't list them: do NOT continue. Fall
-                            // through to the generic merge_fail_count path so a
-                            // PR blocked for some OTHER reason can't spin forever
-                            // through this branch.
-                            Ok(_) => {}
-                            Err(le) => tracing::warn!(
-                                task_id = %task.short_id,
-                                pr = pull_number,
-                                error = %le,
-                                "PR poller: failed to list unresolved threads"
-                            ),
+                            // Nothing unresolved (Some(0)) yet GitHub still
+                            // blocked, or we couldn't list them (None): do NOT
+                            // continue. Fall through to the generic
+                            // merge_fail_count path so a PR blocked for some
+                            // OTHER reason can't spin forever through this branch.
+                            _ => {}
                         }
                     }
 
@@ -1009,6 +1049,59 @@ impl CoordinatorActor {
         }
     }
 
+    /// Resolve every unresolved review thread on a PR via GraphQL.
+    ///
+    /// Idempotent: GitHub no-ops an already-resolved thread and it won't
+    /// reappear in the unresolved list, so repeated calls converge. Returns the
+    /// number of threads resolved this call, or `None` if the *listing* failed
+    /// (caller should retry next tick). `Some(0)` means there were no
+    /// unresolved threads to begin with.
+    ///
+    /// The caller decides WHEN this is appropriate. It is only ever invoked
+    /// when the PR is APPROVED: an explicit approval is the override signal that
+    /// the reviewer's inline comments are non-blocking. Shared by the direct
+    /// REST-merge 405 path and the GitHub-managed auto-merge observe path so
+    /// both enforce the same policy.
+    async fn resolve_unresolved_conversations(
+        &self,
+        gh_client: &GitHubApiClient,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+        task_short_id: &str,
+    ) -> Option<usize> {
+        let ids = match gh_client
+            .list_unresolved_review_thread_ids(owner, repo, pull_number)
+            .await
+        {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_short_id,
+                    pr = pull_number,
+                    error = %e,
+                    "PR poller: failed to list unresolved review threads"
+                );
+                return None;
+            }
+        };
+
+        let mut resolved = 0;
+        for tid in &ids {
+            match gh_client.resolve_review_thread(tid).await {
+                Ok(()) => resolved += 1,
+                Err(re) => tracing::warn!(
+                    task_id = %task_short_id,
+                    pr = pull_number,
+                    thread = %tid,
+                    error = %re,
+                    "PR poller: resolve_review_thread failed"
+                ),
+            }
+        }
+        Some(resolved)
+    }
+
     /// Observe the merge-queue / auto-merge state for a PR we've delegated
     /// to GitHub's auto-merge.
     ///
@@ -1029,6 +1122,8 @@ impl CoordinatorActor {
         owner: &str,
         repo: &str,
         pull_number: u64,
+        has_approved: bool,
+        current_sha: &str,
     ) {
         let state = match gh_client
             .get_pr_merge_queue_state(owner, repo, pull_number)
@@ -1082,6 +1177,54 @@ impl CoordinatorActor {
         // If GitHub still has an auto-merge request, it's just waiting for
         // approvals or required checks — keep waiting.
         if state.auto_merge_request.is_some() {
+            // Approved PR whose auto-merge is BLOCKED: the most likely
+            // remaining gate (we're already past approval + CI in
+            // `poll_pr_review_tasks`) is the "a conversation must be resolved
+            // before merge" branch-protection rule. Unlike the direct REST
+            // merge path, GitHub-managed auto-merge never surfaces a 405 we can
+            // react to — it silently waits forever — so the reactive
+            // resolution in `poll_pr_review_tasks` is never reached for
+            // auto-merge repos. Resolve the leftover threads here too, mirroring
+            // that path's policy: an explicit approval declares the reviewer's
+            // inline comments non-blocking. GitHub re-evaluates auto-merge once
+            // the block clears, and the next tick observes the merge.
+            //
+            // `conversations_resolved` (keyed task→SHA) stops us re-querying
+            // review threads every 30s when a DIFFERENT rule (e.g. a pending
+            // CODEOWNERS review) keeps the PR BLOCKED after the conversations
+            // are already resolved.
+            let already_resolved_this_sha =
+                self.conversations_resolved.get(task_id) == Some(&current_sha.to_string());
+            if should_auto_resolve_conversations(
+                has_approved,
+                state.merge_state_status.as_deref(),
+                already_resolved_this_sha,
+            ) && let Some(resolved) = self
+                .resolve_unresolved_conversations(
+                    gh_client,
+                    owner,
+                    repo,
+                    pull_number,
+                    task_short_id,
+                )
+                .await
+            {
+                if resolved > 0 {
+                    tracing::info!(
+                        task_id = %task_short_id,
+                        pr = pull_number,
+                        resolved,
+                        "PR poller: approved auto-merge PR blocked on unresolved conversations — resolved threads, GitHub will re-evaluate auto-merge"
+                    );
+                }
+                // Mark this SHA done regardless of count: a successful list
+                // (even of zero) means the conversation gate is no longer
+                // the blocker, so stop re-querying until a new push lands.
+                // A failed list returns None and leaves the entry unset so
+                // we retry next tick.
+                self.conversations_resolved
+                    .insert(task_id.to_string(), current_sha.to_string());
+            }
             tracing::debug!(
                 task_id = %task_short_id,
                 pr = pull_number,
@@ -1581,6 +1724,7 @@ impl CoordinatorActor {
         self.pr_draft_first_seen.remove(&task.id);
         self.merge_fail_count.remove(&task.id);
         self.delegated_to_github.remove(&task.id);
+        self.conversations_resolved.remove(&task.id);
     }
 
     /// Attach PR review feedback to the task activity log, increment the
@@ -2407,6 +2551,32 @@ fn is_conversation_resolution_block(err: &anyhow::Error) -> bool {
         || (msg.contains("repository rule violations") && msg.contains("conversation"))
 }
 
+/// Gate for proactively resolving review conversations on the GitHub-managed
+/// **auto-merge** path (where no 405 error is ever surfaced to react to).
+///
+/// Fires only when:
+///   * the PR is APPROVED — approval is the override signal that the
+///     reviewer's inline comments are non-blocking (same policy as the direct
+///     REST-merge 405 path), and
+///   * GitHub reports `mergeStateStatus == "BLOCKED"` — mergeability is
+///     otherwise satisfied (`CLEAN`/`UNSTABLE`/`BEHIND`/`DRAFT` all mean some
+///     non-conversation condition is still in flight, so don't touch threads
+///     yet), and
+///   * we haven't already resolved conversations for this exact head SHA —
+///     avoids re-querying GitHub's review threads every 30s tick when a
+///     *different* protection rule (e.g. an outstanding CODEOWNERS review)
+///     keeps the PR `BLOCKED` after the conversations are resolved.
+///
+/// Resolving is harmless when conversations weren't the real blocker: the
+/// unresolved-thread list comes back empty and the resolve loop is a no-op.
+fn should_auto_resolve_conversations(
+    has_approved: bool,
+    merge_state_status: Option<&str>,
+    already_resolved_this_sha: bool,
+) -> bool {
+    has_approved && merge_state_status == Some("BLOCKED") && !already_resolved_this_sha
+}
+
 /// Determine if a `DequeuedEvent.reason` indicates a real failure that
 /// should kick the task back into the worker loop.
 ///
@@ -2773,7 +2943,7 @@ mod tests {
         Task, blocking_failed_checks, build_ci_failure_sections, dequeue_reason_is_failure,
         effective_review_decision, is_advisory_check_name, is_conversation_resolution_block,
         is_merge_queue_405, is_racing_unmerged_status, parse_actions_run_id, parse_pr_url,
-        pick_conflict_blocker_sibling,
+        pick_conflict_blocker_sibling, should_auto_resolve_conversations,
     };
     use djinn_provider::github_api::{ActionsJob, ActionsJobStep, CheckRun, GitHubUser, PrReview};
 
@@ -3311,5 +3481,49 @@ mod tests {
         let body = sections.join("\n");
         assert!(body.contains("**lint**"), "{body}");
         assert!(ci_jobs.is_empty());
+    }
+
+    #[test]
+    fn auto_resolve_conversations_gate() {
+        // The #287 case: approved PR, auto-merge armed, GitHub reports BLOCKED
+        // (require-conversation-resolution holding the merge), not yet resolved
+        // for this SHA → fire.
+        assert!(should_auto_resolve_conversations(
+            true,
+            Some("BLOCKED"),
+            false
+        ));
+
+        // Not approved → never auto-resolve (the rule is a legitimate gate when
+        // there's no approval override).
+        assert!(!should_auto_resolve_conversations(
+            false,
+            Some("BLOCKED"),
+            false
+        ));
+
+        // Not BLOCKED → some non-conversation condition is still in flight
+        // (waiting on checks / behind base / draft), leave threads alone.
+        for st in [
+            Some("CLEAN"),
+            Some("UNSTABLE"),
+            Some("BEHIND"),
+            Some("DRAFT"),
+            Some("UNKNOWN"),
+            None,
+        ] {
+            assert!(
+                !should_auto_resolve_conversations(true, st, false),
+                "merge_state {st:?} must not trigger auto-resolve"
+            );
+        }
+
+        // Already resolved for this SHA → don't re-query every tick while a
+        // different rule (e.g. pending CODEOWNERS review) keeps it BLOCKED.
+        assert!(!should_auto_resolve_conversations(
+            true,
+            Some("BLOCKED"),
+            true
+        ));
     }
 }
