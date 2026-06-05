@@ -373,60 +373,62 @@ fn build_task_run_env(
     env.push(env_var("GIT_CONFIG_KEY_0", "safe.directory"));
     env.push(env_var("GIT_CONFIG_VALUE_0", "*"));
 
-    // Route Cargo's caches to the persistent /cache PVC, mirroring the Go
-    // GOMODCACHE/GOCACHE treatment baked into the image. Without this every
-    // Rust task-run recompiles the entire workspace dependency graph COLD:
-    // the image's CARGO_HOME (/usr/local/cargo, an image layer) loses any
-    // runtime-downloaded crates when the Pod dies, and CARGO_TARGET_DIR
-    // defaults to <workspace>/target inside the ephemeral clone.
-    //
-    // These are set at RUNTIME, not as image ENV, on purpose: the image must
-    // keep CARGO_HOME at the baked /usr/local/cargo so install-rust.sh's
-    // cargo/rustc proxies stay on PATH. Pointing CARGO_HOME at /cache in the
-    // Dockerfile would install those proxies into a path the runtime PVC
-    // overlay then HIDES — the v2→v3 RUSTUP_HOME regression (see
-    // image-builder/src/hash.rs). Here the proxies stay at
-    // /usr/local/cargo/bin (on PATH); only cargo's data dirs move to the PVC,
-    // which is djinn-owned (uid 10001), persistent, and in the Landlock
-    // allowlist (djinn-agent sandbox/linux.rs).
-    //
-    // - CARGO_HOME: registry index + crate sources, content-addressed by
-    //   crate@version, so it is safe to SHARE across projects (like Go's
-    //   module cache) — common crates download once.
-    // - CARGO_TARGET_DIR: compiled artifacts are workspace-specific, so they
-    //   are namespaced per project. cargo flocks the target dir, so two
-    //   concurrent task-runs on the SAME project serialize on the build lock
-    //   (correct — no corruption); different projects use different dirs and
-    //   build in parallel.
-    env.push(env_var("CARGO_HOME", &format!("{CACHE_MOUNT_DIR}/cargo")));
-    env.push(env_var(
-        "CARGO_TARGET_DIR",
-        &format!("{CACHE_MOUNT_DIR}/cargo-target/{project_id}"),
-    ));
-
-    // Route sccache's disk cache to the persistent /cache PVC. Repos routinely
-    // pin `rustc-wrapper = "sccache"` in .cargo/config.toml (e.g. the platform
-    // repo, which also sets CARGO_INCREMENTAL=0 as sccache requires). cargo
-    // then invokes sccache regardless of any env var — but without SCCACHE_DIR
-    // sccache falls back to $HOME/.cache/sccache (/home/djinn/.cache/sccache),
-    // which is (1) ephemeral, lost when the Pod dies, so it caches nothing
-    // across runs, and (2) NOT in the Landlock allowlist (only $HOME/.cache/djinn
-    // is), so the sandboxed sccache server is denied write there. Pointing it at
-    // /cache fixes both: the PVC is persistent, djinn-owned (uid 10001), and
-    // already in the sandbox allowlist (djinn-agent sandbox/linux.rs).
-    //
-    // Namespaced per project (like CARGO_TARGET_DIR, not CARGO_HOME): sccache's
-    // local disk cache is not safe for multiple concurrent server processes
-    // sharing one directory, and task-run Pods share the /cache PVC, so a single
-    // /cache/sccache would risk multi-writer corruption across projects.
-    env.push(env_var(
-        "SCCACHE_DIR",
-        &format!("{CACHE_MOUNT_DIR}/sccache/{project_id}"),
-    ));
-    // Default is 10G, which evicts fast on a large workspace; give sccache more
-    // headroom on the shared PVC.
-    env.push(env_var("SCCACHE_CACHE_SIZE", "20G"));
+    env.extend(cache_env_vars(project_id));
     env
+}
+
+/// Runtime env vars routing the Rust toolchain caches to the persistent
+/// `/cache` PVC, shared by BOTH the task-run Pod (`build_task_run_env`) and the
+/// warm Pod (`warm_job::build_warm_job`) so the warmer primes exactly the
+/// per-project dirs the task-runs reuse. Single-sourced here on purpose: the DB
+/// env once drifted because the task-run path was updated and the warm path was
+/// missed (see the comment in warm_job.rs) — keeping cache routing in one place
+/// makes that class of drift impossible.
+///
+/// Set at RUNTIME, not as image ENV, on purpose: the image must keep CARGO_HOME
+/// at the baked /usr/local/cargo so install-rust.sh's cargo/rustc proxies stay
+/// on PATH. Pointing CARGO_HOME at /cache in the Dockerfile would install those
+/// proxies into a path the runtime PVC overlay then HIDES — the v2→v3
+/// RUSTUP_HOME regression (see image-builder/src/hash.rs). Here the proxies stay
+/// at /usr/local/cargo/bin (on PATH); only cargo's data dirs move to the PVC,
+/// which is djinn-owned (uid 10001), persistent, and in the Landlock allowlist
+/// (djinn-agent sandbox/linux.rs).
+///
+/// - CARGO_HOME: registry index + crate sources, content-addressed by
+///   crate@version, so it is safe to SHARE across projects (like Go's module
+///   cache) — common crates download once. (Image default /usr/local/cargo is
+///   an image layer that loses runtime-downloaded crates when the Pod dies.)
+/// - CARGO_TARGET_DIR: compiled artifacts are workspace-specific, so they are
+///   namespaced per project. cargo flocks the target dir, so two concurrent
+///   runs on the SAME project serialize on the build lock (correct — no
+///   corruption); different projects use different dirs and build in parallel.
+///   (Default is <workspace>/target inside the ephemeral clone — also lost.)
+/// - SCCACHE_DIR: repos routinely pin `rustc-wrapper = "sccache"` in
+///   .cargo/config.toml (e.g. the platform repo, which also sets
+///   CARGO_INCREMENTAL=0 as sccache requires), so cargo invokes sccache
+///   regardless of any env var. Without SCCACHE_DIR sccache falls back to
+///   $HOME/.cache/sccache (/home/djinn/.cache/sccache), which is (1) ephemeral
+///   and (2) NOT in the Landlock allowlist (only $HOME/.cache/djinn is), so the
+///   sandboxed sccache server is denied write there. Namespaced per project
+///   (like CARGO_TARGET_DIR): sccache's local disk cache is not safe for
+///   multiple concurrent server processes sharing one directory, and Pods share
+///   the /cache PVC, so a single /cache/sccache would risk multi-writer
+///   corruption across projects.
+pub(crate) fn cache_env_vars(project_id: &str) -> Vec<EnvVar> {
+    vec![
+        env_var("CARGO_HOME", &format!("{CACHE_MOUNT_DIR}/cargo")),
+        env_var(
+            "CARGO_TARGET_DIR",
+            &format!("{CACHE_MOUNT_DIR}/cargo-target/{project_id}"),
+        ),
+        env_var(
+            "SCCACHE_DIR",
+            &format!("{CACHE_MOUNT_DIR}/sccache/{project_id}"),
+        ),
+        // Default is 10G, which evicts fast on a large workspace; give sccache
+        // more headroom on the shared PVC.
+        env_var("SCCACHE_CACHE_SIZE", "20G"),
+    ]
 }
 
 fn env_var(name: &str, value: &str) -> EnvVar {

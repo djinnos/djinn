@@ -92,6 +92,11 @@ exec {bin} verify-test "{test_id}"
     if let Some(url) = config.database_url.as_deref() {
         env.push(env_var("DJINN_DATABASE_URL", url));
     }
+    // Route the Rust toolchain caches to the /cache PVC like task-runs/warm, so
+    // candidate verification commands (cargo build/test, sccache via repo
+    // .cargo/config.toml) reuse the warm per-project caches instead of
+    // recompiling cold. Single-sourced in job.rs; needs the cache volume below.
+    env.extend(crate::job::cache_env_vars(project_id));
 
     let container = Container {
         name: "verify-test".to_string(),
@@ -109,6 +114,12 @@ exec {bin} verify-test "{test_id}"
             VolumeMount {
                 name: VOLUME_WORKSPACE.to_string(),
                 mount_path: WORKSPACE_MOUNT_DIR.to_string(),
+                read_only: Some(false),
+                ..VolumeMount::default()
+            },
+            VolumeMount {
+                name: crate::job::VOLUME_CACHE.to_string(),
+                mount_path: crate::job::CACHE_MOUNT_DIR.to_string(),
                 read_only: Some(false),
                 ..VolumeMount::default()
             },
@@ -139,6 +150,14 @@ exec {bin} verify-test "{test_id}"
         Volume {
             name: VOLUME_WORKSPACE.to_string(),
             empty_dir: Some(EmptyDirVolumeSource::default()),
+            ..Volume::default()
+        },
+        Volume {
+            name: crate::job::VOLUME_CACHE.to_string(),
+            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                claim_name: config.cache_pvc.clone(),
+                read_only: Some(false),
+            }),
             ..Volume::default()
         },
     ];
@@ -212,9 +231,20 @@ mod tests {
         let cmd = c.command.as_ref().unwrap().join(" ");
         assert!(cmd.contains("verify-test"), "command must invoke verify-test: {cmd}");
         assert!(cmd.contains("test-123"), "command must pass the test id: {cmd}");
-        // Mirror (ro) + workspace (rw) mounts present.
+        // Mirror (ro) + workspace (rw) + cache (rw) mounts present.
         let mounts = c.volume_mounts.as_ref().unwrap();
         assert!(mounts.iter().any(|m| m.name == VOLUME_MIRROR && m.read_only == Some(true)));
         assert!(mounts.iter().any(|m| m.name == VOLUME_WORKSPACE));
+        assert!(mounts.iter().any(|m| m.name == crate::job::VOLUME_CACHE && m.read_only == Some(false)));
+        // Rust cache routing matches task-runs/warm (single-sourced).
+        let envs: BTreeMap<&str, &str> = c
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+        assert_eq!(envs.get("CARGO_HOME").copied(), Some("/cache/cargo"));
+        assert_eq!(envs.get("SCCACHE_DIR").copied(), Some("/cache/sccache/proj-xyz"));
     }
 }

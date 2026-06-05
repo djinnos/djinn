@@ -136,6 +136,12 @@ exec {bin} warm-graph "{project_id}"
     if let Some(url) = config.database_url.as_deref() {
         env.push(env_var("DJINN_DATABASE_URL", url));
     }
+    // Route the Rust toolchain caches (CARGO_HOME/CARGO_TARGET_DIR/SCCACHE_DIR)
+    // to the /cache PVC, identical to the task-run Pod, so the warmer primes the
+    // exact per-project dirs the task-runs reuse. Single-sourced in job.rs to
+    // avoid the task-run-updated-but-warm-missed drift that bit DJINN_*_URL.
+    // Needs the cache volume mounted below.
+    env.extend(crate::job::cache_env_vars(project_id));
 
     let container = Container {
         name: "warmer".to_string(),
@@ -153,6 +159,15 @@ exec {bin} warm-graph "{project_id}"
             VolumeMount {
                 name: VOLUME_WORKSPACE.to_string(),
                 mount_path: WORKSPACE_MOUNT_DIR.to_string(),
+                read_only: Some(false),
+                ..VolumeMount::default()
+            },
+            // Shared cross-task cache PVC, so the cache_env_vars paths above are
+            // backed by real persistent storage (RWX — concurrent task-run Pods
+            // already mount it).
+            VolumeMount {
+                name: crate::job::VOLUME_CACHE.to_string(),
+                mount_path: crate::job::CACHE_MOUNT_DIR.to_string(),
                 read_only: Some(false),
                 ..VolumeMount::default()
             },
@@ -194,6 +209,14 @@ exec {bin} warm-graph "{project_id}"
         Volume {
             name: VOLUME_WORKSPACE.to_string(),
             empty_dir: Some(EmptyDirVolumeSource::default()),
+            ..Volume::default()
+        },
+        Volume {
+            name: crate::job::VOLUME_CACHE.to_string(),
+            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                claim_name: config.cache_pvc.clone(),
+                read_only: Some(false),
+            }),
             ..Volume::default()
         },
         crate::env_config::env_config_volume(project_id),
@@ -396,8 +419,22 @@ mod tests {
         );
         assert!(!envs.contains_key("DJINN_MYSQL_URL"));
 
+        // Rust cache routing must match the task-run Pod so the warmer primes
+        // the per-project dirs task-runs reuse (single-sourced via
+        // job::cache_env_vars).
+        assert_eq!(envs.get("CARGO_HOME").copied(), Some("/cache/cargo"));
+        assert_eq!(
+            envs.get("CARGO_TARGET_DIR").copied(),
+            Some("/cache/cargo-target/proj-xyz"),
+        );
+        assert_eq!(
+            envs.get("SCCACHE_DIR").copied(),
+            Some("/cache/sccache/proj-xyz"),
+        );
+        assert_eq!(envs.get("SCCACHE_CACHE_SIZE").copied(), Some("20G"));
+
         let mounts = container.volume_mounts.as_ref().expect("mounts");
-        assert_eq!(mounts.len(), 3, "mirror + workspace + env-config");
+        assert_eq!(mounts.len(), 4, "mirror + workspace + cache + env-config");
         let by_name: BTreeMap<&str, &VolumeMount> =
             mounts.iter().map(|m| (m.name.as_str(), m)).collect();
         let mirror = by_name.get(VOLUME_MIRROR).expect("mirror mount");
@@ -406,6 +443,11 @@ mod tests {
         let workspace = by_name.get(VOLUME_WORKSPACE).expect("workspace mount");
         assert_eq!(workspace.mount_path, WORKSPACE_MOUNT_DIR);
         assert_eq!(workspace.read_only, Some(false));
+        let cache = by_name
+            .get(crate::job::VOLUME_CACHE)
+            .expect("cache mount");
+        assert_eq!(cache.mount_path, crate::job::CACHE_MOUNT_DIR);
+        assert_eq!(cache.read_only, Some(false));
         let env_config_mount = by_name
             .get(crate::env_config::VOLUME_ENV_CONFIG)
             .expect("env-config mount");
@@ -429,6 +471,15 @@ mod tests {
             workspace_v.empty_dir.is_some(),
             "workspace must be emptyDir"
         );
+        let cache_v = by_volume_name
+            .get(crate::job::VOLUME_CACHE)
+            .expect("cache volume");
+        let cache_pvc = cache_v
+            .persistent_volume_claim
+            .as_ref()
+            .expect("cache volume is a PVC source");
+        assert_eq!(cache_pvc.claim_name, cfg.cache_pvc);
+        assert_eq!(cache_pvc.read_only, Some(false));
         let env_v = by_volume_name
             .get(crate::env_config::VOLUME_ENV_CONFIG)
             .expect("env-config volume");
