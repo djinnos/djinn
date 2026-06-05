@@ -69,9 +69,17 @@ done
 
 "${CARGO_HOME}/bin/rustup" default "${DEFAULT_TOOLCHAIN_VALUE}"
 
+# Use `:-` defaults, NOT unconditional exports: the worker runs the agent's
+# shell tool as a LOGIN shell (`bash -lc`), so this fragment is sourced on
+# every command. The K8s pod sets CARGO_HOME=/cache/cargo at runtime (job.rs)
+# to route the registry/crate-source cache to the persistent /cache PVC; an
+# unconditional `export CARGO_HOME=/usr/local/cargo` here clobbers that back to
+# the ephemeral image layer, so agent-invoked cargo re-downloads crates COLD
+# every run. The `:-` form keeps the baked default for plain login shells while
+# letting the pod-level override survive.
 cat > /etc/profile.d/10-rust.sh <<'EOF'
-export RUSTUP_HOME=/usr/local/rustup
-export CARGO_HOME=/usr/local/cargo
+export RUSTUP_HOME="${RUSTUP_HOME:-/usr/local/rustup}"
+export CARGO_HOME="${CARGO_HOME:-/usr/local/cargo}"
 export PATH="${CARGO_HOME}/bin:${PATH}"
 EOF
 chmod 0644 /etc/profile.d/10-rust.sh

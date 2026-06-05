@@ -90,7 +90,14 @@ pub fn compute_environment_hash(config: &EnvironmentConfig, agent_worker_ref: &s
     // the one-time rebuild. The hash is now build-only: it covers languages,
     // workspaces, system_packages, env, lifecycle, and the script/worker refs —
     // not the runtime-only verification rules.
-    hasher.update(b"env-config/v7\0");
+    //
+    // v7→v8: install-rust.sh's /etc/profile.d/10-rust.sh fragment now uses
+    // `${CARGO_HOME:-/usr/local/cargo}` instead of an unconditional export.
+    // The agent's shell tool runs `bash -lc` (login), so the old unconditional
+    // export clobbered the pod-level CARGO_HOME=/cache/cargo back to the
+    // ephemeral image layer → agent-invoked cargo re-downloaded crates cold.
+    // The script edit already moves script_sha; bump the salt to document.
+    hasher.update(b"env-config/v8\0");
     hasher.update(config_json.as_bytes());
     hasher.update([0u8]);
     hasher.update(script_sha.as_bytes());
