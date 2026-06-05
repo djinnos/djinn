@@ -3,6 +3,7 @@
 pub mod db;
 pub mod error;
 pub mod events;
+pub mod leadership;
 pub mod logging;
 mod mcp_bridge;
 pub mod memory_fs;

@@ -129,13 +129,18 @@ storage:
     existingClaim: ""
   # Reference working clones populated by `project_add_from_github`. Mounted
   # at /var/lib/djinn/projects and referenced by project.path in the
-  # database, so it must survive pod restarts. Only the server Pod
-  # reads/writes it — RWO is fine on single-node and cheaper than RWX on
-  # shared storage.
+  # database, so it must survive pod restarts. RWX is required on multi-node
+  # clusters: the surge rollout (maxSurge=1) briefly runs two server pods that
+  # both mount this PVC and may land on different nodes. Only the leader pod
+  # writes it; the standby pod reads, and the overlap is bounded to a deploy
+  # window. On single-node clusters (kind, values.local.yaml) RWO still works
+  # because RWO is enforced per-node, not per-pod.
+  # NOTE: accessMode is immutable on an existing PVC — a projects PVC
+  # previously provisioned as RWO must be recreated/migrated to take RWX.
   projects:
     size: 20Gi
     storageClassName: ""
-    accessMode: ReadWriteOnce
+    accessMode: ReadWriteMany
     existingClaim: ""
 
 # -----------------------------------------------------------------------------

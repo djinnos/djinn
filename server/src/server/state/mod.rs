@@ -1137,11 +1137,10 @@ impl AppState {
 
         self.restore_model_health_state().await;
 
-        // Finalize any sessions left in `running` from a previous process.
-        self.interrupt_stale_sessions_on_startup().await;
-
-        // Prune stale verification cache entries (>7 days old).
-        self.prune_verification_cache_on_startup().await;
+        // NOTE: stale-session finalization + verification-cache pruning are
+        // mutating sweeps and now run in `become_leader()` — only the active
+        // (lock-holding) pod may touch `running` sessions, otherwise a standby
+        // pod would interrupt the leader's freshly-dispatched work.
 
         // KB note storage is db-only: there is no on-disk reindex on startup
         // and no .djinn/ filesystem watcher. Notes are written directly to
@@ -1164,66 +1163,112 @@ impl AppState {
             tracing::error!(%error, "failed to bootstrap qdrant code_chunks collection on startup");
         }
 
-        // One-shot backfill of pre-existing blobless mirrors to full
-        // mirrors. Mirrors cloned before the chat-user-global cut-over
-        // carry `extensions.partialClone` + a `promisor` marker; the
-        // chat shell sandbox runs with `CLONE_NEWNET` so a lazy-fetch
-        // inside an ephemeral clone would hard-fail. `ensure_full_mirror`
-        // is idempotent and serialized per-project by the same lock
-        // that guards `ensure_mirror` / `fetch_mirror`, so it is safe
-        // to run concurrently with normal server traffic.
-        let backfill_self = self.clone();
-        tokio::spawn(async move {
-            backfill_self.backfill_full_mirrors_on_startup().await;
-        });
-
-        // commit 7 (chat-user-global): warm the persistent
-        // per-project workspaces on boot so the first chat tool call
-        // against a project doesn't pay the clone latency.
-        // Idempotent — already-warm workspaces fast-path through
-        // `ensure_workspace`'s sync branch.  Serialised per-project
-        // by the store's internal lock; projects warm concurrently
-        // with each other.
-        let warm_workspaces_self = self.clone();
-        tokio::spawn(async move {
-            warm_workspaces_self.warm_workspaces_on_startup().await;
-        });
-
         // ADR-050 Chunk C: the filesystem-watcher SCIP trigger has been
         // removed.  SCIP indexing now happens lazily via
         // `ensure_canonical_graph` on architect dispatch and chat first
         // use.  Per-worktree skeleton refresh is no longer required.
 
+        // NOTE: the mutating/dispatch subsystems that used to spawn here
+        // (mirror backfill, workspace warming, the task-outcome extraction
+        // listener, org-membership sync, the worker RPC listener, and the
+        // image controller) now start in `become_leader()` so only the
+        // single lock-holding pod runs them. See `crate::leadership`.
+
+        // Phase 3 PR 8: pick the canonical-graph warmer impl (K8s or
+        // in-process) and cache it. This is just a cached handle (the actual
+        // warm is single-flight-gated elsewhere), so it is safe on every pod
+        // and the serving/chat path needs it regardless of leadership.
+        self.initialize_graph_warmer().await;
+    }
+
+    /// Start the subsystems that must run on **exactly one** pod: the
+    /// coordinator + slot pool, the worker RPC listener, the image controller,
+    /// the periodic housekeeping/mirror-fetch loops, and the one-shot startup
+    /// sweeps (stale-session finalization, cache pruning, mirror backfill,
+    /// workspace warming). Called once by `crate::leadership::run_with_leadership`
+    /// when this process wins the coordinator advisory lock.
+    ///
+    /// Everything here either dispatches cluster work, reaps/mutates shared
+    /// rows, or writes to shared PVCs — running it on a standby pod during a
+    /// rolling deploy would double-dispatch or corrupt shared state. The HTTP
+    /// plane (which `initialize()` sets up) serves on every pod regardless.
+    pub async fn become_leader(&self) {
+        tracing::info!("become_leader: starting active coordinator subsystems");
+
+        // Coordinator + slot pool (the dispatch engine) + runtime settings.
+        self.initialize_agents().await;
+
+        // Finalize any sessions left in `running` from a previous leader. Safe
+        // now (and only now): we hold the lock, so the previous leader is gone
+        // and any `running` row is genuinely orphaned.
+        self.interrupt_stale_sessions_on_startup().await;
+
+        // Prune stale verification cache entries (>7 days old).
+        self.prune_verification_cache_on_startup().await;
+
+        // One-shot backfill of pre-existing blobless mirrors to full mirrors.
+        // Idempotent + serialized per-project by the mirror lock.
+        let backfill_self = self.clone();
+        tokio::spawn(async move {
+            backfill_self.backfill_full_mirrors_on_startup().await;
+        });
+
+        // Warm the persistent per-project workspaces so the first chat tool
+        // call against a project doesn't pay the clone latency. Idempotent.
+        let warm_workspaces_self = self.clone();
+        tokio::spawn(async move {
+            warm_workspaces_self.warm_workspaces_on_startup().await;
+        });
+
+        // Post-session knowledge-extraction listener (reacts to task outcomes).
         djinn_agent::verification::task_confidence::spawn_task_outcome_listener(
             self.db().clone(),
             self.event_bus(),
             self.events(),
         );
 
-        // Phase 3C: periodic GitHub-org-membership reconciliation.
-        // Flips `users.is_member_of_org` and revokes sessions when someone
-        // leaves the locked org so their existing `djinn_session` cookie
-        // stops working on the next request.
+        // Phase 3C: periodic GitHub-org-membership reconciliation. Flips
+        // `users.is_member_of_org` and revokes sessions when someone leaves
+        // the locked org.
         crate::server::start_org_member_sync(self.clone());
 
-        // Phase 2 K8s PR 4 pt2: spawn the TCP listener that worker Pods dial
-        // back into.  Only runs on the `DJINN_RUNTIME=kubernetes` (default)
-        // path; the `DJINN_RUNTIME=test` path exercises the supervisor
-        // in-process through `TestRuntime` and does not need a TCP listener.
+        // Phase 2 K8s PR 4 pt2: the TCP listener that worker Pods dial back
+        // into. Only the leader dispatches workers, so only the leader needs
+        // to accept their reverse-RPC. (No-op outside the Kubernetes runtime.)
         self.start_rpc_listener_if_needed().await;
 
-        // Phase 3 PR 5: per-project devcontainer image controller.  Best-
-        // effort: absent on dev boxes without a kube::Client; the mirror
-        // fetcher silently skips the enqueue step when `image_controller()`
-        // returns `None`.
+        // Phase 3 PR 5: per-project devcontainer image controller. Dispatches
+        // build Jobs — must be a singleton.
         self.initialize_image_controller().await;
 
-        // Phase 3 PR 8: pick the canonical-graph warmer impl (K8s or
-        // in-process) and cache it.  Call order: after
-        // `image_controller` because the K8s warmer reads the same
-        // `kube::Client` path and we want the info log to surface even
-        // if the controller short-circuited (e.g. env disabled).
-        self.initialize_graph_warmer().await;
+        // Periodic DB housekeeping + mirror-fetch loops. Both mutate shared
+        // state (reaping rows / writing the mirrors PVC) and trigger dispatch,
+        // so they belong to the leader.
+        djinn_db::background::housekeeping::spawn(
+            self.db().clone(),
+            self.event_bus(),
+            self.cancel().clone(),
+        );
+        crate::mirror_fetcher::spawn(self.clone());
+
+        // One-time recovery sweep: backfill post-session knowledge extraction
+        // over completed task-runs whose sessions were never extracted. Opt-in
+        // via `DJINN_BACKFILL_EXTRACTION`; idempotent (skips already-extracted
+        // sessions). Runs in the background so the leader keeps serving.
+        if std::env::var("DJINN_BACKFILL_EXTRACTION")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            tracing::info!(
+                "DJINN_BACKFILL_EXTRACTION set — spawning one-time extraction backfill"
+            );
+            let ctx = self.agent_context();
+            tokio::spawn(async move {
+                djinn_agent::run_extraction_backfill(ctx).await;
+            });
+        }
+
+        tracing::info!("become_leader: active subsystems started");
     }
 
     /// Spawn `djinn_supervisor::serve_on_tcp` on the configured RPC address

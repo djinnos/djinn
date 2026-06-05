@@ -8,6 +8,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+use djinn_agent::runtime_bridge::{RuntimeKind, runtime_kind};
 use djinn_server::db::runtime::{DatabaseRuntimeConfig, DatabaseRuntimeManager};
 use djinn_server::logging;
 use djinn_server::server::{self, AppState};
@@ -145,12 +146,12 @@ async fn async_main() {
     }
 
     let state = AppState::new_with_runtime(db, db_runtime, cancel.clone());
-    djinn_db::background::housekeeping::spawn(
-        state.db().clone(),
-        state.event_bus(),
-        state.cancel().clone(),
-    );
-    djinn_server::mirror_fetcher::spawn(state.clone());
+
+    // NOTE: the periodic housekeeping + mirror-fetch loops, the coordinator,
+    // and the worker RPC listener no longer start here unconditionally — they
+    // run on the single lock-holding pod via `AppState::become_leader()`, which
+    // the leadership manager (below) invokes once this process wins the
+    // coordinator advisory lock. See `djinn_server::leadership`.
 
     // OTLP telemetry is configured at deploy time via env (set by the Helm
     // chart from values.langfuse.*). Absent env → telemetry stays off.
@@ -169,26 +170,35 @@ async fn async_main() {
             tracing::error!(error = %e, "failed to initialize memory mount");
             std::process::exit(1);
         });
-    state.initialize_agents().await;
 
-    // One-time recovery sweep: backfill post-session knowledge extraction over
-    // completed task-runs whose sessions were never extracted — history from
-    // before the streamed-report fix, plus any run whose worker died before
-    // streaming a terminal report. Opt-in via `DJINN_BACKFILL_EXTRACTION` so it
-    // only runs when an operator asks for it; it's idempotent (skips sessions
-    // already marked with an `event_taxonomy`), so a stray re-run is harmless.
-    // Runs in the background using the live, fully-wired AgentContext so the
-    // server keeps serving while it sweeps.
-    if std::env::var("DJINN_BACKFILL_EXTRACTION")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-    {
-        tracing::info!("DJINN_BACKFILL_EXTRACTION set — spawning one-time extraction backfill");
-        let ctx = state.agent_context();
-        tokio::spawn(async move {
-            djinn_agent::run_extraction_backfill(ctx).await;
-        });
-    }
+    // ── Leadership ────────────────────────────────────────────────────
+    // Spawn the leadership manager: it races for the coordinator advisory
+    // lock and, on winning, calls `become_leader()` to start the coordinator,
+    // the worker RPC listener, and the other singleton/mutating subsystems.
+    // The HTTP server (started below) serves on EVERY pod immediately —
+    // readiness is deliberately independent of leadership so a
+    // RollingUpdate(maxSurge=1, maxUnavailable=0) deploy never drops to zero
+    // Ready endpoints (no more 503 window). The new pod serves HTTP in
+    // standby until the old pod terminates, releases the lock, and the new
+    // pod promotes itself.
+    //
+    // The lock is only engaged under the Kubernetes runtime (where multiple
+    // pods can coexist). In-process / dev / test runs pass `None` and become
+    // leader immediately, so they don't depend on a reachable Postgres for the
+    // lock handshake.
+    let lock_dsn = if matches!(runtime_kind(), RuntimeKind::Kubernetes) {
+        cli.database_url.clone()
+    } else {
+        None
+    };
+    let leader_state = state.clone();
+    let leader_cancel = cancel.clone();
+    tokio::spawn(async move {
+        djinn_server::leadership::run_with_leadership(lock_dsn, leader_cancel, move || async move {
+            leader_state.become_leader().await;
+        })
+        .await;
+    });
 
     // Keep a handle on AppState so we can tear the TCP RPC listener down
     // gracefully after the HTTP server's shutdown future resolves.
