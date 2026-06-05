@@ -10,6 +10,7 @@ pub mod env_config;
 pub mod graph_warmer;
 pub mod job;
 pub mod runtime;
+pub mod backing_service;
 pub mod secret;
 pub mod token_review;
 pub mod verification_test_job;
