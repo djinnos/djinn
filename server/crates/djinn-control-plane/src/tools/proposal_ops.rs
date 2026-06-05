@@ -33,6 +33,10 @@ pub struct ProposalModel {
     /// Build owner once graduated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build_owner_user_id: Option<String>,
+    /// Count of unresolved feedback entries — drives the per-row badge in the
+    /// proposals list. Only populated on `proposal_list`; `0` on show paths.
+    #[serde(default)]
+    pub unresolved_feedback_count: i64,
 }
 
 /// An epic this proposal graduated into.
@@ -50,6 +54,14 @@ pub struct ProposalEpicModel {
 
 impl From<&Proposal> for ProposalModel {
     fn from(p: &Proposal) -> Self {
+        Self::from_with_count(p, 0)
+    }
+}
+
+impl ProposalModel {
+    /// Build a view stamping the unresolved-feedback count (the list path
+    /// supplies it from a correlated subquery; show paths pass `0`).
+    pub fn from_with_count(p: &Proposal, unresolved_feedback_count: i64) -> Self {
         Self {
             id: p.id.clone(),
             short_id: p.short_id.clone(),
@@ -64,6 +76,7 @@ impl From<&Proposal> for ProposalModel {
             closed_at: p.closed_at.clone(),
             latest_revision_seq: p.latest_revision_seq,
             build_owner_user_id: p.build_owner_user_id.clone(),
+            unresolved_feedback_count,
         }
     }
 }
@@ -159,15 +172,16 @@ pub struct ProposalFeedbackModel {
     pub body: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_section: Option<String>,
-    /// `null` = discussion; `open` | `accepted` | `rejected` = suggestion.
+    /// When set, the feedback is resolved (addressed or dismissed) and collapsed
+    /// out of the active thread.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    /// For an edit suggestion, the proposed new spec body.
+    pub resolved_at: Option<String>,
+    /// The revision that addressed this feedback (`null` when dismissed without
+    /// a spec change).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub proposed_body: Option<String>,
-    /// Revision the proposed change landed in once accepted.
+    pub resolved_revision_seq: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub applied_revision_seq: Option<i32>,
+    pub resolved_by_user_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -183,9 +197,9 @@ impl From<&ProposalFeedback> for ProposalFeedbackModel {
             author_model: f.author_model.clone(),
             body: f.body.clone(),
             target_section: f.target_section.clone(),
-            status: f.status.clone(),
-            proposed_body: f.proposed_body.clone(),
-            applied_revision_seq: f.applied_revision_seq,
+            resolved_at: f.resolved_at.clone(),
+            resolved_revision_seq: f.resolved_revision_seq,
+            resolved_by_user_id: f.resolved_by_user_id.clone(),
             created_at: f.created_at.clone(),
             updated_at: f.updated_at.clone(),
         }

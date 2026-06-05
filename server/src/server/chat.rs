@@ -17,6 +17,12 @@ pub(super) use project_resolver::{ProjectResolver, ProjectResolverError};
 pub(super) const DJINN_CHAT_SYSTEM_PROMPT: &str =
     include_str!("../../crates/djinn-agent/src/prompts/chat.md");
 
+/// System prompt overlay for a proposal-scoped chat ("Address with djinn").
+/// `{{PROPOSAL_CONTEXT}}` is replaced with the rendered spec + unresolved
+/// feedback before it's merged into the chat system message.
+pub(super) const PROPOSAL_ADDRESS_SYSTEM_PROMPT: &str =
+    include_str!("../../crates/djinn-agent/src/prompts/proposal_address.md");
+
 /// Apply globally-configured chat skills to the base system message.
 ///
 /// Chat is user-scoped and globally multi-project (the chat-user-global
@@ -59,6 +65,17 @@ pub(super) struct ChatCompletionRequest {
     /// silently when omitted; never required.
     #[serde(default)]
     pub project: Option<String>,
+    /// Optional proposal (UUID or short_id) this chat is scoped to — the
+    /// "Address with djinn" flow. When present, the handler seeds the system
+    /// prompt with the proposal spec + its unresolved feedback and grants the
+    /// proposal-editing tool subset, so djinn can rewrite the spec (appending a
+    /// revision) and resolve feedback. Requires an authenticated user.
+    #[serde(default)]
+    pub proposal_id: Option<String>,
+    /// Optional feedback entry the chat is centered on (highlighted in the
+    /// seeded context). Only meaningful alongside `proposal_id`.
+    #[serde(default)]
+    pub feedback_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

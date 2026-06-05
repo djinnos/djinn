@@ -252,6 +252,43 @@ pub fn is_chat_allowed_mcp_tool(name: &str) -> bool {
     CHAT_ALLOWED_MCP_TOOLS.contains(&name)
 }
 
+/// Proposal-editing tools exposed ONLY when a chat is scoped to a proposal
+/// (the "Address with djinn" flow). They are deliberately kept off
+/// [`CHAT_ALLOWED_MCP_TOOLS`] so a plain chat can't reach into proposals — they
+/// are added per-request only when the handler resolves a `proposal_id`, and
+/// the requesting user must be authenticated (the proposal edit gate runs as
+/// that user). All four have flat scalar/string-array params, so they pass the
+/// strict OpenAI schema validator like the board-management writes above.
+pub const PROPOSAL_SCOPED_MCP_TOOLS: &[&str] = &[
+    "proposal_show",
+    "proposal_update",
+    "proposal_feedback_resolve",
+    "proposal_feedback_add",
+];
+
+/// `true` when `name` is one of the proposal-scoped tools (see
+/// [`PROPOSAL_SCOPED_MCP_TOOLS`]).
+pub fn is_proposal_scoped_mcp_tool(name: &str) -> bool {
+    PROPOSAL_SCOPED_MCP_TOOLS.contains(&name)
+}
+
+/// Filter an `all_tool_schemas()` list down to the proposal-scoped subset.
+/// Used to extend the schema set sent to the model for a proposal-scoped chat.
+pub fn filter_proposal_scoped_mcp_schemas(
+    schemas: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    schemas
+        .into_iter()
+        .filter(|schema| {
+            schema
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(is_proposal_scoped_mcp_tool)
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
 /// Union predicate: `true` iff `name` is valid in chat at all, regardless
 /// of which dispatch tier handles it. The two backing lists
 /// ([`CHAT_EXTENSION_TOOLS`] and [`CHAT_ALLOWED_MCP_TOOLS`]) partition

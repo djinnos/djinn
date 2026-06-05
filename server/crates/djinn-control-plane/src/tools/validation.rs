@@ -256,17 +256,6 @@ pub fn validate_proposal_create_status(status: Option<&str>) -> Result<Option<&s
     }
 }
 
-/// Validate a proposal feedback resolution status:
-/// `open` | `accepted` | `rejected`.
-pub fn validate_feedback_status(status: &str) -> Result<(), String> {
-    match status {
-        "open" | "accepted" | "rejected" => Ok(()),
-        other => Err(format!(
-            "invalid feedback status: {other:?} (expected open, accepted, or rejected)"
-        )),
-    }
-}
-
 // ── Emoji helpers ────────────────────────────────────────────────────────────
 
 /// Heuristic: is this char in a common emoji range?

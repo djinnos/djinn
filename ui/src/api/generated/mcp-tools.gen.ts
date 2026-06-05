@@ -3483,6 +3483,11 @@ export namespace ProposalCreateOutputSchema {
   status?: string
   superseded_by?: string
   title?: string
+  /**
+   * Count of unresolved feedback entries — drives the per-row badge in the
+   * proposals list. Only populated on `proposal_list`; `0` on show paths.
+   */
+  unresolved_feedback_count?: number
   updated_at?: string
   [k: string]: any
   }
@@ -3514,54 +3519,6 @@ export namespace ProposalDeleteOutputSchema {
 
 }
 export type ProposalDeleteOutput = ProposalDeleteOutputSchema.ProposalDeleteOutput;
-export namespace ProposalFeedbackAcceptInputSchema {
-  export interface ProposalFeedbackAcceptInput {
-  /**
-   * Feedback entry UUID.
-   */
-  id: string
-  [k: string]: any
-  }
-
-}
-export type ProposalFeedbackAcceptInput = ProposalFeedbackAcceptInputSchema.ProposalFeedbackAcceptInput;
-export namespace ProposalFeedbackAcceptOutputSchema {
-  export interface ProposalFeedbackAcceptOutput {
-  error?: string
-  feedback?: (ProposalFeedbackModel | null)
-  [k: string]: any
-  }
-  export interface ProposalFeedbackModel {
-  /**
-   * Revision the proposed change landed in once accepted.
-   */
-  applied_revision_seq?: number
-  /**
-   * `user` or `ai`.
-   */
-  author_kind: string
-  author_model?: string
-  author_user_id?: string
-  body: string
-  created_at: string
-  id: string
-  parent_id?: string
-  proposal_id: string
-  /**
-   * For an edit suggestion, the proposed new spec body.
-   */
-  proposed_body?: string
-  /**
-   * `null` = discussion; `open` | `accepted` | `rejected` = suggestion.
-   */
-  status?: string
-  target_section?: string
-  updated_at: string
-  [k: string]: any
-  }
-
-}
-export type ProposalFeedbackAcceptOutput = ProposalFeedbackAcceptOutputSchema.ProposalFeedbackAcceptOutput;
 export namespace ProposalFeedbackAddInputSchema {
   export interface ProposalFeedbackAddInput {
   /**
@@ -3582,15 +3539,6 @@ export namespace ProposalFeedbackAddInputSchema {
    */
   proposal_id: string
   /**
-   * For an edit suggestion, the proposed new spec body. Accepting the
-   * feedback applies it (appending a revision).
-   */
-  proposed_body?: string
-  /**
-   * Omit for plain discussion; set `open` to file a trackable suggestion.
-   */
-  status?: string
-  /**
    * Optional pointer to the spec section this is about.
    */
   target_section?: string
@@ -3607,10 +3555,6 @@ export namespace ProposalFeedbackAddOutputSchema {
   }
   export interface ProposalFeedbackModel {
   /**
-   * Revision the proposed change landed in once accepted.
-   */
-  applied_revision_seq?: number
-  /**
    * `user` or `ai`.
    */
   author_kind: string
@@ -3622,13 +3566,16 @@ export namespace ProposalFeedbackAddOutputSchema {
   parent_id?: string
   proposal_id: string
   /**
-   * For an edit suggestion, the proposed new spec body.
+   * When set, the feedback is resolved (addressed or dismissed) and collapsed
+   * out of the active thread.
    */
-  proposed_body?: string
+  resolved_at?: string
+  resolved_by_user_id?: string
   /**
-   * `null` = discussion; `open` | `accepted` | `rejected` = suggestion.
+   * The revision that addressed this feedback (`null` when dismissed without
+   * a spec change).
    */
-  status?: string
+  resolved_revision_seq?: number
   target_section?: string
   updated_at: string
   [k: string]: any
@@ -3643,9 +3590,10 @@ export namespace ProposalFeedbackResolveInputSchema {
    */
   id: string
   /**
-   * `open` | `accepted` | `rejected`, or `none` to revert to discussion.
+   * The proposal revision that addressed this feedback (omit for a plain
+   * dismissal with no spec change).
    */
-  status: string
+  resolved_revision_seq?: number
   [k: string]: any
   }
 
@@ -3659,10 +3607,6 @@ export namespace ProposalFeedbackResolveOutputSchema {
   }
   export interface ProposalFeedbackModel {
   /**
-   * Revision the proposed change landed in once accepted.
-   */
-  applied_revision_seq?: number
-  /**
    * `user` or `ai`.
    */
   author_kind: string
@@ -3674,13 +3618,16 @@ export namespace ProposalFeedbackResolveOutputSchema {
   parent_id?: string
   proposal_id: string
   /**
-   * For an edit suggestion, the proposed new spec body.
+   * When set, the feedback is resolved (addressed or dismissed) and collapsed
+   * out of the active thread.
    */
-  proposed_body?: string
+  resolved_at?: string
+  resolved_by_user_id?: string
   /**
-   * `null` = discussion; `open` | `accepted` | `rejected` = suggestion.
+   * The revision that addressed this feedback (`null` when dismissed without
+   * a spec change).
    */
-  status?: string
+  resolved_revision_seq?: number
   target_section?: string
   updated_at: string
   [k: string]: any
@@ -3735,6 +3682,11 @@ export namespace ProposalGraduateOutputSchema {
   status?: string
   superseded_by?: string
   title?: string
+  /**
+   * Count of unresolved feedback entries — drives the per-row badge in the
+   * proposals list. Only populated on `proposal_list`; `0` on show paths.
+   */
+  unresolved_feedback_count?: number
   updated_at?: string
   [k: string]: any
   }
@@ -3811,6 +3763,11 @@ export namespace ProposalListOutputSchema {
   status: string
   superseded_by?: string
   title: string
+  /**
+   * Count of unresolved feedback entries — drives the per-row badge in the
+   * proposals list. Only populated on `proposal_list`; `0` on show paths.
+   */
+  unresolved_feedback_count?: number
   updated_at: string
   [k: string]: any
   }
@@ -3911,10 +3868,6 @@ export namespace ProposalShowOutputSchema {
   }
   export interface ProposalFeedbackModel {
   /**
-   * Revision the proposed change landed in once accepted.
-   */
-  applied_revision_seq?: number
-  /**
    * `user` or `ai`.
    */
   author_kind: string
@@ -3926,13 +3879,16 @@ export namespace ProposalShowOutputSchema {
   parent_id?: string
   proposal_id: string
   /**
-   * For an edit suggestion, the proposed new spec body.
+   * When set, the feedback is resolved (addressed or dismissed) and collapsed
+   * out of the active thread.
    */
-  proposed_body?: string
+  resolved_at?: string
+  resolved_by_user_id?: string
   /**
-   * `null` = discussion; `open` | `accepted` | `rejected` = suggestion.
+   * The revision that addressed this feedback (`null` when dismissed without
+   * a spec change).
    */
-  status?: string
+  resolved_revision_seq?: number
   target_section?: string
   updated_at: string
   [k: string]: any
@@ -3964,6 +3920,11 @@ export namespace ProposalShowOutputSchema {
   status: string
   superseded_by?: string
   title: string
+  /**
+   * Count of unresolved feedback entries — drives the per-row badge in the
+   * proposals list. Only populated on `proposal_list`; `0` on show paths.
+   */
+  unresolved_feedback_count?: number
   updated_at: string
   [k: string]: any
   }
@@ -4065,6 +4026,11 @@ export namespace ProposalSignoffOutputSchema {
   status?: string
   superseded_by?: string
   title?: string
+  /**
+   * Count of unresolved feedback entries — drives the per-row badge in the
+   * proposals list. Only populated on `proposal_list`; `0` on show paths.
+   */
+  unresolved_feedback_count?: number
   updated_at?: string
   [k: string]: any
   }
@@ -4122,6 +4088,11 @@ export namespace ProposalSignoffClearOutputSchema {
   status?: string
   superseded_by?: string
   title?: string
+  /**
+   * Count of unresolved feedback entries — drives the per-row badge in the
+   * proposals list. Only populated on `proposal_list`; `0` on show paths.
+   */
+  unresolved_feedback_count?: number
   updated_at?: string
   [k: string]: any
   }
@@ -4133,6 +4104,65 @@ export namespace ProposalSignoffClearOutputSchema {
 
 }
 export type ProposalSignoffClearOutput = ProposalSignoffClearOutputSchema.ProposalSignoffClearOutput;
+export namespace ProposalStopBuildInputSchema {
+  export interface ProposalStopBuildInput {
+  /**
+   * Proposal UUID or short_id (must be `building`).
+   */
+  id: string
+  /**
+   * `abort` (tear the build down and revert to `approved`), `freeze` (hold
+   * the build's tasks out of dispatch, leaving epics/tasks/branches in
+   * place), or `unfreeze` (resume a frozen build).
+   */
+  mode: string
+  /**
+   * When true on `abort`, compute and return the blast radius (epics, open
+   * tasks, running sessions) WITHOUT mutating anything.
+   */
+  preview?: boolean
+  /**
+   * Why the build is being stopped. Recorded as the force-close reason on
+   * each torn-down task. Required for `abort`.
+   */
+  reason?: string
+  [k: string]: any
+  }
+
+}
+export type ProposalStopBuildInput = ProposalStopBuildInputSchema.ProposalStopBuildInput;
+export namespace ProposalStopBuildOutputSchema {
+  export interface ProposalStopBuildOutput {
+  /**
+   * Epics torn down (abort) or that would be (preview).
+   */
+  epics_closed: number
+  error?: string
+  mode: string
+  ok: boolean
+  /**
+   * `true` when this was a dry-run that did not mutate anything.
+   */
+  preview: boolean
+  proposal_id?: string
+  /**
+   * Running worker sessions killed (abort) or live now (preview).
+   */
+  sessions_killed: number
+  /**
+   * Resulting proposal status (`approved` after a non-preview abort,
+   * `building` after freeze/unfreeze/preview).
+   */
+  status?: string
+  /**
+   * Worker tasks force-closed (abort) or open right now (preview).
+   */
+  tasks_closed: number
+  [k: string]: any
+  }
+
+}
+export type ProposalStopBuildOutput = ProposalStopBuildOutputSchema.ProposalStopBuildOutput;
 export namespace ProposalUpdateInputSchema {
   export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
 
@@ -4196,6 +4226,11 @@ export namespace ProposalUpdateOutputSchema {
   status?: string
   superseded_by?: string
   title?: string
+  /**
+   * Count of unresolved feedback entries — drives the per-row badge in the
+   * proposals list. Only populated on `proposal_list`; `0` on show paths.
+   */
+  unresolved_feedback_count?: number
   updated_at?: string
   [k: string]: any
   }
@@ -5775,7 +5810,7 @@ export namespace UserSettingsSetOutputSchema {
 }
 export type UserSettingsSetOutput = UserSettingsSetOutputSchema.UserSettingsSetOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_allowed_presets" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "project_verification_get" | "project_verification_set" | "project_verification_test" | "project_verification_test_status" | "proposal_add_target" | "proposal_create" | "proposal_delete" | "proposal_feedback_accept" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_list" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_list" | "service_preset_list" | "service_release" | "service_request" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_allowed_presets" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "project_verification_get" | "project_verification_set" | "project_verification_test" | "project_verification_test_status" | "proposal_add_target" | "proposal_create" | "proposal_delete" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_list" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_list" | "service_preset_list" | "service_release" | "service_request" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -5858,7 +5893,6 @@ export interface McpToolMap {
   "proposal_add_target": { input: ProposalAddTargetInput; output: ProposalAddTargetOutput };
   "proposal_create": { input: ProposalCreateInput; output: ProposalCreateOutput };
   "proposal_delete": { input: ProposalDeleteInput; output: ProposalDeleteOutput };
-  "proposal_feedback_accept": { input: ProposalFeedbackAcceptInput; output: ProposalFeedbackAcceptOutput };
   "proposal_feedback_add": { input: ProposalFeedbackAddInput; output: ProposalFeedbackAddOutput };
   "proposal_feedback_resolve": { input: ProposalFeedbackResolveInput; output: ProposalFeedbackResolveOutput };
   "proposal_graduate": { input: ProposalGraduateInput; output: ProposalGraduateOutput };
@@ -5867,6 +5901,7 @@ export interface McpToolMap {
   "proposal_show": { input: ProposalShowInput; output: ProposalShowOutput };
   "proposal_signoff": { input: ProposalSignoffInput; output: ProposalSignoffOutput };
   "proposal_signoff_clear": { input: ProposalSignoffClearInput; output: ProposalSignoffClearOutput };
+  "proposal_stop_build": { input: ProposalStopBuildInput; output: ProposalStopBuildOutput };
   "proposal_update": { input: ProposalUpdateInput; output: ProposalUpdateOutput };
   "provider_catalog": { input: ProviderCatalogInput; output: ProviderCatalogOutput };
   "provider_connected": { input: ProviderConnectedInput; output: ProviderConnectedOutput };

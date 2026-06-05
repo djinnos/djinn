@@ -45,6 +45,14 @@ export interface SendChatMessageOptions {
    * now — the client no longer does a follow-up completion call.
    */
   onSessionTitle?: (title: string) => void;
+  /**
+   * Scopes this chat to a proposal ("Address with djinn"). The server seeds the
+   * system prompt with the proposal spec + unresolved feedback and grants the
+   * proposal-editing tool subset. `feedbackId` highlights the entry the chat
+   * was opened to address.
+   */
+  proposalId?: string;
+  feedbackId?: string;
 }
 
 export async function sendChatMessage(
@@ -79,6 +87,8 @@ export async function sendChatMessage(
           content: messageToContent(message),
         })),
         model,
+        proposal_id: options?.proposalId,
+        feedback_id: options?.feedbackId,
       }),
       signal: options?.signal,
     });

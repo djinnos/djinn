@@ -11,6 +11,7 @@ import { useIsAllProjects, useSelectedProject } from '@/stores/useProjectStore';
 import { ChatMessageBubble } from './ChatMessageBubble';
 import { ChatInput } from './ChatInput';
 import { ChatEmptyState } from './ChatEmptyState';
+import { ProposalChatContext } from './ProposalChatContext';
 import { AnimatePresence, motion } from 'framer-motion';
 
 const EMPTY_MESSAGES: ChatMessage[] = [];
@@ -47,6 +48,9 @@ export function ChatView() {
   const clearStreaming = useChatStore((state) => state.clearStreaming);
   const setThinkingStartTime = useChatStore((state) => state.setThinkingStartTime);
   const setDraft = useChatStore((state) => state.setDraft);
+  const activeScope = useChatStore((state) =>
+    state.activeSessionId ? state.scopeBySession[state.activeSessionId] ?? null : null
+  );
   const draft = useChatStore((state) =>
     state.activeSessionId ? state.draftBySession[state.activeSessionId] ?? '' : state.globalDraft
   );
@@ -235,6 +239,10 @@ export function ChatView() {
           updateSessionTitle(sessionId, title);
           void queryClient.invalidateQueries({ queryKey: ['chat-sessions'] });
         },
+        // Carry the proposal scope so the server seeds the proposal system
+        // prompt + grants the proposal-editing tools on every turn.
+        proposalId: activeScope?.proposalId,
+        feedbackId: activeScope?.feedbackId,
       }
     );
 
@@ -248,7 +256,8 @@ export function ChatView() {
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto flex min-h-full max-w-3xl flex-col px-4">
           <div className="flex-1 pt-4 pb-32">
-            {isEmpty ? (
+            {activeScope && <ProposalChatContext scope={activeScope} />}
+            {!activeScope && isEmpty ? (
               <ChatEmptyState
                 onPromptClick={(prompt) => {
                   void send(prompt, []);
@@ -256,6 +265,16 @@ export function ChatView() {
               />
             ) : (
               <div className="space-y-3">
+                {activeScope && messages.length === 0 && !streamingText && (
+                  <ChatMessageBubble
+                    message={{
+                      id: 'proposal-greeting',
+                      role: 'assistant',
+                      content: `I can help apply this feedback to **${activeScope.proposalTitle}**. Tell me what you'd like to do — for example *“apply points 1 and 3, ignore 2”* — and I'll revise the spec and resolve the feedback.`,
+                      createdAt: Date.now(),
+                    }}
+                  />
+                )}
                 {messages.map((message) => (
                   <ChatMessageBubble key={message.id} message={message} />
                 ))}

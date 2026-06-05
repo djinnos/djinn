@@ -356,47 +356,54 @@ mod tests {
             .expect("dispatch proposal_list");
         assert_eq!(listed.get("total_count").and_then(|v| v.as_i64()), Some(1));
 
-        // Plain discussion (no status) + a trackable suggestion (status=open).
+        // Two feedback entries: a human comment and an AI-authored one.
         server
             .dispatch_tool(
                 "proposal_feedback_add",
                 json!({ "proposal_id": id, "body": "what about X?" }),
             )
             .await
-            .expect("dispatch proposal_feedback_add (discussion)");
-        let suggestion = server
+            .expect("dispatch proposal_feedback_add (comment)");
+        let ai = server
             .dispatch_tool(
                 "proposal_feedback_add",
                 json!({
                     "proposal_id": id,
                     "body": "enforce in svc-invoice not the gateway",
-                    "status": "open",
                     "author_kind": "ai",
                     "author_model": "claude-opus-4-8",
                 }),
             )
             .await
-            .expect("dispatch proposal_feedback_add (suggestion)");
-        let feedback_id = suggestion
+            .expect("dispatch proposal_feedback_add (ai)");
+        let feedback_id = ai
             .get("feedback")
             .and_then(|f| f.get("id"))
             .and_then(|v| v.as_str())
             .expect("feedback id")
             .to_string();
 
+        // Resolve it as addressed in revision 2.
         let resolved = server
             .dispatch_tool(
                 "proposal_feedback_resolve",
-                json!({ "id": feedback_id, "status": "accepted" }),
+                json!({ "id": feedback_id, "resolved_revision_seq": 2 }),
             )
             .await
             .expect("dispatch proposal_feedback_resolve");
+        assert!(
+            resolved
+                .get("feedback")
+                .and_then(|f| f.get("resolved_at"))
+                .and_then(|v| v.as_str())
+                .is_some()
+        );
         assert_eq!(
             resolved
                 .get("feedback")
-                .and_then(|f| f.get("status"))
-                .and_then(|v| v.as_str()),
-            Some("accepted")
+                .and_then(|f| f.get("resolved_revision_seq"))
+                .and_then(|v| v.as_i64()),
+            Some(2)
         );
 
         let shown = server

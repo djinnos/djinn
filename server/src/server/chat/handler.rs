@@ -25,8 +25,8 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use super::{
     ChatCompletionRequest, ChatContent, ChatContentBlock, DJINN_CHAT_SYSTEM_PROMPT, DeltaPayload,
-    ErrorPayload, ProjectResolver, ProjectResolverError, SessionTitlePayload, ToolCallPayload,
-    ToolResultPayload, apply_chat_skills,
+    ErrorPayload, PROPOSAL_ADDRESS_SYSTEM_PROMPT, ProjectResolver, ProjectResolverError,
+    SessionTitlePayload, ToolCallPayload, ToolResultPayload, apply_chat_skills,
 };
 use crate::server::AppState;
 use crate::server::auth::authenticate;
@@ -37,7 +37,7 @@ use djinn_agent::actors::slot::{
 use djinn_agent::chat_tools::ChatResolvedProject;
 use djinn_control_plane::server::DjinnMcpServer;
 use djinn_core::auth_context::{SESSION_USER_ID, SESSION_USER_TOKEN};
-use djinn_db::{SessionMessageRepository, SessionRepository};
+use djinn_db::{ProposalRepository, SessionMessageRepository, SessionRepository};
 use djinn_provider::message::{ContentBlock, Conversation, Message, Role};
 use djinn_provider::provider::{LlmProvider, StreamEvent, TelemetryMeta, create_provider};
 
@@ -189,6 +189,32 @@ pub(super) async fn completions_handler_impl(
             "session_id must be a UUID".to_string(),
         ));
     }
+
+    // Proposal-scoped chat ("Address with djinn"): seed the system prompt with
+    // the spec + unresolved feedback and grant the proposal-editing tools.
+    // This path edits the proposal as the requesting user, so — unlike generic
+    // chat — it MUST be authenticated: an anonymous caller hits the proposal
+    // edit gate's trusted-system bypass (`None ⇒ Ok`) and would slip past it.
+    let proposal_ref = req.proposal_id.as_deref().filter(|s| !s.trim().is_empty());
+    if proposal_ref.is_some() && user_id.is_none() {
+        return Err((
+            axum::http::StatusCode::UNAUTHORIZED,
+            "addressing a proposal requires an authenticated user".to_string(),
+        ));
+    }
+    let proposal_system = match proposal_ref {
+        Some(p) => match build_proposal_address_prompt(&state, p, req.feedback_id.as_deref()).await
+        {
+            Some(prompt) => Some(prompt),
+            None => {
+                return Err((
+                    axum::http::StatusCode::NOT_FOUND,
+                    format!("proposal not found: {p}"),
+                ));
+            }
+        },
+        None => None,
+    };
 
     let (provider_id, model_name) = parse_model_id(&req.model).map_err(|e| {
         (
@@ -385,10 +411,14 @@ pub(super) async fn completions_handler_impl(
             });
 
     let mut conversation = Conversation::new();
+    // For a proposal-scoped chat the proposal overlay takes the client-system
+    // slot (the client doesn't send one); it merges into the single chat system
+    // message alongside the base prompt.
+    let effective_system = proposal_system.as_deref().or(req.system.as_deref());
     let system_message = super::prompt::system_message::build_system_message(
         DJINN_CHAT_SYSTEM_PROMPT,
         codebase_header.as_deref(),
-        req.system.as_deref(),
+        effective_system,
         &req.model,
     );
     let (system_message, _chat_config) = apply_chat_skills(system_message).await;
@@ -445,9 +475,24 @@ pub(super) async fn completions_handler_impl(
     // has no business invoking (credential_set, project_environment_config_set,
     // task_update, settings_set, provider_*, agent_*, etc.) and also trips
     // OpenAI's strict validator on schemas that accept arbitrary JSON objects.
+    let all_mcp_schemas = mcp.all_tool_schemas();
     let mut tool_schemas =
-        djinn_agent::chat_tools::filter_chat_allowed_mcp_schemas(mcp.all_tool_schemas());
+        djinn_agent::chat_tools::filter_chat_allowed_mcp_schemas(all_mcp_schemas.clone());
     tool_schemas.extend(djinn_agent::chat_tools::chat_extension_tool_schemas());
+    // A proposal-scoped chat additionally gets the proposal-editing tools so
+    // djinn can rewrite the spec and resolve feedback. Off the global allowlist
+    // by design — added here only when this request resolved a proposal.
+    let extra_allowed_mcp: Vec<String> = if proposal_system.is_some() {
+        tool_schemas.extend(djinn_agent::chat_tools::filter_proposal_scoped_mcp_schemas(
+            all_mcp_schemas,
+        ));
+        djinn_agent::chat_tools::PROPOSAL_SCOPED_MCP_TOOLS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // Construct the per-request ProjectResolver: shared
     // `WorkspaceStore` across sessions, per-request `lookup_cache`
@@ -486,6 +531,7 @@ pub(super) async fn completions_handler_impl(
                         user_turn_for_title,
                         model_for_title,
                         context_window,
+                        extra_allowed_mcp,
                     ),
                 ),
             )
@@ -509,6 +555,9 @@ async fn run_chat_loop(
     user_turn_for_title: Option<Vec<ContentBlock>>,
     model_id: String,
     context_window: i64,
+    // Extra MCP tools allowed for this loop on top of the global chat allowlist
+    // (the proposal-editing subset for a proposal-scoped chat; empty otherwise).
+    extra_allowed_mcp: Vec<String>,
 ) {
     let agent_ctx = state.agent_context();
     let mut loop_count = 0usize;
@@ -825,7 +874,9 @@ async fn run_chat_loop(
                         &resolve_fn,
                     )
                     .await
-                } else if djinn_agent::chat_tools::is_chat_allowed_mcp_tool(&name) {
+                } else if djinn_agent::chat_tools::is_chat_allowed_mcp_tool(&name)
+                    || extra_allowed_mcp.iter().any(|t| t == &name)
+                {
                     mcp.dispatch_tool(&name, args).await
                 } else {
                     Err(format!(
@@ -947,6 +998,69 @@ async fn run_chat_loop(
     }
 
     let _ = tx.send(Event::default().event("done").data("{}")).await;
+}
+
+/// Build the proposal-scoped system overlay: the rendered spec + the list of
+/// unresolved feedback, substituted into [`PROPOSAL_ADDRESS_SYSTEM_PROMPT`].
+/// Returns `None` if the proposal can't be resolved (handled as a 404 upstream).
+async fn build_proposal_address_prompt(
+    state: &AppState,
+    proposal_ref: &str,
+    feedback_id: Option<&str>,
+) -> Option<String> {
+    let repo = ProposalRepository::new(state.db().clone(), state.event_bus());
+    let proposal = repo.resolve(proposal_ref).await.ok().flatten()?;
+    let feedback = repo.feedback(&proposal.id).await.unwrap_or_default();
+
+    let mut ctx = String::new();
+    ctx.push_str(&format!(
+        "**{}** (`{}`) — status: {}, head revision: {}\n\n## Current spec\n\n{}\n",
+        proposal.title,
+        proposal.short_id,
+        proposal.status,
+        proposal.latest_revision_seq,
+        if proposal.body.trim().is_empty() {
+            "_(empty)_"
+        } else {
+            proposal.body.trim()
+        },
+    ));
+
+    let ac = djinn_core::models::parse_json_array(&proposal.acceptance_criteria);
+    if !ac.is_empty() {
+        ctx.push_str("\n## Acceptance criteria\n\n");
+        for c in &ac {
+            ctx.push_str(&format!("- {c}\n"));
+        }
+    }
+
+    let unresolved: Vec<_> = feedback.iter().filter(|f| f.resolved_at.is_none()).collect();
+    ctx.push_str("\n## Unresolved feedback\n\n");
+    if unresolved.is_empty() {
+        ctx.push_str("_(none)_\n");
+    } else {
+        for f in &unresolved {
+            let who = if f.author_kind == "ai" {
+                format!("AI ({})", f.author_model.as_deref().unwrap_or("model"))
+            } else {
+                "reviewer".to_string()
+            };
+            let marker = if Some(f.id.as_str()) == feedback_id {
+                " ← the one the user opened this chat to address"
+            } else {
+                ""
+            };
+            ctx.push_str(&format!(
+                "### Feedback `{}` — from {}{}\n\n{}\n\n",
+                f.id,
+                who,
+                marker,
+                f.body.trim()
+            ));
+        }
+    }
+
+    Some(PROPOSAL_ADDRESS_SYSTEM_PROMPT.replace("{{PROPOSAL_CONTEXT}}", &ctx))
 }
 
 /// Persist one conversation turn to `session_messages`.

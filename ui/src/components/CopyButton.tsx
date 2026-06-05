@@ -1,3 +1,4 @@
+import type { MouseEvent } from "react";
 import { Copy01Icon, Tick02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 
@@ -15,13 +16,37 @@ export function CopyButton({
   label = "Copy",
   size = 14,
   className,
+  showLabel = false,
 }: {
   text: string;
   label?: string;
   size?: number;
   className?: string;
+  /** Render `label` (or "Copied") as visible text next to the icon, as a
+   * regular button rather than an icon-only one. */
+  showLabel?: boolean;
 }) {
   const { copy, copied } = useClipboard();
+  const onClick = (e: MouseEvent) => {
+    e.stopPropagation();
+    void copy(text);
+  };
+  if (showLabel) {
+    return (
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className={cn("gap-1.5 text-muted-foreground hover:text-foreground", className)}
+        aria-label={label}
+        title={copied ? "Copied" : label}
+        onClick={onClick}
+      >
+        <HugeiconsIcon icon={copied ? Tick02Icon : Copy01Icon} size={size} />
+        {copied ? "Copied" : label}
+      </Button>
+    );
+  }
   return (
     <Button
       type="button"
@@ -30,10 +55,7 @@ export function CopyButton({
       className={cn("size-6 text-muted-foreground hover:text-foreground", className)}
       aria-label={label}
       title={copied ? "Copied" : label}
-      onClick={(e) => {
-        e.stopPropagation();
-        void copy(text);
-      }}
+      onClick={onClick}
     >
       <HugeiconsIcon icon={copied ? Tick02Icon : Copy01Icon} size={size} />
     </Button>

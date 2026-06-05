@@ -84,10 +84,16 @@ pub struct ProposalTarget {
     pub created_at: String,
 }
 
-/// A unified feedback entry on a proposal — discussion AND suggestions in one
-/// primitive. `status` is `None` for plain discussion (a "comment") and
-/// `open`/`accepted`/`rejected` for a trackable suggestion. `author_kind`
-/// distinguishes human (`user`) from AI (`ai`, with `author_model` set).
+/// A single feedback entry on a proposal — plain discussion that cannot be
+/// applied to the spec directly. Changes flow through djinn in chat, which
+/// rewrites the spec via `proposal_update` (appending a revision) and marks the
+/// feedback resolved. `author_kind` distinguishes human (`user`) from AI (`ai`,
+/// with `author_model` set).
+///
+/// Resolution:
+///   `resolved_at == None`                        → unresolved (shown; counts)
+///   `resolved_at` + `resolved_revision_seq`      → addressed in that revision
+///   `resolved_at` + `resolved_revision_seq` None → dismissed (no spec change)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 pub struct ProposalFeedback {
@@ -103,13 +109,14 @@ pub struct ProposalFeedback {
     pub body: String,
     /// Optional pointer to the part of the spec this entry is about.
     pub target_section: Option<String>,
-    /// `None` = discussion; `open` | `accepted` | `rejected` = suggestion.
-    pub status: Option<String>,
-    /// For an "edit suggestion", the proposed new spec body. `None` for a
-    /// plain discussion/comment.
-    pub proposed_body: Option<String>,
-    /// Revision the proposed change landed in once accepted.
-    pub applied_revision_seq: Option<i32>,
+    /// When set, the feedback has been resolved (addressed or dismissed) and is
+    /// collapsed out of the active thread. `None` while unresolved.
+    pub resolved_at: Option<String>,
+    /// The proposal revision that addressed this feedback. `None` when the
+    /// feedback was dismissed without a spec change.
+    pub resolved_revision_seq: Option<i32>,
+    /// User who resolved it (`None` for system/agent resolution).
+    pub resolved_by_user_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

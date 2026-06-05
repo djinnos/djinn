@@ -46,8 +46,21 @@ impl Default for ProposalListQuery {
 }
 
 pub struct ProposalListResult {
-    pub proposals: Vec<Proposal>,
+    /// Each proposal paired with its unresolved-feedback count (drives the
+    /// per-row badge in the proposals list).
+    pub proposals: Vec<(Proposal, i64)>,
     pub total_count: i64,
+}
+
+/// List-only row: the `Proposal` columns plus the correlated unresolved-feedback
+/// count. Kept separate from `Proposal` (which maps 1:1 to columns via the
+/// `query_as!` macro paths) so the list's extra aggregate doesn't leak into
+/// every get/resolve projection.
+#[derive(sqlx::FromRow)]
+struct ProposalListRow {
+    #[sqlx(flatten)]
+    proposal: Proposal,
+    unresolved_feedback_count: i64,
 }
 
 pub struct ProposalCreateInput<'a> {
@@ -76,10 +89,6 @@ pub struct ProposalFeedbackCreateInput<'a> {
     pub author_model: Option<&'a str>,
     pub body: &'a str,
     pub target_section: Option<&'a str>,
-    /// `None` = discussion; `open` | `accepted` | `rejected` = suggestion.
-    pub status: Option<&'a str>,
-    /// For an edit suggestion, the proposed new spec body.
-    pub proposed_body: Option<&'a str>,
 }
 
 pub struct ProposalRepository {
@@ -340,14 +349,14 @@ impl ProposalRepository {
         Ok(())
     }
 
-    // ── Feedback (unified discussion + suggestions) ──────────────────────────
+    // ── Feedback (discussion; resolved through djinn, not applied directly) ──
 
     pub async fn feedback(&self, proposal_id: &str) -> Result<Vec<ProposalFeedback>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             ProposalFeedback,
             r#"SELECT id, proposal_id, parent_id, author_kind, author_user_id, author_model,
-                    body, target_section, status, proposed_body, applied_revision_seq, created_at, updated_at
+                    body, target_section, resolved_at, resolved_revision_seq, resolved_by_user_id, created_at, updated_at
              FROM proposal_feedback WHERE proposal_id = $1 ORDER BY created_at"#,
             proposal_id
         )
@@ -360,7 +369,7 @@ impl ProposalRepository {
         Ok(sqlx::query_as!(
             ProposalFeedback,
             r#"SELECT id, proposal_id, parent_id, author_kind, author_user_id, author_model,
-                    body, target_section, status, proposed_body, applied_revision_seq, created_at, updated_at
+                    body, target_section, resolved_at, resolved_revision_seq, resolved_by_user_id, created_at, updated_at
              FROM proposal_feedback WHERE id = $1"#,
             feedback_id
         )
@@ -377,8 +386,8 @@ impl ProposalRepository {
         let author_user_id = djinn_core::auth_context::current_user_id();
         sqlx::query!(
             "INSERT INTO proposal_feedback
-                (id, proposal_id, parent_id, author_kind, author_user_id, author_model, body, target_section, status, proposed_body)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                (id, proposal_id, parent_id, author_kind, author_user_id, author_model, body, target_section)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             id,
             input.proposal_id,
             input.parent_id,
@@ -386,9 +395,7 @@ impl ProposalRepository {
             author_user_id,
             input.author_model,
             input.body,
-            input.target_section,
-            input.status,
-            input.proposed_body
+            input.target_section
         )
         .execute(self.db.pool())
         .await?;
@@ -401,66 +408,26 @@ impl ProposalRepository {
         Ok(feedback)
     }
 
-    /// Set (or clear) the resolution status on a feedback entry. Passing
-    /// `None` reverts a suggestion back to plain discussion.
-    pub async fn set_feedback_status(
+    /// Resolve a feedback entry: collapse it out of the active thread. Pass the
+    /// revision that addressed it (when djinn applied a spec change) or `None`
+    /// for a plain dismissal. Stamps the resolving user via `current_user_id()`.
+    /// Idempotent — re-resolving just refreshes the resolution.
+    pub async fn set_feedback_resolved(
         &self,
         feedback_id: &str,
-        status: Option<&str>,
+        resolved_revision_seq: Option<i32>,
     ) -> Result<ProposalFeedback> {
         self.db.ensure_initialized().await?;
+        let resolved_by = djinn_core::auth_context::current_user_id();
         sqlx::query!(
-            r#"UPDATE proposal_feedback SET status = $1,
+            r#"UPDATE proposal_feedback SET
+                    resolved_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                    resolved_revision_seq = $1,
+                    resolved_by_user_id = $2,
                     updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-             WHERE id = $2"#,
-            status,
-            feedback_id
-        )
-        .execute(self.db.pool())
-        .await?;
-        let feedback = self.get_feedback_required(feedback_id).await?;
-        self.events
-            .send(DjinnEventEnvelope::proposal_feedback_created(
-                &feedback.proposal_id,
-                &feedback,
-            ));
-        Ok(feedback)
-    }
-
-    /// Accept a feedback entry. For an edit suggestion (carries
-    /// `proposed_body`), applies the proposed body to the proposal — which
-    /// appends a revision through the normal edit path — and stamps the
-    /// feedback with the revision it landed in. Always marks it `accepted`.
-    pub async fn accept_feedback(&self, feedback_id: &str) -> Result<ProposalFeedback> {
-        self.db.ensure_initialized().await?;
-        let fb = self
-            .get_feedback(feedback_id)
-            .await?
-            .ok_or_else(|| Error::InvalidData(format!("feedback not found: {feedback_id}")))?;
-        let mut applied_seq: Option<i32> = None;
-        if let Some(proposed_body) = fb.proposed_body.as_deref() {
-            let proposal = self.get(&fb.proposal_id).await?.ok_or_else(|| {
-                Error::InvalidData(format!("proposal not found: {}", fb.proposal_id))
-            })?;
-            let updated = self
-                .update(
-                    &proposal.id,
-                    ProposalUpdateInput {
-                        title: &proposal.title,
-                        body: proposed_body,
-                        acceptance_criteria: &proposal.acceptance_criteria,
-                        status: &proposal.status,
-                        superseded_by: proposal.superseded_by.as_deref(),
-                    },
-                )
-                .await?;
-            applied_seq = Some(updated.latest_revision_seq);
-        }
-        sqlx::query!(
-            r#"UPDATE proposal_feedback SET status = 'accepted', applied_revision_seq = $1,
-                updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-             WHERE id = $2"#,
-            applied_seq,
+             WHERE id = $3"#,
+            resolved_revision_seq,
+            resolved_by,
             feedback_id
         )
         .execute(self.db.pool())
@@ -497,13 +464,17 @@ impl ProposalRepository {
 
         let limit_ph = format!("${}", params.len() + 1);
         let offset_ph = format!("${}", params.len() + 2);
-        // NOTE: dynamic SQL (WHERE + ORDER built from optional filters) — compile-time check not possible
+        // NOTE: dynamic SQL (WHERE + ORDER built from optional filters) — compile-time check not possible.
+        // The correlated subquery counts unresolved feedback per row (cheap via
+        // the `proposal_feedback_unresolved` partial index) for the list badge.
         let sql = format!(
             r#"SELECT id, short_id, title, body, acceptance_criteria::text AS acceptance_criteria,
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id, build_frozen, build_breakdown_task_id
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id, build_frozen, build_breakdown_task_id,
+                    (SELECT COUNT(*) FROM proposal_feedback pf
+                       WHERE pf.proposal_id = proposals.id AND pf.resolved_at IS NULL) AS unresolved_feedback_count
              FROM proposals WHERE {where_sql} ORDER BY {order_sql} LIMIT {limit_ph} OFFSET {offset_ph}"#
         );
-        let mut q = sqlx::query_as::<_, Proposal>(&sql);
+        let mut q = sqlx::query_as::<_, ProposalListRow>(&sql);
         for p in &params {
             let SqlParam::Text(s) = p;
             q = q.bind(s.clone());
@@ -512,7 +483,10 @@ impl ProposalRepository {
             .bind(query.limit)
             .bind(query.offset)
             .fetch_all(self.db.pool())
-            .await?;
+            .await?
+            .into_iter()
+            .map(|row| (row.proposal, row.unresolved_feedback_count))
+            .collect();
 
         Ok(ProposalListResult {
             proposals,
@@ -1169,13 +1143,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn feedback_discussion_and_suggestion() {
+    async fn feedback_add_and_resolve() {
         let (bus, captured) = capturing_bus();
         let repo = ProposalRepository::new(test_db(), bus);
         let p = repo.create(create_input("Feedback")).await.unwrap();
         captured.lock().unwrap().clear();
 
-        // Plain discussion (status None).
+        // A human comment (arrives unresolved).
         let comment = repo
             .add_feedback(ProposalFeedbackCreateInput {
                 proposal_id: &p.id,
@@ -1184,15 +1158,13 @@ mod tests {
                 author_model: None,
                 body: "what about X?",
                 target_section: None,
-                status: None,
-                proposed_body: None,
             })
             .await
             .unwrap();
-        assert!(comment.status.is_none());
+        assert!(comment.resolved_at.is_none());
 
-        // Trackable suggestion (status open) then resolve it.
-        let suggestion = repo
+        // An AI-authored entry.
+        let ai = repo
             .add_feedback(ProposalFeedbackCreateInput {
                 proposal_id: &p.id,
                 parent_id: None,
@@ -1200,24 +1172,29 @@ mod tests {
                 author_model: Some("claude-opus-4-8"),
                 body: "enforce in svc-invoice not the gateway",
                 target_section: Some("scope"),
-                status: Some("open"),
-                proposed_body: None,
             })
             .await
             .unwrap();
-        assert_eq!(suggestion.author_kind, "ai");
-        assert_eq!(suggestion.status.as_deref(), Some("open"));
+        assert_eq!(ai.author_kind, "ai");
+        assert!(ai.resolved_at.is_none());
 
+        // Resolve the comment as addressed in revision 2.
         let resolved = repo
-            .set_feedback_status(&suggestion.id, Some("accepted"))
+            .set_feedback_resolved(&comment.id, Some(2))
             .await
             .unwrap();
-        assert_eq!(resolved.status.as_deref(), Some("accepted"));
+        assert!(resolved.resolved_at.is_some());
+        assert_eq!(resolved.resolved_revision_seq, Some(2));
+
+        // Dismiss the AI entry (no spec change).
+        let dismissed = repo.set_feedback_resolved(&ai.id, None).await.unwrap();
+        assert!(dismissed.resolved_at.is_some());
+        assert!(dismissed.resolved_revision_seq.is_none());
 
         assert_eq!(repo.feedback(&p.id).await.unwrap().len(), 2);
         let events = captured.lock().unwrap();
-        // two adds + one resolve = three feedback events
-        assert_eq!(events.len(), 3);
+        // two adds + two resolves = four feedback events
+        assert_eq!(events.len(), 4);
         assert!(events.iter().all(|e| e.entity_type == "proposal_feedback"));
     }
 
@@ -1245,7 +1222,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(targeted.total_count, 1);
-        assert_eq!(targeted.proposals[0].id, a.id);
+        assert_eq!(targeted.proposals[0].0.id, a.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_reports_unresolved_feedback_count() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Counted")).await.unwrap();
+        let mk = |body: &'static str| ProposalFeedbackCreateInput {
+            proposal_id: &p.id,
+            parent_id: None,
+            author_kind: "user",
+            author_model: None,
+            body,
+            target_section: None,
+        };
+        let f1 = repo.add_feedback(mk("one")).await.unwrap();
+        repo.add_feedback(mk("two")).await.unwrap();
+
+        let listed = repo
+            .list_filtered(ProposalListQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(listed.proposals[0].1, 2);
+
+        // Resolving one drops the count.
+        repo.set_feedback_resolved(&f1.id, Some(2)).await.unwrap();
+        let listed = repo
+            .list_filtered(ProposalListQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(listed.proposals[0].1, 1);
     }
 
     fn update_input<'a>(
@@ -1334,10 +1341,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn accept_edit_suggestion_applies_body_and_appends_revision() {
+    async fn addressing_feedback_edits_spec_then_resolves_at_revision() {
+        // Models the chat flow: djinn rewrites the spec via `update` (which
+        // appends a revision), then marks the feedback resolved at that seq.
         let repo = ProposalRepository::new(test_db(), EventBus::noop());
         let p = repo.create(create_input("Edit")).await.unwrap();
-        let s = repo
+        let f = repo
             .add_feedback(ProposalFeedbackCreateInput {
                 proposal_id: &p.id,
                 parent_id: None,
@@ -1345,17 +1354,22 @@ mod tests {
                 author_model: None,
                 body: "tweak the spec",
                 target_section: None,
-                status: Some("open"),
-                proposed_body: Some("New spec body."),
             })
             .await
             .unwrap();
-        let accepted = repo.accept_feedback(&s.id).await.unwrap();
-        assert_eq!(accepted.status.as_deref(), Some("accepted"));
-        assert_eq!(accepted.applied_revision_seq, Some(2));
-        let updated = repo.get(&p.id).await.unwrap().unwrap();
+        let updated = repo
+            .update(&p.id, update_input("Edit", "New spec body.", "[]", "draft"))
+            .await
+            .unwrap();
         assert_eq!(updated.body, "New spec body.");
         assert_eq!(updated.latest_revision_seq, 2);
+
+        let resolved = repo
+            .set_feedback_resolved(&f.id, Some(updated.latest_revision_seq))
+            .await
+            .unwrap();
+        assert_eq!(resolved.resolved_revision_seq, Some(2));
+        assert!(resolved.resolved_at.is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -26,9 +26,8 @@ use crate::tools::proposal_ops::{
     ProposalTargetsResponse,
 };
 use crate::tools::validation::{
-    validate_ac_count, validate_body, validate_design, validate_feedback_status, validate_limit,
-    validate_offset, validate_proposal_create_status, validate_proposal_status, validate_sort,
-    validate_title,
+    validate_ac_count, validate_body, validate_design, validate_limit, validate_offset,
+    validate_proposal_create_status, validate_proposal_status, validate_sort, validate_title,
 };
 use djinn_db::{
     EpicRepository, ProjectRepository, ProposalListQuery, ProposalRepository, TaskRepository,
@@ -183,29 +182,19 @@ pub struct ProposalFeedbackAddParams {
     pub target_section: Option<String>,
     /// Parent feedback id for a threaded reply.
     pub parent_id: Option<String>,
-    /// Omit for plain discussion; set `open` to file a trackable suggestion.
-    pub status: Option<String>,
     /// `user` (default) or `ai`.
     pub author_kind: Option<String>,
     /// Model id when author_kind is `ai`.
     pub author_model: Option<String>,
-    /// For an edit suggestion, the proposed new spec body. Accepting the
-    /// feedback applies it (appending a revision).
-    pub proposed_body: Option<String>,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ProposalFeedbackAcceptParams {
-    /// Feedback entry UUID.
-    pub id: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ProposalFeedbackResolveParams {
     /// Feedback entry UUID.
     pub id: String,
-    /// `open` | `accepted` | `rejected`, or `none` to revert to discussion.
-    pub status: String,
+    /// The proposal revision that addressed this feedback (omit for a plain
+    /// dismissal with no spec change).
+    pub resolved_revision_seq: Option<i32>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -252,11 +241,11 @@ pub struct ProposalStopBuildResponse {
     /// `true` when this was a dry-run that did not mutate anything.
     pub preview: bool,
     /// Epics torn down (abort) or that would be (preview).
-    pub epics_closed: u32,
+    pub epics_closed: i64,
     /// Worker tasks force-closed (abort) or open right now (preview).
-    pub tasks_closed: u32,
+    pub tasks_closed: i64,
     /// Running worker sessions killed (abort) or live now (preview).
-    pub sessions_killed: u32,
+    pub sessions_killed: i64,
     pub error: Option<String>,
 }
 
@@ -425,7 +414,11 @@ impl DjinnMcpServer {
         };
         match repo.list_filtered(query).await {
             Ok(result) => Json(list_response::success::<ProposalListResponse>(
-                result.proposals.iter().map(ProposalModel::from).collect(),
+                result
+                    .proposals
+                    .iter()
+                    .map(|(p, count)| ProposalModel::from_with_count(p, *count))
+                    .collect(),
                 result.total_count,
                 limit,
                 offset,
@@ -615,9 +608,9 @@ impl DjinnMcpServer {
         finish_targets(&repo, &project_repo, &proposal.id).await
     }
 
-    /// Add a feedback entry (discussion or suggestion) to a proposal.
+    /// Add a feedback entry (plain discussion) to a proposal.
     #[tool(
-        description = "Add feedback to a proposal. Omit `status` for plain discussion; set `status=open` to file a trackable suggestion (resolve later with proposal_feedback_resolve). To propose a concrete spec change, set `proposed_body` to the full revised body — the UI renders a diff against the current spec and proposal_feedback_accept applies it as a new revision. `author_kind` is `user` (default) or `ai` (set `author_model` for AI). `parent_id` threads a reply."
+        description = "Add a feedback comment to a proposal. Feedback is plain discussion — it is NOT applied to the spec directly; the proposal owner asks djinn in chat to apply it, which rewrites the spec as a new revision and resolves the feedback. `author_kind` is `user` (default) or `ai` (set `author_model` for AI). `parent_id` threads a reply."
     )]
     pub async fn proposal_feedback_add(
         &self,
@@ -636,11 +629,6 @@ impl DjinnMcpServer {
                 "invalid author_kind: {author_kind:?} (expected user or ai)"
             )));
         }
-        if let Some(ref s) = p.status
-            && let Err(e) = validate_feedback_status(s)
-        {
-            return Json(err_feedback(e));
-        }
         match repo
             .add_feedback(djinn_db::ProposalFeedbackCreateInput {
                 proposal_id: &proposal.id,
@@ -649,8 +637,6 @@ impl DjinnMcpServer {
                 author_model: p.author_model.as_deref(),
                 body: &p.body,
                 target_section: p.target_section.as_deref(),
-                status: p.status.as_deref(),
-                proposed_body: p.proposed_body.as_deref(),
             })
             .await
         {
@@ -662,19 +648,20 @@ impl DjinnMcpServer {
         }
     }
 
-    /// Accept a feedback entry, applying its proposed edit if it has one.
+    /// Resolve a feedback entry: collapse it out of the active thread.
     #[tool(
-        description = "Accept a feedback entry. If it's an edit suggestion (carries `proposed_body`), applies the proposed spec body — appending a revision — and marks it accepted. Otherwise just marks it accepted. Requires edit rights on the proposal."
+        description = "Resolve a feedback entry, collapsing it out of the active thread. Pass `resolved_revision_seq` with the proposal revision that addressed it (when a spec change was applied), or omit it for a plain dismissal. Requires edit rights on the proposal."
     )]
-    pub async fn proposal_feedback_accept(
+    pub async fn proposal_feedback_resolve(
         &self,
-        Parameters(p): Parameters<ProposalFeedbackAcceptParams>,
+        Parameters(p): Parameters<ProposalFeedbackResolveParams>,
     ) -> Json<ProposalFeedbackResponse> {
         let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
         let Some(feedback) = repo.get_feedback(&p.id).await.ok().flatten() else {
             return Json(err_feedback(format!("feedback not found: {}", p.id)));
         };
-        // Accepting applies an edit → requires edit rights on the proposal.
+        // Resolving a proposal's feedback is an edit on that proposal's review
+        // state → requires edit rights, same gate as proposal_update.
         let author = repo
             .resolve(&feedback.proposal_id)
             .await
@@ -684,37 +671,7 @@ impl DjinnMcpServer {
         if let Err(e) = self.gate_proposal_edit(author.as_deref()).await {
             return Json(err_feedback(e));
         }
-        match repo.accept_feedback(&p.id).await {
-            Ok(f) => Json(ProposalFeedbackResponse {
-                feedback: Some((&f).into()),
-                error: None,
-            }),
-            Err(e) => Json(err_feedback(e.to_string())),
-        }
-    }
-
-    /// Resolve (or reopen/clear) a feedback suggestion.
-    #[tool(
-        description = "Set the resolution status on a feedback entry: `open`, `accepted`, or `rejected` — or `none` to revert it to plain discussion. Returns the updated entry."
-    )]
-    pub async fn proposal_feedback_resolve(
-        &self,
-        Parameters(p): Parameters<ProposalFeedbackResolveParams>,
-    ) -> Json<ProposalFeedbackResponse> {
-        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
-        if repo.get_feedback(&p.id).await.ok().flatten().is_none() {
-            return Json(err_feedback(format!("feedback not found: {}", p.id)));
-        }
-        let status: Option<&str> = match p.status.as_str() {
-            "none" | "clear" | "" => None,
-            other => {
-                if let Err(e) = validate_feedback_status(other) {
-                    return Json(err_feedback(e));
-                }
-                Some(other)
-            }
-        };
-        match repo.set_feedback_status(&p.id, status).await {
+        match repo.set_feedback_resolved(&p.id, p.resolved_revision_seq).await {
             Ok(f) => Json(ProposalFeedbackResponse {
                 feedback: Some((&f).into()),
                 error: None,
@@ -1074,7 +1031,7 @@ impl DjinnMcpServer {
         }
 
         // Count live worker sessions (used by both preview and the kill count).
-        let mut live_sessions = 0u32;
+        let mut live_sessions = 0i64;
         if let Some(pool) = pool.as_ref() {
             for t in &open_tasks {
                 if pool.has_session(&t.id).await.unwrap_or(false) {
@@ -1090,8 +1047,8 @@ impl DjinnMcpServer {
                 proposal_id: Some(proposal.id.clone()),
                 status: Some(proposal.status.clone()),
                 preview: true,
-                epics_closed: graduated.len() as u32,
-                tasks_closed: open_tasks.len() as u32,
+                epics_closed: graduated.len() as i64,
+                tasks_closed: open_tasks.len() as i64,
                 sessions_killed: live_sessions,
                 error: None,
             });
@@ -1100,8 +1057,8 @@ impl DjinnMcpServer {
         // Act. Kill the live worker (graceful), force-close the task, clean its
         // branch/PR. Best-effort throughout: a failed kill/cleanup is logged by
         // the underlying primitive and the next reaper backstops it.
-        let mut sessions_killed = 0u32;
-        let mut tasks_closed = 0u32;
+        let mut sessions_killed = 0i64;
+        let mut tasks_closed = 0i64;
         for t in &open_tasks {
             if let Some(pool) = pool.as_ref()
                 && pool.has_session(&t.id).await.unwrap_or(false)
@@ -1126,7 +1083,7 @@ impl DjinnMcpServer {
             }
         }
 
-        let mut epics_closed = 0u32;
+        let mut epics_closed = 0i64;
         for (epic_id, _project_id) in &graduated {
             if epic_repo.close(epic_id).await.is_ok() {
                 epics_closed += 1;

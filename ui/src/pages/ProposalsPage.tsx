@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ArrowLeft01Icon } from "@hugeicons/core-free-icons";
+import { ArrowLeft01Icon, Comment01Icon, Robot01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { callMcpTool } from "@/api/mcpClient";
 import { usersQueryOptions } from "@/api/queryOptions";
@@ -24,7 +24,6 @@ import { StatusIcon } from "@/components/proposals/StatusIcon";
 import { ProposalSignoffs } from "@/components/proposals/ProposalSignoffs";
 import { ProposalKickoff } from "@/components/proposals/ProposalKickoff";
 import { ProposalHistory } from "@/components/proposals/ProposalHistory";
-import { DiffView } from "@/components/proposals/DiffView";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -32,7 +31,6 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -44,6 +42,7 @@ import { showToast } from "@/lib/toast";
 import { useAuthUser } from "@/components/AuthGate";
 import { canEdit, capsFromUser } from "@/lib/proposalPermissions";
 import { useProjects } from "@/stores/useProjectStore";
+import { useStartProposalChat } from "@/components/proposals/useStartProposalChat";
 import {
   type ProposalDetail as ProposalDetailData,
   proposalDetailQueryOptions,
@@ -166,6 +165,17 @@ function ProposalsListView() {
                       >
                         <StatusIcon status={p.status} />
                         <span className="min-w-0 flex-1 truncate text-sm">{p.title}</span>
+                        {(p.unresolved_feedback_count ?? 0) > 0 && (
+                          <span
+                            className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground"
+                            title={`${p.unresolved_feedback_count} unresolved comment${
+                              p.unresolved_feedback_count === 1 ? "" : "s"
+                            }`}
+                          >
+                            <HugeiconsIcon icon={Comment01Icon} size={13} />
+                            {p.unresolved_feedback_count}
+                          </span>
+                        )}
                         <AcceptanceProgressBadge
                           criteria={p.acceptance_criteria}
                           className="shrink-0"
@@ -290,6 +300,11 @@ function ProposalDetailView({
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <CopyButton
+              text={proposalAsMarkdown(proposal)}
+              label="Copy spec"
+              showLabel
+            />
             <Select
               value={proposal.status}
               onValueChange={(status) =>
@@ -385,15 +400,9 @@ function ProposalDetailView({
           </div>
         )}
 
-        {/* Spec body — read-only; editing happens via AI. */}
+        {/* Spec body — read-only; editing happens via djinn in chat. */}
         <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <Label className="text-xs uppercase text-muted-foreground">Spec</Label>
-            <CopyButton
-              text={proposalAsMarkdown(proposal)}
-              label="Copy proposal (title + spec + acceptance criteria)"
-            />
-          </div>
+          <Label className="text-xs uppercase text-muted-foreground">Spec</Label>
           <div className="prose prose-sm max-w-none dark:prose-invert">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>
               {proposal.body || "_No spec body yet._"}
@@ -412,10 +421,9 @@ function ProposalDetailView({
         <Separator />
 
         <FeedbackThread
-          proposalId={proposal.id}
+          proposal={proposal}
           feedback={detail.feedback}
-          currentBody={proposal.body}
-          canAccept={canDirectEdit}
+          canEdit={canDirectEdit}
           onChanged={onChanged}
         />
       </div>
@@ -426,125 +434,107 @@ function ProposalDetailView({
 // ── Feedback ─────────────────────────────────────────────────────────────────
 
 function FeedbackThread({
-  proposalId,
+  proposal,
   feedback,
-  currentBody,
-  canAccept,
+  canEdit,
   onChanged,
 }: {
-  proposalId: string;
+  proposal: Proposal;
   feedback: ProposalFeedback[];
-  currentBody: string;
-  canAccept: boolean;
+  canEdit: boolean;
   onChanged: () => void;
 }) {
-  const [body, setBody] = useState("");
-  const [posting, setPosting] = useState(false);
+  const [showResolved, setShowResolved] = useState(false);
   const usersQuery = useQuery(usersQueryOptions());
   const userFor = (id?: string | null) =>
     id ? (usersQuery.data ?? []).find((u: OrgUser) => u.id === id) : undefined;
+  const startChat = useStartProposalChat();
 
-  const accept = async (id: string) => {
+  const authorName = (f: ProposalFeedback) => {
+    if (f.author_kind === "ai") return f.author_model ?? "ai";
+    const u = userFor(f.author_user_id);
+    return u ? userDisplayName(u) : "reviewer";
+  };
+
+  // Dismiss = resolve with no revision (no spec change). Applying feedback runs
+  // through djinn in chat, which resolves it with the revision it landed in.
+  const dismiss = async (id: string) => {
     try {
-      const res = await callMcpTool("proposal_feedback_accept", { id });
+      const res = await callMcpTool("proposal_feedback_resolve", { id });
       if (res.error) throw new Error(res.error);
       onChanged();
     } catch (e) {
-      showToast.error("Failed to accept", { description: (e as Error).message });
+      showToast.error("Failed to dismiss", { description: (e as Error).message });
     }
   };
 
-  const post = async () => {
-    if (!body.trim()) return;
-    setPosting(true);
-    try {
-      // A plain discussion comment — no status, so it isn't accept/rejectable.
-      // Trackable suggestions (status="open") and concrete spec changes (a diff
-      // to apply, with proposed_body) come from an agent via chat / the djinn
-      // MCP, not from this comment box.
-      const res = await callMcpTool("proposal_feedback_add", {
-        proposal_id: proposalId,
-        body: body.trim(),
-      });
-      if (res.error) throw new Error(res.error);
-      setBody("");
-      onChanged();
-    } catch (e) {
-      showToast.error("Failed to post", { description: (e as Error).message });
-    } finally {
-      setPosting(false);
-    }
-  };
+  const unresolved = feedback.filter((f) => f.resolved_at == null);
+  const resolved = feedback.filter((f) => f.resolved_at != null);
 
-  const resolve = async (id: string, status: string) => {
-    try {
-      const res = await callMcpTool("proposal_feedback_resolve", { id, status });
-      if (res.error) throw new Error(res.error);
-      onChanged();
-    } catch (e) {
-      showToast.error("Failed to resolve", { description: (e as Error).message });
-    }
-  };
-
-  const openCount = feedback.filter((f) => f.status === "open").length;
+  const authorHeader = (f: ProposalFeedback) => (
+    <div className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
+      {f.author_kind === "ai" ? (
+        <Badge variant="secondary">{f.author_model ?? "ai"}</Badge>
+      ) : (
+        <span className="flex items-center gap-1.5">
+          <UserAvatar user={userFor(f.author_user_id)} className="size-4" />
+          <span className="font-medium text-foreground">{authorName(f)}</span>
+        </span>
+      )}
+      {f.target_section && <span>· {f.target_section}</span>}
+      <span>· {relativeTime(f.created_at)}</span>
+      <CopyButton text={f.body} label="Copy comment" className="ml-auto" />
+    </div>
+  );
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <Label className="text-xs uppercase text-muted-foreground">Discussion &amp; suggestions</Label>
-        {openCount > 0 && <Badge variant="secondary">{openCount} open</Badge>}
+        <Label className="text-xs uppercase text-muted-foreground">Feedback</Label>
+        <div className="flex items-center gap-2">
+          {unresolved.length > 0 && (
+            <Badge variant="secondary">{unresolved.length} unresolved</Badge>
+          )}
+          {canEdit && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-1.5"
+              onClick={() => startChat(proposal)}
+            >
+              <HugeiconsIcon icon={Robot01Icon} size={15} />
+              Ask djinn
+            </Button>
+          )}
+        </div>
       </div>
 
       <div className="space-y-3">
-        {feedback.length === 0 && (
+        {unresolved.length === 0 && (
           <p className="text-sm text-muted-foreground">
-            No feedback yet. Share the spec and enhance it together.
+            No open feedback. Reviewers can leave feedback via the djinn MCP, and
+            you can ask djinn to apply it.
           </p>
         )}
-        {feedback.map((f) => (
-          <div key={f.id} className="rounded-md border p-3">
-            <div className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
-              {f.author_kind === "ai" ? (
-                <Badge variant="secondary">{f.author_model ?? "ai"}</Badge>
-              ) : (
-                <span className="flex items-center gap-1.5">
-                  <UserAvatar user={userFor(f.author_user_id)} className="size-4" />
-                  <span className="font-medium text-foreground">
-                    {(() => {
-                      const u = userFor(f.author_user_id);
-                      return u ? userDisplayName(u) : "user";
-                    })()}
-                  </span>
-                </span>
-              )}
-              {f.status && (
-                <Badge
-                  variant={f.status === "accepted" ? "default" : "outline"}
-                  className="capitalize"
-                >
-                  {f.status}
-                </Badge>
-              )}
-              {f.target_section && <span>· {f.target_section}</span>}
-              <span>· {relativeTime(f.created_at)}</span>
-              <CopyButton text={f.body} label="Copy comment" className="ml-auto" />
-            </div>
+        {unresolved.map((f) => (
+          <div key={f.id} className="rounded-md border bg-muted/40 p-3">
+            {authorHeader(f)}
             <div className="prose prose-sm max-w-none dark:prose-invert">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{f.body}</ReactMarkdown>
             </div>
-            {f.proposed_body != null && (
-              <div className="mt-2">
-                <span className="text-xs text-muted-foreground">Proposed spec change:</span>
-                <DiffView before={currentBody} after={f.proposed_body} />
-              </div>
-            )}
-            {f.status === "open" && canAccept && (
+            {canEdit && (
               <div className="mt-2 flex gap-2">
-                <Button size="sm" variant="outline" onClick={() => accept(f.id)}>
-                  {f.proposed_body != null ? "Accept & apply" : "Accept"}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="gap-1.5"
+                  onClick={() => startChat(proposal, f, authorName(f))}
+                >
+                  <HugeiconsIcon icon={Robot01Icon} size={15} />
+                  Address with djinn
                 </Button>
-                <Button size="sm" variant="ghost" onClick={() => resolve(f.id, "rejected")}>
-                  Reject
+                <Button size="sm" variant="ghost" onClick={() => dismiss(f.id)}>
+                  Dismiss
                 </Button>
               </div>
             )}
@@ -552,23 +542,34 @@ function FeedbackThread({
         ))}
       </div>
 
-      <div className="space-y-2">
-        <Textarea
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
-          placeholder="Add to the discussion…"
-          className="min-h-[80px]"
-        />
-        <div className="flex items-center gap-3">
-          <Button onClick={post} disabled={posting || !body.trim()}>
-            Comment
-          </Button>
+      {resolved.length > 0 && (
+        <div className="space-y-2">
+          <button
+            type="button"
+            onClick={() => setShowResolved((v) => !v)}
+            className="text-xs text-muted-foreground hover:text-foreground"
+          >
+            {showResolved ? "Hide" : "Show"} resolved ({resolved.length})
+          </button>
+          {showResolved && (
+            <div className="space-y-3 opacity-70">
+              {resolved.map((f) => (
+                <div key={f.id} className="rounded-md border bg-muted/20 p-3">
+                  {authorHeader(f)}
+                  <div className="prose prose-sm max-w-none dark:prose-invert">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{f.body}</ReactMarkdown>
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {f.resolved_revision_seq != null
+                      ? `Addressed in revision ${f.resolved_revision_seq}`
+                      : "Dismissed"}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
-        <p className="text-xs text-muted-foreground">
-          To propose a concrete spec change, ask in chat or via the djinn MCP — an
-          agent can draft a diff you can review and apply here.
-        </p>
-      </div>
+      )}
     </div>
   );
 }

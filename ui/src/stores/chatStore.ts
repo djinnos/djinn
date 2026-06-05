@@ -22,6 +22,22 @@ export interface ChatSession {
   updatedAt: number;
 }
 
+/**
+ * Marks a chat session as scoped to a proposal ("Address with djinn"). Carried
+ * client-side (persisted to sessionStorage) and sent with each chat request as
+ * `proposal_id` / `feedback_id`; the server rebuilds the proposal system prompt
+ * from the live proposal each turn. Enough fields to render the context card
+ * without a refetch.
+ */
+export interface ProposalChatScope {
+  proposalId: string;
+  proposalShortId: string;
+  proposalTitle: string;
+  feedbackId?: string;
+  feedbackAuthor?: string;
+  feedbackBody?: string;
+}
+
 export interface ChatAttachment {
   id: string;
   filename: string;
@@ -53,6 +69,8 @@ export interface ChatState {
   draftBySession: Record<string, string>;
   globalDraft: string;
   activeSessionId: string | null;
+  /** Proposal scope per session (the "Address with djinn" chats). Persisted. */
+  scopeBySession: Record<string, ProposalChatScope>;
 
   /**
    * Replace the cached session list (used by `useQuery` onSuccess). Preserves
@@ -75,12 +93,15 @@ export interface ChatState {
   clearStreaming: (sessionId: string) => void;
   setThinkingStartTime: (sessionId: string, startTime: number | null) => void;
   setDraft: (sessionId: string | null, text: string) => void;
+  /** Associate (or clear) a proposal scope with a session. */
+  setSessionScope: (sessionId: string, scope: ProposalChatScope | null) => void;
 }
 
 interface PersistedChatState {
   draftBySession: Record<string, string>;
   globalDraft: string;
   activeSessionId: string | null;
+  scopeBySession: Record<string, ProposalChatScope>;
 }
 
 const persistOptions: PersistOptions<ChatState, PersistedChatState> = {
@@ -92,6 +113,7 @@ const persistOptions: PersistOptions<ChatState, PersistedChatState> = {
     draftBySession: state.draftBySession,
     globalDraft: state.globalDraft,
     activeSessionId: state.activeSessionId,
+    scopeBySession: state.scopeBySession,
   }),
 };
 
@@ -106,6 +128,7 @@ export const useChatStore = create<ChatState>()(
       draftBySession: {},
       globalDraft: '',
       activeSessionId: null,
+      scopeBySession: {},
 
       setSessions: (sessions) => {
         set({ sessions });
@@ -308,6 +331,18 @@ export const useChatStore = create<ChatState>()(
             },
           }));
         }
+      },
+
+      setSessionScope: (sessionId, scope) => {
+        set((state) => {
+          const scopeBySession = { ...state.scopeBySession };
+          if (scope === null) {
+            delete scopeBySession[sessionId];
+          } else {
+            scopeBySession[sessionId] = scope;
+          }
+          return { scopeBySession };
+        });
       },
     }),
     persistOptions
