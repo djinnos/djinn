@@ -817,8 +817,12 @@ fn proposal_build_where(
     if let Some(t) = text {
         let ph_a = format!("${}", params.len() + 1);
         let ph_b = format!("${}", params.len() + 2);
-        clauses.push(format!("(title LIKE {ph_a} OR body LIKE {ph_b})"));
+        let ph_c = format!("${}", params.len() + 3);
+        clauses.push(format!(
+            "(title LIKE {ph_a} OR body LIKE {ph_b} OR short_id LIKE {ph_c})"
+        ));
         let pattern = format!("%{t}%");
+        params.push(SqlParam::Text(pattern.clone()));
         params.push(SqlParam::Text(pattern.clone()));
         params.push(SqlParam::Text(pattern));
     }
