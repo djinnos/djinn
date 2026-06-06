@@ -649,29 +649,40 @@ mod tests {
         }
     }
 
-    /// Seed a project row with a READY image state; returns the DB-assigned
+    /// Seed a project assigned a READY catalog image; returns the DB-assigned
     /// project id (a uuid — `ProjectRepository::create` ignores the `name`
     /// for the primary-key slot and mints its own uuid). Tests key their
     /// `trigger` / `await_fresh` calls on this returned id.
+    ///
+    /// Dispatch image resolution is catalog-only since the "build once, share"
+    /// refactor (`resolve_dispatch_image` reads `projects.selected_image_id`
+    /// → the `images` catalog table); the legacy per-project `set_project_image`
+    /// columns are no longer consulted. So we create a catalog `images` row,
+    /// mark it ready with the expected content-addressed tag (no digest, so
+    /// `pull_ref` returns the tag verbatim), and assign it to the project.
     async fn seed_project_with_ready_image(db: &Database, name: &str) -> String {
-        use djinn_db::{ProjectImage, ProjectImageStatus};
+        use djinn_db::ImageRepository;
         let repo = ProjectRepository::new(db.clone(), EventBus::noop());
         let project = repo
             .create(name, "test", name)
             .await
             .expect("create project");
-        let image = ProjectImage {
-            tag: Some(format!(
-                "reg.example:5000/djinn-project-{}:abc123def456",
-                &project.id
-            )),
-            hash: Some("abc123def456".into()),
-            status: ProjectImageStatus::READY.into(),
-            last_error: None,
-        };
-        repo.set_project_image(&project.id, &image)
+
+        let images = ImageRepository::new(db.clone());
+        let image_id = format!("img-{name}");
+        images
+            .create(&image_id, name, None, "{}")
             .await
-            .expect("set project image");
+            .expect("create catalog image");
+        let tag = format!("reg.example:5000/djinn-project-{}:abc123def456", &project.id);
+        images
+            .mark_ready(&image_id, &tag, None)
+            .await
+            .expect("mark image ready");
+        images
+            .set_project_image(&project.id, Some(&image_id))
+            .await
+            .expect("assign catalog image to project");
         project.id
     }
 

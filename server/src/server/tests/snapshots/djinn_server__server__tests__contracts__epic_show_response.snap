@@ -9,7 +9,7 @@ expression: epic_show
   "description": "Epic used for MCP snapshot contract testing",
   "emoji": "",
   "color": "",
-  "status": "drafting",
+  "status": "open",
   "owner": "",
   "created_at": "[TIMESTAMP]",
   "updated_at": "[TIMESTAMP]",
