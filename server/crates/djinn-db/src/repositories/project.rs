@@ -784,17 +784,32 @@ impl ProjectRepository {
         // schema-wide timestamp convention (see migration 2). An empty
         // string means "never warmed".
         let row = sqlx::query!(
-            "SELECT image_status, graph_warmed_at FROM projects WHERE id = $1",
+            "SELECT graph_warmed_at FROM projects WHERE id = $1",
             project_id,
         )
         .fetch_optional(self.db.pool())
         .await?;
-        Ok(row.map(|r| {
-            let stamp = r.graph_warmed_at;
-            ProjectDispatchReadiness {
-                image_status: r.image_status,
-                graph_warmed_at: if stamp.is_empty() { None } else { Some(stamp) },
-            }
+        let Some(r) = row else {
+            return Ok(None);
+        };
+        // Image readiness is sourced from the resolved *dispatch* image — the
+        // catalog image the project selected (migration 46's single source of
+        // truth) — NOT the legacy `projects.image_status` column. That column
+        // is only flipped to `ready` by the build watcher for *per-project*
+        // builds (keyed by project_id); a project that selects a shared
+        // catalog image stays `image_status = 'none'` forever even after the
+        // catalog image is built, which would defer its dispatch indefinitely.
+        // `resolve_dispatch_image` returns `Ok(None)` only for an unknown
+        // project (already handled above), so a `None` here is treated as the
+        // not-dispatchable `none` status.
+        let image_status = match self.resolve_dispatch_image(project_id).await? {
+            Some(img) => img.status,
+            None => ProjectImageStatus::NONE.to_string(),
+        };
+        let stamp = r.graph_warmed_at;
+        Ok(Some(ProjectDispatchReadiness {
+            image_status,
+            graph_warmed_at: if stamp.is_empty() { None } else { Some(stamp) },
         }))
     }
 
