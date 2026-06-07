@@ -5,6 +5,15 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+# Cancel superseded PR runs when new commits are pushed (e.g. by coding
+# agents). Merge-queue runs each have a distinct ref and must run to
+# completion, so only pull_request runs are cancellable.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Shared environment for all jobs.
 # RUSTC_WRAPPER is cleared to disable local sccache in CI; the
@@ -46,9 +55,9 @@ jobs:
   # ║  Cache Warming (main push only)                                 ║
   # ║                                                                  ║
   # ║  These jobs build the workspace to pre-populate GitHub Actions   ║
-  # ║  cache after every merge to main.  PR jobs set save-if: false    ║
-  # ║  so they never write cache — guaranteeing consistent warm hits   ║
-  # ║  from the last main commit.                                      ║
+  # ║  cache after every merge to main.  PR / merge_group jobs set     ║
+  # ║  save-if: false so they never write cache — guaranteeing         ║
+  # ║  consistent warm hits from the last main commit.                 ║
   # ╚══════════════════════════════════════════════════════════════════╝
 
   warm-cache-quality:
@@ -137,17 +146,18 @@ jobs:
             xargs -r -I{} gh cache delete {} --repo ${{ github.repository }} 2>/dev/null || true
 
   # ╔══════════════════════════════════════════════════════════════════╗
-  # ║  Server Quality & Tests                                          ║
+  # ║  Server Lint (PR + merge queue)                                  ║
   # ║                                                                  ║
-  # ║  These jobs read warm cache (save-if: false) and run the actual  ║
-  # ║  quality gates.  On main pushes the warm-cache jobs above write  ║
-  # ║  the cache; on PRs these jobs consume it.                        ║
+  # ║  Clippy is the cheap, fast-feedback gate that runs on every PR   ║
+  # ║  push as well as in the merge queue.  It reads warm cache and    ║
+  # ║  needs no database.  The expensive DB-backed test jobs below     ║
+  # ║  run only in the merge queue to save action runs on PR churn.    ║
   # ╚══════════════════════════════════════════════════════════════════╝
 
   server-clippy:
     name: Server Clippy
     needs: changes
-    if: needs.changes.outputs.server == 'true'
+    if: needs.changes.outputs.server == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -182,10 +192,20 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  # ╔══════════════════════════════════════════════════════════════════╗
+  # ║  Server Tests (merge queue only)                                 ║
+  # ║                                                                  ║
+  # ║  DB-backed, full-compile + run. Skipped on PRs to save action    ║
+  # ║  runs — they execute once when a PR enters the merge queue       ║
+  # ║  (and on manual workflow_dispatch).  needs: server-clippy gates  ║
+  # ║  these behind a green lint so we don't burn a Postgres + full    ║
+  # ║  test build when clippy would have failed anyway.                ║
+  # ╚══════════════════════════════════════════════════════════════════╝
+
   server-test:
     name: Server Test
-    needs: changes
-    if: needs.changes.outputs.server == 'true'
+    needs: [changes, server-clippy]
+    if: needs.changes.outputs.server == 'true' && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -271,7 +291,7 @@ jobs:
         run: cargo nextest run --workspace --all-targets --all-features --profile ci
 
   # ╔══════════════════════════════════════════════════════════════════╗
-  # ║  sqlx offline-cache freshness gate                               ║
+  # ║  sqlx offline-cache freshness gate (merge queue only)            ║
   # ║                                                                  ║
   # ║  The compile-checked `sqlx::query!` macros validate SQL against  ║
   # ║  a live schema. Their results are committed to `server/.sqlx/`   ║
@@ -284,8 +304,8 @@ jobs:
 
   server-sqlx-cache:
     name: Server sqlx Cache
-    needs: changes
-    if: needs.changes.outputs.server == 'true'
+    needs: [changes, server-clippy]
+    if: needs.changes.outputs.server == 'true' && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -339,13 +359,13 @@ jobs:
         run: cargo sqlx prepare --check --workspace
 
   # ╔══════════════════════════════════════════════════════════════════╗
-  # ║  UI                                                              ║
+  # ║  UI (PR + merge queue)                                           ║
   # ╚══════════════════════════════════════════════════════════════════╝
 
   ui-frontend:
     name: UI Frontend
     needs: changes
-    if: needs.changes.outputs.ui == 'true'
+    if: needs.changes.outputs.ui == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -373,13 +393,17 @@ jobs:
         run: pnpm test
 
   # ── Quality gate ────────────────────────────────────────────────────
+  # If you change this job's name, also update the branch-protection rule
+  # (and the merge-queue config) that requires "Quality Gate" as THE
+  # single required status check. The individual jobs above must NOT be
+  # listed as required — they are skipped on PRs, and a skipped required
+  # check blocks merges. "Quality Gate" treats skipped as success, so a
+  # PR passes on lint alone while the heavy suite runs in the merge queue.
   quality-gate:
     name: Quality Gate
     runs-on: ubuntu-latest
-    if: always()
+    if: always() && github.event_name != 'push'
     needs:
-      - warm-cache-quality
-      - warm-cache-test
       - server-clippy
       - server-test
       - server-sqlx-cache
@@ -388,8 +412,6 @@ jobs:
       - name: Check results
         run: |
           results=(
-            "${{ needs.warm-cache-quality.result }}"
-            "${{ needs.warm-cache-test.result }}"
             "${{ needs.server-clippy.result }}"
             "${{ needs.server-test.result }}"
             "${{ needs.server-sqlx-cache.result }}"
