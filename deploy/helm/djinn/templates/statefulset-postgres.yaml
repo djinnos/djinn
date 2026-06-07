@@ -63,8 +63,8 @@ spec:
             - name: data
               mountPath: /var/lib/postgresql/data
           # `pg_isready` returns 0 when the server is accepting connections —
-          # the right "ready for traffic" signal for the pre-upgrade migrate
-          # Job and the server Deployment to dial.
+          # the right "ready for traffic" signal for the server Deployment's
+          # migrate initContainer and app container to dial.
           readinessProbe:
             exec:
               command:

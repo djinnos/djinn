@@ -17,8 +17,8 @@ data:
   #   - postgres.enabled=true: in-cluster URL with chart-known credentials.
   #   - database.externalUrl: caller already committed to plaintext-in-Helm.
   # When database.existingSecret is set, the env is wired via
-  # valueFrom: secretKeyRef on the Deployment + migrate Job instead — see
-  # deployment-server.yaml + job-migrate.yaml.
+  # valueFrom: secretKeyRef on the Deployment (both its app and migrate
+  # containers) instead — see deployment-server.yaml.
   {{- if not (include "djinn.databaseUrl.fromSecret" .) }}
   DJINN_DATABASE_URL: {{ include "djinn.databaseUrl" . | quote }}
   {{- end }}

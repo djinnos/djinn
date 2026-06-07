@@ -215,9 +215,10 @@ Precedence:
   1. .Values.database.externalUrl — emit the literal URL (operator owns
      the host:port + credentials, typically an RDS endpoint).
   2. .Values.database.existingSecret — return empty string. Consumers
-     (configmap, deployment, job-migrate) test for existingSecret first
-     and wire DJINN_DATABASE_URL via valueFrom: secretKeyRef instead of
-     plumbing the secret value through this helper.
+     (configmap, deployment app + migrate containers) test for
+     existingSecret first and wire DJINN_DATABASE_URL via
+     valueFrom: secretKeyRef instead of plumbing the secret value
+     through this helper.
   3. Bundled in-cluster Postgres — build the URL from
      djinn.serviceName.postgres + namespace + the postgres.auth.password
      value (defaulting to "djinn-local-dev" to match the StatefulSet's

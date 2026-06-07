@@ -36,12 +36,13 @@ struct Cli {
 
     /// One-shot mode: apply every pending SQL migration, then exit.
     ///
-    /// Used by the Helm `pre-upgrade` migrate Job so app pods can skip
-    /// the migrator lock entirely on boot — they just verify the schema
-    /// matches what their binary expects. The Job has exclusive DB
-    /// access (no traffic, no concurrent pods racing on the same
-    /// `GET_LOCK`), so it can take the full ALTER duration without
-    /// blocking anyone.
+    /// Run by the server Deployment's `migrate` initContainer so the app
+    /// container can skip the migrator lock entirely on boot — it just
+    /// verifies the schema matches what its binary expects. The sqlx
+    /// migrator advisory lock serialises any overlapping migrator, so
+    /// even on a rolling upgrade (maxSurge=1 → one new pod at a time)
+    /// only one process applies migrations while the rest verify. Also
+    /// useful standalone for debugging: `djinn-server --migrate-only`.
     #[arg(long, env = "DJINN_MIGRATE_ONLY", default_value_t = false)]
     migrate_only: bool,
 }

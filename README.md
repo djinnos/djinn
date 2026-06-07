@@ -144,34 +144,26 @@ Open the UI at **http://127.0.0.1:3000**. `tilt down` removes the Helm release b
 
 ## Deploy (Kubernetes)
 
-Two Helm charts live under `deploy/helm/`. Install the CRDs chart first (it reserves a separate lifecycle for future custom resources), then the workload chart:
+djinn is Kubernetes-native — it dispatches every agent run as a Job/Pod — so it
+needs a cluster, but it can be **any** conformant Kubernetes. One Helm chart
+(`deploy/helm/djinn`) covers every environment; the only thing that changes is
+whether the backing services (Postgres, Qdrant, registry) are bundled or
+managed:
+
+- **Local** — `tilt up` brings up the whole stack in kind ([Quick start](#quick-start-local)).
+- **Single node / self-hosted / VPS** — everything bundled on a one-box k3s cluster.
+- **Any managed or self-managed cluster (EKS / GKE / AKS / kubeadm)** — external Postgres/registry, cloud identity, GitOps.
 
 ```bash
-helm install djinn-crds deploy/helm/djinn-crds
-helm install djinn deploy/helm/djinn \
+helm upgrade --install djinn deploy/helm/djinn \
   --namespace djinn --create-namespace \
   -f my-values.yaml
 ```
 
-The chart installs `djinn-server`, Postgres 16, Qdrant, the BuildKit image pipeline, RBAC for dispatching task-run Jobs, and the secrets/PVCs the controller needs. Database migrations run as a `pre-install`/`pre-upgrade` Helm hook (`djinn-server --migrate-only`) so they complete before the new server rolls.
+That one command handles fresh installs and upgrades, bundled or external
+Postgres — migrations run automatically in the server's migrate initContainer.
 
-Key `values.yaml` knobs:
-
-| Setting | Purpose |
-|---------|---------|
-| `image.server`, `image.runtime` | Server and agent-runtime image refs (pin these for prod). |
-| `env.publicUrl` / `DJINN_PUBLIC_URL` | Public ingress URL — **required** for OAuth callbacks and the MCP audience. |
-| `ingress.{enabled,className,host,tls}` | Expose the server externally. |
-| `secrets.providers.*` | LLM API keys (`anthropicApiKey`, `openaiApiKey`, …) bootstrapped into the encrypted vault. |
-| `secrets.githubApp.*` | GitHub App credentials for repo clone/push/PRs. |
-| `secrets.vaultKey.key` | Base64 32-byte AES key for the credential vault (auto-generated and preserved across upgrades if empty). |
-| `postgres.enabled` / `database.externalUrl` | Bundled Postgres vs. external (e.g. RDS). |
-| `qdrant.enabled` | Bundled Qdrant vs. external. |
-| `imagePipeline.{registryHost,buildkitd,zot}` | Per-project image build + registry (Zot in-cluster, or ECR/GCR/ACR via cred helpers). |
-| `langfuse.{enabled,endpoint,publicKey,secretKey}` | Optional LLM tracing export. |
-| `storage.{mirrors,cache,projects}` | PVC sizes / storage classes. |
-
-Every node that may schedule the BuildKit pod needs the user-namespace sysctls shown in [Quick start](#quick-start-local). See [`deploy/helm/djinn/README.md`](deploy/helm/djinn/README.md) for node prerequisites.
+**→ Full guide, per-environment values, and the production/EKS overlay: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).**
 
 ## Features
 

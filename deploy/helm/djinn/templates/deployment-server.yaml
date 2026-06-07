@@ -94,6 +94,51 @@ spec:
               mountPath: /var/lib/djinn/cache
             - name: projects
               mountPath: /var/lib/djinn/projects
+        # Apply pending SQL migrations before the server boots.
+        #
+        # This was a separate `pre-install,pre-upgrade` Helm hook Job, but a
+        # hook runs in its own phase BEFORE the chart's normal resources are
+        # applied — so on a cold install neither this ServiceAccount nor the
+        # bundled Postgres StatefulSet exist yet, and the migrator can never
+        # connect (the hook silently assumed an already-running external DB, as
+        # in the ArgoCD/EKS path where every sync is an upgrade of a live app).
+        # A fresh `helm install` with bundled Postgres therefore wedged in
+        # pending-install forever.
+        #
+        # As an initContainer it's an ordinary part of the Deployment: it reads
+        # the CURRENT release's ConfigMap (no stale-configmap foot-gun), waits
+        # for Postgres via the binary's built-in `wait_for_database_reachable`
+        # (~60s TCP retry), takes the sqlx migrator advisory lock to apply
+        # migrations, then exits — the app container boots next and only
+        # verifies the schema (lock-free). With replicas=1 + maxSurge=1 exactly
+        # one migrator runs at a time; the advisory lock serialises any overlap.
+        # Works identically for fresh/upgrade and bundled/external Postgres.
+        - name: migrate
+          image: {{ .Values.image.server | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["djinn-server"]
+          args: ["--migrate-only"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "djinn.fullname" . }}-server
+            {{- with .Values.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            {{- if .Values.database.existingSecret }}
+            # External DB URL from a caller-owned Secret — the ConfigMap omits
+            # DJINN_DATABASE_URL in this mode, mirroring the app container.
+            - name: DJINN_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret | quote }}
+                  key: url
+            {{- end }}
+            # migrate-only never serves HTTP/UI — skip the embedded-asset probe.
+            - name: DJINN_UI_ENABLED
+              value: "false"
+          resources:
+            {{- toYaml .Values.resources.server | nindent 12 }}
       containers:
         - name: djinn-server
           image: {{ .Values.image.server | quote }}

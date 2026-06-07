@@ -253,8 +253,8 @@ postgres:
     storageClassName: ""
   # Surfaced as `-c key=value` args on the postgres process. shared_buffers
   # at 2G matches the prior MySQL footprint; max_connections=200 leaves
-  # headroom over the server's pool (100) + migrate-job (1) + worker
-  # pool (<=16) + ad-hoc tooling.
+  # headroom over the server's pool (100) + migrate initContainer (1) +
+  # worker pool (<=16) + ad-hoc tooling.
   config:
     sharedBuffers: 2GB
     maxConnections: 200
@@ -278,9 +278,9 @@ postgres:
 #        postgres://user:password@host:5432/dbname?sslmode=require
 #
 #   2. existingSecret: name of an existing Kubernetes Secret with a `url`
-#      key holding the full Postgres URL. The Deployment + migrate Job
-#      pull DJINN_DATABASE_URL via `valueFrom: secretKeyRef`, so the URL
-#      never lands in a ConfigMap or in `helm get values` output. Preferred
+#      key holding the full Postgres URL. The Deployment's app + migrate
+#      containers pull DJINN_DATABASE_URL via `valueFrom: secretKeyRef`, so
+#      the URL never lands in a ConfigMap or in `helm get values` output. Preferred
 #      for RDS credentials (typically provisioned out-of-band in a vault).
 #
 # Set exactly one. When `postgres.enabled: true`, both should be empty.
