@@ -2,10 +2,12 @@ use std::path::{Component, Path};
 
 /// Derive a stable, collision-resistant workspace slug from a repo-relative root.
 ///
-/// The human-readable prefix is the path sanitized to lowercase ASCII words. A
-/// short hash of the full path is appended for every non-root path so distinct
-/// roots that sanitize to the same prefix (for example `foo/bar`, `foo-bar`,
-/// and `foo bar`) do not collapse onto the same workspace name.
+/// The human-readable prefix is the path sanitized to lowercase ASCII words.
+/// Paths that already are a lowercase ASCII slug (for example `server`) keep
+/// that slug for compatibility. Paths that lose information during
+/// sanitization (case-folding, separators, punctuation, unicode, or the literal
+/// `root`) get a short hash of the full path appended so distinct roots that
+/// sanitize to the same prefix cannot collapse onto the same workspace name.
 pub fn workspace_slug(root: &Path) -> String {
     let fingerprint = fingerprint_path(root);
     let base = sanitized_path(root);
@@ -19,6 +21,11 @@ pub fn workspace_slug(root: &Path) -> String {
     } else {
         base.as_str()
     };
+
+    if base != "root" && fingerprint == base {
+        return base.to_string();
+    }
+
     format!("{base}-{:08x}", fnv1a32(fingerprint.as_bytes()))
 }
 
@@ -100,11 +107,17 @@ mod tests {
         let spaced = workspace_slug(Path::new("packages api"));
 
         assert!(nested.starts_with("packages-api-"));
-        assert!(dashed.starts_with("packages-api-"));
+        assert_eq!(dashed, "packages-api");
         assert!(spaced.starts_with("packages-api-"));
         assert_ne!(nested, dashed);
         assert_ne!(nested, spaced);
         assert_ne!(dashed, spaced);
+    }
+
+    #[test]
+    fn simple_lowercase_ascii_slugs_stay_compatible() {
+        assert_eq!(workspace_slug(Path::new("server")), "server");
+        assert_eq!(workspace_slug(Path::new("packages-api")), "packages-api");
     }
 
     #[test]
