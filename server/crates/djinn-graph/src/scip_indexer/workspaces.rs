@@ -4,9 +4,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use djinn_stack::workspace_slug;
 
 use super::{DiscoveredWorkspace, SupportedIndexer};
+
+// Keep the legacy `scip_indexer::workspaces::workspace_slug` path available for
+// graph-internal callers while the canonical implementation lives in
+// `djinn_stack`. This submodule is intentionally mostly an implementation
+// detail, so the crate-level `unreachable_pub` lint cannot see the re-export as
+// part of the public API even though downstream code may still import it via the
+// public `scip_indexer` module.
+#[allow(unreachable_pub)]
+pub use djinn_stack::workspace_slug;
 
 pub(crate) fn discover_workspaces(
     project_root: &Path,
@@ -57,7 +65,7 @@ pub(crate) fn discover_workspaces(
         discovered.push(DiscoveredWorkspace {
             indexer,
             root: PathBuf::new(),
-            slug: "root".to_string(),
+            slug: workspace_slug(Path::new("")),
         });
     }
 
@@ -212,7 +220,7 @@ mod tests {
         let rust_workspaces = discover_workspaces(&project_root, SupportedIndexer::RustAnalyzer);
         assert_eq!(rust_workspaces.len(), 1);
         assert_eq!(rust_workspaces[0].root, PathBuf::from("server"));
-        assert_eq!(rust_workspaces[0].slug, "server");
+        assert_eq!(rust_workspaces[0].slug, workspace_slug(Path::new("server")));
 
         let ts_workspaces = discover_workspaces(&project_root, SupportedIndexer::TypeScript);
         assert_eq!(
@@ -225,9 +233,12 @@ mod tests {
         assert_eq!(
             ts_workspaces
                 .iter()
-                .map(|workspace| workspace.slug.as_str())
+                .map(|workspace| workspace.slug.clone())
                 .collect::<Vec<_>>(),
-            vec!["desktop", "website"]
+            vec![
+                workspace_slug(Path::new("desktop")),
+                workspace_slug(Path::new("website"))
+            ]
         );
     }
 

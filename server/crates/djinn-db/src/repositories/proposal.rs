@@ -1441,11 +1441,13 @@ mod tests {
         repo.set_building(&p.id, "user-x").await.unwrap();
 
         // Reverse lookup resolves the parent proposal.
-        assert_eq!(
-            repo.proposal_for_epic(&e1).await.unwrap().unwrap().id,
-            p.id
+        assert_eq!(repo.proposal_for_epic(&e1).await.unwrap().unwrap().id, p.id);
+        assert!(
+            repo.proposal_for_epic("no-such-epic")
+                .await
+                .unwrap()
+                .is_none()
         );
-        assert!(repo.proposal_for_epic("no-such-epic").await.unwrap().is_none());
 
         // Not complete while any graduated epic is open.
         assert!(!repo.all_graduated_epics_closed(&p.id).await.unwrap());
@@ -1498,8 +1500,7 @@ mod tests {
         // Unlike update(): no new revision and the sign-off survives.
         assert_eq!(updated.latest_revision_seq, seq_before);
         assert_eq!(repo.signoffs(&p.id).await.unwrap().len(), 1);
-        let parsed: serde_json::Value =
-            serde_json::from_str(&updated.acceptance_criteria).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&updated.acceptance_criteria).unwrap();
         assert_eq!(parsed[0]["met"], serde_json::json!(true));
         assert_eq!(parsed[1]["met"], serde_json::json!(false));
     }
@@ -1540,9 +1541,15 @@ mod tests {
             .into_iter()
             .map(|p| p.id)
             .collect();
-        assert!(ids.contains(&p2.id), "building + all epics closed is drained");
+        assert!(
+            ids.contains(&p2.id),
+            "building + all epics closed is drained"
+        );
         assert!(!ids.contains(&p1.id), "an open epic means not drained");
-        assert!(!ids.contains(&p3.id), "no graduated epics means not drained");
+        assert!(
+            !ids.contains(&p3.id),
+            "no graduated epics means not drained"
+        );
         assert!(!ids.contains(&p4.id), "non-building is never drained");
     }
 
@@ -1576,7 +1583,10 @@ mod tests {
 
         // A material edit while building is rejected.
         let err = repo
-            .update(&p.id, update_input("Guarded v2", "new body", "[]", "building"))
+            .update(
+                &p.id,
+                update_input("Guarded v2", "new body", "[]", "building"),
+            )
             .await;
         assert!(err.is_err(), "spec edit while building must be rejected");
 
@@ -1665,7 +1675,12 @@ mod tests {
         let task = insert_task(&db, &proj, &epic, "bd01t").await;
         repo.set_breakdown_task(&p.id, &task).await.unwrap();
         assert_eq!(
-            repo.get(&p.id).await.unwrap().unwrap().build_breakdown_task_id.as_deref(),
+            repo.get(&p.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .build_breakdown_task_id
+                .as_deref(),
             Some(task.as_str())
         );
 

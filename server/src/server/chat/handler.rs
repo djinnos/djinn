@@ -1034,7 +1034,10 @@ async fn build_proposal_address_prompt(
         }
     }
 
-    let unresolved: Vec<_> = feedback.iter().filter(|f| f.resolved_at.is_none()).collect();
+    let unresolved: Vec<_> = feedback
+        .iter()
+        .filter(|f| f.resolved_at.is_none())
+        .collect();
     ctx.push_str("\n## Unresolved feedback\n\n");
     if unresolved.is_empty() {
         ctx.push_str("_(none)_\n");

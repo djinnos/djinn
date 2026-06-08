@@ -5,12 +5,12 @@
 //! typed configuration, and empty trait-impl shell — real cluster wiring
 //! arrives in PR 3.
 
+pub mod backing_service;
 pub mod config;
 pub mod env_config;
 pub mod graph_warmer;
 pub mod job;
 pub mod runtime;
-pub mod backing_service;
 pub mod secret;
 pub mod token_review;
 pub mod verification_test_job;

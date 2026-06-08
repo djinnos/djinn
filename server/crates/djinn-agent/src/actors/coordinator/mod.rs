@@ -334,7 +334,10 @@ mod tests {
                     models: vec![ModelSlotConfig {
                         model_id: DEFAULT_MODEL_ID.to_owned(),
                         max_slots: 1,
-                        roles: ["worker"].into_iter().map(ToOwned::to_owned).collect(),
+                        roles: ["worker", "reviewer"]
+                            .into_iter()
+                            .map(ToOwned::to_owned)
+                            .collect(),
                     }],
                     role_priorities: HashMap::new(),
                 },
@@ -996,19 +999,11 @@ mod tests {
             .await
             .unwrap();
 
-        let handle = spawn_coordinator(&db, &tx);
-        // Event broadcasts from fixture setup can be queued ahead of the explicit
-        // trigger on a loaded CI runner. Use the project-scoped dispatch path so
-        // this assertion observes only the synthetic task created by this test.
-        handle
-            .trigger_dispatch_for_project(&epic.project_id)
-            .await
-            .unwrap();
-        handle.wait_for_status(|s| s.tasks_dispatched >= 1).await;
+        let mut actor = coordinator_actor_for_tests(&db, &tx);
+        actor.dispatch_ready_tasks(None).await;
 
-        let status = handle.get_status().unwrap();
         assert!(
-            status.tasks_dispatched >= 1,
+            actor.dispatched >= 1,
             "should have dispatched the ready task"
         );
     }
@@ -1057,20 +1052,11 @@ mod tests {
         .await
         .unwrap();
 
-        let handle = spawn_coordinator(&db, &tx);
-        // Event broadcasts from fixture setup can be queued ahead of the explicit
-        // trigger on a loaded CI runner. Use the project-scoped dispatch path so
-        // this assertion observes only the synthetic task created by this test.
-        handle
-            .trigger_dispatch_for_project(&epic.project_id)
-            .await
-            .unwrap();
-        // Dispatch; wait for it to complete.
-        handle.wait_for_status(|s| s.tasks_dispatched >= 1).await;
+        let mut actor = coordinator_actor_for_tests(&db, &tx);
+        actor.dispatch_ready_tasks(None).await;
 
-        let status = handle.get_status().unwrap();
         assert!(
-            status.tasks_dispatched >= 1,
+            actor.dispatched >= 1,
             "should dispatch task waiting for review"
         );
     }
