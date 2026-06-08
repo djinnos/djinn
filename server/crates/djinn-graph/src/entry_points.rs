@@ -589,6 +589,7 @@ mod tests {
         let helper_sym = "scip-rust pkg src/lib.rs `helper`().";
 
         ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata {
                 project_root: Some("file:///workspace/test".to_string()),
                 tool_name: Some("scip-rust".to_string()),
@@ -689,6 +690,7 @@ mod tests {
     fn k8s_binary_target_path_is_recognized() {
         let bin_sym = "scip-rust pkg crates/foo/src/bin/worker.rs `main`().";
         let index = ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata::default(),
             files: vec![ScipFile {
                 language: "rust".to_string(),
@@ -710,6 +712,7 @@ mod tests {
         let main_sym = "scip-python pkg app/cli.py `__main__`().";
         let helper_sym = "scip-python pkg app/cli.py `helper`().";
         let index = ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata::default(),
             files: vec![ScipFile {
                 language: "python".to_string(),

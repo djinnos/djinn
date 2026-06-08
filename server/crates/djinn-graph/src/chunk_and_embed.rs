@@ -347,6 +347,7 @@ mod tests {
         let main_sym_id = "scip-rust pkg src/app.rs `main`().".to_string();
 
         let parsed = ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata::default(),
             files: vec![
                 ScipFile {
