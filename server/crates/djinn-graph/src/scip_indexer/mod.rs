@@ -272,9 +272,18 @@ pub struct ScipArtifact {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceWarmStatus {
+    pub workspace_slug: String,
+    pub indexer: SupportedIndexer,
+    pub status: String,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexingRun {
     pub project_root: PathBuf,
     pub output_root: PathBuf,
     pub commands: Vec<ExecutedIndexerCommand>,
     pub artifacts: Vec<ScipArtifact>,
+    pub workspace_statuses: Vec<WorkspaceWarmStatus>,
 }

@@ -31,6 +31,41 @@ fn project_config_ok(project: &Project, config: ProjectConfig) -> ProjectConfigR
     }
 }
 
+fn derive_graph_warm_status_with_workspaces(
+    image_status: &str,
+    graph_warmed_at: &Option<String>,
+    workspace_statuses: &[WorkspaceWarmStatusEntry],
+) -> String {
+    if workspace_statuses
+        .iter()
+        .any(|entry| matches!(entry.status.as_str(), "failed" | "timed_out"))
+    {
+        return "failed".to_string();
+    }
+    derive_graph_warm_status(image_status, graph_warmed_at)
+}
+
+async fn read_workspace_warm_statuses(project_root: &Path) -> Vec<WorkspaceWarmStatusEntry> {
+    let path = project_root.join(".djinn").join("graph_warm_status.json");
+    match fs::read_to_string(&path).await {
+        Ok(contents) => match serde_json::from_str::<Vec<WorkspaceWarmStatusEntry>>(&contents) {
+            Ok(mut statuses) => {
+                statuses.sort_by(|left, right| {
+                    left.workspace_slug
+                        .cmp(&right.workspace_slug)
+                        .then_with(|| left.indexer.cmp(&right.indexer))
+                });
+                statuses
+            }
+            Err(err) => {
+                tracing::warn!(path = %path.display(), error = %err, "failed to parse workspace graph warm statuses");
+                Vec::new()
+            }
+        },
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Fallback shape used when `get_config` returns `None` (no row) or
 /// an error — we still echo back the denormalized fields from the
 /// `Project` row itself.
@@ -271,9 +306,23 @@ pub struct GetProjectDevcontainerStatusResponse {
     /// in flight (or imminent); `ready` means `graph_warmed_at` is set;
     /// `failed` mirrors the image build's failed status (no warm possible).
     pub graph_warm_status: String,
+    /// Per-workspace graph warm results from the most recent indexer run.
+    /// Entries with `failed` or `timed_out` explain which workspace did not
+    /// produce a SCIP artifact even when another workspace succeeded.
+    #[serde(default)]
+    pub workspace_warm_statuses: Vec<WorkspaceWarmStatusEntry>,
     /// Populated on lookup failures; clients should surface this verbatim.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct WorkspaceWarmStatusEntry {
+    pub workspace_slug: String,
+    pub indexer: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -545,6 +594,7 @@ fn error_response(
         image_last_error,
         graph_warmed_at: None,
         graph_warm_status,
+        workspace_warm_statuses: Vec::new(),
         error: Some(error),
     }
 }
@@ -1344,7 +1394,22 @@ impl DjinnMcpServer {
                 .map(|row| row.built_at),
         };
 
-        let graph_warm_status = derive_graph_warm_status(&dispatch.status, &graph_warmed_at);
+        let workspace_warm_statuses = match resolve_project(&repo, &input.project).await {
+            Ok(Some(project)) => {
+                let project_root = project_dir(&project.github_owner, &project.github_repo);
+                read_workspace_warm_statuses(&project_root).await
+            }
+            Ok(None) => Vec::new(),
+            Err(err) => {
+                tracing::warn!(project = %input.project, error = %err, "project lookup failed while reading workspace warm statuses");
+                Vec::new()
+            }
+        };
+        let graph_warm_status = derive_graph_warm_status_with_workspaces(
+            &dispatch.status,
+            &graph_warmed_at,
+            &workspace_warm_statuses,
+        );
 
         Json(GetProjectDevcontainerStatusResponse {
             image_tag,
@@ -1353,6 +1418,7 @@ impl DjinnMcpServer {
             image_last_error: dispatch.last_error,
             graph_warmed_at,
             graph_warm_status,
+            workspace_warm_statuses,
             error: None,
         })
     }
