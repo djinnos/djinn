@@ -343,10 +343,13 @@ jobs:
       - run: rustup toolchain install
         working-directory: server
 
-      - name: Install mold linker
+      - name: Install Rust linker toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y mold
+          # server/.cargo/config.toml drives Linux builds through clang with
+          # -fuse-ld=mold; install both before cargo-sqlx shells out to cargo.
+          sudo apt-get install -y clang mold
+          clang --version
           mold --version
           ld.mold --version
 
