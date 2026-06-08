@@ -53,11 +53,13 @@ pub fn build_verification_test_job(
     let suffix = Uuid::now_v7();
     let sanitized_project = sanitize_id(project_id);
     let sanitized_test = sanitize_id(test_id);
-    let job_name = format!(
-        "djinn-verify-test-{}-{}",
-        sanitized_test,
-        short_uuid(&suffix)
-    );
+    // The Job name is copied verbatim into an auto-injected `job-name` pod
+    // label, which Kubernetes caps at 63 bytes. The full test UUID plus the
+    // `djinn-verify-test-` prefix and the disambiguator overruns that cap, so
+    // keep only a short slice of the test id in the name; the full id is still
+    // preserved in LABEL_TEST_ID below for lookups.
+    let short_test: String = sanitized_test.chars().take(12).collect();
+    let job_name = format!("djinn-verify-test-{short_test}-{}", short_uuid(&suffix));
 
     let project_root = format!("{WORKSPACE_MOUNT_DIR}/{sanitized_project}");
     let mirror_path = format!("{MIRROR_MOUNT_DIR}/{project_id}.git");
@@ -282,5 +284,26 @@ mod tests {
             envs.get("SCCACHE_DIR").copied(),
             Some("/cache/sccache/proj-xyz")
         );
+    }
+
+    #[test]
+    fn job_name_stays_within_k8s_label_budget() {
+        // Kubernetes copies the Job name into an auto-injected `job-name` pod
+        // label, which is rejected above 63 bytes. A full UUID test id plus the
+        // `djinn-verify-test-` prefix used to overrun this and 422 the Test run.
+        let cfg = KubernetesConfig::for_testing();
+        let job = build_verification_test_job(
+            &cfg,
+            "019ea3bd-a305-73e3-806c-4edcc96ebfe2",
+            "reg.example:5000/djinn-project-p:abc123",
+            "019ea7ed-7db6-7252-ad45-d4180f934386",
+        );
+        let name = job.metadata.name.unwrap();
+        assert!(
+            name.len() <= 63,
+            "job name must fit the 63-byte k8s label cap, got {} bytes: {name}",
+            name.len()
+        );
+        assert!(name.starts_with("djinn-verify-test-"), "got {name}");
     }
 }
