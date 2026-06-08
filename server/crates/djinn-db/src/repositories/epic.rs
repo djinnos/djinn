@@ -921,7 +921,11 @@ impl EpicRepository {
 
         let id = uuid::Uuid::now_v7().to_string();
         let owner = "test";
-        let repo_slug = format!("default-{id}");
+        // `projects.github_repo` is varchar(36) in the real Postgres schema.
+        // Keep the synthesized default project slug below that cap while still
+        // deriving it from the UUID so concurrent tests do not collide.
+        let compact_id = id.replace('-', "");
+        let repo_slug = format!("default-{}", &compact_id[..28]);
         sqlx::query!(
             "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
             id,
