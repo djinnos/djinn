@@ -357,7 +357,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         return Ok((handle, graph));
     }
 
-    if let Err(e) = cache_repo
+    match cache_repo
         .upsert(RepoGraphCacheInsert {
             project_id,
             commit_sha: &commit_sha,
@@ -365,7 +365,13 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         })
         .await
     {
-        tracing::warn!(error = %e, "ensure_canonical_graph: failed to persist graph cache row");
+        Ok(()) => {
+            persist_workspace_graph_freshness_best_effort(ctx, project_id, &commit_sha, &graph)
+                .await;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "ensure_canonical_graph: failed to persist graph cache row");
+        }
     }
 
     // Coupling ingest already ran early in this function, so no
@@ -448,6 +454,65 @@ async fn ingest_coupling_best_effort<C: WarmContext>(
             project_id = %project_id,
             error = %e,
             "ensure_canonical_graph: coupling ingest failed"
+        );
+    }
+}
+
+fn distinct_workspace_slugs(graph: &crate::repo_graph::RepoDependencyGraph) -> Vec<String> {
+    let mut slugs = std::collections::BTreeSet::new();
+    for node in graph.graph().node_weights() {
+        if let Some(slug) = node
+            .workspace
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            slugs.insert(slug.to_string());
+        }
+    }
+
+    // Pre-workspace v10 artifacts and synthetic nodes may not carry workspace
+    // metadata. For a non-empty freshly warmed graph, stamp a stable root row
+    // rather than leaving the project with no per-workspace freshness signal.
+    if slugs.is_empty() && graph.node_count() > 0 {
+        slugs.insert("root".to_string());
+    }
+
+    slugs.into_iter().collect()
+}
+
+async fn persist_workspace_graph_freshness_best_effort<C: WarmContext>(
+    ctx: &C,
+    project_id: &str,
+    commit_sha: &str,
+    graph: &crate::repo_graph::RepoDependencyGraph,
+) {
+    use djinn_db::{ProjectWorkspaceGraphRepository, ProjectWorkspaceGraphUpsert};
+
+    let workspaces = distinct_workspace_slugs(graph);
+    if workspaces.is_empty() {
+        return;
+    }
+
+    let rows: Vec<_> = workspaces
+        .iter()
+        .map(|workspace_slug| ProjectWorkspaceGraphUpsert {
+            project_id,
+            workspace_slug,
+            commit_sha,
+            status: "ready",
+        })
+        .collect();
+
+    let workspace_count = rows.len();
+    let repo = ProjectWorkspaceGraphRepository::new(ctx.db().clone());
+    if let Err(e) = repo.upsert_many(&rows).await {
+        tracing::warn!(
+            project_id = %project_id,
+            commit_sha = %commit_sha,
+            workspace_count,
+            error = %e,
+            "ensure_canonical_graph: failed to persist project_workspace_graph freshness rows"
         );
     }
 }
@@ -846,6 +911,36 @@ mod tests {
         run(&["add", "a.txt"]).await;
         run(&["commit", "-q", "-m", "init"]).await;
         project_root
+    }
+
+    #[test]
+    fn distinct_workspace_slugs_returns_each_graph_workspace_once() {
+        let mut graph = build_test_graph_fixture();
+        for (i, node) in graph.graph_mut_unchecked().node_weights_mut().enumerate() {
+            node.workspace = Some(if i % 2 == 0 { "api" } else { "web" }.to_string());
+        }
+
+        assert_eq!(
+            distinct_workspace_slugs(&graph),
+            vec!["api".to_string(), "web".to_string()]
+        );
+    }
+
+    #[test]
+    fn distinct_workspace_slugs_skips_empty_graphs() {
+        let graph = crate::repo_graph::RepoDependencyGraph::build(&[]);
+
+        assert!(distinct_workspace_slugs(&graph).is_empty());
+    }
+
+    #[test]
+    fn distinct_workspace_slugs_falls_back_to_root_for_non_empty_legacy_graph() {
+        let mut graph = build_test_graph_fixture();
+        for node in graph.graph_mut_unchecked().node_weights_mut() {
+            node.workspace = None;
+        }
+
+        assert_eq!(distinct_workspace_slugs(&graph), vec!["root".to_string()]);
     }
 
     #[tokio::test]
