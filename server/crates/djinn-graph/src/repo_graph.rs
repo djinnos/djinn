@@ -3336,7 +3336,7 @@ mod tests {
                 documentation: node.documentation.clone(),
                 signature_parts: node.signature_parts.clone(),
                 is_test: node.is_test,
-                complexity: node.complexity.clone(),
+                complexity: node.complexity,
             })
             .collect();
         let old_artifact = V10RepoGraphArtifactWithoutWorkspace {
