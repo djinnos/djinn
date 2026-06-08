@@ -3995,6 +3995,7 @@ pub(crate) mod graph_bridge_tests {
             signature_parts: None,
             is_test: false,
             complexity: None,
+            workspace: None,
         };
         // Both file-path match (User in path) and kind hint ("class")
         // fire. Tiebreaker for Type/Class is 0.05.
@@ -4320,6 +4321,7 @@ pub(crate) mod graph_bridge_tests {
             signature_parts: None,
             is_test: false,
             complexity: None,
+            workspace: None,
         };
         // Three nodes:
         //   [0] target — receives both edges
@@ -4673,6 +4675,7 @@ pub(crate) mod graph_bridge_tests {
             signature_parts: None,
             is_test: false,
             complexity: None,
+            workspace: None,
         };
 
         let any_node = mk_node(None);
@@ -5106,6 +5109,7 @@ pub(crate) mod graph_bridge_tests {
             signature_parts: None,
             is_test: false,
             complexity: None,
+            workspace: None,
         }
     }
 
@@ -5278,6 +5282,7 @@ pub(crate) mod graph_bridge_tests {
             signature_parts: None,
             is_test: false,
             complexity: None,
+            workspace: None,
         };
         let nodes = vec![
             mk_node("auth_login", "src/auth/login.rs"),

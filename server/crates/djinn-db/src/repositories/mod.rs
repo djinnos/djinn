@@ -11,6 +11,7 @@ pub mod note;
 pub mod oauth;
 pub mod org_config;
 pub mod project;
+pub mod project_workspace_graph;
 pub mod proposal;
 pub mod repo_graph_cache;
 pub mod service;

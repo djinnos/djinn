@@ -2566,6 +2566,31 @@ expression: signatures
       "type": "object"
     },
     "output_schema": {
+      "$defs": {
+        "WorkspaceWarmStatusEntry": {
+          "properties": {
+            "detail": {
+              "nullable": true,
+              "type": "string"
+            },
+            "indexer": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "workspace_slug": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_slug",
+            "indexer",
+            "status"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "Snapshot of a project's image-build state, used by the UI onboarding\nbanner.",
       "properties": {
@@ -2600,6 +2625,14 @@ expression: signatures
         "needs_image": {
           "description": "`true` when the project has no catalog image assigned yet — it needs\nsetup (pick an image) before it can build/dispatch. The UI surfaces\nthis as a distinct \"Needs image\" state rather than a build status.",
           "type": "boolean"
+        },
+        "workspace_warm_statuses": {
+          "default": [],
+          "description": "Per-workspace graph warm results from the most recent indexer run.\nEntries with `failed` or `timed_out` explain which workspace did not\nproduce a SCIP artifact even when another workspace succeeded.",
+          "items": {
+            "$ref": "#/$defs/WorkspaceWarmStatusEntry"
+          },
+          "type": "array"
         }
       },
       "required": [

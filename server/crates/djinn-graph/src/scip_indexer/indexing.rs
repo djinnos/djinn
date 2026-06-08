@@ -7,7 +7,7 @@ use crate::process;
 use super::workspaces::{discover_workspaces, visit_dirs};
 use super::{
     ExecutedIndexerCommand, IndexerAvailability, IndexingRun, PlannedIndexerCommand, ScipArtifact,
-    SupportedIndexer, note_missing_indexer_once,
+    SupportedIndexer, WorkspaceWarmStatus, note_missing_indexer_once,
 };
 
 const SCIP_ARTIFACT_EXTENSION: &str = "scip";
@@ -190,16 +190,32 @@ pub(crate) async fn run_indexers(
 
     let results = futures::future::join_all(futures).await;
 
-    let commands = tally_indexer_results(results)?;
+    let mut tally = tally_indexer_results(results)?;
 
-    let artifacts = collect_scip_artifacts(&output_root, &commands)?;
+    let artifacts = collect_scip_artifacts(&output_root, &tally.commands)?;
+    apply_artifact_statuses(&artifacts, &mut tally.workspace_statuses);
+    write_workspace_warm_statuses(&project_root, &tally.workspace_statuses)?;
+
+    if tally.all_failed {
+        return Err(anyhow!(
+            "all {} SCIP indexers failed (no index produced)",
+            tally.workspace_statuses.len()
+        ));
+    }
 
     Ok(IndexingRun {
         project_root,
         output_root,
-        commands,
+        commands: tally.commands,
         artifacts,
+        workspace_statuses: tally.workspace_statuses,
     })
+}
+
+struct IndexerTally {
+    commands: Vec<ExecutedIndexerCommand>,
+    workspace_statuses: Vec<WorkspaceWarmStatus>,
+    all_failed: bool,
 }
 
 /// Aggregate the per-target indexer results into the set of successful
@@ -217,14 +233,21 @@ pub(crate) async fn run_indexers(
 /// commands — there was nothing to index, which is not a failure.
 fn tally_indexer_results(
     results: Vec<(PlannedIndexerCommand, std::io::Result<std::process::Output>)>,
-) -> Result<Vec<ExecutedIndexerCommand>> {
+) -> Result<IndexerTally> {
     let total = results.len();
     let mut commands = Vec::with_capacity(total);
+    let mut workspace_statuses = Vec::with_capacity(total);
     let mut failure_count = 0usize;
 
     for (plan, result) in results {
         match result {
             Ok(output) if output.status.success() => {
+                workspace_statuses.push(WorkspaceWarmStatus {
+                    workspace_slug: plan.workspace_slug.clone(),
+                    indexer: plan.indexer,
+                    status: "artifact_pending".to_string(),
+                    detail: Some(format!("expected artifact {}", plan.output_path.display())),
+                });
                 commands.push(ExecutedIndexerCommand {
                     plan,
                     exit_code: output.status.code(),
@@ -234,6 +257,17 @@ fn tally_indexer_results(
             }
             Ok(output) => {
                 failure_count += 1;
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                workspace_statuses.push(WorkspaceWarmStatus {
+                    workspace_slug: plan.workspace_slug.clone(),
+                    indexer: plan.indexer,
+                    status: "failed".to_string(),
+                    detail: Some(if stderr.is_empty() {
+                        format!("indexer exited with status {:?}", output.status.code())
+                    } else {
+                        stderr.clone()
+                    }),
+                });
                 tracing::warn!(
                     indexer = plan.indexer.binary_name(),
                     workspace = %plan.workspace_root.display(),
@@ -244,6 +278,17 @@ fn tally_indexer_results(
             }
             Err(err) => {
                 failure_count += 1;
+                let status = if err.kind() == std::io::ErrorKind::TimedOut {
+                    "timed_out"
+                } else {
+                    "failed"
+                };
+                workspace_statuses.push(WorkspaceWarmStatus {
+                    workspace_slug: plan.workspace_slug.clone(),
+                    indexer: plan.indexer,
+                    status: status.to_string(),
+                    detail: Some(err.to_string()),
+                });
                 tracing::warn!(
                     indexer = plan.indexer.binary_name(),
                     workspace = %plan.workspace_root.display(),
@@ -263,14 +308,54 @@ fn tally_indexer_results(
         );
     }
 
-    if total > 0 && failure_count == total {
-        return Err(anyhow!(
-            "all {} SCIP indexers failed (no index produced)",
-            total
-        ));
-    }
+    Ok(IndexerTally {
+        commands,
+        workspace_statuses,
+        all_failed: total > 0 && failure_count == total,
+    })
+}
 
-    Ok(commands)
+fn apply_artifact_statuses(artifacts: &[ScipArtifact], statuses: &mut [WorkspaceWarmStatus]) {
+    let produced: std::collections::HashSet<(String, SupportedIndexer)> = artifacts
+        .iter()
+        .filter_map(|artifact| {
+            artifact
+                .indexer
+                .map(|indexer| (artifact.workspace_slug.clone(), indexer))
+        })
+        .collect();
+
+    for status in statuses {
+        if status.status != "artifact_pending" {
+            continue;
+        }
+        if produced.contains(&(status.workspace_slug.clone(), status.indexer)) {
+            status.status = "ready".to_string();
+            status.detail = None;
+        } else {
+            status.status = "failed".to_string();
+            status.detail =
+                Some("indexer exited successfully but produced no SCIP artifact".to_string());
+        }
+    }
+}
+
+pub(crate) fn workspace_warm_status_path(project_root: &Path) -> PathBuf {
+    project_root.join(".djinn").join("graph_warm_status.json")
+}
+
+fn write_workspace_warm_statuses(
+    project_root: &Path,
+    statuses: &[WorkspaceWarmStatus],
+) -> Result<()> {
+    let path = workspace_warm_status_path(project_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create graph warm status dir {}", parent.display()))?;
+    }
+    let json =
+        serde_json::to_string_pretty(statuses).context("serialize workspace warm statuses")?;
+    fs::write(&path, json).with_context(|| format!("write graph warm status {}", path.display()))
 }
 
 pub(crate) fn collect_scip_artifacts(
@@ -529,16 +614,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["desktop", "website"]
         );
-        assert_eq!(
-            plans[1..]
-                .iter()
-                .map(|plan| plan
-                    .output_path
+        let ts_output_names = plans[1..]
+            .iter()
+            .map(|plan| {
+                plan.output_path
                     .file_name()
                     .unwrap()
                     .to_string_lossy()
-                    .into_owned())
-                .collect::<Vec<_>>(),
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ts_output_names,
             vec![
                 format!(
                     "djinn-typescript-{}.scip",
@@ -640,6 +727,47 @@ mod tests {
         assert_eq!(artifacts[0].workspace_slug, "server");
         assert_eq!(artifacts[1].indexer, Some(SupportedIndexer::TypeScript));
         assert_eq!(artifacts[1].workspace_slug, "desktop");
+    }
+
+    #[test]
+    fn artifact_statuses_surface_success_and_missing_output_per_workspace() {
+        let artifacts = vec![ScipArtifact {
+            path: PathBuf::from("/out/repo-typescript-web.scip"),
+            indexer: Some(SupportedIndexer::TypeScript),
+            workspace_slug: "web".to_string(),
+        }];
+        let mut statuses = vec![
+            WorkspaceWarmStatus {
+                workspace_slug: "api".to_string(),
+                indexer: SupportedIndexer::TypeScript,
+                status: "failed".to_string(),
+                detail: Some("crashed".to_string()),
+            },
+            WorkspaceWarmStatus {
+                workspace_slug: "web".to_string(),
+                indexer: SupportedIndexer::TypeScript,
+                status: "artifact_pending".to_string(),
+                detail: Some("expected artifact".to_string()),
+            },
+            WorkspaceWarmStatus {
+                workspace_slug: "worker".to_string(),
+                indexer: SupportedIndexer::TypeScript,
+                status: "artifact_pending".to_string(),
+                detail: Some("expected artifact".to_string()),
+            },
+        ];
+
+        apply_artifact_statuses(&artifacts, &mut statuses);
+
+        assert_eq!(statuses[0].status, "failed");
+        assert_eq!(statuses[0].detail.as_deref(), Some("crashed"));
+        assert_eq!(statuses[1].status, "ready");
+        assert!(statuses[1].detail.is_none());
+        assert_eq!(statuses[2].status, "failed");
+        assert_eq!(
+            statuses[2].detail.as_deref(),
+            Some("indexer exited successfully but produced no SCIP artifact")
+        );
     }
 
     #[test]
@@ -854,20 +982,26 @@ mod tests {
                 output_for(true),
             ),
         ];
-        let commands = tally_indexer_results(results).expect("partial success must be Ok");
+        let tally = tally_indexer_results(results).expect("partial success must be Ok");
         assert_eq!(
-            commands.len(),
+            tally.commands.len(),
             1,
             "only the succeeding target should be retained"
         );
         assert_eq!(
-            commands[0].plan.workspace_root,
+            tally.commands[0].plan.workspace_root,
             PathBuf::from("packages/acqua")
         );
+        assert_eq!(tally.workspace_statuses.len(), 3);
+        assert_eq!(tally.workspace_statuses[0].workspace_slug, "packages-lib");
+        assert_eq!(tally.workspace_statuses[0].status, "failed");
+        assert_eq!(tally.workspace_statuses[2].workspace_slug, "packages-acqua");
+        assert_eq!(tally.workspace_statuses[2].status, "artifact_pending");
+        assert!(!tally.all_failed);
     }
 
     #[test]
-    fn tally_total_failure_errors() {
+    fn tally_total_failure_records_all_failed_without_swallowing_statuses() {
         let results = vec![
             (
                 fake_plan(SupportedIndexer::TypeScript, "packages/lib"),
@@ -878,18 +1012,27 @@ mod tests {
                 output_for(false),
             ),
         ];
-        let err = tally_indexer_results(results).expect_err("total failure must error");
-        assert!(
-            err.to_string().contains("all 2 SCIP indexers failed"),
-            "unexpected error: {err}"
+        let tally =
+            tally_indexer_results(results).expect("tally records statuses before caller errors");
+        assert!(tally.all_failed);
+        assert!(tally.commands.is_empty());
+        assert_eq!(
+            tally
+                .workspace_statuses
+                .iter()
+                .map(|entry| (entry.workspace_slug.as_str(), entry.status.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("packages-lib", "failed"), ("packages-utils", "failed")]
         );
     }
 
     #[test]
     fn tally_empty_input_is_ok() {
         // A code-less repo plans zero indexers — that's not a failure.
-        let commands = tally_indexer_results(Vec::new()).expect("empty is Ok");
-        assert!(commands.is_empty());
+        let tally = tally_indexer_results(Vec::new()).expect("empty is Ok");
+        assert!(tally.commands.is_empty());
+        assert!(tally.workspace_statuses.is_empty());
+        assert!(!tally.all_failed);
     }
 
     #[test]
