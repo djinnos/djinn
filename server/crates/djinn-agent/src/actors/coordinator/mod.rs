@@ -138,8 +138,12 @@ mod tests {
         db: &Database,
         tx: broadcast::Sender<DjinnEventEnvelope>,
     ) -> djinn_core::models::Epic {
-        let epic = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx))
-            .create("Epic", "", "", "", "", None)
+        let epic = djinn_core::auth_context::SESSION_USER_ID
+            .scope(
+                None,
+                EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+                    .create("Epic", "", "", "", "", None),
+            )
             .await
             .unwrap();
         // Satisfy the coordinator's readiness gate: assign a ready catalog
