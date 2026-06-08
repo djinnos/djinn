@@ -149,7 +149,9 @@ mod tests {
             .set_project_image(&epic.project_id, &image)
             .await;
         let image_repo = djinn_db::ImageRepository::new(db.clone());
-        let image_id = format!("test-image-{}", epic.project_id);
+        // `images.id` is varchar(36); reuse the project UUID so the helper
+        // remains schema-valid while still producing a unique catalog image.
+        let image_id = epic.project_id.clone();
         image_repo
             .create(&image_id, "Test Image", Some("ready test image"), "{}")
             .await
