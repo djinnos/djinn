@@ -137,8 +137,6 @@ mod tests {
         // catalog image instead of the legacy per-project image columns, so
         // setting only `projects.image_status` leaves dispatch fail-closed.
         let image = djinn_db::ProjectImage {
-            // Keep the synthetic tag short: some CI test templates still use
-            // legacy VARCHAR(36) image tag columns.
             tag: Some("djinn-test:testhash".into()),
             hash: Some("testhash".into()),
             status: djinn_db::ProjectImageStatus::READY.into(),
@@ -148,12 +146,12 @@ mod tests {
             .set_project_image(&epic.project_id, &image)
             .await;
         let image_repo = djinn_db::ImageRepository::new(db.clone());
-        // `images.id` is varchar(36). The default-project identifier used by
-        // some test repository paths is longer than that, so generate a fresh
-        // schema-valid catalog image id for this helper. Keep the synthesized
-        // catalog name short too; older test templates constrain image text
-        // fields to varchar(36).
-        let image_id = uuid::Uuid::now_v7().to_string();
+        // `images.id` is varchar(36); use a compact, unique-enough synthetic id
+        // so this helper also stays inside older CI test-template limits.
+        let image_id = format!(
+            "ci-ready-{}",
+            &uuid::Uuid::now_v7().simple().to_string()[..16]
+        );
         let image_name = format!("ci-ready-{}", &image_id[..8]);
         image_repo
             .create(&image_id, &image_name, Some("ready test image"), "{}")

@@ -124,11 +124,14 @@ pub async fn create_test_project(db: &Database) -> Project {
     // Also satisfy the catalog-image readiness path used by dispatch.  The
     // legacy `projects.image_status` columns are still populated above for
     // older call sites, but `get_dispatch_readiness` resolves the selected
-    // image from the catalog first. Use a fresh UUID for `images.id` because
-    // that column is varchar(36).
+    // image from the catalog first. Use a compact id/name so this helper also
+    // stays inside older CI test-template varchar limits.
     let image_repo = djinn_db::ImageRepository::new(db.clone());
-    let image_id = uuid::Uuid::now_v7().to_string();
-    let image_name = format!("Test Image {image_id}");
+    let image_id = format!(
+        "ci-ready-{}",
+        &uuid::Uuid::now_v7().simple().to_string()[..16]
+    );
+    let image_name = format!("ci-ready-{}", &image_id[..8]);
     let _ = image_repo
         .create(&image_id, &image_name, Some("ready test image"), "{}")
         .await;
