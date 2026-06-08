@@ -131,8 +131,11 @@ mod tests {
             .create("Epic", "", "", "", "", None)
             .await
             .unwrap();
-        // Satisfy the coordinator's readiness gate: mark the synthesized
-        // default project as image-ready and stamp `graph_warmed_at`.
+        // Satisfy the coordinator's readiness gate: select a ready catalog
+        // image for the synthesized default project and stamp
+        // `graph_warmed_at`. `get_dispatch_readiness` resolves the selected
+        // catalog image instead of the legacy per-project image columns, so
+        // setting only `projects.image_status` leaves dispatch fail-closed.
         let image = djinn_db::ProjectImage {
             tag: Some(format!(
                 "test-registry/djinn-project-{}:testhash",
@@ -145,6 +148,27 @@ mod tests {
         let _ = djinn_db::ProjectRepository::new(db.clone(), crate::events::event_bus_for(&tx))
             .set_project_image(&epic.project_id, &image)
             .await;
+        let image_repo = djinn_db::ImageRepository::new(db.clone());
+        let image_id = format!("test-image-{}", epic.project_id);
+        image_repo
+            .create(&image_id, "Test Image", Some("ready test image"), "{}")
+            .await
+            .unwrap();
+        image_repo
+            .mark_ready(
+                &image_id,
+                image
+                    .tag
+                    .as_deref()
+                    .unwrap_or("test-registry/djinn-test:testhash"),
+                None,
+            )
+            .await
+            .unwrap();
+        image_repo
+            .set_project_image(&epic.project_id, Some(&image_id))
+            .await
+            .unwrap();
         let cache_repo = djinn_db::RepoGraphCacheRepository::new(db.clone());
         let _ = cache_repo
             .upsert(djinn_db::RepoGraphCacheInsert {
