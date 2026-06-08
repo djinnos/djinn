@@ -123,6 +123,12 @@ mod tests {
         ))
     }
 
+    fn test_image_id() -> String {
+        let id = uuid::Uuid::now_v7().simple().to_string();
+        debug_assert!(id.len() <= 36, "images.id is varchar(36)");
+        id
+    }
+
     async fn make_epic(
         db: &Database,
         tx: broadcast::Sender<DjinnEventEnvelope>,
@@ -139,7 +145,7 @@ mod tests {
         // `images.id` is varchar(36), so use an unprefixed UUID payload.
         // Prefixing the id overflows CI's Postgres schema; the compact form
         // leaves extra headroom while remaining globally unique for tests.
-        let image_id = uuid::Uuid::now_v7().simple().to_string();
+        let image_id = test_image_id();
         image_repo
             .create(&image_id, "Test image", None, r#"{"schema_version":1}"#)
             .await
