@@ -3735,6 +3735,7 @@ pub(crate) mod graph_bridge_tests {
             signature_parts: None,
         };
         ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata::default(),
             files: vec![
                 ScipFile {
@@ -3868,6 +3869,7 @@ pub(crate) mod graph_bridge_tests {
             }],
         };
         ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata::default(),
             files: vec![
                 mk_user_file(
@@ -4838,6 +4840,7 @@ pub(crate) mod graph_bridge_tests {
             });
         }
         let parsed = ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata::default(),
             files,
             external_symbols: vec![],
@@ -4953,6 +4956,7 @@ pub(crate) mod graph_bridge_tests {
         let b_sym = "scip-rust pkg src/b.rs `b`().";
 
         let parsed = ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata::default(),
             files: vec![
                 ScipFile {
