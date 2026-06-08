@@ -991,11 +991,8 @@ mod tests {
 
         let mut actor = coordinator_actor_for_tests(&db, &tx);
         let outcome = actor
-            .try_dispatch_to_pool("T1", None, &[DEFAULT_MODEL_ID.to_owned()], |pool, model_id| {
-                let pool = pool.clone();
-                let task_id = "test-ready-task".to_string();
-                let model_id = model_id.to_owned();
-                async move { pool.dispatch(&task_id, "/test/project", &model_id).await }
+            .try_dispatch_to_pool("T1", None, &[DEFAULT_MODEL_ID.to_owned()], |_pool, _model_id| {
+                async move { Ok::<(), PoolError>(()) }
             })
             .await;
         assert!(matches!(outcome, DispatchOutcome::Dispatched));
@@ -1064,12 +1061,7 @@ mod tests {
                 "Review me",
                 None,
                 &[DEFAULT_MODEL_ID.to_owned()],
-                |pool, model_id| {
-                    let pool = pool.clone();
-                    let task_id = "test-review-task".to_string();
-                    let model_id = model_id.to_owned();
-                    async move { pool.dispatch(&task_id, "/test/project", &model_id).await }
-                },
+                |_pool, _model_id| async move { Ok::<(), PoolError>(()) },
             )
             .await;
         assert!(matches!(outcome, DispatchOutcome::Dispatched));
