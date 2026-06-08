@@ -37,6 +37,9 @@ pub struct CodeGraphParams {
     /// server-managed clone path via `djinn_core::paths::project_dir`
     /// before dispatching to the graph backend.
     pub project: String,
+    /// Optional workspace slug used by follow-up workspace-scoped graph ops.
+    #[serde(default)]
+    pub workspace: Option<String>,
     /// Resolved absolute filesystem path. Populated by the `code_graph`
     /// dispatch after it resolves `project`; the inner operation handlers
     /// read this when they need to call into the graph backend.
@@ -234,6 +237,7 @@ impl CodeGraphParams {
             }
         }
         clear(&mut self.key);
+        clear(&mut self.workspace);
         clear(&mut self.direction);
         clear(&mut self.kind_filter);
         clear(&mut self.query);
@@ -2482,6 +2486,20 @@ mod tests {
         assert_eq!(params.mode.as_deref(), Some("hybrid"));
     }
 
+    #[test]
+    fn normalize_clears_empty_workspace() {
+        let json = serde_json::json!({
+            "operation": "ranked",
+            "project": "/workspace/repo",
+            "workspace": "",
+        });
+        let mut params: CodeGraphParams = serde_json::from_value(json).unwrap();
+
+        params.normalize();
+
+        assert_eq!(params.workspace, None);
+    }
+
     /// PR B4: the default `hybrid_search` impl on `RepoGraphOps`
     /// degrades to the structural-only path so test stubs that only
     /// override `search` still serve the hybrid mode (with every hit
@@ -2560,6 +2578,7 @@ mod tests {
         CodeGraphParams {
             operation: op.to_string(),
             project: "test/test".to_string(),
+            workspace: None,
             project_id: String::new(),
             project_path: "/tmp".to_string(),
             key: None,
