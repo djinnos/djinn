@@ -139,14 +139,14 @@ mod tests {
         let project_repo =
             djinn_db::ProjectRepository::new(db.clone(), crate::events::event_bus_for(&tx));
         let image_repo = djinn_db::repositories::image::ImageRepository::new(db.clone());
-        // `images.id` is varchar(36); use the UUID-sized project id directly so
-        // the synthetic catalog image remains unique without overflowing the
-        // column in CI's real Postgres schema.
-        let image_id = epic.project_id.clone();
+        // `images.id` is varchar(36); use a bare UUID for the synthetic catalog
+        // image so it stays unique without overflowing CI's real Postgres
+        // schema.
+        let image_id = uuid::Uuid::now_v7().to_string();
         image_repo
             .create(
                 &image_id,
-                &format!("Test Image {}", epic.project_id),
+                &format!("Test Image {}", &image_id[..8]),
                 None,
                 "{}",
             )
