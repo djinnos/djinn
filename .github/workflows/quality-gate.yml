@@ -44,7 +44,9 @@ jobs:
               - 'server/rust-toolchain.toml'
               - 'server/.cargo/**'
               - 'server/.config/**'
+              - 'server/.sqlx/**'
               - 'server/crates/**/Cargo.toml'
+              - 'server/crates/**/migrations_postgres/**'
               - 'server/crates/**/*.rs'
               - 'server/src/**/*.rs'
               - '.github/workflows/quality-gate.yml'
@@ -80,7 +82,11 @@ jobs:
         working-directory: server
 
       - name: Install mold linker
-        run: sudo apt-get update && sudo apt-get install -y mold
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold
+          mold --version
+          ld.mold --version
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -338,7 +344,11 @@ jobs:
         working-directory: server
 
       - name: Install mold linker
-        run: sudo apt-get update && sudo apt-get install -y mold
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold
+          mold --version
+          ld.mold --version
 
       - uses: Swatinem/rust-cache@v2
         with:
