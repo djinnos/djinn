@@ -2083,14 +2083,7 @@ mod tests {
             })
             .await
             .expect("old workspace upsert");
-        sqlx::query(r#"UPDATE project_workspace_graph
-                  SET warmed_at = to_char((now() at time zone 'utc') - interval '1 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-                WHERE project_id = $1 AND workspace_slug = $2"#)
-            .bind(&project.id)
-            .bind("old")
-            .execute(db.pool())
-            .await
-            .expect("age old workspace");
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         workspace_repo
             .upsert(ProjectWorkspaceGraphUpsert {
                 project_id: &project.id,
