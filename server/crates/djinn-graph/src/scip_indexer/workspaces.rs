@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use djinn_stack::workspace_slug;
 
 use super::{DiscoveredWorkspace, SupportedIndexer};
 
@@ -100,34 +101,6 @@ fn file_contains(path: &Path, needle: &str) -> Result<bool> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("read workspace marker {}", path.display()))?;
     Ok(content.contains(needle))
-}
-
-fn workspace_slug(root: &Path) -> String {
-    if root.as_os_str().is_empty() {
-        return "root".to_string();
-    }
-
-    let slug = root
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .flat_map(|segment| {
-            segment
-                .chars()
-                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-                .collect::<String>()
-                .split('-')
-                .filter(|part| !part.is_empty())
-                .map(str::to_ascii_lowercase)
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>()
-        .join("-");
-
-    if slug.is_empty() {
-        "root".to_string()
-    } else {
-        slug
-    }
 }
 
 /// Directory names that target discovery must never descend into.
