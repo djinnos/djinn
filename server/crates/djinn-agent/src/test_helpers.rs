@@ -121,6 +121,30 @@ pub async fn create_test_project(db: &Database) -> Project {
         last_error: None,
     };
     let _ = repo.set_project_image(&project.id, &image).await;
+    // Also satisfy the catalog-image readiness path used by dispatch.  The
+    // legacy `projects.image_status` columns are still populated above for
+    // older call sites, but `get_dispatch_readiness` resolves the selected
+    // image from the catalog first. Use a fresh UUID for `images.id` because
+    // that column is varchar(36).
+    let image_repo = djinn_db::ImageRepository::new(db.clone());
+    let image_id = uuid::Uuid::now_v7().to_string();
+    let image_name = format!("Test Image {image_id}");
+    let _ = image_repo
+        .create(&image_id, &image_name, Some("ready test image"), "{}")
+        .await;
+    let _ = image_repo
+        .mark_ready(
+            &image_id,
+            image
+                .tag
+                .as_deref()
+                .unwrap_or("test-registry/djinn-test:testhash"),
+            None,
+        )
+        .await;
+    let _ = image_repo
+        .set_project_image(&project.id, Some(&image_id))
+        .await;
     let cache_repo = djinn_db::RepoGraphCacheRepository::new(db.clone());
     let _ = cache_repo
         .upsert(djinn_db::RepoGraphCacheInsert {
