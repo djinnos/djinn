@@ -188,6 +188,16 @@ exec {bin} verify-test "{test_id}"
         volumes: Some(volumes),
         node_selector,
         tolerations,
+        // Run as uid 10001 like task-runs (job.rs). Both share the /cache
+        // cargo target PVC; without this the verify pod runs as the image
+        // default (root) and writes root-owned cargo fingerprints that the
+        // worker (uid 10001) then can't overwrite — permission-denied builds
+        // that hang for the whole stall window, then trip the model breaker.
+        security_context: Some(k8s_openapi::api::core::v1::PodSecurityContext {
+            run_as_user: Some(10001),
+            run_as_group: Some(10001),
+            ..Default::default()
+        }),
         ..PodSpec::default()
     };
 
@@ -244,6 +254,13 @@ mod tests {
         let spec = job.spec.unwrap();
         assert_eq!(spec.backoff_limit, Some(0));
         let pod = spec.template.spec.unwrap();
+        // Must run as uid 10001 like task-runs, or it writes root-owned cargo
+        // artifacts into the shared /cache target and breaks worker builds.
+        assert_eq!(
+            pod.security_context.as_ref().and_then(|s| s.run_as_user),
+            Some(10001),
+            "verify pod must run as the worker uid to share the cargo cache safely"
+        );
         let c = &pod.containers[0];
         assert_eq!(
             c.image.as_deref(),
