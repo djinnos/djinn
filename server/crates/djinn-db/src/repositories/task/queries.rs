@@ -907,16 +907,41 @@ mod ready_projection_tests {
         .execute(db.pool())
         .await
         .unwrap();
-        prepo.link_epic(&proposal.id, &epic_id, &project_id).await.unwrap();
+        prepo
+            .link_epic(&proposal.id, &epic_id, &project_id)
+            .await
+            .unwrap();
 
         let epic_task = repo
-            .create_in_project(&project_id, Some(&epic_id), "under epic", "", "", "task", 0, "", None, None)
+            .create_in_project(
+                &project_id,
+                Some(&epic_id),
+                "under epic",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                None,
+                None,
+            )
             .await
             .unwrap()
             .id;
         // An epic-less task (mirrors the epic_breakdown task: epic_id IS NULL).
         let loose_task = repo
-            .create_in_project(&project_id, None, "no epic", "", "", "task", 0, "", None, None)
+            .create_in_project(
+                &project_id,
+                None,
+                "no epic",
+                "",
+                "",
+                "task",
+                0,
+                "",
+                None,
+                None,
+            )
             .await
             .unwrap()
             .id;
@@ -942,8 +967,14 @@ mod ready_projection_tests {
         // Frozen: the epic's task is held; the epic-less task is unaffected.
         prepo.set_frozen(&proposal.id, true).await.unwrap();
         let frozen = ready_ids(&repo, &project_id).await;
-        assert!(!frozen.contains(&epic_task), "frozen build's epic task must be held from dispatch");
-        assert!(frozen.contains(&loose_task), "epic-less task (epic_id NULL) must stay dispatchable");
+        assert!(
+            !frozen.contains(&epic_task),
+            "frozen build's epic task must be held from dispatch"
+        );
+        assert!(
+            frozen.contains(&loose_task),
+            "epic-less task (epic_id NULL) must stay dispatchable"
+        );
 
         // Un-freezing re-admits it.
         prepo.set_frozen(&proposal.id, false).await.unwrap();

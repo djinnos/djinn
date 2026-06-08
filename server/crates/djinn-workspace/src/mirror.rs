@@ -448,11 +448,7 @@ pub async fn git_gc(repo: &Path) -> Result<(), djinn_git::GitError> {
     .await;
     run_git_command_with_timeout(
         repo.to_path_buf(),
-        vec![
-            "gc".into(),
-            "--prune=2.weeks.ago".into(),
-            "--quiet".into(),
-        ],
+        vec!["gc".into(), "--prune=2.weeks.ago".into(), "--quiet".into()],
         GC_TIMEOUT,
     )
     .await

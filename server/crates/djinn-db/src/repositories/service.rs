@@ -27,8 +27,8 @@ pub struct ServicePreset {
     pub service_type: String,
     pub image: String,
     pub port: i32,
-    pub env: String,           // JSON object (text)
-    pub resources: String,     // JSON object (text)
+    pub env: String,       // JSON object (text)
+    pub resources: String, // JSON object (text)
     pub conn_template: String,
     pub conn_env_var: String,
 }
@@ -69,7 +69,10 @@ impl ServicePresetRepository {
     pub async fn get(&self, id: &str) -> Result<Option<ServicePreset>> {
         self.db.ensure_initialized().await?;
         let q = format!("SELECT {PRESET_COLS} FROM service_presets WHERE id = $1");
-        let row = sqlx::query(&q).bind(id).fetch_optional(self.db.pool()).await?;
+        let row = sqlx::query(&q)
+            .bind(id)
+            .fetch_optional(self.db.pool())
+            .await?;
         Ok(row.as_ref().map(map_preset))
     }
 }
@@ -160,7 +163,10 @@ impl ServiceInstanceRepository {
     pub async fn get(&self, id: &str) -> Result<Option<ServiceInstance>> {
         self.db.ensure_initialized().await?;
         let q = format!("SELECT {INSTANCE_COLS} FROM service_instances WHERE id = $1");
-        let row = sqlx::query(&q).bind(id).fetch_optional(self.db.pool()).await?;
+        let row = sqlx::query(&q)
+            .bind(id)
+            .fetch_optional(self.db.pool())
+            .await?;
         Ok(row.as_ref().map(map_instance))
     }
 
@@ -220,7 +226,10 @@ impl ServiceInstanceRepository {
     pub async fn list_for_task(&self, task_run_id: &str) -> Result<Vec<ServiceInstance>> {
         self.db.ensure_initialized().await?;
         let q = format!("SELECT {INSTANCE_COLS} FROM service_instances WHERE task_run_id = $1");
-        let rows = sqlx::query(&q).bind(task_run_id).fetch_all(self.db.pool()).await?;
+        let rows = sqlx::query(&q)
+            .bind(task_run_id)
+            .fetch_all(self.db.pool())
+            .await?;
         Ok(rows.iter().map(map_instance).collect())
     }
 }
@@ -242,7 +251,9 @@ impl ServicePolicyRepository {
             .bind(project_id)
             .fetch_optional(self.db.pool())
             .await?;
-        Ok(row.map(|r| r.get::<bool, _>("allow_services")).unwrap_or(true))
+        Ok(row
+            .map(|r| r.get::<bool, _>("allow_services"))
+            .unwrap_or(true))
     }
 
     pub async fn set_allow_services(&self, project_id: &str, allow: bool) -> Result<()> {
@@ -284,7 +295,11 @@ mod tests {
         let repo = ServicePresetRepository::new(db.clone());
         let presets = repo.list().await.unwrap();
         assert_eq!(presets.len(), 3, "postgres/redis/rabbitmq seeded");
-        let pg = repo.get("preset-postgres-18").await.unwrap().expect("pg preset");
+        let pg = repo
+            .get("preset-postgres-18")
+            .await
+            .unwrap()
+            .expect("pg preset");
         assert_eq!(pg.service_type, "postgres");
         assert_eq!(pg.conn_env_var, "TEST_POSTGRES_URL");
     }
@@ -303,11 +318,21 @@ mod tests {
             .claim("i2", "tr1", "p1", "preset-postgres-18", "postgres")
             .await
             .unwrap();
-        assert!(!created_b, "second claim for same (task,type) returns existing");
+        assert!(
+            !created_b,
+            "second claim for same (task,type) returns existing"
+        );
         assert_eq!(a.id, b.id);
-        repo.mark_ready(&a.id, "pod-x", "svc-x", None, "TEST_POSTGRES_URL", "postgres://x")
-            .await
-            .unwrap();
+        repo.mark_ready(
+            &a.id,
+            "pod-x",
+            "svc-x",
+            None,
+            "TEST_POSTGRES_URL",
+            "postgres://x",
+        )
+        .await
+        .unwrap();
         assert_eq!(repo.get(&a.id).await.unwrap().unwrap().status, "ready");
     }
 
