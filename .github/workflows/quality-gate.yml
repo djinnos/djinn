@@ -80,8 +80,10 @@ jobs:
       - run: rustup toolchain install
         working-directory: server
 
-      - name: Install mold linker
-        run: sudo apt-get update && sudo apt-get install -y mold
+      - name: Install mold
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y mold
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -122,8 +124,10 @@ jobs:
       - run: rustup toolchain install
         working-directory: server
 
-      - name: Install mold linker
-        run: sudo apt-get update && sudo apt-get install -y mold
+      - name: Install mold
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y mold
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -173,8 +177,10 @@ jobs:
       - run: rustup toolchain install
         working-directory: server
 
-      - name: Install mold linker
-        run: sudo apt-get update && sudo apt-get install -y mold
+      - name: Install mold
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y mold
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -237,8 +243,10 @@ jobs:
       - run: rustup toolchain install
         working-directory: server
 
-      - name: Install mold linker
-        run: sudo apt-get update && sudo apt-get install -y mold
+      - name: Install mold
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y mold
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -340,8 +348,10 @@ jobs:
       - run: rustup toolchain install
         working-directory: server
 
-      - name: Install mold linker
-        run: sudo apt-get update && sudo apt-get install -y mold
+      - name: Install mold
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y mold
 
       - uses: Swatinem/rust-cache@v2
         with:

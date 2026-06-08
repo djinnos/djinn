@@ -123,49 +123,59 @@ mod tests {
         ))
     }
 
+    const MAX_IMAGE_ID_LEN: usize = 36;
+    const MAX_IMAGE_TAG_LEN: usize = 512;
+
+    fn assert_fits_varchar(value: &str, column: &str, max_len: usize) {
+        assert!(
+            value.len() <= max_len,
+            "{column} is varchar({max_len}); generated test value was {} bytes",
+            value.len()
+        );
+    }
+
+    fn test_image_id() -> String {
+        let id = uuid::Uuid::now_v7().simple().to_string();
+        assert_fits_varchar(&id, "images.id", MAX_IMAGE_ID_LEN);
+        id
+    }
+
+    fn test_image_tag(image_id: &str) -> String {
+        let tag = format!("test-image-{}", &image_id[..20]);
+        assert_fits_varchar(&tag, "images.tag", MAX_IMAGE_TAG_LEN);
+        tag
+    }
+
     async fn make_epic(
         db: &Database,
         tx: broadcast::Sender<DjinnEventEnvelope>,
     ) -> djinn_core::models::Epic {
-        let epic = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx))
-            .create("Epic", "", "", "", "", None)
-            .await
-            .unwrap();
-        // Satisfy the coordinator's readiness gate: select a ready catalog
-        // image for the synthesized default project and stamp
-        // `graph_warmed_at`. `get_dispatch_readiness` resolves the selected
-        // catalog image instead of the legacy per-project image columns, so
-        // setting only `projects.image_status` leaves dispatch fail-closed.
-        let image = djinn_db::ProjectImage {
-            tag: Some("djinn-test:testhash".into()),
-            hash: Some("testhash".into()),
-            status: djinn_db::ProjectImageStatus::READY.into(),
-            last_error: None,
-        };
-        let _ = djinn_db::ProjectRepository::new(db.clone(), crate::events::event_bus_for(&tx))
-            .set_project_image(&epic.project_id, &image)
-            .await;
-        let image_repo = djinn_db::ImageRepository::new(db.clone());
-        // `images.id` is varchar(36); use a compact, unique-enough synthetic id
-        // so this helper also stays inside older CI test-template limits.
-        let image_id = format!(
-            "ci-ready-{}",
-            &uuid::Uuid::now_v7().simple().to_string()[..16]
-        );
-        let image_name = format!("ci-ready-{}", &image_id[..8]);
-        image_repo
-            .create(&image_id, &image_name, Some("ready test image"), "{}")
-            .await
-            .unwrap();
-        image_repo
-            .mark_ready(
-                &image_id,
-                image
-                    .tag
-                    .as_deref()
-                    .unwrap_or("test-registry/djinn-test:testhash"),
+        let epic = djinn_core::auth_context::SESSION_USER_ID
+            .scope(
                 None,
+                EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+                    .create("Epic", "", "", "", "", None),
             )
+            .await
+            .unwrap();
+        // Satisfy the coordinator's readiness gate: assign a ready catalog
+        // image to the synthesized default project and stamp `graph_warmed_at`.
+        // The dispatch gate resolves readiness from `selected_image_id`, not
+        // the legacy per-project image columns.
+        let image_repo = djinn_db::ImageRepository::new(db.clone());
+        // `images.id` is varchar(36), so use an unprefixed UUID payload.
+        // Prefixing the id overflows CI's Postgres schema; the compact form
+        // leaves extra headroom while remaining globally unique for tests.
+        let image_id = test_image_id();
+        image_repo
+            .create(&image_id, "Test image", None, r#"{"schema_version":1}"#)
+            .await
+            .unwrap();
+        // Keep the synthetic tag compact too: these tests run against the
+        // real Postgres schema, whose image identity fields are length-bound.
+        let image_tag = test_image_tag(&image_id);
+        image_repo
+            .mark_ready(&image_id, &image_tag, Some("sha256:testhash"))
             .await
             .unwrap();
         image_repo
