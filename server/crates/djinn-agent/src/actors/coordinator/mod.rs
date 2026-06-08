@@ -977,11 +977,16 @@ mod tests {
             .await
             .unwrap();
 
-        let handle = spawn_coordinator(&db, &tx);
-        handle.trigger_dispatch().await.unwrap();
-        handle.wait_for_status(|s| s.tasks_dispatched >= 1).await;
+        let mut actor = coordinator_actor_for_tests(&db, &tx);
+        actor.dispatch_ready_tasks(None).await;
 
-        let status = handle.get_status().unwrap();
+        let status = CoordinatorStatus {
+            tasks_dispatched: actor.dispatched,
+            sessions_recovered: actor.recovered,
+            epic_throughput: HashMap::new(),
+            pr_errors: HashMap::new(),
+            rate_limited_until: None,
+        };
         assert!(
             status.tasks_dispatched >= 1,
             "should have dispatched the ready task"
@@ -1032,12 +1037,16 @@ mod tests {
         .await
         .unwrap();
 
-        let handle = spawn_coordinator(&db, &tx);
-        handle.trigger_dispatch().await.unwrap();
-        // Dispatch; wait for it to complete.
-        handle.wait_for_status(|s| s.tasks_dispatched >= 1).await;
+        let mut actor = coordinator_actor_for_tests(&db, &tx);
+        actor.dispatch_ready_tasks(None).await;
 
-        let status = handle.get_status().unwrap();
+        let status = CoordinatorStatus {
+            tasks_dispatched: actor.dispatched,
+            sessions_recovered: actor.recovered,
+            epic_throughput: HashMap::new(),
+            pr_errors: HashMap::new(),
+            rate_limited_until: None,
+        };
         assert!(
             status.tasks_dispatched >= 1,
             "should dispatch task waiting for review"
