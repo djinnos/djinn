@@ -250,6 +250,8 @@ pub(crate) async fn call_code_graph(
     let ctx = djinn_control_plane::bridge::ProjectCtx {
         id: project_id.to_string(),
         clone_path: project_path.to_string(),
+        workspace: p.workspace.clone(),
+        sub_path: None,
     };
 
     // PR C2: pre-resolve key-bearing ops so the chat tool surfaces

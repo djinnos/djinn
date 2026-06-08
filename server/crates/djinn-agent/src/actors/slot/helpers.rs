@@ -1333,6 +1333,8 @@ pub(crate) async fn build_role_code_graph_context(
     let ctx = djinn_control_plane::bridge::ProjectCtx {
         id: task.project_id.clone(),
         clone_path: project_path.to_string(),
+        workspace: None,
+        sub_path: None,
     };
 
     let ranked = match graph_ops
@@ -1558,6 +1560,8 @@ pub(crate) async fn build_reviewer_diff_context(
     let ctx = djinn_control_plane::bridge::ProjectCtx {
         id: task.project_id.clone(),
         clone_path: project_path.to_string(),
+        workspace: None,
+        sub_path: None,
     };
 
     let detected = match graph_ops.detect_changes(&ctx, from_sha, to_sha, &[]).await {
@@ -1665,6 +1669,8 @@ pub(crate) async fn build_planner_patrol_context(
     let ctx = djinn_control_plane::bridge::ProjectCtx {
         id: task.project_id.clone(),
         clone_path: project_path.to_string(),
+        workspace: None,
+        sub_path: None,
     };
     let ranked = graph_ops
         .ranked(&ctx, Some("file"), Some("pagerank"), 20)
