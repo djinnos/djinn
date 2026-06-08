@@ -137,7 +137,12 @@ mod tests {
         // kept in sync below for older assertions/helpers, but they are not
         // sufficient by themselves.
         let image_repo = djinn_db::ImageRepository::new(db.clone());
-        let image_id = epic.project_id.clone();
+        // `images.id` is VARCHAR(36). Some synthetic project ids used by test
+        // helpers can already be 36 chars (or longer once prefixed), so keep the
+        // catalog image id explicitly bounded while retaining enough of the
+        // project id to avoid collisions within these isolated test databases.
+        let project_id_prefix: String = epic.project_id.chars().take(32).collect();
+        let image_id = format!("img-{project_id_prefix}");
         let image_tag = format!("test-registry/djinn-test:{image_id}");
         image_repo
             .create(&image_id, "Test image", Some("ready test image"), "{}")
