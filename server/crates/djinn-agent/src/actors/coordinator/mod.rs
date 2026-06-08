@@ -151,9 +151,11 @@ mod tests {
         let image_repo = djinn_db::ImageRepository::new(db.clone());
         // `images.id` is varchar(36). The default-project identifier used by
         // some test repository paths is longer than that, so generate a fresh
-        // schema-valid catalog image id for this helper.
+        // schema-valid catalog image id for this helper. Keep the synthesized
+        // catalog name short too; older test templates constrain image text
+        // fields to varchar(36).
         let image_id = uuid::Uuid::now_v7().to_string();
-        let image_name = format!("ci-ready-{image_id}");
+        let image_name = format!("ci-ready-{}", &image_id[..8]);
         image_repo
             .create(&image_id, &image_name, Some("ready test image"), "{}")
             .await
