@@ -131,22 +131,29 @@ mod tests {
             .create("Epic", "", "", "", "", None)
             .await
             .unwrap();
-        // Satisfy the coordinator's readiness gate: mark the synthesized
-        // default project as image-ready and stamp `graph_warmed_at`.
-        let project_repo =
-            djinn_db::ProjectRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-        let image = djinn_db::ProjectImage {
-            tag: Some(format!(
-                "test-registry/djinn-project-{}:testhash",
-                &epic.project_id
-            )),
-            hash: Some("testhash".into()),
-            status: djinn_db::ProjectImageStatus::READY.into(),
-            last_error: None,
-        };
-        let _ = project_repo
-            .set_project_image(&epic.project_id, &image)
-            .await;
+        // Satisfy the coordinator's readiness gate: assign a ready catalog
+        // image to the synthesized default project and seed a graph cache row.
+        // `ProjectRepository::resolve_dispatch_image` intentionally ignores the
+        // legacy per-project image columns, so this fixture must use the image
+        // catalog selection path rather than `ProjectRepository::set_project_image`.
+        let image_repo = djinn_db::ImageRepository::new(db.clone());
+        let image_id = format!("test-image-{}", &epic.project_id);
+        image_repo
+            .create(&image_id, "Test image", None, r#"{"schema_version":1}"#)
+            .await
+            .unwrap();
+        image_repo
+            .mark_ready(
+                &image_id,
+                &format!("test-registry/djinn-project-{}:testhash", &epic.project_id),
+                Some("sha256:testhash"),
+            )
+            .await
+            .unwrap();
+        image_repo
+            .set_project_image(&epic.project_id, Some(&image_id))
+            .await
+            .unwrap();
         let cache_repo = djinn_db::RepoGraphCacheRepository::new(db.clone());
         let _ = cache_repo
             .upsert(djinn_db::RepoGraphCacheInsert {
