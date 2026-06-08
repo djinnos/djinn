@@ -97,7 +97,17 @@ pub fn compute_environment_hash(config: &EnvironmentConfig, agent_worker_ref: &s
     // export clobbered the pod-level CARGO_HOME=/cache/cargo back to the
     // ephemeral image layer → agent-invoked cargo re-downloaded crates cold.
     // The script edit already moves script_sha; bump the salt to document.
-    hasher.update(b"env-config/v8\0");
+    //
+    // v8→v9: v8 fixed the cache clobber but, by keeping the PATH line deriving
+    // from `${CARGO_HOME}/bin`, pushed a NEW bug: at runtime CARGO_HOME is
+    // /cache/cargo (the PVC cache dir, no cargo binary), so the login-shell PATH
+    // got /cache/cargo/bin and `cargo` fell off PATH — the agent dropped to
+    // cold, uncached `rustc` fallbacks (~12-min compiles) and `cargo: command
+    // not found` loops. The 10-rust.sh fragment now pins PATH to the baked
+    // /usr/local/cargo/bin (expanded at build time) while CARGO_HOME stays
+    // runtime-overridable for the cache. Script edit moves script_sha; bump the
+    // salt to document + guarantee the rebuild.
+    hasher.update(b"env-config/v9\0");
     hasher.update(config_json.as_bytes());
     hasher.update([0u8]);
     hasher.update(script_sha.as_bytes());
