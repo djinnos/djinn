@@ -1047,7 +1047,8 @@ impl AppState {
                 self.inner.lsp.clone(),
             )
             .with_graph_warmer(self.graph_warmer().await)
-            .with_mirror(self.inner.mirror.clone()),
+            .with_mirror(self.inner.mirror.clone())
+            .with_rpc_registry(self.inner.rpc_registry.clone()),
         );
 
         *self.inner.pool.lock().await = Some(pool.clone());

@@ -1098,6 +1098,25 @@ impl CoordinatorActor {
                 continue;
             }
 
+            // Ground-truth liveness gate: if the worker still holds a live RPC
+            // connection for this run, it is alive — just long or quiet — so
+            // never reap it. This is authoritative where the heuristics below
+            // are not: session-row tokens read `0/0` until session *end*, and
+            // for remote K8s workers the host-side slot/activity bookkeeping
+            // (`task_to_slot` / `active_tasks`) can drift out of sync with the
+            // live pod, making the activity gate below false-negative and
+            // reaping a productive worker (it then restarts from scratch and
+            // never converges). A genuinely dead worker — crashed, OOM-killed,
+            // or never scheduled — has no attached connection slot and falls
+            // through to the reap. `None` registry (off-server/tests) skips
+            // this and uses the activity heuristic alone.
+            if let (Some(registry), Some(run_id)) =
+                (self.rpc_registry.as_ref(), session.task_run_id.as_deref())
+                && registry.is_connected(run_id).await
+            {
+                continue;
+            }
+
             // Liveness gate (leak-safe): a worker that has touched activity
             // within the hard cap is alive and productive — its DB row reads
             // `0/0` only because `sessions.tokens_in/out` are flushed at session

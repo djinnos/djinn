@@ -456,6 +456,7 @@ mod tests {
             last_graph_refresh: StdInstant::now(),
             graph_warmer: None,
             mirror: None,
+            rpc_registry: None,
             prune_tick_counter: 0,
             last_patrol_completed: StdInstant::now(),
             next_patrol_interval: rules::DEFAULT_PLANNER_PATROL_INTERVAL,

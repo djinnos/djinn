@@ -96,6 +96,9 @@ pub(super) struct CoordinatorActor {
     /// an `AgentContext` whose direct-push fallback can clone ephemeral
     /// workspaces. `None` in tests.
     pub(super) mirror: Option<Arc<djinn_workspace::MirrorManager>>,
+    /// Host worker RPC connection registry — ground-truth liveness for the
+    /// zombie reaper. `None` in tests (reaper falls back to DB/activity heuristics).
+    pub(super) rpc_registry: Option<Arc<djinn_supervisor::ConnectionRegistry>>,
     /// Tick counter for association pruning (runs once per ~120 ticks ≈ 1 hour)
     pub(super) prune_tick_counter: u32,
     /// Timestamp of the last patrol completion (or actor start as initial baseline).
@@ -194,6 +197,7 @@ impl CoordinatorActor {
             graph_warmer,
             consolidation_runner,
             mirror,
+            rpc_registry,
         } = deps;
         let events = events_tx.subscribe();
         let mut tick = time::interval(STUCK_INTERVAL);
@@ -228,6 +232,7 @@ impl CoordinatorActor {
             last_graph_refresh: StdInstant::now(),
             graph_warmer,
             mirror,
+            rpc_registry,
             prune_tick_counter: 0,
             last_patrol_completed: StdInstant::now(),
             next_patrol_interval: rules::DEFAULT_PLANNER_PATROL_INTERVAL,

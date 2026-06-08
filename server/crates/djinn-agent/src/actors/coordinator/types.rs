@@ -10,6 +10,7 @@ use djinn_db::Database;
 use djinn_provider::catalog::CatalogService;
 use djinn_provider::catalog::health::HealthTracker;
 use djinn_runtime::GraphWarmerService;
+use djinn_supervisor::ConnectionRegistry;
 use djinn_workspace::MirrorManager;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -41,6 +42,11 @@ pub struct CoordinatorDeps {
     /// can clone the ephemeral workspace from the mirror. `None` in test
     /// contexts — the direct-push path bails cleanly in that case.
     pub mirror: Option<Arc<MirrorManager>>,
+    /// Host-side worker RPC connection registry. The zombie reaper consults it
+    /// for ground-truth liveness so a long-running but actively-connected K8s
+    /// worker is never false-reaped. `None` in off-server/test contexts, where
+    /// the reaper falls back to its DB/activity heuristics.
+    pub rpc_registry: Option<Arc<ConnectionRegistry>>,
 }
 
 impl CoordinatorDeps {
@@ -69,6 +75,7 @@ impl CoordinatorDeps {
             graph_warmer: None,
             consolidation_runner: None,
             mirror: None,
+            rpc_registry: None,
         }
     }
 
@@ -85,6 +92,14 @@ impl CoordinatorDeps {
     /// returns a descriptive error instead of crashing.
     pub fn with_mirror(mut self, mirror: Arc<MirrorManager>) -> Self {
         self.mirror = Some(mirror);
+        self
+    }
+
+    /// Inject the host worker RPC connection registry so the zombie reaper can
+    /// gate reaping on real connection liveness instead of drift-prone in-memory
+    /// slot/activity bookkeeping. Off-server tests omit this.
+    pub fn with_rpc_registry(mut self, registry: Arc<ConnectionRegistry>) -> Self {
+        self.rpc_registry = Some(registry);
         self
     }
 }
