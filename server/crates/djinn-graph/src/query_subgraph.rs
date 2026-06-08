@@ -13,7 +13,7 @@
 //! not an IDF-only selector and does not compete with richer hybrid indexes.
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use petgraph::Direction::{Incoming, Outgoing};
 use petgraph::graph::{EdgeIndex, NodeIndex};
@@ -669,7 +669,11 @@ fn apply_budget(graph: &RepoDependencyGraph, items: &[BudgetItem], budget: usize
 
 fn estimate_node_tokens(node: &RepoGraphNode) -> usize {
     let mut chars = stable_node_uid(node).len() + node.display_name.len() + 16;
-    chars += node.file_path.as_ref().map(path_chars).unwrap_or_default();
+    chars += node
+        .file_path
+        .as_deref()
+        .map(path_chars)
+        .unwrap_or_default();
     chars += node
         .signature
         .as_ref()
@@ -736,6 +740,7 @@ mod tests {
     use super::*;
     use crate::repo_graph::{RepoGraphEdge, edge_confidence_floor, edge_weight_for};
     use petgraph::graph::NodeIndex;
+    use std::path::PathBuf;
 
     fn test_node(name: &str) -> RepoGraphNode {
         RepoGraphNode {
