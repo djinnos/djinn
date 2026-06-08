@@ -931,6 +931,7 @@ impl EpicRepository {
             repo_slug.len() <= MAX_GITHUB_REPO_LEN,
             "projects.github_repo is varchar({MAX_GITHUB_REPO_LEN})"
         );
+
         sqlx::query!(
             "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
             id,
