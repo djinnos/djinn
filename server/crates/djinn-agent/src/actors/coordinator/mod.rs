@@ -334,7 +334,10 @@ mod tests {
                     models: vec![ModelSlotConfig {
                         model_id: DEFAULT_MODEL_ID.to_owned(),
                         max_slots: 1,
-                        roles: ["worker"].into_iter().map(ToOwned::to_owned).collect(),
+                        roles: ["worker", "reviewer"]
+                            .into_iter()
+                            .map(ToOwned::to_owned)
+                            .collect(),
                     }],
                     role_priorities: HashMap::new(),
                 },
@@ -996,13 +999,11 @@ mod tests {
             .await
             .unwrap();
 
-        let handle = spawn_coordinator(&db, &tx);
-        handle.trigger_dispatch().await.unwrap();
-        handle.wait_for_status(|s| s.tasks_dispatched >= 1).await;
+        let mut actor = coordinator_actor_for_tests(&db, &tx);
+        actor.dispatch_ready_tasks(None).await;
 
-        let status = handle.get_status().unwrap();
         assert!(
-            status.tasks_dispatched >= 1,
+            actor.dispatched >= 1,
             "should have dispatched the ready task"
         );
     }
@@ -1051,14 +1052,11 @@ mod tests {
         .await
         .unwrap();
 
-        let handle = spawn_coordinator(&db, &tx);
-        handle.trigger_dispatch().await.unwrap();
-        // Dispatch; wait for it to complete.
-        handle.wait_for_status(|s| s.tasks_dispatched >= 1).await;
+        let mut actor = coordinator_actor_for_tests(&db, &tx);
+        actor.dispatch_ready_tasks(None).await;
 
-        let status = handle.get_status().unwrap();
         assert!(
-            status.tasks_dispatched >= 1,
+            actor.dispatched >= 1,
             "should dispatch task waiting for review"
         );
     }

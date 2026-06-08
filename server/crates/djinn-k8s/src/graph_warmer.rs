@@ -367,7 +367,9 @@ impl GraphWarmerService for K8sGraphWarmer {
             memory_limit: req.memory_limit.clone(),
         };
         let client = self.client.clone().ok_or_else(|| {
-            WarmerError::Backend("backing-service provisioning requires a live kube client".to_string())
+            WarmerError::Backend(
+                "backing-service provisioning requires a live kube client".to_string(),
+            )
         })?;
         // ownerRef the task-run Job so the Pod + Service GC with the task.
         let owner = self.task_run_owner_ref(&req.task_run_id).await;
@@ -410,8 +412,7 @@ impl GraphWarmerService for K8sGraphWarmer {
     }
 
     async fn release_backing_service(&self, instance_id: &str) -> Result<(), WarmerError> {
-        let (pod_name, service_name) =
-            crate::backing_service::backing_service_names(instance_id);
+        let (pod_name, service_name) = crate::backing_service::backing_service_names(instance_id);
         let Some(client) = self.client.clone() else {
             return Ok(());
         };
@@ -674,7 +675,10 @@ mod tests {
             .create(&image_id, name, None, "{}")
             .await
             .expect("create catalog image");
-        let tag = format!("reg.example:5000/djinn-project-{}:abc123def456", &project.id);
+        let tag = format!(
+            "reg.example:5000/djinn-project-{}:abc123def456",
+            &project.id
+        );
         images
             .mark_ready(&image_id, &tag, None)
             .await

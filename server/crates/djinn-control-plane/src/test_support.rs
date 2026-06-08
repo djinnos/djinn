@@ -145,7 +145,11 @@ impl RuntimeOps for StubRuntime {
     }
     async fn trigger_graph_warm(&self, _project_id: &str) {}
     async fn apply_user_model_change(&self) {}
-    async fn dispatch_verification_test(&self, _test_id: &str, _project_id: &str) -> Result<(), String> {
+    async fn dispatch_verification_test(
+        &self,
+        _test_id: &str,
+        _project_id: &str,
+    ) -> Result<(), String> {
         Err("stub: RuntimeOps::dispatch_verification_test not implemented".into())
     }
     async fn provision_backing_service(

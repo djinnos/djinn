@@ -127,7 +127,11 @@ const DOCKERFILE_KEY: &str = "Dockerfile";
 /// subject + hash. Stable per (subject, hash) — two concurrent builds
 /// at the same hash share the same CM.
 pub fn build_context_config_map_name_for(subject: &BuildSubject, hash_prefix: &str) -> String {
-    format!("djinn-build-ctx-{}-{}", subject.resource_segment(), hash_prefix)
+    format!(
+        "djinn-build-ctx-{}-{}",
+        subject.resource_segment(),
+        hash_prefix
+    )
 }
 
 /// Project-keyed convenience wrapper over [`build_context_config_map_name_for`].
@@ -510,7 +514,13 @@ mod tests {
     fn builds_job_targets_buildctl_not_devcontainer() {
         let cfg = test_cfg();
         let ctx = test_build_context();
-        let job = build_image_build_job(&cfg, &BuildSubject::project("p"), "abc123def456", "reg/p:abc123", &ctx);
+        let job = build_image_build_job(
+            &cfg,
+            &BuildSubject::project("p"),
+            "abc123def456",
+            "reg/p:abc123",
+            &ctx,
+        );
         let script = &job
             .spec
             .as_ref()
@@ -547,7 +557,13 @@ mod tests {
     fn builds_job_mounts_build_context_cm_via_items() {
         let cfg = test_cfg();
         let ctx = test_build_context();
-        let job = build_image_build_job(&cfg, &BuildSubject::project("proj-xyz"), "abc123", "reg/p:abc123", &ctx);
+        let job = build_image_build_job(
+            &cfg,
+            &BuildSubject::project("proj-xyz"),
+            "abc123",
+            "reg/p:abc123",
+            &ctx,
+        );
         let pod = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         let volumes = pod.volumes.as_ref().unwrap();
         let ctx_vol = volumes
@@ -581,7 +597,13 @@ mod tests {
         let mut cfg = test_cfg();
         cfg.build_service_account = "custom-build-sa".into();
         let ctx = test_build_context();
-        let job = build_image_build_job(&cfg, &BuildSubject::project("p"), "abc123", "reg/p:abc123", &ctx);
+        let job = build_image_build_job(
+            &cfg,
+            &BuildSubject::project("p"),
+            "abc123",
+            "reg/p:abc123",
+            &ctx,
+        );
         let pod = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         assert_eq!(pod.service_account_name.as_deref(), Some("custom-build-sa"));
     }
@@ -590,7 +612,13 @@ mod tests {
     fn builds_job_does_not_mount_mirror_pvc() {
         let cfg = test_cfg();
         let ctx = test_build_context();
-        let job = build_image_build_job(&cfg, &BuildSubject::project("p"), "abc123", "reg/p:abc123", &ctx);
+        let job = build_image_build_job(
+            &cfg,
+            &BuildSubject::project("p"),
+            "abc123",
+            "reg/p:abc123",
+            &ctx,
+        );
         let pod = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         let volumes = pod.volumes.as_ref().unwrap();
         assert!(
@@ -603,7 +631,13 @@ mod tests {
     fn job_has_backoff_limit_and_ttl_set() {
         let cfg = test_cfg();
         let ctx = test_build_context();
-        let job = build_image_build_job(&cfg, &BuildSubject::project("p"), "abc123", "reg/p:abc123", &ctx);
+        let job = build_image_build_job(
+            &cfg,
+            &BuildSubject::project("p"),
+            "abc123",
+            "reg/p:abc123",
+            &ctx,
+        );
         let spec = job.spec.as_ref().unwrap();
         assert_eq!(spec.backoff_limit, Some(1));
         assert_eq!(
@@ -661,7 +695,12 @@ mod tests {
             &ctx,
         );
         let name = job.metadata.name.as_deref().unwrap();
-        assert!(name.len() <= 63, "job name {} is {} chars", name, name.len());
+        assert!(
+            name.len() <= 63,
+            "job name {} is {} chars",
+            name,
+            name.len()
+        );
     }
 
     #[test]
@@ -676,9 +715,15 @@ mod tests {
             &ctx,
         );
         let labels = job.metadata.labels.as_ref().unwrap();
-        assert_eq!(labels.get(LABEL_IMAGE_ID).map(String::as_str), Some("img-1"));
+        assert_eq!(
+            labels.get(LABEL_IMAGE_ID).map(String::as_str),
+            Some("img-1")
+        );
         assert!(!labels.contains_key(LABEL_PROJECT_ID));
-        assert_eq!(job.metadata.name.as_deref(), Some("djinn-build-img-1-abc123"));
+        assert_eq!(
+            job.metadata.name.as_deref(),
+            Some("djinn-build-img-1-abc123")
+        );
     }
 
     #[test]
@@ -692,7 +737,15 @@ mod tests {
             "reg/djinn-image-img-1:abc123",
             &ctx,
         );
-        let script = &job.spec.as_ref().unwrap().template.spec.as_ref().unwrap().containers[0]
+        let script = &job
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0]
             .command
             .as_ref()
             .unwrap()[2];

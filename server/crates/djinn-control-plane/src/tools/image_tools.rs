@@ -252,7 +252,12 @@ impl DjinnMcpServer {
         };
         let repo = ImageRepository::new(self.state.db().clone());
         if let Err(e) = repo
-            .update(&input.id, &input.name, input.description.as_deref(), &config_json)
+            .update(
+                &input.id,
+                &input.name,
+                input.description.as_deref(),
+                &config_json,
+            )
             .await
         {
             return Json(ImageMutateResponse {
@@ -306,9 +311,7 @@ impl DjinnMcpServer {
             }),
             Err(e) => Json(ImageMutateResponse {
                 status: "error".into(),
-                error: Some(format!(
-                    "delete failed (is a project still using it?): {e}"
-                )),
+                error: Some(format!("delete failed (is a project still using it?): {e}")),
                 id: None,
             }),
         }
@@ -343,8 +346,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(input): Parameters<ProjectSetImageParams>,
     ) -> Json<ImageMutateResponse> {
-        let project_repo =
-            ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+        let project_repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
         let project_id = match project_repo.resolve(&input.project).await {
             Ok(Some(id)) => id,
             Ok(None) => {
@@ -401,9 +403,9 @@ impl DjinnMcpServer {
         // selection up front, but do NOT copy it into the project. A
         // catalogued project shares the catalog image; it does not build (or
         // dispatch against) its own per-project image (migration 46).
-        if let Err(e) = serde_json::from_str::<djinn_stack::environment::EnvironmentConfig>(
-            &image.config,
-        ) {
+        if let Err(e) =
+            serde_json::from_str::<djinn_stack::environment::EnvironmentConfig>(&image.config)
+        {
             return Json(ImageMutateResponse {
                 status: "error".into(),
                 error: Some(format!("image config parse: {e}")),
@@ -411,7 +413,10 @@ impl DjinnMcpServer {
             });
         }
 
-        if let Err(e) = image_repo.set_project_image(&project_id, Some(image_id)).await {
+        if let Err(e) = image_repo
+            .set_project_image(&project_id, Some(image_id))
+            .await
+        {
             return Json(ImageMutateResponse {
                 status: "error".into(),
                 error: Some(format!("assign: {e}")),
