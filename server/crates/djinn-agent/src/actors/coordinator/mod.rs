@@ -141,8 +141,11 @@ mod tests {
         // helpers can already be 36 chars (or longer once prefixed), so cap the
         // prefixed catalog image id at the column bound while retaining enough of
         // the project id to avoid collisions within these isolated test databases.
-        let project_id_prefix: String = epic.project_id.chars().take(32).collect();
+        let max_project_id_chars = 36usize.saturating_sub("img-".len());
+        let project_id_prefix: String =
+            epic.project_id.chars().take(max_project_id_chars).collect();
         let image_id = format!("img-{project_id_prefix}");
+        debug_assert!(image_id.len() <= 36);
         let image_tag = format!("test-registry/djinn-test:{image_id}");
         image_repo
             .create(&image_id, "Test image", Some("ready test image"), "{}")
