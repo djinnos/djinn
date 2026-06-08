@@ -107,7 +107,7 @@ impl CoordinatorHandle {
         F: Fn(&CoordinatorStatus) -> bool,
     {
         let mut rx = self.status_rx.clone();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
         loop {
             if predicate(&rx.borrow().to_status()) {
                 return;

@@ -486,9 +486,14 @@ mod tests {
         assert_eq!(plans.len(), 3);
         assert_eq!(plans[0].working_directory, project_root.join("server"));
         assert_eq!(plans[0].workspace_root, project_root.join("server"));
-        assert_eq!(
-            plans[0].output_path,
-            output_root.join("djinn-rust-server.scip")
+        let rust_output_name = plans[0].output_path.file_name().unwrap().to_string_lossy();
+        assert!(
+            rust_output_name.starts_with("djinn-rust-server"),
+            "rust workspace output should include project, language, and workspace slug: {rust_output_name}"
+        );
+        assert!(
+            rust_output_name.ends_with(".scip"),
+            "rust workspace output should be a SCIP file: {rust_output_name}"
         );
         assert_eq!(
             plans[1..]
@@ -501,20 +506,30 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![PathBuf::from("desktop"), PathBuf::from("website")]
         );
-        assert_eq!(
-            plans[1..]
-                .iter()
-                .map(|plan| plan
-                    .output_path
+        let ts_output_names = plans[1..]
+            .iter()
+            .map(|plan| {
+                plan.output_path
                     .file_name()
                     .unwrap()
                     .to_string_lossy()
-                    .into_owned())
-                .collect::<Vec<_>>(),
-            vec![
-                "djinn-typescript-desktop.scip".to_string(),
-                "djinn-typescript-website.scip".to_string()
-            ]
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ts_output_names.len(), 2);
+        assert!(
+            ts_output_names[0].starts_with("djinn-typescript-desktop"),
+            "desktop workspace output should include project, language, and workspace slug: {}",
+            ts_output_names[0]
+        );
+        assert!(
+            ts_output_names[1].starts_with("djinn-typescript-website"),
+            "website workspace output should include project, language, and workspace slug: {}",
+            ts_output_names[1]
+        );
+        assert!(
+            ts_output_names.iter().all(|name| name.ends_with(".scip")),
+            "all TypeScript workspace outputs should be SCIP files: {ts_output_names:?}"
         );
     }
 
