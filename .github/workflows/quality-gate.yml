@@ -69,7 +69,6 @@ jobs:
       run:
         working-directory: server
     env:
-      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
       # No MySQL service in this job. Force sqlx to read from the
       # committed `.sqlx/` offline cache instead of trying to connect to
       # the DATABASE_URL baked into `.cargo/config.toml`.
@@ -80,7 +79,6 @@ jobs:
       - run: rustup toolchain install
         working-directory: server
 
-      - uses: rui314/setup-mold@v1
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -111,7 +109,6 @@ jobs:
       run:
         working-directory: server
     env:
-      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
       # No MySQL service in this job (it only compiles, --no-run).
       # Force sqlx to read from the committed `.sqlx/` offline cache.
       SQLX_OFFLINE: "true"
@@ -121,7 +118,6 @@ jobs:
       - run: rustup toolchain install
         working-directory: server
 
-      - uses: rui314/setup-mold@v1
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -163,7 +159,7 @@ jobs:
       run:
         working-directory: server
     env:
-      RUSTFLAGS: "-D warnings -C link-arg=-fuse-ld=mold"
+      RUSTFLAGS: "-D warnings"
       SQLX_OFFLINE: "true"
     steps:
       - uses: actions/checkout@v4
@@ -171,7 +167,6 @@ jobs:
       - run: rustup toolchain install
         working-directory: server
 
-      - uses: rui314/setup-mold@v1
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -211,7 +206,7 @@ jobs:
       run:
         working-directory: server
     env:
-      RUSTFLAGS: "-D warnings -C link-arg=-fuse-ld=mold"
+      RUSTFLAGS: "-D warnings"
     # Ephemeral Postgres for djinn-db integration tests (the MySQL/Dolt
     # cut-over shipped in v0.2.x). The workspace `.cargo/config.toml`
     # points DATABASE_URL (compile-time sqlx macros) and
@@ -234,7 +229,6 @@ jobs:
       - run: rustup toolchain install
         working-directory: server
 
-      - uses: rui314/setup-mold@v1
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -311,7 +305,6 @@ jobs:
       run:
         working-directory: server
     env:
-      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
       # `cargo sqlx prepare --check` connects to DATABASE_URL to re-derive
       # each query's type info, then diffs it against the committed
       # `.sqlx/`. Point it at the ephemeral Postgres service below.
@@ -336,7 +329,6 @@ jobs:
       - run: rustup toolchain install
         working-directory: server
 
-      - uses: rui314/setup-mold@v1
 
       - uses: Swatinem/rust-cache@v2
         with:
