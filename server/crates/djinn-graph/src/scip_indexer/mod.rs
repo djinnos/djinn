@@ -225,6 +225,7 @@ pub struct PlannedIndexerCommand {
     pub args: Vec<String>,
     pub working_directory: PathBuf,
     pub workspace_root: PathBuf,
+    pub workspace_slug: String,
     pub output_path: PathBuf,
 }
 
@@ -267,6 +268,7 @@ pub struct ExecutedIndexerCommand {
 pub struct ScipArtifact {
     pub path: PathBuf,
     pub indexer: Option<SupportedIndexer>,
+    pub workspace_slug: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -123,50 +123,65 @@ mod tests {
         ))
     }
 
+    const MAX_IMAGE_ID_LEN: usize = 36;
+    const MAX_IMAGE_TAG_LEN: usize = 512;
+
+    fn assert_fits_varchar(value: &str, column: &str, max_len: usize) {
+        assert!(
+            value.len() <= max_len,
+            "{column} is varchar({max_len}); generated test value was {} bytes",
+            value.len()
+        );
+    }
+
+    fn test_image_id() -> String {
+        let id = uuid::Uuid::now_v7().simple().to_string();
+        assert_fits_varchar(&id, "images.id", MAX_IMAGE_ID_LEN);
+        id
+    }
+
+    fn test_image_tag(image_id: &str) -> String {
+        let tag = format!("test-image-{}", &image_id[..20]);
+        assert_fits_varchar(&tag, "images.tag", MAX_IMAGE_TAG_LEN);
+        tag
+    }
+
     async fn make_epic(
         db: &Database,
         tx: broadcast::Sender<DjinnEventEnvelope>,
     ) -> djinn_core::models::Epic {
-        let epic = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx))
-            .create("Epic", "", "", "", "", None)
+        let epic = djinn_core::auth_context::SESSION_USER_ID
+            .scope(
+                None,
+                EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+                    .create("Epic", "", "", "", "", None),
+            )
             .await
             .unwrap();
         // Satisfy the coordinator's readiness gate: assign a ready catalog
-        // image and stamp `graph_warmed_at`. Dispatch readiness resolves the
-        // selected catalog image now; the legacy per-project image columns are
-        // kept in sync below for older assertions/helpers, but they are not
-        // sufficient by themselves.
+        // image to the synthesized default project and stamp `graph_warmed_at`.
+        // The dispatch gate resolves readiness from `selected_image_id`, not
+        // the legacy per-project image columns.
         let image_repo = djinn_db::ImageRepository::new(db.clone());
-        // `images.id` is VARCHAR(36). Synthetic project ids used by test
-        // helpers are UUIDs (36 chars), so prefixing the full id would exceed
-        // the column bound. Use a short stable prefix instead; these tests run
-        // against isolated databases, so the retained project-id entropy is
-        // enough to avoid collisions while leaving ample room under the limit.
-        let project_id_prefix: String = epic.project_id.chars().take(20).collect();
-        let image_id = format!("img-{project_id_prefix}");
-        debug_assert!(image_id.len() <= 36);
-        let image_tag = format!("test-registry/djinn-test:{image_id}");
+        // `images.id` is varchar(36), so use an unprefixed UUID payload.
+        // Prefixing the id overflows CI's Postgres schema; the compact form
+        // leaves extra headroom while remaining globally unique for tests.
+        let image_id = test_image_id();
         image_repo
-            .create(&image_id, "Test image", Some("ready test image"), "{}")
+            .create(&image_id, "Test image", None, r#"{"schema_version":1}"#)
             .await
             .unwrap();
+        // Keep the synthetic tag compact too: these tests run against the
+        // real Postgres schema, whose image identity fields are length-bound.
+        let image_tag = test_image_tag(&image_id);
         image_repo
-            .mark_ready(&image_id, &image_tag, None)
+            .mark_ready(&image_id, &image_tag, Some("sha256:testhash"))
             .await
             .unwrap();
         image_repo
             .set_project_image(&epic.project_id, Some(&image_id))
             .await
             .unwrap();
-        let image = djinn_db::ProjectImage {
-            tag: Some(image_tag),
-            hash: Some("testhash".into()),
-            status: djinn_db::ProjectImageStatus::READY.into(),
-            last_error: None,
-        };
-        let _ = djinn_db::ProjectRepository::new(db.clone(), crate::events::event_bus_for(&tx))
-            .set_project_image(&epic.project_id, &image)
-            .await;
         let cache_repo = djinn_db::RepoGraphCacheRepository::new(db.clone());
         let _ = cache_repo
             .upsert(djinn_db::RepoGraphCacheInsert {
