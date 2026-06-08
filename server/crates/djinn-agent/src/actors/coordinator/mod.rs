@@ -150,12 +150,11 @@ mod tests {
             .create(&image_id, "Test image", None, r#"{"schema_version":1}"#)
             .await
             .unwrap();
+        // Keep the synthetic tag compact too: these tests run against the
+        // real Postgres schema, whose image identity fields are length-bound.
+        let image_tag = format!("test-image-{}", &image_id[..20]);
         image_repo
-            .mark_ready(
-                &image_id,
-                &format!("test-registry/djinn-project-{}:testhash", &epic.project_id),
-                Some("sha256:testhash"),
-            )
+            .mark_ready(&image_id, &image_tag, Some("sha256:testhash"))
             .await
             .unwrap();
         image_repo
