@@ -144,16 +144,13 @@ mod tests {
             "{image_id_prefix}{}",
             &image_slug[..image_id_suffix_len.min(image_slug.len())]
         );
+        let image_tag = format!("test-registry/djinn-test:{image_id}");
         image_repo
             .create(&image_id, "Test image", Some("ready test image"), "{}")
             .await
             .unwrap();
         image_repo
-            .mark_ready(
-                &image_id,
-                &format!("test-registry/djinn-project-{}:testhash", &epic.project_id),
-                None,
-            )
+            .mark_ready(&image_id, &image_tag, None)
             .await
             .unwrap();
         image_repo
@@ -161,10 +158,7 @@ mod tests {
             .await
             .unwrap();
         let image = djinn_db::ProjectImage {
-            tag: Some(format!(
-                "test-registry/djinn-project-{}:testhash",
-                &epic.project_id
-            )),
+            tag: Some(image_tag),
             hash: Some("testhash".into()),
             status: djinn_db::ProjectImageStatus::READY.into(),
             last_error: None,
