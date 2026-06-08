@@ -617,7 +617,9 @@ mod tests {
 
         assert_eq!(artifacts.len(), 2);
         assert_eq!(artifacts[0].indexer, Some(SupportedIndexer::RustAnalyzer));
+        assert_eq!(artifacts[0].workspace_slug, "server");
         assert_eq!(artifacts[1].indexer, Some(SupportedIndexer::TypeScript));
+        assert_eq!(artifacts[1].workspace_slug, "desktop");
     }
 
     #[test]
@@ -655,7 +657,9 @@ mod tests {
 
         assert_eq!(artifacts.len(), 2);
         assert_eq!(artifacts[0].indexer, Some(SupportedIndexer::Go));
+        assert_eq!(artifacts[0].workspace_slug, "root");
         assert_eq!(artifacts[1].indexer, None);
+        assert_eq!(artifacts[1].workspace_slug, "root");
     }
 
     #[test]
