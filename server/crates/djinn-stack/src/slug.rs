@@ -38,11 +38,7 @@ fn has_generated_hash_suffix(slug: &str) -> bool {
         return false;
     };
 
-    !prefix.is_empty()
-        && suffix.len() == 8
-        && suffix
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
+    !prefix.is_empty() && suffix.len() == 8 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn sanitized_path(root: &Path) -> String {
@@ -95,7 +91,9 @@ fn fnv1a32(bytes: &[u8]) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::path::Path;
+
+    use super::workspace_slug;
 
     #[test]
     fn empty_path_maps_to_root() {
