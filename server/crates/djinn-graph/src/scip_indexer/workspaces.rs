@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 
 use super::{DiscoveredWorkspace, SupportedIndexer};
 
-pub(crate) use djinn_stack::workspace_slug;
+pub use djinn_stack::workspace_slug;
 
 pub(crate) fn discover_workspaces(
     project_root: &Path,
@@ -58,7 +58,7 @@ pub(crate) fn discover_workspaces(
         discovered.push(DiscoveredWorkspace {
             indexer,
             root: PathBuf::new(),
-            slug: "root".to_string(),
+            slug: workspace_slug(Path::new("")),
         });
     }
 
