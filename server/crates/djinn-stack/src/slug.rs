@@ -4,10 +4,14 @@ use std::path::{Component, Path};
 ///
 /// The human-readable prefix is the path sanitized to lowercase ASCII words.
 /// Paths that already are a lowercase ASCII slug (for example `server`) keep
-/// that slug for compatibility. Paths that lose information during
+/// that slug for compatibility, unless they occupy the generated suffix
+/// namespace (`*-<8 lowercase hex digits>`). Paths that lose information during
 /// sanitization (case-folding, separators, punctuation, unicode, or the literal
 /// `root`) get a short hash of the full path appended so distinct roots that
 /// sanitize to the same prefix cannot collapse onto the same workspace name.
+/// Reserving the generated suffix namespace prevents a literal directory like
+/// `packages-api-f59bf297` from colliding with the generated slug for a
+/// different path such as `packages/api`.
 pub fn workspace_slug(root: &Path) -> String {
     let fingerprint = fingerprint_path(root);
     let base = sanitized_path(root);
@@ -22,11 +26,23 @@ pub fn workspace_slug(root: &Path) -> String {
         base.as_str()
     };
 
-    if base != "root" && fingerprint == base {
+    if base != "root" && fingerprint == base && !has_generated_hash_suffix(base) {
         return base.to_string();
     }
 
     format!("{base}-{:08x}", fnv1a32(fingerprint.as_bytes()))
+}
+
+fn has_generated_hash_suffix(slug: &str) -> bool {
+    let Some((prefix, suffix)) = slug.rsplit_once('-') else {
+        return false;
+    };
+
+    !prefix.is_empty()
+        && suffix.len() == 8
+        && suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn sanitized_path(root: &Path) -> String {
@@ -112,6 +128,16 @@ mod tests {
         assert_ne!(nested, dashed);
         assert_ne!(nested, spaced);
         assert_ne!(dashed, spaced);
+    }
+
+    #[test]
+    fn literal_generated_slug_namespace_is_escaped() {
+        let generated = workspace_slug(Path::new("packages/api"));
+        let literal = workspace_slug(Path::new(generated.as_str()));
+
+        assert_eq!(generated, "packages-api-f59bf297");
+        assert!(literal.starts_with("packages-api-f59bf297-"));
+        assert_ne!(generated, literal);
     }
 
     #[test]
