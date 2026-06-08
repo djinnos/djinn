@@ -921,7 +921,9 @@ impl EpicRepository {
 
         let id = uuid::Uuid::now_v7().to_string();
         let owner = "test";
-        let repo_slug = format!("default-{id}");
+        // `projects.github_repo` is varchar(36). Keep the synthetic repo
+        // identifier within that bound while preserving per-test uniqueness.
+        let repo_slug = id.clone();
         sqlx::query!(
             "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
             id,
