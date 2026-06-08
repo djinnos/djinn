@@ -625,6 +625,7 @@ mod tests {
             signature_parts: None,
             is_test: false,
             complexity: None,
+            workspace: None,
         };
 
         let nodes = vec![
