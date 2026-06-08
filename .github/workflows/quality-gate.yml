@@ -18,11 +18,19 @@ concurrency:
 # Shared environment for all jobs.
 # RUSTC_WRAPPER is cleared to disable local sccache in CI; the
 # Swatinem/rust-cache action handles caching instead.
+#
+# RUSTFLAGS is set ONCE here and must NOT be overridden per-job. Both the
+# rust-cache key and Cargo's compile fingerprint fold in RUSTFLAGS, so any
+# divergence between the warm-cache jobs (push to main) and the PR /
+# merge_group consumer jobs is a guaranteed cache miss + full cold rebuild.
+# (Registry/path deps are capped to `--cap-lints allow`, so `-D warnings`
+# only gates first-party crates and never recompiles dependencies.)
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   CARGO_BUILD_BUILD_DIR: target
   RUSTC_WRAPPER: ""
+  RUSTFLAGS: "-D warnings"
 
 jobs:
   # ── Change detection ────────────────────────────────────────────────
@@ -91,8 +99,12 @@ jobs:
           cache-on-failure: true
           cache-all-crates: true
 
+      # Warm with the SAME command the PR consumer runs (`cargo clippy`),
+      # not `cargo check` — clippy compiles workspace crates through
+      # clippy-driver under a separate fingerprint, so a `check` warm
+      # leaves the workspace-crate clippy pass cold. Deps are shared.
       - name: Build workspace (populate cache)
-        run: cargo check --workspace --all-targets --all-features
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Prune old caches
         if: always()
@@ -167,7 +179,6 @@ jobs:
       run:
         working-directory: server
     env:
-      RUSTFLAGS: "-D warnings"
       SQLX_OFFLINE: "true"
     steps:
       - uses: actions/checkout@v4
@@ -217,8 +228,6 @@ jobs:
     defaults:
       run:
         working-directory: server
-    env:
-      RUSTFLAGS: "-D warnings"
     # Ephemeral Postgres for djinn-db integration tests (the MySQL/Dolt
     # cut-over shipped in v0.2.x). The workspace `.cargo/config.toml`
     # points DATABASE_URL (compile-time sqlx macros) and
