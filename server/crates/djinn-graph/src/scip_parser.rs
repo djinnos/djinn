@@ -1165,6 +1165,19 @@ mod tests {
         let _ = fs::remove_file(second);
     }
 
+    #[test]
+    fn parse_scip_file_preserves_workspace_slug() {
+        let dir = PathBuf::from("tmp/scip-parser-tests");
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("workspace.scip");
+        fs::write(&path, fixture_index_bytes()).expect("write fixture");
+
+        let parsed = parse_scip_file(&path, "server").expect("parse fixture");
+
+        assert_eq!(parsed.workspace_slug, "server");
+        let _ = fs::remove_file(path);
+    }
+
     /// Synthetic SCIP index that mixes a global symbol with several
     /// per-document `local …` entries. The parser must drop every
     /// `local` symbol from `symbols`, `definitions`, `references`,
