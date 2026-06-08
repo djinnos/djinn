@@ -30,6 +30,7 @@ pub mod index_tree;
 pub mod process;
 pub mod processes;
 pub mod query_planner;
+pub mod query_subgraph;
 pub mod repo_graph;
 pub mod scip_indexer;
 pub mod scip_parser;
