@@ -153,9 +153,9 @@ mod tests {
         // some test repository paths is longer than that, so generate a fresh
         // schema-valid catalog image id for this helper.
         let image_id = uuid::Uuid::now_v7().to_string();
-        let image_name = "Test Image";
+        let image_name = format!("Test Image {image_id}");
         image_repo
-            .create(&image_id, image_name, Some("ready test image"), "{}")
+            .create(&image_id, &image_name, Some("ready test image"), "{}")
             .await
             .unwrap();
         image_repo
