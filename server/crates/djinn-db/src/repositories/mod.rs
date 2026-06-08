@@ -14,9 +14,9 @@ pub mod project;
 pub mod project_workspace_graph;
 pub mod proposal;
 pub mod repo_graph_cache;
+pub mod service;
 pub mod session;
 pub mod session_auth;
-pub mod service;
 pub mod session_message;
 pub mod settings;
 pub mod task;
@@ -26,8 +26,8 @@ pub mod user;
 pub mod user_settings;
 pub mod verification;
 pub mod verification_cache;
-pub mod verification_test;
 pub mod verification_result;
+pub mod verification_test;
 
 /// Render `count` Postgres positional placeholders starting at `$start`.
 ///

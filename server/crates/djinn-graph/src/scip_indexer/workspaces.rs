@@ -7,6 +7,15 @@ use anyhow::{Context, Result};
 
 use super::{DiscoveredWorkspace, SupportedIndexer};
 
+// Keep the legacy `scip_indexer::workspaces::workspace_slug` path available for
+// graph-internal callers while the canonical implementation lives in
+// `djinn_stack`. This submodule is intentionally mostly an implementation
+// detail, so the crate-level `unreachable_pub` lint cannot see the re-export as
+// part of the public API even though downstream code may still import it via the
+// public `scip_indexer` module.
+#[allow(unreachable_pub)]
+pub use djinn_stack::workspace_slug;
+
 pub(crate) fn discover_workspaces(
     project_root: &Path,
     indexer: SupportedIndexer,
@@ -56,7 +65,7 @@ pub(crate) fn discover_workspaces(
         discovered.push(DiscoveredWorkspace {
             indexer,
             root: PathBuf::new(),
-            slug: "root".to_string(),
+            slug: workspace_slug(Path::new("")),
         });
     }
 
@@ -100,34 +109,6 @@ fn file_contains(path: &Path, needle: &str) -> Result<bool> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("read workspace marker {}", path.display()))?;
     Ok(content.contains(needle))
-}
-
-fn workspace_slug(root: &Path) -> String {
-    if root.as_os_str().is_empty() {
-        return "root".to_string();
-    }
-
-    let slug = root
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .flat_map(|segment| {
-            segment
-                .chars()
-                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-                .collect::<String>()
-                .split('-')
-                .filter(|part| !part.is_empty())
-                .map(str::to_ascii_lowercase)
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>()
-        .join("-");
-
-    if slug.is_empty() {
-        "root".to_string()
-    } else {
-        slug
-    }
 }
 
 /// Directory names that target discovery must never descend into.
@@ -239,7 +220,7 @@ mod tests {
         let rust_workspaces = discover_workspaces(&project_root, SupportedIndexer::RustAnalyzer);
         assert_eq!(rust_workspaces.len(), 1);
         assert_eq!(rust_workspaces[0].root, PathBuf::from("server"));
-        assert_eq!(rust_workspaces[0].slug, "server");
+        assert_eq!(rust_workspaces[0].slug, workspace_slug(Path::new("server")));
 
         let ts_workspaces = discover_workspaces(&project_root, SupportedIndexer::TypeScript);
         assert_eq!(
@@ -252,9 +233,12 @@ mod tests {
         assert_eq!(
             ts_workspaces
                 .iter()
-                .map(|workspace| workspace.slug.as_str())
+                .map(|workspace| workspace.slug.clone())
                 .collect::<Vec<_>>(),
-            vec!["desktop", "website"]
+            vec![
+                workspace_slug(Path::new("desktop")),
+                workspace_slug(Path::new("website"))
+            ]
         );
     }
 

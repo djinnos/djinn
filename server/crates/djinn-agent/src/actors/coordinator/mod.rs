@@ -1022,15 +1022,8 @@ mod tests {
         assert!(matches!(outcome, DispatchOutcome::Dispatched));
         actor.dispatched += 1;
 
-        let status = CoordinatorStatus {
-            tasks_dispatched: actor.dispatched,
-            sessions_recovered: actor.recovered,
-            epic_throughput: HashMap::new(),
-            pr_errors: HashMap::new(),
-            rate_limited_until: None,
-        };
         assert!(
-            status.tasks_dispatched >= 1,
+            actor.dispatched >= 1,
             "should have dispatched the ready task"
         );
     }
@@ -1052,15 +1045,8 @@ mod tests {
         assert!(matches!(outcome, DispatchOutcome::Dispatched));
         actor.dispatched += 1;
 
-        let status = CoordinatorStatus {
-            tasks_dispatched: actor.dispatched,
-            sessions_recovered: actor.recovered,
-            epic_throughput: HashMap::new(),
-            pr_errors: HashMap::new(),
-            rate_limited_until: None,
-        };
         assert!(
-            status.tasks_dispatched >= 1,
+            actor.dispatched >= 1,
             "should dispatch task waiting for review"
         );
     }

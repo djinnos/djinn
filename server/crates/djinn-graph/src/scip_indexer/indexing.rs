@@ -504,7 +504,13 @@ mod tests {
         assert_eq!(plans[0].working_directory, project_root.join("server"));
         assert_eq!(plans[0].workspace_root, project_root.join("server"));
         assert_eq!(plans[0].workspace_slug, "server");
-        assert_eq!(plans[0].output_path, output_root.join("djinn-rust-server.scip"));
+        assert_eq!(
+            plans[0].output_path,
+            output_root.join(format!(
+                "djinn-rust-{}.scip",
+                crate::scip_indexer::workspaces::workspace_slug(Path::new("server"))
+            ))
+        );
         assert_eq!(
             plans[1..]
                 .iter()
@@ -533,20 +539,18 @@ mod tests {
                     .into_owned()
             })
             .collect::<Vec<_>>();
-        assert_eq!(ts_output_names.len(), 2);
-        assert!(
-            ts_output_names[0].starts_with("djinn-typescript-desktop"),
-            "desktop workspace output should include project, language, and workspace slug: {}",
-            ts_output_names[0]
-        );
-        assert!(
-            ts_output_names[1].starts_with("djinn-typescript-website"),
-            "website workspace output should include project, language, and workspace slug: {}",
-            ts_output_names[1]
-        );
-        assert!(
-            ts_output_names.iter().all(|name| name.ends_with(".scip")),
-            "all TypeScript workspace outputs should be SCIP files: {ts_output_names:?}"
+        assert_eq!(
+            ts_output_names,
+            vec![
+                format!(
+                    "djinn-typescript-{}.scip",
+                    crate::scip_indexer::workspaces::workspace_slug(Path::new("desktop"))
+                ),
+                format!(
+                    "djinn-typescript-{}.scip",
+                    crate::scip_indexer::workspaces::workspace_slug(Path::new("website"))
+                )
+            ]
         );
     }
 

@@ -17,6 +17,7 @@ pub mod heuristics;
 pub mod languages;
 pub mod manifests;
 pub mod schema;
+pub mod slug;
 pub mod test_runners;
 
 pub use detect::{detect, detect_blocking};
@@ -26,3 +27,4 @@ pub use environment::{
     RubyLanguage, RustLanguage, SCHEMA_VERSION, Verification, VerificationRule, Workspace,
 };
 pub use schema::{LanguageStat, ManifestSignals, Runtimes, Stack};
+pub use slug::workspace_slug;
