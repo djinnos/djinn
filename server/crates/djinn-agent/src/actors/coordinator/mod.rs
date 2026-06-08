@@ -138,7 +138,12 @@ mod tests {
         // sufficient by themselves.
         let image_repo = djinn_db::ImageRepository::new(db.clone());
         let image_slug = epic.project_id.replace('-', "");
-        let image_id = format!("img-{}", &image_slug[..32]);
+        let image_id_prefix = "img-";
+        let image_id_suffix_len = 36usize.saturating_sub(image_id_prefix.len());
+        let image_id = format!(
+            "{image_id_prefix}{}",
+            &image_slug[..image_id_suffix_len.min(image_slug.len())]
+        );
         image_repo
             .create(&image_id, "Test image", Some("ready test image"), "{}")
             .await
