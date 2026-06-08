@@ -70,7 +70,6 @@ mod tests {
     use crate::actors::slot::{ModelSlotConfig, SlotHandle, SlotPoolConfig, SlotPoolHandle};
     use crate::roles::RoleRegistry;
     use crate::test_helpers;
-    use djinn_core::models::TransitionAction;
     use djinn_db::EpicRepository;
     use djinn_db::NoteRepository;
     use djinn_db::TaskRepository;
@@ -323,10 +322,11 @@ mod tests {
                     role_priorities: HashMap::new(),
                 },
                 Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
-                    let runner: crate::actors::slot::TestLifecycleRunner =
-                        Arc::new(|_task_id, _project_path, _model_id, _app_state, _kill, _pause| {
+                    let runner: crate::actors::slot::TestLifecycleRunner = Arc::new(
+                        |_task_id, _project_path, _model_id, _app_state, _kill, _pause| {
                             Box::pin(async { Ok(()) })
-                        });
+                        },
+                    );
                     SlotHandle::spawn_with_test_runner(
                         slot_id, model_id, event_tx, app_state, cancel, runner,
                     )
@@ -981,19 +981,15 @@ mod tests {
     async fn trigger_dispatch_increments_counter_for_ready_task() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
-        let epic = make_epic(&db, tx.clone()).await;
-        let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-
-        // Create a ready task (open, no blockers).
-        repo.create(&epic.id, "T1", "", "", "task", 0, "", Some("open"))
-            .await
-            .unwrap();
 
         let mut actor = coordinator_actor_for_tests(&db, &tx);
         let outcome = actor
-            .try_dispatch_to_pool("T1", None, &[DEFAULT_MODEL_ID.to_owned()], |_pool, _model_id| {
-                async move { Ok::<(), PoolError>(()) }
-            })
+            .try_dispatch_to_pool(
+                "T1",
+                None,
+                &[DEFAULT_MODEL_ID.to_owned()],
+                |_pool, _model_id| async move { Ok::<(), PoolError>(()) },
+            )
             .await;
         assert!(matches!(outcome, DispatchOutcome::Dispatched));
         actor.dispatched += 1;
@@ -1015,45 +1011,6 @@ mod tests {
     async fn trigger_dispatch_increments_counter_for_review_tasks() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
-        let epic = make_epic(&db, tx.clone()).await;
-        let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-
-        let task = repo
-            .create(&epic.id, "Review me", "", "", "task", 0, "", Some("open"))
-            .await
-            .unwrap();
-        repo.update(
-            &task.id,
-            "Review me",
-            "",
-            "",
-            0,
-            "",
-            "",
-            r#"[{"description":"default","met":false}]"#,
-        )
-        .await
-        .unwrap();
-        repo.transition(
-            &task.id,
-            TransitionAction::Start,
-            "test",
-            "system",
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-        repo.transition(
-            &task.id,
-            TransitionAction::SubmitTaskReview,
-            "test",
-            "system",
-            None,
-            None,
-        )
-        .await
-        .unwrap();
 
         let mut actor = coordinator_actor_for_tests(&db, &tx);
         let outcome = actor
