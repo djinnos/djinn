@@ -1353,7 +1353,7 @@ mod tests {
             id,
             owner,
             owner,
-            format!("repo-{id}")
+            format!("repo-{}", &id.replace('-', "")[..31])
         )
         .execute(db.pool())
         .await
