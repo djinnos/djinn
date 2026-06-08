@@ -136,9 +136,9 @@ mod tests {
         // The dispatch gate resolves readiness from `selected_image_id`, not
         // the legacy per-project image columns.
         let image_repo = djinn_db::ImageRepository::new(db.clone());
-        // `images.id` is varchar(36), so use the UUID-sized project id directly
-        // instead of prefixing it and overflowing the column in CI's Postgres.
-        let image_id = epic.project_id.clone();
+        // `images.id` is varchar(36), so use a bare UUID without any test
+        // prefix. Prefixing the id overflows CI's Postgres schema.
+        let image_id = uuid::Uuid::now_v7().to_string();
         image_repo
             .create(&image_id, "Test image", None, r#"{"schema_version":1}"#)
             .await
