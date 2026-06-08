@@ -15,6 +15,7 @@ use crate::scip_indexer::ScipArtifact;
 /// Normalized SCIP payload ready for graph construction without exposing protobuf details.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedScipIndex {
+    pub workspace_slug: String,
     pub metadata: ScipMetadata,
     pub files: Vec<ScipFile>,
     pub external_symbols: Vec<ScipSymbol>,
@@ -262,22 +263,33 @@ pub enum ScipSymbolKind {
 pub fn parse_scip_artifacts(artifacts: &[ScipArtifact]) -> Result<Vec<ParsedScipIndex>> {
     artifacts
         .iter()
-        .map(|artifact| parse_scip_file(&artifact.path))
+        .map(|artifact| parse_scip_file(&artifact.path, artifact.workspace_slug.clone()))
         .collect()
 }
 
-pub fn parse_scip_file(path: impl AsRef<Path>) -> Result<ParsedScipIndex> {
+pub fn parse_scip_file(
+    path: impl AsRef<Path>,
+    workspace_slug: impl Into<String>,
+) -> Result<ParsedScipIndex> {
     let path = path.as_ref();
     let bytes = fs::read(path).with_context(|| format!("read SCIP file {}", path.display()))?;
-    parse_scip_bytes(&bytes).with_context(|| format!("parse SCIP file {}", path.display()))
+    parse_scip_bytes_with_workspace(&bytes, workspace_slug)
+        .with_context(|| format!("parse SCIP file {}", path.display()))
 }
 
 pub fn parse_scip_bytes(bytes: &[u8]) -> Result<ParsedScipIndex> {
-    let index = Index::parse_from_bytes(bytes).context("decode SCIP protobuf payload")?;
-    parse_index(index)
+    parse_scip_bytes_with_workspace(bytes, "root")
 }
 
-fn parse_index(index: Index) -> Result<ParsedScipIndex> {
+fn parse_scip_bytes_with_workspace(
+    bytes: &[u8],
+    workspace_slug: impl Into<String>,
+) -> Result<ParsedScipIndex> {
+    let index = Index::parse_from_bytes(bytes).context("decode SCIP protobuf payload")?;
+    parse_index(index, workspace_slug.into())
+}
+
+fn parse_index(index: Index, workspace_slug: String) -> Result<ParsedScipIndex> {
     let metadata = normalize_metadata(index.metadata.as_ref());
 
     // First gate: drop SCIP documents whose `relative_path` escapes the
@@ -359,6 +371,7 @@ fn parse_index(index: Index) -> Result<ParsedScipIndex> {
     }
 
     Ok(ParsedScipIndex {
+        workspace_slug,
         metadata,
         files,
         external_symbols,
@@ -1133,10 +1146,12 @@ mod tests {
 
         let parsed = parse_scip_artifacts(&[
             ScipArtifact {
+                workspace_slug: "server".to_string(),
                 path: first.clone(),
                 indexer: None,
             },
             ScipArtifact {
+                workspace_slug: "desktop".to_string(),
                 path: second.clone(),
                 indexer: None,
             },
@@ -1144,6 +1159,8 @@ mod tests {
         .expect("parse artifacts");
 
         assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].workspace_slug, "server");
+        assert_eq!(parsed[1].workspace_slug, "desktop");
         let _ = fs::remove_file(first);
         let _ = fs::remove_file(second);
     }

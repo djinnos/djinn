@@ -783,6 +783,7 @@ pub fn build_test_parsed_index_fixture() -> crate::scip_parser::ParsedScipIndex 
     }
 
     ParsedScipIndex {
+        workspace_slug: "root".to_string(),
         metadata: ScipMetadata {
             project_root: Some("file:///workspace/repo".to_string()),
             tool_name: Some("rust-analyzer".to_string()),

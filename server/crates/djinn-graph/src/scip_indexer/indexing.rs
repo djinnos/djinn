@@ -58,6 +58,7 @@ pub(crate) fn plan_indexer_commands(
                         args: availability.indexer.command_args(&output_path),
                         working_directory: working_directory.clone(),
                         workspace_root: working_directory,
+                        workspace_slug: workspace.slug,
                         output_path,
                     }
                 })
@@ -280,17 +281,31 @@ pub(crate) fn collect_scip_artifacts(
     let mut seen = std::collections::HashSet::new();
     let mut artifacts = Vec::new();
 
-    let expected_paths: Vec<(PathBuf, SupportedIndexer)> = commands
+    let expected_paths: Vec<(PathBuf, SupportedIndexer, String)> = commands
         .iter()
-        .map(|command| (command.plan.output_path.clone(), command.plan.indexer))
+        .map(|command| {
+            (
+                command.plan.output_path.clone(),
+                command.plan.indexer,
+                command.plan.workspace_slug.clone(),
+            )
+        })
         .collect();
 
     for path in discover_scip_files(output_root)? {
         if seen.insert(path.clone()) {
-            let indexer = expected_paths
+            let matched = expected_paths
                 .iter()
-                .find_map(|(expected, indexer)| (expected == &path).then_some(*indexer));
-            artifacts.push(ScipArtifact { path, indexer });
+                .find(|(expected, _, _)| expected == &path);
+            let indexer = matched.map(|(_, indexer, _)| *indexer);
+            let workspace_slug = matched
+                .map(|(_, _, workspace_slug)| workspace_slug.clone())
+                .unwrap_or_else(|| "root".to_string());
+            artifacts.push(ScipArtifact {
+                path,
+                indexer,
+                workspace_slug,
+            });
         }
     }
 
@@ -560,6 +575,7 @@ mod tests {
             ],
             working_directory: PathBuf::from("/tmp/project/server"),
             workspace_root: PathBuf::from("/tmp/project/server"),
+            workspace_slug: "server".to_string(),
             output_path: output_root.join("repo-rust-server.scip"),
         };
         let planned_ts = PlannedIndexerCommand {
@@ -574,6 +590,7 @@ mod tests {
             ],
             working_directory: PathBuf::from("/tmp/project/desktop"),
             workspace_root: PathBuf::from("/tmp/project/desktop"),
+            workspace_slug: "desktop".to_string(),
             output_path: output_root.join("repo-typescript-desktop.scip"),
         };
         fs::write(&planned_rust.output_path, b"rust-index").expect("write rust output");
@@ -618,6 +635,7 @@ mod tests {
             ],
             working_directory: PathBuf::from("/tmp/project"),
             workspace_root: PathBuf::from("/tmp/project"),
+            workspace_slug: "root".to_string(),
             output_path: output_root.join("example-go.scip"),
         };
         fs::write(&planned.output_path, b"go-index").expect("write planned output");
@@ -784,6 +802,7 @@ mod tests {
             args: vec!["index".to_string()],
             working_directory: PathBuf::from(workspace),
             workspace_root: PathBuf::from(workspace),
+            workspace_slug: workspace.replace('/', "-"),
             output_path: PathBuf::from(workspace).join("out.scip"),
         }
     }

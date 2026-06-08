@@ -402,6 +402,7 @@ mod tests {
         let d_sym = "scip-rust pkg src/d.rs `d`().";
 
         ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata {
                 project_root: Some("file:///workspace/test".to_string()),
                 tool_name: Some("scip-rust".to_string()),
@@ -465,6 +466,7 @@ mod tests {
         let e_sym = "scip-rust pkg src/lib.rs `e`().";
 
         ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata::default(),
             files: vec![
                 ScipFile {
@@ -632,6 +634,7 @@ mod tests {
         // running the detector on a graph with no `main`-style
         // symbols is a clean no-op.
         let mut graph = RepoDependencyGraph::build(&[ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata::default(),
             files: vec![],
             external_symbols: vec![],
