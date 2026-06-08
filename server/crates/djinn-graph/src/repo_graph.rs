@@ -2488,6 +2488,7 @@ mod tests {
             signature_parts: None,
         };
         let index = ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata {
                 project_root: Some("file:///workspace/repo".to_string()),
                 tool_name: Some("rust-analyzer".to_string()),
@@ -2746,6 +2747,7 @@ mod tests {
         };
 
         ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata {
                 project_root: Some("file:///workspace/repo".to_string()),
                 tool_name: Some("rust-analyzer".to_string()),
@@ -2898,6 +2900,7 @@ mod tests {
         };
 
         let index = ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata {
                 project_root: Some("file:///workspace/repo".to_string()),
                 tool_name: Some("rust-analyzer".to_string()),
@@ -3185,6 +3188,7 @@ mod tests {
             signature_parts: None,
         };
         let index = ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata::default(),
             files: vec![ScipFile {
                 language: "rust".to_string(),
@@ -3292,6 +3296,7 @@ mod tests {
         }
 
         let index = ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata::default(),
             files: vec![
                 ScipFile {
@@ -3464,6 +3469,7 @@ mod tests {
         }
 
         let index = ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata::default(),
             files: vec![
                 ScipFile {
@@ -3570,6 +3576,7 @@ mod tests {
             signature_parts: None,
         };
         let new_index = ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata::default(),
             files: vec![ScipFile {
                 language: "rust".to_string(),
@@ -3653,6 +3660,7 @@ mod tests {
             signature_parts: None,
         };
         let new_index = ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata::default(),
             files: vec![ScipFile {
                 language: "rust".to_string(),
@@ -3803,6 +3811,7 @@ mod tests {
             signature_parts: None,
         };
         let index = ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata::default(),
             files: vec![
                 ScipFile {
@@ -3861,6 +3870,7 @@ mod tests {
             signature_parts: None,
         };
         let index = ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata::default(),
             files: vec![ScipFile {
                 language: "rust".to_string(),
@@ -4013,6 +4023,7 @@ mod tests {
         };
 
         ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata::default(),
             files: vec![
                 ScipFile {
@@ -4210,6 +4221,7 @@ mod tests {
         let _ = source; // silence unused if the layout drifts; lines pinned below.
 
         ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata {
                 project_root: Some("file:///workspace/repo".to_string()),
                 tool_name: Some("scip-rust".to_string()),
@@ -4333,6 +4345,7 @@ mod tests {
             signature_parts: None,
         };
         let index = ParsedScipIndex {
+            workspace_slug: "root".to_string(),
             metadata: ScipMetadata::default(),
             files: vec![ScipFile {
                 language: "haskell".to_string(),

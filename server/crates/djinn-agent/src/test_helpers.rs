@@ -103,9 +103,11 @@ pub async fn create_test_project(db: &Database) -> Project {
     // Keep the persistent tempdir creation for tests that still need a
     // writable workspace, but the project row no longer stores a path.
     let _ = test_persistent_dir("djinn-test-project-");
-    let name = format!("test-project-{id}");
+    let compact_id = id.simple().to_string();
+    let name = format!("test-project-{compact_id}");
+    let repo_slug = format!("test-project-{}", &compact_id[..23]);
     let project = repo
-        .create(&name, "test", &name)
+        .create(&name, "test", &repo_slug)
         .await
         .expect("failed to create test project");
     // Satisfy the coordinator's readiness gate so existing tests can dispatch
