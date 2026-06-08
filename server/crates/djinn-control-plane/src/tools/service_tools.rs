@@ -27,12 +27,7 @@ fn backing_services_enabled() -> bool {
 
 fn parse_resources(json: &str) -> (String, String, String, String) {
     let v: serde_json::Value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
-    let g = |k: &str, d: &str| {
-        v.get(k)
-            .and_then(|x| x.as_str())
-            .unwrap_or(d)
-            .to_string()
-    };
+    let g = |k: &str, d: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or(d).to_string();
     (
         g("cpu_request", "100m"),
         g("memory_request", "256Mi"),
@@ -153,7 +148,10 @@ impl DjinnMcpServer {
         &self,
         Parameters(_): Parameters<ServicePresetListParams>,
     ) -> Json<ServicePresetListResponse> {
-        match ServicePresetRepository::new(self.state.db().clone()).list().await {
+        match ServicePresetRepository::new(self.state.db().clone())
+            .list()
+            .await
+        {
             Ok(rows) => Json(ServicePresetListResponse {
                 status: "ok".into(),
                 error: None,
@@ -196,7 +194,10 @@ impl DjinnMcpServer {
         let project_id = task.project_id.clone();
 
         // Current run owns the service (ownerRef + idempotency key).
-        let runs = match TaskRunRepository::new(db.clone()).list_for_task(&task.id).await {
+        let runs = match TaskRunRepository::new(db.clone())
+            .list_for_task(&task.id)
+            .await
+        {
             Ok(r) => r,
             Err(e) => return err_req(format!("db error: {e}")),
         };
@@ -205,7 +206,10 @@ impl DjinnMcpServer {
         };
 
         // Policy kill-switch.
-        match ServicePolicyRepository::new(db.clone()).allow_services(&project_id).await {
+        match ServicePolicyRepository::new(db.clone())
+            .allow_services(&project_id)
+            .await
+        {
             Ok(true) => {}
             Ok(false) => return err_req("backing services are disabled for this project"),
             Err(e) => return err_req(format!("db error: {e}")),
@@ -253,7 +257,13 @@ impl DjinnMcpServer {
         let instance_repo = ServiceInstanceRepository::new(db.clone());
         let instance_id = uuid::Uuid::now_v7().to_string();
         let (instance, _created) = match instance_repo
-            .claim(&instance_id, &task_run_id, &project_id, &preset.id, &preset.service_type)
+            .claim(
+                &instance_id,
+                &task_run_id,
+                &project_id,
+                &preset.id,
+                &preset.service_type,
+            )
             .await
         {
             Ok(v) => v,
@@ -416,7 +426,10 @@ impl DjinnMcpServer {
             });
         };
         let instance_repo = ServiceInstanceRepository::new(db.clone());
-        let instances = instance_repo.list_for_task(&task_run_id).await.unwrap_or_default();
+        let instances = instance_repo
+            .list_for_task(&task_run_id)
+            .await
+            .unwrap_or_default();
         let mut released: i64 = 0;
         for inst in instances {
             if let Some(t) = &input.service_type

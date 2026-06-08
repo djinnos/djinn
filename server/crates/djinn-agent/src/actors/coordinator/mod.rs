@@ -137,7 +137,8 @@ mod tests {
         // kept in sync below for older assertions/helpers, but they are not
         // sufficient by themselves.
         let image_repo = djinn_db::ImageRepository::new(db.clone());
-        let image_id = format!("test-image-{}", &epic.project_id);
+        let image_slug = epic.project_id.replace('-', "");
+        let image_id = format!("img-{}", &image_slug[..32]);
         image_repo
             .create(&image_id, "Test image", Some("ready test image"), "{}")
             .await

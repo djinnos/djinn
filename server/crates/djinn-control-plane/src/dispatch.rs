@@ -14,17 +14,14 @@ use crate::tools::epic_tools::{
     EpicListParams, EpicReadSourceParams, EpicReopenParams, EpicShowParams, EpicTasksParams,
     EpicUpdateParams,
 };
-use crate::tools::image_tools::{
-    ImageCreateParams, ImageDeleteParams, ImageListParams, ImageSetAllowedPresetsParams,
-    ImageUpdateParams, ProjectSetImageParams, ToolchainVersionsParams,
-};
-use crate::tools::service_tools::{
-    ServiceListParams, ServicePresetListParams, ServiceReleaseParams, ServiceRequestParams,
-};
 use crate::tools::execution_tools::{ExecutionKillTaskParams, SessionForTaskParams};
 use crate::tools::github_app_tools::{GithubAppInstallUrlParams, GithubAppInstallationsParams};
 use crate::tools::github_tools::{GithubFetchFileParams, GithubSearchParams};
 use crate::tools::graph_tools::CodeGraphParams;
+use crate::tools::image_tools::{
+    ImageCreateParams, ImageDeleteParams, ImageListParams, ImageSetAllowedPresetsParams,
+    ImageUpdateParams, ProjectSetImageParams, ToolchainVersionsParams,
+};
 use crate::tools::memory_tools::{
     AssociationsParams, BrokenLinksParams, BuildContextParams, CatalogParams, DeleteParams,
     DiffParams, EditParams, ExtractedAuditParams, GraphParams, HealthParams, HistoryParams,
@@ -50,6 +47,9 @@ use crate::tools::provider_tools::{
     ModelHealthInput, ProviderCatalogInput, ProviderConnectedInput, ProviderModelLookupInput,
     ProviderModelsConnectedInput, ProviderModelsInput, ProviderOauthStartInput,
     ProviderRemoveInput, ProviderValidateInput,
+};
+use crate::tools::service_tools::{
+    ServiceListParams, ServicePresetListParams, ServiceReleaseParams, ServiceRequestParams,
 };
 use crate::tools::session_tools::{
     SessionActiveParams, SessionListParams, SessionMessagesParams, SessionShowParams,
@@ -336,7 +336,7 @@ impl DjinnMcpServer {
                 self.toolchain_versions(Parameters(decode_args::<ToolchainVersionsParams>(
                     name, args,
                 )?))
-                    .await,
+                .await,
             ),
             "image_list" => map_json(
                 name,
@@ -360,8 +360,10 @@ impl DjinnMcpServer {
             ),
             "project_set_image" => map_json(
                 name,
-                self.project_set_image(Parameters(decode_args::<ProjectSetImageParams>(name, args)?))
-                    .await,
+                self.project_set_image(Parameters(decode_args::<ProjectSetImageParams>(
+                    name, args,
+                )?))
+                .await,
             ),
             "image_set_allowed_presets" => map_json(
                 name,
@@ -375,7 +377,7 @@ impl DjinnMcpServer {
                 self.service_preset_list(Parameters(decode_args::<ServicePresetListParams>(
                     name, args,
                 )?))
-                    .await,
+                .await,
             ),
             "service_request" => map_json(
                 name,

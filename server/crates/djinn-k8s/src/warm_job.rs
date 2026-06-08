@@ -443,9 +443,7 @@ mod tests {
         let workspace = by_name.get(VOLUME_WORKSPACE).expect("workspace mount");
         assert_eq!(workspace.mount_path, WORKSPACE_MOUNT_DIR);
         assert_eq!(workspace.read_only, Some(false));
-        let cache = by_name
-            .get(crate::job::VOLUME_CACHE)
-            .expect("cache mount");
+        let cache = by_name.get(crate::job::VOLUME_CACHE).expect("cache mount");
         assert_eq!(cache.mount_path, crate::job::CACHE_MOUNT_DIR);
         assert_eq!(cache.read_only, Some(false));
         let env_config_mount = by_name
