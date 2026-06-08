@@ -1136,7 +1136,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_multiple_artifacts() {
+    fn parse_scip_artifacts_preserves_workspace_slugs() {
         let dir = PathBuf::from("tmp/scip-parser-tests");
         let _ = fs::create_dir_all(&dir);
         let first = dir.join("one.scip");
