@@ -27,3 +27,28 @@ pub fn workspace_slug(root: &Path) -> String {
         slug
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::workspace_slug;
+
+    #[test]
+    fn workspace_slug_uses_root_for_empty_paths() {
+        assert_eq!(workspace_slug(Path::new("")), "root");
+    }
+
+    #[test]
+    fn workspace_slug_normalizes_path_segments() {
+        assert_eq!(
+            workspace_slug(Path::new("Crates/djinn_graph/scip-indexer")),
+            "crates-djinn-graph-scip-indexer"
+        );
+    }
+
+    #[test]
+    fn workspace_slug_falls_back_to_root_when_no_slug_parts_remain() {
+        assert_eq!(workspace_slug(Path::new("---")), "root");
+    }
+}
