@@ -21,7 +21,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 mod indexing;
-mod workspaces;
+pub mod workspaces;
 
 pub(crate) use indexing::run_indexers_already_locked;
 pub use workspaces::workspace_slug;
