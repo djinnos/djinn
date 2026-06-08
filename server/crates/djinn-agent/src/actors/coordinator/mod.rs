@@ -135,8 +135,6 @@ mod tests {
         // image to the synthesized default project and stamp `graph_warmed_at`.
         // The dispatch gate resolves readiness from `selected_image_id`, not
         // the legacy per-project image columns.
-        let project_repo =
-            djinn_db::ProjectRepository::new(db.clone(), crate::events::event_bus_for(&tx));
         let image_repo = djinn_db::ImageRepository::new(db.clone());
         let image_id = format!("test-image-{}", epic.project_id);
         image_repo
