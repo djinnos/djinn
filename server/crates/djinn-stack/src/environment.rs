@@ -65,6 +65,8 @@ pub enum EnvironmentConfigError {
     },
     #[error("duplicate workspace {root:?} ({language})")]
     DuplicateWorkspace { root: String, language: String },
+    #[error("duplicate workspace slug {slug:?}")]
+    DuplicateWorkspaceSlug { slug: String },
     #[error("env var key {key:?} is not a valid identifier ([A-Za-z_][A-Za-z0-9_]*)")]
     InvalidEnvKey { key: String },
     #[error("env var {key:?}: value contains disallowed newline/NUL")]
@@ -269,7 +271,9 @@ impl EnvironmentConfig {
                     _ => (None, ws.toolchain.clone()),
                 };
                 Workspace {
-                    slug: workspace_slug(std::path::Path::new(&ws.root)),
+                    slug: Some(workspace_slug(std::path::Path::new(&ws.root))),
+                    name: None,
+                    tags: Vec::new(),
                     root: ws.root.clone(),
                     language: ws.language.clone(),
                     toolchain,
@@ -498,7 +502,11 @@ impl ClangLanguage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Workspace {
     #[serde(default)]
-    pub slug: String,
+    pub slug: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub root: String,
     pub language: String,
     // `skip_serializing_if` dropped on all three Options — `Workspace` rides
@@ -521,6 +529,7 @@ fn validate_workspaces(workspaces: &[Workspace]) -> EnvResult<()> {
         });
     }
     let mut seen: HashSet<(&str, &str)> = HashSet::with_capacity(workspaces.len());
+    let mut seen_slugs: HashSet<&str> = HashSet::with_capacity(workspaces.len());
     for ws in workspaces {
         if !seen.insert((ws.root.as_str(), ws.language.as_str())) {
             return Err(EnvironmentConfigError::DuplicateWorkspace {
@@ -530,8 +539,13 @@ fn validate_workspaces(workspaces: &[Workspace]) -> EnvResult<()> {
         }
         // `root` is a path within the repo; allow `/` and be lenient.
         validate_path("workspaces[*].root", &ws.root)?;
-        if !ws.slug.is_empty() {
-            validate_identifier("workspaces[*].slug", &ws.slug)?;
+        if let Some(slug) = &ws.slug {
+            validate_identifier("workspaces[*].slug", slug)?;
+            if !seen_slugs.insert(slug.as_str()) {
+                return Err(EnvironmentConfigError::DuplicateWorkspaceSlug {
+                    slug: slug.clone(),
+                });
+            }
         }
         validate_identifier("workspaces[*].language", &ws.language)?;
         if let Some(t) = &ws.toolchain {
@@ -1038,7 +1052,9 @@ mod tests {
         let mut cfg = valid_minimal();
         cfg.workspaces = vec![
             Workspace {
-                slug: String::new(),
+                slug: None,
+                name: None,
+                tags: Vec::new(),
                 root: "server".to_owned(),
                 language: "rust".to_owned(),
                 toolchain: Some("stable".to_owned()),
@@ -1046,7 +1062,9 @@ mod tests {
                 package_manager: None,
             },
             Workspace {
-                slug: String::new(),
+                slug: None,
+                name: None,
+                tags: Vec::new(),
                 root: "server".to_owned(),
                 language: "rust".to_owned(),
                 toolchain: None,
@@ -1068,7 +1086,9 @@ mod tests {
         let mut cfg = valid_minimal();
         cfg.workspaces = vec![
             Workspace {
-                slug: String::new(),
+                slug: Some("root-go".to_owned()),
+                name: Some("Go root".to_owned()),
+                tags: vec!["backend".to_owned()],
                 root: "".to_owned(),
                 language: "go".to_owned(),
                 toolchain: None,
@@ -1076,7 +1096,9 @@ mod tests {
                 package_manager: None,
             },
             Workspace {
-                slug: String::new(),
+                slug: Some("root-node".to_owned()),
+                name: Some("Node root".to_owned()),
+                tags: vec!["frontend".to_owned()],
                 root: "".to_owned(),
                 language: "node".to_owned(),
                 toolchain: None,
@@ -1089,10 +1111,79 @@ mod tests {
     }
 
     #[test]
+    fn rejects_duplicate_workspace_slugs() {
+        let mut cfg = valid_minimal();
+        cfg.workspaces = vec![
+            Workspace {
+                slug: Some("shared".to_owned()),
+                name: None,
+                tags: Vec::new(),
+                root: "server".to_owned(),
+                language: "rust".to_owned(),
+                toolchain: None,
+                version: None,
+                package_manager: None,
+            },
+            Workspace {
+                slug: Some("shared".to_owned()),
+                name: None,
+                tags: Vec::new(),
+                root: "ui".to_owned(),
+                language: "node".to_owned(),
+                toolchain: None,
+                version: Some("22".to_owned()),
+                package_manager: Some("pnpm".to_owned()),
+            },
+        ];
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            EnvironmentConfigError::DuplicateWorkspaceSlug { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_workspace_slug() {
+        let mut cfg = valid_minimal();
+        cfg.workspaces = vec![Workspace {
+            slug: Some("bad slug".to_owned()),
+            name: None,
+            tags: Vec::new(),
+            root: "server".to_owned(),
+            language: "rust".to_owned(),
+            toolchain: None,
+            version: None,
+            package_manager: None,
+        }];
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            EnvironmentConfigError::UnsafeIdentifier { .. }
+        ));
+    }
+
+    #[test]
+    fn legacy_workspace_defaults_slug_name_and_tags() {
+        let raw = r#"{
+            "schema_version": 1,
+            "workspaces": [
+                {"root": "server", "language": "rust", "toolchain": "stable"}
+            ]
+        }"#;
+        let cfg: EnvironmentConfig = serde_json::from_str(raw).unwrap();
+        assert_eq!(cfg.workspaces[0].slug, None);
+        assert_eq!(cfg.workspaces[0].name, None);
+        assert!(cfg.workspaces[0].tags.is_empty());
+        cfg.validate().unwrap();
+    }
+
+    #[test]
     fn rejects_absolute_workspace_root() {
         let mut cfg = valid_minimal();
         cfg.workspaces = vec![Workspace {
-            slug: String::new(),
+            slug: None,
+            name: None,
+            tags: Vec::new(),
             root: "/etc".to_owned(),
             language: "rust".to_owned(),
             toolchain: None,
@@ -1110,7 +1201,9 @@ mod tests {
     fn rejects_dotdot_workspace_root() {
         let mut cfg = valid_minimal();
         cfg.workspaces = vec![Workspace {
-            slug: String::new(),
+            slug: None,
+            name: None,
+            tags: Vec::new(),
             root: "../outside".to_owned(),
             language: "rust".to_owned(),
             toolchain: None,
@@ -1128,7 +1221,9 @@ mod tests {
     fn accepts_nested_workspace_root() {
         let mut cfg = valid_minimal();
         cfg.workspaces = vec![Workspace {
-            slug: String::new(),
+            slug: None,
+            name: None,
+            tags: Vec::new(),
             root: "tools/codegen".to_owned(),
             language: "rust".to_owned(),
             toolchain: Some("1.85.0".to_owned()),
@@ -1144,7 +1239,9 @@ mod tests {
         let mut cfg = valid_minimal();
         cfg.workspaces = (0..(MAX_WORKSPACES + 1))
             .map(|i| Workspace {
-                slug: String::new(),
+                slug: None,
+                name: None,
+                tags: Vec::new(),
                 root: format!("dir{i}"),
                 language: "rust".to_owned(),
                 toolchain: None,
@@ -1325,8 +1422,8 @@ mod tests {
         // Unpinned workspace now falls back to the language default so
         // the UI can show a concrete toolchain.
         assert_eq!(
-            cfg.workspaces[0].slug,
-            workspace_slug(std::path::Path::new(""))
+            cfg.workspaces[0].slug.as_deref(),
+            Some(workspace_slug(std::path::Path::new("")).as_str())
         );
         assert_eq!(cfg.workspaces[0].toolchain.as_deref(), Some("stable"));
         assert!(cfg.workspaces[0].version.is_none());
@@ -1355,12 +1452,18 @@ mod tests {
         let cfg = EnvironmentConfig::from_stack(&stack);
         // Rust workspace uses `toolchain`, not `version`.
         let rust_ws = cfg.workspaces.iter().find(|w| w.root == "server").unwrap();
-        assert_eq!(rust_ws.slug, workspace_slug(std::path::Path::new("server")));
+        assert_eq!(
+            rust_ws.slug.as_deref(),
+            Some(workspace_slug(std::path::Path::new("server")).as_str())
+        );
         assert_eq!(rust_ws.toolchain.as_deref(), Some("stable"));
         assert!(rust_ws.version.is_none());
         // Node workspace uses `version`, not `toolchain`.
         let node_ws = cfg.workspaces.iter().find(|w| w.root == "ui").unwrap();
-        assert_eq!(node_ws.slug, workspace_slug(std::path::Path::new("ui")));
+        assert_eq!(
+            node_ws.slug.as_deref(),
+            Some(workspace_slug(std::path::Path::new("ui")).as_str())
+        );
         assert!(node_ws.toolchain.is_none());
         assert_eq!(node_ws.version.as_deref(), Some("20"));
         assert_eq!(node_ws.package_manager.as_deref(), Some("pnpm"));
@@ -1424,9 +1527,9 @@ mod tests {
                 "go":     {"default_version": "1.22"}
             },
             "workspaces": [
-                {"slug": "server", "root": "server", "language": "rust", "toolchain": "stable"},
-                {"slug": "tools-codegen", "root": "tools/codegen", "language": "rust", "toolchain": "1.85.0"},
-                {"slug": "ui", "root": "ui", "language": "node", "version": "20", "package_manager": "pnpm"}
+                {"slug": "server", "name": "Server", "tags": ["backend"], "root": "server", "language": "rust", "toolchain": "stable"},
+                {"slug": "tools-codegen", "name": "Codegen", "tags": ["tools"], "root": "tools/codegen", "language": "rust", "toolchain": "1.85.0"},
+                {"slug": "ui", "name": "UI", "tags": ["frontend"], "root": "ui", "language": "node", "version": "20", "package_manager": "pnpm"}
             ],
             "system_packages": ["postgresql-client"],
             "env": {"RUST_LOG": "info"},
