@@ -137,13 +137,12 @@ mod tests {
         // kept in sync below for older assertions/helpers, but they are not
         // sufficient by themselves.
         let image_repo = djinn_db::ImageRepository::new(db.clone());
-        // `images.id` is VARCHAR(36). Some synthetic project ids used by test
-        // helpers can already be 36 chars (or longer once prefixed), so cap the
-        // prefixed catalog image id at the column bound while retaining enough of
-        // the project id to avoid collisions within these isolated test databases.
-        let max_project_id_chars = 36usize.saturating_sub("img-".len());
-        let project_id_prefix: String =
-            epic.project_id.chars().take(max_project_id_chars).collect();
+        // `images.id` is VARCHAR(36). Synthetic project ids used by test
+        // helpers are UUIDs (36 chars), so prefixing the full id would exceed
+        // the column bound. Use a short stable prefix instead; these tests run
+        // against isolated databases, so the retained project-id entropy is
+        // enough to avoid collisions while leaving ample room under the limit.
+        let project_id_prefix: String = epic.project_id.chars().take(20).collect();
         let image_id = format!("img-{project_id_prefix}");
         debug_assert!(image_id.len() <= 36);
         let image_tag = format!("test-registry/djinn-test:{image_id}");
