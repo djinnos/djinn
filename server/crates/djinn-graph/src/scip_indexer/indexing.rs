@@ -439,6 +439,7 @@ mod tests {
             plans[0].workspace_root,
             PathBuf::from("/tmp/example-project")
         );
+        assert_eq!(plans[0].workspace_slug, "root");
         assert_eq!(
             plans[0].args,
             vec![
@@ -449,6 +450,7 @@ mod tests {
             ]
         );
         assert_eq!(plans[1].indexer, SupportedIndexer::TypeScript);
+        assert_eq!(plans[1].workspace_slug, "root");
         assert_eq!(
             plans[1].args,
             vec![
@@ -501,6 +503,7 @@ mod tests {
         assert_eq!(plans.len(), 3);
         assert_eq!(plans[0].working_directory, project_root.join("server"));
         assert_eq!(plans[0].workspace_root, project_root.join("server"));
+        assert_eq!(plans[0].workspace_slug, "server");
         assert_eq!(
             plans[0].output_path,
             output_root.join("djinn-rust-server.scip")
@@ -515,6 +518,13 @@ mod tests {
                     .to_path_buf())
                 .collect::<Vec<_>>(),
             vec![PathBuf::from("desktop"), PathBuf::from("website")]
+        );
+        assert_eq!(
+            plans[1..]
+                .iter()
+                .map(|plan| plan.workspace_slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["desktop", "website"]
         );
         assert_eq!(
             plans[1..]
@@ -547,6 +557,7 @@ mod tests {
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].working_directory, project_root);
         assert_eq!(plans[0].workspace_root, PathBuf::from("/workspace/repo"));
+        assert_eq!(plans[0].workspace_slug, "root");
         assert_eq!(
             plans[0].args,
             vec![
