@@ -24,6 +24,7 @@ mod indexing;
 mod workspaces;
 
 pub(crate) use indexing::run_indexers_already_locked;
+pub use workspaces::workspace_slug;
 
 /// Tracks `(project_root, indexer)` pairs we have already logged a
 /// "missing indexer binary" notice for, so the periodic warmer does
