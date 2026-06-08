@@ -771,22 +771,37 @@ impl ProjectRepository {
 
     /// Return the readiness snapshot the dispatch gate consults before it is
     /// willing to run tasks for a project: the current `image_status` plus
-    /// whether the canonical-graph warm pipeline has produced a
-    /// `graph_warmed_at` stamp. Returns `Ok(None)` when the project id is
-    /// unknown.
+    /// whether the canonical-graph warm pipeline has produced freshness in
+    /// `project_workspace_graph` or `repo_graph_cache`. Returns `Ok(None)`
+    /// when the project id is unknown.
     ///
     pub async fn get_dispatch_readiness(
         &self,
         project_id: &str,
     ) -> Result<Option<ProjectDispatchReadiness>> {
         self.db.ensure_initialized().await?;
-        // `graph_warmed_at` is a VARCHAR(64) RFC3339 string matching the
-        // schema-wide timestamp convention (see migration 2). An empty
-        // string means "never warmed".
-        let row = sqlx::query!(
-            "SELECT graph_warmed_at FROM projects WHERE id = $1",
-            project_id,
+        let row = sqlx::query(
+            r#"WITH project_exists AS (
+                   SELECT 1 FROM projects WHERE id = $1
+               ), freshness AS (
+                   SELECT warmed_at AS warmed_at, 0 AS source_rank
+                     FROM project_workspace_graph
+                    WHERE project_id = $1 AND warmed_at <> ''
+                   UNION ALL
+                   SELECT built_at AS warmed_at, 1 AS source_rank
+                     FROM repo_graph_cache
+                    WHERE project_id = $1 AND built_at <> ''
+               )
+               SELECT
+                   (SELECT warmed_at
+                      FROM freshness
+                     ORDER BY source_rank ASC, warmed_at DESC
+                     LIMIT 1) AS graph_warmed_at,
+                   EXISTS(SELECT 1 FROM project_workspace_graph WHERE project_id = $1)
+                   OR EXISTS(SELECT 1 FROM repo_graph_cache WHERE project_id = $1) AS has_graph_freshness
+                 FROM project_exists"#,
         )
+        .bind(project_id)
         .fetch_optional(self.db.pool())
         .await?;
         let Some(r) = row else {
@@ -806,10 +821,15 @@ impl ProjectRepository {
             Some(img) => img.status,
             None => ProjectImageStatus::NONE.to_string(),
         };
-        let stamp = r.graph_warmed_at;
+        let stamp: Option<String> = r.get("graph_warmed_at");
+        let has_graph_freshness: bool = r.get("has_graph_freshness");
         Ok(Some(ProjectDispatchReadiness {
             image_status,
-            graph_warmed_at: if stamp.is_empty() { None } else { Some(stamp) },
+            graph_warmed_at: match stamp {
+                Some(stamp) if !stamp.is_empty() => Some(stamp),
+                Some(_) | None if has_graph_freshness => Some(String::new()),
+                Some(_) | None => None,
+            },
         }))
     }
 
@@ -1009,8 +1029,12 @@ impl ProjectImage {
 pub struct ProjectDispatchReadiness {
     /// Current `image_status` string (`"none"` / `"building"` / `"ready"` / `"failed"`).
     pub image_status: String,
-    /// Wall-clock timestamp of the most recent successful canonical-graph warm.
-    /// `None` means the warm has never completed for this project.
+    /// Derived wall-clock timestamp of the most recent successful canonical-
+    /// graph warm. For rollout compatibility this field name is retained, but
+    /// the value now comes from `project_workspace_graph.warmed_at` (preferred)
+    /// or `repo_graph_cache.built_at`; it is not read from the legacy
+    /// `projects.graph_warmed_at` scalar. `None` means neither freshness source
+    /// has a row for this project.
     pub graph_warmed_at: Option<String>,
 }
 
@@ -1054,6 +1078,11 @@ mod tests {
 
     use djinn_core::events::{DjinnEventEnvelope, EventBus};
     use djinn_core::models::Project;
+
+    use crate::repositories::project_workspace_graph::{
+        ProjectWorkspaceGraphRepository, ProjectWorkspaceGraphUpsert,
+    };
+    use crate::repositories::repo_graph_cache::{RepoGraphCacheInsert, RepoGraphCacheRepository};
 
     use super::*;
 
@@ -1104,34 +1133,136 @@ mod tests {
         (bus, captured)
     }
 
+    async fn dispatch_graph_warmed_at(
+        repo: &ProjectRepository,
+        project_id: &str,
+    ) -> Option<String> {
+        repo.get_dispatch_readiness(project_id)
+            .await
+            .expect("readiness")
+            .expect("project exists")
+            .graph_warmed_at
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn mark_graph_warmed_stamps_graph_warmed_at() {
-        // BUG: a code-less project's warm is skipped, so nothing ever stamped
-        // `graph_warmed_at` and the UI badge stuck on "Warming". The coordinator
-        // tick now calls this setter on the code-less skip path.
+    async fn dispatch_readiness_ignores_legacy_project_graph_warmed_scalar() {
         let repo = ProjectRepository::new(test_db(), EventBus::noop());
         let project = repo.create("docs", "acme", "docs").await.unwrap();
 
-        let before = repo
-            .get_dispatch_readiness(&project.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            before.graph_warmed_at.is_none(),
-            "graph_warmed_at should be unset before marking"
-        );
-
         repo.mark_graph_warmed(&project.id).await.unwrap();
 
-        let after = repo
-            .get_dispatch_readiness(&project.id)
+        assert_eq!(
+            dispatch_graph_warmed_at(&repo, &project.id).await,
+            None,
+            "legacy projects.graph_warmed_at alone must not make readiness warmed"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_readiness_treats_cache_only_project_as_warmed() {
+        let db = test_db();
+        let repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let cache_repo = RepoGraphCacheRepository::new(db);
+        let project = repo
+            .create("cache-only", "acme", "cache-only")
             .await
-            .unwrap()
             .unwrap();
-        assert!(
-            after.graph_warmed_at.is_some(),
-            "graph_warmed_at must be stamped after mark_graph_warmed"
+
+        assert_eq!(dispatch_graph_warmed_at(&repo, &project.id).await, None);
+
+        cache_repo
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: "abc123",
+                graph_blob: b"graph",
+            })
+            .await
+            .expect("cache upsert");
+        let cache_stamp = cache_repo
+            .latest_for_project(&project.id)
+            .await
+            .expect("cache latest")
+            .expect("cache row")
+            .built_at;
+
+        assert_eq!(
+            dispatch_graph_warmed_at(&repo, &project.id).await,
+            Some(cache_stamp)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_readiness_treats_workspace_only_project_as_warmed() {
+        let db = test_db();
+        let repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let workspace_repo = ProjectWorkspaceGraphRepository::new(db);
+        let project = repo
+            .create("workspace-only", "acme", "workspace-only")
+            .await
+            .unwrap();
+
+        workspace_repo
+            .upsert(ProjectWorkspaceGraphUpsert {
+                project_id: &project.id,
+                workspace_slug: "root",
+                commit_sha: "abc123",
+                status: "ready",
+            })
+            .await
+            .expect("workspace upsert");
+        let workspace_stamp = workspace_repo
+            .latest_warmed_state(&project.id)
+            .await
+            .expect("workspace latest")
+            .expect("workspace row")
+            .warmed_at;
+
+        assert_eq!(
+            dispatch_graph_warmed_at(&repo, &project.id).await,
+            Some(workspace_stamp)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_readiness_prefers_workspace_stamp_when_both_sources_exist() {
+        let db = test_db();
+        let repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let cache_repo = RepoGraphCacheRepository::new(db.clone());
+        let workspace_repo = ProjectWorkspaceGraphRepository::new(db);
+        let project = repo
+            .create("both-graph-sources", "acme", "both-graph-sources")
+            .await
+            .unwrap();
+
+        cache_repo
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: "cache-sha",
+                graph_blob: b"graph",
+            })
+            .await
+            .expect("cache upsert");
+        workspace_repo
+            .upsert(ProjectWorkspaceGraphUpsert {
+                project_id: &project.id,
+                workspace_slug: "root",
+                commit_sha: "workspace-sha",
+                status: "ready",
+            })
+            .await
+            .expect("workspace upsert");
+
+        let workspace_stamp = workspace_repo
+            .latest_warmed_state(&project.id)
+            .await
+            .expect("workspace latest")
+            .expect("workspace row")
+            .warmed_at;
+
+        assert_eq!(
+            dispatch_graph_warmed_at(&repo, &project.id).await,
+            Some(workspace_stamp),
+            "workspace freshness is the preferred derived readiness stamp"
         );
     }
 

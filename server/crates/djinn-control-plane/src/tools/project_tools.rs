@@ -11,8 +11,8 @@ use djinn_core::auth_context::current_user_token;
 use djinn_core::models::Project;
 use djinn_core::paths::project_dir;
 use djinn_db::{
-    OrgConfigRepository, ProjectConfig, ProjectImageStatus, ProjectRepository,
-    RepoGraphCacheRepository,
+    Database, OrgConfigRepository, ProjectConfig, ProjectImageStatus, ProjectRepository,
+    ProjectWorkspaceGraphRepository, RepoGraphCacheRepository,
 };
 use djinn_stack::Stack;
 
@@ -29,6 +29,26 @@ fn project_config_ok(project: &Project, config: ProjectConfig) -> ProjectConfigR
         graph_excluded_paths: config.graph_excluded_paths,
         graph_orphan_ignore: config.graph_orphan_ignore,
     }
+}
+
+async fn graph_warmed_at_from_freshness(db: Database, project_id: &str) -> Option<String> {
+    if let Some(workspace) = ProjectWorkspaceGraphRepository::new(db.clone())
+        .latest_warmed_state(project_id)
+        .await
+        .ok()
+        .flatten()
+    {
+        if !workspace.warmed_at.is_empty() {
+            return Some(workspace.warmed_at);
+        }
+    }
+
+    RepoGraphCacheRepository::new(db)
+        .latest_for_project(project_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|row| row.built_at)
 }
 
 fn derive_graph_warm_status_with_workspaces(
@@ -1322,9 +1342,9 @@ impl DjinnMcpServer {
 
     /// Return image-build status for a project.
     ///
-    /// Drives the UI status badge (P7). Joins the `image_*` columns with
-    /// the `graph_warmed_at` stamp so the badge can reflect both build
-    /// progress and canonical-graph warm readiness.
+    /// Drives the UI status badge (P7). Joins the image state with derived
+    /// graph freshness so the badge can reflect both build progress and
+    /// canonical-graph warm readiness.
     #[tool(
         description = "Return image-build status for a project (image_tag, image_status, image_last_error, graph_warmed_at, graph_warm_status). Drives the UI status badge."
     )]
@@ -1368,31 +1388,12 @@ impl DjinnMcpServer {
         // Prefer the digest-pinned ref the runtime actually uses, else the tag.
         let image_tag = dispatch.pull_ref().or(dispatch.tag);
 
-        // Graph-warm status: derived from the dispatch-readiness row so the
-        // banner can surface a distinct progress row alongside image state.
-        // Errors are swallowed — banner shows `pending` on lookup failure.
-        //
-        // Fall back to `repo_graph_cache.built_at` when `projects.graph_warmed_at`
-        // is missing: the stamp is best-effort (the cache upsert logs a warning
-        // and continues on failure), and rows written before migration 9
-        // landed never got stamped. Treating a present cache row as "warmed"
-        // keeps the banner honest when the two sources drift.
-        let stamp_from_project = repo
-            .get_dispatch_readiness(&input.project)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|r| r.graph_warmed_at);
-
-        let graph_warmed_at = match stamp_from_project {
-            Some(v) => Some(v),
-            None => RepoGraphCacheRepository::new(self.state.db().clone())
-                .latest_for_project(&input.project)
-                .await
-                .ok()
-                .flatten()
-                .map(|row| row.built_at),
-        };
+        // Graph-warm status: derived from per-workspace freshness first, then
+        // the merged repo graph cache. Do not fall through to the legacy
+        // `projects.graph_warmed_at` scalar: it is being removed, while a
+        // cache-only project must remain visibly warmed during rollout.
+        let graph_warmed_at =
+            graph_warmed_at_from_freshness(self.state.db().clone(), &input.project).await;
 
         let workspace_warm_statuses = match resolve_project(&repo, &input.project).await {
             Ok(Some(project)) => {
@@ -1989,6 +1990,8 @@ impl DjinnMcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use djinn_core::events::EventBus;
+    use djinn_db::{ProjectRepository, ProjectWorkspaceGraphUpsert, RepoGraphCacheInsert};
 
     #[test]
     fn parse_branch_list_skips_empty_and_detached_marker() {
@@ -2020,5 +2023,94 @@ mod tests {
         let branches = vec!["a".to_string(), "b".to_string()];
         let ordered = order_branches(branches, Some("missing"));
         assert_eq!(ordered, vec!["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn graph_freshness_badge_uses_cache_when_workspace_missing() {
+        let db = Database::open_in_memory().expect("in-memory db");
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let cache_repo = RepoGraphCacheRepository::new(db.clone());
+        let project = project_repo
+            .create("badge-cache", "acme", "badge-cache")
+            .await
+            .expect("create project");
+
+        cache_repo
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: "cache-sha",
+                graph_blob: b"graph",
+            })
+            .await
+            .expect("cache upsert");
+        let cache_stamp = cache_repo
+            .latest_for_project(&project.id)
+            .await
+            .expect("cache latest")
+            .expect("cache row")
+            .built_at;
+
+        assert_eq!(
+            graph_warmed_at_from_freshness(db, &project.id).await,
+            Some(cache_stamp)
+        );
+    }
+
+    #[tokio::test]
+    async fn graph_freshness_badge_prefers_latest_workspace_stamp() {
+        let db = Database::open_in_memory().expect("in-memory db");
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let workspace_repo = ProjectWorkspaceGraphRepository::new(db.clone());
+        let cache_repo = RepoGraphCacheRepository::new(db.clone());
+        let project = project_repo
+            .create("badge-workspace", "acme", "badge-workspace")
+            .await
+            .expect("create project");
+
+        cache_repo
+            .upsert(RepoGraphCacheInsert {
+                project_id: &project.id,
+                commit_sha: "cache-sha",
+                graph_blob: b"graph",
+            })
+            .await
+            .expect("cache upsert");
+        workspace_repo
+            .upsert(ProjectWorkspaceGraphUpsert {
+                project_id: &project.id,
+                workspace_slug: "old",
+                commit_sha: "old-sha",
+                status: "ready",
+            })
+            .await
+            .expect("old workspace upsert");
+        sqlx::query(r#"UPDATE project_workspace_graph
+                  SET warmed_at = to_char((now() at time zone 'utc') - interval '1 day', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                WHERE project_id = $1 AND workspace_slug = $2"#)
+            .bind(&project.id)
+            .bind("old")
+            .execute(db.pool())
+            .await
+            .expect("age old workspace");
+        workspace_repo
+            .upsert(ProjectWorkspaceGraphUpsert {
+                project_id: &project.id,
+                workspace_slug: "new",
+                commit_sha: "new-sha",
+                status: "ready",
+            })
+            .await
+            .expect("new workspace upsert");
+        let workspace_stamp = workspace_repo
+            .latest_warmed_state(&project.id)
+            .await
+            .expect("workspace latest")
+            .expect("workspace row")
+            .warmed_at;
+
+        assert_eq!(
+            graph_warmed_at_from_freshness(db, &project.id).await,
+            Some(workspace_stamp)
+        );
     }
 }
