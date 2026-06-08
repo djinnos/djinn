@@ -123,9 +123,14 @@ mod tests {
         ))
     }
 
+    const MAX_IMAGE_ID_LEN: usize = 36;
+
     fn test_image_id() -> String {
         let id = uuid::Uuid::now_v7().simple().to_string();
-        debug_assert!(id.len() <= 36, "images.id is varchar(36)");
+        assert!(
+            id.len() <= MAX_IMAGE_ID_LEN,
+            "images.id is varchar({MAX_IMAGE_ID_LEN})"
+        );
         id
     }
 
