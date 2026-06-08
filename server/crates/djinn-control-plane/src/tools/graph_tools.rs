@@ -37,6 +37,9 @@ pub struct CodeGraphParams {
     /// server-managed clone path via `djinn_core::paths::project_dir`
     /// before dispatching to the graph backend.
     pub project: String,
+    /// Optional workspace slug used by follow-up workspace-scoped graph ops.
+    #[serde(default)]
+    pub workspace: Option<String>,
     /// Resolved absolute filesystem path. Populated by the `code_graph`
     /// dispatch after it resolves `project`; the inner operation handlers
     /// read this when they need to call into the graph backend.
@@ -234,6 +237,7 @@ impl CodeGraphParams {
             }
         }
         clear(&mut self.key);
+        clear(&mut self.workspace);
         clear(&mut self.direction);
         clear(&mut self.kind_filter);
         clear(&mut self.query);
