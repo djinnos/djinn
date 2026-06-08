@@ -81,10 +81,11 @@ jobs:
       - run: rustup toolchain install
         working-directory: server
 
-      - name: Install mold linker
+      - name: Install Rust linker toolchain
         run: |
-          sudo apt-get update
-          sudo apt-get install -y mold
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y clang mold
+          clang --version
           mold --version
           ld.mold --version
 
@@ -126,8 +127,13 @@ jobs:
       - run: rustup toolchain install
         working-directory: server
 
-      - name: Install mold linker
-        run: sudo apt-get update && sudo apt-get install -y mold
+      - name: Install Rust linker toolchain
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y clang mold
+          clang --version
+          mold --version
+          ld.mold --version
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -177,8 +183,13 @@ jobs:
       - run: rustup toolchain install
         working-directory: server
 
-      - name: Install mold linker
-        run: sudo apt-get update && sudo apt-get install -y mold
+      - name: Install Rust linker toolchain
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y clang mold
+          clang --version
+          mold --version
+          ld.mold --version
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -241,8 +252,13 @@ jobs:
       - run: rustup toolchain install
         working-directory: server
 
-      - name: Install mold linker
-        run: sudo apt-get update && sudo apt-get install -y mold
+      - name: Install Rust linker toolchain
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y clang mold
+          clang --version
+          mold --version
+          ld.mold --version
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -345,10 +361,10 @@ jobs:
 
       - name: Install Rust linker toolchain
         run: |
-          sudo apt-get update
+          sudo apt-get -o Acquire::Retries=3 update
           # server/.cargo/config.toml drives Linux builds through clang with
           # -fuse-ld=mold; install both before cargo-sqlx shells out to cargo.
-          sudo apt-get install -y clang mold
+          sudo apt-get -o Acquire::Retries=3 install -y clang mold
           clang --version
           mold --version
           ld.mold --version
