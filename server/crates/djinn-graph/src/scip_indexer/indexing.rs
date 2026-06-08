@@ -74,11 +74,14 @@ pub(crate) fn plan_indexer_commands(
 }
 
 fn workspace_declared_slug(workspace: &djinn_stack::Workspace) -> String {
-    if workspace.slug.is_empty() {
-        crate::scip_indexer::workspaces::workspace_slug(Path::new(&workspace.root))
-    } else {
-        workspace.slug.clone()
-    }
+    workspace
+        .slug
+        .as_deref()
+        .filter(|slug| !slug.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            crate::scip_indexer::workspaces::workspace_slug(Path::new(&workspace.root))
+        })
 }
 
 fn warn_on_workspace_divergence(
