@@ -67,7 +67,7 @@ mod tests {
     use super::consolidation;
     use super::dispatch::DispatchOutcome;
     use super::*;
-    use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle};
+    use crate::actors::slot::{ModelSlotConfig, SlotHandle, SlotPoolConfig, SlotPoolHandle};
     use crate::roles::RoleRegistry;
     use crate::test_helpers;
     use djinn_core::models::TransitionAction;
@@ -308,17 +308,29 @@ mod tests {
             tick: tokio::time::interval(STUCK_INTERVAL),
             db: db.clone(),
             events_tx: tx.clone(),
-            pool: SlotPoolHandle::spawn(
+            pool: SlotPoolHandle::spawn_with_factory(
                 test_helpers::agent_context_from_db(db.clone(), CancellationToken::new()),
                 CancellationToken::new(),
                 SlotPoolConfig {
                     models: vec![ModelSlotConfig {
                         model_id: DEFAULT_MODEL_ID.to_owned(),
                         max_slots: 1,
-                        roles: ["worker"].into_iter().map(ToOwned::to_owned).collect(),
+                        roles: ["worker", "reviewer"]
+                            .into_iter()
+                            .map(ToOwned::to_owned)
+                            .collect(),
                     }],
                     role_priorities: HashMap::new(),
                 },
+                Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
+                    let runner: crate::actors::slot::TestLifecycleRunner =
+                        Arc::new(|_task_id, _project_path, _model_id, _app_state, _kill, _pause| {
+                            Box::pin(async { Ok(()) })
+                        });
+                    SlotHandle::spawn_with_test_runner(
+                        slot_id, model_id, event_tx, app_state, cancel, runner,
+                    )
+                }),
             ),
             catalog: CatalogService::new(),
             health: HealthTracker::new(),
