@@ -962,7 +962,13 @@ mod tests {
             .unwrap();
 
         let handle = spawn_coordinator(&db, &tx);
-        handle.trigger_dispatch().await.unwrap();
+        // Event broadcasts from fixture setup can be queued ahead of the explicit
+        // trigger on a loaded CI runner. Use the project-scoped dispatch path so
+        // this assertion observes only the synthetic task created by this test.
+        handle
+            .trigger_dispatch_for_project(&epic.project_id)
+            .await
+            .unwrap();
         handle.wait_for_status(|s| s.tasks_dispatched >= 1).await;
 
         let status = handle.get_status().unwrap();
@@ -1017,7 +1023,13 @@ mod tests {
         .unwrap();
 
         let handle = spawn_coordinator(&db, &tx);
-        handle.trigger_dispatch().await.unwrap();
+        // Event broadcasts from fixture setup can be queued ahead of the explicit
+        // trigger on a loaded CI runner. Use the project-scoped dispatch path so
+        // this assertion observes only the synthetic task created by this test.
+        handle
+            .trigger_dispatch_for_project(&epic.project_id)
+            .await
+            .unwrap();
         // Dispatch; wait for it to complete.
         handle.wait_for_status(|s| s.tasks_dispatched >= 1).await;
 

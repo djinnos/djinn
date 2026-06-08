@@ -797,7 +797,10 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
     // Proposal closeout (Mode E): reconcile AC met-flags as epics land, then
     // mark the building proposal done once every criterion is satisfied.
     tool_values.push(serialize_tool(shared_schemas::tool_proposal_ac_set(), true));
-    tool_values.push(serialize_tool(shared_schemas::tool_proposal_complete(), true));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_complete(),
+        true,
+    ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_epic_blockers_list(),
         true,
