@@ -132,7 +132,7 @@ mod tests {
             .await
             .unwrap();
         // Satisfy the coordinator's readiness gate: assign a ready catalog
-        // image to the synthesized default project and seed a graph cache row.
+        // image to the synthesized default project and seed graph freshness rows.
         // `ProjectRepository::resolve_dispatch_image` intentionally ignores the
         // legacy per-project image columns, so this fixture must use the image
         // catalog selection path rather than `ProjectRepository::set_project_image`.
@@ -162,6 +162,15 @@ mod tests {
                 graph_blob: b"test-graph",
             })
             .await;
+        djinn_db::ProjectWorkspaceGraphRepository::new(db.clone())
+            .upsert(djinn_db::ProjectWorkspaceGraphUpsert {
+                project_id: &epic.project_id,
+                workspace_slug: "root",
+                commit_sha: "test-commit",
+                status: "ready",
+            })
+            .await
+            .unwrap();
         epic
     }
 
