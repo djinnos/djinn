@@ -109,8 +109,10 @@ pub async fn create_test_project(db: &Database) -> Project {
         .await
         .expect("failed to create test project");
     // Satisfy the coordinator's readiness gate so existing tests can dispatch
-    // without threading a full devcontainer pipeline: mark the image as ready
-    // and stamp `graph_warmed_at` via a cache row with a synthetic commit SHA.
+    // without threading a full devcontainer pipeline. Keep both readiness
+    // representations populated: legacy project image columns for older
+    // callers, catalog-image selection for dispatch, and graph freshness rows
+    // for both repo-level and per-workspace checks.
     let image = djinn_db::ProjectImage {
         tag: Some(format!(
             "test-registry/djinn-project-{}:testhash",
@@ -121,12 +123,37 @@ pub async fn create_test_project(db: &Database) -> Project {
         last_error: None,
     };
     let _ = repo.set_project_image(&project.id, &image).await;
+
+    let image_repo = djinn_db::ImageRepository::new(db.clone());
+    let image_id = project.id.clone();
+    let _ = image_repo
+        .create(&image_id, "Test image", None, r#"{"schema_version":1}"#)
+        .await;
+    let _ = image_repo
+        .mark_ready(
+            &image_id,
+            &format!("test-registry/djinn-project-{}:testhash", &project.id),
+            Some("sha256:testhash"),
+        )
+        .await;
+    let _ = image_repo
+        .set_project_image(&project.id, Some(&image_id))
+        .await;
+
     let cache_repo = djinn_db::RepoGraphCacheRepository::new(db.clone());
     let _ = cache_repo
         .upsert(djinn_db::RepoGraphCacheInsert {
             project_id: &project.id,
             commit_sha: "test-commit",
             graph_blob: b"test-graph",
+        })
+        .await;
+    let _ = djinn_db::ProjectWorkspaceGraphRepository::new(db.clone())
+        .upsert(djinn_db::ProjectWorkspaceGraphUpsert {
+            project_id: &project.id,
+            workspace_slug: "root",
+            commit_sha: "test-commit",
+            status: "ready",
         })
         .await;
     project
