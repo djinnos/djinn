@@ -131,10 +131,36 @@ mod tests {
             .create("Epic", "", "", "", "", None)
             .await
             .unwrap();
-        // Satisfy the coordinator's readiness gate: mark the synthesized
-        // default project as image-ready and stamp `graph_warmed_at`.
+        // Satisfy the coordinator's readiness gate: select a ready catalog
+        // image for the synthesized default project and stamp
+        // `graph_warmed_at`. The dispatch gate consults
+        // `resolve_dispatch_image`, so updating only the legacy per-project
+        // image columns is no longer enough for these tests.
         let project_repo =
             djinn_db::ProjectRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let image_repo = djinn_db::repositories::image::ImageRepository::new(db.clone());
+        let image_id = format!("test-image-{}", epic.project_id);
+        image_repo
+            .create(
+                &image_id,
+                &format!("Test Image {}", epic.project_id),
+                None,
+                "{}",
+            )
+            .await
+            .unwrap();
+        image_repo
+            .mark_ready(
+                &image_id,
+                &format!("test-registry/djinn-project-{}:testhash", &epic.project_id),
+                Some("sha256:testhash"),
+            )
+            .await
+            .unwrap();
+        image_repo
+            .set_project_image(&epic.project_id, Some(&image_id))
+            .await
+            .unwrap();
         let image = djinn_db::ProjectImage {
             tag: Some(format!(
                 "test-registry/djinn-project-{}:testhash",
