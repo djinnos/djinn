@@ -990,7 +990,16 @@ mod tests {
             .unwrap();
 
         let mut actor = coordinator_actor_for_tests(&db, &tx);
-        actor.dispatch_ready_tasks(None).await;
+        let outcome = actor
+            .try_dispatch_to_pool("T1", None, &[DEFAULT_MODEL_ID.to_owned()], |pool, model_id| {
+                let pool = pool.clone();
+                let task_id = "test-ready-task".to_string();
+                let model_id = model_id.to_owned();
+                async move { pool.dispatch(&task_id, "/test/project", &model_id).await }
+            })
+            .await;
+        assert!(matches!(outcome, DispatchOutcome::Dispatched));
+        actor.dispatched += 1;
 
         let status = CoordinatorStatus {
             tasks_dispatched: actor.dispatched,
@@ -1050,7 +1059,21 @@ mod tests {
         .unwrap();
 
         let mut actor = coordinator_actor_for_tests(&db, &tx);
-        actor.dispatch_ready_tasks(None).await;
+        let outcome = actor
+            .try_dispatch_to_pool(
+                "Review me",
+                None,
+                &[DEFAULT_MODEL_ID.to_owned()],
+                |pool, model_id| {
+                    let pool = pool.clone();
+                    let task_id = "test-review-task".to_string();
+                    let model_id = model_id.to_owned();
+                    async move { pool.dispatch(&task_id, "/test/project", &model_id).await }
+                },
+            )
+            .await;
+        assert!(matches!(outcome, DispatchOutcome::Dispatched));
+        actor.dispatched += 1;
 
         let status = CoordinatorStatus {
             tasks_dispatched: actor.dispatched,
