@@ -77,9 +77,19 @@ done
 # the ephemeral image layer, so agent-invoked cargo re-downloads crates COLD
 # every run. The `:-` form keeps the baked default for plain login shells while
 # letting the pod-level override survive.
-cat > /etc/profile.d/10-rust.sh <<'EOF'
-export RUSTUP_HOME="${RUSTUP_HOME:-/usr/local/rustup}"
-export CARGO_HOME="${CARGO_HOME:-/usr/local/cargo}"
-export PATH="${CARGO_HOME}/bin:${PATH}"
+#
+# PATH, however, must point at the BAKED cargo/rustup proxies. Those live at the
+# build-time CARGO_HOME (/usr/local/cargo/bin) regardless of the runtime cache
+# override. Deriving PATH from the (overridden) CARGO_HOME resolved it to
+# /cache/cargo/bin — the PVC cache dir, which holds the registry index/crate
+# sources but NOT the cargo binary — so `cargo` fell off the login-shell PATH
+# entirely and the agent dropped to cold, uncached `rustc` fallbacks (~12-min
+# compiles; also the "cargo: command not found" worker loops). Expand
+# ${CARGO_HOME} at BUILD time for the PATH line (note the unquoted heredoc);
+# keep RUSTUP_HOME/CARGO_HOME runtime-overridable via escaped `\${...}`.
+cat > /etc/profile.d/10-rust.sh <<EOF
+export RUSTUP_HOME="\${RUSTUP_HOME:-/usr/local/rustup}"
+export CARGO_HOME="\${CARGO_HOME:-/usr/local/cargo}"
+export PATH="${CARGO_HOME}/bin:\${PATH}"
 EOF
 chmod 0644 /etc/profile.d/10-rust.sh

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -32,11 +33,12 @@ pub(crate) fn plan_indexer_commands(
     project_root: impl AsRef<Path>,
     output_root: impl AsRef<Path>,
     available_indexers: &[IndexerAvailability],
+    declared_workspaces: Option<&[djinn_stack::Workspace]>,
 ) -> Vec<PlannedIndexerCommand> {
     let project_root = project_root.as_ref();
     let output_root = output_root.as_ref();
 
-    available_indexers
+    let plans: Vec<_> = available_indexers
         .iter()
         .flat_map(|availability| {
             let Some(binary_path) = availability.path.as_ref() else {
@@ -64,7 +66,55 @@ pub(crate) fn plan_indexer_commands(
                 })
                 .collect::<Vec<_>>()
         })
-        .collect()
+        .collect();
+
+    warn_on_workspace_divergence(project_root, &plans, declared_workspaces);
+
+    plans
+}
+
+fn workspace_declared_slug(workspace: &djinn_stack::Workspace) -> String {
+    workspace
+        .slug
+        .as_deref()
+        .filter(|slug| !slug.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            crate::scip_indexer::workspaces::workspace_slug(Path::new(&workspace.root))
+        })
+}
+
+fn warn_on_workspace_divergence(
+    project_root: &Path,
+    plans: &[PlannedIndexerCommand],
+    declared_workspaces: Option<&[djinn_stack::Workspace]>,
+) {
+    let Some(declared_workspaces) = declared_workspaces else {
+        return;
+    };
+
+    let declared: BTreeSet<String> = declared_workspaces
+        .iter()
+        .map(workspace_declared_slug)
+        .collect();
+
+    let found: BTreeSet<String> = plans
+        .iter()
+        .map(|plan| plan.workspace_slug.clone())
+        .collect();
+    let declared_but_not_found: Vec<_> = declared.difference(&found).cloned().collect();
+    let found_but_undeclared: Vec<_> = found.difference(&declared).cloned().collect();
+
+    if declared_but_not_found.is_empty() && found_but_undeclared.is_empty() {
+        return;
+    }
+
+    tracing::warn!(
+        project_root = %project_root.display(),
+        declared_but_not_found = ?declared_but_not_found,
+        found_but_undeclared = ?found_but_undeclared,
+        "SCIP workspace discovery diverged from declared EnvironmentConfig workspaces"
+    );
 }
 
 /// RAII guard that temporarily sets `CARGO_TARGET_DIR` to a caller-supplied
@@ -129,15 +179,23 @@ pub(crate) async fn run_indexers_already_locked(
     output_root: impl AsRef<Path>,
     target_dir: Option<&Path>,
     language_filter: Option<&[SupportedIndexer]>,
+    declared_workspaces: Option<&[djinn_stack::Workspace]>,
 ) -> Result<IndexingRun> {
     let _guard = target_dir.map(CargoTargetDirGuard::new);
-    run_indexers(project_root, output_root, language_filter).await
+    run_indexers(
+        project_root,
+        output_root,
+        language_filter,
+        declared_workspaces,
+    )
+    .await
 }
 
 pub(crate) async fn run_indexers(
     project_root: impl AsRef<Path>,
     output_root: impl AsRef<Path>,
     language_filter: Option<&[SupportedIndexer]>,
+    declared_workspaces: Option<&[djinn_stack::Workspace]>,
 ) -> Result<IndexingRun> {
     let project_root = project_root.as_ref().to_path_buf();
     let output_root = output_root.as_ref().to_path_buf();
@@ -173,7 +231,7 @@ pub(crate) async fn run_indexers(
         }
     }
 
-    let plans = plan_indexer_commands(&project_root, &output_root, &available);
+    let plans = plan_indexer_commands(&project_root, &output_root, &available, declared_workspaces);
     let futures: Vec<_> = plans
         .into_iter()
         .map(|plan| {
@@ -512,7 +570,7 @@ mod tests {
             },
         ];
 
-        let plans = plan_indexer_commands(&project_root, &output_root, &available);
+        let plans = plan_indexer_commands(&project_root, &output_root, &available, None);
 
         assert_eq!(plans.len(), 2);
         assert_eq!(plans[0].indexer, SupportedIndexer::RustAnalyzer);
@@ -584,7 +642,7 @@ mod tests {
             },
         ];
 
-        let plans = plan_indexer_commands(&project_root, &output_root, &available);
+        let plans = plan_indexer_commands(&project_root, &output_root, &available, None);
         assert_eq!(plans.len(), 3);
         assert_eq!(plans[0].working_directory, project_root.join("server"));
         assert_eq!(plans[0].workspace_root, project_root.join("server"));
@@ -649,7 +707,7 @@ mod tests {
             path: Some(PathBuf::from("/tooling/scip-python")),
         }];
 
-        let plans = plan_indexer_commands(&project_root, &output_root, &available);
+        let plans = plan_indexer_commands(&project_root, &output_root, &available, None);
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].working_directory, project_root);
         assert_eq!(plans[0].workspace_root, PathBuf::from("/workspace/repo"));
@@ -828,7 +886,7 @@ mod tests {
             })
             .collect();
 
-        let plans = plan_indexer_commands(&project_root, &output_root, &available);
+        let plans = plan_indexer_commands(&project_root, &output_root, &available, None);
         assert_eq!(plans.len(), SupportedIndexer::ALL.len());
         assert_eq!(
             plans.iter().map(|plan| plan.indexer).collect::<Vec<_>>(),
@@ -940,7 +998,8 @@ mod tests {
         std::fs::create_dir_all(&project_root).unwrap();
         let output_root = tmp.path().join("scip-out");
 
-        let result = run_indexers_already_locked(&project_root, &output_root, None, None).await;
+        let result =
+            run_indexers_already_locked(&project_root, &output_root, None, None, None).await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         assert!(std::env::var_os("CARGO_TARGET_DIR").is_none());
     }
