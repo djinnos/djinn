@@ -124,14 +124,26 @@ mod tests {
     }
 
     const MAX_IMAGE_ID_LEN: usize = 36;
+    const MAX_IMAGE_TAG_LEN: usize = 512;
+
+    fn assert_fits_varchar(value: &str, column: &str, max_len: usize) {
+        assert!(
+            value.len() <= max_len,
+            "{column} is varchar({max_len}); generated test value was {} bytes",
+            value.len()
+        );
+    }
 
     fn test_image_id() -> String {
         let id = uuid::Uuid::now_v7().simple().to_string();
-        assert!(
-            id.len() <= MAX_IMAGE_ID_LEN,
-            "images.id is varchar({MAX_IMAGE_ID_LEN})"
-        );
+        assert_fits_varchar(&id, "images.id", MAX_IMAGE_ID_LEN);
         id
+    }
+
+    fn test_image_tag(image_id: &str) -> String {
+        let tag = format!("test-image-{}", &image_id[..20]);
+        assert_fits_varchar(&tag, "images.tag", MAX_IMAGE_TAG_LEN);
+        tag
     }
 
     async fn make_epic(
@@ -161,7 +173,7 @@ mod tests {
             .unwrap();
         // Keep the synthetic tag compact too: these tests run against the
         // real Postgres schema, whose image identity fields are length-bound.
-        let image_tag = format!("test-image-{}", &image_id[..20]);
+        let image_tag = test_image_tag(&image_id);
         image_repo
             .mark_ready(&image_id, &image_tag, Some("sha256:testhash"))
             .await
