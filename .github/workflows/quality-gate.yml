@@ -333,12 +333,6 @@ jobs:
           cache-all-crates: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # server/.cargo/config.toml links with mold for all cargo invocations;
-      # install it from apt before `cargo sqlx prepare --check` so a cold
-      # sqlx-cache job does not fail during build-script linking.
-      - name: Install mold linker
-        run: sudo apt-get update && sudo apt-get install -y mold
-
       # Prebuilt binary — avoids a multi-minute Rust build of sqlx-cli.
       - uses: taiki-e/install-action@v2
         with:
