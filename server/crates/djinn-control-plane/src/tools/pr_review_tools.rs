@@ -290,6 +290,8 @@ impl DjinnMcpServer {
         let ctx = ProjectCtx {
             id: project.id.clone(),
             clone_path: clone_path.clone(),
+            workspace: None,
+            sub_path: None,
         };
 
         let base_commit = resolve_base_commit(&clone_path);

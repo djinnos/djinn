@@ -109,6 +109,8 @@ pub(in crate::server::chat) async fn build_codebase_header(
     let ctx = ProjectCtx {
         id: project_id.to_owned(),
         clone_path: clone_path.to_string_lossy().into_owned(),
+        workspace: None,
+        sub_path: None,
     };
 
     // Run status, ranked, and folder-tree in parallel. status_result
