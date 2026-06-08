@@ -20,6 +20,13 @@ rustc-wrapper = "sccache"
 
 [env]
 TMPDIR = "/var/tmp"
+# Force openssl-sys to link the system OpenSSL instead of compiling the
+# vendored copy from source. `--all-features` activates `openssl/vendored`
+# somewhere in the dep tree, and the agent/CI images ship libssl but NOT the
+# make/perl/C toolchain needed to build OpenSSL from source — so without this
+# `cargo clippy/test --all-features` fails in the build script. No effect on
+# default-feature builds (vendored isn't active there).
+OPENSSL_NO_VENDOR = "1"
 # Default every cargo invocation in this workspace to the isolated test
 # Postgres on :5433. Both sqlx-macros (compile-time schema validation via
 # DATABASE_URL) and the test harness (runtime DB creation via

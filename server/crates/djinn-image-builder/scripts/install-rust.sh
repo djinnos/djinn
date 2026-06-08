@@ -69,6 +69,17 @@ done
 
 "${CARGO_HOME}/bin/rustup" default "${DEFAULT_TOOLCHAIN_VALUE}"
 
+# cargo-nextest: the test runner CI uses (`cargo nextest run`). Pull the
+# prebuilt static binary (no compile) into CARGO_HOME/bin so it's on the baked
+# PATH. Arch-detected; best-effort so a fetch failure never fails the image.
+NEXTEST_PLATFORM="linux"
+case "$(uname -m)" in
+    aarch64 | arm64) NEXTEST_PLATFORM="linux-arm" ;;
+esac
+curl --proto '=https' --tlsv1.2 -LsSf "https://get.nexte.st/latest/${NEXTEST_PLATFORM}" \
+    | tar zxf - -C "${CARGO_HOME}/bin" \
+    || echo "[install-rust] cargo-nextest install failed; skipping (CI uses nextest, task-runs can fall back to 'cargo test')" >&2
+
 # Use `:-` defaults, NOT unconditional exports: the worker runs the agent's
 # shell tool as a LOGIN shell (`bash -lc`), so this fragment is sourced on
 # every command. The K8s pod sets CARGO_HOME=/cache/cargo at runtime (job.rs)

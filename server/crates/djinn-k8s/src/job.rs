@@ -428,6 +428,13 @@ pub(crate) fn cache_env_vars(project_id: &str) -> Vec<EnvVar> {
         // Default is 10G, which evicts fast on a large workspace; give sccache
         // more headroom on the shared PVC.
         env_var("SCCACHE_CACHE_SIZE", "20G"),
+        // Build-in-pod contexts (task-run, warm, verification) have no Postgres
+        // reachable, but a repo's .cargo/config.toml may bake a DATABASE_URL for
+        // local online sqlx (djinn itself bakes :5433). Force offline so the
+        // compile-time sqlx macros use the committed .sqlx cache instead of
+        // trying — and failing — to connect. Local dev keeps online validation
+        // because it never sources cache_env_vars.
+        env_var("SQLX_OFFLINE", "true"),
     ]
 }
 
@@ -797,6 +804,11 @@ mod tests {
             "sccache dir must be on the PVC and namespaced per project (no multi-writer corruption)"
         );
         assert_eq!(envs.get("SCCACHE_CACHE_SIZE").copied(), Some("20G"));
+        assert_eq!(
+            envs.get("SQLX_OFFLINE").copied(),
+            Some("true"),
+            "build-in-pod has no DB; sqlx macros must use the committed .sqlx cache"
+        );
     }
 
     /// When the operator has configured nodeSelector + tolerations (typical
