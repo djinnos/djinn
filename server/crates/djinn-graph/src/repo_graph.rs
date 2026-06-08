@@ -841,6 +841,7 @@ impl RepoDependencyGraph {
             signature_parts: None,
             is_test: false,
             complexity: None,
+            workspace: None,
         };
         let idx = self.graph.add_node(node);
         self.node_lookup.insert(key, idx);
@@ -871,6 +872,7 @@ impl RepoDependencyGraph {
             signature_parts: None,
             is_test: false,
             complexity: None,
+            workspace: None,
         };
         let idx = self.graph.add_node(node);
         self.node_lookup.insert(key, idx);
@@ -1026,6 +1028,12 @@ pub struct RepoGraphNode {
     /// case, but the version bump forces a re-warm.
     #[serde(default)]
     pub complexity: Option<ComplexityMetrics>,
+    /// Workspace slug for the SCIP artifact that produced this node. Kept at
+    /// the end of the struct and defaulted so existing v10 bincode artifacts,
+    /// which stop after `complexity`, can deserialize with `None` without a
+    /// repo-graph artifact version bump or cluster-wide re-warm.
+    #[serde(default)]
+    pub workspace: Option<String>,
 }
 
 impl RepoGraphNode {
@@ -1234,10 +1242,14 @@ struct RepoDependencyGraphBuilder {
     /// (file outside project root, missing, not UTF-8) — re-cached so
     /// we don't keep retrying.
     source_cache: BTreeMap<PathBuf, Option<String>>,
+    /// Workspace slug of the ParsedScipIndex currently being replayed into
+    /// the builder. Stamped on every SCIP-derived node created during the pass.
+    current_workspace: Option<String>,
 }
 
 impl RepoDependencyGraphBuilder {
     fn add_index(&mut self, index: &ParsedScipIndex) {
+        self.current_workspace = Some(index.workspace_slug.clone());
         for external_symbol in &index.external_symbols {
             self.ensure_symbol_node(external_symbol, None, None, true);
         }
@@ -1245,6 +1257,7 @@ impl RepoDependencyGraphBuilder {
         for file in &index.files {
             self.add_file(file);
         }
+        self.current_workspace = None;
     }
 
     fn add_file(&mut self, file: &ScipFile) {
@@ -1447,6 +1460,7 @@ impl RepoDependencyGraphBuilder {
             signature_parts: None,
             is_test,
             complexity: None,
+            workspace: self.current_workspace.clone(),
         };
         let node_index = self.graph.add_node(node);
         self.node_lookup.insert(key, node_index);
@@ -1487,6 +1501,7 @@ impl RepoDependencyGraphBuilder {
                 .map(|p| is_test_path(&p.display().to_string()))
                 .unwrap_or(false),
             complexity: None,
+            workspace: self.current_workspace.clone(),
         };
         let node_index = self.graph.add_node(node);
         self.node_lookup.insert(key, node_index);
@@ -1570,6 +1585,7 @@ impl RepoDependencyGraphBuilder {
             signature_parts: None,
             is_test,
             complexity: None,
+            workspace: self.current_workspace.clone(),
         };
         let key = node.id.clone();
         let node_index = self.graph.add_node(node);
@@ -1899,6 +1915,96 @@ pub struct RepoGraphArtifact {
     /// without re-running the detector.
     #[serde(default)]
     pub processes: Vec<RepoGraphArtifactProcess>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepoGraphArtifactV10WithoutWorkspace {
+    version: u32,
+    nodes: Vec<RepoGraphNodeV10WithoutWorkspace>,
+    edges: Vec<RepoGraphArtifactEdge>,
+    #[serde(default)]
+    symbol_ranges: BTreeMap<PathBuf, Vec<RepoGraphArtifactSymbolRange>>,
+    #[serde(default)]
+    communities: Vec<crate::communities::Community>,
+    #[serde(default)]
+    processes: Vec<RepoGraphArtifactProcess>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepoGraphNodeV10WithoutWorkspace {
+    id: RepoNodeKey,
+    kind: RepoGraphNodeKind,
+    display_name: String,
+    language: Option<String>,
+    file_path: Option<PathBuf>,
+    symbol: Option<String>,
+    symbol_kind: Option<ScipSymbolKind>,
+    is_external: bool,
+    #[serde(default)]
+    visibility: Option<ScipVisibility>,
+    #[serde(default)]
+    signature: Option<String>,
+    #[serde(default)]
+    documentation: Vec<String>,
+    #[serde(default)]
+    signature_parts: Option<crate::scip_parser::ScipSignatureParts>,
+    #[serde(default)]
+    is_test: bool,
+    #[serde(default)]
+    complexity: Option<ComplexityMetrics>,
+}
+
+impl From<RepoGraphArtifactV10WithoutWorkspace> for RepoGraphArtifact {
+    fn from(old: RepoGraphArtifactV10WithoutWorkspace) -> Self {
+        Self {
+            version: old.version,
+            nodes: old.nodes.into_iter().map(RepoGraphNode::from).collect(),
+            edges: old.edges,
+            symbol_ranges: old.symbol_ranges,
+            communities: old.communities,
+            processes: old.processes,
+        }
+    }
+}
+
+impl From<RepoGraphNodeV10WithoutWorkspace> for RepoGraphNode {
+    fn from(old: RepoGraphNodeV10WithoutWorkspace) -> Self {
+        Self {
+            id: old.id,
+            kind: old.kind,
+            display_name: old.display_name,
+            language: old.language,
+            file_path: old.file_path,
+            symbol: old.symbol,
+            symbol_kind: old.symbol_kind,
+            is_external: old.is_external,
+            visibility: old.visibility,
+            signature: old.signature,
+            documentation: old.documentation,
+            signature_parts: old.signature_parts,
+            is_test: old.is_test,
+            complexity: old.complexity,
+            workspace: None,
+        }
+    }
+}
+
+/// Deserialize a repo-graph bincode artifact, accepting both the current v10
+/// node layout (with `workspace`) and pre-workspace v10 blobs that do not carry
+/// the appended node field. The artifact version deliberately remains v10, so
+/// callers on the persisted cache path must use this compatibility seam instead
+/// of raw `bincode::deserialize`.
+pub fn deserialize_repo_graph_artifact_bincode(blob: &[u8]) -> Result<RepoGraphArtifact, String> {
+    match bincode::deserialize::<RepoGraphArtifact>(blob) {
+        Ok(artifact) => Ok(artifact),
+        Err(current_err) => bincode::deserialize::<RepoGraphArtifactV10WithoutWorkspace>(blob)
+            .map(RepoGraphArtifact::from)
+            .map_err(|compat_err| {
+                format!(
+                    "deserialize graph: {current_err}; v10 pre-workspace fallback also failed: {compat_err}"
+                )
+            }),
+    }
 }
 
 /// A serializable directed edge between two graph nodes, identified by their
@@ -2415,6 +2521,7 @@ mod tests {
     use std::path::PathBuf;
 
     use petgraph::visit::EdgeRef;
+    use serde::Serialize;
 
     use super::*;
     use crate::scip_parser::{
@@ -2442,6 +2549,7 @@ mod tests {
         assert_eq!(app_node.kind, RepoGraphNodeKind::File);
         assert_eq!(app_node.language.as_deref(), Some("rust"));
         assert_eq!(app_node.file_path.as_deref(), Some(Path::new("src/app.rs")));
+        assert_eq!(app_node.workspace.as_deref(), Some("root"));
 
         let helper_symbol = graph
             .symbol_node("scip-rust pkg src/helper.rs `helper`().")
@@ -2453,6 +2561,7 @@ mod tests {
             helper_node.file_path.as_deref(),
             Some(Path::new("src/helper.rs"))
         );
+        assert_eq!(helper_node.workspace.as_deref(), Some("root"));
 
         let has_file_reference = graph.graph().edges(app_file).any(|edge| {
             edge.target() == helper_symbol && edge.weight().kind == RepoGraphEdgeKind::FileReference
@@ -2996,6 +3105,29 @@ mod tests {
     }
 
     #[test]
+    fn build_stamps_workspace_from_parsed_index() {
+        let mut index = fixture_index();
+        index.workspace_slug = "api".to_string();
+        let graph = RepoDependencyGraph::build(&[index]);
+
+        let app_file = graph.file_node("src/app.rs").expect("app file");
+        assert_eq!(graph.node(app_file).workspace.as_deref(), Some("api"));
+
+        let helper_symbol = graph
+            .symbol_node("scip-rust pkg src/helper.rs `helper`().")
+            .expect("helper symbol");
+        assert_eq!(graph.node(helper_symbol).workspace.as_deref(), Some("api"));
+
+        for node in graph
+            .graph()
+            .node_weights()
+            .filter(|node| node.kind == RepoGraphNodeKind::Process)
+        {
+            assert_eq!(node.workspace, None);
+        }
+    }
+
+    #[test]
     fn artifact_json_round_trip_preserves_graph() {
         let graph = RepoDependencyGraph::build(&[fixture_index()]);
         let json = graph.serialize_artifact().expect("serialize");
@@ -3153,6 +3285,80 @@ mod tests {
             let edge = edge_ref.weight();
             assert!(edge.confidence > 0.0 && edge.confidence <= 1.0);
         }
+    }
+
+    #[test]
+    fn bincode_v10_artifact_without_workspace_deserializes_with_none() {
+        #[derive(Serialize)]
+        struct V10RepoGraphNodeWithoutWorkspace {
+            id: RepoNodeKey,
+            kind: RepoGraphNodeKind,
+            display_name: String,
+            language: Option<String>,
+            file_path: Option<PathBuf>,
+            symbol: Option<String>,
+            symbol_kind: Option<ScipSymbolKind>,
+            is_external: bool,
+            visibility: Option<crate::scip_parser::ScipVisibility>,
+            signature: Option<String>,
+            documentation: Vec<String>,
+            signature_parts: Option<crate::scip_parser::ScipSignatureParts>,
+            is_test: bool,
+            complexity: Option<ComplexityMetrics>,
+        }
+
+        #[derive(Serialize)]
+        struct V10RepoGraphArtifactWithoutWorkspace {
+            version: u32,
+            nodes: Vec<V10RepoGraphNodeWithoutWorkspace>,
+            edges: Vec<RepoGraphArtifactEdge>,
+            symbol_ranges: BTreeMap<PathBuf, Vec<RepoGraphArtifactSymbolRange>>,
+            communities: Vec<crate::communities::Community>,
+            processes: Vec<RepoGraphArtifactProcess>,
+        }
+
+        let graph = RepoDependencyGraph::build(&[fixture_index()]);
+        let artifact = graph.to_artifact();
+        let old_nodes = artifact
+            .nodes
+            .iter()
+            .map(|node| V10RepoGraphNodeWithoutWorkspace {
+                id: node.id.clone(),
+                kind: node.kind,
+                display_name: node.display_name.clone(),
+                language: node.language.clone(),
+                file_path: node.file_path.clone(),
+                symbol: node.symbol.clone(),
+                symbol_kind: node.symbol_kind.clone(),
+                is_external: node.is_external,
+                visibility: node.visibility,
+                signature: node.signature.clone(),
+                documentation: node.documentation.clone(),
+                signature_parts: node.signature_parts.clone(),
+                is_test: node.is_test,
+                complexity: node.complexity.clone(),
+            })
+            .collect();
+        let old_artifact = V10RepoGraphArtifactWithoutWorkspace {
+            version: REPO_GRAPH_ARTIFACT_VERSION,
+            nodes: old_nodes,
+            edges: artifact.edges.clone(),
+            symbol_ranges: artifact.symbol_ranges.clone(),
+            communities: artifact.communities.clone(),
+            processes: artifact.processes.clone(),
+        };
+
+        let encoded = bincode::serialize(&old_artifact).expect("serialize old v10 bincode");
+        let decoded = deserialize_repo_graph_artifact_bincode(&encoded)
+            .expect("deserialize old v10 bincode through compatibility path");
+
+        assert_eq!(decoded.version, REPO_GRAPH_ARTIFACT_VERSION);
+        assert!(!decoded.nodes.is_empty());
+        assert!(decoded.nodes.iter().all(|node| node.workspace.is_none()));
+
+        let restored = RepoDependencyGraph::from_artifact(&decoded);
+        let app_file = restored.file_node("src/app.rs").expect("app file");
+        assert_eq!(restored.node(app_file).workspace, None);
     }
 
     /// A `local`-prefixed symbol triggers `reason="local-prefix"` and a

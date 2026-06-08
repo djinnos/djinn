@@ -504,8 +504,7 @@ async fn load_cached_artifact(
     String,
 > {
     tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let artifact: crate::repo_graph::RepoGraphArtifact =
-            bincode::deserialize(&blob).map_err(|e| format!("deserialize graph: {e}"))?;
+        let artifact = crate::repo_graph::deserialize_repo_graph_artifact_bincode(&blob)?;
         let graph = crate::repo_graph::RepoDependencyGraph::from_artifact(&artifact);
         let (pagerank, sccs) = derive_graph_caches(&graph);
         Ok((graph, pagerank, sccs))
