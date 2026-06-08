@@ -952,6 +952,18 @@ impl OAuthConfigWire {
     }
 }
 
+/// Serializes codex OAuth token refresh process-wide. Codex/OpenAI rotate the
+/// refresh token on every use (single-use), so concurrent task-run dispatches
+/// hitting an expired token would each POST the SAME refresh_token — the first
+/// rotates it and the rest get `invalid_grant`; OpenAI then invalidates the
+/// whole token family on reuse, poisoning the credential until a manual
+/// reconnect. Holding this lock across [reload → check → refresh → save] makes
+/// losers reuse the winner's freshly-saved token instead of racing a second
+/// refresh. (Process-local: correct for the single-replica VPS; on a
+/// multi-replica deploy a Postgres advisory lock would close the cross-replica
+/// window — tracked as a follow-up.)
+static CODEX_REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub async fn load_provider_credential(
     provider_id: &str,
     app_state: &AgentContext,
@@ -969,27 +981,37 @@ pub async fn load_provider_credential(
             if let Some(tokens) =
                 crate::oauth::codex::CodexTokens::load_from_db(&credential_repo).await
             {
-                if tokens.is_expired() {
-                    // Attempt silent refresh.
-                    match crate::oauth::codex::refresh_cached_token(&tokens, &credential_repo).await
-                    {
-                        Ok(refreshed) => {
-                            return Ok(ProviderCredential::OAuthConfig(Box::new(
-                                crate::oauth::codex_provider_config(&refreshed),
-                            )));
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                provider = provider_id,
-                                error = %e,
-                                "OAuth token refresh failed; falling back to credential vault"
-                            );
-                        }
-                    }
-                } else {
+                if !tokens.is_expired() {
                     return Ok(ProviderCredential::OAuthConfig(Box::new(
                         crate::oauth::codex_provider_config(&tokens),
                     )));
+                }
+                // Expired → refresh under the single-flight lock (see
+                // CODEX_REFRESH_LOCK) so concurrent dispatches don't race the
+                // single-use refresh token. Double-check after acquiring: a
+                // peer may have already refreshed while we waited.
+                let _guard = CODEX_REFRESH_LOCK.lock().await;
+                let current = crate::oauth::codex::CodexTokens::load_from_db(&credential_repo)
+                    .await
+                    .unwrap_or(tokens);
+                if !current.is_expired() {
+                    return Ok(ProviderCredential::OAuthConfig(Box::new(
+                        crate::oauth::codex_provider_config(&current),
+                    )));
+                }
+                match crate::oauth::codex::refresh_cached_token(&current, &credential_repo).await {
+                    Ok(refreshed) => {
+                        return Ok(ProviderCredential::OAuthConfig(Box::new(
+                            crate::oauth::codex_provider_config(&refreshed),
+                        )));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            provider = provider_id,
+                            error = %e,
+                            "OAuth token refresh failed; falling back to credential vault"
+                        );
+                    }
                 }
             }
         }
