@@ -1096,6 +1096,10 @@ pub enum ImpactResult {
 ///   and other per-project tables.
 /// - `clone_path`: `$DJINN_HOME/projects/{owner}/{repo}` — the
 ///   filesystem root the SCIP indexer / git CLI operates against.
+/// - `workspace`: optional workspace slug supplied by the caller after
+///   request-boundary normalization.
+/// - `sub_path`: optional repository-relative workspace sub-path, when
+///   available to the dispatch caller.
 ///
 /// Every bridge method takes this by reference so implementations can
 /// decide whether an operation is DB-only (`status`, `metrics_at`) or
@@ -1105,6 +1109,8 @@ pub enum ImpactResult {
 pub struct ProjectCtx {
     pub id: String,
     pub clone_path: String,
+    pub workspace: Option<String>,
+    pub sub_path: Option<String>,
 }
 
 #[async_trait]

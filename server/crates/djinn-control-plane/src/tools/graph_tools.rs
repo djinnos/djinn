@@ -1175,6 +1175,8 @@ impl DjinnMcpServer {
         let ctx = ProjectCtx {
             id: params.project_id.clone(),
             clone_path: params.project_path.clone(),
+            workspace: params.workspace.clone(),
+            sub_path: None,
         };
 
         // Both pre-resolve and the per-op match now live inside
@@ -2515,6 +2517,8 @@ mod tests {
         let ctx = ProjectCtx {
             id: "p".to_string(),
             clone_path: "/tmp".to_string(),
+            workspace: None,
+            sub_path: None,
         };
         let ops = StubRepoGraphOps;
         // Stub returns no hits; the default impl still has to compile
