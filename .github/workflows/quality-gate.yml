@@ -80,7 +80,10 @@ jobs:
       - run: rustup toolchain install
         working-directory: server
 
-      - uses: rui314/setup-mold@v1
+      - name: Install mold
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -121,7 +124,10 @@ jobs:
       - run: rustup toolchain install
         working-directory: server
 
-      - uses: rui314/setup-mold@v1
+      - name: Install mold
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -171,7 +177,10 @@ jobs:
       - run: rustup toolchain install
         working-directory: server
 
-      - uses: rui314/setup-mold@v1
+      - name: Install mold
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -234,7 +243,10 @@ jobs:
       - run: rustup toolchain install
         working-directory: server
 
-      - uses: rui314/setup-mold@v1
+      - name: Install mold
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -336,7 +348,10 @@ jobs:
       - run: rustup toolchain install
         working-directory: server
 
-      - uses: rui314/setup-mold@v1
+      - name: Install mold
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold
 
       - uses: Swatinem/rust-cache@v2
         with:
