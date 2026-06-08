@@ -13,7 +13,7 @@
 //! not an IDF-only selector and does not compete with richer hybrid indexes.
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use petgraph::Direction::{Incoming, Outgoing};
 use petgraph::graph::{EdgeIndex, NodeIndex};
@@ -533,11 +533,11 @@ fn normalize_seeds(
             continue;
         }
         let actual_uid = stable_node_uid(graph.node(seed.node_index));
-        if let Some(uid) = &seed.node_uid {
-            if uid != &actual_uid {
-                seed.debug
-                    .push(format!("seed uid normalized from {uid} to {actual_uid}"));
-            }
+        if let Some(uid) = &seed.node_uid
+            && uid != &actual_uid
+        {
+            seed.debug
+                .push(format!("seed uid normalized from {uid} to {actual_uid}"));
         }
         seed.node_uid = Some(actual_uid);
         out.push(seed);
@@ -560,12 +560,11 @@ fn node_allowed(node: &RepoGraphNode, params: &QuerySubgraphParams) -> bool {
     {
         return false;
     }
-    if let Some(workspace) = params.workspace.as_deref() {
-        if let Some(node_workspace) = node.workspace.as_deref()
-            && node_workspace != workspace
-        {
-            return false;
-        }
+    if let Some(workspace) = params.workspace.as_deref()
+        && let Some(node_workspace) = node.workspace.as_deref()
+        && node_workspace != workspace
+    {
+        return false;
     }
     if let Some(file_filter) = params.file_filter.as_deref() {
         let file = node.file_path.as_ref().map(|p| p.to_string_lossy());
@@ -680,7 +679,7 @@ fn estimate_node_tokens(node: &RepoGraphNode) -> usize {
     chars.div_ceil(4).max(8)
 }
 
-fn path_chars(path: &PathBuf) -> usize {
+fn path_chars(path: &Path) -> usize {
     path.to_string_lossy().len()
 }
 
