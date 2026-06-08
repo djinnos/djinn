@@ -2486,6 +2486,20 @@ mod tests {
         assert_eq!(params.mode.as_deref(), Some("hybrid"));
     }
 
+    #[test]
+    fn normalize_clears_empty_workspace() {
+        let json = serde_json::json!({
+            "operation": "ranked",
+            "project": "/workspace/repo",
+            "workspace": "",
+        });
+        let mut params: CodeGraphParams = serde_json::from_value(json).unwrap();
+
+        params.normalize();
+
+        assert_eq!(params.workspace, None);
+    }
+
     /// PR B4: the default `hybrid_search` impl on `RepoGraphOps`
     /// degrades to the structural-only path so test stubs that only
     /// override `search` still serve the hybrid mode (with every hit
