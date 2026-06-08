@@ -59,13 +59,20 @@ impl SlotActor {
                         break;
                     }
                     join_result = &mut running.join => {
-                        if let Err(e) = join_result {
-                            // A panicked/aborted lifecycle leaves no task-status
-                            // transition behind, so surface it loudly with the
-                            // task id — otherwise the task silently bounces back
-                            // to `open` and the only signal is the coordinator's
-                            // re-dispatch streak.
-                            tracing::error!(slot_id = self.id, model_id = %self.model_id, task_id = %running.task_id, error = %e, "slot lifecycle task panicked/aborted");
+                        // A failed lifecycle leaves no task-status transition
+                        // behind, so surface it loudly with the task id —
+                        // otherwise the task silently bounces back to `open`
+                        // and the only signal is the coordinator's re-dispatch
+                        // streak. Two distinct failure shapes: a JoinError
+                        // (panic/abort) AND the runner *returning* `Err(..)`
+                        // (an infra/setup failure from `run_supervisor_dispatch`
+                        // — e.g. credential resolution). The latter was
+                        // previously dropped on the floor, making dispatch-time
+                        // failures invisible.
+                        match &join_result {
+                            Err(e) => tracing::error!(slot_id = self.id, model_id = %self.model_id, task_id = %running.task_id, error = %e, "slot lifecycle task panicked/aborted"),
+                            Ok(Err(e)) => tracing::error!(slot_id = self.id, model_id = %self.model_id, task_id = %running.task_id, error = %format!("{e:#}"), "slot lifecycle returned error (dispatch/setup failure)"),
+                            Ok(Ok(())) => {}
                         }
                         self.emit_completion_event(&running).await;
                         if drain_requested {
