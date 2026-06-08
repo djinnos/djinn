@@ -137,10 +137,9 @@ mod tests {
         // catalog image instead of the legacy per-project image columns, so
         // setting only `projects.image_status` leaves dispatch fail-closed.
         let image = djinn_db::ProjectImage {
-            tag: Some(format!(
-                "test-registry/djinn-project-{}:testhash",
-                &epic.project_id
-            )),
+            // Keep the synthetic tag short: some CI test templates still use
+            // legacy VARCHAR(36) image tag columns.
+            tag: Some("djinn-test:testhash".into()),
             hash: Some("testhash".into()),
             status: djinn_db::ProjectImageStatus::READY.into(),
             last_error: None,
