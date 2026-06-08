@@ -174,7 +174,12 @@ impl ImageRepository {
         Ok(())
     }
 
-    pub async fn mark_ready(&self, id: &str, tag: &str, registry_digest: Option<&str>) -> Result<()> {
+    pub async fn mark_ready(
+        &self,
+        id: &str,
+        tag: &str,
+        registry_digest: Option<&str>,
+    ) -> Result<()> {
         self.db.ensure_initialized().await?;
         sqlx::query(
             r#"UPDATE images SET status = 'ready', tag = $2, registry_digest = $3, last_error = NULL,
@@ -208,7 +213,10 @@ impl ImageRepository {
             .bind(image_id)
             .fetch_all(self.db.pool())
             .await?;
-        Ok(rows.iter().map(|r| r.get::<String, _>("preset_id")).collect())
+        Ok(rows
+            .iter()
+            .map(|r| r.get::<String, _>("preset_id"))
+            .collect())
     }
 
     /// Replace the image's allowed-preset set wholesale.
@@ -312,12 +320,19 @@ mod tests {
         let img = repo.get("i1").await.unwrap().expect("row");
         assert_eq!(img.name, "Go");
         assert_eq!(img.status, ImageStatus::NONE);
-        repo.mark_ready("i1", "ghcr/x:abc", Some("sha256:deadbeef")).await.unwrap();
-        assert_eq!(repo.get("i1").await.unwrap().unwrap().status, "ready");
-        // Editing config resets build state.
-        repo.update("i1", "Go", None, r#"{"schema_version":1,"system_packages":["libpq-dev"]}"#)
+        repo.mark_ready("i1", "ghcr/x:abc", Some("sha256:deadbeef"))
             .await
             .unwrap();
+        assert_eq!(repo.get("i1").await.unwrap().unwrap().status, "ready");
+        // Editing config resets build state.
+        repo.update(
+            "i1",
+            "Go",
+            None,
+            r#"{"schema_version":1,"system_packages":["libpq-dev"]}"#,
+        )
+        .await
+        .unwrap();
         let after = repo.get("i1").await.unwrap().unwrap();
         assert_eq!(after.status, "none");
         assert!(after.registry_digest.is_none());
@@ -332,7 +347,11 @@ mod tests {
         repo.create("i1", "Rust", None, "{}").await.unwrap();
         assert!(repo.resolve_for_project("p1").await.unwrap().is_none());
         repo.set_project_image("p1", Some("i1")).await.unwrap();
-        let resolved = repo.resolve_for_project("p1").await.unwrap().expect("resolved");
+        let resolved = repo
+            .resolve_for_project("p1")
+            .await
+            .unwrap()
+            .expect("resolved");
         assert_eq!(resolved.id, "i1");
         repo.set_project_image("p1", None).await.unwrap();
         assert!(repo.resolve_for_project("p1").await.unwrap().is_none());
@@ -346,27 +365,48 @@ mod tests {
         let projects = ProjectRepository::new(db.clone(), EventBus::noop());
 
         // Unknown project → None.
-        assert!(projects.resolve_dispatch_image("nope").await.unwrap().is_none());
+        assert!(
+            projects
+                .resolve_dispatch_image("nope")
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         // No catalog image assigned → project exists but is NOT dispatchable
         // (projects no longer build a bespoke image — they need a catalog one).
-        let d = projects.resolve_dispatch_image("p1").await.unwrap().unwrap();
+        let d = projects
+            .resolve_dispatch_image("p1")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(d.from_catalog, None);
         assert!(d.pull_ref().is_none());
 
         // Assign a catalog image that is NOT ready yet → not dispatchable.
         images.create("i1", "Rust", None, "{}").await.unwrap();
         images.set_project_image("p1", Some("i1")).await.unwrap();
-        let d = projects.resolve_dispatch_image("p1").await.unwrap().unwrap();
+        let d = projects
+            .resolve_dispatch_image("p1")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(d.from_catalog.as_deref(), Some("i1"));
-        assert!(d.pull_ref().is_none(), "catalog image not ready ⇒ not dispatchable");
+        assert!(
+            d.pull_ref().is_none(),
+            "catalog image not ready ⇒ not dispatchable"
+        );
 
         // Mark the catalog image ready with a digest → digest-pinned pull ref.
         images
             .mark_ready("i1", "reg/djinn-image-i1:hash", Some("sha256:abc"))
             .await
             .unwrap();
-        let d = projects.resolve_dispatch_image("p1").await.unwrap().unwrap();
+        let d = projects
+            .resolve_dispatch_image("p1")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(d.from_catalog.as_deref(), Some("i1"));
         assert_eq!(
             d.pull_ref().as_deref(),
@@ -376,7 +416,11 @@ mod tests {
 
         // Clearing the selection → back to not-dispatchable (needs setup).
         images.set_project_image("p1", None).await.unwrap();
-        let d = projects.resolve_dispatch_image("p1").await.unwrap().unwrap();
+        let d = projects
+            .resolve_dispatch_image("p1")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(d.from_catalog, None);
         assert!(d.pull_ref().is_none());
     }

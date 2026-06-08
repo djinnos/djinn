@@ -7,6 +7,13 @@ use anyhow::{Context, Result};
 
 use super::{DiscoveredWorkspace, SupportedIndexer};
 
+// Keep the legacy `scip_indexer::workspaces::workspace_slug` path available for
+// graph-internal callers while the canonical implementation lives in
+// `djinn_stack`. This submodule is intentionally mostly an implementation
+// detail, so the crate-level `unreachable_pub` lint cannot see the re-export as
+// part of the public API even though downstream code may still import it via the
+// public `scip_indexer` module.
+#[allow(unreachable_pub)]
 pub use djinn_stack::workspace_slug;
 
 pub(crate) fn discover_workspaces(

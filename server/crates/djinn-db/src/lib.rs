@@ -46,10 +46,6 @@ pub use repositories::{
     events::EventsRepository,
     git_settings::GitSettingsRepository,
     image::{Image, ImageRepository, ImageStatus},
-    service::{
-        ServiceInstance, ServiceInstanceRepository, ServiceInstanceStatus, ServicePolicyRepository,
-        ServicePreset, ServicePresetRepository,
-    },
     models::ModelsRepository,
     note::{
         CONTRADICTION, ConsolidatedNoteProvenance, ConsolidationCandidateEdge,
@@ -83,6 +79,10 @@ pub use repositories::{
         ProposalRepository, ProposalUpdateInput,
     },
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
+    service::{
+        ServiceInstance, ServiceInstanceRepository, ServiceInstanceStatus, ServicePolicyRepository,
+        ServicePreset, ServicePresetRepository,
+    },
     session::{CreateSessionParams, SessionRepository},
     session_auth::{CreateUserAuthSession, SessionAuthRepository, UserAuthSessionRecord},
     session_message::SessionMessageRepository,
@@ -97,8 +97,8 @@ pub use repositories::{
     user_settings::UserSettingsRepository,
     verification::VerificationRepository,
     verification_cache::{CachedVerification, VerificationCacheRepository},
-    verification_test::{VerificationTestRepository, VerificationTestRun, VerificationTestStatus},
     verification_result::{
         VerificationResultRepository, VerificationStepInsert, VerificationStepRow,
     },
+    verification_test::{VerificationTestRepository, VerificationTestRun, VerificationTestStatus},
 };
