@@ -2564,6 +2564,7 @@ mod tests {
         CodeGraphParams {
             operation: op.to_string(),
             project: "test/test".to_string(),
+            workspace: None,
             project_id: String::new(),
             project_path: "/tmp".to_string(),
             key: None,
