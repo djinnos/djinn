@@ -37,10 +37,9 @@ async fn graph_warmed_at_from_freshness(db: Database, project_id: &str) -> Optio
         .await
         .ok()
         .flatten()
+        .filter(|workspace| !workspace.warmed_at.is_empty())
     {
-        if !workspace.warmed_at.is_empty() {
-            return Some(workspace.warmed_at);
-        }
+        return Some(workspace.warmed_at);
     }
 
     RepoGraphCacheRepository::new(db)
