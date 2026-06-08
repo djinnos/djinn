@@ -74,6 +74,10 @@ pub use repositories::{
         DispatchImage, ProjectConfig, ProjectDispatchReadiness, ProjectImage, ProjectImageStatus,
         ProjectRepository,
     },
+    project_workspace_graph::{
+        ProjectWorkspaceGraph, ProjectWorkspaceGraphLatest, ProjectWorkspaceGraphRepository,
+        ProjectWorkspaceGraphUpsert,
+    },
     proposal::{
         ProposalCreateInput, ProposalFeedbackCreateInput, ProposalListQuery, ProposalListResult,
         ProposalRepository, ProposalUpdateInput,

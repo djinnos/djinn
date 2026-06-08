@@ -529,16 +529,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["desktop", "website"]
         );
-        assert_eq!(
-            plans[1..]
-                .iter()
-                .map(|plan| plan
-                    .output_path
+        let ts_output_names = plans[1..]
+            .iter()
+            .map(|plan| {
+                plan.output_path
                     .file_name()
                     .unwrap()
                     .to_string_lossy()
-                    .into_owned())
-                .collect::<Vec<_>>(),
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ts_output_names,
             vec![
                 format!(
                     "djinn-typescript-{}.scip",

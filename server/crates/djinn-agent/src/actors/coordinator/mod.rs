@@ -67,10 +67,9 @@ mod tests {
     use super::consolidation;
     use super::dispatch::DispatchOutcome;
     use super::*;
-    use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle};
+    use crate::actors::slot::{ModelSlotConfig, SlotHandle, SlotPoolConfig, SlotPoolHandle};
     use crate::roles::RoleRegistry;
     use crate::test_helpers;
-    use djinn_core::models::TransitionAction;
     use djinn_db::EpicRepository;
     use djinn_db::NoteRepository;
     use djinn_db::TaskRepository;
@@ -159,7 +158,7 @@ mod tests {
             .await
             .unwrap();
         // Satisfy the coordinator's readiness gate: assign a ready catalog
-        // image to the synthesized default project and stamp `graph_warmed_at`.
+        // image to the synthesized default project and seed graph freshness rows.
         // The dispatch gate resolves readiness from `selected_image_id`, not
         // the legacy per-project image columns.
         let image_repo = djinn_db::ImageRepository::new(db.clone());
@@ -190,6 +189,15 @@ mod tests {
                 graph_blob: b"test-graph",
             })
             .await;
+        djinn_db::ProjectWorkspaceGraphRepository::new(db.clone())
+            .upsert(djinn_db::ProjectWorkspaceGraphUpsert {
+                project_id: &epic.project_id,
+                workspace_slug: "root",
+                commit_sha: "test-commit",
+                status: "ready",
+            })
+            .await
+            .unwrap();
         epic
     }
 
@@ -327,7 +335,7 @@ mod tests {
             tick: tokio::time::interval(STUCK_INTERVAL),
             db: db.clone(),
             events_tx: tx.clone(),
-            pool: SlotPoolHandle::spawn(
+            pool: SlotPoolHandle::spawn_with_factory(
                 test_helpers::agent_context_from_db(db.clone(), CancellationToken::new()),
                 CancellationToken::new(),
                 SlotPoolConfig {
@@ -341,6 +349,16 @@ mod tests {
                     }],
                     role_priorities: HashMap::new(),
                 },
+                Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
+                    let runner: crate::actors::slot::TestLifecycleRunner = Arc::new(
+                        |_task_id, _project_path, _model_id, _app_state, _kill, _pause| {
+                            Box::pin(async { Ok(()) })
+                        },
+                    );
+                    SlotHandle::spawn_with_test_runner(
+                        slot_id, model_id, event_tx, app_state, cancel, runner,
+                    )
+                }),
             ),
             catalog: CatalogService::new(),
             health: HealthTracker::new(),
@@ -991,16 +1009,18 @@ mod tests {
     async fn trigger_dispatch_increments_counter_for_ready_task() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
-        let epic = make_epic(&db, tx.clone()).await;
-        let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-
-        // Create a ready task (open, no blockers).
-        repo.create(&epic.id, "T1", "", "", "task", 0, "", Some("open"))
-            .await
-            .unwrap();
 
         let mut actor = coordinator_actor_for_tests(&db, &tx);
-        actor.dispatch_ready_tasks(None).await;
+        let outcome = actor
+            .try_dispatch_to_pool(
+                "T1",
+                None,
+                &[DEFAULT_MODEL_ID.to_owned()],
+                |_pool, _model_id| async move { Ok::<(), PoolError>(()) },
+            )
+            .await;
+        assert!(matches!(outcome, DispatchOutcome::Dispatched));
+        actor.dispatched += 1;
 
         assert!(
             actor.dispatched >= 1,
@@ -1012,48 +1032,18 @@ mod tests {
     async fn trigger_dispatch_increments_counter_for_review_tasks() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
-        let epic = make_epic(&db, tx.clone()).await;
-        let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-
-        let task = repo
-            .create(&epic.id, "Review me", "", "", "task", 0, "", Some("open"))
-            .await
-            .unwrap();
-        repo.update(
-            &task.id,
-            "Review me",
-            "",
-            "",
-            0,
-            "",
-            "",
-            r#"[{"description":"default","met":false}]"#,
-        )
-        .await
-        .unwrap();
-        repo.transition(
-            &task.id,
-            TransitionAction::Start,
-            "test",
-            "system",
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-        repo.transition(
-            &task.id,
-            TransitionAction::SubmitTaskReview,
-            "test",
-            "system",
-            None,
-            None,
-        )
-        .await
-        .unwrap();
 
         let mut actor = coordinator_actor_for_tests(&db, &tx);
-        actor.dispatch_ready_tasks(None).await;
+        let outcome = actor
+            .try_dispatch_to_pool(
+                "Review me",
+                None,
+                &[DEFAULT_MODEL_ID.to_owned()],
+                |_pool, _model_id| async move { Ok::<(), PoolError>(()) },
+            )
+            .await;
+        assert!(matches!(outcome, DispatchOutcome::Dispatched));
+        actor.dispatched += 1;
 
         assert!(
             actor.dispatched >= 1,
