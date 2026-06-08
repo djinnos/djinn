@@ -460,8 +460,10 @@ pub(crate) async fn call_proposal_complete(
     let existing: Vec<serde_json::Value> =
         serde_json::from_str(&proposal.acceptance_criteria).unwrap_or_default();
     if !existing.is_empty() {
-        let all_met: Vec<serde_json::Value> =
-            existing.iter().map(|_| serde_json::json!({ "met": true })).collect();
+        let all_met: Vec<serde_json::Value> = existing
+            .iter()
+            .map(|_| serde_json::json!({ "met": true }))
+            .collect();
         let ac_json = merge_acceptance_criteria(&proposal.acceptance_criteria, &all_met);
         let _ = proposal_repo
             .set_acceptance_criteria(&proposal.id, &ac_json)
@@ -509,7 +511,11 @@ pub(crate) async fn call_proposal_ac_set(
         serde_json::from_str(&updated.acceptance_criteria).unwrap_or_default();
     let met = parsed
         .iter()
-        .filter(|c| c.get("met").and_then(serde_json::Value::as_bool).unwrap_or(false))
+        .filter(|c| {
+            c.get("met")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        })
         .count();
     Ok(serde_json::json!({
         "ok": true,

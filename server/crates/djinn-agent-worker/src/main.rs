@@ -737,12 +737,21 @@ async fn run_verify_test(test_id: &str) -> Result<()> {
             repo.complete(test_id, status, &results_json, None)
                 .await
                 .with_context(|| format!("write verification_test_run {test_id} result"))?;
-            tracing::info!(test_id, passed = result.passed, "verification test complete");
+            tracing::info!(
+                test_id,
+                passed = result.passed,
+                "verification test complete"
+            );
         }
         Err(e) => {
             let msg = format!("{e:#}");
             let _ = repo
-                .complete(test_id, djinn_db::VerificationTestStatus::ERROR, "[]", Some(&msg))
+                .complete(
+                    test_id,
+                    djinn_db::VerificationTestStatus::ERROR,
+                    "[]",
+                    Some(&msg),
+                )
                 .await;
             tracing::warn!(test_id, error = %msg, "verification test errored");
         }

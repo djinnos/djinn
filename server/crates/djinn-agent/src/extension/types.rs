@@ -351,6 +351,8 @@ pub(super) struct LspParams {
 pub(super) struct CodeGraphParams {
     pub operation: String,
     #[serde(default)]
+    pub workspace: Option<String>,
+    #[serde(default)]
     pub key: Option<String>,
     #[serde(default)]
     pub direction: Option<String>,
@@ -480,6 +482,7 @@ impl CodeGraphParams {
             }
         }
         clear(&mut self.key);
+        clear(&mut self.workspace);
         clear(&mut self.direction);
         clear(&mut self.kind_filter);
         clear(&mut self.query);

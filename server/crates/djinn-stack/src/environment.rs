@@ -25,6 +25,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::workspace_slug;
+
 /// Current schema version. Bumped for every breaking shape change. The worker
 /// rejects configs with `schema_version` greater than this (forward-incompat
 /// canary — see `risks & gotchas` in the plan).
@@ -267,6 +269,7 @@ impl EnvironmentConfig {
                     _ => (None, ws.toolchain.clone()),
                 };
                 Workspace {
+                    slug: workspace_slug(std::path::Path::new(&ws.root)),
                     root: ws.root.clone(),
                     language: ws.language.clone(),
                     toolchain,
@@ -494,6 +497,8 @@ impl ClangLanguage {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Workspace {
+    #[serde(default)]
+    pub slug: String,
     pub root: String,
     pub language: String,
     // `skip_serializing_if` dropped on all three Options — `Workspace` rides
@@ -525,6 +530,9 @@ fn validate_workspaces(workspaces: &[Workspace]) -> EnvResult<()> {
         }
         // `root` is a path within the repo; allow `/` and be lenient.
         validate_path("workspaces[*].root", &ws.root)?;
+        if !ws.slug.is_empty() {
+            validate_identifier("workspaces[*].slug", &ws.slug)?;
+        }
         validate_identifier("workspaces[*].language", &ws.language)?;
         if let Some(t) = &ws.toolchain {
             validate_identifier("workspaces[*].toolchain", t)?;
@@ -1030,6 +1038,7 @@ mod tests {
         let mut cfg = valid_minimal();
         cfg.workspaces = vec![
             Workspace {
+                slug: String::new(),
                 root: "server".to_owned(),
                 language: "rust".to_owned(),
                 toolchain: Some("stable".to_owned()),
@@ -1037,6 +1046,7 @@ mod tests {
                 package_manager: None,
             },
             Workspace {
+                slug: String::new(),
                 root: "server".to_owned(),
                 language: "rust".to_owned(),
                 toolchain: None,
@@ -1058,6 +1068,7 @@ mod tests {
         let mut cfg = valid_minimal();
         cfg.workspaces = vec![
             Workspace {
+                slug: String::new(),
                 root: "".to_owned(),
                 language: "go".to_owned(),
                 toolchain: None,
@@ -1065,6 +1076,7 @@ mod tests {
                 package_manager: None,
             },
             Workspace {
+                slug: String::new(),
                 root: "".to_owned(),
                 language: "node".to_owned(),
                 toolchain: None,
@@ -1080,6 +1092,7 @@ mod tests {
     fn rejects_absolute_workspace_root() {
         let mut cfg = valid_minimal();
         cfg.workspaces = vec![Workspace {
+            slug: String::new(),
             root: "/etc".to_owned(),
             language: "rust".to_owned(),
             toolchain: None,
@@ -1097,6 +1110,7 @@ mod tests {
     fn rejects_dotdot_workspace_root() {
         let mut cfg = valid_minimal();
         cfg.workspaces = vec![Workspace {
+            slug: String::new(),
             root: "../outside".to_owned(),
             language: "rust".to_owned(),
             toolchain: None,
@@ -1114,6 +1128,7 @@ mod tests {
     fn accepts_nested_workspace_root() {
         let mut cfg = valid_minimal();
         cfg.workspaces = vec![Workspace {
+            slug: String::new(),
             root: "tools/codegen".to_owned(),
             language: "rust".to_owned(),
             toolchain: Some("1.85.0".to_owned()),
@@ -1129,6 +1144,7 @@ mod tests {
         let mut cfg = valid_minimal();
         cfg.workspaces = (0..(MAX_WORKSPACES + 1))
             .map(|i| Workspace {
+                slug: String::new(),
                 root: format!("dir{i}"),
                 language: "rust".to_owned(),
                 toolchain: None,
@@ -1308,6 +1324,10 @@ mod tests {
         assert_eq!(cfg.workspaces.len(), 1);
         // Unpinned workspace now falls back to the language default so
         // the UI can show a concrete toolchain.
+        assert_eq!(
+            cfg.workspaces[0].slug,
+            workspace_slug(std::path::Path::new(""))
+        );
         assert_eq!(cfg.workspaces[0].toolchain.as_deref(), Some("stable"));
         assert!(cfg.workspaces[0].version.is_none());
     }
@@ -1335,10 +1355,12 @@ mod tests {
         let cfg = EnvironmentConfig::from_stack(&stack);
         // Rust workspace uses `toolchain`, not `version`.
         let rust_ws = cfg.workspaces.iter().find(|w| w.root == "server").unwrap();
+        assert_eq!(rust_ws.slug, workspace_slug(std::path::Path::new("server")));
         assert_eq!(rust_ws.toolchain.as_deref(), Some("stable"));
         assert!(rust_ws.version.is_none());
         // Node workspace uses `version`, not `toolchain`.
         let node_ws = cfg.workspaces.iter().find(|w| w.root == "ui").unwrap();
+        assert_eq!(node_ws.slug, workspace_slug(std::path::Path::new("ui")));
         assert!(node_ws.toolchain.is_none());
         assert_eq!(node_ws.version.as_deref(), Some("20"));
         assert_eq!(node_ws.package_manager.as_deref(), Some("pnpm"));

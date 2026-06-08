@@ -46,7 +46,10 @@ pub fn backing_service_names(instance_id: &str) -> (String, String) {
 
 fn labels(instance_id: &str, task_run_id: &str, service_type: &str) -> BTreeMap<String, String> {
     BTreeMap::from([
-        (LABEL_COMPONENT.to_string(), COMPONENT_BACKING_SERVICE.to_string()),
+        (
+            LABEL_COMPONENT.to_string(),
+            COMPONENT_BACKING_SERVICE.to_string(),
+        ),
         (LABEL_TASK_RUN_ID.to_string(), sanitize_id(task_run_id)),
         (LABEL_SERVICE_TYPE.to_string(), sanitize_id(service_type)),
         (LABEL_INSTANCE_ID.to_string(), sanitize_id(instance_id)),
@@ -128,8 +131,7 @@ pub fn build_backing_service_pod(
     };
 
     let node_selector = (!config.node_selector.is_empty()).then(|| config.node_selector.clone());
-    let tolerations =
-        (!config.tolerations.is_empty()).then(|| config.tolerations.clone());
+    let tolerations = (!config.tolerations.is_empty()).then(|| config.tolerations.clone());
 
     Pod {
         metadata: ObjectMeta {
@@ -242,6 +244,9 @@ mod tests {
             5432,
         );
         assert!(url.contains(".svc.cluster.local:5432"), "got {url}");
-        assert!(url.starts_with("postgres://postgres:postgres@djinn-svc-inst-1."), "got {url}");
+        assert!(
+            url.starts_with("postgres://postgres:postgres@djinn-svc-inst-1."),
+            "got {url}"
+        );
     }
 }

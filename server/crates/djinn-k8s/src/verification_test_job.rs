@@ -53,13 +53,20 @@ pub fn build_verification_test_job(
     let suffix = Uuid::now_v7();
     let sanitized_project = sanitize_id(project_id);
     let sanitized_test = sanitize_id(test_id);
-    let job_name = format!("djinn-verify-test-{}-{}", sanitized_test, short_uuid(&suffix));
+    let job_name = format!(
+        "djinn-verify-test-{}-{}",
+        sanitized_test,
+        short_uuid(&suffix)
+    );
 
     let project_root = format!("{WORKSPACE_MOUNT_DIR}/{sanitized_project}");
     let mirror_path = format!("{MIRROR_MOUNT_DIR}/{project_id}.git");
 
     let mut labels = BTreeMap::new();
-    labels.insert(LABEL_COMPONENT.to_string(), COMPONENT_VERIFICATION_TEST.to_string());
+    labels.insert(
+        LABEL_COMPONENT.to_string(),
+        COMPONENT_VERIFICATION_TEST.to_string(),
+    );
     labels.insert(LABEL_VERIFICATION_TEST.to_string(), "true".to_string());
     labels.insert(LABEL_PROJECT_ID.to_string(), sanitized_project.clone());
     labels.insert(LABEL_TEST_ID.to_string(), sanitized_test);
@@ -127,11 +134,17 @@ exec {bin} verify-test "{test_id}"
         resources: Some(ResourceRequirements {
             requests: Some(BTreeMap::from([
                 ("cpu".to_string(), Quantity(config.warm_cpu_request.clone())),
-                ("memory".to_string(), Quantity(config.warm_memory_request.clone())),
+                (
+                    "memory".to_string(),
+                    Quantity(config.warm_memory_request.clone()),
+                ),
             ])),
             limits: Some(BTreeMap::from([
                 ("cpu".to_string(), Quantity(config.warm_cpu_limit.clone())),
-                ("memory".to_string(), Quantity(config.warm_memory_limit.clone())),
+                (
+                    "memory".to_string(),
+                    Quantity(config.warm_memory_limit.clone()),
+                ),
             ])),
             ..ResourceRequirements::default()
         }),
@@ -222,20 +235,40 @@ mod tests {
             "test-123",
         );
         let name = job.metadata.name.unwrap();
-        assert!(name.starts_with("djinn-verify-test-test-123-"), "got {name}");
+        assert!(
+            name.starts_with("djinn-verify-test-test-123-"),
+            "got {name}"
+        );
         let spec = job.spec.unwrap();
         assert_eq!(spec.backoff_limit, Some(0));
         let pod = spec.template.spec.unwrap();
         let c = &pod.containers[0];
-        assert_eq!(c.image.as_deref(), Some("reg.example:5000/djinn-project-p:abc123"));
+        assert_eq!(
+            c.image.as_deref(),
+            Some("reg.example:5000/djinn-project-p:abc123")
+        );
         let cmd = c.command.as_ref().unwrap().join(" ");
-        assert!(cmd.contains("verify-test"), "command must invoke verify-test: {cmd}");
-        assert!(cmd.contains("test-123"), "command must pass the test id: {cmd}");
+        assert!(
+            cmd.contains("verify-test"),
+            "command must invoke verify-test: {cmd}"
+        );
+        assert!(
+            cmd.contains("test-123"),
+            "command must pass the test id: {cmd}"
+        );
         // Mirror (ro) + workspace (rw) + cache (rw) mounts present.
         let mounts = c.volume_mounts.as_ref().unwrap();
-        assert!(mounts.iter().any(|m| m.name == VOLUME_MIRROR && m.read_only == Some(true)));
+        assert!(
+            mounts
+                .iter()
+                .any(|m| m.name == VOLUME_MIRROR && m.read_only == Some(true))
+        );
         assert!(mounts.iter().any(|m| m.name == VOLUME_WORKSPACE));
-        assert!(mounts.iter().any(|m| m.name == crate::job::VOLUME_CACHE && m.read_only == Some(false)));
+        assert!(
+            mounts
+                .iter()
+                .any(|m| m.name == crate::job::VOLUME_CACHE && m.read_only == Some(false))
+        );
         // Rust cache routing matches task-runs/warm (single-sourced).
         let envs: BTreeMap<&str, &str> = c
             .env
@@ -245,6 +278,9 @@ mod tests {
             .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
             .collect();
         assert_eq!(envs.get("CARGO_HOME").copied(), Some("/cache/cargo"));
-        assert_eq!(envs.get("SCCACHE_DIR").copied(), Some("/cache/sccache/proj-xyz"));
+        assert_eq!(
+            envs.get("SCCACHE_DIR").copied(),
+            Some("/cache/sccache/proj-xyz")
+        );
     }
 }

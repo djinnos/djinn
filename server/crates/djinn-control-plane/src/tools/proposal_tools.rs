@@ -671,7 +671,10 @@ impl DjinnMcpServer {
         if let Err(e) = self.gate_proposal_edit(author.as_deref()).await {
             return Json(err_feedback(e));
         }
-        match repo.set_feedback_resolved(&p.id, p.resolved_revision_seq).await {
+        match repo
+            .set_feedback_resolved(&p.id, p.resolved_revision_seq)
+            .await
+        {
             Ok(f) => Json(ProposalFeedbackResponse {
                 feedback: Some((&f).into()),
                 error: None,
@@ -1224,7 +1227,14 @@ mod stop_build_tests {
     /// A `building` proposal: one graduated epic with two open worker tasks,
     /// plus a recorded breakdown task. The slot pool is the test stub (no live
     /// sessions), so the cascade exercises the DB-observable teardown.
-    async fn building_proposal() -> (DjinnMcpServer, Database, String, String, Vec<String>, String) {
+    async fn building_proposal() -> (
+        DjinnMcpServer,
+        Database,
+        String,
+        String,
+        Vec<String>,
+        String,
+    ) {
         let db = Database::open_in_memory().unwrap();
         db.ensure_initialized().await.unwrap();
         let bus = EventBus::noop();

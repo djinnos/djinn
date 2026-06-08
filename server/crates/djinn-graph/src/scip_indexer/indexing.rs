@@ -506,7 +506,10 @@ mod tests {
         assert_eq!(plans[0].workspace_slug, "server");
         assert_eq!(
             plans[0].output_path,
-            output_root.join("djinn-rust-server.scip")
+            output_root.join(format!(
+                "djinn-rust-{}.scip",
+                crate::scip_indexer::workspaces::workspace_slug(Path::new("server"))
+            ))
         );
         assert_eq!(
             plans[1..]
@@ -537,8 +540,14 @@ mod tests {
                     .into_owned())
                 .collect::<Vec<_>>(),
             vec![
-                "djinn-typescript-desktop.scip".to_string(),
-                "djinn-typescript-website.scip".to_string()
+                format!(
+                    "djinn-typescript-{}.scip",
+                    crate::scip_indexer::workspaces::workspace_slug(Path::new("desktop"))
+                ),
+                format!(
+                    "djinn-typescript-{}.scip",
+                    crate::scip_indexer::workspaces::workspace_slug(Path::new("website"))
+                )
             ]
         );
     }

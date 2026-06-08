@@ -121,7 +121,8 @@ impl ImageController {
                     image_id = %image.id,
                     "image_controller: reconciling project's shared catalog image"
                 );
-                self.enqueue_image(image.id.clone(), &image_repo, image).await
+                self.enqueue_image(image.id.clone(), &image_repo, image)
+                    .await
             }
             None => {
                 debug!(
@@ -183,13 +184,18 @@ impl ImageController {
             .await?;
 
         // 3. Create the Job.
-        let job = build_image_build_job(&self.config, subject, hash_prefix, image_tag, &build_context);
+        let job = build_image_build_job(
+            &self.config,
+            subject,
+            hash_prefix,
+            image_tag,
+            &build_context,
+        );
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.config.namespace);
-        let job_name = job
-            .metadata
-            .name
-            .clone()
-            .unwrap_or_else(|| format!("djinn-build-{}-{hash_prefix}", subject.resource_segment()));
+        let job_name =
+            job.metadata.name.clone().unwrap_or_else(|| {
+                format!("djinn-build-{}-{hash_prefix}", subject.resource_segment())
+            });
 
         let existing = jobs.get_opt(&job_name).await?;
         let existing = match existing {
@@ -307,12 +313,11 @@ impl ImageController {
         image_repo: &ImageRepository,
         image: Image,
     ) -> Result<()> {
-        let cfg: EnvironmentConfig = serde_json::from_str(&image.config).map_err(|e| {
-            ImageControllerError::ConfigParse {
+        let cfg: EnvironmentConfig =
+            serde_json::from_str(&image.config).map_err(|e| ImageControllerError::ConfigParse {
                 project_id: image_id.clone(),
                 reason: e.to_string(),
-            }
-        })?;
+            })?;
         cfg.validate()
             .map_err(|source| ImageControllerError::ConfigInvalid {
                 project_id: image_id.clone(),
@@ -361,18 +366,25 @@ impl ImageController {
                 cap = cap.max(1),
                 "image_controller: at max concurrent builds — deferring catalog image to a later tick"
             );
-            self.in_flight.lock().await.remove(&subject.resource_segment());
+            self.in_flight
+                .lock()
+                .await
+                .remove(&subject.resource_segment());
             return Ok(());
         }
 
         let hash_prefix = &new_hash[..HASH_TAG_PREFIX_LEN.min(new_hash.len())];
-        let image_tag = format_catalog_image_tag(&self.config.registry_host, &image_id, hash_prefix);
+        let image_tag =
+            format_catalog_image_tag(&self.config.registry_host, &image_id, hash_prefix);
 
         let outcome = self
             .dispatch_build_job(&subject, &cfg, &new_hash, &image_tag)
             .await;
 
-        self.in_flight.lock().await.remove(&subject.resource_segment());
+        self.in_flight
+            .lock()
+            .await
+            .remove(&subject.resource_segment());
 
         match outcome? {
             BuildDispatch::AlreadySucceeded => {

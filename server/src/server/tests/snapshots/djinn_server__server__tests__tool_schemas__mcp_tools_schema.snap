@@ -1013,6 +1013,12 @@ expression: signatures
           "format": "int64",
           "nullable": true,
           "type": "integer"
+        },
+        "workspace": {
+          "default": null,
+          "description": "Optional workspace slug used by follow-up workspace-scoped graph ops.",
+          "nullable": true,
+          "type": "string"
         }
       },
       "required": [
