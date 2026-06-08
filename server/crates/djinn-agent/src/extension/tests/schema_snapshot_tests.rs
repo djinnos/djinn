@@ -192,6 +192,25 @@ fn tool_schemas_include_concurrency_metadata() {
 }
 
 #[test]
+fn tool_schemas_include_typed_safety_annotations() {
+    let worker = tool_schemas_worker();
+
+    let github_search = tool_schema(&worker, "github_search");
+    assert_eq!(github_search["readOnly"], true);
+    assert_eq!(github_search["destructive"], false);
+    assert_eq!(github_search["idempotent"], true);
+    assert_eq!(github_search["openWorld"], true);
+    assert_eq!(github_search["concurrent_safe"], true);
+
+    let write = tool_schema(&worker, "write");
+    assert_eq!(write["readOnly"], false);
+    assert_eq!(write["destructive"], true);
+    assert_eq!(write["idempotent"], false);
+    assert_eq!(write["openWorld"], false);
+    assert_eq!(write["concurrent_safe"], false);
+}
+
+#[test]
 fn snapshot_worker_tool_names() {
     let schemas = tool_schemas_worker();
     let names = tool_names(&schemas);

@@ -17,7 +17,11 @@ expression: tool_schemas_planner()
           "description": "Task UUID or short ID"
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -56,7 +60,11 @@ expression: tool_schemas_planner()
           "type": "integer"
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -85,7 +93,11 @@ expression: tool_schemas_planner()
           "description": "Max entries to return (default 30, max 50)"
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -102,7 +114,11 @@ expression: tool_schemas_planner()
           "description": "Permalink or title"
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -131,7 +147,11 @@ expression: tool_schemas_planner()
           "type": "integer"
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -153,7 +173,11 @@ expression: tool_schemas_planner()
           "description": "Depth control: 0 = unlimited, 1 = exact folder (default), N = N levels"
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -174,7 +198,11 @@ expression: tool_schemas_planner()
           "description": "Timeout in milliseconds (default 120000)"
         }
       }
-    },
+    },,
+    "readOnly": false,
+    "destructive": true,
+    "idempotent": false,
+    "openWorld": false
     "concurrent_safe": false
   },
   {
@@ -202,7 +230,11 @@ expression: tool_schemas_planner()
       "required": [
         "file_path"
       ]
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -235,7 +267,11 @@ expression: tool_schemas_planner()
           "description": "Max hits per project (default 100)"
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": true
     "concurrent_safe": true
   },
   {
@@ -252,7 +288,11 @@ expression: tool_schemas_planner()
           "description": "Name of the skill to load (as shown in the Available Skills section)"
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -307,7 +347,11 @@ expression: tool_schemas_planner()
           "description": "Case-insensitive substring filter applied to symbol names and name paths for operation='symbols'"
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -328,7 +372,11 @@ expression: tool_schemas_planner()
           "description": "Optional step name to filter the log to (e.g. 'Tests')"
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -357,7 +405,11 @@ expression: tool_schemas_planner()
           "description": "Path filter to search within specific directories (e.g. \"src/\")"
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": true
     "concurrent_safe": true
   },
   {
@@ -384,7 +436,11 @@ expression: tool_schemas_planner()
           "description": "Number of lines to return (default 200)"
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -411,7 +467,11 @@ expression: tool_schemas_planner()
           "description": "Lines of context around each match (default 3)"
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -433,7 +493,11 @@ expression: tool_schemas_planner()
           "description": "File content to write"
         }
       }
-    },
+    },,
+    "readOnly": false,
+    "destructive": true,
+    "idempotent": false,
+    "openWorld": false
     "concurrent_safe": false
   },
   {
@@ -460,7 +524,11 @@ expression: tool_schemas_planner()
           "description": "Replacement text"
         }
       }
-    },
+    },,
+    "readOnly": false,
+    "destructive": true,
+    "idempotent": false,
+    "openWorld": false
     "concurrent_safe": false
   },
   {
@@ -523,7 +591,11 @@ expression: tool_schemas_planner()
           "description": "Task IDs (UUID or short_id) that must complete before this task can be dispatched."
         }
       }
-    },
+    },,
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": false,
+    "openWorld": false
     "concurrent_safe": false
   },
   {
@@ -592,7 +664,11 @@ expression: tool_schemas_planner()
           "description": "Task IDs (UUID or short_id) to remove as blockers."
         }
       }
-    },
+    },,
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": false,
+    "openWorld": false
     "concurrent_safe": false
   },
   {
@@ -609,7 +685,11 @@ expression: tool_schemas_planner()
           "description": "Task UUID or short ID"
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -626,7 +706,11 @@ expression: tool_schemas_planner()
           "description": "Epic UUID or short ID"
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -678,7 +762,11 @@ expression: tool_schemas_planner()
           "description": "Epic dependencies to remove."
         }
       }
-    },
+    },,
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": false,
+    "openWorld": false
     "concurrent_safe": false
   },
   {
@@ -701,7 +789,11 @@ expression: tool_schemas_planner()
           "type": "integer"
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -718,7 +810,11 @@ expression: tool_schemas_planner()
           "description": "Epic UUID or short ID"
         }
       }
-    },
+    },,
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": false,
+    "openWorld": false
     "concurrent_safe": false
   },
   {
@@ -772,7 +868,11 @@ expression: tool_schemas_planner()
           "description": "Epics (UUIDs or short_ids; may be in other repos) that must CLOSE before this epic's breakdown auto-dispatches. Use to sequence epics — e.g. a consumer epic blocked on a schema epic."
         }
       }
-    },
+    },,
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": false,
+    "openWorld": false
     "concurrent_safe": false
   },
   {
@@ -789,7 +889,11 @@ expression: tool_schemas_planner()
           "description": "Proposal UUID or short ID"
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -822,7 +926,11 @@ expression: tool_schemas_planner()
           }
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -843,7 +951,11 @@ expression: tool_schemas_planner()
           "description": "Short note on what shipped and how it satisfies the spec (recorded in logs)."
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -860,7 +972,11 @@ expression: tool_schemas_planner()
           "description": "Epic UUID or short ID"
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -877,7 +993,11 @@ expression: tool_schemas_planner()
           "description": "Epic UUID or short ID"
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -910,7 +1030,11 @@ expression: tool_schemas_planner()
           "description": "UUIDs or short IDs of replacement tasks. Required for force_close when no reason is provided."
         }
       }
-    },
+    },,
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": false,
+    "openWorld": false
     "concurrent_safe": false
   },
   {
@@ -932,7 +1056,11 @@ expression: tool_schemas_planner()
           "description": "Comment body to add to the activity log"
         }
       }
-    },
+    },,
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": false,
+    "openWorld": false
     "concurrent_safe": false
   },
   {
@@ -958,7 +1086,11 @@ expression: tool_schemas_planner()
           "description": "Minimum confidence threshold for related notes (default 0.1). Notes below this are excluded."
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -967,7 +1099,11 @@ expression: tool_schemas_planner()
     "inputSchema": {
       "type": "object",
       "properties": {}
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -976,7 +1112,11 @@ expression: tool_schemas_planner()
     "inputSchema": {
       "type": "object",
       "properties": {}
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -990,7 +1130,11 @@ expression: tool_schemas_planner()
           "description": "Optional folder filter (e.g. \"decisions\")"
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -1004,7 +1148,11 @@ expression: tool_schemas_planner()
           "description": "Optional folder filter (e.g. \"pitfalls\")"
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -1042,7 +1190,11 @@ expression: tool_schemas_planner()
           "description": "Optional tags for categorisation"
         }
       }
-    },
+    },,
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": false,
+    "openWorld": false
     "concurrent_safe": false
   },
   {
@@ -1081,7 +1233,11 @@ expression: tool_schemas_planner()
           "description": "If provided and different from current type, move the note to the new type's folder"
         }
       }
-    },
+    },,
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": false,
+    "openWorld": false
     "concurrent_safe": false
   },
   {
@@ -1098,7 +1254,11 @@ expression: tool_schemas_planner()
           "description": "Role name (worker, reviewer, lead, planner, architect)"
         }
       }
-    },
+    },,
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false
     "concurrent_safe": true
   },
   {
@@ -1132,7 +1292,11 @@ expression: tool_schemas_planner()
           "description": "Preferred model ID (falls back to project default)"
         }
       }
-    },
+    },,
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": false,
+    "openWorld": false
     "concurrent_safe": false
   },
   {
@@ -1149,7 +1313,11 @@ expression: tool_schemas_planner()
           "description": "Task UUID or short ID"
         }
       }
-    },
+    },,
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": false,
+    "openWorld": false
     "concurrent_safe": false
   },
   {
@@ -1166,7 +1334,11 @@ expression: tool_schemas_planner()
           "description": "Task UUID or short ID"
         }
       }
-    },
+    },,
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": false,
+    "openWorld": false
     "concurrent_safe": false
   },
   {
@@ -1183,7 +1355,11 @@ expression: tool_schemas_planner()
           "description": "Task UUID or short ID"
         }
       }
-    },
+    },,
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": false,
+    "openWorld": false
     "concurrent_safe": false
   },
   {
@@ -1200,7 +1376,11 @@ expression: tool_schemas_planner()
           "description": "Task UUID or short ID"
         }
       }
-    },
+    },,
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": false,
+    "openWorld": false
     "concurrent_safe": false
   },
   {
@@ -1230,7 +1410,11 @@ expression: tool_schemas_planner()
           "description": "JSON string of current metrics for the history record"
         }
       }
-    },
+    },,
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": false,
+    "openWorld": false
     "concurrent_safe": false
   },
   {
@@ -1289,7 +1473,11 @@ expression: tool_schemas_planner()
           "description": "Outcome decision: 'execute' = wave was created or board work continues (coordinator dispatches the new tasks); 'close' = epic is complete and the planning task should close (set `reason` in summary); 'escalate' = board state needs human attention. Optional — defaults to 'execute' when omitted."
         }
       }
-    },
+    },,
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": false,
+    "openWorld": false
     "concurrent_safe": false
   }
 ]

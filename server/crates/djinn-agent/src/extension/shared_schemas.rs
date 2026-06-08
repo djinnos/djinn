@@ -1,10 +1,84 @@
 use rmcp::model::Tool as RmcpTool;
 use rmcp::object;
 
-pub(crate) fn serialize_tool_schema(tool: RmcpTool, concurrent_safe: bool) -> serde_json::Value {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ToolSafetyAnnotations {
+    pub read_only: bool,
+    pub destructive: bool,
+    pub idempotent: bool,
+    pub open_world: bool,
+    pub concurrent_safe: bool,
+}
+
+impl ToolSafetyAnnotations {
+    pub(crate) const fn new(
+        read_only: bool,
+        destructive: bool,
+        idempotent: bool,
+        open_world: bool,
+        concurrent_safe: bool,
+    ) -> Self {
+        Self {
+            read_only,
+            destructive,
+            idempotent,
+            open_world,
+            concurrent_safe,
+        }
+    }
+
+    pub(crate) const fn read_only() -> Self {
+        Self::new(true, false, true, false, true)
+    }
+
+    pub(crate) const fn open_world_read_only() -> Self {
+        Self::new(true, false, true, true, true)
+    }
+
+    pub(crate) const fn mutation() -> Self {
+        Self::new(false, false, false, false, false)
+    }
+
+    pub(crate) const fn destructive() -> Self {
+        Self::new(false, true, false, false, false)
+    }
+}
+
+pub(crate) fn serialize_tool_schema(
+    tool: RmcpTool,
+    annotations: ToolSafetyAnnotations,
+) -> serde_json::Value {
     let mut value = serde_json::to_value(tool).expect("serialize tool schema");
-    annotate_concurrent_safe(&mut value, concurrent_safe);
+    annotate_tool_safety(&mut value, annotations);
     value
+}
+
+pub(crate) fn annotate_tool_safety(
+    value: &mut serde_json::Value,
+    annotations: ToolSafetyAnnotations,
+) {
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "readOnly".to_string(),
+            serde_json::Value::Bool(annotations.read_only),
+        );
+        obj.insert(
+            "destructive".to_string(),
+            serde_json::Value::Bool(annotations.destructive),
+        );
+        obj.insert(
+            "idempotent".to_string(),
+            serde_json::Value::Bool(annotations.idempotent),
+        );
+        obj.insert(
+            "openWorld".to_string(),
+            serde_json::Value::Bool(annotations.open_world),
+        );
+        obj.insert(
+            "concurrent_safe".to_string(),
+            serde_json::Value::Bool(annotations.concurrent_safe),
+        );
+    }
 }
 
 pub(crate) fn tool_memory_move() -> RmcpTool {
@@ -23,35 +97,29 @@ pub(crate) fn tool_memory_move() -> RmcpTool {
     )
 }
 
-pub(crate) fn annotate_concurrent_safe(value: &mut serde_json::Value, concurrent_safe: bool) {
-    if let Some(obj) = value.as_object_mut() {
-        obj.insert(
-            "concurrent_safe".to_string(),
-            serde_json::Value::Bool(concurrent_safe),
-        );
-    }
-}
-
 pub(crate) fn shared_base_tool_schemas() -> Vec<serde_json::Value> {
     vec![
-        serialize_tool_schema(tool_task_show(), true),
-        serialize_tool_schema(tool_task_list(), true),
-        serialize_tool_schema(tool_task_activity_list(), true),
-        serialize_tool_schema(tool_memory_read(), true),
-        serialize_tool_schema(tool_memory_search(), true),
-        serialize_tool_schema(tool_memory_list(), true),
+        serialize_tool_schema(tool_task_show(), ToolSafetyAnnotations::read_only()),
+        serialize_tool_schema(tool_task_list(), ToolSafetyAnnotations::read_only()),
+        serialize_tool_schema(
+            tool_task_activity_list(),
+            ToolSafetyAnnotations::read_only(),
+        ),
+        serialize_tool_schema(tool_memory_read(), ToolSafetyAnnotations::read_only()),
+        serialize_tool_schema(tool_memory_search(), ToolSafetyAnnotations::read_only()),
+        serialize_tool_schema(tool_memory_list(), ToolSafetyAnnotations::read_only()),
     ]
 }
 
 pub(crate) fn shared_lead_tool_schemas() -> Vec<serde_json::Value> {
     vec![
-        serialize_tool_schema(tool_task_create(), false),
-        serialize_tool_schema(tool_task_update(), false),
-        serialize_tool_schema(tool_task_blocked_list(), true),
-        serialize_tool_schema(tool_epic_show(), true),
-        serialize_tool_schema(tool_epic_update(), false),
-        serialize_tool_schema(tool_epic_tasks(), true),
-        serialize_tool_schema(tool_epic_close(), false),
+        serialize_tool_schema(tool_task_create(), ToolSafetyAnnotations::mutation()),
+        serialize_tool_schema(tool_task_update(), ToolSafetyAnnotations::mutation()),
+        serialize_tool_schema(tool_task_blocked_list(), ToolSafetyAnnotations::read_only()),
+        serialize_tool_schema(tool_epic_show(), ToolSafetyAnnotations::read_only()),
+        serialize_tool_schema(tool_epic_update(), ToolSafetyAnnotations::mutation()),
+        serialize_tool_schema(tool_epic_tasks(), ToolSafetyAnnotations::read_only()),
+        serialize_tool_schema(tool_epic_close(), ToolSafetyAnnotations::mutation()),
     ]
 }
 
