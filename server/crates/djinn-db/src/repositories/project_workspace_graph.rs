@@ -313,4 +313,29 @@ mod tests {
         assert_eq!(state.warmed_at, latest.warmed_at);
         assert_eq!(state.status, "ready");
     }
+
+    #[tokio::test]
+    async fn deleting_project_cascades_workspace_graph_rows() {
+        let repo = fresh().await;
+        seed_project(&repo, "p1").await;
+
+        repo.upsert(ProjectWorkspaceGraphUpsert {
+            project_id: "p1",
+            workspace_slug: "root",
+            commit_sha: "abc",
+            status: "ready",
+        })
+        .await
+        .expect("upsert");
+        assert!(repo.has_any_for_project("p1").await.expect("has any"));
+
+        sqlx::query("DELETE FROM projects WHERE id = $1")
+            .bind("p1")
+            .execute(repo.db.pool())
+            .await
+            .expect("delete project");
+
+        assert!(!repo.has_any_for_project("p1").await.expect("has any"));
+        assert!(repo.get("p1", "root").await.expect("get").is_none());
+    }
 }
