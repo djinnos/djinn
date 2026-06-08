@@ -352,6 +352,7 @@ jobs:
           clang --version
           mold --version
           ld.mold --version
+          printf 'int main(void) { return 0; }\n' | clang -x c -fuse-ld=mold - -o /var/tmp/mold-smoke
 
       - uses: Swatinem/rust-cache@v2
         with:
