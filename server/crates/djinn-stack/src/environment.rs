@@ -542,9 +542,7 @@ fn validate_workspaces(workspaces: &[Workspace]) -> EnvResult<()> {
         if let Some(slug) = &ws.slug {
             validate_identifier("workspaces[*].slug", slug)?;
             if !seen_slugs.insert(slug.as_str()) {
-                return Err(EnvironmentConfigError::DuplicateWorkspaceSlug {
-                    slug: slug.clone(),
-                });
+                return Err(EnvironmentConfigError::DuplicateWorkspaceSlug { slug: slug.clone() });
             }
         }
         validate_identifier("workspaces[*].language", &ws.language)?;
@@ -1025,6 +1023,15 @@ mod tests {
     }
 
     #[test]
+    fn schema_version_stays_one_for_reseed_gate_compatibility() {
+        // Keep this in sync with the boot reseed gate: existing declared
+        // configs with schema_version >= 1 must not be forced through reseed
+        // merely because workspace naming metadata was added.
+        assert_eq!(SCHEMA_VERSION, 1);
+        assert_eq!(EnvironmentConfig::empty().schema_version, 1);
+    }
+
+    #[test]
     fn rejects_shell_injection_in_toolchain() {
         let mut cfg = valid_minimal();
         cfg.languages.rust = Some(RustLanguage {
@@ -1175,6 +1182,44 @@ mod tests {
         assert_eq!(cfg.workspaces[0].name, None);
         assert!(cfg.workspaces[0].tags.is_empty());
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn workspace_slug_name_and_tags_round_trip_through_json() {
+        let mut cfg = EnvironmentConfig::empty();
+        cfg.workspaces = vec![
+            Workspace {
+                slug: Some("server".to_owned()),
+                name: Some("Server".to_owned()),
+                tags: vec!["backend".to_owned(), "rust".to_owned()],
+                root: "server".to_owned(),
+                language: "rust".to_owned(),
+                toolchain: Some("stable".to_owned()),
+                version: None,
+                package_manager: None,
+            },
+            Workspace {
+                slug: Some("ui".to_owned()),
+                name: Some("User interface".to_owned()),
+                tags: vec!["frontend".to_owned(), "node".to_owned()],
+                root: "ui".to_owned(),
+                language: "node".to_owned(),
+                toolchain: None,
+                version: Some("22".to_owned()),
+                package_manager: Some("pnpm".to_owned()),
+            },
+        ];
+
+        let serialized = serde_json::to_string(&cfg).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(value["schema_version"], json!(1));
+        assert_eq!(value["workspaces"][0]["slug"], json!("server"));
+        assert_eq!(value["workspaces"][0]["name"], json!("Server"));
+        assert_eq!(value["workspaces"][0]["tags"], json!(["backend", "rust"]));
+
+        let round_tripped: EnvironmentConfig = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(round_tripped, cfg);
+        round_tripped.validate().unwrap();
     }
 
     #[test]
