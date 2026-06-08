@@ -1,5 +1,6 @@
 use std::path::Path;
 
+/// Derive the stable warm-pipeline slug for a workspace root path.
 pub fn workspace_slug(root: &Path) -> String {
     if root.as_os_str().is_empty() {
         return "root".to_string();
