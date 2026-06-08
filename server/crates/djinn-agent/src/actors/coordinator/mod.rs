@@ -137,7 +137,7 @@ mod tests {
         // legacy per-project image columns, so this fixture must use the image
         // catalog selection path rather than `ProjectRepository::set_project_image`.
         let image_repo = djinn_db::ImageRepository::new(db.clone());
-        let image_id = format!("test-image-{}", &epic.project_id);
+        let image_id = epic.project_id.clone();
         image_repo
             .create(&image_id, "Test image", None, r#"{"schema_version":1}"#)
             .await
