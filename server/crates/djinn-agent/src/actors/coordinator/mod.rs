@@ -133,8 +133,6 @@ mod tests {
             .unwrap();
         // Satisfy the coordinator's readiness gate: mark the synthesized
         // default project as image-ready and stamp `graph_warmed_at`.
-        let project_repo =
-            djinn_db::ProjectRepository::new(db.clone(), crate::events::event_bus_for(&tx));
         let image = djinn_db::ProjectImage {
             tag: Some(format!(
                 "test-registry/djinn-project-{}:testhash",
@@ -144,7 +142,7 @@ mod tests {
             status: djinn_db::ProjectImageStatus::READY.into(),
             last_error: None,
         };
-        let _ = project_repo
+        let _ = djinn_db::ProjectRepository::new(db.clone(), crate::events::event_bus_for(&tx))
             .set_project_image(&epic.project_id, &image)
             .await;
         let cache_repo = djinn_db::RepoGraphCacheRepository::new(db.clone());
