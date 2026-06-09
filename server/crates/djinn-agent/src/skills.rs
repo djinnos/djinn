@@ -234,7 +234,7 @@ pub(crate) fn format_skills_section(skills: &[ResolvedSkill]) -> String {
 /// When `progressive` is `true`, `required` skills are still inlined in full,
 /// but non-required skills emit only their name + description followed by a
 /// note directing the model to `skill_read(name)` for the full body.
-fn format_skills_section_with(skills: &[ResolvedSkill], progressive: bool) -> String {
+pub(crate) fn format_skills_section_with(skills: &[ResolvedSkill], progressive: bool) -> String {
     if skills.is_empty() {
         return String::new();
     }

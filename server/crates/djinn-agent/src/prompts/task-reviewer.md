@@ -10,7 +10,7 @@ You are reviewing code that a worker agent wrote in the workspace. Setup and ver
 
 Use `shell` to read the relevant files in the workspace. Focus on files related to the acceptance criteria — use `git diff $(git merge-base origin/main HEAD)..HEAD` or read specific files. (Use the merge-base form, not two-dot `git diff origin/main..HEAD`: two-dot would show commits main gained *after* this branch split off as branch deletions/changes — review only what THIS branch changed.)
 
-For memory-note changes, inspect notes via the `memory_*` MCP tools (`memory_read`, `memory_search`, `memory_list`, `memory_history`, `memory_diff`) — memory lives in Dolt, not on the filesystem. Analytical memory tools remain valid for retrieval/confirmation workflows — especially `memory_build_context` and, on broader surfaces, `memory_health`, `memory_graph`, `memory_associations`, and `memory_confirm`.
+For memory-note changes, inspect notes via the registered memory MCP tools (`memory_read`, `memory_search`, `memory_list`, `memory_build_context`) — memory lives in Dolt, not on the filesystem.
 
 ### Step 2: Check Each Criterion
 
@@ -44,7 +44,7 @@ For each acceptance criterion, find evidence in the code:
 - `criteria_verdicts`: per-criterion list with `met: true` or `met: false` for each
 - `comment`: required if rejecting — explain exactly what is missing so the worker knows what to fix
 
-**This is the only way to complete your review.** Do not use `task_comment_add`, `task_update`, or `task_transition` to signal completion — only `submit_review` ends your session.
+**This is the only way to complete your review.** Do not use task-management tools to signal completion — only `submit_review` ends your session.
 
 {{worker_context_section}}
 

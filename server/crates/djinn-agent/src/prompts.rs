@@ -626,8 +626,8 @@ mod tests {
         assert!(prompt.contains(&task.id));
         // The reviewer is instructed to run git diff itself, not receive it injected.
         assert!(prompt.contains("git diff"));
-        // Reviewer uses AC state for verdict.
-        assert!(prompt.contains("task_update"));
+        // Reviewer uses the role-specific finalize tool for verdict.
+        assert!(prompt.contains("submit_review"));
         assert!(!prompt.contains("{{"));
     }
 
@@ -888,10 +888,8 @@ mod tests {
             "worker prompt should call out the memory CRUD MCP tools by name"
         );
         assert!(
-            prompt.contains("memory_graph")
-                && prompt.contains("memory_associations")
-                && prompt.contains("memory_confirm"),
-            "worker prompt should retain analytical memory tools even when they are not CRUD tools"
+            prompt.contains("memory_build_context"),
+            "worker prompt should retain registered analytical memory retrieval"
         );
     }
 
@@ -939,10 +937,8 @@ mod tests {
             "planner prompt should enforce the knowledge-task budget"
         );
         assert!(
-            prompt.contains("memory_graph")
-                && prompt.contains("memory_associations")
-                && prompt.contains("memory_confirm"),
-            "planner prompt should keep analytical memory tools alongside CRUD MCP tools"
+            prompt.contains("memory_build_context") && prompt.contains("memory_health"),
+            "planner prompt should keep registered analytical memory tools alongside CRUD MCP tools"
         );
         assert!(
             prompt.contains("Memory notes live in Dolt"),

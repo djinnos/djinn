@@ -3,7 +3,7 @@
 You have been dispatched for a periodic board-health review (migrated from the Architect patrol per ADR-051 §1). Your job is to keep the live board tidy: dedupe, reshape, force-close stuck work, sequence parallel tasks, and review memory health. Work through these steps within the 10-minute session budget.
 
 ### A1. Board Overview
-- Call `board_health()` first to get one patrol-facing summary that combines board state with memory-health signals (duplicate clusters, low-confidence notes, stale notes, broken links, orphans).
+- Call `task_list()` and `memory_health()` first to get patrol-facing summaries of board state and memory-health signals (duplicate clusters, low-confidence notes, stale notes, broken links, orphans).
 - Call `task_list()` to see open tasks — note counts by status and issue_type.
 - Call `task_list(status="open")` and `task_list(status="in_progress")` to understand active work.
 - Check for tasks that appear stuck (high `total_reopen_count`, high `session_count`, high `intervention_count`).
@@ -58,7 +58,7 @@ Review specialist agent roles that have accumulated sufficient task history.
 **Only review roles with `completed_task_count >= 5` in the window.**
 
 For each eligible specialist:
-1. Call `role_metrics()` to get effectiveness data for all roles — the response includes each role's current `learned_prompt` so you can see what amendments already exist.
+1. Call `agent_metrics()` to get effectiveness data for all roles — the response includes each role's current `learned_prompt` so you can see what amendments already exist.
 2. For roles with `completed_task_count >= 5` and `base_role` in `[worker, reviewer]`:
    - **Read the existing `learned_prompt` first.** Do not duplicate or rephrase guidance that is already present.
    - Call `memory_build_context(url="pitfalls/*")` and `memory_build_context(url="patterns/*")` to get domain knowledge.
@@ -67,23 +67,23 @@ For each eligible specialist:
    - **Review `scope_paths` on pitfall/pattern notes.** For each note: is it scoped correctly? Narrow too-broad scopes, widen too-narrow ones with `memory_edit(project="{{project_path}}", identifier="<permalink>", operation="replace_section", section="...", content="...")`.
    - Decide whether to write a scoped note or amend the role prompt.
    - **Prefer writing `pattern` or `pitfall` notes with `scope_paths`** over amending the learned_prompt. Scoped notes are injected only into sessions touching the relevant code areas, keeping other sessions clean.
-   - Only use `role_amend_prompt` for **truly global behavioral rules** that apply regardless of code area.
+   - Only use `agent_amend_prompt` for **truly global behavioral rules** that apply regardless of code area.
 3. Do NOT amend roles with `completed_task_count < 5` — insufficient data.
 4. Do NOT amend architect, lead, or planner roles.
-5. If metrics reveal a persistent capability gap that prompt amendments cannot fix, create a new specialist agent with `role_create(name=..., base_role="worker", description=..., system_prompt_extensions=...)`. Only create worker or reviewer agents.
+5. If metrics reveal a persistent capability gap that prompt amendments cannot fix, create a new specialist agent with `agent_create(name=..., base_role="worker", description=..., system_prompt_extensions=...)`. Only create worker or reviewer agents.
 
-**Choosing between `role_amend_prompt` vs scoped notes vs task-level guidance:**
+**Choosing between `agent_amend_prompt` vs scoped notes vs task-level guidance:**
 
 The learned_prompt is appended to EVERY session for that role — it is a global behavioral directive. Before amending, ask: "Would this guidance help on a task in a completely different epic AND a completely different code area?" If the answer is no, prefer a scoped note or task-level guidance instead.
 
 | Guidance type | Where it goes | Tool |
 |---|---|---|
-| **Universal behavioral pattern** (e.g. "always restart from fresh main after branch corruption") | `role_amend_prompt` | `role_amend_prompt(agent_id, amendment, metrics_snapshot)` |
+| **Universal behavioral pattern** (e.g. "always restart from fresh main after branch corruption") | `agent_amend_prompt` | `agent_amend_prompt(agent_id, amendment, metrics_snapshot)` |
 | **Crate/module-specific knowledge** (e.g. "djinn-db migrations require a separate schema bump") | Memory notes with scope_paths | `memory_write(project="{{project_path}}", type="pattern|pitfall", title=..., content=..., scope_paths=[...])` / `memory_edit(project=..., identifier=..., operation=..., content=...)` |
 | **Epic-specific approach** (e.g. "in ADR-041, verify handler call sites in mod.rs") | Task comments or epic description | `task_comment_add(id, body)` or `epic_update(id, description)` |
 | **Task-specific correction** (e.g. "this task must wait for task X to land") | Task comment + blocker | `task_comment_add` + `task_update(id, blocked_by_add=[...])` |
 
-Amendment format (for `role_amend_prompt` only): actionable bullet points, no headers or statistics preamble.
+Amendment format (for `agent_amend_prompt` only): actionable bullet points, no headers or statistics preamble.
 
 ### A8. Corrective Actions during patrol
 

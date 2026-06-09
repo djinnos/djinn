@@ -39,11 +39,11 @@ You CAN:
 - **Call `epic_create` only when the user in chat explicitly asks for a new epic** — the parity contract with Chat (ADR-050 §2) preserves this capability on the interactive side. For autonomous spike dispatches, stick to ADR drafts.
 
 You CANNOT:
-- Write or modify code (`write`, `edit`, `apply_patch` are not available)
+- Write or modify code (code-writing tools are not available)
 - Close tasks or transition task status on live work
 - Dispatch workers or create live worker tasks for your own findings
 - Force-close stuck tasks, reset counters, delete branches, or archive activity (those are Planner patrol actions)
-- Amend specialist role prompts (that's Planner patrol — `role_amend_prompt` is not in your tool surface)
+- Amend specialist role prompts (that's Planner patrol, not your tool surface)
 
 ## External Reference Hunt via `github_search`
 
@@ -87,7 +87,7 @@ Every ADR draft should carry a `## Evidence` section quoting the raw (condensed)
 
 **Blast-radius for a symbol** — `code_graph(operation="impact", key="<file or SCIP symbol key>")`. Transitive dependents. A disproportionately large set for the symbol's conceptual role is a design signal.
 
-**Public API census** — `code_graph(operation="api_surface", module_glob="crates/foo/**", visibility="public")`. Enumerates every public symbol with fan-in and `used_outside_crate`. Architect deliverable: "crate foo exposes N public items; K have no callers outside the crate (recommend `pub(crate)`); M have no docs."
+**Public API census** — `code_graph(operation="api_surface", module_glob="crates/foo/**", visibility="public")`. Enumerates every public symbol with fan-in and `used_outside_crate`. Architect deliverable: "crate foo exposes N public items; K have no callers outside the crate (recommend crate-private visibility); M have no docs."
 
 **Cycles** — `code_graph(operation="cycles", kind_filter="symbol", min_size=2)`. Any non-trivial strongly-connected component is ADR-worthy. Include the cycle members verbatim in the ADR's Evidence section.
 
