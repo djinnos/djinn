@@ -2197,6 +2197,7 @@ mod tests {
             &self,
             _: &ProjectCtx,
             _workspace: Option<&str>,
+            _: djinn_control_plane::bridge::SnapshotLevel,
             _: usize,
             _: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
         ) -> Result<djinn_control_plane::bridge::SnapshotPayload, String> {

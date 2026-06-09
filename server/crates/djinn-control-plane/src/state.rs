@@ -463,6 +463,7 @@ pub mod stubs {
             &self,
             _: &crate::bridge::ProjectCtx,
             _workspace: Option<&str>,
+            _level: crate::bridge::SnapshotLevel,
             node_cap: usize,
             _: &crate::tools::graph_exclusions::GraphExclusions,
         ) -> Result<crate::bridge::SnapshotPayload, String> {
