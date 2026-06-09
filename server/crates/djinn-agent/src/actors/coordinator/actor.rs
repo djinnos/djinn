@@ -802,7 +802,7 @@ impl CoordinatorActor {
                     tracing::warn!(
                         project_id = %project.id,
                         error = %e,
-                        "CoordinatorActor: graph refresh tick — failed to stamp graph_warmed_at for code-less project"
+                        "CoordinatorActor: graph refresh tick — failed to record graph freshness for code-less project"
                     );
                 }
                 continue;

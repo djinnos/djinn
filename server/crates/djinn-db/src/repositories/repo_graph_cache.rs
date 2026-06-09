@@ -86,25 +86,6 @@ impl RepoGraphCacheRepository {
         )
         .execute(self.db.pool())
         .await?;
-        // Stamp the project row so the coordinator's dispatch gate can see
-        // that the warm pipeline has completed at least once for this project.
-        // Intentionally best-effort: a stamp failure must not roll back the
-        // cache write, so we log and continue.
-        if let Err(e) = sqlx::query!(
-            r#"UPDATE projects
-               SET graph_warmed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-             WHERE id = $1"#,
-            entry.project_id,
-        )
-        .execute(self.db.pool())
-        .await
-        {
-            tracing::warn!(
-                project_id = %entry.project_id,
-                error = %e,
-                "RepoGraphCacheRepository::upsert: failed to stamp projects.graph_warmed_at"
-            );
-        }
         Ok(())
     }
 }
@@ -153,7 +134,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upsert_stamps_projects_graph_warmed_at() {
+    async fn upsert_makes_project_dispatch_freshness_available() {
         use crate::repositories::project::ProjectRepository;
         use djinn_core::events::EventBus;
         let db = Database::open_in_memory().expect("in-memory db");
@@ -171,7 +152,7 @@ mod tests {
             .expect("exists");
         assert!(
             before.graph_warmed_at.is_none(),
-            "graph_warmed_at should be NULL before the first warm"
+            "derived graph freshness should be absent before the first warm"
         );
 
         repo.upsert(RepoGraphCacheInsert {
@@ -189,7 +170,7 @@ mod tests {
             .expect("exists");
         assert!(
             after.graph_warmed_at.is_some(),
-            "graph_warmed_at must be stamped after a cache upsert"
+            "derived graph freshness must be available after a cache upsert"
         );
     }
 

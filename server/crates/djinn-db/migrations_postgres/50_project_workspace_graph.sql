@@ -2,8 +2,8 @@
 --
 -- `repo_graph_cache` remains the merged graph blob keyed by (project_id, commit_sha).
 -- This table records which workspace slugs have been warmed for a project so
--- consumers can reason about graph freshness without the legacy project-level
--- projects.graph_warmed_at scalar.
+-- consumers can reason about graph freshness without a project-level
+-- freshness scalar.
 CREATE TABLE IF NOT EXISTS project_workspace_graph (
     project_id     VARCHAR(36)  NOT NULL,
     workspace_slug VARCHAR(255) NOT NULL,
