@@ -13,9 +13,9 @@ use crate::bridge::{
     ComplexityResult, CoupledPairEntry, CouplingEntry, CouplingHubEntry, CycleGroup,
     DeadSymbolEntry, DeprecatedHit, DetectedChangesResult, EdgeEntry, FileGroupEntry,
     GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry, ImpactEntry, ImpactResult,
-    MetricsAtResult, NeighborsResult, OrphanEntry, PathResult, ProjectCtx, RankedNode,
-    RefactorCandidate, ResolveOutcome, SearchHit, SnapshotPayload, SymbolAtHit, SymbolContext,
-    SymbolDescription, TouchedSymbol,
+    MetricsAtResult, NeighborsResult, OrphanEntry, PathResult, ProjectCtx, QuerySubgraphRequest,
+    QuerySubgraphResult, RankedNode, RefactorCandidate, ResolveOutcome, SearchHit, SnapshotPayload,
+    SymbolAtHit, SymbolContext, SymbolDescription, TouchedSymbol,
 };
 use crate::server::DjinnMcpServer;
 use crate::tools::graph_exclusions::GraphExclusions;
@@ -72,6 +72,21 @@ pub struct CodeGraphParams {
     /// Substring query for `search`.
     #[serde(default)]
     pub query: Option<String>,
+    /// Optional coarse context substring for `query_subgraph`.
+    #[serde(default)]
+    pub context_filter: Option<String>,
+    /// Optional path/file substring filter for `query_subgraph`.
+    #[serde(default)]
+    pub file_filter: Option<String>,
+    /// Optional explicit edge kinds for `query_subgraph`.
+    #[serde(default)]
+    pub edge_filters: Option<Vec<String>>,
+    /// Approximate response token budget for `query_subgraph`.
+    #[serde(default)]
+    pub token_budget: Option<i64>,
+    /// Maximum seed count for `query_subgraph`.
+    #[serde(default)]
+    pub max_seeds: Option<i64>,
     /// Source node for `path`.
     #[serde(default)]
     pub from: Option<String>,
@@ -241,6 +256,8 @@ impl CodeGraphParams {
         clear(&mut self.direction);
         clear(&mut self.kind_filter);
         clear(&mut self.query);
+        clear(&mut self.context_filter);
+        clear(&mut self.file_filter);
         clear(&mut self.from);
         clear(&mut self.to);
         clear(&mut self.from_glob);
@@ -649,6 +666,13 @@ pub struct SnapshotResponse {
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct QuerySubgraphResponse {
+    pub query_subgraph: QuerySubgraphResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum CodeGraphResponse {
     Neighbors(NeighborsResponse),
@@ -692,6 +716,7 @@ pub enum CodeGraphResponse {
     /// PR D2: full-graph snapshot for the `/code-graph` UI render.
     /// Discriminator field `snapshot`.
     Snapshot(SnapshotResponse),
+    QuerySubgraph(QuerySubgraphResponse),
 }
 
 // ── Next-step hints ─────────────────────────────────────────────────────────────
@@ -793,6 +818,12 @@ fn compute_next_step_hint(op: &str, response: &CodeGraphResponse) -> String {
         // node. Truncation is the common case for medium repos, so the
         // hint focuses on drilling into the cap rather than expanding
         // it.
+        ("query_subgraph", CodeGraphResponse::QuerySubgraph(r)) => r
+            .query_subgraph
+            .narrowing_hints
+            .first()
+            .cloned()
+            .unwrap_or_else(|| FALLBACK_NEXT_STEP.to_string()),
         ("snapshot", CodeGraphResponse::Snapshot(r)) => match r.snapshot.nodes.first() {
             Some(node) => format!(
                 "Snapshot capped at {} of {} nodes; call `code_graph context name={}` to drill in.",
@@ -844,6 +875,7 @@ fn next_step_slot(response: &mut CodeGraphResponse) -> &mut Option<String> {
         CodeGraphResponse::NotFound(r) => &mut r.next_step,
         CodeGraphResponse::DetectedChanges(r) => &mut r.next_step,
         CodeGraphResponse::Snapshot(r) => &mut r.next_step,
+        CodeGraphResponse::QuerySubgraph(r) => &mut r.next_step,
     }
 }
 
@@ -1065,6 +1097,22 @@ fn require_globs(params: &CodeGraphParams) -> Result<(&str, &str), String> {
         .filter(|s| !s.is_empty())
         .ok_or_else(|| format!("'to_glob' is required for operation '{}'", params.operation))?;
     Ok((from, to))
+}
+
+fn bounded_optional_usize(
+    value: Option<i64>,
+    name: &str,
+    min: usize,
+    max: usize,
+    allow_zero: bool,
+) -> Result<Option<usize>, String> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    if raw < 0 || (!allow_zero && raw == 0) {
+        return Err(format!("invalid {name} {raw}: expected a positive integer"));
+    }
+    Ok(Some((raw as usize).clamp(min, max)))
 }
 
 fn validate_visibility(visibility: Option<&str>) -> Result<(), String> {
@@ -1304,6 +1352,7 @@ impl DjinnMcpServer {
             "implementations" => self.code_graph_implementations(ctx, params).await,
             "impact" => self.code_graph_impact(ctx, params).await,
             "search" => self.code_graph_search(ctx, params).await,
+            "query_subgraph" => self.code_graph_query_subgraph(ctx, params).await,
             "cycles" => self.code_graph_cycles(ctx, params).await,
             "orphans" => self.code_graph_orphans(ctx, params).await,
             "path" => self.code_graph_path(ctx, params).await,
@@ -1331,7 +1380,7 @@ impl DjinnMcpServer {
             other => Err(format!(
                 "unknown code_graph operation '{other}': expected one of \
                  'neighbors', 'ranked', 'impact', 'implementations', \
-                 'search', 'cycles', 'orphans', 'path', 'edges', \
+                 'search', 'query_subgraph', 'cycles', 'orphans', 'path', 'edges', \
                  'symbols_at', 'diff_touches', 'detect_changes', \
                  'describe', 'context', 'status', \
                  'api_surface', 'boundary_check', 'hotspots', 'complexity', \
@@ -1669,6 +1718,76 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::Search(SearchResponse {
             query: query.to_string(),
             hits,
+            next_step: None,
+        }))
+    }
+
+    async fn code_graph_query_subgraph(
+        &self,
+        ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let query = params
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|q| !q.is_empty())
+            .ok_or_else(|| "'query' is required for operation 'query_subgraph'".to_string())?;
+        validate_kind_filter(params.kind_filter.as_deref())?;
+
+        let token_budget =
+            bounded_optional_usize(params.token_budget, "token_budget", 1_024, 32_000, false)?;
+        let max_depth = bounded_optional_usize(params.max_depth, "max_depth", 0, 8, true)?;
+        let max_seeds = bounded_optional_usize(params.max_seeds, "max_seeds", 1, 32, false)?;
+
+        let edge_filter = params
+            .edge_filters
+            .clone()
+            .unwrap_or_else(|| params.edge_kind.clone().into_iter().collect())
+            .into_iter()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let file_filter = params
+            .file_filter
+            .as_deref()
+            .or(params.file_glob.as_deref())
+            .or(params.file.as_deref())
+            .or(params.from_glob.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
+        let request = QuerySubgraphRequest {
+            query: query.to_string(),
+            workspace: ctx
+                .workspace
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            context_filter: params
+                .context_filter
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            file_filter,
+            kind_filter: params
+                .kind_filter
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            edge_filter,
+            token_budget,
+            max_depth,
+            max_seeds,
+        };
+        let result = self.state.repo_graph().query_subgraph(ctx, request).await?;
+        Ok(CodeGraphResponse::QuerySubgraph(QuerySubgraphResponse {
+            query_subgraph: result,
             next_step: None,
         }))
     }
@@ -2600,6 +2719,11 @@ mod tests {
             kind_filter: None,
             limit: None,
             query: None,
+            context_filter: None,
+            file_filter: None,
+            edge_filters: None,
+            token_budget: None,
+            max_seeds: None,
             from: None,
             to: None,
             from_glob: None,
@@ -3188,6 +3312,7 @@ mod tests {
             CodeGraphResponse::NotFound(r) => r.next_step.as_deref(),
             CodeGraphResponse::DetectedChanges(r) => r.next_step.as_deref(),
             CodeGraphResponse::Snapshot(r) => r.next_step.as_deref(),
+            CodeGraphResponse::QuerySubgraph(r) => r.next_step.as_deref(),
         }
     }
 
