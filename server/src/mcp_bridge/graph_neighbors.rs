@@ -262,20 +262,41 @@ pub(crate) fn resolve_node_with_hint(
     key: &str,
     kind_hint: Option<&str>,
 ) -> ResolveOutcome {
+    resolve_node_with_hint_and_filter(graph, key, kind_hint, |_| true)
+}
+
+pub(crate) fn resolve_node_with_hint_and_filter(
+    graph: &RepoDependencyGraph,
+    key: &str,
+    kind_hint: Option<&str>,
+    mut matches_scope: impl FnMut(&RepoGraphNode) -> bool,
+) -> ResolveOutcome {
     let stripped_file = key.strip_prefix("file:").unwrap_or(key);
     if let Some(index) = graph.file_node(stripped_file) {
-        return ResolveOutcome::Found(index);
+        return if matches_scope(graph.node(index)) {
+            ResolveOutcome::Found(index)
+        } else {
+            ResolveOutcome::NotFound
+        };
     }
 
     let stripped_symbol = key.strip_prefix("symbol:").unwrap_or(key);
     if let Some(index) = graph.symbol_node(stripped_symbol) {
-        return ResolveOutcome::Found(index);
+        return if matches_scope(graph.node(index)) {
+            ResolveOutcome::Found(index)
+        } else {
+            ResolveOutcome::NotFound
+        };
     }
 
     // Exact match failed — fall back to the name index. We over-fetch
     // (3× the cap) so the rescoring pass below has room to pick the
     // strongest candidates after the file-path / kind-hint signals fire.
-    let raw_hits = graph.search_by_name(stripped_symbol, None, CANDIDATE_CAP * 3);
+    let raw_hits: Vec<_> = graph
+        .search_by_name(stripped_symbol, None, CANDIDATE_CAP * 3)
+        .into_iter()
+        .filter(|hit| matches_scope(graph.node(hit.node_index)))
+        .collect();
     if raw_hits.is_empty() {
         return ResolveOutcome::NotFound;
     }
