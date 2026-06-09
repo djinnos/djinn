@@ -89,15 +89,6 @@ pub(crate) fn annotate_tool_safety(
     }
 }
 
-pub(crate) fn annotate_concurrent_safe(value: &mut serde_json::Value, concurrent_safe: bool) {
-    let annotations = if concurrent_safe {
-        ToolSafetyAnnotations::read_only()
-    } else {
-        ToolSafetyAnnotations::mutation()
-    };
-    annotate_tool_safety(value, annotations);
-}
-
 pub(crate) fn tool_memory_move() -> RmcpTool {
     RmcpTool::new(
         "memory_move".to_string(),

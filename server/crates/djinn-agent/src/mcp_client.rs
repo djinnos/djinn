@@ -15,7 +15,7 @@ use std::pin::Pin;
 use regex::Regex;
 use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::ServiceExt;
-use rmcp::model::{CallToolRequestParams, CallToolResult};
+use rmcp::model::{CallToolRequestParams, CallToolResult, Tool as RmcpTool};
 use rmcp::service::{Peer, RoleClient};
 use rmcp::transport::{
     StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
@@ -35,6 +35,47 @@ static PLACEHOLDER_RE: LazyLock<Regex> =
 /// in traces, Langfuse, and the LLM's tool-call output.
 pub fn mcp_namespaced_name(server_name: &str, tool_name: &str) -> String {
     format!("mcp__{server_name}__{tool_name}")
+}
+
+fn external_tool_schema_json(
+    tool: &RmcpTool,
+    namespaced: &str,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let mut value = serde_json::to_value(tool)?;
+    // Rewrite the tool name in the schema to the namespaced form while leaving
+    // upstream MCP `annotations` intact.
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "name".to_string(),
+            serde_json::Value::String(namespaced.to_string()),
+        );
+    }
+    annotate_external_tool_schema_safety(&mut value);
+    Ok(value)
+}
+
+fn annotation_bool(
+    annotations: Option<&serde_json::Map<String, serde_json::Value>>,
+    key: &str,
+) -> Option<bool> {
+    annotations?.get(key).and_then(serde_json::Value::as_bool)
+}
+
+fn annotate_external_tool_schema_safety(value: &mut serde_json::Value) {
+    let annotations = value
+        .get("annotations")
+        .and_then(serde_json::Value::as_object);
+
+    shared_schemas::annotate_tool_safety(
+        value,
+        shared_schemas::ToolSafetyAnnotations::new(
+            annotation_bool(annotations, "readOnlyHint").unwrap_or(false),
+            annotation_bool(annotations, "destructiveHint").unwrap_or(true),
+            annotation_bool(annotations, "idempotentHint").unwrap_or(false),
+            annotation_bool(annotations, "openWorldHint").unwrap_or(false),
+            false,
+        ),
+    );
 }
 
 /// Registry of MCP tool names → server connections built at session start.
@@ -302,18 +343,8 @@ pub async fn connect_and_discover(
                     let namespaced = mcp_namespaced_name(name, &original_name);
 
                     // Convert rmcp Tool to provider-compatible JSON schema.
-                    let schema = match serde_json::to_value(&tool) {
-                        Ok(mut v) => {
-                            // Rewrite the tool name in the schema to the namespaced form
-                            if let Some(obj) = v.as_object_mut() {
-                                obj.insert(
-                                    "name".to_string(),
-                                    serde_json::Value::String(namespaced.clone()),
-                                );
-                            }
-                            shared_schemas::annotate_concurrent_safe(&mut v, false);
-                            v
-                        }
+                    let schema = match external_tool_schema_json(&tool, &namespaced) {
+                        Ok(v) => v,
                         Err(e) => {
                             tracing::warn!(
                                 task_id = %task_short_id,
@@ -615,6 +646,61 @@ mod tests {
             registry.tool_schemas()[0]["concurrent_safe"],
             serde_json::Value::Bool(false)
         );
+    }
+
+    #[test]
+    fn external_tool_schema_preserves_supplied_safety_annotations() {
+        use rmcp::model::ToolAnnotations;
+        use rmcp::object;
+
+        let namespaced = mcp_namespaced_name("search-server", "web_search");
+        let tool = RmcpTool::new(
+            "web_search".to_string(),
+            "search".to_string(),
+            object!({"type": "object"}),
+        )
+        .annotate(
+            ToolAnnotations::new()
+                .read_only(true)
+                .destructive(false)
+                .idempotent(true)
+                .open_world(true),
+        );
+
+        let schema = external_tool_schema_json(&tool, &namespaced).expect("serialize tool schema");
+
+        assert_eq!(schema["name"], serde_json::Value::String(namespaced));
+        assert_eq!(schema["annotations"]["readOnlyHint"], true);
+        assert_eq!(schema["annotations"]["destructiveHint"], false);
+        assert_eq!(schema["annotations"]["idempotentHint"], true);
+        assert_eq!(schema["annotations"]["openWorldHint"], true);
+        assert_eq!(schema["readOnly"], true);
+        assert_eq!(schema["destructive"], false);
+        assert_eq!(schema["idempotent"], true);
+        assert_eq!(schema["openWorld"], true);
+        assert_eq!(schema["concurrent_safe"], false);
+    }
+
+    #[test]
+    fn external_tool_schema_without_annotations_defaults_fail_closed() {
+        use rmcp::object;
+
+        let namespaced = mcp_namespaced_name("unknown-server", "mutate");
+        let tool = RmcpTool::new(
+            "mutate".to_string(),
+            "unknown third-party tool".to_string(),
+            object!({"type": "object"}),
+        );
+
+        let schema = external_tool_schema_json(&tool, &namespaced).expect("serialize tool schema");
+
+        assert_eq!(schema["name"], serde_json::Value::String(namespaced));
+        assert!(schema.get("annotations").is_none());
+        assert_eq!(schema["readOnly"], false);
+        assert_eq!(schema["destructive"], true);
+        assert_eq!(schema["idempotent"], false);
+        assert_eq!(schema["openWorld"], false);
+        assert_eq!(schema["concurrent_safe"], false);
     }
 
     #[tokio::test]

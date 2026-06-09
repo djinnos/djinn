@@ -36,6 +36,36 @@ async fn all_tool_schemas_includes_cross_domain_tools() {
 }
 
 #[tokio::test]
+async fn all_tool_schemas_default_safety_annotations_fail_closed() {
+    let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+    let mcp = djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state());
+    let tools = mcp.all_tool_schemas();
+
+    for field in [
+        "readOnly",
+        "destructive",
+        "idempotent",
+        "openWorld",
+        "concurrent_safe",
+    ] {
+        assert!(
+            tools.iter().all(|tool| tool.get(field).is_some()),
+            "server-wide all_tool_schemas omitted safety field {field}"
+        );
+    }
+
+    let task_list = tools
+        .iter()
+        .find(|tool| tool.get("name").and_then(Value::as_str) == Some("task_list"))
+        .expect("task_list schema");
+    assert_eq!(task_list["readOnly"], false);
+    assert_eq!(task_list["destructive"], true);
+    assert_eq!(task_list["idempotent"], false);
+    assert_eq!(task_list["openWorld"], false);
+    assert_eq!(task_list["concurrent_safe"], false);
+}
+
+#[tokio::test]
 async fn chat_uses_router_derived_tool_schemas() {
     let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
     let mcp = djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state());
@@ -243,18 +273,20 @@ async fn mcp_tools_list_schemas_do_not_use_nonstandard_uint_or_nullable_without_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_tools_schema_snapshot() {
-    let app = test_helpers::create_test_app();
-    let session_id = test_helpers::initialize_mcp_session(&app).await;
-    let list_event = mcp_jsonrpc(&app, &session_id, 2, "tools/list", json!({})).await;
-    let tools = list_event["result"]["tools"]
-        .as_array()
-        .expect("tools array");
+    let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+    let mcp = djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state());
+    let tools = mcp.all_tool_schemas();
 
     let mut signatures: Vec<Value> = tools
             .iter()
             .map(|tool| {
                 json!({
                     "name": tool["name"],
+                    "read_only": tool["readOnly"],
+                    "destructive": tool["destructive"],
+                    "idempotent": tool["idempotent"],
+                    "open_world": tool["openWorld"],
+                    "concurrent_safe": tool["concurrent_safe"],
                     "input_schema": canonicalize_json(tool.get("inputSchema").unwrap_or(&Value::Null)),
                     "output_schema": canonicalize_json(tool.get("outputSchema").unwrap_or(&Value::Null)),
                 })
