@@ -171,6 +171,33 @@ fn non_architect_role_registries_do_not_include_code_graph() {
 }
 
 #[test]
+fn code_graph_schema_embeds_workflow_guidance() {
+    let schema = serde_json::to_value(tool_code_graph()).expect("serialize code_graph schema");
+    let description = schema
+        .get("description")
+        .and_then(|value| value.as_str())
+        .expect("code_graph has a description");
+
+    assert!(description.contains("WHEN TO USE"));
+    assert!(description.contains("AFTER THIS"));
+    for operation in [
+        "capabilities",
+        "search",
+        "describe",
+        "neighbors",
+        "impact",
+        "context",
+        "complexity",
+        "refactor_candidates",
+    ] {
+        assert!(
+            description.contains(operation),
+            "code_graph guidance should mention {operation}"
+        );
+    }
+}
+
+#[test]
 fn loaded_skills_and_progressive_disclosure_reference_only_registered_worker_tools() {
     let project_root = crate::test_helpers::test_tempdir("djinn-skill-lockstep-");
     let skill_dir = project_root.path().join(".djinn").join("skills");
