@@ -313,16 +313,17 @@ pub struct GetProjectDevcontainerStatusResponse {
     /// Human-readable error from the most recent failed build, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_last_error: Option<String>,
-    /// ISO-8601 UTC timestamp of the most recent successful canonical-graph
-    /// warm for this project. `None` means the warmer has not completed a
-    /// run yet (cold project or failing pipeline). The coordinator will not
-    /// dispatch tasks until this is set.
+    /// ISO-8601 UTC timestamp derived from per-workspace graph freshness
+    /// or the merged repo graph cache. `None` means no freshness source has
+    /// completed yet (cold project or failing pipeline). Dispatch no longer
+    /// blocks on this value; it is badge metadata retained under a
+    /// compatibility field name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub graph_warmed_at: Option<String>,
     /// Derived status for the UI banner. One of
     /// `pending | running | ready | failed`. `pending` means no warm has
     /// ever run; `running` means the image is ready and a warm should be
-    /// in flight (or imminent); `ready` means `graph_warmed_at` is set;
+    /// in flight (or imminent); `ready` means derived graph freshness exists;
     /// `failed` mirrors the image build's failed status (no warm possible).
     pub graph_warm_status: String,
     /// Per-workspace graph warm results from the most recent indexer run.
@@ -1388,9 +1389,8 @@ impl DjinnMcpServer {
         let image_tag = dispatch.pull_ref().or(dispatch.tag);
 
         // Graph-warm status: derived from per-workspace freshness first, then
-        // the merged repo graph cache. Do not fall through to the legacy
-        // `projects.graph_warmed_at` scalar: it is being removed, while a
-        // cache-only project must remain visibly warmed during rollout.
+        // the merged repo graph cache. There is no project-table freshness
+        // scalar fallback after the storage migration; a cache-only project must remain visibly warmed during rollout.
         let graph_warmed_at =
             graph_warmed_at_from_freshness(self.state.db().clone(), &input.project).await;
 

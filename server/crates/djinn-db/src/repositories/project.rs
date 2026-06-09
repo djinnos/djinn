@@ -914,27 +914,31 @@ impl ProjectRepository {
         Ok(())
     }
 
-    /// Stamp `projects.graph_warmed_at = now()` for a project.
+    /// Record successful graph freshness for a project with no indexable code.
     ///
-    /// The normal warm path stamps this as a side-effect of
-    /// `RepoGraphCacheRepository::upsert`. This standalone setter exists for
-    /// the *code-less* skip path: a docs / memory-only repo (no detected
-    /// language) has nothing to index, so the warm pipeline is correctly
-    /// skipped — but without a stamp the UI badge derives to "Warming"
-    /// forever. Stamping it here means "nothing to warm = considered warmed",
-    /// resolving the badge to "ready". Uses the same RFC3339 string format as
-    /// the cache-upsert stamp (matching the schema's timestamp convention).
+    /// The normal warm path records `project_workspace_graph` rows for each
+    /// discovered workspace and writes the merged `repo_graph_cache` blob. A
+    /// docs / memory-only repo has no detected language and nothing to index,
+    /// so the warm pipeline is correctly skipped — but without durable
+    /// freshness the UI badge would derive to "Warming" forever. Recording a
+    /// synthetic workspace row here means "nothing to warm = considered
+    /// warmed", resolving the badge to "ready" while keeping all graph
+    /// freshness off the `projects` table.
     pub async fn mark_graph_warmed(&self, project_id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
-            r#"UPDATE projects
-               SET graph_warmed_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-             WHERE id = $1"#,
-            project_id
+        crate::repositories::project_workspace_graph::ProjectWorkspaceGraphRepository::new(
+            self.db.clone(),
         )
-        .execute(self.db.pool())
-        .await?;
-        Ok(())
+        .upsert(
+            crate::repositories::project_workspace_graph::ProjectWorkspaceGraphUpsert {
+                project_id,
+                workspace_slug:
+                    crate::repositories::project_workspace_graph::CODELESS_WORKSPACE_SLUG,
+                commit_sha: "no-code",
+                status: "ready",
+            },
+        )
+        .await
     }
 }
 
@@ -1032,8 +1036,7 @@ pub struct ProjectDispatchReadiness {
     /// Derived wall-clock timestamp of the most recent successful canonical-
     /// graph warm. For rollout compatibility this field name is retained, but
     /// the value now comes from `project_workspace_graph.warmed_at` (preferred)
-    /// or `repo_graph_cache.built_at`; it is not read from the legacy
-    /// `projects.graph_warmed_at` scalar. `None` means neither freshness source
+    /// or `repo_graph_cache.built_at`; it is not read from the legacy project-table graph freshness scalar. `None` means neither freshness source
     /// has a row for this project.
     pub graph_warmed_at: Option<String>,
 }
@@ -1145,17 +1148,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn dispatch_readiness_ignores_legacy_project_graph_warmed_scalar() {
+    async fn mark_graph_warmed_records_synthetic_workspace_freshness() {
         let repo = ProjectRepository::new(test_db(), EventBus::noop());
         let project = repo.create("docs", "acme", "docs").await.unwrap();
 
         repo.mark_graph_warmed(&project.id).await.unwrap();
 
-        assert_eq!(
-            dispatch_graph_warmed_at(&repo, &project.id).await,
-            None,
-            "legacy projects.graph_warmed_at alone must not make readiness warmed"
-        );
+        assert!(dispatch_graph_warmed_at(&repo, &project.id).await.is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
