@@ -24,6 +24,7 @@ import { ConnectIcon, AlertCircleIcon, RefreshIcon } from "@hugeicons/core-free-
 import { fetchSnapshot } from "@/api/codeGraph";
 import {
   buildGraphFromSnapshot,
+  filterSnapshotForWorkspace,
   parseSnapshotResponse,
   type SnapshotPayload,
 } from "@/lib/codeGraphAdapter";
@@ -66,6 +67,9 @@ export function CodeGraphCanvas({
 }: CodeGraphCanvasProps) {
   const [state, setState] = useState<FetchState>({ status: "loading" });
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const selectedWorkspaceSlug = useCodeGraphStore(
+    (s) => s.selectedWorkspaceSlug,
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -99,10 +103,15 @@ export function CodeGraphCanvas({
     };
   }, [projectId, nodeCap, reloadKey]);
 
-  const graph = useMemo(() => {
+  const visibleSnapshot = useMemo(() => {
     if (state.status !== "ready") return null;
-    return buildGraphFromSnapshot(state.snapshot);
-  }, [state]);
+    return filterSnapshotForWorkspace(state.snapshot, selectedWorkspaceSlug);
+  }, [state, selectedWorkspaceSlug]);
+
+  const graph = useMemo(() => {
+    if (!visibleSnapshot) return null;
+    return buildGraphFromSnapshot(visibleSnapshot);
+  }, [visibleSnapshot]);
 
   // The reducers hook needs the live Sigma handle to call refresh()
   // when store slices change. We init `null` and lift the handle from
@@ -176,10 +185,10 @@ export function CodeGraphCanvas({
         className="absolute inset-0"
         style={{ cursor: "grab" }}
       />
-      <CanvasOverlay state={state} />
-      {layoutRunning && state.status === "ready" && state.snapshot.nodes.length > 0 && (
+      <CanvasOverlay state={state} visibleSnapshot={visibleSnapshot} />
+      {layoutRunning && visibleSnapshot?.nodes.length ? (
         <LayoutOptimizingPill />
-      )}
+      ) : null}
       <CitationStatusBadge />
       <ComplexityLegend thresholds={complexityThresholds} />
     </div>
@@ -278,9 +287,10 @@ function CitationStatusBadge() {
 
 interface CanvasOverlayProps {
   state: FetchState;
+  visibleSnapshot: SnapshotPayload | null;
 }
 
-function CanvasOverlay({ state }: CanvasOverlayProps) {
+function CanvasOverlay({ state, visibleSnapshot }: CanvasOverlayProps) {
   if (state.status === "loading") {
     return (
       <CenterCard>
@@ -306,7 +316,8 @@ function CanvasOverlay({ state }: CanvasOverlayProps) {
       </CenterCard>
     );
   }
-  if (state.snapshot.nodes.length === 0) {
+  const snapshot = visibleSnapshot ?? state.snapshot;
+  if (snapshot.nodes.length === 0) {
     return (
       <CenterCard>
         <span className="mx-auto flex h-10 w-10 items-center justify-center rounded-full bg-zinc-800/60 text-zinc-400">
@@ -319,7 +330,6 @@ function CanvasOverlay({ state }: CanvasOverlayProps) {
     );
   }
 
-  const { snapshot } = state;
   return (
     <div className="pointer-events-none absolute left-3 top-3 flex flex-col gap-1.5">
       <Pill>

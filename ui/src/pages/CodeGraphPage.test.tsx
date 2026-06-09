@@ -219,9 +219,12 @@ describe("CodeGraphPage", () => {
 
     fireEvent.change(selector, { target: { value: "api" } });
     expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBe("api");
+    expect(fetchSnapshotMock).toHaveBeenCalledTimes(1);
+    expect(fetchSnapshotMock).toHaveBeenLastCalledWith("project-a", 10_000);
 
     fireEvent.change(selector, { target: { value: "" } });
     expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBeNull();
+    expect(fetchSnapshotMock).toHaveBeenCalledTimes(1);
   });
 
   it("persists workspace selection across canvas remounts for the same project", async () => {

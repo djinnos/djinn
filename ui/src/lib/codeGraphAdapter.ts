@@ -29,6 +29,11 @@ export interface SnapshotNode {
   community_id?: string;
   workspace?: string;
   /**
+   * True when included only to preserve a selected workspace's external edge
+   * context.
+   */
+  workspace_context?: boolean;
+  /**
    * Iter 30: per-function cognitive complexity from the tree-sitter
    * walker. Only populated for function-like nodes (function/method/
    * constructor) and only when the language is in the walker's table.
@@ -63,6 +68,62 @@ export interface SnapshotPayload {
   node_cap: number;
   nodes: SnapshotNode[];
   edges: SnapshotEdge[];
+}
+
+/**
+ * Filter a full project snapshot to one workspace without losing the
+ * cross-workspace relationships that make the local nodes understandable.
+ *
+ * The server snapshot is intentionally fetched once for the project. When the
+ * user chooses a workspace we keep nodes tagged with that workspace, then keep
+ * any edge touching one of those nodes and pull in the remote endpoint node as
+ * `workspace_context` so downstream rendering can de-emphasize it without
+ * dropping the relationship entirely.
+ */
+export function filterSnapshotForWorkspace(
+  snapshot: SnapshotPayload,
+  workspaceSlug: string | null | undefined,
+): SnapshotPayload {
+  const slug = workspaceSlug?.trim();
+  if (!slug) return snapshot;
+
+  const nodeById = new Map(snapshot.nodes.map((node) => [node.id, node]));
+  const selectedNodeIds = new Set(
+    snapshot.nodes
+      .filter((node) => node.workspace === slug)
+      .map((node) => node.id),
+  );
+
+  const includedNodeIds = new Set<string>(selectedNodeIds);
+  const edges = snapshot.edges.filter((edge) => {
+    const touchesSelected =
+      selectedNodeIds.has(edge.from) || selectedNodeIds.has(edge.to);
+    if (!touchesSelected) return false;
+    if (!nodeById.has(edge.from) || !nodeById.has(edge.to)) return false;
+    includedNodeIds.add(edge.from);
+    includedNodeIds.add(edge.to);
+    return true;
+  });
+
+  const nodes = snapshot.nodes
+    .filter((node) => includedNodeIds.has(node.id))
+    .map((node) => {
+      if (selectedNodeIds.has(node.id)) {
+        const selectedNode = { ...node };
+        delete selectedNode.workspace_context;
+        return selectedNode;
+      }
+      return { ...node, workspace_context: true };
+    });
+
+  return {
+    ...snapshot,
+    nodes,
+    edges,
+    total_nodes: nodes.length,
+    total_edges: edges.length,
+    truncated: false,
+  };
 }
 
 export interface SnapshotResponse {
@@ -108,6 +169,7 @@ export function parseSnapshotResponse(value: unknown): SnapshotPayload | null {
           community_id:
             typeof n.community_id === "string" ? n.community_id : undefined,
           workspace: nonEmptyString(n.workspace),
+          workspace_context: n.workspace_context === true,
           cognitive:
             typeof n.cognitive === "number" && Number.isFinite(n.cognitive)
               ? n.cognitive
@@ -568,6 +630,7 @@ function addNode(
     filePath: node.file_path,
     communityId: node.community_id,
     workspace: node.workspace,
+    isWorkspaceContext: node.workspace_context === true,
     /**
      * Iter 30: forwarded so the heatmap reducer can colorize without
      * a side lookup. `undefined` means "non-function or unsupported
