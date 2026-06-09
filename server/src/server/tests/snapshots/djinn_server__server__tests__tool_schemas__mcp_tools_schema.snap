@@ -775,11 +775,26 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "context_filter": {
+          "default": null,
+          "description": "Optional coarse context substring for `query_subgraph`.",
+          "nullable": true,
+          "type": "string"
+        },
         "direction": {
           "default": null,
           "description": "Edge direction filter for `neighbors`: `incoming`, `outgoing`, or omit for both.",
           "nullable": true,
           "type": "string"
+        },
+        "edge_filters": {
+          "default": null,
+          "description": "Optional explicit edge kinds for `query_subgraph`.",
+          "items": {
+            "type": "string"
+          },
+          "nullable": true,
+          "type": "array"
         },
         "edge_kind": {
           "default": null,
@@ -797,6 +812,12 @@ expression: signatures
         "file": {
           "default": null,
           "description": "Repository-relative file path for `symbols_at`.",
+          "nullable": true,
+          "type": "string"
+        },
+        "file_filter": {
+          "default": null,
+          "description": "Optional path/file substring filter for `query_subgraph`.",
           "nullable": true,
           "type": "string"
         },
@@ -871,6 +892,13 @@ expression: signatures
         "max_files_per_commit": {
           "default": null,
           "description": "Max files per commit before a commit is skipped in the\n`coupling_hotspots` / `coupling_hubs` aggregation. Default 15.\nProtects the pair-count signal from lockfile refreshes,\ncodemods, and similar bulk rewrites that contribute `N^2`\npairs with essentially zero real coupling information.",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
+        "max_seeds": {
+          "default": null,
+          "description": "Maximum seed count for `query_subgraph`.",
           "format": "int64",
           "nullable": true,
           "type": "integer"
@@ -1000,6 +1028,13 @@ expression: signatures
           "description": "Head SHA for `detect_changes`.",
           "nullable": true,
           "type": "string"
+        },
+        "token_budget": {
+          "default": null,
+          "description": "Approximate response token budget for `query_subgraph`.",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
         },
         "visibility": {
           "default": null,
