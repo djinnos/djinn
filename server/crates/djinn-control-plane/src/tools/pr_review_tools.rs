@@ -316,7 +316,7 @@ impl DjinnMcpServer {
             let impact = self
                 .state
                 .repo_graph()
-                .impact(&ctx, &ts.key, 3, None, None)
+                .impact(&ctx, ctx.workspace.as_deref(), &ts.key, 3, None, None)
                 .await?;
             if let ImpactResult::Detailed(mut entries) = impact {
                 let total = entries.len();
@@ -400,6 +400,7 @@ impl DjinnMcpServer {
                     .repo_graph()
                     .touches_hot_path(
                         &ctx,
+                        ctx.workspace.as_deref(),
                         &params.seed_entries,
                         &params.seed_sinks,
                         &touched_symbol_keys,

@@ -1535,6 +1535,7 @@ impl DjinnMcpServer {
             .repo_graph()
             .ranked(
                 ctx,
+                ctx.workspace.as_deref(),
                 params.kind_filter.as_deref(),
                 params.sort_by.as_deref(),
                 fetch_limit,
@@ -1591,6 +1592,7 @@ impl DjinnMcpServer {
             .repo_graph()
             .impact(
                 ctx,
+                ctx.workspace.as_deref(),
                 key,
                 depth,
                 params.group_by.as_deref(),
@@ -1727,6 +1729,7 @@ impl DjinnMcpServer {
             .repo_graph()
             .orphans(
                 ctx,
+                ctx.workspace.as_deref(),
                 params.kind_filter.as_deref(),
                 params.visibility.as_deref(),
                 fetch_limit,
@@ -1754,7 +1757,7 @@ impl DjinnMcpServer {
         let path = self
             .state
             .repo_graph()
-            .path(ctx, from, to, max_depth)
+            .path(ctx, ctx.workspace.as_deref(), from, to, max_depth)
             .await?;
         Ok(CodeGraphResponse::Path(PathResponse {
             path,
@@ -2019,6 +2022,7 @@ impl DjinnMcpServer {
             .repo_graph()
             .api_surface(
                 ctx,
+                ctx.workspace.as_deref(),
                 params.module_glob.as_deref(),
                 params.visibility.as_deref(),
                 limit.saturating_mul(4).clamp(limit, 500),
@@ -2340,7 +2344,13 @@ impl DjinnMcpServer {
         let hits = self
             .state
             .repo_graph()
-            .touches_hot_path(ctx, seed_entries, seed_sinks, symbols)
+            .touches_hot_path(
+                ctx,
+                ctx.workspace.as_deref(),
+                seed_entries,
+                seed_sinks,
+                symbols,
+            )
             .await?;
         Ok(CodeGraphResponse::TouchesHotPath(TouchesHotPathResponse {
             hits,
@@ -2378,7 +2388,7 @@ impl DjinnMcpServer {
         let mut snapshot = self
             .state
             .repo_graph()
-            .snapshot(ctx, node_cap, &exclusions)
+            .snapshot(ctx, ctx.workspace.as_deref(), node_cap, &exclusions)
             .await?;
         // v10: apply the `tests=` filter to the assembled snapshot. The
         // UI defaults to `include` (it toggles test visibility

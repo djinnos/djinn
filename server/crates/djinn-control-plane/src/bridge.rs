@@ -1133,9 +1133,15 @@ pub trait RepoGraphOps: Send + Sync {
 
     /// Top-ranked nodes by PageRank + structural weight. `sort_by` can be one
     /// of `pagerank` (default), `in_degree`, `out_degree`, or `total_degree`.
+    ///
+    /// `workspace` hard-scopes this listing operation: when present, returned
+    /// nodes should be bounded to that workspace rather than merely biasing
+    /// resolution. Implementations that do not yet support workspace filtering
+    /// may accept and ignore it while follow-up behavior lands.
     async fn ranked(
         &self,
         ctx: &ProjectCtx,
+        workspace: Option<&str>,
         kind_filter: Option<&str>,
         sort_by: Option<&str>,
         limit: usize,
@@ -1153,9 +1159,15 @@ pub trait RepoGraphOps: Send + Sync {
     /// threshold are skipped, so weak SCIP signals (e.g. `local`-prefixed
     /// references that took the visibility-heuristic penalty) drop out of the
     /// blast radius. `None` keeps every edge — the pre-PR-A2 behaviour.
+    ///
+    /// `workspace` scopes only seed resolution for this traversal operation:
+    /// the initial `key` should be resolved inside the workspace when present,
+    /// but the walk itself must never be constrained so cross-workspace blast
+    /// radius remains visible.
     async fn impact(
         &self,
         ctx: &ProjectCtx,
+        workspace: Option<&str>,
         key: &str,
         depth: usize,
         group_by: Option<&str>,
@@ -1209,18 +1221,27 @@ pub trait RepoGraphOps: Send + Sync {
     ) -> Result<Vec<CycleGroup>, String>;
 
     /// Bulk dead-symbol enumeration (nodes with zero incoming references).
+    ///
+    /// `workspace` hard-scopes this listing operation: when present, returned
+    /// orphan candidates should be bounded to that workspace.
     async fn orphans(
         &self,
         ctx: &ProjectCtx,
+        workspace: Option<&str>,
         kind_filter: Option<&str>,
         visibility: Option<&str>,
         limit: usize,
     ) -> Result<Vec<OrphanEntry>, String>;
 
     /// Shortest dependency path between two nodes.
+    ///
+    /// `workspace` scopes only endpoint resolution for this traversal operation:
+    /// `from` and `to` should be resolved inside the workspace when present,
+    /// but the shortest-path walk itself must not be constrained.
     async fn path(
         &self,
         ctx: &ProjectCtx,
+        workspace: Option<&str>,
         from: &str,
         to: &str,
         max_depth: Option<usize>,
@@ -1271,9 +1292,14 @@ pub trait RepoGraphOps: Send + Sync {
     /// set of node keys filtered out by `graph_excluded_paths`; both
     /// node and edge filtering happens against this set so the wire
     /// shape is consistent with what the rest of `code_graph` returns.
+    ///
+    /// `workspace` hard-scopes this bounded/listing operation: when present,
+    /// snapshot nodes and the retained induced edges should be bounded to that
+    /// workspace.
     async fn snapshot(
         &self,
         ctx: &ProjectCtx,
+        workspace: Option<&str>,
         node_cap: usize,
         exclusions: &crate::tools::graph_exclusions::GraphExclusions,
     ) -> Result<SnapshotPayload, String>;
@@ -1326,9 +1352,13 @@ pub trait RepoGraphOps: Send + Sync {
     /// List every public (or private/any, per `visibility`) symbol in
     /// the base graph, enriched with fan-in / fan-out and a
     /// "used outside crate" signal.
+    ///
+    /// `workspace` hard-scopes this listing operation: when present, returned
+    /// API-surface symbols should be bounded to that workspace.
     async fn api_surface(
         &self,
         ctx: &ProjectCtx,
+        workspace: Option<&str>,
         module_glob: Option<&str>,
         visibility: Option<&str>,
         limit: usize,
@@ -1414,9 +1444,14 @@ pub trait RepoGraphOps: Send + Sync {
     /// Given entry-point and sink keys (plus queried symbols), return
     /// which queried symbols sit on any shortest path from any entry
     /// to any sink.
+    ///
+    /// `workspace` scopes only seed/entry/sink resolution for this traversal
+    /// operation: seed entries, seed sinks, and queried symbols may be resolved
+    /// within the workspace, but shortest-path walks must remain unconstrained.
     async fn touches_hot_path(
         &self,
         ctx: &ProjectCtx,
+        workspace: Option<&str>,
         seed_entries: &[String],
         seed_sinks: &[String],
         symbols: &[String],
