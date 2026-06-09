@@ -451,6 +451,10 @@ pub struct SnapshotNode {
     pub id: String,
     pub kind: String,
     pub label: String,
+    /// Workspace slug that produced this node when available. Optional for
+    /// legacy graph artifacts and synthetic/external nodes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

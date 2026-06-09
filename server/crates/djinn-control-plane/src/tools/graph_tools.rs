@@ -4566,6 +4566,7 @@ mod tests {
             id: "symbol:scip-rust . . . main()".to_string(),
             kind: "symbol".to_string(),
             label: "main".to_string(),
+            workspace: Some("server".to_string()),
             symbol_kind: Some("function".to_string()),
             file_path: Some("src/main.rs".to_string()),
             pagerank: 0.42,
@@ -4614,12 +4615,17 @@ mod tests {
             .and_then(|arr| arr.first())
             .and_then(|v| v.as_object())
             .expect("first node object");
-        for required in ["id", "kind", "label", "pagerank"] {
+        for required in ["id", "kind", "label", "workspace", "pagerank"] {
             assert!(
                 node.contains_key(required),
                 "node missing `{required}`: {node:?}"
             );
         }
+        assert_eq!(
+            node.get("workspace").and_then(|v| v.as_str()),
+            Some("server"),
+            "node workspace slug should serialize from SnapshotNode.workspace: {node:?}"
+        );
         let edge = snapshot
             .get("edges")
             .and_then(|v| v.as_array())
@@ -4644,5 +4650,29 @@ mod tests {
         let params: CodeGraphParams = serde_json::from_value(json).unwrap();
         assert_eq!(params.operation, "snapshot");
         assert_eq!(params.limit, Some(1500));
+    }
+
+    #[test]
+    fn snapshot_node_omits_absent_workspace() {
+        let node = crate::bridge::SnapshotNode {
+            id: "file:src/lib.rs".to_string(),
+            kind: "file".to_string(),
+            label: "src/lib.rs".to_string(),
+            workspace: None,
+            symbol_kind: None,
+            file_path: Some("src/lib.rs".to_string()),
+            pagerank: 0.1,
+            community_id: None,
+            cognitive: None,
+            is_test: false,
+        };
+        let json = serde_json::to_value(node).expect("serialize node");
+        assert!(
+            json.as_object()
+                .expect("node object")
+                .get("workspace")
+                .is_none(),
+            "workspace should be omitted when absent: {json}"
+        );
     }
 }
