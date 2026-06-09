@@ -1,50 +1,55 @@
 @import "tailwindcss";
 
 :root {
-  /* Brand Colors */
-  --color-brand-purple: #A855F7;
-  --color-brand-purple-dark: #7C3AED;
-  
-  /* App Theme Colors */
-  --color-bg-page: #09090B;
-  --color-bg-surface: #101010;
-  --color-bg-surface-elevated: #1C1C1C;
-  --color-border: #282828;
-  
+  /* Brand */
+  --color-brand-purple: #a855f7;
+  --color-brand-purple-dark: #7c3aed;
+
+  /* Ink theme */
+  --color-bg-page: #0a0a0e;
+  --color-bg-surface: #0f0f15;
+  --color-bg-surface-elevated: #16161e;
+  --color-border: #232330;
+  --color-border-faint: #1a1a24;
+
   /* Text */
-  --color-text-primary: #FFFFFF;
-  --color-text-secondary: #A0A0A0;
-  --color-text-muted: #525252;
-  
-  /* Accents */
-  --color-accent-peach: #FFC799;
-  --color-accent-mint: #99FFE4;
-  --color-accent-coral: #FF8080;
+  --color-text-primary: #f4f4f5;
+  --color-text-secondary: #9b9ba6;
+  --color-text-muted: #565664;
+
+  /* System / status accents (CI palette) */
+  --color-accent-peach: #ffc799;
+  --color-accent-mint: #99ffe4;
+  --color-accent-coral: #ff8080;
+  --color-status-pass: #3fb950;
+  --color-status-warn: #d29922;
+  --color-status-merge: #a371f7;
 }
 
 @theme {
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
-  
+  --font-display: var(--font-fraunces);
+
   --color-brand-purple: var(--color-brand-purple);
   --color-brand-purple-dark: var(--color-brand-purple-dark);
-  
+
   --color-bg-page: var(--color-bg-page);
   --color-bg-surface: var(--color-bg-surface);
   --color-bg-surface-elevated: var(--color-bg-surface-elevated);
   --color-border: var(--color-border);
-  
+  --color-border-faint: var(--color-border-faint);
+
   --color-text-primary: var(--color-text-primary);
   --color-text-secondary: var(--color-text-secondary);
   --color-text-muted: var(--color-text-muted);
-  
+
   --color-accent-peach: var(--color-accent-peach);
   --color-accent-mint: var(--color-accent-mint);
   --color-accent-coral: var(--color-accent-coral);
-  
-  --animate-float: float 6s ease-in-out infinite;
-  --animate-float-delayed: float 6s ease-in-out infinite 3s;
-  --animate-pulse-slow: pulse 4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --color-status-pass: var(--color-status-pass);
+  --color-status-warn: var(--color-status-warn);
+  --color-status-merge: var(--color-status-merge);
 }
 
 body {
@@ -53,27 +58,144 @@ body {
   font-family: var(--font-sans);
 }
 
-@keyframes float {
-  0% { transform: translateY(0px); }
-  50% { transform: translateY(-20px); }
-  100% { transform: translateY(0px); }
+/* ——— Atmosphere ——————————————————————————————————— */
+
+/* Blueprint grid: fine hairlines, faded out at the edges */
+.blueprint {
+  background-image:
+    linear-gradient(to right, rgba(155, 155, 180, 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(155, 155, 180, 0.05) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: radial-gradient(ellipse 90% 70% at 50% 0%, black 30%, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse 90% 70% at 50% 0%, black 30%, transparent 100%);
+}
+
+/* Film grain over the whole page */
+.grain::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
 .glass-nav {
-  background: rgba(16, 16, 16, 0.7);
+  background: rgba(10, 10, 14, 0.72);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid var(--color-border-faint);
 }
 
-.glass-card {
-  background: rgba(28, 28, 28, 0.4);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+/* ——— System chrome ————————————————————————————————— */
+
+/* Mono status chip: `✓ signed off — product` */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+  padding: 0.3rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 9999px;
+  background: var(--color-bg-surface);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
 }
 
-.hero-gradient {
-  background: radial-gradient(circle at 50% 0%, #2e1065 0%, #09090b 80%);
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+  flex-shrink: 0;
+}
+
+.dot-pulse {
+  animation: dot-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes dot-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 45%, transparent); }
+  50% { opacity: 0.55; box-shadow: 0 0 0 5px transparent; }
+}
+
+/* Window frame around screenshots */
+.window {
+  border: 1px solid var(--color-border);
+  border-radius: 0.75rem;
+  background: var(--color-bg-surface);
+  overflow: hidden;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 24px 60px -24px rgba(0, 0, 0, 0.8);
+}
+
+.window-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 0.9rem;
+  border-bottom: 1px solid var(--color-border-faint);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+}
+
+/* ——— Entrance choreography (hero only) ————————————— */
+
+@media (prefers-reduced-motion: no-preference) {
+  .rise {
+    opacity: 0;
+    animation: rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  }
+
+  .rise-1 { animation-delay: 0.05s; }
+  .rise-2 { animation-delay: 0.18s; }
+  .rise-3 { animation-delay: 0.32s; }
+  .rise-4 { animation-delay: 0.46s; }
+  .rise-5 { animation-delay: 0.62s; }
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(18px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dot-pulse { animation: none; }
+}
+
+/* ——— Pipeline rail ————————————————————————————————— */
+
+.rail {
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    var(--color-border) 8%,
+    var(--color-border) 92%,
+    transparent
+  );
+  width: 1px;
+}
+
+.rail-node {
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-surface-elevated);
+  font-family: var(--font-mono);
+}
+
+/* Headline underline stroke */
+.stroke-under {
+  background-image: linear-gradient(
+    to right,
+    var(--color-status-merge),
+    var(--color-brand-purple)
+  );
+  background-repeat: no-repeat;
+  background-size: 100% 0.09em;
+  background-position: 0 96%;
+  padding-bottom: 0.04em;
 }

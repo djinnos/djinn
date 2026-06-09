@@ -146,26 +146,32 @@ Open the UI at **http://127.0.0.1:3000**. `tilt down` removes the Helm release b
 
 > The heavy build steps (`djinn-binaries`, `djinn-ui-dist`, runtime base image) are **manual** triggers in the Tilt UI — hit refresh on `djinn-binaries` to recompile after Rust changes; the server image and pod roll follow automatically.
 
-## Deploy (Kubernetes)
+## Deploy (Kubernetes — a single VPS counts)
 
 djinn is Kubernetes-native — it dispatches every agent run as a Job/Pod — so it
-needs a cluster, but it can be **any** conformant Kubernetes. One Helm chart
-(`deploy/helm/djinn`) covers every environment; the only thing that changes is
-whether the backing services (Postgres, Qdrant, registry) are bundled or
-managed:
-
-- **Local** — `tilt up` brings up the whole stack in kind ([Quick start](#quick-start-local)).
-- **Single node / self-hosted / VPS** — everything bundled on a one-box k3s cluster.
-- **Any managed or self-managed cluster (EKS / GKE / AKS / kubeadm)** — external Postgres/registry, cloud identity, GitOps.
+needs a cluster. But **"a cluster" can be one cheap VPS**: [k3s](https://k3s.io)
+is full Kubernetes in a single binary, and djinn's Helm chart bundles everything
+else (Postgres, Qdrant, an in-cluster registry) on that one box.
 
 ```bash
+# on a fresh Ubuntu/Debian VPS — k3s is Kubernetes in one binary
+curl -sfL https://get.k3s.io | sh -
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml   # then install Helm
+
 helm upgrade --install djinn deploy/helm/djinn \
   --namespace djinn --create-namespace \
-  -f my-values.yaml
+  -f my-values.yaml    # bundled Postgres/Qdrant/registry, ingress host, secrets
 ```
 
-That one command handles fresh installs and upgrades, bundled or external
-Postgres — migrations run automatically in the server's migrate initContainer.
+The same one chart covers every environment — the only thing that changes is
+whether the backing services are bundled or managed:
+
+- **Local** — `tilt up` brings up the whole stack in kind ([Quick start](#quick-start-local)).
+- **Single node / self-hosted / VPS** — everything bundled on a one-box k3s cluster ([guide](docs/DEPLOYMENT.md#single-node--self-hosted--vps), including the exact bundled values and a turnkey Ansible reference).
+- **Any managed or self-managed cluster (EKS / GKE / AKS / kubeadm)** — external Postgres/registry, cloud identity, GitOps.
+
+`helm upgrade --install` handles fresh installs and upgrades alike — migrations
+run automatically in the server's migrate initContainer.
 
 **→ Full guide, per-environment values, and the production/EKS overlay: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).**
 
