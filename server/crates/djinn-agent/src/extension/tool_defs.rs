@@ -1,10 +1,26 @@
 use rmcp::model::Tool as RmcpTool;
 use rmcp::object;
 
-use super::shared_schemas;
+use super::shared_schemas::{self, ToolSafetyAnnotations};
 
-fn serialize_tool(tool: RmcpTool, concurrent_safe: bool) -> serde_json::Value {
-    shared_schemas::serialize_tool_schema(tool, concurrent_safe)
+fn serialize_tool(tool: RmcpTool, annotations: ToolSafetyAnnotations) -> serde_json::Value {
+    shared_schemas::serialize_tool_schema(tool, annotations)
+}
+
+fn read_only() -> ToolSafetyAnnotations {
+    ToolSafetyAnnotations::read_only()
+}
+
+fn open_world_read_only() -> ToolSafetyAnnotations {
+    ToolSafetyAnnotations::open_world_read_only()
+}
+
+fn mutation() -> ToolSafetyAnnotations {
+    ToolSafetyAnnotations::mutation()
+}
+
+fn destructive() -> ToolSafetyAnnotations {
+    ToolSafetyAnnotations::destructive()
 }
 
 pub(super) fn tool_request_lead() -> RmcpTool {
@@ -693,41 +709,47 @@ pub(crate) fn tool_github_search() -> RmcpTool {
 
 fn base_tool_schemas() -> Vec<serde_json::Value> {
     let mut tool_values = shared_schemas::shared_base_tool_schemas();
-    tool_values.push(serialize_tool(tool_shell(), false));
-    tool_values.push(serialize_tool(tool_read(), true));
-    tool_values.push(serialize_tool(tool_code_search(), true));
-    tool_values.push(serialize_tool(tool_skill_read(), true));
-    tool_values.push(serialize_tool(tool_lsp(), true));
+    tool_values.push(serialize_tool(tool_shell(), destructive()));
+    tool_values.push(serialize_tool(tool_read(), read_only()));
+    tool_values.push(serialize_tool(tool_code_search(), open_world_read_only()));
+    tool_values.push(serialize_tool(tool_skill_read(), read_only()));
+    tool_values.push(serialize_tool(tool_lsp(), read_only()));
     // NOTE: `tool_code_graph()` is intentionally NOT in the base schema set.
     // Per ADR-050, the code-graph tool is exclusive to the Architect (autonomous patrol form)
     // and the Chat surface (interactive form). Worker, reviewer, planner, and lead do not
     // see it. The architect's role-specific schema function appends it directly.
-    tool_values.push(serialize_tool(tool_ci_job_log(), true));
-    tool_values.push(serialize_tool(tool_github_search(), true));
-    tool_values.push(serialize_tool(tool_output_view(), true));
-    tool_values.push(serialize_tool(tool_output_grep(), true));
+    tool_values.push(serialize_tool(tool_ci_job_log(), read_only()));
+    tool_values.push(serialize_tool(tool_github_search(), open_world_read_only()));
+    tool_values.push(serialize_tool(tool_output_view(), read_only()));
+    tool_values.push(serialize_tool(tool_output_grep(), read_only()));
     tool_values
 }
 
 /// Tool schemas for Worker: base + file-editing tools.
 pub(crate) fn tool_schemas_worker() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
-    tool_values.push(serialize_tool(tool_write(), false));
-    tool_values.push(serialize_tool(tool_edit(), false));
-    tool_values.push(serialize_tool(tool_apply_patch(), false));
+    tool_values.push(serialize_tool(tool_write(), destructive()));
+    tool_values.push(serialize_tool(tool_edit(), destructive()));
+    tool_values.push(serialize_tool(tool_apply_patch(), destructive()));
     tool_values.push(serialize_tool(
         shared_schemas::tool_memory_build_context(),
-        true,
+        read_only(),
     ));
     // Workers may deliberately record durable knowledge (decisions, patterns,
     // pitfalls hit during the task) — complements the automatic post-session
     // extraction. Previously memory writes were Architect-only.
-    tool_values.push(serialize_tool(shared_schemas::tool_memory_write(), false));
-    tool_values.push(serialize_tool(shared_schemas::tool_memory_edit(), false));
-    tool_values.push(serialize_tool(tool_request_lead(), false));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_write(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_edit(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(tool_request_lead(), mutation()));
     tool_values.push(serialize_tool(
         crate::roles::finalize::tool_submit_work(),
-        false,
+        mutation(),
     ));
     tool_values
 }
@@ -738,11 +760,11 @@ pub(crate) fn tool_schemas_reviewer() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
     tool_values.push(serialize_tool(
         shared_schemas::tool_memory_build_context(),
-        false,
+        mutation(),
     ));
     tool_values.push(serialize_tool(
         crate::roles::finalize::tool_submit_review(),
-        false,
+        mutation(),
     ));
     tool_values
 }
@@ -761,12 +783,12 @@ fn tool_schemas_lead_inner() -> Vec<serde_json::Value> {
         tool_values.push(value);
     }
     for value in [
-        serialize_tool(tool_task_delete_branch(), false),
-        serialize_tool(tool_task_archive_activity(), false),
-        serialize_tool(tool_task_reset_counters(), false),
-        serialize_tool(tool_task_kill_session(), false),
-        serialize_tool(tool_request_planner(), false),
-        serialize_tool(crate::roles::finalize::tool_submit_decision(), false),
+        serialize_tool(tool_task_delete_branch(), mutation()),
+        serialize_tool(tool_task_archive_activity(), mutation()),
+        serialize_tool(tool_task_reset_counters(), mutation()),
+        serialize_tool(tool_task_kill_session(), mutation()),
+        serialize_tool(tool_request_planner(), mutation()),
+        serialize_tool(crate::roles::finalize::tool_submit_decision(), mutation()),
     ] {
         tool_values.push(value);
     }
@@ -784,76 +806,103 @@ fn tool_schemas_lead_inner() -> Vec<serde_json::Value> {
 /// a patrol responsibility.
 pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
-    tool_values.push(serialize_tool(tool_write(), false));
-    tool_values.push(serialize_tool(tool_edit(), false));
+    tool_values.push(serialize_tool(tool_write(), destructive()));
+    tool_values.push(serialize_tool(tool_edit(), destructive()));
     for value in shared_schemas::shared_lead_tool_schemas() {
         tool_values.push(value);
     }
     // Proposal decomposition (Mode D): create epics across the proposal's
     // targets, sequence them with dependencies, and read the proposal + sibling
     // repos.
-    tool_values.push(serialize_tool(shared_schemas::tool_epic_create(), false));
-    tool_values.push(serialize_tool(shared_schemas::tool_proposal_show(), true));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_epic_create(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_show(),
+        read_only(),
+    ));
     // Proposal closeout (Mode E): reconcile AC met-flags as epics land, then
     // mark the building proposal done once every criterion is satisfied.
-    tool_values.push(serialize_tool(shared_schemas::tool_proposal_ac_set(), true));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_ac_set(),
+        read_only(),
+    ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_proposal_complete(),
-        true,
+        read_only(),
     ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_epic_blockers_list(),
-        true,
+        read_only(),
     ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_epic_blocked_list(),
-        true,
+        read_only(),
     ));
     // Sibling-repo survey for Mode D uses the base `read(project=…)` and
     // `code_search` tools (mirror-backed, full local repos) — no github_* needed.
     tool_values.push(serialize_tool(
         shared_schemas::tool_task_transition(),
-        false,
+        mutation(),
     ));
     // task_comment_add was previously excluded for planners (submit_grooming
     // captured output), but patrol mode needs to leave diagnostic comments on
     // stuck tasks.
     tool_values.push(serialize_tool(
         shared_schemas::tool_task_comment_add(),
-        false,
+        mutation(),
     ));
     // Memory-health and knowledge-graph tools used by the patrol workflow
     // (sections "Memory Health Review" and "Contradiction and Low-Confidence
     // Review" in the patrol prompt).
     tool_values.push(serialize_tool(
         shared_schemas::tool_memory_build_context(),
-        true,
+        read_only(),
     ));
-    tool_values.push(serialize_tool(shared_schemas::tool_memory_health(), true));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_health(),
+        read_only(),
+    ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_memory_extracted_audit(),
-        true,
+        read_only(),
     ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_memory_broken_links(),
-        true,
+        read_only(),
     ));
-    tool_values.push(serialize_tool(shared_schemas::tool_memory_orphans(), true));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_orphans(),
+        read_only(),
+    ));
     // Patrol may curate the knowledge base directly (annotate/fix notes during
     // the Memory Health Review), so expose write + edit alongside the read tools.
-    tool_values.push(serialize_tool(shared_schemas::tool_memory_write(), false));
-    tool_values.push(serialize_tool(shared_schemas::tool_memory_edit(), false));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_write(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_edit(),
+        mutation(),
+    ));
     // Agent effectiveness review tools (migrated from Architect §10 per ADR-051
     // patrol ownership migration).
-    tool_values.push(serialize_tool(shared_schemas::tool_role_metrics(), true));
-    tool_values.push(serialize_tool(shared_schemas::tool_role_create(), false));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_role_metrics(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_role_create(),
+        mutation(),
+    ));
     for value in [
-        serialize_tool(tool_task_delete_branch(), false),
-        serialize_tool(tool_task_archive_activity(), false),
-        serialize_tool(tool_task_reset_counters(), false),
-        serialize_tool(tool_task_kill_session(), false),
-        serialize_tool(tool_role_amend_prompt(), false),
-        serialize_tool(crate::roles::finalize::tool_submit_grooming(), false),
+        serialize_tool(tool_task_delete_branch(), mutation()),
+        serialize_tool(tool_task_archive_activity(), mutation()),
+        serialize_tool(tool_task_reset_counters(), mutation()),
+        serialize_tool(tool_task_kill_session(), mutation()),
+        serialize_tool(tool_role_amend_prompt(), mutation()),
+        serialize_tool(crate::roles::finalize::tool_submit_grooming(), mutation()),
     ] {
         tool_values.push(value);
     }
@@ -873,53 +922,83 @@ pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
         .position(|v| v.get("name").and_then(|n| n.as_str()) == Some("lsp"))
         .map(|i| i + 1)
         .unwrap_or(tool_values.len());
-    tool_values.insert(lsp_pos, serialize_tool(tool_code_graph(), true));
+    tool_values.insert(
+        lsp_pos,
+        serialize_tool(tool_code_graph(), open_world_read_only()),
+    );
     // Phase 3: the `pr_review_context` meta-tool rides the same Architect-only
     // access contract as `code_graph` — it's a base-graph analysis surface
     // aimed at PR review.
-    tool_values.insert(lsp_pos + 1, serialize_tool(tool_pr_review_context(), true));
+    tool_values.insert(
+        lsp_pos + 1,
+        serialize_tool(tool_pr_review_context(), read_only()),
+    );
     for value in shared_schemas::shared_lead_tool_schemas() {
         tool_values.push(value);
     }
     // Per ADR-050 §2, parity contract: chat exposes `epic_create`; the Architect must too.
-    tool_values.push(serialize_tool(shared_schemas::tool_epic_create(), false));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_epic_create(),
+        mutation(),
+    ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_task_transition(),
-        false,
+        mutation(),
     ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_task_comment_add(),
-        false,
+        mutation(),
     ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_memory_build_context(),
-        true,
+        read_only(),
     ));
-    tool_values.push(serialize_tool(shared_schemas::tool_memory_health(), true));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_health(),
+        read_only(),
+    ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_memory_extracted_audit(),
-        true,
+        read_only(),
     ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_memory_broken_links(),
-        true,
+        read_only(),
     ));
-    tool_values.push(serialize_tool(shared_schemas::tool_memory_orphans(), true));
-    tool_values.push(serialize_tool(shared_schemas::tool_role_metrics(), true));
-    tool_values.push(serialize_tool(shared_schemas::tool_role_create(), false));
-    tool_values.push(serialize_tool(shared_schemas::tool_memory_write(), false));
-    tool_values.push(serialize_tool(shared_schemas::tool_memory_edit(), false));
-    tool_values.push(serialize_tool(shared_schemas::tool_memory_move(), false));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_orphans(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_role_metrics(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_role_create(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_write(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_edit(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_move(),
+        mutation(),
+    ));
     for value in [
-        serialize_tool(tool_task_delete_branch(), false),
-        serialize_tool(tool_task_archive_activity(), false),
-        serialize_tool(tool_task_reset_counters(), false),
-        serialize_tool(tool_task_kill_session(), false),
+        serialize_tool(tool_task_delete_branch(), mutation()),
+        serialize_tool(tool_task_archive_activity(), mutation()),
+        serialize_tool(tool_task_reset_counters(), mutation()),
+        serialize_tool(tool_task_kill_session(), mutation()),
         // Per ADR-051 §1, `role_amend_prompt` has moved to the Planner —
         // agent-effectiveness amendment is a patrol action, not a consultant
         // action. Architect keeps `role_metrics` (read) and `role_create`
         // (structural proposal) but cannot mutate existing learned_prompts.
-        serialize_tool(crate::roles::finalize::tool_submit_work(), false),
+        serialize_tool(crate::roles::finalize::tool_submit_work(), mutation()),
     ] {
         tool_values.push(value);
     }
