@@ -90,6 +90,19 @@ impl ProjectWorkspaceGraphRepository {
         Ok(exists)
     }
 
+    pub async fn list_for_project(&self, project_id: &str) -> Result<Vec<ProjectWorkspaceGraph>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, ProjectWorkspaceGraph>(
+            r#"SELECT project_id, workspace_slug, commit_sha, warmed_at, status
+               FROM project_workspace_graph
+              WHERE project_id = $1
+              ORDER BY workspace_slug ASC"#,
+        )
+        .bind(project_id)
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
     pub async fn latest_for_project(
         &self,
         project_id: &str,
@@ -239,6 +252,35 @@ mod tests {
 
         assert!(repo.get("p1", "root").await.expect("get root").is_some());
         assert!(repo.get("p1", "api").await.expect("get api").is_some());
+    }
+
+    #[tokio::test]
+    async fn list_for_project_returns_rows_sorted_by_workspace_slug() {
+        let repo = fresh().await;
+        seed_project(&repo, "p1").await;
+
+        repo.upsert_many(&[
+            ProjectWorkspaceGraphUpsert {
+                project_id: "p1",
+                workspace_slug: "server",
+                commit_sha: "sha-server",
+                status: "ready",
+            },
+            ProjectWorkspaceGraphUpsert {
+                project_id: "p1",
+                workspace_slug: "api",
+                commit_sha: "sha-api",
+                status: "warming",
+            },
+        ])
+        .await
+        .expect("upsert many");
+
+        let rows = repo.list_for_project("p1").await.expect("list rows");
+        let slugs: Vec<_> = rows.iter().map(|row| row.workspace_slug.as_str()).collect();
+        assert_eq!(slugs, vec!["api", "server"]);
+        assert_eq!(rows[0].commit_sha, "sha-api");
+        assert_eq!(rows[0].status, "warming");
     }
 
     #[tokio::test]
