@@ -3389,6 +3389,25 @@ mod tests {
     }
 
     #[test]
+    fn parses_workspace_from_json() {
+        for (workspace, expected) in [
+            ("", Some("")),
+            ("nonexistent", Some("nonexistent")),
+            ("server", Some("server")),
+        ] {
+            let json = serde_json::json!({
+                "operation": "ranked",
+                "project": "/workspace/repo",
+                "workspace": workspace,
+            });
+
+            let params: CodeGraphParams = serde_json::from_value(json).unwrap();
+
+            assert_eq!(params.workspace.as_deref(), expected);
+        }
+    }
+
+    #[test]
     fn normalize_clears_empty_workspace() {
         let json = serde_json::json!({
             "operation": "ranked",

@@ -4121,6 +4121,218 @@ pub(crate) mod graph_bridge_tests {
         RepoDependencyGraph::build(&[fixture_index()])
     }
 
+    fn multi_workspace_graph() -> RepoDependencyGraph {
+        use djinn_graph::repo_graph::{
+            REPO_GRAPH_ARTIFACT_VERSION, RepoGraphArtifact, RepoGraphArtifactEdge,
+            RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind,
+        };
+        use djinn_graph::scip_parser::ScipVisibility;
+
+        let mk_symbol =
+            |symbol: &str, display_name: &str, file_path: &str, workspace: &str| RepoGraphNode {
+                id: RepoNodeKey::Symbol(symbol.to_string()),
+                kind: RepoGraphNodeKind::Symbol,
+                display_name: display_name.to_string(),
+                language: Some("rust".to_string()),
+                file_path: Some(PathBuf::from(file_path)),
+                symbol: Some(symbol.to_string()),
+                symbol_kind: Some(ScipSymbolKind::Function),
+                is_external: false,
+                visibility: Some(ScipVisibility::Public),
+                signature: None,
+                documentation: vec![],
+                signature_parts: None,
+                is_test: false,
+                complexity: None,
+                workspace: Some(workspace.to_string()),
+            };
+        let mk_edge = |source: usize, target: usize| RepoGraphArtifactEdge {
+            source,
+            target,
+            kind: RepoGraphEdgeKind::SymbolReference,
+            weight: 1.0,
+            evidence_count: 1,
+            confidence: 0.95,
+            reason: None,
+            step: None,
+        };
+
+        let artifact = RepoGraphArtifact {
+            version: REPO_GRAPH_ARTIFACT_VERSION,
+            nodes: vec![
+                mk_symbol(
+                    "scip-rust pkg server/src/entry.rs `entry`().",
+                    "server_entry",
+                    "server/src/entry.rs",
+                    "server",
+                ),
+                mk_symbol(
+                    "scip-rust pkg desktop/src/shared.rs `shared`().",
+                    "desktop_shared",
+                    "desktop/src/shared.rs",
+                    "desktop",
+                ),
+                mk_symbol(
+                    "scip-rust pkg server/src/sink.rs `sink`().",
+                    "server_sink",
+                    "server/src/sink.rs",
+                    "server",
+                ),
+                mk_symbol(
+                    "scip-rust pkg desktop/src/leaf.rs `leaf`().",
+                    "desktop_leaf",
+                    "desktop/src/leaf.rs",
+                    "desktop",
+                ),
+            ],
+            // The first two edges form a server → desktop → server chain.
+            // Traversal ops should keep this cross-workspace middle hop when
+            // the server workspace scopes only seed resolution.
+            edges: vec![mk_edge(0, 1), mk_edge(1, 2), mk_edge(3, 1)],
+            symbol_ranges: std::collections::BTreeMap::new(),
+            communities: vec![],
+            processes: vec![],
+        };
+        RepoDependencyGraph::from_artifact(&artifact)
+    }
+
+    #[test]
+    fn workspace_hint_for_nonexistent_slug_returns_available_slugs() {
+        let graph = multi_workspace_graph();
+
+        assert_eq!(
+            workspace_hint_from_graph(&graph, Some("nonexistent")),
+            Some(vec!["desktop".to_string(), "server".to_string()])
+        );
+        assert_eq!(workspace_hint_from_graph(&graph, Some("server")), None);
+        assert_eq!(workspace_hint_from_graph(&graph, Some("")), None);
+    }
+
+    #[test]
+    fn valid_workspace_restricts_listing_style_graph_ops() {
+        let graph = multi_workspace_graph();
+        let workspace = active_workspace_prefix(&graph, Some("server"))
+            .expect("server workspace should be active");
+
+        let ranked_kept: Vec<String> = graph
+            .rank()
+            .nodes
+            .iter()
+            .filter_map(|ranked| {
+                let node = graph.node(ranked.node_index);
+                repo_graph_node_matches_workspace(node, &workspace)
+                    .then(|| node.display_name.clone())
+            })
+            .collect();
+        assert!(ranked_kept.iter().any(|name| name == "server_entry"));
+        assert!(ranked_kept.iter().any(|name| name == "server_sink"));
+        assert!(
+            !ranked_kept.iter().any(|name| name.starts_with("desktop_")),
+            "ranked hard filter leaked desktop nodes: {ranked_kept:?}"
+        );
+
+        let orphan_kept: Vec<String> = graph
+            .orphans(None, None, usize::MAX)
+            .into_iter()
+            .filter_map(|idx| {
+                let node = graph.node(idx);
+                repo_graph_node_matches_workspace(node, &workspace)
+                    .then(|| node.display_name.clone())
+            })
+            .collect();
+        assert!(orphan_kept.iter().any(|name| name == "server_entry"));
+        assert!(
+            !orphan_kept.iter().any(|name| name.starts_with("desktop_")),
+            "orphans hard filter leaked desktop nodes: {orphan_kept:?}"
+        );
+
+        let api_surface_kept: Vec<String> = graph
+            .graph()
+            .node_indices()
+            .filter_map(|idx| {
+                let node = graph.node(idx);
+                (node.visibility == Some(djinn_graph::scip_parser::ScipVisibility::Public)
+                    && repo_graph_node_matches_workspace(node, &workspace))
+                .then(|| node.display_name.clone())
+            })
+            .collect();
+        assert_eq!(api_surface_kept.len(), 2);
+        assert!(
+            api_surface_kept
+                .iter()
+                .all(|name| name.starts_with("server_"))
+        );
+
+        let snapshot_payload = build_snapshot_payload(
+            &graph,
+            &graph.rank(),
+            "project".to_string(),
+            "head".to_string(),
+            "now".to_string(),
+            &djinn_control_plane::tools::graph_exclusions::GraphExclusions::empty(),
+            Some("server"),
+            20,
+        );
+        assert_eq!(snapshot_payload.total_nodes, 2);
+        assert!(
+            snapshot_payload
+                .nodes
+                .iter()
+                .all(|node| node.workspace.as_deref() == Some("server")),
+            "snapshot hard filter leaked non-server nodes: {:?}",
+            snapshot_payload.nodes
+        );
+    }
+
+    #[test]
+    fn traversal_ops_scope_seeds_but_do_not_restrict_the_walk() {
+        let graph = multi_workspace_graph();
+        let entry = "scip-rust pkg server/src/entry.rs `entry`().";
+        let shared = "scip-rust pkg desktop/src/shared.rs `shared`().";
+        let sink = "scip-rust pkg server/src/sink.rs `sink`().";
+
+        let sink_idx =
+            resolve_node_or_err_for_workspace_seed(&graph, sink, Some("server")).unwrap();
+        let impact_keys: Vec<String> = impact_bfs(&graph, sink_idx, 3, Some(0.0))
+            .into_iter()
+            .map(|(_, entry)| entry.key)
+            .collect();
+        assert!(
+            impact_keys
+                .iter()
+                .any(|key| key.contains("desktop/src/shared.rs")),
+            "impact should preserve cross-workspace blast radius after resolving a server seed: {impact_keys:?}"
+        );
+
+        let entry_idx =
+            resolve_node_or_err_for_workspace_seed(&graph, entry, Some("server")).unwrap();
+        let path = graph
+            .shortest_path(entry_idx, sink_idx, Some(4))
+            .expect("server seeds should connect through desktop shared node");
+        let path_keys: Vec<String> = path
+            .iter()
+            .map(|idx| format_node_key(&graph.node(*idx).id))
+            .collect();
+        assert!(
+            path_keys
+                .iter()
+                .any(|key| key.contains("desktop/src/shared.rs")),
+            "path should not hard-filter the desktop middle hop: {path_keys:?}"
+        );
+
+        let shared_idx = resolve_node_or_err(&graph, shared).unwrap();
+        let touches_hot_path = path.contains(&shared_idx);
+        assert!(
+            touches_hot_path,
+            "touches_hot_path semantics should allow an unscoped queried desktop symbol on a server seed path: {path_keys:?}"
+        );
+
+        assert!(
+            resolve_node_or_err_for_workspace_seed(&graph, shared, Some("server")).is_err(),
+            "workspace scoping should apply to traversal seeds, even though the walk itself is unscoped"
+        );
+    }
+
     #[test]
     fn resolve_node_finds_file_by_path() {
         let graph = build_test_graph();
