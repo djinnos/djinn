@@ -22,7 +22,7 @@ use error_handling::{
     wind_down_message,
 };
 use streaming::{StreamLoopContext, consume_provider_stream};
-use tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_concurrency_safety};
+use tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_runtime_metadata};
 
 const MAX_TURNS: u32 = 1000;
 
@@ -173,7 +173,7 @@ pub(crate) async fn run_reply_loop(
         max_turns_override,
     } = ctx;
 
-    let tool_metadata = tool_concurrency_safety(tools);
+    let tool_metadata = tool_runtime_metadata(tools);
 
     // Register activity tracker — stall detection uses this to kill idle sessions.
     let activity_ts = app_state.register_activity(task_id);
@@ -423,6 +423,7 @@ pub(crate) async fn run_reply_loop(
                 worktree_path,
                 role_name,
                 mcp_registry,
+                tool_metadata: &tool_metadata,
                 output_stash: Arc::clone(&output_stash),
                 otel_session: otel_session.as_ref(),
             };

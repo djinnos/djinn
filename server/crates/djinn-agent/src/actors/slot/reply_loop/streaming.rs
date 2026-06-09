@@ -14,7 +14,8 @@ use super::error_handling::{
     MAX_COMPACTION_RETRIES, is_context_length_error, is_orphaned_tool_call_error,
 };
 use super::tool_dispatch::{
-    MAX_TOOL_CONCURRENCY, ToolDispatchContext, is_side_query_tool, make_tool_future,
+    MAX_TOOL_CONCURRENCY, ToolDispatchContext, ToolRuntimeMetadataMap, is_side_query_tool,
+    make_tool_future,
 };
 
 pub(super) type StreamingFut<'a> =
@@ -63,7 +64,7 @@ impl StreamTurnState {
 pub(super) struct StreamLoopContext<'a> {
     pub provider: &'a dyn LlmProvider,
     pub stream: Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>,
-    pub tool_metadata: &'a std::collections::HashMap<String, bool>,
+    pub tool_metadata: &'a ToolRuntimeMetadataMap,
     pub dispatch: &'a ToolDispatchContext<'a>,
     pub task_id: &'a str,
     pub session_id: &'a str,

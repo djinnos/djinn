@@ -19,6 +19,10 @@ fn dummy_tool_schema_with_safety(name: &str, concurrent_safe: bool) -> serde_jso
     serde_json::json!({
         "type": "function",
         "function": { "name": name, "description": "test", "parameters": {"type": "object"} },
+        "readOnly": concurrent_safe,
+        "destructive": false,
+        "idempotent": concurrent_safe,
+        "openWorld": false,
         "concurrent_safe": concurrent_safe
     })
 }
