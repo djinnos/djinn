@@ -1487,7 +1487,10 @@ impl CoordinatorActor {
     /// the task has no creator, the user made no selection, or none of the
     /// selected models' providers are connected for them — callers then fall
     /// back to the project preference / global priorities.
-    async fn resolve_user_model_priority(&self, created_by_user_id: Option<&str>) -> Vec<String> {
+    pub(super) async fn resolve_user_model_priority(
+        &self,
+        created_by_user_id: Option<&str>,
+    ) -> Vec<String> {
         #[cfg(test)]
         {
             let _ = created_by_user_id;

@@ -944,9 +944,21 @@ impl CoordinatorActor {
                 }
             }
 
-            // Return whatever resolved (may be empty if no priorities configured
-            // or all configured providers are disconnected). Never fall back to
-            // enumerating random credentials — only dispatch what the user configured.
+            // When the role resolved no model (no per-role priorities — the
+            // common case, since model_priorities is usually empty and workers
+            // get their model from the per-USER selection below — or all
+            // configured providers disconnected), fall back to the creator's
+            // GLOBAL per-user model selection: the SAME `resolve_user_model_priority`
+            // the worker dispatch path uses. This is still "only what the user
+            // configured" (their global model choice), not random credentials.
+            // Without it, escalation/patrol roles (planner, lead) silently get
+            // NO model and the autonomous stuck-task Planner intervention no-ops
+            // ("no model configured for planner role"), so stuck tasks loop on
+            // the same rejected acceptance criterion forever instead of
+            // escalating to a Planner that can decompose/rescope/close them.
+            if selected.is_empty() {
+                return self.resolve_user_model_priority(user_id).await;
+            }
             selected
         }
     }
