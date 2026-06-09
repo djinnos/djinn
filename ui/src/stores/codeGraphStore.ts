@@ -151,6 +151,7 @@ export interface CodeGraphHighlightState {
    * be degenerate.
    */
   complexityAvailable: boolean;
+  selectedWorkspaceSlug: string | null;
 }
 
 export interface CodeGraphHighlightActions {
@@ -173,6 +174,7 @@ export interface CodeGraphHighlightActions {
   setColorMode: (mode: ColorMode) => void;
   /** Iter 30: canvas reports whether complexity data is present in the snapshot. */
   setComplexityAvailable: (available: boolean) => void;
+  setSelectedWorkspaceSlug: (slug: string | null) => void;
   reset: () => void;
 }
 
@@ -205,6 +207,7 @@ const INITIAL_STATE: CodeGraphHighlightState = {
   depthFilter: DEFAULT_DEPTH,
   colorMode: DEFAULT_COLOR_MODE,
   complexityAvailable: false,
+  selectedWorkspaceSlug: null,
 };
 
 export const useCodeGraphStore = create<
@@ -303,9 +306,14 @@ export const useCodeGraphStore = create<
     });
   },
 
+  setSelectedWorkspaceSlug: (slug) => {
+    set({ selectedWorkspaceSlug: slug });
+  },
+
   reset: () => {
-    set({
+    set((state) => ({
       ...INITIAL_STATE,
+      selectedWorkspaceSlug: state.selectedWorkspaceSlug,
       citationIds: new Set(),
       toolHighlightIds: new Set(),
       blastRadiusFrontier: new Set(),
@@ -314,7 +322,7 @@ export const useCodeGraphStore = create<
       symbolKindFilters: defaultSymbolKindFilters(),
       colorMode: DEFAULT_COLOR_MODE,
       complexityAvailable: false,
-    });
+    }));
   },
 }));
 
