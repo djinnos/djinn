@@ -2635,11 +2635,11 @@ expression: signatures
           "type": "string"
         },
         "graph_warm_status": {
-          "description": "Derived status for the UI banner. One of\n`pending | running | ready | failed`. `pending` means no warm has\never run; `running` means the image is ready and a warm should be\nin flight (or imminent); `ready` means `graph_warmed_at` is set;\n`failed` mirrors the image build's failed status (no warm possible).",
+          "description": "Derived status for the UI banner. One of\n`pending | running | ready | failed`. `pending` means no warm has\never run; `running` means the image is ready and a warm should be\nin flight (or imminent); `ready` means derived graph freshness exists;\n`failed` mirrors the image build's failed status (no warm possible).",
           "type": "string"
         },
         "graph_warmed_at": {
-          "description": "ISO-8601 UTC timestamp of the most recent successful canonical-graph\nwarm for this project. `None` means the warmer has not completed a\nrun yet (cold project or failing pipeline). The coordinator will not\ndispatch tasks until this is set.",
+          "description": "ISO-8601 UTC timestamp derived from per-workspace graph freshness\nor the merged repo graph cache. `None` means no freshness source has\ncompleted yet (cold project or failing pipeline). Dispatch no longer\nblocks on this value; it is badge metadata retained under a\ncompatibility field name.",
           "nullable": true,
           "type": "string"
         },

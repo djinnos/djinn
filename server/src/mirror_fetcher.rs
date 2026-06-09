@@ -247,7 +247,7 @@ pub(crate) async fn fetch_one(
             tracing::warn!(
                 project_id,
                 error = %err,
-                "mirror_fetcher: failed to stamp graph_warmed_at for code-less project"
+                "mirror_fetcher: failed to record graph freshness for code-less project"
             );
         }
     }
