@@ -6,12 +6,15 @@ use std::{
 
 use futures::Stream;
 use rmcp::{
-    ServerHandler,
+    ErrorData as McpError, ServerHandler,
     handler::server::router::tool::ToolRouter,
     model::{
-        ClientJsonRpcMessage, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
-        ServerJsonRpcMessage,
+        Annotated, ClientJsonRpcMessage, Implementation, ListResourceTemplatesResult,
+        ListResourcesResult, PaginatedRequestParams, ProtocolVersion, RawResourceTemplate,
+        ReadResourceRequestParams, ReadResourceResult, ResourceContents, ServerCapabilities,
+        ServerInfo, ServerJsonRpcMessage,
     },
+    service::{RequestContext, RoleServer},
     tool_handler,
     transport::{
         WorkerTransport,
@@ -36,6 +39,8 @@ use crate::tools::memory_tools::contradiction::{
 use crate::tools::memory_tools::summaries::spawn_summary_backfill_worker;
 
 const HIGH_CONFIDENCE_THRESHOLD: f64 = 0.8;
+const GRAPH_SCHEMA_RESOURCE_TEMPLATE_URI: &str = "djinn://project/{id}/graph-schema";
+const GRAPH_SCHEMA_RESOURCE_MIME_TYPE: &str = "application/json";
 
 #[derive(Clone, Default)]
 pub(crate) struct CoAccessBatch {
@@ -142,6 +147,34 @@ impl DjinnMcpServer {
             .collect()
     }
 
+    pub(crate) fn all_resource_templates(&self) -> ListResourceTemplatesResult {
+        ListResourceTemplatesResult::with_all_items(vec![graph_schema_resource_template()])
+    }
+
+    pub(crate) fn read_resource_uri(&self, uri: String) -> Result<ReadResourceResult, McpError> {
+        let result = if let Some(project_id) = parse_graph_schema_project_id(&uri) {
+            let text = serde_json::to_string_pretty(&graph_schema_payload(project_id))
+                .expect("graph schema payload must serialize");
+            Some(ReadResourceResult {
+                contents: vec![ResourceContents::TextResourceContents {
+                    uri,
+                    mime_type: Some(GRAPH_SCHEMA_RESOURCE_MIME_TYPE.to_string()),
+                    text,
+                    meta: None,
+                }],
+            })
+        } else {
+            None
+        };
+
+        result.ok_or_else(|| {
+            McpError::resource_not_found(
+                "unknown resource; expected djinn://project/{id}/graph-schema",
+                None,
+            )
+        })
+    }
+
     pub fn new(state: McpState) -> Self {
         Self::new_with_batch(state, Arc::new(RwLock::new(CoAccessBatch::default())))
     }
@@ -242,6 +275,108 @@ fn annotate_server_tool_schema_safety(value: &mut serde_json::Value) {
         obj.entry("concurrent_safe")
             .or_insert(serde_json::Value::Bool(false));
     }
+}
+
+fn graph_schema_resource_template() -> Annotated<RawResourceTemplate> {
+    Annotated::new(
+        RawResourceTemplate {
+            uri_template: GRAPH_SCHEMA_RESOURCE_TEMPLATE_URI.to_string(),
+            name: "project_graph_schema".to_string(),
+            title: Some("Project code graph schema".to_string()),
+            description: Some(
+                "Stable read-only schema/context for the code_graph MCP tool. Hosts can preload \
+                 this resource instead of adding another tool for graph discovery."
+                    .to_string(),
+            ),
+            mime_type: Some(GRAPH_SCHEMA_RESOURCE_MIME_TYPE.to_string()),
+            icons: None,
+        },
+        None,
+    )
+}
+
+fn parse_graph_schema_project_id(uri: &str) -> Option<&str> {
+    const PREFIX: &str = "djinn://project/";
+    const SUFFIX: &str = "/graph-schema";
+    let id = uri.strip_prefix(PREFIX)?.strip_suffix(SUFFIX)?;
+    (!id.is_empty() && !id.contains('/')).then_some(id)
+}
+
+fn graph_schema_payload(project_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "resource": {
+            "uri_template": GRAPH_SCHEMA_RESOURCE_TEMPLATE_URI,
+            "project_id_or_slug": project_id,
+            "read_only": true,
+            "mime_type": GRAPH_SCHEMA_RESOURCE_MIME_TYPE
+        },
+        "tool": {
+            "name": "code_graph",
+            "relationship": "This resource describes the stable graph concepts and operation surface for the existing code_graph tool; it does not add a new MCP tool."
+        },
+        "operations": [
+            { "name": "status", "requires": [], "common_fields": ["project", "workspace"], "purpose": "Inspect graph availability, freshness, and warm status before deeper graph reads." },
+            { "name": "search", "requires": ["query"], "common_fields": ["limit", "tests", "workspace"], "purpose": "Find symbol/file nodes by query before resolving a precise node." },
+            { "name": "describe", "requires": ["key"], "common_fields": ["workspace"], "purpose": "Return identity, metadata, and summary details for one resolved graph node." },
+            { "name": "neighbors", "requires": ["key"], "common_fields": ["direction", "limit", "tests", "workspace"], "purpose": "Traverse direct incoming/outgoing edges around a symbol or file." },
+            { "name": "context", "requires": ["key"], "common_fields": ["limit", "tests", "workspace"], "purpose": "Return a 360-degree symbol view with callers, callees, implementations, and related nodes." },
+            { "name": "impact", "requires": ["key"], "common_fields": ["depth", "limit", "tests", "workspace"], "purpose": "Estimate blast radius and risk from dependents reachable through graph edges." },
+            { "name": "path", "requires": ["from", "to"], "common_fields": ["max_depth", "workspace"], "purpose": "Find a dependency path between two nodes." },
+            { "name": "edges", "requires": ["from_glob", "to_glob"], "common_fields": ["limit", "workspace"], "purpose": "List cross-boundary graph edges matching source and target globs." },
+            { "name": "ranked", "requires": [], "common_fields": ["limit", "tests", "workspace"], "purpose": "List high-importance nodes by graph ranking." },
+            { "name": "implementations", "requires": ["key"], "common_fields": ["limit", "workspace"], "purpose": "Find implementation nodes for an interface/trait-like symbol." },
+            { "name": "query_subgraph", "requires": ["query"], "common_fields": ["budget", "limit", "workspace"], "purpose": "Budgeted natural-language graph/subgraph query for focused exploration." },
+            { "name": "cycles", "requires": [], "common_fields": ["limit", "workspace"], "purpose": "Detect cyclic dependencies." },
+            { "name": "orphans", "requires": [], "common_fields": ["limit", "workspace"], "purpose": "Find isolated or weakly connected nodes." },
+            { "name": "symbols_at", "requires": ["file"], "common_fields": ["line", "workspace"], "purpose": "Resolve symbols at a source location." },
+            { "name": "diff_touches", "requires": [], "common_fields": ["base", "head", "workspace"], "purpose": "Map changed files/regions to graph nodes." },
+            { "name": "detect_changes", "requires": [], "common_fields": ["base", "head", "workspace"], "purpose": "Summarize graph-relevant changes between revisions." },
+            { "name": "api_surface", "requires": [], "common_fields": ["path", "limit", "workspace"], "purpose": "Inspect exposed/public surface nodes." },
+            { "name": "boundary_check", "requires": ["from_glob", "to_glob"], "common_fields": ["workspace"], "purpose": "Check whether dependencies cross an intended architecture boundary." },
+            { "name": "hotspots", "requires": [], "common_fields": ["limit", "workspace"], "purpose": "Identify high-risk/high-activity graph areas." },
+            { "name": "complexity", "requires": [], "common_fields": ["limit", "workspace"], "purpose": "Rank nodes/files by complexity metrics." },
+            { "name": "refactor_candidates", "requires": [], "common_fields": ["limit", "workspace"], "purpose": "Find nodes combining complexity, churn, coupling, or centrality signals." },
+            { "name": "metrics_at", "requires": ["key"], "common_fields": ["workspace"], "purpose": "Return graph/complexity/churn metrics for one node." },
+            { "name": "dead_symbols", "requires": [], "common_fields": ["limit", "workspace"], "purpose": "Find symbols without observed inbound usage." },
+            { "name": "deprecated_callers", "requires": [], "common_fields": ["limit", "workspace"], "purpose": "Find callers of deprecated symbols." },
+            { "name": "touches_hot_path", "requires": [], "common_fields": ["base", "head", "workspace"], "purpose": "Determine whether a diff touches hot-path nodes." },
+            { "name": "coupling", "requires": [], "common_fields": ["limit", "workspace"], "purpose": "Measure coupling between modules/areas." },
+            { "name": "churn", "requires": [], "common_fields": ["limit", "workspace"], "purpose": "Rank graph nodes by change frequency." },
+            { "name": "coupling_hotspots", "requires": [], "common_fields": ["limit", "workspace"], "purpose": "Find high-coupling, high-risk nodes or modules." },
+            { "name": "coupling_hubs", "requires": [], "common_fields": ["limit", "workspace"], "purpose": "Find highly connected dependency hubs." },
+            { "name": "snapshot", "requires": [], "common_fields": ["limit", "workspace"], "purpose": "Return a capped graph snapshot for preloading or visualization." }
+        ],
+        "node_concepts": [
+            { "name": "symbol", "description": "Function, method, type, trait/interface, module, or similar code entity addressable by a stable graph key/uid." },
+            { "name": "file", "description": "Repository file node that contains or groups symbols." },
+            { "name": "workspace", "description": "Optional workspace slug for monorepos; requests can scope reads with the workspace field." },
+            { "name": "test node", "description": "Node classified as test code; many operations accept tests filters to include/exclude it." }
+        ],
+        "edge_concepts": [
+            { "name": "contains", "description": "File/module containment relationships for symbols." },
+            { "name": "calls", "description": "Caller-to-callee executable dependency." },
+            { "name": "imports", "description": "Module/file import or dependency relationship." },
+            { "name": "implements", "description": "Implementation relationship between concrete symbols and interfaces/traits." },
+            { "name": "references", "description": "General symbol/file reference edge used for navigation and impact analysis." }
+        ],
+        "common_request_fields": {
+            "project": "Project id, short id, or slug used by code_graph tool calls; this resource embeds the id/slug from its URI.",
+            "workspace": "Optional monorepo workspace slug.",
+            "key": "Resolved node key or uid from search/describe/context.",
+            "query": "Text query for search or query_subgraph.",
+            "direction": "incoming, outgoing, or both for edge traversals.",
+            "limit": "Maximum result count/budget cap for list-like operations.",
+            "tests": "Test-code filter where supported."
+        },
+        "recommended_flow": [
+            "Read this graph-schema resource once per project to prime client context.",
+            "Call code_graph status before relying on warmed graph answers.",
+            "Use search to find candidate nodes, then describe or context to inspect one node.",
+            "Use neighbors/path/impact for traversal and blast-radius analysis.",
+            "Use query_subgraph with a budget for focused natural-language graph exploration."
+        ]
+    })
 }
 
 #[derive(Default)]
@@ -372,7 +507,10 @@ impl ServerHandler for DjinnMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: ProtocolVersion::LATEST,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
             server_info: Implementation {
                 name: "djinn-server".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
@@ -380,5 +518,29 @@ impl ServerHandler for DjinnMcpServer {
             },
             instructions: None,
         }
+    }
+
+    fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ListResourcesResult, McpError>> + Send + '_ {
+        std::future::ready(Ok(ListResourcesResult::default()))
+    }
+
+    fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ListResourceTemplatesResult, McpError>> + Send + '_ {
+        std::future::ready(Ok(self.all_resource_templates()))
+    }
+
+    fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ReadResourceResult, McpError>> + Send + '_ {
+        std::future::ready(self.read_resource_uri(request.uri))
     }
 }
