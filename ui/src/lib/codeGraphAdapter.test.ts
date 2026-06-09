@@ -5,6 +5,7 @@ import {
   colorForCommunity,
   colorForNode,
   edgeStyleFor,
+  filterSnapshotForWorkspace,
   massForNode,
   parseSnapshotResponse,
   prettifyLabel,
@@ -253,6 +254,122 @@ describe("prettifyLabel", () => {
   });
 });
 
+describe("filterSnapshotForWorkspace", () => {
+  const workspaceSnapshot: SnapshotPayload = {
+    ...fixtureSnapshot,
+    total_nodes: 6,
+    total_edges: 5,
+    nodes: [
+      {
+        id: "api:file",
+        kind: "file",
+        label: "api.ts",
+        pagerank: 0.5,
+        workspace: "api",
+      },
+      {
+        id: "api:fn",
+        kind: "symbol",
+        label: "apiFn",
+        symbol_kind: "function",
+        pagerank: 0.4,
+        workspace: "api",
+      },
+      {
+        id: "web:file",
+        kind: "file",
+        label: "web.ts",
+        pagerank: 0.3,
+        workspace: "web",
+      },
+      {
+        id: "web:fn",
+        kind: "symbol",
+        label: "webFn",
+        symbol_kind: "function",
+        pagerank: 0.2,
+        workspace: "web",
+      },
+      {
+        id: "worker:file",
+        kind: "file",
+        label: "worker.ts",
+        pagerank: 0.1,
+        workspace: "worker",
+      },
+      {
+        id: "worker:fn",
+        kind: "symbol",
+        label: "workerFn",
+        symbol_kind: "function",
+        pagerank: 0.1,
+        workspace: "worker",
+      },
+    ],
+    edges: [
+      {
+        from: "api:file",
+        to: "api:fn",
+        kind: "ContainsDefinition",
+        confidence: 1,
+      },
+      {
+        from: "api:fn",
+        to: "web:fn",
+        kind: "SymbolReference",
+        confidence: 0.8,
+      },
+      {
+        from: "web:file",
+        to: "web:fn",
+        kind: "ContainsDefinition",
+        confidence: 1,
+      },
+      {
+        from: "worker:file",
+        to: "worker:fn",
+        kind: "ContainsDefinition",
+        confidence: 1,
+      },
+      {
+        from: "web:fn",
+        to: "worker:fn",
+        kind: "SymbolReference",
+        confidence: 0.7,
+      },
+    ],
+  };
+
+  it("returns the original full snapshot for All", () => {
+    expect(filterSnapshotForWorkspace(workspaceSnapshot, null)).toBe(
+      workspaceSnapshot,
+    );
+    expect(filterSnapshotForWorkspace(workspaceSnapshot, "")).toBe(workspaceSnapshot);
+  });
+
+  it("keeps selected nodes plus remote endpoints for cross-workspace edges", () => {
+    const filtered = filterSnapshotForWorkspace(workspaceSnapshot, "api");
+    expect(filtered.nodes.map((node) => node.id)).toEqual([
+      "api:file",
+      "api:fn",
+      "web:fn",
+    ]);
+    expect(filtered.edges.map((edge) => [edge.from, edge.to])).toEqual([
+      ["api:file", "api:fn"],
+      ["api:fn", "web:fn"],
+    ]);
+    expect(
+      filtered.nodes.find((node) => node.id === "api:fn")?.workspace_context,
+    ).toBeUndefined();
+    expect(
+      filtered.nodes.find((node) => node.id === "web:fn")?.workspace_context,
+    ).toBe(true);
+    expect(filtered.nodes.some((node) => node.id.startsWith("worker:"))).toBe(
+      false,
+    );
+  });
+});
+
 describe("buildGraphFromSnapshot", () => {
   it("emits one graphology node per snapshot node and one edge per snapshot edge", () => {
     const graph = buildGraphFromSnapshot(fixtureSnapshot);
@@ -284,6 +401,24 @@ describe("buildGraphFromSnapshot", () => {
     expect(graph.getNodeAttribute("file:src/main.rs", "workspace")).toBe(
       "app",
     );
+  });
+
+  it("carries workspace context markers onto graphology node attributes", () => {
+    const withWorkspaceContext: SnapshotPayload = {
+      ...fixtureSnapshot,
+      nodes: fixtureSnapshot.nodes.map((n) =>
+        n.id === "symbol:scip-rust . . . User#"
+          ? { ...n, workspace_context: true }
+          : n,
+      ),
+    };
+    const graph = buildGraphFromSnapshot(withWorkspaceContext);
+    expect(
+      graph.getNodeAttribute("symbol:scip-rust . . . User#", "isWorkspaceContext"),
+    ).toBe(true);
+    expect(
+      graph.getNodeAttribute("file:src/main.rs", "isWorkspaceContext"),
+    ).toBe(false);
   });
 
   it("attaches endpoint workspace metadata to edges", () => {
