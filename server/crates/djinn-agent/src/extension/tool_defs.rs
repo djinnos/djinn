@@ -386,7 +386,7 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
          around a known key; impact = bounded transitive dependents for what-breaks-if-this-changes; \
          context = compact bucketed incoming/outgoing context for a symbol; ranked/cycles/orphans/path/edges \
          = broader structural queries; symbols_at/diff_touches/detect_changes = line range to touched \
-         symbols; status/metrics_at/snapshot = graph health/introspection; api_surface/dead_symbols/deprecated_callers \
+         symbols; status/metrics_at/snapshot/workspaces = graph health/introspection; api_surface/dead_symbols/deprecated_callers \
          = public surface health; boundary_check/blast_radius/touches_hot_path = \
          change-impact analysis; hotspots/cochange/churn/coupling_hubs = git-coupling × PageRank \
          centrality; complexity/refactor_candidates = budget-conscious discovery of risky/refactorable \
@@ -409,7 +409,7 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
                         "blast_radius", "hotspots", "complexity", "refactor_candidates", "cochange",
                         "churn", "coupling_hubs", "metrics_at", "dead_symbols",
                         "deprecated_callers", "touches_hot_path", "status",
-                        "snapshot", "capabilities"
+                        "snapshot", "workspaces", "capabilities"
                     ],
                     "description": "Graph query to perform. Start with capabilities for cheap supported-op discovery, search when you need a key, describe/context for one key, neighbors for direct edges, and impact for bounded transitive dependents."
                 },
