@@ -364,6 +364,8 @@ pub struct NeighborsResponse {
 pub struct RankedResponse {
     pub nodes: Vec<RankedNode>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_hint: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
 }
 
@@ -437,6 +439,8 @@ pub struct ImpactResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_hint: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
 }
 
@@ -459,12 +463,16 @@ pub struct CyclesResponse {
 pub struct OrphansResponse {
     pub orphans: Vec<OrphanEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_hint: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct PathResponse {
     pub path: Option<PathResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_hint: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
 }
@@ -541,6 +549,8 @@ pub struct DetectedChangesResponse {
 pub struct ApiSurfaceResponse {
     pub symbols: Vec<ApiSurfaceEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_hint: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
 }
 
@@ -612,6 +622,8 @@ pub struct DeprecatedCallersResponse {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct TouchesHotPathResponse {
     pub hits: Vec<HotPathHit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_hint: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
 }
@@ -691,6 +703,8 @@ pub struct NotFoundDetail {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SnapshotResponse {
     pub snapshot: SnapshotPayload,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_hint: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
 }
@@ -1609,12 +1623,22 @@ impl DjinnMcpServer {
         // second round-trip. Clamp to 200 to keep the cache lookup
         // cheap and the post-filter linear.
         let fetch_limit = (limit.saturating_mul(4)).clamp(limit, 200);
+        let workspace_hint = self
+            .state
+            .repo_graph()
+            .workspace_hint(ctx, ctx.workspace.as_deref())
+            .await?;
+        let workspace = if workspace_hint.is_some() {
+            None
+        } else {
+            ctx.workspace.as_deref()
+        };
         let nodes = self
             .state
             .repo_graph()
             .ranked(
                 ctx,
-                ctx.workspace.as_deref(),
+                workspace,
                 params.kind_filter.as_deref(),
                 params.sort_by.as_deref(),
                 fetch_limit,
@@ -1630,6 +1654,7 @@ impl DjinnMcpServer {
         nodes.truncate(limit);
         Ok(CodeGraphResponse::Ranked(RankedResponse {
             nodes,
+            workspace_hint,
             next_step: None,
         }))
     }
@@ -1666,12 +1691,22 @@ impl DjinnMcpServer {
         {
             return Err(format!("invalid min_confidence {c}: must be in [0.0, 1.0]"));
         }
+        let workspace_hint = self
+            .state
+            .repo_graph()
+            .workspace_hint(ctx, ctx.workspace.as_deref())
+            .await?;
+        let workspace = if workspace_hint.is_some() {
+            None
+        } else {
+            ctx.workspace.as_deref()
+        };
         let result = self
             .state
             .repo_graph()
             .impact(
                 ctx,
-                ctx.workspace.as_deref(),
+                workspace,
                 key,
                 depth,
                 params.group_by.as_deref(),
@@ -1707,6 +1742,7 @@ impl DjinnMcpServer {
             file_groups,
             risk: Some(risk),
             summary: Some(summary),
+            workspace_hint,
             next_step: None,
         }))
     }
@@ -1873,12 +1909,22 @@ impl DjinnMcpServer {
         validate_visibility(params.visibility.as_deref())?;
         let limit = params.limit.unwrap_or(50) as usize;
         let fetch_limit = (limit.saturating_mul(4)).clamp(limit, 500);
+        let workspace_hint = self
+            .state
+            .repo_graph()
+            .workspace_hint(ctx, ctx.workspace.as_deref())
+            .await?;
+        let workspace = if workspace_hint.is_some() {
+            None
+        } else {
+            ctx.workspace.as_deref()
+        };
         let orphans = self
             .state
             .repo_graph()
             .orphans(
                 ctx,
-                ctx.workspace.as_deref(),
+                workspace,
                 params.kind_filter.as_deref(),
                 params.visibility.as_deref(),
                 fetch_limit,
@@ -1892,6 +1938,7 @@ impl DjinnMcpServer {
             .collect();
         Ok(CodeGraphResponse::Orphans(OrphansResponse {
             orphans,
+            workspace_hint,
             next_step: None,
         }))
     }
@@ -1903,13 +1950,24 @@ impl DjinnMcpServer {
     ) -> Result<CodeGraphResponse, String> {
         let (from, to) = require_from_to(params)?;
         let max_depth = params.max_depth.map(|v| v.max(0) as usize);
+        let workspace_hint = self
+            .state
+            .repo_graph()
+            .workspace_hint(ctx, ctx.workspace.as_deref())
+            .await?;
+        let workspace = if workspace_hint.is_some() {
+            None
+        } else {
+            ctx.workspace.as_deref()
+        };
         let path = self
             .state
             .repo_graph()
-            .path(ctx, ctx.workspace.as_deref(), from, to, max_depth)
+            .path(ctx, workspace, from, to, max_depth)
             .await?;
         Ok(CodeGraphResponse::Path(PathResponse {
             path,
+            workspace_hint,
             next_step: None,
         }))
     }
@@ -2166,12 +2224,22 @@ impl DjinnMcpServer {
     ) -> Result<CodeGraphResponse, String> {
         validate_visibility(params.visibility.as_deref())?;
         let limit = params.limit.unwrap_or(100).max(0) as usize;
+        let workspace_hint = self
+            .state
+            .repo_graph()
+            .workspace_hint(ctx, ctx.workspace.as_deref())
+            .await?;
+        let workspace = if workspace_hint.is_some() {
+            None
+        } else {
+            ctx.workspace.as_deref()
+        };
         let symbols = self
             .state
             .repo_graph()
             .api_surface(
                 ctx,
-                ctx.workspace.as_deref(),
+                workspace,
                 params.module_glob.as_deref(),
                 params.visibility.as_deref(),
                 limit.saturating_mul(4).clamp(limit, 500),
@@ -2187,6 +2255,7 @@ impl DjinnMcpServer {
             .collect();
         Ok(CodeGraphResponse::ApiSurface(ApiSurfaceResponse {
             symbols,
+            workspace_hint,
             next_step: None,
         }))
     }
@@ -2490,19 +2559,24 @@ impl DjinnMcpServer {
             .symbols
             .as_deref()
             .ok_or_else(|| format!("'symbols' is required for operation '{}'", params.operation))?;
+        let workspace_hint = self
+            .state
+            .repo_graph()
+            .workspace_hint(ctx, ctx.workspace.as_deref())
+            .await?;
+        let workspace = if workspace_hint.is_some() {
+            None
+        } else {
+            ctx.workspace.as_deref()
+        };
         let hits = self
             .state
             .repo_graph()
-            .touches_hot_path(
-                ctx,
-                ctx.workspace.as_deref(),
-                seed_entries,
-                seed_sinks,
-                symbols,
-            )
+            .touches_hot_path(ctx, workspace, seed_entries, seed_sinks, symbols)
             .await?;
         Ok(CodeGraphResponse::TouchesHotPath(TouchesHotPathResponse {
             hits,
+            workspace_hint,
             next_step: None,
         }))
     }
@@ -2534,10 +2608,20 @@ impl DjinnMcpServer {
             .unwrap_or(2_000)
             .clamp(1, 10_000);
         let exclusions = self.load_graph_exclusions(&params.project_id).await;
+        let workspace_hint = self
+            .state
+            .repo_graph()
+            .workspace_hint(ctx, ctx.workspace.as_deref())
+            .await?;
+        let workspace = if workspace_hint.is_some() {
+            None
+        } else {
+            ctx.workspace.as_deref()
+        };
         let mut snapshot = self
             .state
             .repo_graph()
-            .snapshot(ctx, ctx.workspace.as_deref(), node_cap, &exclusions)
+            .snapshot(ctx, workspace, node_cap, &exclusions)
             .await?;
         // v10: apply the `tests=` filter to the assembled snapshot. The
         // UI defaults to `include` (it toggles test visibility
@@ -2556,6 +2640,7 @@ impl DjinnMcpServer {
         }
         Ok(CodeGraphResponse::Snapshot(SnapshotResponse {
             snapshot,
+            workspace_hint,
             next_step: None,
         }))
     }
@@ -3876,6 +3961,7 @@ mod tests {
     fn empty_ranked() -> CodeGraphResponse {
         CodeGraphResponse::Ranked(RankedResponse {
             nodes: vec![],
+            workspace_hint: None,
             next_step: None,
         })
     }
@@ -3894,6 +3980,7 @@ mod tests {
             file_groups: None,
             risk: Some(ImpactRisk::Low),
             summary: Some("no direct callers in current graph snapshot".to_string()),
+            workspace_hint: None,
             next_step: None,
         })
     }
@@ -3921,6 +4008,7 @@ mod tests {
             file_groups: None,
             risk: Some(risk),
             summary: Some(summary),
+            workspace_hint: None,
             next_step: None,
         })
     }
@@ -3960,6 +4048,7 @@ mod tests {
     fn empty_orphans() -> CodeGraphResponse {
         CodeGraphResponse::Orphans(OrphansResponse {
             orphans: vec![],
+            workspace_hint: None,
             next_step: None,
         })
     }
@@ -4499,6 +4588,7 @@ mod tests {
                 nodes: vec![],
                 edges: vec![],
             },
+            workspace_hint: None,
             next_step: None,
         }
     }

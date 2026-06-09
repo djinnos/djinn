@@ -677,6 +677,46 @@ fn active_workspace_prefix(
         .then_some(slug)
 }
 
+fn available_workspace_slugs(graph: &djinn_graph::repo_graph::RepoDependencyGraph) -> Vec<String> {
+    let mut slugs = std::collections::BTreeSet::new();
+    for idx in graph.graph().node_indices() {
+        let node = graph.node(idx);
+        if let Some(slug) = node
+            .workspace
+            .as_deref()
+            .and_then(|s| normalize_workspace_slug(Some(s)))
+        {
+            slugs.insert(slug);
+            continue;
+        }
+        if let Some(path) = repo_graph_node_file_path(node) {
+            let path = path.trim().trim_matches('/').replace('\\', "/");
+            if let Some((first, _rest)) = path.split_once('/')
+                && !first.is_empty()
+            {
+                slugs.insert(first.to_string());
+            }
+        }
+    }
+    slugs.into_iter().collect()
+}
+
+fn workspace_hint_from_graph(
+    graph: &djinn_graph::repo_graph::RepoDependencyGraph,
+    workspace: Option<&str>,
+) -> Option<Vec<String>> {
+    let requested = normalize_workspace_slug(workspace)?;
+    if graph
+        .graph()
+        .node_indices()
+        .any(|idx| repo_graph_node_matches_workspace(graph.node(idx), &requested))
+    {
+        return None;
+    }
+    let slugs = available_workspace_slugs(graph);
+    (slugs.len() > 1).then_some(slugs)
+}
+
 fn resolve_node_or_err_for_workspace_seed(
     graph: &djinn_graph::repo_graph::RepoDependencyGraph,
     key: &str,
@@ -707,6 +747,20 @@ fn resolve_node_or_err_for_workspace_seed(
 
 #[async_trait]
 impl RepoGraphOps for RepoGraphBridge {
+    async fn workspace_hint(
+        &self,
+        ctx: &ProjectCtx,
+        workspace: Option<&str>,
+    ) -> Result<Option<Vec<String>>, String> {
+        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
+            &self.state,
+            &ctx.id,
+            &ctx.clone_path,
+        )
+        .await?;
+        Ok(workspace_hint_from_graph(&graph, workspace))
+    }
+
     async fn neighbors(
         &self,
         ctx: &ProjectCtx,
