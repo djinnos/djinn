@@ -19,8 +19,16 @@ fn mutation() -> ToolSafetyAnnotations {
     ToolSafetyAnnotations::mutation()
 }
 
+fn idempotent_mutation() -> ToolSafetyAnnotations {
+    ToolSafetyAnnotations::idempotent_mutation()
+}
+
 fn destructive() -> ToolSafetyAnnotations {
     ToolSafetyAnnotations::destructive()
+}
+
+fn idempotent_destructive() -> ToolSafetyAnnotations {
+    ToolSafetyAnnotations::idempotent_destructive()
 }
 
 pub(super) fn tool_request_lead() -> RmcpTool {
@@ -760,7 +768,7 @@ pub(crate) fn tool_schemas_reviewer() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
     tool_values.push(serialize_tool(
         shared_schemas::tool_memory_build_context(),
-        mutation(),
+        read_only(),
     ));
     tool_values.push(serialize_tool(
         crate::roles::finalize::tool_submit_review(),
@@ -783,10 +791,10 @@ fn tool_schemas_lead_inner() -> Vec<serde_json::Value> {
         tool_values.push(value);
     }
     for value in [
-        serialize_tool(tool_task_delete_branch(), mutation()),
-        serialize_tool(tool_task_archive_activity(), mutation()),
-        serialize_tool(tool_task_reset_counters(), mutation()),
-        serialize_tool(tool_task_kill_session(), mutation()),
+        serialize_tool(tool_task_delete_branch(), destructive()),
+        serialize_tool(tool_task_archive_activity(), destructive()),
+        serialize_tool(tool_task_reset_counters(), idempotent_destructive()),
+        serialize_tool(tool_task_kill_session(), destructive()),
         serialize_tool(tool_request_planner(), mutation()),
         serialize_tool(crate::roles::finalize::tool_submit_decision(), mutation()),
     ] {
@@ -826,11 +834,11 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
     // mark the building proposal done once every criterion is satisfied.
     tool_values.push(serialize_tool(
         shared_schemas::tool_proposal_ac_set(),
-        read_only(),
+        idempotent_mutation(),
     ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_proposal_complete(),
-        read_only(),
+        idempotent_destructive(),
     ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_epic_blockers_list(),
@@ -894,14 +902,14 @@ pub(crate) fn tool_schemas_planner() -> Vec<serde_json::Value> {
     ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_role_create(),
-        mutation(),
+        destructive(),
     ));
     for value in [
-        serialize_tool(tool_task_delete_branch(), mutation()),
-        serialize_tool(tool_task_archive_activity(), mutation()),
-        serialize_tool(tool_task_reset_counters(), mutation()),
-        serialize_tool(tool_task_kill_session(), mutation()),
-        serialize_tool(tool_role_amend_prompt(), mutation()),
+        serialize_tool(tool_task_delete_branch(), destructive()),
+        serialize_tool(tool_task_archive_activity(), destructive()),
+        serialize_tool(tool_task_reset_counters(), idempotent_destructive()),
+        serialize_tool(tool_task_kill_session(), destructive()),
+        serialize_tool(tool_role_amend_prompt(), destructive()),
         serialize_tool(crate::roles::finalize::tool_submit_grooming(), mutation()),
     ] {
         tool_values.push(value);
@@ -975,7 +983,7 @@ pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
     ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_role_create(),
-        mutation(),
+        destructive(),
     ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_memory_write(),
@@ -990,10 +998,10 @@ pub(crate) fn tool_schemas_architect() -> Vec<serde_json::Value> {
         mutation(),
     ));
     for value in [
-        serialize_tool(tool_task_delete_branch(), mutation()),
-        serialize_tool(tool_task_archive_activity(), mutation()),
-        serialize_tool(tool_task_reset_counters(), mutation()),
-        serialize_tool(tool_task_kill_session(), mutation()),
+        serialize_tool(tool_task_delete_branch(), destructive()),
+        serialize_tool(tool_task_archive_activity(), destructive()),
+        serialize_tool(tool_task_reset_counters(), idempotent_destructive()),
+        serialize_tool(tool_task_kill_session(), destructive()),
         // Per ADR-051 §1, `role_amend_prompt` has moved to the Planner —
         // agent-effectiveness amendment is a patrol action, not a consultant
         // action. Architect keeps `role_metrics` (read) and `role_create`

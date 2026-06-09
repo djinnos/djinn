@@ -498,11 +498,11 @@ expression: tool_schemas_reviewer()
         }
       }
     },
-    "readOnly": false,
+    "readOnly": true,
     "destructive": false,
-    "idempotent": false,
+    "idempotent": true,
     "openWorld": false,
-    "concurrent_safe": false
+    "concurrent_safe": true
   },
   {
     "name": "submit_review",

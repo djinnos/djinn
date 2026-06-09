@@ -667,7 +667,7 @@ expression: tool_schemas_planner()
     },
     "readOnly": false,
     "destructive": false,
-    "idempotent": false,
+    "idempotent": true,
     "openWorld": false,
     "concurrent_safe": false
   },
@@ -765,7 +765,7 @@ expression: tool_schemas_planner()
     },
     "readOnly": false,
     "destructive": false,
-    "idempotent": false,
+    "idempotent": true,
     "openWorld": false,
     "concurrent_safe": false
   },
@@ -813,7 +813,7 @@ expression: tool_schemas_planner()
     },
     "readOnly": false,
     "destructive": false,
-    "idempotent": false,
+    "idempotent": true,
     "openWorld": false,
     "concurrent_safe": false
   },
@@ -927,11 +927,11 @@ expression: tool_schemas_planner()
         }
       }
     },
-    "readOnly": true,
+    "readOnly": false,
     "destructive": false,
     "idempotent": true,
     "openWorld": false,
-    "concurrent_safe": true
+    "concurrent_safe": false
   },
   {
     "name": "proposal_complete",
@@ -952,11 +952,11 @@ expression: tool_schemas_planner()
         }
       }
     },
-    "readOnly": true,
-    "destructive": false,
+    "readOnly": false,
+    "destructive": true,
     "idempotent": true,
     "openWorld": false,
-    "concurrent_safe": true
+    "concurrent_safe": false
   },
   {
     "name": "epic_blockers_list",
@@ -1294,7 +1294,7 @@ expression: tool_schemas_planner()
       }
     },
     "readOnly": false,
-    "destructive": false,
+    "destructive": true,
     "idempotent": false,
     "openWorld": false,
     "concurrent_safe": false
@@ -1315,7 +1315,7 @@ expression: tool_schemas_planner()
       }
     },
     "readOnly": false,
-    "destructive": false,
+    "destructive": true,
     "idempotent": false,
     "openWorld": false,
     "concurrent_safe": false
@@ -1336,7 +1336,7 @@ expression: tool_schemas_planner()
       }
     },
     "readOnly": false,
-    "destructive": false,
+    "destructive": true,
     "idempotent": false,
     "openWorld": false,
     "concurrent_safe": false
@@ -1357,8 +1357,8 @@ expression: tool_schemas_planner()
       }
     },
     "readOnly": false,
-    "destructive": false,
-    "idempotent": false,
+    "destructive": true,
+    "idempotent": true,
     "openWorld": false,
     "concurrent_safe": false
   },
@@ -1378,7 +1378,7 @@ expression: tool_schemas_planner()
       }
     },
     "readOnly": false,
-    "destructive": false,
+    "destructive": true,
     "idempotent": false,
     "openWorld": false,
     "concurrent_safe": false
@@ -1412,7 +1412,7 @@ expression: tool_schemas_planner()
       }
     },
     "readOnly": false,
-    "destructive": false,
+    "destructive": true,
     "idempotent": false,
     "openWorld": false,
     "concurrent_safe": false

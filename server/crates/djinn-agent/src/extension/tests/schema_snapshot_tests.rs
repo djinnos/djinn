@@ -210,6 +210,157 @@ fn tool_schemas_include_typed_safety_annotations() {
     assert_eq!(write["concurrent_safe"], false);
 }
 
+fn safety_tuple(schema: &serde_json::Value) -> (bool, bool, bool, bool) {
+    let name = schema
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or("<unnamed>");
+    let field = |field_name: &str| {
+        schema
+            .get(field_name)
+            .and_then(|value| value.as_bool())
+            .unwrap_or_else(|| panic!("{name} missing boolean {field_name} safety annotation"))
+    };
+
+    (
+        field("readOnly"),
+        field("destructive"),
+        field("idempotent"),
+        field("openWorld"),
+    )
+}
+
+fn expected_safety_tuple(name: &str) -> Option<(bool, bool, bool, bool)> {
+    let read_only = (true, false, true, false);
+    let open_world_read_only = (true, false, true, true);
+    let mutation = (false, false, false, false);
+    let idempotent_mutation = (false, false, true, false);
+    let destructive = (false, true, false, false);
+    let idempotent_destructive = (false, true, true, false);
+
+    match name {
+        "task_show"
+        | "task_list"
+        | "task_activity_list"
+        | "task_blocked_list"
+        | "epic_show"
+        | "epic_tasks"
+        | "epic_blockers_list"
+        | "epic_blocked_list"
+        | "proposal_show"
+        | "memory_read"
+        | "memory_search"
+        | "memory_list"
+        | "read"
+        | "skill_read"
+        | "lsp"
+        | "ci_job_log"
+        | "output_view"
+        | "output_grep"
+        | "memory_build_context"
+        | "memory_health"
+        | "memory_extracted_audit"
+        | "memory_broken_links"
+        | "memory_orphans"
+        | "agent_metrics"
+        | "pr_review_context" => Some(read_only),
+        "code_search" | "github_search" | "code_graph" => Some(open_world_read_only),
+        "task_update" | "epic_update" | "epic_close" | "proposal_ac_set" => {
+            Some(idempotent_mutation)
+        }
+        "task_create" | "epic_create" | "task_transition" | "task_comment_add" | "memory_write"
+        | "memory_edit" | "memory_move" | "request_lead" | "request_planner" | "submit_work"
+        | "submit_review" | "submit_decision" | "submit_grooming" => Some(mutation),
+        "shell"
+        | "write"
+        | "edit"
+        | "apply_patch"
+        | "task_delete_branch"
+        | "task_archive_activity"
+        | "task_kill_session"
+        | "agent_create"
+        | "agent_amend_prompt" => Some(destructive),
+        "task_reset_counters" | "proposal_complete" => Some(idempotent_destructive),
+        _ => None,
+    }
+}
+
+#[test]
+fn all_role_tool_schemas_have_pinned_safety_annotations() {
+    for (role, schemas) in [
+        ("worker", tool_schemas_worker()),
+        ("reviewer", tool_schemas_reviewer()),
+        ("lead", tool_schemas_lead()),
+        ("planner", tool_schemas_planner()),
+        ("architect", tool_schemas_architect()),
+    ] {
+        for schema in schemas {
+            let name = schema
+                .get("name")
+                .and_then(|value| value.as_str())
+                .expect("tool schema has a string name");
+            let expected = expected_safety_tuple(name).unwrap_or_else(|| {
+                panic!("{role} tool {name} is missing pinned safety classification")
+            });
+            assert_eq!(
+                safety_tuple(&schema),
+                expected,
+                "{role} tool {name} safety classification changed without updating the invariant"
+            );
+        }
+    }
+}
+
+#[test]
+fn role_tool_schemas_pin_destructive_and_open_world_sets() {
+    let mut destructive_tools = std::collections::BTreeSet::new();
+    let mut open_world_read_only_tools = std::collections::BTreeSet::new();
+
+    for schemas in [
+        tool_schemas_worker(),
+        tool_schemas_reviewer(),
+        tool_schemas_lead(),
+        tool_schemas_planner(),
+        tool_schemas_architect(),
+    ] {
+        for schema in schemas {
+            let name = schema
+                .get("name")
+                .and_then(|value| value.as_str())
+                .expect("tool schema has a string name");
+            let (read_only, destructive, idempotent, open_world) = safety_tuple(&schema);
+            if destructive {
+                destructive_tools.insert(name.to_string());
+            }
+            if read_only && idempotent && open_world {
+                open_world_read_only_tools.insert(name.to_string());
+            }
+        }
+    }
+
+    let expected_destructive = std::collections::BTreeSet::from([
+        "agent_amend_prompt".to_string(),
+        "agent_create".to_string(),
+        "apply_patch".to_string(),
+        "edit".to_string(),
+        "proposal_complete".to_string(),
+        "shell".to_string(),
+        "task_archive_activity".to_string(),
+        "task_delete_branch".to_string(),
+        "task_kill_session".to_string(),
+        "task_reset_counters".to_string(),
+        "write".to_string(),
+    ]);
+    assert_eq!(destructive_tools, expected_destructive);
+
+    let expected_open_world_read_only = std::collections::BTreeSet::from([
+        "code_graph".to_string(),
+        "code_search".to_string(),
+        "github_search".to_string(),
+    ]);
+    assert_eq!(open_world_read_only_tools, expected_open_world_read_only);
+}
+
 #[test]
 fn snapshot_worker_tool_names() {
     let schemas = tool_schemas_worker();
