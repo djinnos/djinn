@@ -2565,6 +2565,662 @@ impl DjinnMcpServer {
 mod tests {
     use super::*;
 
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use djinn_core::events::EventBus;
+    use djinn_db::Database;
+    use djinn_provider::catalog::{CatalogService, HealthTracker};
+
+    use crate::bridge::{
+        ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangedRange, ChurnEntry,
+        ComplexityResult, CoupledPairEntry, CouplingEntry, CouplingHubEntry, CycleGroup,
+        DeadSymbolEntry, DeprecatedHit, DetectedChangesResult, DiffTouchesResult, EdgeEntry,
+        GraphStatus, HotPathHit, HotspotEntry, ImpactResult, MetricsAtResult, NeighborsResult,
+        OrphanEntry, PathResult, ProjectCtx, QuerySubgraphBudget, QuerySubgraphEdge,
+        QuerySubgraphNode, QuerySubgraphRequest, QuerySubgraphResult, QuerySubgraphSeedDebug,
+        QuerySubgraphTraversalDebug, RankedNode, RefactorCandidate, RepoGraphOps, ResolveOutcome,
+        SearchHit, SnapshotPayload, SymbolAtHit, SymbolContext, SymbolDescription,
+    };
+    use crate::server::DjinnMcpServer;
+    use crate::state::McpState;
+
+    #[derive(Clone)]
+    struct RecordingQuerySubgraphOps {
+        seen: Arc<Mutex<Vec<QuerySubgraphRequest>>>,
+        response: QuerySubgraphResult,
+    }
+
+    impl RecordingQuerySubgraphOps {
+        fn new(response: QuerySubgraphResult) -> Self {
+            Self {
+                seen: Arc::new(Mutex::new(Vec::new())),
+                response,
+            }
+        }
+
+        fn seen_requests(&self) -> Vec<QuerySubgraphRequest> {
+            self.seen.lock().expect("seen requests lock").clone()
+        }
+    }
+
+    #[async_trait]
+    impl RepoGraphOps for RecordingQuerySubgraphOps {
+        async fn neighbors(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<NeighborsResult, String> {
+            unreachable!("query_subgraph tests should not call neighbors")
+        }
+
+        async fn ranked(
+            &self,
+            _: &ProjectCtx,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<RankedNode>, String> {
+            unreachable!("query_subgraph tests should not call ranked")
+        }
+
+        async fn implementations(&self, _: &ProjectCtx, _: &str) -> Result<Vec<String>, String> {
+            unreachable!("query_subgraph tests should not call implementations")
+        }
+
+        async fn impact(
+            &self,
+            _: &ProjectCtx,
+            _: Option<&str>,
+            _: &str,
+            _: usize,
+            _: Option<&str>,
+            _: Option<f64>,
+        ) -> Result<ImpactResult, String> {
+            unreachable!("query_subgraph tests should not call impact")
+        }
+
+        async fn search(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<SearchHit>, String> {
+            unreachable!("query_subgraph tests should not call search")
+        }
+
+        async fn query_subgraph(
+            &self,
+            _: &ProjectCtx,
+            req: QuerySubgraphRequest,
+        ) -> Result<QuerySubgraphResult, String> {
+            self.seen.lock().expect("seen requests lock").push(req);
+            Ok(self.response.clone())
+        }
+
+        async fn cycles(
+            &self,
+            _: &ProjectCtx,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<CycleGroup>, String> {
+            unreachable!("query_subgraph tests should not call cycles")
+        }
+
+        async fn orphans(
+            &self,
+            _: &ProjectCtx,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<OrphanEntry>, String> {
+            unreachable!("query_subgraph tests should not call orphans")
+        }
+
+        async fn path(
+            &self,
+            _: &ProjectCtx,
+            _: Option<&str>,
+            _: &str,
+            _: &str,
+            _: Option<usize>,
+        ) -> Result<Option<PathResult>, String> {
+            unreachable!("query_subgraph tests should not call path")
+        }
+
+        async fn edges(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<EdgeEntry>, String> {
+            unreachable!("query_subgraph tests should not call edges")
+        }
+
+        async fn describe(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+        ) -> Result<Option<SymbolDescription>, String> {
+            unreachable!("query_subgraph tests should not call describe")
+        }
+
+        async fn context(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+            _: bool,
+        ) -> Result<Option<SymbolContext>, String> {
+            unreachable!("query_subgraph tests should not call context")
+        }
+
+        async fn status(&self, _: &ProjectCtx) -> Result<GraphStatus, String> {
+            unreachable!("query_subgraph tests should not call status")
+        }
+
+        async fn snapshot(
+            &self,
+            _: &ProjectCtx,
+            _: Option<&str>,
+            _: usize,
+            _: &GraphExclusions,
+        ) -> Result<SnapshotPayload, String> {
+            unreachable!("query_subgraph tests should not call snapshot")
+        }
+
+        async fn symbols_at(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+            _: u32,
+            _: Option<u32>,
+        ) -> Result<Vec<SymbolAtHit>, String> {
+            unreachable!("query_subgraph tests should not call symbols_at")
+        }
+
+        async fn diff_touches(
+            &self,
+            _: &ProjectCtx,
+            _: &[ChangedRange],
+        ) -> Result<DiffTouchesResult, String> {
+            unreachable!("query_subgraph tests should not call diff_touches")
+        }
+
+        async fn detect_changes(
+            &self,
+            _: &ProjectCtx,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &[String],
+        ) -> Result<DetectedChangesResult, String> {
+            unreachable!("query_subgraph tests should not call detect_changes")
+        }
+
+        async fn api_surface(
+            &self,
+            _: &ProjectCtx,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<ApiSurfaceEntry>, String> {
+            unreachable!("query_subgraph tests should not call api_surface")
+        }
+
+        async fn boundary_check(
+            &self,
+            _: &ProjectCtx,
+            _: &[BoundaryRule],
+        ) -> Result<Vec<BoundaryViolation>, String> {
+            unreachable!("query_subgraph tests should not call boundary_check")
+        }
+
+        async fn hotspots(
+            &self,
+            _: &ProjectCtx,
+            _: u32,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<HotspotEntry>, String> {
+            unreachable!("query_subgraph tests should not call hotspots")
+        }
+
+        async fn complexity(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<ComplexityResult, String> {
+            unreachable!("query_subgraph tests should not call complexity")
+        }
+
+        async fn refactor_candidates(
+            &self,
+            _: &ProjectCtx,
+            _: Option<u32>,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<RefactorCandidate>, String> {
+            unreachable!("query_subgraph tests should not call refactor_candidates")
+        }
+
+        async fn metrics_at(&self, _: &ProjectCtx) -> Result<MetricsAtResult, String> {
+            unreachable!("query_subgraph tests should not call metrics_at")
+        }
+
+        async fn dead_symbols(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+            _: usize,
+        ) -> Result<Vec<DeadSymbolEntry>, String> {
+            unreachable!("query_subgraph tests should not call dead_symbols")
+        }
+
+        async fn deprecated_callers(
+            &self,
+            _: &ProjectCtx,
+            _: usize,
+        ) -> Result<Vec<DeprecatedHit>, String> {
+            unreachable!("query_subgraph tests should not call deprecated_callers")
+        }
+
+        async fn touches_hot_path(
+            &self,
+            _: &ProjectCtx,
+            _: Option<&str>,
+            _: &[String],
+            _: &[String],
+            _: &[String],
+        ) -> Result<Vec<HotPathHit>, String> {
+            unreachable!("query_subgraph tests should not call touches_hot_path")
+        }
+
+        async fn coupling(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+            _: usize,
+        ) -> Result<Vec<CouplingEntry>, String> {
+            unreachable!("query_subgraph tests should not call coupling")
+        }
+
+        async fn churn(
+            &self,
+            _: &ProjectCtx,
+            _: usize,
+            _: Option<u32>,
+        ) -> Result<Vec<ChurnEntry>, String> {
+            unreachable!("query_subgraph tests should not call churn")
+        }
+
+        async fn coupling_hotspots(
+            &self,
+            _: &ProjectCtx,
+            _: usize,
+            _: Option<u32>,
+            _: usize,
+        ) -> Result<Vec<CoupledPairEntry>, String> {
+            unreachable!("query_subgraph tests should not call coupling_hotspots")
+        }
+
+        async fn coupling_hubs(
+            &self,
+            _: &ProjectCtx,
+            _: usize,
+            _: Option<u32>,
+            _: usize,
+        ) -> Result<Vec<CouplingHubEntry>, String> {
+            unreachable!("query_subgraph tests should not call coupling_hubs")
+        }
+
+        async fn resolve(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<ResolveOutcome, String> {
+            Ok(ResolveOutcome::NotFound)
+        }
+    }
+
+    fn query_subgraph_canned_response() -> QuerySubgraphResult {
+        QuerySubgraphResult {
+            query: "How is auth routed?".to_string(),
+            nodes: vec![
+                QuerySubgraphNode {
+                    uid: "file:src/auth.rs".to_string(),
+                    kind: "file".to_string(),
+                    display_name: "src/auth.rs".to_string(),
+                    file_path: Some("src/auth.rs".to_string()),
+                    workspace: Some("server".to_string()),
+                    is_seed: true,
+                    is_hub: false,
+                    degree: 3,
+                },
+                QuerySubgraphNode {
+                    uid: "sym:login".to_string(),
+                    kind: "symbol".to_string(),
+                    display_name: "login".to_string(),
+                    file_path: Some("src/auth.rs".to_string()),
+                    workspace: Some("server".to_string()),
+                    is_seed: false,
+                    is_hub: false,
+                    degree: 1,
+                },
+            ],
+            edges: vec![QuerySubgraphEdge {
+                from_uid: "file:src/auth.rs".to_string(),
+                to_uid: "sym:login".to_string(),
+                kind: "contains_definition".to_string(),
+                confidence: 0.98,
+                reason: Some("seed expansion".to_string()),
+            }],
+            seeds: vec![QuerySubgraphSeedDebug {
+                uid: "file:src/auth.rs".to_string(),
+                display_name: "src/auth.rs".to_string(),
+                score: 0.91,
+                source: "hybrid".to_string(),
+                matched_text: Some("auth routed".to_string()),
+                debug: vec!["rrf=0.91".to_string()],
+            }],
+            inferred_edge_kinds: vec!["calls".to_string(), "imports".to_string()],
+            budget: QuerySubgraphBudget {
+                requested_tokens: 2_048,
+                estimated_tokens: 1_200,
+                truncated: true,
+                omitted_nodes: 4,
+                omitted_edges: 7,
+            },
+            traversal: QuerySubgraphTraversalDebug {
+                max_depth: 2,
+                hub_degree_threshold: 99,
+                hubs_blocked: vec!["sym:common".to_string()],
+                skipped_edge_kinds: vec!["writes".to_string()],
+            },
+            narrowing_hints: vec!["narrow with context_filter=auth middleware".to_string()],
+        }
+    }
+
+    fn query_subgraph_test_server(
+        graph: RecordingQuerySubgraphOps,
+    ) -> (DjinnMcpServer, RecordingQuerySubgraphOps) {
+        let db = Database::open_in_memory().expect("open in-memory db");
+        let state = McpState::new(
+            db,
+            EventBus::noop(),
+            CatalogService::new(),
+            HealthTracker::new(),
+            None,
+            None,
+            None,
+            None,
+            Arc::new(crate::state::stubs::StubLspOps),
+            Arc::new(crate::state::stubs::StubRuntimeOps),
+            Arc::new(crate::state::stubs::StubGitOps),
+            Arc::new(graph.clone()),
+        );
+        (DjinnMcpServer::new(state), graph)
+    }
+
+    fn query_subgraph_ctx() -> ProjectCtx {
+        ProjectCtx {
+            id: "proj-query-subgraph".to_string(),
+            clone_path: "/workspace/repo".to_string(),
+            workspace: Some("server".to_string()),
+            sub_path: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn query_subgraph_dispatch_maps_request_fields() {
+        let graph = RecordingQuerySubgraphOps::new(query_subgraph_canned_response());
+        let (server, graph) = query_subgraph_test_server(graph);
+        let mut params = test_params("query_subgraph");
+        params.project_id = "proj-query-subgraph".to_string();
+        params.project_path = "/workspace/repo".to_string();
+        params.workspace = Some("server".to_string());
+        params.query = Some("  How is auth routed?  ".to_string());
+        params.context_filter = Some(" middleware ".to_string());
+        params.file_filter = Some(" src/auth ".to_string());
+        params.kind_filter = Some("symbol".to_string());
+        params.edge_filters = Some(vec![" Calls ".to_string(), "IMPORTS".to_string()]);
+        params.token_budget = Some(2_048);
+        params.max_depth = Some(3);
+        params.max_seeds = Some(4);
+
+        let response = server
+            .dispatch_code_graph(&query_subgraph_ctx(), &mut params)
+            .await
+            .expect("query_subgraph dispatch succeeds");
+
+        match response {
+            CodeGraphResponse::QuerySubgraph(resp) => {
+                assert_eq!(resp.query_subgraph.query, "How is auth routed?");
+            }
+            other => panic!("expected query_subgraph response, got {other:?}"),
+        }
+        let seen = graph.seen_requests();
+        assert_eq!(seen.len(), 1, "RepoGraphOps::query_subgraph called once");
+        let req = &seen[0];
+        assert_eq!(req.query, "How is auth routed?");
+        assert_eq!(req.workspace.as_deref(), Some("server"));
+        assert_eq!(req.context_filter.as_deref(), Some("middleware"));
+        assert_eq!(req.file_filter.as_deref(), Some("src/auth"));
+        assert_eq!(req.kind_filter.as_deref(), Some("symbol"));
+        assert_eq!(req.edge_filter, vec!["calls", "imports"]);
+        assert_eq!(req.token_budget, Some(2_048));
+        assert_eq!(req.max_depth, Some(3));
+        assert_eq!(req.max_seeds, Some(4));
+    }
+
+    #[tokio::test]
+    async fn query_subgraph_dispatch_rejects_missing_and_blank_query() {
+        let graph = RecordingQuerySubgraphOps::new(query_subgraph_canned_response());
+        let (server, graph) = query_subgraph_test_server(graph);
+        let ctx = query_subgraph_ctx();
+
+        let mut missing = test_params("query_subgraph");
+        missing.project_id = ctx.id.clone();
+        missing.project_path = ctx.clone_path.clone();
+        let err = server
+            .dispatch_code_graph(&ctx, &mut missing)
+            .await
+            .expect_err("missing query rejected through dispatch");
+        assert!(
+            err.contains("'query' is required for operation 'query_subgraph'"),
+            "explicit query validation error: {err}"
+        );
+
+        let mut blank = test_params("query_subgraph");
+        blank.project_id = ctx.id.clone();
+        blank.project_path = ctx.clone_path.clone();
+        blank.query = Some(" \t\n ".to_string());
+        let err = server
+            .dispatch_code_graph(&ctx, &mut blank)
+            .await
+            .expect_err("blank query rejected through dispatch");
+        assert!(
+            err.contains("'query' is required for operation 'query_subgraph'"),
+            "explicit blank query validation error: {err}"
+        );
+        assert!(
+            graph.seen_requests().is_empty(),
+            "invalid requests must not reach RepoGraphOps::query_subgraph"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_subgraph_dispatch_applies_token_budget_defaults_clamps_and_rejections() {
+        let graph = RecordingQuerySubgraphOps::new(query_subgraph_canned_response());
+        let (server, graph) = query_subgraph_test_server(graph);
+        let ctx = query_subgraph_ctx();
+
+        let mut default_budget = test_params("query_subgraph");
+        default_budget.project_id = ctx.id.clone();
+        default_budget.project_path = ctx.clone_path.clone();
+        default_budget.query = Some("default budget".to_string());
+        server
+            .dispatch_code_graph(&ctx, &mut default_budget)
+            .await
+            .expect("default budget dispatch succeeds");
+
+        let mut clamped_low = test_params("query_subgraph");
+        clamped_low.project_id = ctx.id.clone();
+        clamped_low.project_path = ctx.clone_path.clone();
+        clamped_low.query = Some("small budget".to_string());
+        clamped_low.token_budget = Some(128);
+        server
+            .dispatch_code_graph(&ctx, &mut clamped_low)
+            .await
+            .expect("low budget dispatch succeeds with clamp");
+
+        let mut clamped_high = test_params("query_subgraph");
+        clamped_high.project_id = ctx.id.clone();
+        clamped_high.project_path = ctx.clone_path.clone();
+        clamped_high.query = Some("large budget".to_string());
+        clamped_high.token_budget = Some(99_999);
+        server
+            .dispatch_code_graph(&ctx, &mut clamped_high)
+            .await
+            .expect("high budget dispatch succeeds with clamp");
+
+        let requests = graph.seen_requests();
+        assert_eq!(
+            requests[0].token_budget, None,
+            "omitted budget stays omitted"
+        );
+        assert_eq!(
+            requests[1].token_budget,
+            Some(1_024),
+            "low budget clamps up"
+        );
+        assert_eq!(
+            requests[2].token_budget,
+            Some(32_000),
+            "high budget clamps down"
+        );
+
+        let mut zero = test_params("query_subgraph");
+        zero.project_id = ctx.id.clone();
+        zero.project_path = ctx.clone_path.clone();
+        zero.query = Some("zero budget".to_string());
+        zero.token_budget = Some(0);
+        let err = server
+            .dispatch_code_graph(&ctx, &mut zero)
+            .await
+            .expect_err("zero budget rejected through dispatch");
+        assert!(
+            err.contains("invalid token_budget 0"),
+            "invalid budget error should name token_budget: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_subgraph_dispatch_serializes_full_response_shape() {
+        let graph = RecordingQuerySubgraphOps::new(query_subgraph_canned_response());
+        let (server, _) = query_subgraph_test_server(graph);
+        let mut params = test_params("query_subgraph");
+        params.project_id = "proj-query-subgraph".to_string();
+        params.project_path = "/workspace/repo".to_string();
+        params.query = Some("How is auth routed?".to_string());
+
+        let response = server
+            .dispatch_code_graph(&query_subgraph_ctx(), &mut params)
+            .await
+            .expect("query_subgraph dispatch succeeds");
+        let json = serde_json::to_value(CodeGraphResponse::QuerySubgraph(match response {
+            CodeGraphResponse::QuerySubgraph(resp) => resp,
+            other => panic!("expected query_subgraph response, got {other:?}"),
+        }))
+        .expect("serialize query_subgraph response");
+        let payload = json
+            .get("query_subgraph")
+            .and_then(|v| v.as_object())
+            .expect("query_subgraph payload object");
+        for required in [
+            "query",
+            "nodes",
+            "edges",
+            "seeds",
+            "inferred_edge_kinds",
+            "budget",
+            "traversal",
+            "narrowing_hints",
+        ] {
+            assert!(payload.contains_key(required), "missing {required}: {json}");
+        }
+        assert_eq!(payload["nodes"].as_array().expect("nodes array").len(), 2);
+        assert_eq!(payload["edges"].as_array().expect("edges array").len(), 1);
+
+        let seed = payload["seeds"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_object())
+            .expect("seed debug object");
+        for required in [
+            "uid",
+            "display_name",
+            "score",
+            "source",
+            "matched_text",
+            "debug",
+        ] {
+            assert!(
+                seed.contains_key(required),
+                "seed missing {required}: {seed:?}"
+            );
+        }
+
+        let budget = payload["budget"].as_object().expect("budget object");
+        for required in [
+            "requested_tokens",
+            "estimated_tokens",
+            "truncated",
+            "omitted_nodes",
+            "omitted_edges",
+        ] {
+            assert!(
+                budget.contains_key(required),
+                "budget missing {required}: {budget:?}"
+            );
+        }
+        assert_eq!(
+            budget.get("truncated").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        let traversal = payload["traversal"].as_object().expect("traversal object");
+        for required in [
+            "max_depth",
+            "hub_degree_threshold",
+            "hubs_blocked",
+            "skipped_edge_kinds",
+        ] {
+            assert!(
+                traversal.contains_key(required),
+                "traversal missing {required}: {traversal:?}"
+            );
+        }
+        assert_eq!(
+            payload["narrowing_hints"]
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_str()),
+            Some("narrow with context_filter=auth middleware")
+        );
+    }
+
     #[test]
     fn validates_operation_field() {
         let params = test_params("unknown_op");
