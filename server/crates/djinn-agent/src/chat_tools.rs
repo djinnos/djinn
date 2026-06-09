@@ -115,6 +115,16 @@ fn serialize_chat_tool(
     crate::extension::shared_schemas::serialize_tool_schema(tool, annotations)
 }
 
+fn chat_shell_safety_annotations() -> crate::extension::shared_schemas::ToolSafetyAnnotations {
+    // Chat `shell` is deliberately different from the agent-facing shell: the
+    // chat sandbox executes only an allowlisted argv against an ephemeral clone,
+    // with no shell interpreter and no write access to durable state. That makes
+    // it read-only/non-destructive for chat safety gating. It is still not
+    // idempotent or concurrent-safe: commands such as `date`, `git status`, or
+    // pipelines over changing mirrors can produce time/order-dependent output.
+    crate::extension::shared_schemas::ToolSafetyAnnotations::new(true, false, false, false, false)
+}
+
 /// Tool schemas for the chat interface: read-only codebase tools plus
 /// `project_list` for discoverability.
 ///
@@ -128,7 +138,7 @@ pub fn chat_extension_tool_schemas() -> Vec<serde_json::Value> {
     };
 
     vec![
-        serialize_chat_tool(tool_chat_shell(), ToolSafetyAnnotations::mutation()),
+        serialize_chat_tool(tool_chat_shell(), chat_shell_safety_annotations()),
         serialize_chat_tool(tool_chat_read(), ToolSafetyAnnotations::read_only()),
         serialize_chat_tool(
             tool_code_search(),
@@ -163,6 +173,58 @@ const CHAT_EXTENSION_TOOLS: &[&str] = &[
     "github_search",
     "project_list",
 ];
+
+fn chat_allowed_mcp_tool_annotations(
+    name: &str,
+) -> Option<crate::extension::shared_schemas::ToolSafetyAnnotations> {
+    use crate::extension::shared_schemas::ToolSafetyAnnotations;
+
+    let annotations = match name {
+        // Read-only memory.
+        "memory_read"
+        | "memory_search"
+        | "memory_list"
+        | "memory_build_context"
+        | "memory_health"
+        | "memory_broken_links"
+        | "memory_orphans"
+        | "memory_associations"
+        | "memory_catalog"
+        | "memory_recent"
+        | "memory_graph"
+        | "memory_diff"
+        | "memory_history"
+        | "memory_task_refs"
+        | "memory_extracted_audit"
+        // Read-only tasks + epics.
+        | "task_show"
+        | "task_list"
+        | "task_activity_list"
+        | "task_blocked_list"
+        | "task_blockers_list"
+        | "task_memory_refs"
+        | "task_ready"
+        | "task_count"
+        | "task_timeline"
+        | "epic_show"
+        | "epic_list"
+        | "epic_tasks"
+        | "epic_count"
+        | "project_graph_exclusions_get" => ToolSafetyAnnotations::read_only(),
+        // GitHub file fetch crosses the local workspace boundary but is read-only.
+        "github_fetch_file" => ToolSafetyAnnotations::open_world_read_only(),
+        // Board-management writes retained for chat. They mutate Djinn's board
+        // state, but they are not destructive/admin/runtime operations.
+        "task_create" | "task_transition" | "task_comment_add" | "task_claim" | "epic_create" => {
+            ToolSafetyAnnotations::mutation()
+        }
+        "task_update" | "epic_update" | "epic_close" | "epic_reopen" | "project_graph_exclusions_set" => {
+            ToolSafetyAnnotations::idempotent_mutation()
+        }
+        _ => return None,
+    };
+    Some(annotations)
+}
 
 /// Returns `true` if this tool name is handled by the chat extension dispatch.
 pub fn is_chat_extension_tool(name: &str) -> bool {
@@ -319,12 +381,14 @@ pub fn is_chat_allowed_tool(name: &str) -> bool {
 pub fn filter_chat_allowed_mcp_schemas(schemas: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
     schemas
         .into_iter()
-        .filter(|schema| {
-            schema
+        .filter_map(|mut schema| {
+            let annotations = schema
                 .get("name")
                 .and_then(|v| v.as_str())
-                .map(is_chat_allowed_mcp_tool)
-                .unwrap_or(false)
+                .filter(|name| is_chat_allowed_mcp_tool(name))
+                .and_then(chat_allowed_mcp_tool_annotations)?;
+            crate::extension::shared_schemas::annotate_tool_safety(&mut schema, annotations);
+            Some(schema)
         })
         .collect()
 }
@@ -585,6 +649,37 @@ mod tests {
             .collect()
     }
 
+    fn safety_tuple(schema: &serde_json::Value) -> (bool, bool, bool, bool) {
+        let name = schema
+            .get("name")
+            .and_then(|value| value.as_str())
+            .unwrap_or("<unnamed>");
+        let field = |field_name: &str| {
+            schema
+                .get(field_name)
+                .and_then(|value| value.as_bool())
+                .unwrap_or_else(|| panic!("{name} missing boolean {field_name} safety annotation"))
+        };
+
+        (
+            field("readOnly"),
+            field("destructive"),
+            field("idempotent"),
+            field("openWorld"),
+        )
+    }
+
+    fn annotations_tuple(
+        annotations: crate::extension::shared_schemas::ToolSafetyAnnotations,
+    ) -> (bool, bool, bool, bool) {
+        (
+            annotations.read_only,
+            annotations.destructive,
+            annotations.idempotent,
+            annotations.open_world,
+        )
+    }
+
     /// Chat's post-refactor tool surface (chat-user-global §5).  Pinned
     /// explicitly so accidental additions/removals are caught.
     ///
@@ -614,6 +709,100 @@ mod tests {
             chat, expected,
             "chat tool surface drift — update chat_extension_tool_schemas() \
              in chat_tools.rs and ADR-050 §2 together"
+        );
+    }
+
+    #[test]
+    fn chat_extension_tool_schemas_have_complete_safety_annotations() {
+        let expected = std::collections::BTreeMap::from([
+            // Chat shell is sandboxed/read-only but output may be time/order
+            // dependent, so it is not idempotent/open-world.
+            ("shell", (true, false, false, false)),
+            ("read", (true, false, true, false)),
+            ("code_search", (true, false, true, true)),
+            ("code_graph", (true, false, true, true)),
+            ("pr_review_context", (true, false, true, false)),
+            ("github_search", (true, false, true, true)),
+            ("project_list", (true, false, true, false)),
+            ("output_view", (true, false, true, false)),
+            ("output_grep", (true, false, true, false)),
+        ]);
+
+        for schema in chat_extension_tool_schemas() {
+            let name = schema
+                .get("name")
+                .and_then(|value| value.as_str())
+                .expect("chat tool schema has a string name");
+            let expected_tuple = expected
+                .get(name)
+                .unwrap_or_else(|| panic!("chat tool {name} is missing a pinned safety tuple"));
+            assert_eq!(
+                safety_tuple(&schema),
+                *expected_tuple,
+                "chat extension tool {name} safety classification drifted"
+            );
+            assert!(
+                schema
+                    .get("concurrent_safe")
+                    .and_then(|value| value.as_bool())
+                    .is_some(),
+                "chat extension tool {name} missing concurrent_safe compatibility annotation"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_allowed_mcp_tools_have_pinned_safety_annotations() {
+        for name in CHAT_ALLOWED_MCP_TOOLS {
+            let annotations = chat_allowed_mcp_tool_annotations(name)
+                .unwrap_or_else(|| panic!("chat MCP allowlist tool {name} lacks annotations"));
+            assert!(
+                !annotations.destructive,
+                "chat MCP allowlist must not expose destructive tool `{name}`"
+            );
+        }
+
+        for name in [
+            "task_create",
+            "task_update",
+            "task_transition",
+            "task_comment_add",
+            "task_claim",
+            "epic_create",
+            "epic_update",
+            "epic_close",
+            "epic_reopen",
+            "project_graph_exclusions_set",
+        ] {
+            let annotations = chat_allowed_mcp_tool_annotations(name).expect("allowed write annotated");
+            assert_eq!(
+                annotations_tuple(annotations),
+                match name {
+                    "task_update"
+                    | "epic_update"
+                    | "epic_close"
+                    | "epic_reopen"
+                    | "project_graph_exclusions_set" => (false, false, true, false),
+                    _ => (false, false, false, false),
+                },
+                "allowed chat board/graph-management write {name} must be non-read-only and non-destructive"
+            );
+        }
+
+        for name in [
+            "memory_read",
+            "task_show",
+            "epic_show",
+            "project_graph_exclusions_get",
+        ] {
+            let annotations = chat_allowed_mcp_tool_annotations(name).expect("allowed read annotated");
+            assert_eq!(annotations_tuple(annotations), (true, false, true, false));
+        }
+
+        assert_eq!(
+            annotations_tuple(chat_allowed_mcp_tool_annotations("github_fetch_file").unwrap()),
+            (true, false, true, true),
+            "GitHub fetch is a read-only open-world chat MCP tool"
         );
     }
 
@@ -725,6 +914,10 @@ mod tests {
             "agent_metrics",
             "board_reconcile",
             "execution_kill_task",
+            "task_kill_session",
+            "task_delete_branch",
+            "task_reset_counters",
+            "task_archive_activity",
             "retrigger_image_build",
             "github_app_installations",
             "github_app_install_url",
@@ -861,5 +1054,17 @@ mod tests {
             .map(ToString::to_string)
             .collect();
         assert_eq!(names, expected);
+
+        let epic_create = filtered
+            .iter()
+            .find(|schema| schema.get("name").and_then(|name| name.as_str()) == Some("epic_create"))
+            .expect("epic_create schema retained");
+        assert_eq!(safety_tuple(epic_create), (false, false, false, false));
+
+        let memory_read = filtered
+            .iter()
+            .find(|schema| schema.get("name").and_then(|name| name.as_str()) == Some("memory_read"))
+            .expect("memory_read schema retained");
+        assert_eq!(safety_tuple(memory_read), (true, false, true, false));
     }
 }
