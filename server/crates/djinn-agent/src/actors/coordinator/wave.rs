@@ -276,28 +276,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn patrol_skips_when_no_open_epics() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(256);
-
-        let handle = spawn_coordinator_with_planner(&db, &tx);
-        handle.trigger_planner_patrol().await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-        let review_tasks = task_repo
-            .list_ready(djinn_db::ReadyQuery {
-                issue_type: Some("review".to_string()),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-
-        assert!(review_tasks.is_empty());
-        assert_eq!(handle.get_status().unwrap().tasks_dispatched, 0);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn epic_creation_triggers_decomposition_task() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
@@ -327,51 +305,6 @@ mod tests {
 
         let decomp_tasks = wait_for_decomp_tasks(&db, &tx, &epic.id, 1).await;
         assert_eq!(decomp_tasks.len(), 1);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn patrol_skips_when_planner_already_running() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(256);
-
-        let project = test_helpers::create_test_project(&db).await;
-        EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx))
-            .create_for_project(
-                &project.id,
-                djinn_db::EpicCreateInput {
-                    title: "Test Epic",
-                    description: "",
-                    emoji: "",
-                    color: "",
-                    owner: "",
-                    memory_refs: None,
-                    status: Some("open"),
-                    auto_breakdown: None,
-                    originating_adr_id: None,
-                },
-            )
-            .await
-            .unwrap();
-
-        let session_repo =
-            djinn_db::SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-        session_repo
-            .create(djinn_db::CreateSessionParams {
-                project_id: &project.id,
-                task_id: None,
-                model: "test/mock",
-                agent_type: "planner",
-                metadata_json: None,
-                task_run_id: None,
-            })
-            .await
-            .unwrap();
-
-        let handle = spawn_coordinator_with_planner(&db, &tx);
-        handle.trigger_planner_patrol().await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        assert_eq!(handle.get_status().unwrap().tasks_dispatched, 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -544,75 +477,6 @@ mod tests {
             })
             .count();
         assert_eq!(open_planning_count, 1);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn patrol_creates_review_task_when_open_epic_exists() {
-        let db = test_helpers::create_test_db();
-        let (tx, _rx) = broadcast::channel(256);
-
-        let project = test_helpers::create_test_project(&db).await;
-        let epic = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx))
-            .create_for_project(
-                &project.id,
-                djinn_db::EpicCreateInput {
-                    title: "Active Epic",
-                    description: "",
-                    emoji: "",
-                    color: "",
-                    owner: "",
-                    memory_refs: None,
-                    status: Some("open"),
-                    auto_breakdown: None,
-                    originating_adr_id: None,
-                },
-            )
-            .await
-            .unwrap();
-
-        TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
-            .create_in_project(
-                &project.id,
-                Some(&epic.id),
-                "Test task",
-                "",
-                "",
-                "task",
-                1,
-                "",
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-
-        let handle = spawn_coordinator_with_planner(&db, &tx);
-        handle.trigger_planner_patrol().await.unwrap();
-
-        // Poll (up to 5s) rather than sleep-then-check: the planner patrol
-        // task is async and under concurrent test load the 200ms sleep
-        // occasionally ran out before the review task landed in the DB.
-        let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            let tasks_by_project = task_repo.list_by_project(&project.id).await.unwrap();
-            if tasks_by_project
-                .iter()
-                .any(|t| t.issue_type == "review" && t.title.contains("patrol"))
-            {
-                return;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                panic!(
-                    "patrol review task did not land within 5s; current tasks: {:?}",
-                    tasks_by_project
-                        .iter()
-                        .map(|t| (&t.issue_type, &t.title))
-                        .collect::<Vec<_>>()
-                );
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
     }
 
     /// Regression (epic `lywz`, 2026-06-02): the Planner re-links the epic

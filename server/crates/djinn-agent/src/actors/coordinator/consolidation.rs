@@ -349,7 +349,6 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::actors::coordinator::rules;
     use crate::actors::coordinator::{
         DEFAULT_MODEL_ID, STUCK_INTERVAL, SharedCoordinatorState, VerificationTracker,
     };
@@ -458,8 +457,6 @@ mod tests {
             mirror: None,
             rpc_registry: None,
             prune_tick_counter: 0,
-            last_patrol_completed: StdInstant::now(),
-            next_patrol_interval: rules::DEFAULT_PLANNER_PATROL_INTERVAL,
             throughput_events: std::collections::HashMap::new(),
             escalation_counts: std::collections::HashMap::new(),
             pr_status_cache: std::collections::HashMap::new(),

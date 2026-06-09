@@ -267,11 +267,6 @@ pub(super) fn diff_membership(
 
     let mut diff = MembershipDiff::default();
     for user in local_users {
-        // The synthetic automation service user is not a GitHub member; never
-        // touch its membership (it stays a non-member no-op regardless).
-        if user.github_id == djinn_core::AUTOMATION_GITHUB_ID {
-            continue;
-        }
         let is_present = present.contains(&user.github_id);
         match (user.is_member_of_org, is_present) {
             (false, true) => diff.to_activate.push(user.id.clone()),
@@ -493,38 +488,6 @@ mod tests {
         assert_eq!(diff.to_activate, vec!["u-carol".to_string()]);
         assert_eq!(diff.to_deactivate, vec!["u-bob".to_string()]);
         assert_eq!(diff.present_members_to_touch, vec!["u-alice".to_string()]);
-    }
-
-    #[test]
-    fn diff_skips_automation_service_user() {
-        // The synthetic automation user (sentinel github_id) is never on the
-        // GitHub roster; the diff must skip it entirely — even if it were
-        // somehow flagged as a member — so the sync never deactivates it or
-        // revokes (non-existent) sessions.
-        let local = vec![
-            mk_user(
-                "u-automation",
-                djinn_core::AUTOMATION_GITHUB_ID,
-                djinn_core::AUTOMATION_LOGIN,
-                true,
-            ),
-            mk_user("u-human", 9, "human", true),
-        ];
-        let gh: Vec<GithubOrgMember> = vec![]; // empty roster
-
-        let diff = diff_membership(&local, &gh);
-        assert!(
-            !diff.to_deactivate.contains(&"u-automation".to_string()),
-            "automation service user must be skipped, never deactivated"
-        );
-        assert!(
-            !diff
-                .present_members_to_touch
-                .contains(&"u-automation".to_string()),
-            "automation service user must not be touched by the sync"
-        );
-        // The real human not on the roster is still deactivated.
-        assert_eq!(diff.to_deactivate, vec!["u-human".to_string()]);
     }
 
     /// Empty roster response revokes every currently-active user. Guards

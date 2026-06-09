@@ -129,38 +129,21 @@ impl TaskRepository {
         //   1. the session user (`SESSION_USER_ID`, set at the MCP dispatch
         //      root) — a human acting directly;
         //   2. the parent epic's creator — Planner work spawned under an owned
-        //      epic belongs to that human;
-        //   3. the synthetic "automation" service user — system-initiated work
-        //      (patrols, wave-planning, escalations) gets a real identity so
-        //      every per-user dispatch axis (credential, model priority, fleet,
-        //      spend) resolves under it instead of degrading to "no user".
-        // Only NULL when automation hasn't been seeded (e.g. unit tests) and
-        // there's no session/epic creator.
+        //      epic belongs to that human.
+        // Leaves NULL when neither resolves. There is deliberately NO automation
+        // fallback (proposal 1omc): ownerless tasks are refused at dispatch
+        // rather than silently run under a synthetic service user.
         let created_by_user_id = match djinn_core::auth_context::current_user_id() {
             Some(uid) => Some(uid),
-            None => {
-                let from_epic = match epic_id {
-                    Some(eid) => sqlx::query_scalar!(
-                        "SELECT created_by_user_id FROM epics WHERE id = $1",
-                        eid
-                    )
-                    .fetch_optional(self.db.pool())
-                    .await?
-                    .flatten(),
-                    None => None,
-                };
-                match from_epic {
-                    Some(uid) => Some(uid),
-                    None => {
-                        sqlx::query_scalar!(
-                            "SELECT id FROM users WHERE github_id = $1",
-                            djinn_core::AUTOMATION_GITHUB_ID
-                        )
+            None => match epic_id {
+                Some(eid) => {
+                    sqlx::query_scalar!("SELECT created_by_user_id FROM epics WHERE id = $1", eid)
                         .fetch_optional(self.db.pool())
                         .await?
-                    }
+                        .flatten()
                 }
-            }
+                None => None,
+            },
         };
 
         let project_id_owned = project_id.to_owned();

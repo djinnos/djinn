@@ -1077,17 +1077,6 @@ impl AppState {
             tracing::warn!(error = %e, "failed to bootstrap provider env credentials");
         }
 
-        // Seed the synthetic "automation" service user that owns
-        // system-initiated work (board patrols, wave-planning, escalations,
-        // future cron). Idempotent. System tasks stamp this user as their
-        // creator so every per-user dispatch axis resolves under it.
-        if let Err(e) = djinn_db::UserRepository::new(self.db().clone())
-            .ensure_automation_user()
-            .await
-        {
-            tracing::warn!(error = %e, "failed to ensure automation service user");
-        }
-
         // Load custom providers from DB → merge into in-memory catalog.
         let repo = CustomProviderRepository::new(self.db().clone(), self.event_bus());
         match repo.list().await {

@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
 use std::time::Instant as StdInstant;
 
 use tokio::sync::{broadcast, mpsc, watch};
@@ -10,7 +9,6 @@ use tokio_util::sync::CancellationToken;
 use super::consolidation::{ConsolidationRunner, DbConsolidationRunner};
 use super::health;
 use super::messages::CoordinatorMessage;
-use super::rules;
 use super::types::*;
 use crate::actors::slot::SlotPoolHandle;
 use crate::roles::RoleRegistry;
@@ -101,15 +99,6 @@ pub(super) struct CoordinatorActor {
     pub(super) rpc_registry: Option<Arc<djinn_supervisor::ConnectionRegistry>>,
     /// Tick counter for association pruning (runs once per ~120 ticks ≈ 1 hour)
     pub(super) prune_tick_counter: u32,
-    /// Timestamp of the last patrol completion (or actor start as initial baseline).
-    /// The next patrol is eligible only after `next_patrol_interval` has elapsed
-    /// since this instant.  Reset when a patrol task reaches a terminal state.
-    pub(super) last_patrol_completed: StdInstant,
-    /// Dynamic patrol interval, set by the planner's self-scheduling.
-    /// Defaults to `rules::DEFAULT_PLANNER_PATROL_INTERVAL`.
-    /// Updated when the coordinator reads a `patrol_schedule` activity entry.
-    /// Per ADR-051 §1 the Planner owns the board patrol.
-    pub(super) next_patrol_interval: Duration,
     /// Rolling-window throughput tracking: epic_id → Vec of merge event instants.
     pub(super) throughput_events: HashMap<String, Vec<StdInstant>>,
     /// Per-task Lead escalation count (request_lead call count per task UUID).
@@ -234,8 +223,6 @@ impl CoordinatorActor {
             mirror,
             rpc_registry,
             prune_tick_counter: 0,
-            last_patrol_completed: StdInstant::now(),
-            next_patrol_interval: rules::DEFAULT_PLANNER_PATROL_INTERVAL,
             throughput_events: HashMap::new(),
             escalation_counts: HashMap::new(),
             pr_status_cache: HashMap::new(),
@@ -384,13 +371,6 @@ impl CoordinatorActor {
                             self.evaluate_prompt_amendments().await;
                         }
                     }
-                    // Planner patrol (per ADR-051 §1): completion-time-based scheduling.
-                    // Only attempt dispatch once `next_patrol_interval` has
-                    // elapsed since the last patrol completed (or actor start).
-                    if self.last_patrol_completed.elapsed() >= self.next_patrol_interval {
-                        self.maybe_dispatch_planner_patrol().await;
-                    }
-
                     // ADR-048 §3A: idle-time memory consolidation.
                     // Check if a previously spawned sweep has completed.
                     if let Some(handle) = self.idle_consolidation_handle.as_ref()
@@ -472,10 +452,6 @@ impl CoordinatorActor {
             CoordinatorMessage::UpdateModelPriorities { priorities } => {
                 self.model_priorities = priorities;
                 tracing::info!("CoordinatorActor: updated per-role model priorities");
-            }
-            #[cfg(test)]
-            CoordinatorMessage::TriggerPlannerPatrol => {
-                self.maybe_dispatch_planner_patrol().await;
             }
             CoordinatorMessage::DispatchPlannerEscalation {
                 source_task_id,
@@ -570,15 +546,6 @@ impl CoordinatorActor {
                         && let Some(epic_id) = task.epic_id.as_deref()
                     {
                         self.record_merge_event(epic_id);
-                    }
-                    // When a patrol review task closes, reset the patrol timer
-                    // so the next patrol is scheduled relative to completion.
-                    if task.issue_type == "review" && task.title.contains("patrol") {
-                        tracing::info!(
-                            task_id = %task.short_id,
-                            "CoordinatorActor: patrol task closed — resetting patrol timer"
-                        );
-                        self.last_patrol_completed = StdInstant::now();
                     }
                     // Fire epic completion rules (spike/batch).
                     self.on_task_closed(&task).await;
