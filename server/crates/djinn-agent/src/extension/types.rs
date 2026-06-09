@@ -398,6 +398,11 @@ pub(super) struct CodeGraphParams {
     /// inline. Default `false` (bandwidth gate).
     #[serde(default)]
     pub include_content: Option<bool>,
+    /// Semantic zoom level for `snapshot`: `symbol` keeps the existing
+    /// file/symbol-node payload shape; `community` is accepted for forward
+    /// compatibility with the collapsed community view.
+    #[serde(default)]
+    pub level: Option<String>,
     /// PR B4: search mode for the `search` op. `"name"` (legacy fast
     /// path) or `"hybrid"` (RRF over lexical + semantic + structural).
     /// When omitted the dispatcher falls back to
@@ -501,6 +506,7 @@ impl CodeGraphParams {
         clear(&mut self.file_glob);
         clear(&mut self.from_sha);
         clear(&mut self.to_sha);
+        clear(&mut self.level);
         clear(&mut self.target);
     }
 }

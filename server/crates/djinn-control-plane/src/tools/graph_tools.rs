@@ -14,8 +14,8 @@ use crate::bridge::{
     DeadSymbolEntry, DeprecatedHit, DetectedChangesResult, EdgeEntry, FileGroupEntry,
     GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry, ImpactEntry, ImpactResult,
     MetricsAtResult, NeighborsResult, OrphanEntry, PathResult, ProjectCtx, QuerySubgraphRequest,
-    QuerySubgraphResult, RankedNode, RefactorCandidate, ResolveOutcome, SearchHit, SnapshotPayload,
-    SymbolAtHit, SymbolContext, SymbolDescription, TouchedSymbol,
+    QuerySubgraphResult, RankedNode, RefactorCandidate, ResolveOutcome, SearchHit, SnapshotLevel,
+    SnapshotPayload, SymbolAtHit, SymbolContext, SymbolDescription, TouchedSymbol,
 };
 use crate::server::DjinnMcpServer;
 use crate::tools::graph_exclusions::GraphExclusions;
@@ -238,6 +238,11 @@ pub struct CodeGraphParams {
     /// the body shipped over MCP.
     #[serde(default)]
     pub include_content: Option<bool>,
+    /// Semantic zoom level for `snapshot`: `symbol` keeps the existing
+    /// file/symbol-node payload shape; `community` is accepted for forward
+    /// compatibility with the collapsed community view.
+    #[serde(default)]
+    pub level: Option<String>,
     /// PR B4: search mode for the `search` op. `"name"` (the legacy
     /// fast path) runs the canonical-graph name index only;
     /// `"hybrid"` blends lexical (`code_chunks` LIKE), semantic
@@ -304,6 +309,7 @@ impl CodeGraphParams {
         clear(&mut self.from_sha);
         clear(&mut self.to_sha);
         clear(&mut self.mode);
+        clear(&mut self.level);
         clear(&mut self.target);
         clear(&mut self.tests);
     }
@@ -2672,6 +2678,7 @@ impl DjinnMcpServer {
             .map(|l| l.max(1) as usize)
             .unwrap_or(2_000)
             .clamp(1, 10_000);
+        let level = SnapshotLevel::parse(params.level.as_deref())?;
         let exclusions = self.load_graph_exclusions(&params.project_id).await;
         let workspace_hint = self
             .state
@@ -2686,7 +2693,7 @@ impl DjinnMcpServer {
         let mut snapshot = self
             .state
             .repo_graph()
-            .snapshot(ctx, workspace, node_cap, &exclusions)
+            .snapshot(ctx, workspace, level, node_cap, &exclusions)
             .await?;
         // v10: apply the `tests=` filter to the assembled snapshot. The
         // UI defaults to `include` (it toggles test visibility
@@ -2880,6 +2887,7 @@ mod tests {
             &self,
             _: &ProjectCtx,
             _: Option<&str>,
+            _: SnapshotLevel,
             _: usize,
             _: &GraphExclusions,
         ) -> Result<SnapshotPayload, String> {
@@ -3609,6 +3617,7 @@ mod tests {
             to_sha: None,
             changed_files: None,
             include_content: None,
+            level: None,
             mode: None,
             target: None,
             tests: None,
