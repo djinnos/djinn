@@ -171,6 +171,46 @@ describe("parseSnapshotResponse", () => {
     const parsed = parseSnapshotResponse(wire);
     expect(parsed?.nodes[0]?.community_id).toBe("cluster-7");
   });
+
+  it("preserves non-empty workspace tags on nodes when present", () => {
+    const wire = {
+      snapshot: {
+        ...fixtureSnapshot,
+        nodes: [
+          {
+            ...fixtureSnapshot.nodes[1],
+            workspace: "api",
+          },
+        ],
+      },
+    };
+    const parsed = parseSnapshotResponse(wire);
+    expect(parsed?.nodes[0]?.workspace).toBe("api");
+  });
+
+  it("leaves missing workspace tags undefined", () => {
+    const parsed = parseSnapshotResponse({ snapshot: fixtureSnapshot });
+    expect(parsed?.nodes[0]?.workspace).toBeUndefined();
+  });
+
+  it("drops invalid or blank workspace tags", () => {
+    const wire = {
+      snapshot: {
+        ...fixtureSnapshot,
+        nodes: [
+          { ...fixtureSnapshot.nodes[0], workspace: "" },
+          { ...fixtureSnapshot.nodes[1], workspace: "   " },
+          { ...fixtureSnapshot.nodes[2], workspace: 42 },
+        ],
+      },
+    };
+    const parsed = parseSnapshotResponse(wire);
+    expect(parsed?.nodes.map((n) => n.workspace)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ]);
+  });
 });
 
 describe("prettifyLabel", () => {
@@ -231,6 +271,48 @@ describe("buildGraphFromSnapshot", () => {
     expect(classAttrs.kind).toBe("symbol");
     expect(classAttrs.symbolKind).toBe("class");
     expect(classAttrs.mass).toBe(5); // class symbols anchor methods
+  });
+
+  it("carries workspace tags onto graphology node attributes", () => {
+    const withWorkspace: SnapshotPayload = {
+      ...fixtureSnapshot,
+      nodes: fixtureSnapshot.nodes.map((n) =>
+        n.id === "file:src/main.rs" ? { ...n, workspace: "app" } : n,
+      ),
+    };
+    const graph = buildGraphFromSnapshot(withWorkspace);
+    expect(graph.getNodeAttribute("file:src/main.rs", "workspace")).toBe(
+      "app",
+    );
+  });
+
+  it("attaches endpoint workspace metadata to edges", () => {
+    const withWorkspace: SnapshotPayload = {
+      ...fixtureSnapshot,
+      nodes: fixtureSnapshot.nodes.map((n) => {
+        if (n.id === "symbol:scip-rust . . . main()") {
+          return { ...n, workspace: "app" };
+        }
+        if (n.id === "symbol:scip-rust . . . User#") {
+          return { ...n, workspace: "domain" };
+        }
+        return n;
+      }),
+    };
+    const graph = buildGraphFromSnapshot(withWorkspace);
+    const crossEdge = graph
+      .edges()
+      .find(
+        (edge) =>
+          graph.source(edge) === "symbol:scip-rust . . . main()" &&
+          graph.target(edge) === "symbol:scip-rust . . . User#",
+      );
+    expect(crossEdge).toBeDefined();
+    expect(graph.getEdgeAttribute(crossEdge!, "sourceWorkspace")).toBe("app");
+    expect(graph.getEdgeAttribute(crossEdge!, "targetWorkspace")).toBe(
+      "domain",
+    );
+    expect(graph.getEdgeAttribute(crossEdge!, "isCrossWorkspace")).toBe(true);
   });
 
   it("seeds structural nodes on a deterministic-radius spiral, not at the origin", () => {

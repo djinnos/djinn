@@ -27,6 +27,7 @@ export interface SnapshotNode {
   file_path?: string;
   pagerank: number;
   community_id?: string;
+  workspace?: string;
   /**
    * Iter 30: per-function cognitive complexity from the tree-sitter
    * walker. Only populated for function-like nodes (function/method/
@@ -106,6 +107,7 @@ export function parseSnapshotResponse(value: unknown): SnapshotPayload | null {
           pagerank: Number(n.pagerank ?? 0),
           community_id:
             typeof n.community_id === "string" ? n.community_id : undefined,
+          workspace: nonEmptyString(n.workspace),
           cognitive:
             typeof n.cognitive === "number" && Number.isFinite(n.cognitive)
               ? n.cognitive
@@ -128,6 +130,12 @@ export function parseSnapshotResponse(value: unknown): SnapshotPayload | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : undefined;
 }
 
 function normalizeKind(value: unknown): SnapshotNodeKind {
@@ -515,10 +523,18 @@ export function buildGraphFromSnapshot(
     const style = edgeStyleFor(edge.kind);
     if (style.drop) continue;
     const confidenceFactor = 0.4 + edge.confidence * 0.6;
+    const sourceWorkspace = nodeMap.get(edge.from)?.workspace;
+    const targetWorkspace = nodeMap.get(edge.to)?.workspace;
     graph.addEdge(edge.from, edge.to, {
       kind: edge.kind,
       confidence: edge.confidence,
       reason: edge.reason,
+      sourceWorkspace,
+      targetWorkspace,
+      isCrossWorkspace:
+        !!sourceWorkspace &&
+        !!targetWorkspace &&
+        sourceWorkspace !== targetWorkspace,
       size: baseSize * style.sizeMultiplier * confidenceFactor,
       color: style.color,
       type: "curved",
@@ -551,6 +567,7 @@ function addNode(
     pagerank: node.pagerank,
     filePath: node.file_path,
     communityId: node.community_id,
+    workspace: node.workspace,
     /**
      * Iter 30: forwarded so the heatmap reducer can colorize without
      * a side lookup. `undefined` means "non-function or unsupported
