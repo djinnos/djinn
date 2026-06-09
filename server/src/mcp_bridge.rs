@@ -305,7 +305,7 @@ pub(crate) mod hybrid_search;
 use self::graph_neighbors::{
     build_method_metadata, build_related_symbol, classify_edge_category, format_node_key,
     group_impact_by_file, group_neighbors_by_file, kind_label_for_node, read_symbol_content,
-    resolve_node_or_err, resolve_node_with_hint,
+    resolve_node_or_err, resolve_node_with_hint, resolve_node_with_hint_and_filter,
 };
 
 // ── Newtype wrappers ───────────────────────────────────────────────────────────
@@ -627,13 +627,17 @@ impl RepoGraphBridge {
     }
 }
 
-fn normalize_workspace_prefix(workspace: Option<&str>) -> Option<String> {
+fn normalize_workspace_slug(workspace: Option<&str>) -> Option<String> {
     let slug = workspace?.trim().trim_matches('/').trim();
     if slug.is_empty() {
         None
     } else {
-        Some(format!("{}/", slug.replace('\\', "/")))
+        Some(slug.replace('\\', "/"))
     }
+}
+
+fn normalize_workspace_prefix(workspace: Option<&str>) -> Option<String> {
+    normalize_workspace_slug(workspace).map(|slug| format!("{slug}/"))
 }
 
 fn repo_graph_node_file_path(node: &djinn_graph::repo_graph::RepoGraphNode) -> Option<String> {
@@ -644,23 +648,61 @@ fn repo_graph_node_file_path(node: &djinn_graph::repo_graph::RepoGraphNode) -> O
 
 fn repo_graph_node_matches_workspace(
     node: &djinn_graph::repo_graph::RepoGraphNode,
-    workspace_prefix: &str,
+    workspace_slug: &str,
 ) -> bool {
+    if node
+        .workspace
+        .as_deref()
+        .is_some_and(|slug| slug.trim().trim_matches('/').eq(workspace_slug))
+    {
+        return true;
+    }
+    let Some(workspace_prefix) = normalize_workspace_prefix(Some(workspace_slug)) else {
+        return false;
+    };
     repo_graph_node_file_path(node)
         .as_deref()
-        .is_some_and(|path| path.starts_with(workspace_prefix))
+        .is_some_and(|path| path.starts_with(&workspace_prefix))
 }
 
 fn active_workspace_prefix(
     graph: &djinn_graph::repo_graph::RepoDependencyGraph,
     workspace: Option<&str>,
 ) -> Option<String> {
-    let prefix = normalize_workspace_prefix(workspace)?;
+    let slug = normalize_workspace_slug(workspace)?;
     graph
         .graph()
         .node_indices()
-        .any(|idx| repo_graph_node_matches_workspace(graph.node(idx), &prefix))
-        .then_some(prefix)
+        .any(|idx| repo_graph_node_matches_workspace(graph.node(idx), &slug))
+        .then_some(slug)
+}
+
+fn resolve_node_or_err_for_workspace_seed(
+    graph: &djinn_graph::repo_graph::RepoDependencyGraph,
+    key: &str,
+    workspace: Option<&str>,
+) -> Result<petgraph::graph::NodeIndex, String> {
+    let outcome = match active_workspace_prefix(graph, workspace) {
+        Some(workspace_slug) => resolve_node_with_hint_and_filter(graph, key, None, |node| {
+            repo_graph_node_matches_workspace(node, &workspace_slug)
+        }),
+        None => resolve_node_with_hint(graph, key, None),
+    };
+
+    match outcome {
+        self::graph_neighbors::ResolveOutcome::Found(idx) => Ok(idx),
+        self::graph_neighbors::ResolveOutcome::Ambiguous(candidates) => Err(format!(
+            "node '{key}' is ambiguous: {} candidates (e.g. {})",
+            candidates.len(),
+            candidates
+                .first()
+                .map(|c| c.uid.as_str())
+                .unwrap_or("<none>")
+        )),
+        self::graph_neighbors::ResolveOutcome::NotFound => {
+            Err(format!("node '{key}' not found in graph"))
+        }
+    }
 }
 
 #[async_trait]
@@ -1108,7 +1150,7 @@ impl RepoGraphOps for RepoGraphBridge {
     async fn impact(
         &self,
         ctx: &ProjectCtx,
-        _workspace: Option<&str>,
+        workspace: Option<&str>,
         key: &str,
         max_depth: usize,
         group_by: Option<&str>,
@@ -1125,7 +1167,7 @@ impl RepoGraphOps for RepoGraphBridge {
         // can land on nodes the user has explicitly excluded
         // (vendored mirrors, generated dirs).
         let exclusions = self.state.mcp_state_graph_exclusions(&ctx.id).await;
-        let start = resolve_node_or_err(&graph, key)?;
+        let start = resolve_node_or_err_for_workspace_seed(&graph, key, workspace)?;
         let raw = impact_bfs(&graph, start, max_depth, min_confidence);
         let result: Vec<_> = raw
             .into_iter()
@@ -1388,7 +1430,7 @@ impl RepoGraphOps for RepoGraphBridge {
     async fn path(
         &self,
         ctx: &ProjectCtx,
-        _workspace: Option<&str>,
+        workspace: Option<&str>,
         from: &str,
         to: &str,
         max_depth: Option<usize>,
@@ -1399,8 +1441,8 @@ impl RepoGraphOps for RepoGraphBridge {
             &ctx.clone_path,
         )
         .await?;
-        let from_idx = resolve_node_or_err(&graph, from)?;
-        let to_idx = resolve_node_or_err(&graph, to)?;
+        let from_idx = resolve_node_or_err_for_workspace_seed(&graph, from, workspace)?;
+        let to_idx = resolve_node_or_err_for_workspace_seed(&graph, to, workspace)?;
         let path = match graph.shortest_path(from_idx, to_idx, max_depth) {
             Some(p) => p,
             None => return Ok(None),
@@ -3042,7 +3084,7 @@ impl RepoGraphOps for RepoGraphBridge {
     async fn touches_hot_path(
         &self,
         ctx: &ProjectCtx,
-        _workspace: Option<&str>,
+        workspace: Option<&str>,
         seed_entries: &[String],
         seed_sinks: &[String],
         symbols: &[String],
@@ -3060,14 +3102,21 @@ impl RepoGraphOps for RepoGraphBridge {
             return Ok(Vec::new());
         }
 
-        // Resolve all keys once.
-        let resolve = |key: &str| -> Option<petgraph::graph::NodeIndex> {
+        // Resolve entry/sink seeds inside the requested workspace only.
+        // The queried symbols remain unscoped so callers can ask whether
+        // cross-workspace nodes sit on any in-workspace entry→sink path.
+        let resolve_seed = |key: &str| -> Option<petgraph::graph::NodeIndex> {
+            resolve_node_or_err_for_workspace_seed(&graph, key, workspace).ok()
+        };
+        let resolve_symbol = |key: &str| -> Option<petgraph::graph::NodeIndex> {
             resolve_node_or_err(&graph, key).ok()
         };
-        let entry_ix: Vec<petgraph::graph::NodeIndex> =
-            seed_entries.iter().filter_map(|k| resolve(k)).collect();
+        let entry_ix: Vec<petgraph::graph::NodeIndex> = seed_entries
+            .iter()
+            .filter_map(|k| resolve_seed(k))
+            .collect();
         let sink_ix: Vec<petgraph::graph::NodeIndex> =
-            seed_sinks.iter().filter_map(|k| resolve(k)).collect();
+            seed_sinks.iter().filter_map(|k| resolve_seed(k)).collect();
 
         let pair_cap = 400usize;
         let total_pairs = entry_ix.len() * sink_ix.len();
@@ -3102,7 +3151,7 @@ impl RepoGraphOps for RepoGraphBridge {
         // list once per queried symbol (O(Q × P × |path|), P ≤ 400).
         let mut queried: HashMap<String, petgraph::graph::NodeIndex> = HashMap::new();
         for k in symbols {
-            if let Some(idx) = resolve(k) {
+            if let Some(idx) = resolve_symbol(k) {
                 queried.insert(k.clone(), idx);
             }
         }
