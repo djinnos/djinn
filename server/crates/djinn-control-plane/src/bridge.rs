@@ -1197,6 +1197,15 @@ pub struct ProjectCtx {
 
 #[async_trait]
 pub trait RepoGraphOps: Send + Sync {
+    /// Return node counts grouped by workspace slug from the warmed graph when
+    /// a graph artifact is available. Implementations should not warm.
+    async fn workspace_node_counts(
+        &self,
+        _ctx: &ProjectCtx,
+    ) -> Result<std::collections::HashMap<String, usize>, String> {
+        Ok(std::collections::HashMap::new())
+    }
+
     /// Return workspace slugs that should be suggested for an unknown non-empty
     /// workspace request, or `None` when the request is absent/known or the
     /// project does not expose multiple workspace choices.
