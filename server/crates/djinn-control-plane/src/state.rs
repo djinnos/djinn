@@ -645,8 +645,6 @@ pub mod stubs {
     }
 
     /// Build a McpState backed only by an in-memory database (no live actors).
-
-    /// Build a McpState backed only by an in-memory database (no live actors).
     /// Useful for direct-invocation tests of MCP tool handlers.
     pub fn test_mcp_state(db: Database) -> McpState {
         McpState::new(
