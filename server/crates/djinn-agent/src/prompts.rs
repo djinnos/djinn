@@ -770,7 +770,8 @@ mod tests {
         let ctx = make_ctx();
         let prompt = render_prompt(AgentType::Worker, &task, &ctx);
 
-        assert!(!prompt.contains("omitted"));
+        assert!(!prompt.contains("bytes omitted"));
+        assert!(!prompt.contains("[truncated"));
     }
 
     #[test]
