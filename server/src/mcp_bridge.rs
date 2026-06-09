@@ -3600,6 +3600,7 @@ fn build_snapshot_payload(
                 id: format_node_key(&node.id),
                 kind: format!("{:?}", node.kind).to_lowercase(),
                 label,
+                workspace: node.workspace.clone(),
                 symbol_kind: node
                     .symbol_kind
                     .as_ref()
@@ -5320,6 +5321,14 @@ pub(crate) mod graph_bridge_tests {
                 "unexpected node.kind {}",
                 node.kind
             );
+            if matches!(node.kind.as_str(), "file" | "symbol") {
+                assert_eq!(
+                    node.workspace.as_deref(),
+                    Some("root"),
+                    "snapshot node {} should carry workspace slug from RepoGraphNode.workspace",
+                    node.id
+                );
+            }
         }
 
         // Nodes must be in pagerank-desc order.
