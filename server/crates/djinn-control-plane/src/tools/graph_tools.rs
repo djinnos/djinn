@@ -28,16 +28,18 @@ use djinn_db::ProjectRepository;
 pub struct CodeGraphParams {
     /// The operation to perform.
     /// One of: `neighbors`, `ranked`, `impact`, `implementations`,
-    /// `search`, `cycles`, `orphans`, `path`, `edges`, `symbols_at`,
-    /// `diff_touches`, `detect_changes`, `describe`, `context`, `status`,
-    /// `snapshot`.
+    /// `search`, `query_subgraph`, `cycles`, `orphans`, `path`, `edges`,
+    /// `symbols_at`, `diff_touches`, `detect_changes`, `describe`,
+    /// `context`, `status`, `snapshot`, and the other graph analysis ops.
     pub operation: String,
     /// Project identifier — either the UUID (`project_id`) or the
     /// canonical `"owner/repo"` slug. The handler resolves it to the
     /// server-managed clone path via `djinn_core::paths::project_dir`
     /// before dispatching to the graph backend.
     pub project: String,
-    /// Optional workspace slug used by follow-up workspace-scoped graph ops.
+    /// Optional workspace slug. For `query_subgraph`, scopes seed search and
+    /// traversal to a warmed workspace when provided; omit to query the
+    /// project-level graph/default workspace selection.
     #[serde(default)]
     pub workspace: Option<String>,
     /// Resolved absolute filesystem path. Populated by the `code_graph`
@@ -59,6 +61,8 @@ pub struct CodeGraphParams {
     /// Kind filter, op-specific:
     /// - `ranked` / `search` / `cycles` / `orphans`: node kind — `file` or
     ///   `symbol`.
+    /// - `query_subgraph`: node-kind narrowing for seeds/traversal — `file`
+    ///   or `symbol`.
     /// - `neighbors`: edge kind — `reads` or `writes` (PR A3). Restricts
     ///   the response to neighbors connected by `Reads` / `Writes` edges
     ///   only, so callers can ask for "who writes to field X" without
@@ -69,22 +73,42 @@ pub struct CodeGraphParams {
     /// (default 20) or max traversal depth for `impact` (default 3).
     #[serde(default)]
     pub limit: Option<i64>,
-    /// Substring query for `search`.
+    /// Query text, op-specific:
+    /// - `search`: substring/name lookup text.
+    /// - `query_subgraph`: required nonblank natural-language question used
+    ///   to pick relevant seeds and infer useful traversal edge kinds.
     #[serde(default)]
     pub query: Option<String>,
-    /// Optional coarse context substring for `query_subgraph`.
+    /// Optional coarse context substring for `query_subgraph`. Use this to
+    /// narrow the natural-language subgraph query to a subsystem, API, type,
+    /// or concern when the initial response is too broad; returned
+    /// `narrowing_hints` may suggest values for this field.
     #[serde(default)]
     pub context_filter: Option<String>,
-    /// Optional path/file substring filter for `query_subgraph`.
+    /// Optional repository-relative path/file substring filter for
+    /// `query_subgraph`. It narrows seed selection and traversal to matching
+    /// file paths. `file_glob` is also accepted as a compatibility alias and
+    /// is used when `file_filter` is omitted.
     #[serde(default)]
     pub file_filter: Option<String>,
-    /// Optional explicit edge kinds for `query_subgraph`.
+    /// Optional explicit edge kinds for `query_subgraph` traversal. Omit to
+    /// let the planner infer edge kinds from the question; provide values such
+    /// as calls/imports/returns/reads/writes/implements/extends to narrow the
+    /// bounded subgraph. `edge_kind` is accepted as a single-kind compatibility
+    /// alias when this list is omitted.
     #[serde(default)]
     pub edge_filters: Option<Vec<String>>,
-    /// Approximate response token budget for `query_subgraph`.
+    /// Approximate response token budget for `query_subgraph`. Omit to use
+    /// the backend default (currently about 2000 tokens). Positive values below 1024 are clamped up to 1024,
+    /// values above 32000 are clamped down to 32000, and zero/negative values
+    /// are rejected. The result reports budget/truncation state so callers can
+    /// retry with a narrower filter or a different budget.
     #[serde(default)]
     pub token_budget: Option<i64>,
-    /// Maximum seed count for `query_subgraph`.
+    /// Maximum seed count for `query_subgraph`. Omit to use the backend
+    /// default (currently 6). Positive values are clamped into 1..=32; zero/negative values
+    /// are rejected. Returned seed debug metadata explains which seeds were
+    /// selected and why.
     #[serde(default)]
     pub max_seeds: Option<i64>,
     /// Source node for `path`.
@@ -112,10 +136,14 @@ pub struct CodeGraphParams {
     /// Group results: only `file` is supported. Applies to `impact`/`neighbors`.
     #[serde(default)]
     pub group_by: Option<String>,
-    /// Optional max depth for `path`.
+    /// Optional max depth. For `path`, bounds shortest-path search depth. For
+    /// `query_subgraph`, bounds traversal depth from selected seeds; omit to
+    /// use the backend default (currently 2). Values are clamped into 0..=8, so 0 means seed
+    /// nodes only and larger values are capped at 8.
     #[serde(default)]
     pub max_depth: Option<i64>,
-    /// Optional edge-kind filter for `edges`.
+    /// Optional edge-kind filter for `edges`; for `query_subgraph`, a
+    /// single-kind compatibility alias used when `edge_filters` is omitted.
     #[serde(default)]
     pub edge_kind: Option<String>,
     /// Repository-relative file path for `symbols_at`.
@@ -143,7 +171,9 @@ pub struct CodeGraphParams {
     /// to 365).
     #[serde(default)]
     pub window_days: Option<i64>,
-    /// Optional file glob restricting `hotspots` to a subset of paths.
+    /// Optional file glob restricting `hotspots` to a subset of paths. For
+    /// `query_subgraph`, a path-filter compatibility alias used when
+    /// `file_filter` is omitted.
     #[serde(default)]
     pub file_glob: Option<String>,
     /// Boundary rules for `boundary_check`.
@@ -1180,7 +1210,7 @@ fn pick_next_step_target(symbols: &[crate::bridge::DetectedTouchedSymbol]) -> Op
 impl DjinnMcpServer {
     /// Query the repository dependency graph built from SCIP indexer output.
     #[tool(
-        description = "Query the repository dependency graph built from SCIP indexer output and the commit-based file-coupling index. Operations: neighbors (edges in/out of a node, with optional group_by=file rollup), ranked (top nodes; sort_by pagerank/in_degree/out_degree/total_degree), impact (transitive dependents, with optional group_by=file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup), cycles (strongly-connected components), orphans (zero-incoming-reference nodes, with visibility filter), path (shortest dependency path), edges (enumerate edges by from_glob/to_glob), symbols_at (given file+line range, return SCIP symbols whose definition range encloses those lines — diff-hunk → symbol lookup), diff_touches (given a list of changed line ranges parsed from `git diff --unified=0 base..head`, return every base-graph symbol touched, with fan-in/fan-out and file grouping; the base graph is always current main — this op does NOT build a head graph), detect_changes (given from_sha + to_sha [or a changed_files list], return touched symbols + their PageRank tier [High/Medium/Low quartile] + per-file rollup; shells out to `git diff --unified=0 from_sha..to_sha` server-side and maps hunks via symbols_enclosing — replaces the architect's manual diff inspection), describe (symbol signature/documentation without an LSP round trip), context (PR C1: 360° symbol view — categorized incoming/outgoing dicts [calls/reads/writes/extends/implements/...], plus structured method_metadata when SCIP populates it; pass include_content=true to include the symbol body. Each category list is hard-capped at 30 entries), status (peek at the persisted canonical graph cache; never warms), api_surface (list every public symbol with fan-in/fan-out and a used-outside-crate signal), boundary_check (edge-based architecture rule scanner over from_glob→to_glob pairs; returns forbidden violations), hotspots (file churn × centrality ranking over a configurable window; top_symbols per file), complexity (rank functions or files by complexity metric — target: functions|files, sort_by: cognitive|cyclomatic|nloc|max_nesting|param_count, file_glob, limit), refactor_candidates (composite refactor-priority ranking — fuses cognitive complexity × file-level churn × PageRank into a single z-score and surfaces the top function-level targets; respects since_days [default 90, clamped 1..=365], file_glob, limit [default 30, clamped 1..=200]; each entry carries the composite score, a tier label [high/medium/low], and the underlying raw + z-score signals so callers can re-rank locally), metrics_at (scalar graph snapshot: node/edge/cycle counts, god-object floor, orphans, public API and doc coverage), dead_symbols (no-incoming-edge-from-entry-points enumeration; confidence=high|med|low), deprecated_callers (symbols whose signature/documentation contains #[deprecated] or @deprecated, with caller list), touches_hot_path (given entry and sink SCIP keys, report which queried symbols sit on any entry→sink shortest path), coupling (files most frequently co-edited with `file`, sourced from the per-commit change log; returns co-edit count, last co-edit timestamp, and up to three supporting SHAs per peer), churn (top files by distinct-commit count over an optional `since_days` window; returns commit count, cumulative insertions/deletions, and last-touched timestamp), coupling_hotspots (top file PAIRS by co-edit count project-wide; returns [{file_a,file_b,co_edits,last_co_edit}]; respects `since_days` and `max_files_per_commit` [default 15] — useful for spotting implicit coupling between distant parts of the tree), coupling_hubs (top FILES by cumulative coupling across all partners; returns [{file_path,total_coupling,partner_count}] — change-propagation risk map, higher total_coupling means a touch to this file is more likely to require touching many others), snapshot (PR D2: full graph snapshot capped by PageRank tier — returns {snapshot:{project_id,git_head,generated_at,truncated,total_nodes,total_edges,node_cap,nodes,edges}}; default cap 2000 nodes [Sigma WebGL ceiling], settable via `limit` up to 10k. Drives the `/code-graph` UI's force-directed render. Pass tests=include|exclude|only to filter test files/symbols — include is the default [whole graph], exclude drops everything marked is_test, only keeps test nodes; classification is the canonical is_test flag built from the file-path convention OR the SCIP Test role). All coupling / churn outputs are filtered through the project's `project_graph_exclusions` glob list at query time, so tuning exclusions takes effect without re-ingesting."
+        description = "Query the repository dependency graph built from SCIP indexer output and the commit-based file-coupling index. Operations: neighbors (edges in/out of a node, with optional group_by=file rollup), ranked (top nodes; sort_by pagerank/in_degree/out_degree/total_degree), impact (transitive dependents, with optional group_by=file rollup), implementations (find implementors of a trait/interface symbol), search (name-based symbol lookup; `query` is substring/name text), query_subgraph (natural-language, budget-bounded subgraph query; requires nonblank `query` as the question. Optional narrowing fields: `workspace` scopes to a warmed workspace, `file_filter` narrows by repository-relative path/file substring [`file_glob` alias when omitted], `kind_filter` narrows node kind to file|symbol, `edge_filters` narrows traversal edge kinds such as calls/imports/returns/reads/writes/implements/extends [`edge_kind` single-kind alias when omitted], and `context_filter` narrows to a subsystem/API/type/concern. Budget controls: `token_budget` is approximate; omit for the backend default (currently about 2000 tokens), positive values are clamped into 1024..=32000, and zero/negative values are rejected. `max_depth` is clamped into 0..=8 [0 means seeds only; omit for backend default, currently 2], and positive `max_seeds` is clamped into 1..=32 [omit for backend default, currently 6; zero/negative rejected]. The response is bounded and includes nodes/edges, seed debug metadata, inferred/requested edge kinds, budget/truncation/traversal/hub-skip state where available, and `narrowing_hints` suggesting tighter context/path/kind/edge filters or budget changes), cycles (strongly-connected components), orphans (zero-incoming-reference nodes, with visibility filter), path (shortest dependency path), edges (enumerate edges by from_glob/to_glob), symbols_at (given file+line range, return SCIP symbols whose definition range encloses those lines — diff-hunk → symbol lookup), diff_touches (given a list of changed line ranges parsed from `git diff --unified=0 base..head`, return every base-graph symbol touched, with fan-in/fan-out and file grouping; the base graph is always current main — this op does NOT build a head graph), detect_changes (given from_sha + to_sha [or a changed_files list], return touched symbols + their PageRank tier [High/Medium/Low quartile] + per-file rollup; shells out to `git diff --unified=0 from_sha..to_sha` server-side and maps hunks via symbols_enclosing — replaces the architect's manual diff inspection), describe (symbol signature/documentation without an LSP round trip), context (PR C1: 360° symbol view — categorized incoming/outgoing dicts [calls/reads/writes/extends/implements/...], plus structured method_metadata when SCIP populates it; pass include_content=true to include the symbol body. Each category list is hard-capped at 30 entries), status (peek at the persisted canonical graph cache; never warms), api_surface (list every public symbol with fan-in/fan-out and a used-outside-crate signal), boundary_check (edge-based architecture rule scanner over from_glob→to_glob pairs; returns forbidden violations), hotspots (file churn × centrality ranking over a configurable window; top_symbols per file), complexity (rank functions or files by complexity metric — target: functions|files, sort_by: cognitive|cyclomatic|nloc|max_nesting|param_count, file_glob, limit), refactor_candidates (composite refactor-priority ranking — fuses cognitive complexity × file-level churn × PageRank into a single z-score and surfaces the top function-level targets; respects since_days [default 90, clamped 1..=365], file_glob, limit [default 30, clamped 1..=200]; each entry carries the composite score, a tier label [high/medium/low], and the underlying raw + z-score signals so callers can re-rank locally), metrics_at (scalar graph snapshot: node/edge/cycle counts, god-object floor, orphans, public API and doc coverage), dead_symbols (no-incoming-edge-from-entry-points enumeration; confidence=high|med|low), deprecated_callers (symbols whose signature/documentation contains #[deprecated] or @deprecated, with caller list), touches_hot_path (given entry and sink SCIP keys, report which queried symbols sit on any entry→sink shortest path), coupling (files most frequently co-edited with `file`, sourced from the per-commit change log; returns co-edit count, last co-edit timestamp, and up to three supporting SHAs per peer), churn (top files by distinct-commit count over an optional `since_days` window; returns commit count, cumulative insertions/deletions, and last-touched timestamp), coupling_hotspots (top file PAIRS by co-edit count project-wide; returns [{file_a,file_b,co_edits,last_co_edit}]; respects `since_days` and `max_files_per_commit` [default 15] — useful for spotting implicit coupling between distant parts of the tree), coupling_hubs (top FILES by cumulative coupling across all partners; returns [{file_path,total_coupling,partner_count}] — change-propagation risk map, higher total_coupling means a touch to this file is more likely to require touching many others), snapshot (PR D2: full graph snapshot capped by PageRank tier — returns {snapshot:{project_id,git_head,generated_at,truncated,total_nodes,total_edges,node_cap,nodes,edges}}; default cap 2000 nodes [Sigma WebGL ceiling], settable via `limit` up to 10k. Drives the `/code-graph` UI's force-directed render. Pass tests=include|exclude|only to filter test files/symbols — include is the default [whole graph], exclude drops everything marked is_test, only keeps test nodes; classification is the canonical is_test flag built from the file-path convention OR the SCIP Test role). All coupling / churn outputs are filtered through the project's `project_graph_exclusions` glob list at query time, so tuning exclusions takes effect without re-ingesting."
     )]
     pub async fn code_graph(
         &self,
