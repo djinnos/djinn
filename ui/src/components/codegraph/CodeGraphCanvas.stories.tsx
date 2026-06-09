@@ -17,6 +17,7 @@ import { GraphToolbar } from "./GraphToolbar";
 import {
   EMPTY_HIGHLIGHT_VIEW,
   computeComplexityThresholds,
+  edgeReducer,
   nodeReducer,
   topComplexityIds,
   type ColorMode,
@@ -31,6 +32,10 @@ interface StubNode {
   size: number;
   color: string;
   label: string;
+  workspace?: string;
+  workspaceColor?: string;
+  workspaceBadge?: string;
+  isWorkspaceContext?: boolean;
   /** Iter 30: optional cognitive complexity for the heatmap stories. */
   cognitive?: number;
 }
@@ -39,6 +44,9 @@ interface StubEdge {
   source: string;
   target: string;
   kind: string;
+  size?: number;
+  color?: string;
+  isCrossWorkspace?: boolean;
 }
 
 const NODES: StubNode[] = [
@@ -57,7 +65,73 @@ const EDGES: StubEdge[] = [
   { source: "gamma", target: "delta", kind: "SymbolReference" },
 ];
 
-function StubCanvas({ view }: { view: HighlightView }) {
+const WORKSPACE_NODES: StubNode[] = [
+  {
+    id: "api-file",
+    x: 90,
+    y: 95,
+    size: 13,
+    color: "#60a5fa",
+    label: "api/routes.ts · api",
+    workspace: "api",
+    workspaceColor: "#22d3ee",
+    workspaceBadge: "A",
+    cognitive: 4,
+  },
+  {
+    id: "api-handler",
+    x: 205,
+    y: 145,
+    size: 10,
+    color: "#60a5fa",
+    label: "handleCreate · api",
+    workspace: "api",
+    workspaceColor: "#22d3ee",
+    workspaceBadge: "A",
+    cognitive: 9,
+  },
+  {
+    id: "web-client",
+    x: 320,
+    y: 210,
+    size: 9,
+    color: "#f472b6",
+    label: "submitForm · web",
+    workspace: "web",
+    workspaceColor: "#f472b6",
+    workspaceBadge: "W",
+    isWorkspaceContext: true,
+    cognitive: 18,
+  },
+];
+
+const WORKSPACE_EDGES: StubEdge[] = [
+  {
+    source: "api-file",
+    target: "api-handler",
+    kind: "ContainsDefinition",
+    size: 1,
+    color: "#2d5a3d",
+  },
+  {
+    source: "api-handler",
+    target: "web-client",
+    kind: "SymbolReference",
+    size: 2.2,
+    color: "#facc15",
+    isCrossWorkspace: true,
+  },
+];
+
+function StubCanvas({
+  view,
+  nodes = NODES,
+  edges = EDGES,
+}: {
+  view: HighlightView;
+  nodes?: StubNode[];
+  edges?: StubEdge[];
+}) {
   return (
     <svg
       width={400}
@@ -65,14 +139,22 @@ function StubCanvas({ view }: { view: HighlightView }) {
       className="rounded-md border border-[#2d2d3d]"
       style={{ background: "#0a0a10" }}
     >
-      {EDGES.map((e, i) => {
-        const a = NODES.find((n) => n.id === e.source)!;
-        const b = NODES.find((n) => n.id === e.target)!;
+      {edges.map((e, i) => {
+        const a = nodes.find((n) => n.id === e.source)!;
+        const b = nodes.find((n) => n.id === e.target)!;
         const enabled = view.edgeKindFilters[e.kind] !== false;
         if (!enabled) return null;
-        const isSel =
-          view.selectionId &&
-          (view.selectionId === e.source || view.selectionId === e.target);
+        const out = edgeReducer(
+          e.source,
+          e.target,
+          {
+            kind: e.kind,
+            size: e.size ?? 1,
+            color: e.color ?? "rgba(100,116,139,0.45)",
+            isCrossWorkspace: e.isCrossWorkspace,
+          },
+          view,
+        );
         return (
           <line
             key={i}
@@ -80,12 +162,13 @@ function StubCanvas({ view }: { view: HighlightView }) {
             y1={a.y}
             x2={b.x}
             y2={b.y}
-            stroke={isSel ? "rgba(251,146,60,0.85)" : "rgba(100,116,139,0.45)"}
-            strokeWidth={isSel ? 2 : 1}
+            stroke={(out.color as string) ?? e.color ?? "rgba(100,116,139,0.45)"}
+            strokeWidth={(out.size as number) ?? e.size ?? 1}
+            strokeDasharray={e.isCrossWorkspace ? "6 4" : undefined}
           />
         );
       })}
-      {NODES.map((n) => {
+      {nodes.map((n) => {
         const out = nodeReducer(
           n.id,
           {
@@ -93,12 +176,20 @@ function StubCanvas({ view }: { view: HighlightView }) {
             size: n.size,
             label: n.label,
             cognitive: n.cognitive,
+            workspace: n.workspace,
+            workspaceColor: n.workspaceColor,
+            workspaceBadge: n.workspaceBadge,
+            borderColor: n.workspaceColor,
+            borderSize: n.workspaceColor ? 2 : undefined,
+            haloed: n.workspaceColor ? true : undefined,
+            isWorkspaceContext: n.isWorkspaceContext,
           },
           view,
         );
         if (out.hidden) return null;
         const size = (out.size as number) ?? n.size;
         const haloed = out.haloed === true;
+        const workspaceBadge = out.workspaceBadge as string | undefined;
         return (
           <g key={n.id}>
             {haloed && (
@@ -107,8 +198,8 @@ function StubCanvas({ view }: { view: HighlightView }) {
                 cy={n.y}
                 r={size + 4}
                 fill="none"
-                stroke="rgba(239, 68, 68, 0.6)"
-                strokeWidth={2}
+                stroke={(out.borderColor as string) ?? "rgba(239, 68, 68, 0.6)"}
+                strokeWidth={(out.borderSize as number) ?? 2}
               />
             )}
             <circle
@@ -118,6 +209,19 @@ function StubCanvas({ view }: { view: HighlightView }) {
               fill={(out.color as string) ?? n.color}
               opacity={out.highlighted === false ? 0.4 : 1}
             />
+            {workspaceBadge && (
+              <text
+                x={n.x - 4}
+                y={n.y + 4}
+                fontSize={9}
+                fontFamily="monospace"
+                fill="#020617"
+                textAnchor="middle"
+                fontWeight={700}
+              >
+                {workspaceBadge}
+              </text>
+            )}
             <text
               x={n.x + size + 4}
               y={n.y + 4}
@@ -142,6 +246,7 @@ interface StoryShellProps {
   blastRadiusFrontier?: string[];
   /** Iter 30: pin the canvas into a specific color mode for the story. */
   colorMode?: ColorMode;
+  workspaceFixture?: boolean;
 }
 
 function StoryShell({
@@ -151,6 +256,7 @@ function StoryShell({
   toolHighlightIds = [],
   blastRadiusFrontier = [],
   colorMode = "topology",
+  workspaceFixture = false,
 }: StoryShellProps) {
   // Mirror the inputs into the global store so the toolbar reflects
   // the selection state correctly (depth-slider enable etc.).
@@ -189,12 +295,14 @@ function StoryShell({
   // Iter 30: derive heatmap thresholds + top-N halo set from the
   // stub fixture so the story renders the same colors / ring the live
   // canvas does.
-  const cognitiveValues = NODES.flatMap((n) =>
+  const storyNodes = workspaceFixture ? WORKSPACE_NODES : NODES;
+  const storyEdges = workspaceFixture ? WORKSPACE_EDGES : EDGES;
+  const cognitiveValues = storyNodes.flatMap((n) =>
     typeof n.cognitive === "number" ? [n.cognitive] : [],
   );
   const complexityThresholds = computeComplexityThresholds(cognitiveValues);
   const complexityHaloIds = topComplexityIds(
-    NODES.map((n) => ({ id: n.id, cognitive: n.cognitive ?? null })),
+    storyNodes.map((n) => ({ id: n.id, cognitive: n.cognitive ?? null })),
     1,
   );
 
@@ -224,7 +332,7 @@ function StoryShell({
       }}
     >
       <GraphToolbar />
-      <StubCanvas view={view} />
+      <StubCanvas view={view} nodes={storyNodes} edges={storyEdges} />
     </div>
   );
 }
@@ -234,6 +342,7 @@ const meta: Meta<typeof StoryShell> = {
   component: StoryShell,
   parameters: { layout: "centered" },
 };
+
 export default meta;
 type Story = StoryObj<typeof StoryShell>;
 
@@ -293,5 +402,17 @@ export const ComplexityHeatmap: Story = {
 export const TopologyWithRefactorHalo: Story = {
   args: {
     colorMode: "topology",
+  },
+};
+
+/**
+ * Multi-workspace fixture: api owns the left two nodes/intra edge, while web is
+ * retained as selected-workspace remote context through the dashed yellow
+ * cross-workspace dependency. The web node is intentionally muted but still
+ * wears a workspace badge/ring so reviewers can see endpoint identity.
+ */
+export const WorkspacesAndCrossWorkspaceEdge: Story = {
+  args: {
+    workspaceFixture: true,
   },
 };

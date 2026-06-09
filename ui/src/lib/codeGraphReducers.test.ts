@@ -142,6 +142,24 @@ describe("nodeReducer", () => {
     expect(out).toBe(attrs);
   });
 
+  it("de-emphasizes workspace context nodes even when no highlight is active", () => {
+    const out = nodeReducer(
+      "remote",
+      {
+        color: "#22d3ee",
+        size: 10,
+        label: "Remote",
+        isWorkspaceContext: true,
+        borderSize: 2,
+      },
+      EMPTY_HIGHLIGHT_VIEW,
+    );
+    expect(out.workspaceContextDimmed).toBe(true);
+    expect(out.label).toBeUndefined();
+    expect(out.size as number).toBeLessThan(10);
+    expect(out.borderSize as number).toBeLessThan(2);
+  });
+
   it("hides nodes outside the depth frontier", () => {
     const v = viewWith({
       selectionId: "a",
@@ -244,6 +262,39 @@ describe("edgeReducer", () => {
     });
     const out = edgeReducer("y", "z", { kind: "Reads", size: 1 }, v);
     expect(out.color).toMatch(/rgba\(100/);
+  });
+
+  it("keeps cross-workspace edges prominent under selection dimming", () => {
+    const v = viewWith({
+      selectionId: "a",
+      selectionNeighbors: new Set(["a"]),
+    });
+    const out = edgeReducer(
+      "remote-a",
+      "remote-b",
+      { kind: "Reads", size: 2, isCrossWorkspace: true, color: "#facc15" },
+      v,
+    );
+    expect(out.color).toMatch(/250, 204, 21/);
+    expect(out.size as number).toBeGreaterThan(2);
+    expect(out.zIndex as number).toBeGreaterThan(5);
+  });
+
+  it("makes selected cross-workspace edges stronger than normal selected edges", () => {
+    const v = viewWith({
+      selectionId: "a",
+      selectionNeighbors: new Set(["a", "b"]),
+    });
+    const normal = edgeReducer("a", "b", { kind: "Reads", size: 2 }, v);
+    const cross = edgeReducer(
+      "a",
+      "b",
+      { kind: "Reads", size: 2, crossWorkspace: true },
+      v,
+    );
+    expect(cross.color).toMatch(/250, 204, 21/);
+    expect(cross.size).toBeGreaterThan(normal.size as number);
+    expect(cross.zIndex).toBeGreaterThan(normal.zIndex as number);
   });
 });
 
