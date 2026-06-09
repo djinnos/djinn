@@ -610,7 +610,7 @@ expression: tool_schemas_lead()
     },
     "readOnly": false,
     "destructive": false,
-    "idempotent": false,
+    "idempotent": true,
     "openWorld": false,
     "concurrent_safe": false
   },
@@ -708,7 +708,7 @@ expression: tool_schemas_lead()
     },
     "readOnly": false,
     "destructive": false,
-    "idempotent": false,
+    "idempotent": true,
     "openWorld": false,
     "concurrent_safe": false
   },
@@ -756,7 +756,7 @@ expression: tool_schemas_lead()
     },
     "readOnly": false,
     "destructive": false,
-    "idempotent": false,
+    "idempotent": true,
     "openWorld": false,
     "concurrent_safe": false
   },
@@ -776,7 +776,7 @@ expression: tool_schemas_lead()
       }
     },
     "readOnly": false,
-    "destructive": false,
+    "destructive": true,
     "idempotent": false,
     "openWorld": false,
     "concurrent_safe": false
@@ -797,7 +797,7 @@ expression: tool_schemas_lead()
       }
     },
     "readOnly": false,
-    "destructive": false,
+    "destructive": true,
     "idempotent": false,
     "openWorld": false,
     "concurrent_safe": false
@@ -818,8 +818,8 @@ expression: tool_schemas_lead()
       }
     },
     "readOnly": false,
-    "destructive": false,
-    "idempotent": false,
+    "destructive": true,
+    "idempotent": true,
     "openWorld": false,
     "concurrent_safe": false
   },
@@ -839,7 +839,7 @@ expression: tool_schemas_lead()
       }
     },
     "readOnly": false,
-    "destructive": false,
+    "destructive": true,
     "idempotent": false,
     "openWorld": false,
     "concurrent_safe": false

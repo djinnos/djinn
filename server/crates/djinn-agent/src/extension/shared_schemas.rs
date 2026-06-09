@@ -39,8 +39,16 @@ impl ToolSafetyAnnotations {
         Self::new(false, false, false, false, false)
     }
 
+    pub(crate) const fn idempotent_mutation() -> Self {
+        Self::new(false, false, true, false, false)
+    }
+
     pub(crate) const fn destructive() -> Self {
         Self::new(false, true, false, false, false)
+    }
+
+    pub(crate) const fn idempotent_destructive() -> Self {
+        Self::new(false, true, true, false, false)
     }
 }
 
@@ -123,12 +131,21 @@ pub(crate) fn shared_base_tool_schemas() -> Vec<serde_json::Value> {
 pub(crate) fn shared_lead_tool_schemas() -> Vec<serde_json::Value> {
     vec![
         serialize_tool_schema(tool_task_create(), ToolSafetyAnnotations::mutation()),
-        serialize_tool_schema(tool_task_update(), ToolSafetyAnnotations::mutation()),
+        serialize_tool_schema(
+            tool_task_update(),
+            ToolSafetyAnnotations::idempotent_mutation(),
+        ),
         serialize_tool_schema(tool_task_blocked_list(), ToolSafetyAnnotations::read_only()),
         serialize_tool_schema(tool_epic_show(), ToolSafetyAnnotations::read_only()),
-        serialize_tool_schema(tool_epic_update(), ToolSafetyAnnotations::mutation()),
+        serialize_tool_schema(
+            tool_epic_update(),
+            ToolSafetyAnnotations::idempotent_mutation(),
+        ),
         serialize_tool_schema(tool_epic_tasks(), ToolSafetyAnnotations::read_only()),
-        serialize_tool_schema(tool_epic_close(), ToolSafetyAnnotations::mutation()),
+        serialize_tool_schema(
+            tool_epic_close(),
+            ToolSafetyAnnotations::idempotent_mutation(),
+        ),
     ]
 }
 
