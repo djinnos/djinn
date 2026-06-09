@@ -17,11 +17,11 @@ expression: tool_schemas_worker()
           "description": "Task UUID or short ID"
         }
       }
-    },,
+    },
     "readOnly": true,
     "destructive": false,
     "idempotent": true,
-    "openWorld": false
+    "openWorld": false,
     "concurrent_safe": true
   },
   {
@@ -60,11 +60,11 @@ expression: tool_schemas_worker()
           "type": "integer"
         }
       }
-    },,
+    },
     "readOnly": true,
     "destructive": false,
     "idempotent": true,
-    "openWorld": false
+    "openWorld": false,
     "concurrent_safe": true
   },
   {
@@ -93,11 +93,11 @@ expression: tool_schemas_worker()
           "description": "Max entries to return (default 30, max 50)"
         }
       }
-    },,
+    },
     "readOnly": true,
     "destructive": false,
     "idempotent": true,
-    "openWorld": false
+    "openWorld": false,
     "concurrent_safe": true
   },
   {
@@ -114,11 +114,11 @@ expression: tool_schemas_worker()
           "description": "Permalink or title"
         }
       }
-    },,
+    },
     "readOnly": true,
     "destructive": false,
     "idempotent": true,
-    "openWorld": false
+    "openWorld": false,
     "concurrent_safe": true
   },
   {
@@ -147,11 +147,11 @@ expression: tool_schemas_worker()
           "type": "integer"
         }
       }
-    },,
+    },
     "readOnly": true,
     "destructive": false,
     "idempotent": true,
-    "openWorld": false
+    "openWorld": false,
     "concurrent_safe": true
   },
   {
@@ -173,11 +173,11 @@ expression: tool_schemas_worker()
           "description": "Depth control: 0 = unlimited, 1 = exact folder (default), N = N levels"
         }
       }
-    },,
+    },
     "readOnly": true,
     "destructive": false,
     "idempotent": true,
-    "openWorld": false
+    "openWorld": false,
     "concurrent_safe": true
   },
   {
@@ -198,11 +198,11 @@ expression: tool_schemas_worker()
           "description": "Timeout in milliseconds (default 120000)"
         }
       }
-    },,
+    },
     "readOnly": false,
     "destructive": true,
     "idempotent": false,
-    "openWorld": false
+    "openWorld": false,
     "concurrent_safe": false
   },
   {
@@ -230,11 +230,11 @@ expression: tool_schemas_worker()
       "required": [
         "file_path"
       ]
-    },,
+    },
     "readOnly": true,
     "destructive": false,
     "idempotent": true,
-    "openWorld": false
+    "openWorld": false,
     "concurrent_safe": true
   },
   {
@@ -267,11 +267,11 @@ expression: tool_schemas_worker()
           "description": "Max hits per project (default 100)"
         }
       }
-    },,
+    },
     "readOnly": true,
     "destructive": false,
     "idempotent": true,
-    "openWorld": true
+    "openWorld": true,
     "concurrent_safe": true
   },
   {
@@ -288,11 +288,11 @@ expression: tool_schemas_worker()
           "description": "Name of the skill to load (as shown in the Available Skills section)"
         }
       }
-    },,
+    },
     "readOnly": true,
     "destructive": false,
     "idempotent": true,
-    "openWorld": false
+    "openWorld": false,
     "concurrent_safe": true
   },
   {
@@ -347,11 +347,11 @@ expression: tool_schemas_worker()
           "description": "Case-insensitive substring filter applied to symbol names and name paths for operation='symbols'"
         }
       }
-    },,
+    },
     "readOnly": true,
     "destructive": false,
     "idempotent": true,
-    "openWorld": false
+    "openWorld": false,
     "concurrent_safe": true
   },
   {
@@ -372,11 +372,11 @@ expression: tool_schemas_worker()
           "description": "Optional step name to filter the log to (e.g. 'Tests')"
         }
       }
-    },,
+    },
     "readOnly": true,
     "destructive": false,
     "idempotent": true,
-    "openWorld": false
+    "openWorld": false,
     "concurrent_safe": true
   },
   {
@@ -405,11 +405,11 @@ expression: tool_schemas_worker()
           "description": "Path filter to search within specific directories (e.g. \"src/\")"
         }
       }
-    },,
+    },
     "readOnly": true,
     "destructive": false,
     "idempotent": true,
-    "openWorld": true
+    "openWorld": true,
     "concurrent_safe": true
   },
   {
@@ -436,11 +436,11 @@ expression: tool_schemas_worker()
           "description": "Number of lines to return (default 200)"
         }
       }
-    },,
+    },
     "readOnly": true,
     "destructive": false,
     "idempotent": true,
-    "openWorld": false
+    "openWorld": false,
     "concurrent_safe": true
   },
   {
@@ -467,11 +467,11 @@ expression: tool_schemas_worker()
           "description": "Lines of context around each match (default 3)"
         }
       }
-    },,
+    },
     "readOnly": true,
     "destructive": false,
     "idempotent": true,
-    "openWorld": false
+    "openWorld": false,
     "concurrent_safe": true
   },
   {
@@ -493,11 +493,11 @@ expression: tool_schemas_worker()
           "description": "File content to write"
         }
       }
-    },,
+    },
     "readOnly": false,
     "destructive": true,
     "idempotent": false,
-    "openWorld": false
+    "openWorld": false,
     "concurrent_safe": false
   },
   {
@@ -524,11 +524,11 @@ expression: tool_schemas_worker()
           "description": "Replacement text"
         }
       }
-    },,
+    },
     "readOnly": false,
     "destructive": true,
     "idempotent": false,
-    "openWorld": false
+    "openWorld": false,
     "concurrent_safe": false
   },
   {
@@ -545,11 +545,11 @@ expression: tool_schemas_worker()
           "description": "Patch content in the custom format (see tool description)"
         }
       }
-    },,
+    },
     "readOnly": false,
     "destructive": true,
     "idempotent": false,
-    "openWorld": false
+    "openWorld": false,
     "concurrent_safe": false
   },
   {
@@ -575,11 +575,11 @@ expression: tool_schemas_worker()
           "description": "Minimum confidence threshold for related notes (default 0.1). Notes below this are excluded."
         }
       }
-    },,
+    },
     "readOnly": true,
     "destructive": false,
     "idempotent": true,
-    "openWorld": false
+    "openWorld": false,
     "concurrent_safe": true
   },
   {
@@ -617,11 +617,11 @@ expression: tool_schemas_worker()
           "description": "Optional tags for categorisation"
         }
       }
-    },,
+    },
     "readOnly": false,
     "destructive": false,
     "idempotent": false,
-    "openWorld": false
+    "openWorld": false,
     "concurrent_safe": false
   },
   {
@@ -660,11 +660,11 @@ expression: tool_schemas_worker()
           "description": "If provided and different from current type, move the note to the new type's folder"
         }
       }
-    },,
+    },
     "readOnly": false,
     "destructive": false,
     "idempotent": false,
-    "openWorld": false
+    "openWorld": false,
     "concurrent_safe": false
   },
   {
@@ -690,11 +690,11 @@ expression: tool_schemas_worker()
           "description": "Optional suggested split: list of smaller tasks the Lead should create"
         }
       }
-    },,
+    },
     "readOnly": false,
     "destructive": false,
     "idempotent": false,
-    "openWorld": false
+    "openWorld": false,
     "concurrent_safe": false
   },
   {
@@ -736,11 +736,11 @@ expression: tool_schemas_worker()
           "description": "Any outstanding concerns or caveats for the reviewer"
         }
       }
-    },,
+    },
     "readOnly": false,
     "destructive": false,
     "idempotent": false,
-    "openWorld": false
+    "openWorld": false,
     "concurrent_safe": false
   }
 ]

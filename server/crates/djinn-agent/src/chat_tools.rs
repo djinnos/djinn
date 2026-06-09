@@ -108,8 +108,11 @@ fn tool_project_list() -> RmcpTool {
     )
 }
 
-fn serialize_chat_tool(tool: RmcpTool, concurrent_safe: bool) -> serde_json::Value {
-    crate::extension::shared_schemas::serialize_tool_schema(tool, concurrent_safe)
+fn serialize_chat_tool(
+    tool: RmcpTool,
+    annotations: crate::extension::shared_schemas::ToolSafetyAnnotations,
+) -> serde_json::Value {
+    crate::extension::shared_schemas::serialize_tool_schema(tool, annotations)
 }
 
 /// Tool schemas for the chat interface: read-only codebase tools plus
@@ -118,24 +121,35 @@ fn serialize_chat_tool(tool: RmcpTool, concurrent_safe: bool) -> serde_json::Val
 /// Diverges from the architect surface on `lsp` (chat drops it; architect
 /// keeps it).  See module-level docs + ADR-050 amendment.
 pub fn chat_extension_tool_schemas() -> Vec<serde_json::Value> {
+    use crate::extension::shared_schemas::ToolSafetyAnnotations;
     use crate::extension::tool_defs::{
         tool_code_graph, tool_code_search, tool_github_search, tool_output_grep, tool_output_view,
         tool_pr_review_context,
     };
+
     vec![
-        serialize_chat_tool(tool_chat_shell(), false),
-        serialize_chat_tool(tool_chat_read(), true),
-        serialize_chat_tool(tool_code_search(), true),
-        serialize_chat_tool(tool_code_graph(), true),
-        serialize_chat_tool(tool_pr_review_context(), true),
-        serialize_chat_tool(tool_github_search(), true),
-        serialize_chat_tool(tool_project_list(), true),
+        serialize_chat_tool(tool_chat_shell(), ToolSafetyAnnotations::mutation()),
+        serialize_chat_tool(tool_chat_read(), ToolSafetyAnnotations::read_only()),
+        serialize_chat_tool(
+            tool_code_search(),
+            ToolSafetyAnnotations::open_world_read_only(),
+        ),
+        serialize_chat_tool(
+            tool_code_graph(),
+            ToolSafetyAnnotations::open_world_read_only(),
+        ),
+        serialize_chat_tool(tool_pr_review_context(), ToolSafetyAnnotations::read_only()),
+        serialize_chat_tool(
+            tool_github_search(),
+            ToolSafetyAnnotations::open_world_read_only(),
+        ),
+        serialize_chat_tool(tool_project_list(), ToolSafetyAnnotations::read_only()),
         // Stash navigation for truncated tool results. Served in-process
         // against the chat loop's `OutputStash` (see the chat handler), not
         // routed through `dispatch_chat_tool` — so they're advertised here
         // but excluded from `CHAT_EXTENSION_TOOLS`.
-        serialize_chat_tool(tool_output_view(), true),
-        serialize_chat_tool(tool_output_grep(), true),
+        serialize_chat_tool(tool_output_view(), ToolSafetyAnnotations::read_only()),
+        serialize_chat_tool(tool_output_grep(), ToolSafetyAnnotations::read_only()),
     ]
 }
 
