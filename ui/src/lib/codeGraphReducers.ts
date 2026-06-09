@@ -266,6 +266,21 @@ export function nodeReducer(
     };
   }
 
+  if (attrs.isWorkspaceContext === true) {
+    baseAttrs = {
+      ...baseAttrs,
+      color: "rgba(148, 163, 184, 0.42)",
+      size: attrSize(attrs, 6) * 0.78,
+      label: undefined,
+      zIndex: -1,
+      highlighted: false,
+      workspaceContextDimmed: true,
+      // Keep the workspace ring/badge visible so remote context still has an
+      // identity, but make it thinner than selected-workspace nodes.
+      borderSize: Math.max(1, (typeof attrs.borderSize === "number" ? attrs.borderSize : 1) * 0.7),
+    };
+  }
+
   const mode = pickHighlightMode(nodeId, view);
   if (mode === "none") return baseAttrs;
 
@@ -507,6 +522,8 @@ export function topComplexityIds(
 
 const EDGE_COLOR_DIMMED = "rgba(100, 116, 139, 0.08)"; // slate-500 @ 8%
 const EDGE_COLOR_HIGHLIGHTED = "rgba(251, 146, 60, 0.85)"; // orange-400 @ 85%
+const EDGE_COLOR_CROSS_WORKSPACE = "rgba(250, 204, 21, 0.92)"; // yellow-400 @ 92%
+const EDGE_COLOR_CROSS_WORKSPACE_DIMMED = "rgba(250, 204, 21, 0.55)";
 
 export interface EdgeReducerOverride extends Attributes {
   color?: string;
@@ -551,6 +568,8 @@ export function edgeReducer(
   if (isViewEmpty(view)) return attrs;
 
   // Edge sits inside the selection's 1-hop frontier?
+  const isCrossWorkspace =
+    attrs.isCrossWorkspace === true || attrs.crossWorkspace === true;
   const isSelectionEdge =
     view.selectionId !== null &&
     (source === view.selectionId ||
@@ -561,9 +580,18 @@ export function edgeReducer(
   if (isSelectionEdge) {
     return {
       ...attrs,
-      color: EDGE_COLOR_HIGHLIGHTED,
-      size: attrSize(attrs, 1) * 1.3,
-      zIndex: 5,
+      color: isCrossWorkspace ? EDGE_COLOR_CROSS_WORKSPACE : EDGE_COLOR_HIGHLIGHTED,
+      size: attrSize(attrs, 1) * (isCrossWorkspace ? 1.55 : 1.3),
+      zIndex: isCrossWorkspace ? 30 : 5,
+    };
+  }
+
+  if (isCrossWorkspace) {
+    return {
+      ...attrs,
+      color: EDGE_COLOR_CROSS_WORKSPACE_DIMMED,
+      size: attrSize(attrs, 1) * 1.2,
+      zIndex: 18,
     };
   }
 

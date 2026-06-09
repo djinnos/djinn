@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   COMMUNITY_COLORS,
+  WORKSPACE_COLORS,
   buildGraphFromSnapshot,
   colorForCommunity,
   colorForNode,
+  colorForWorkspace,
   edgeStyleFor,
   filterSnapshotForWorkspace,
   massForNode,
@@ -401,6 +403,21 @@ describe("buildGraphFromSnapshot", () => {
     expect(graph.getNodeAttribute("file:src/main.rs", "workspace")).toBe(
       "app",
     );
+    expect(graph.getNodeAttribute("file:src/main.rs", "workspaceColor")).toBe(
+      colorForWorkspace("app"),
+    );
+    expect(graph.getNodeAttribute("file:src/main.rs", "workspaceBadge")).toBe(
+      "A",
+    );
+    expect(graph.getNodeAttribute("file:src/main.rs", "label")).toBe(
+      "main.rs · app",
+    );
+    expect(graph.getNodeAttribute("file:src/main.rs", "baseLabel")).toBe(
+      "main.rs",
+    );
+    expect(graph.getNodeAttribute("file:src/main.rs", "borderColor")).toBe(
+      colorForWorkspace("app"),
+    );
   });
 
   it("carries workspace context markers onto graphology node attributes", () => {
@@ -448,6 +465,43 @@ describe("buildGraphFromSnapshot", () => {
       "domain",
     );
     expect(graph.getEdgeAttribute(crossEdge!, "isCrossWorkspace")).toBe(true);
+    expect(graph.getEdgeAttribute(crossEdge!, "crossWorkspace")).toBe(true);
+    expect(graph.getEdgeAttribute(crossEdge!, "color")).toBe("#facc15");
+    expect(graph.getEdgeAttribute(crossEdge!, "zIndex")).toBe(20);
+    expect(graph.getEdgeAttribute(crossEdge!, "lineStyle")).toBe("dashed");
+  });
+
+  it("keeps intra-workspace edges less prominent than cross-workspace edges", () => {
+    const withWorkspace: SnapshotPayload = {
+      ...fixtureSnapshot,
+      nodes: fixtureSnapshot.nodes.map((n) => {
+        if (n.id === "file:src/main.rs" || n.id === "symbol:scip-rust . . . main()") {
+          return { ...n, workspace: "app" };
+        }
+        if (n.id === "symbol:scip-rust . . . User#") {
+          return { ...n, workspace: "domain" };
+        }
+        return n;
+      }),
+    };
+    const graph = buildGraphFromSnapshot(withWorkspace);
+    const intraEdge = graph.edges().find(
+      (edge) =>
+        graph.source(edge) === "file:src/main.rs" &&
+        graph.target(edge) === "symbol:scip-rust . . . main()",
+    );
+    const crossEdge = graph.edges().find(
+      (edge) =>
+        graph.source(edge) === "symbol:scip-rust . . . main()" &&
+        graph.target(edge) === "symbol:scip-rust . . . User#",
+    );
+    expect(intraEdge).toBeDefined();
+    expect(crossEdge).toBeDefined();
+    expect(graph.getEdgeAttribute(intraEdge!, "isCrossWorkspace")).toBe(false);
+    expect(graph.getEdgeAttribute(crossEdge!, "isCrossWorkspace")).toBe(true);
+    expect(graph.getEdgeAttribute(crossEdge!, "size") as number).toBeGreaterThan(
+      graph.getEdgeAttribute(intraEdge!, "size") as number,
+    );
   });
 
   it("seeds structural nodes on a deterministic-radius spiral, not at the origin", () => {
@@ -683,6 +737,11 @@ describe("colorForNode", () => {
 
   it("colorForCommunity is deterministic across calls", () => {
     expect(colorForCommunity("alpha")).toBe(colorForCommunity("alpha"));
+  });
+
+  it("colorForWorkspace is deterministic and separate from topology color", () => {
+    expect(colorForWorkspace("api")).toBe(colorForWorkspace("api"));
+    expect(WORKSPACE_COLORS).toContain(colorForWorkspace("api"));
   });
 
   it("colorForCommunity distributes distinct community ids across the palette", () => {

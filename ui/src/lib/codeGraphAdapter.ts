@@ -299,6 +299,23 @@ export const COMMUNITY_COLORS = [
 ] as const;
 
 /**
+ * Distinct, deterministic workspace identity palette. Kept separate from the
+ * topology/community palette so workspace membership can be shown via halos /
+ * badges without stealing the main color channel from topology or complexity
+ * heatmap modes.
+ */
+export const WORKSPACE_COLORS = [
+  "#22d3ee", // cyan-400
+  "#f472b6", // pink-400
+  "#a3e635", // lime-400
+  "#fb923c", // orange-400
+  "#818cf8", // indigo-400
+  "#34d399", // emerald-400
+  "#facc15", // yellow-400
+  "#c084fc", // purple-400
+] as const;
+
+/**
  * The project root keeps its own bright accent so it always reads as
  * "the apex node" no matter which palette index its slug hashes to.
  */
@@ -323,6 +340,23 @@ function parentDirectory(filePath: string): string {
 
 export function colorForCommunity(communityId: string): string {
   return COMMUNITY_COLORS[fnv1a(communityId) % COMMUNITY_COLORS.length];
+}
+
+export function colorForWorkspace(workspace: string): string {
+  return WORKSPACE_COLORS[fnv1a(workspace) % WORKSPACE_COLORS.length];
+}
+
+function workspaceBadge(workspace: string): string {
+  const parts = workspace
+    .split(/[^a-zA-Z0-9]+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const seed = parts.length > 0 ? parts : [workspace];
+  return seed
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? "")
+    .join("")
+    .slice(0, 3);
 }
 
 /**
@@ -587,20 +621,23 @@ export function buildGraphFromSnapshot(
     const confidenceFactor = 0.4 + edge.confidence * 0.6;
     const sourceWorkspace = nodeMap.get(edge.from)?.workspace;
     const targetWorkspace = nodeMap.get(edge.to)?.workspace;
+    const isCrossWorkspace =
+      !!sourceWorkspace && !!targetWorkspace && sourceWorkspace !== targetWorkspace;
+    const crossWorkspaceColor = isCrossWorkspace ? "#facc15" : undefined;
     graph.addEdge(edge.from, edge.to, {
       kind: edge.kind,
       confidence: edge.confidence,
       reason: edge.reason,
       sourceWorkspace,
       targetWorkspace,
-      isCrossWorkspace:
-        !!sourceWorkspace &&
-        !!targetWorkspace &&
-        sourceWorkspace !== targetWorkspace,
-      size: baseSize * style.sizeMultiplier * confidenceFactor,
-      color: style.color,
+      isCrossWorkspace,
+      crossWorkspace: isCrossWorkspace,
+      size: baseSize * style.sizeMultiplier * confidenceFactor * (isCrossWorkspace ? 2.4 : 1),
+      color: crossWorkspaceColor ?? style.color,
       type: "curved",
-      curvature: 0.12 + Math.random() * 0.08,
+      curvature: (isCrossWorkspace ? 0.28 : 0.12) + Math.random() * 0.08,
+      zIndex: isCrossWorkspace ? 20 : 1,
+      lineStyle: isCrossWorkspace ? "dashed" : "solid",
     });
   }
 
@@ -617,8 +654,11 @@ function addNode(
   if (graph.hasNode(node.id)) return;
   const normalized = node.pagerank / maxRank;
   const size = scaledNodeSize(node, normalized, nodeCount);
+  const workspaceColor = node.workspace ? colorForWorkspace(node.workspace) : undefined;
+  const label = node.workspace ? `${node.label} · ${node.workspace}` : node.label;
   graph.addNode(node.id, {
-    label: node.label,
+    label,
+    baseLabel: node.label,
     x: pos.x,
     y: pos.y,
     size,
@@ -630,6 +670,11 @@ function addNode(
     filePath: node.file_path,
     communityId: node.community_id,
     workspace: node.workspace,
+    workspaceColor,
+    workspaceBadge: node.workspace ? workspaceBadge(node.workspace) : undefined,
+    borderColor: workspaceColor,
+    borderSize: workspaceColor ? (node.workspace_context === true ? 1 : 1.5) : undefined,
+    haloed: workspaceColor ? true : undefined,
     isWorkspaceContext: node.workspace_context === true,
     /**
      * Iter 30: forwarded so the heatmap reducer can colorize without
