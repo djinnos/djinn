@@ -4,7 +4,7 @@ mod tests {
 
     use djinn_core::events::EventBus;
     use djinn_db::{Database, NoteRepository, ProjectRepository};
-    use rmcp::{Json, handler::server::wrapper::Parameters};
+    use rmcp::{Json, ServerHandler, handler::server::wrapper::Parameters};
     use serde_json::json;
     use tokio::time::sleep;
 
@@ -253,6 +253,95 @@ mod tests {
         assert!(pair.contains(&note_a.id.as_str()));
         assert!(pair.contains(&note_b.id.as_str()));
         assert!(manager.server_for_session(&session_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn graph_schema_resource_is_advertised_and_readable() {
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db);
+        let server = DjinnMcpServer::new(state);
+
+        let info = server.get_info();
+        assert!(
+            info.capabilities.resources.is_some(),
+            "server should advertise MCP resources capability"
+        );
+
+        let templates = server.all_resource_templates();
+        let graph_template = templates
+            .resource_templates
+            .iter()
+            .find(|template| template.uri_template == "djinn://project/{id}/graph-schema")
+            .expect("graph schema resource template is advertised");
+        assert_eq!(graph_template.name, "project_graph_schema");
+        assert_eq!(
+            graph_template.mime_type.as_deref(),
+            Some("application/json")
+        );
+
+        let result = server
+            .read_resource_uri("djinn://project/test-project/graph-schema".to_string())
+            .expect("read graph schema resource");
+        assert_eq!(result.contents.len(), 1);
+        let text = match &result.contents[0] {
+            rmcp::model::ResourceContents::TextResourceContents {
+                uri,
+                mime_type,
+                text,
+                ..
+            } => {
+                assert_eq!(uri, "djinn://project/test-project/graph-schema");
+                assert_eq!(mime_type.as_deref(), Some("application/json"));
+                text
+            }
+            other => panic!("expected text graph schema resource, got {other:?}"),
+        };
+        let payload: serde_json::Value = serde_json::from_str(text).expect("schema JSON");
+        assert_eq!(payload["tool"]["name"], "code_graph");
+        assert_eq!(payload["resource"]["project_id_or_slug"], "test-project");
+
+        let operations = payload["operations"].as_array().expect("operations array");
+        for expected in [
+            "search",
+            "describe",
+            "neighbors",
+            "impact",
+            "context",
+            "query_subgraph",
+        ] {
+            assert!(
+                operations
+                    .iter()
+                    .any(|operation| operation["name"] == expected),
+                "graph schema should include operation {expected}"
+            );
+        }
+        let node_concepts = payload["node_concepts"]
+            .as_array()
+            .expect("node concepts array");
+        assert!(
+            node_concepts
+                .iter()
+                .any(|concept| concept["name"] == "symbol")
+        );
+        assert!(
+            node_concepts
+                .iter()
+                .any(|concept| concept["name"] == "file")
+        );
+        let edge_concepts = payload["edge_concepts"]
+            .as_array()
+            .expect("edge concepts array");
+        assert!(
+            edge_concepts
+                .iter()
+                .any(|concept| concept["name"] == "calls")
+        );
+        assert!(
+            edge_concepts
+                .iter()
+                .any(|concept| concept["name"] == "imports")
+        );
     }
 
     // The legacy propose_adr_* dispatch tests were removed with the old
