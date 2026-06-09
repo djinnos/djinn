@@ -755,6 +755,7 @@ impl RepoGraphOps for RepoGraphBridge {
     async fn ranked(
         &self,
         ctx: &ProjectCtx,
+        _workspace: Option<&str>,
         kind_filter: Option<&str>,
         sort_by: Option<&str>,
         limit: usize,
@@ -920,6 +921,7 @@ impl RepoGraphOps for RepoGraphBridge {
     async fn impact(
         &self,
         ctx: &ProjectCtx,
+        _workspace: Option<&str>,
         key: &str,
         max_depth: usize,
         group_by: Option<&str>,
@@ -1099,6 +1101,7 @@ impl RepoGraphOps for RepoGraphBridge {
     async fn orphans(
         &self,
         ctx: &ProjectCtx,
+        _workspace: Option<&str>,
         kind_filter: Option<&str>,
         visibility: Option<&str>,
         limit: usize,
@@ -1194,6 +1197,7 @@ impl RepoGraphOps for RepoGraphBridge {
     async fn path(
         &self,
         ctx: &ProjectCtx,
+        _workspace: Option<&str>,
         from: &str,
         to: &str,
         max_depth: Option<usize>,
@@ -1554,6 +1558,7 @@ impl RepoGraphOps for RepoGraphBridge {
     async fn snapshot(
         &self,
         ctx: &ProjectCtx,
+        _workspace: Option<&str>,
         node_cap: usize,
         exclusions: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
     ) -> Result<SnapshotPayload, String> {
@@ -1921,6 +1926,7 @@ impl RepoGraphOps for RepoGraphBridge {
     async fn api_surface(
         &self,
         ctx: &ProjectCtx,
+        _workspace: Option<&str>,
         module_glob: Option<&str>,
         visibility: Option<&str>,
         limit: usize,
@@ -2838,6 +2844,7 @@ impl RepoGraphOps for RepoGraphBridge {
     async fn touches_hot_path(
         &self,
         ctx: &ProjectCtx,
+        _workspace: Option<&str>,
         seed_entries: &[String],
         seed_sinks: &[String],
         symbols: &[String],

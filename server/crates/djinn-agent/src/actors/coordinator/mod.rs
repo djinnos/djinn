@@ -1615,7 +1615,10 @@ mod tests {
 
         // Parked terminally — task is closed.
         let parked = repo.get(&task.id).await.unwrap().unwrap();
-        assert_eq!(parked.status, "closed", "second strike force-closes the task");
+        assert_eq!(
+            parked.status, "closed",
+            "second strike force-closes the task"
+        );
 
         // No planner intervention marker for this reopen count, and no new
         // planner review task — the loop is broken, not re-escalated.

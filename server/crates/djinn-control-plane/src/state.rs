@@ -360,6 +360,7 @@ pub mod stubs {
         async fn ranked(
             &self,
             _: &crate::bridge::ProjectCtx,
+            _workspace: Option<&str>,
             _: Option<&str>,
             _: Option<&str>,
             _: usize,
@@ -376,6 +377,7 @@ pub mod stubs {
         async fn impact(
             &self,
             _: &crate::bridge::ProjectCtx,
+            _workspace: Option<&str>,
             _: &str,
             _: usize,
             _: Option<&str>,
@@ -403,6 +405,7 @@ pub mod stubs {
         async fn orphans(
             &self,
             _: &crate::bridge::ProjectCtx,
+            _workspace: Option<&str>,
             _: Option<&str>,
             _: Option<&str>,
             _: usize,
@@ -412,6 +415,7 @@ pub mod stubs {
         async fn path(
             &self,
             _: &crate::bridge::ProjectCtx,
+            _workspace: Option<&str>,
             _: &str,
             _: &str,
             _: Option<usize>,
@@ -458,6 +462,7 @@ pub mod stubs {
         async fn snapshot(
             &self,
             _: &crate::bridge::ProjectCtx,
+            _workspace: Option<&str>,
             node_cap: usize,
             _: &crate::tools::graph_exclusions::GraphExclusions,
         ) -> Result<crate::bridge::SnapshotPayload, String> {
@@ -510,6 +515,7 @@ pub mod stubs {
         async fn api_surface(
             &self,
             _: &crate::bridge::ProjectCtx,
+            _workspace: Option<&str>,
             _: Option<&str>,
             _: Option<&str>,
             _: usize,
@@ -587,6 +593,7 @@ pub mod stubs {
         async fn touches_hot_path(
             &self,
             _: &crate::bridge::ProjectCtx,
+            _workspace: Option<&str>,
             _: &[String],
             _: &[String],
             _: &[String],
