@@ -16,7 +16,12 @@ use djinn_control_plane::bridge::{
     DiffTouchesResult, EdgeCategory, EdgeEntry, GitOps, GraphNeighbor, GraphStatus, HotPathHit,
     HotspotEntry, ImpactEntry, ImpactResult, LspOps, LspWarning, MetricsAtResult, ModelPoolStatus,
     NeighborsResult, OrphanEntry, PagerankTier, PathHop, PathResult, PoolStatus, ProcessRef,
-    ProjectCtx, ProvisionServiceRequest, ProvisionedService, RankedNode, RefactorCandidate,
+    ProjectCtx, ProvisionServiceRequest, ProvisionedService,
+    QuerySubgraphBudget as WireQuerySubgraphBudget, QuerySubgraphEdge as WireQuerySubgraphEdge,
+    QuerySubgraphNode as WireQuerySubgraphNode, QuerySubgraphRequest,
+    QuerySubgraphResult as WireQuerySubgraphResult,
+    QuerySubgraphSeedDebug as WireQuerySubgraphSeedDebug,
+    QuerySubgraphTraversalDebug as WireQuerySubgraphTraversalDebug, RankedNode, RefactorCandidate,
     RelatedSymbol, RepoGraphOps, ResolveOutcome, RunningTaskInfo, RuntimeOps, SearchHit,
     SemanticQueryEmbedding, SlotPoolOps, SnapshotEdge, SnapshotNode, SnapshotPayload, SymbolAtHit,
     SymbolContext, SymbolDescription, SymbolNode, TouchedSymbol,
@@ -750,6 +755,149 @@ impl RepoGraphOps for RepoGraphBridge {
                 "invalid group_by '{other}': only 'file' is supported"
             )),
         }
+    }
+
+    async fn query_subgraph(
+        &self,
+        ctx: &ProjectCtx,
+        req: QuerySubgraphRequest,
+    ) -> Result<WireQuerySubgraphResult, String> {
+        use djinn_graph::query_subgraph::{QuerySubgraphParams, SeedSource};
+        use djinn_graph::repo_graph::{RepoGraphEdgeKind, RepoGraphNodeKind};
+
+        fn node_kind(label: Option<&str>) -> Result<Option<RepoGraphNodeKind>, String> {
+            match label.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+                None | Some("") => Ok(None),
+                Some("file") => Ok(Some(RepoGraphNodeKind::File)),
+                Some("symbol") => Ok(Some(RepoGraphNodeKind::Symbol)),
+                Some("process") => Ok(Some(RepoGraphNodeKind::Process)),
+                Some("table") => Ok(Some(RepoGraphNodeKind::Table)),
+                Some(other) => Err(format!("invalid kind_filter '{other}' for query_subgraph")),
+            }
+        }
+        fn edge_kind(label: &str) -> Result<RepoGraphEdgeKind, String> {
+            match label.trim().to_ascii_lowercase().as_str() {
+                "contains_definition" | "containsdefinition" => {
+                    Ok(RepoGraphEdgeKind::ContainsDefinition)
+                }
+                "declared_in_file" | "declaredinfile" => Ok(RepoGraphEdgeKind::DeclaredInFile),
+                "file_reference" | "filereference" | "imports" | "import" => {
+                    Ok(RepoGraphEdgeKind::FileReference)
+                }
+                "symbol_reference" | "symbolreference" | "calls" | "call" | "references" => {
+                    Ok(RepoGraphEdgeKind::SymbolReference)
+                }
+                "reads" | "read" => Ok(RepoGraphEdgeKind::Reads),
+                "writes" | "write" => Ok(RepoGraphEdgeKind::Writes),
+                "extends" | "extend" => Ok(RepoGraphEdgeKind::Extends),
+                "implements" | "implement" => Ok(RepoGraphEdgeKind::Implements),
+                "type_defines" | "typedefines" | "returns" | "return" => {
+                    Ok(RepoGraphEdgeKind::TypeDefines)
+                }
+                "defines" | "define" => Ok(RepoGraphEdgeKind::Defines),
+                "entry_point_of" | "entrypointof" => Ok(RepoGraphEdgeKind::EntryPointOf),
+                "member_of" | "memberof" => Ok(RepoGraphEdgeKind::MemberOf),
+                "step_in_process" | "stepinprocess" => Ok(RepoGraphEdgeKind::StepInProcess),
+                other => Err(format!("invalid edge kind '{other}' for query_subgraph")),
+            }
+        }
+        fn edge_label(kind: RepoGraphEdgeKind) -> String {
+            format!("{:?}", kind).to_ascii_lowercase()
+        }
+        fn node_label(kind: RepoGraphNodeKind) -> String {
+            format!("{:?}", kind).to_ascii_lowercase()
+        }
+        fn seed_label(source: SeedSource) -> String {
+            format!("{:?}", source).to_ascii_lowercase()
+        }
+
+        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
+            &self.state,
+            &ctx.id,
+            &ctx.clone_path,
+        )
+        .await?;
+        let params = QuerySubgraphParams {
+            query: req.query,
+            workspace: req.workspace,
+            context_filter: req.context_filter,
+            file_filter: req.file_filter,
+            kind_filter: node_kind(req.kind_filter.as_deref())?,
+            edge_filter: req
+                .edge_filter
+                .iter()
+                .map(|kind| edge_kind(kind))
+                .collect::<Result<Vec<_>, _>>()?,
+            token_budget: req.token_budget,
+            max_depth: req.max_depth,
+            max_seeds: req.max_seeds,
+            min_hub_degree: None,
+        };
+        let result = graph.query_subgraph(params, None);
+        Ok(WireQuerySubgraphResult {
+            query: result.query,
+            nodes: result
+                .nodes
+                .into_iter()
+                .map(|node| WireQuerySubgraphNode {
+                    uid: node.uid,
+                    kind: node_label(node.kind),
+                    display_name: node.display_name,
+                    file_path: node.file_path,
+                    workspace: node.workspace,
+                    is_seed: node.is_seed,
+                    is_hub: node.is_hub,
+                    degree: node.degree,
+                })
+                .collect(),
+            edges: result
+                .edges
+                .into_iter()
+                .map(|edge| WireQuerySubgraphEdge {
+                    from_uid: edge.from_uid,
+                    to_uid: edge.to_uid,
+                    kind: edge_label(edge.kind),
+                    confidence: edge.confidence,
+                    reason: edge.reason,
+                })
+                .collect(),
+            seeds: result
+                .seeds
+                .into_iter()
+                .map(|seed| WireQuerySubgraphSeedDebug {
+                    uid: seed.uid,
+                    display_name: seed.display_name,
+                    score: seed.score,
+                    source: seed_label(seed.source),
+                    matched_text: seed.matched_text,
+                    debug: seed.debug,
+                })
+                .collect(),
+            inferred_edge_kinds: result
+                .inferred_edge_kinds
+                .into_iter()
+                .map(edge_label)
+                .collect(),
+            budget: WireQuerySubgraphBudget {
+                requested_tokens: result.budget.requested_tokens,
+                estimated_tokens: result.budget.estimated_tokens,
+                truncated: result.budget.truncated,
+                omitted_nodes: result.budget.omitted_nodes,
+                omitted_edges: result.budget.omitted_edges,
+            },
+            traversal: WireQuerySubgraphTraversalDebug {
+                max_depth: result.traversal.max_depth,
+                hub_degree_threshold: result.traversal.hub_degree_threshold,
+                hubs_blocked: result.traversal.hubs_blocked,
+                skipped_edge_kinds: result
+                    .traversal
+                    .skipped_edge_kinds
+                    .into_iter()
+                    .map(edge_label)
+                    .collect(),
+            },
+            narrowing_hints: result.narrowing_hints,
+        })
     }
 
     async fn ranked(
