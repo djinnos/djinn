@@ -334,7 +334,7 @@ async fn call_code_graph_inner(
     ctx: &djinn_control_plane::bridge::ProjectCtx,
     graph_ops: &dyn RepoGraphOps,
 ) -> Result<serde_json::Value, String> {
-    let _ = state; // reserved for future op handlers that need full context
+    let mcp_state = state.to_mcp_state();
     let result: serde_json::Value = match p.operation.as_str() {
         "neighbors" => {
             let key = p
@@ -569,6 +569,35 @@ async fn call_code_graph_inner(
                 )
                 .await?;
             serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
+        }
+        "workspaces" => {
+            let repo = djinn_db::ProjectWorkspaceGraphRepository::new(mcp_state.db().clone());
+            let rows = repo
+                .list_for_project(&ctx.id)
+                .await
+                .map_err(|e| format!("read project_workspace_graph: {e}"))?;
+            let node_counts = graph_ops
+                .workspace_node_counts(ctx)
+                .await
+                .unwrap_or_default();
+            let workspaces: Vec<serde_json::Value> = rows
+                .into_iter()
+                .map(|row| {
+                    let node_count = node_counts
+                        .get(row.workspace_slug.as_str())
+                        .copied()
+                        .unwrap_or(0);
+                    serde_json::json!({
+                        "slug": row.workspace_slug.clone(),
+                        "name": row.workspace_slug,
+                        "node_count": node_count,
+                        "commit_sha": row.commit_sha,
+                        "warmed_at": row.warmed_at,
+                        "status": row.status,
+                    })
+                })
+                .collect();
+            serde_json::json!({ "workspaces": workspaces })
         }
         "symbols_at" => {
             // v8: file/line → enclosing symbols.
@@ -1015,7 +1044,7 @@ async fn call_code_graph_inner(
                  'boundary_check', 'cochange', 'churn', 'hotspots', \
                  'complexity', 'refactor_candidates', 'api_surface', 'metrics_at', 'dead_symbols', \
                  'deprecated_callers', 'touches_hot_path', 'coupling_hubs', \
-                 'status', 'snapshot', 'symbols_at', 'diff_touches', \
+                 'status', 'snapshot', 'workspaces', 'symbols_at', 'diff_touches', \
                  'detect_changes'"
             ));
         }
@@ -1171,7 +1200,7 @@ fn code_graph_capabilities() -> serde_json::Value {
             "boundary_check", "cochange", "churn", "hotspots",
             "complexity", "refactor_candidates", "api_surface", "metrics_at", "dead_symbols",
             "deprecated_callers", "touches_hot_path", "coupling_hubs",
-            "status", "snapshot", "symbols_at", "diff_touches",
+            "status", "snapshot", "workspaces", "symbols_at", "diff_touches",
             "detect_changes",
         ],
         "default_search_mode": std::env::var("DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE")

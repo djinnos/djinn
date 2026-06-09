@@ -970,7 +970,7 @@ expression: signatures
           "type": "string"
         },
         "operation": {
-          "description": "The operation to perform.\nOne of: `neighbors`, `ranked`, `impact`, `implementations`,\n`search`, `query_subgraph`, `cycles`, `orphans`, `path`, `edges`,\n`symbols_at`, `diff_touches`, `detect_changes`, `describe`,\n`context`, `status`, `snapshot`, and the other graph analysis ops.",
+          "description": "The operation to perform.\nOne of: `neighbors`, `ranked`, `impact`, `implementations`,\n`search`, `query_subgraph`, `cycles`, `orphans`, `path`, `edges`,\n`symbols_at`, `diff_touches`, `detect_changes`, `describe`,\n`context`, `status`, `snapshot`, `workspaces`, and the other graph analysis ops.",
           "type": "string"
         },
         "project": {
