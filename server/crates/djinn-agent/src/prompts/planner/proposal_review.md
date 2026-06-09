@@ -9,7 +9,7 @@ Your task `design` contains the proposal id.
 1. Call `proposal_show(id="<proposal-id-from-design>")`. Read the `title`, `body`, `acceptance_criteria` (each has a `met` flag), and `status`.
 2. Review what the closed epics delivered. The targets are directly readable:
    - `read(project="owner/repo", file_path="...")` and `code_search(query="...", project="owner/repo")` against any target repo's default branch (where merged work lives).
-   - For the home project you also have `code_graph` and `build_context`.
+   - For the home project, combine `read`, `code_search`, and `memory_build_context` for local structural and historical context; the code graph tool remains Architect/Chat-only per ADR-050.
 
 ### E2. Reconcile the acceptance criteria
 

@@ -148,9 +148,24 @@ pub(super) fn is_tool_allowed_for_schemas(schemas: &[serde_json::Value], name: &
 }
 
 #[cfg(test)]
+pub(super) fn tool_names_for_agent(
+    agent_type: crate::AgentType,
+) -> std::collections::BTreeSet<String> {
+    agent_type
+        .tool_schemas()
+        .into_iter()
+        .filter_map(|schema| {
+            schema
+                .get("name")
+                .and_then(|name| name.as_str())
+                .map(ToString::to_string)
+        })
+        .collect()
+}
+
+#[cfg(test)]
 pub(super) fn is_tool_allowed_for_agent(agent_type: crate::AgentType, name: &str) -> bool {
-    let schemas = agent_type.tool_schemas();
-    is_tool_allowed_for_schemas(&schemas, name)
+    tool_names_for_agent(agent_type).contains(name)
 }
 
 pub(super) fn ensure_path_within_worktree(path: &Path, worktree_path: &Path) -> Result<(), String> {
