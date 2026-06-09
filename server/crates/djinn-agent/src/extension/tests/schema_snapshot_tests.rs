@@ -45,18 +45,22 @@ fn all_registered_tool_names() -> BTreeSet<String> {
 }
 
 fn assert_tool_references_registered(agent_type: AgentType, references: &[ToolReference]) {
-    let registered = tool_names_for_agent(agent_type);
-    let missing: Vec<String> = references
-        .iter()
-        .filter(|reference| !registered.contains(&reference.name))
-        .map(|reference| format!("{} references `{}`", reference.source, reference.name))
-        .collect();
+    let missing = missing_tool_references(agent_type, references);
     assert!(
         missing.is_empty(),
         "{} prompt/skill references tools absent from its registered schema set:\n{}",
         agent_type.as_str(),
         missing.join("\n")
     );
+}
+
+fn missing_tool_references(agent_type: AgentType, references: &[ToolReference]) -> Vec<String> {
+    let registered = tool_names_for_agent(agent_type);
+    references
+        .iter()
+        .filter(|reference| !registered.contains(&reference.name))
+        .map(|reference| format!("{} references `{}`", reference.source, reference.name))
+        .collect()
 }
 
 fn prompt_references_for_agent(agent_type: AgentType) -> Vec<ToolReference> {
@@ -202,6 +206,33 @@ Use `read(file_path="Cargo.toml")` before edits, then finish with `submit_work(.
         "progressive disclosure guidance should reference the skill_read tool"
     );
     assert_tool_references_registered(AgentType::Worker, &disclosure_references);
+}
+
+#[test]
+fn loaded_skill_fixture_with_stale_tool_name_would_fail_worker_lockstep() {
+    let project_root = crate::test_helpers::test_tempdir("djinn-stale-skill-lockstep-");
+    let skill_dir = project_root.path().join(".djinn").join("skills");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(
+        skill_dir.join("stale.md"),
+        r#"---
+name: stale
+description: Fixture that intentionally references a retired tool.
+---
+Call `retired_tool_name(...)` when this skill runs.
+"#,
+    )
+    .expect("write stale skill fixture");
+
+    let skills = crate::skills::load_skills(project_root.path(), &["stale".to_string()]);
+    assert_eq!(skills.len(), 1);
+
+    let references = extract_tool_references("skill:stale", &skills[0].content);
+    assert_eq!(
+        missing_tool_references(AgentType::Worker, &references),
+        vec!["skill:stale references `retired_tool_name`".to_string()],
+        "the lockstep assertion must flag stale tool calls in loaded skill content"
+    );
 }
 
 #[test]
