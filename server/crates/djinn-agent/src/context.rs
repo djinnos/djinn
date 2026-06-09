@@ -298,6 +298,7 @@ impl RepoGraphOps for StubRepoGraphOps {
     async fn ranked(
         &self,
         _: &ProjectCtx,
+        _workspace: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
         _: usize,
@@ -310,6 +311,7 @@ impl RepoGraphOps for StubRepoGraphOps {
     async fn impact(
         &self,
         _: &ProjectCtx,
+        _workspace: Option<&str>,
         _: &str,
         _: usize,
         _: Option<&str>,
@@ -337,6 +339,7 @@ impl RepoGraphOps for StubRepoGraphOps {
     async fn orphans(
         &self,
         _: &ProjectCtx,
+        _workspace: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
         _: usize,
@@ -346,6 +349,7 @@ impl RepoGraphOps for StubRepoGraphOps {
     async fn path(
         &self,
         _: &ProjectCtx,
+        _workspace: Option<&str>,
         _: &str,
         _: &str,
         _: Option<usize>,
@@ -379,6 +383,7 @@ impl RepoGraphOps for StubRepoGraphOps {
     async fn snapshot(
         &self,
         _: &ProjectCtx,
+        _workspace: Option<&str>,
         _: usize,
         _: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
     ) -> Result<bridge::SnapshotPayload, String> {
@@ -412,6 +417,7 @@ impl RepoGraphOps for StubRepoGraphOps {
     async fn api_surface(
         &self,
         _: &ProjectCtx,
+        _workspace: Option<&str>,
         _: Option<&str>,
         _: Option<&str>,
         _: usize,
@@ -474,6 +480,7 @@ impl RepoGraphOps for StubRepoGraphOps {
     async fn touches_hot_path(
         &self,
         _: &ProjectCtx,
+        _workspace: Option<&str>,
         _: &[String],
         _: &[String],
         _: &[String],

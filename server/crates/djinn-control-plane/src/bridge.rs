@@ -515,6 +515,84 @@ pub struct SnapshotPayload {
     pub edges: Vec<SnapshotEdge>,
 }
 
+/// Typed bridge request for the budgeted natural-language subgraph planner.
+#[derive(Debug, Clone)]
+pub struct QuerySubgraphRequest {
+    pub query: String,
+    pub workspace: Option<String>,
+    pub context_filter: Option<String>,
+    pub file_filter: Option<String>,
+    pub kind_filter: Option<String>,
+    pub edge_filter: Vec<String>,
+    pub token_budget: Option<usize>,
+    pub max_depth: Option<usize>,
+    pub max_seeds: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct QuerySubgraphResult {
+    pub query: String,
+    pub nodes: Vec<QuerySubgraphNode>,
+    pub edges: Vec<QuerySubgraphEdge>,
+    pub seeds: Vec<QuerySubgraphSeedDebug>,
+    pub inferred_edge_kinds: Vec<String>,
+    pub budget: QuerySubgraphBudget,
+    pub traversal: QuerySubgraphTraversalDebug,
+    pub narrowing_hints: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct QuerySubgraphNode {
+    pub uid: String,
+    pub kind: String,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    pub is_seed: bool,
+    pub is_hub: bool,
+    pub degree: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct QuerySubgraphEdge {
+    pub from_uid: String,
+    pub to_uid: String,
+    pub kind: String,
+    pub confidence: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct QuerySubgraphSeedDebug {
+    pub uid: String,
+    pub display_name: String,
+    pub score: f64,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_text: Option<String>,
+    pub debug: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct QuerySubgraphBudget {
+    pub requested_tokens: usize,
+    pub estimated_tokens: usize,
+    pub truncated: bool,
+    pub omitted_nodes: usize,
+    pub omitted_edges: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct QuerySubgraphTraversalDebug {
+    pub max_depth: usize,
+    pub hub_degree_threshold: usize,
+    pub hubs_blocked: Vec<String>,
+    pub skipped_edge_kinds: Vec<String>,
+}
+
 /// Per-function complexity metrics surfaced on `describe` and
 /// `context` responses (iter 27). Wire-shape mirror of
 /// `djinn_graph::complexity::ComplexityMetrics`. Computed from the
@@ -1133,9 +1211,15 @@ pub trait RepoGraphOps: Send + Sync {
 
     /// Top-ranked nodes by PageRank + structural weight. `sort_by` can be one
     /// of `pagerank` (default), `in_degree`, `out_degree`, or `total_degree`.
+    ///
+    /// `workspace` hard-scopes this listing operation: when present, returned
+    /// nodes should be bounded to that workspace rather than merely biasing
+    /// resolution. Implementations that do not yet support workspace filtering
+    /// may accept and ignore it while follow-up behavior lands.
     async fn ranked(
         &self,
         ctx: &ProjectCtx,
+        workspace: Option<&str>,
         kind_filter: Option<&str>,
         sort_by: Option<&str>,
         limit: usize,
@@ -1153,9 +1237,15 @@ pub trait RepoGraphOps: Send + Sync {
     /// threshold are skipped, so weak SCIP signals (e.g. `local`-prefixed
     /// references that took the visibility-heuristic penalty) drop out of the
     /// blast radius. `None` keeps every edge — the pre-PR-A2 behaviour.
+    ///
+    /// `workspace` scopes only seed resolution for this traversal operation:
+    /// the initial `key` should be resolved inside the workspace when present,
+    /// but the walk itself must never be constrained so cross-workspace blast
+    /// radius remains visible.
     async fn impact(
         &self,
         ctx: &ProjectCtx,
+        workspace: Option<&str>,
         key: &str,
         depth: usize,
         group_by: Option<&str>,
@@ -1200,6 +1290,37 @@ pub trait RepoGraphOps: Send + Sync {
         Ok(hits)
     }
 
+    /// Budgeted natural-language subgraph query. Implementations map this
+    /// bridge DTO to the graph-layer planner params and return the bounded
+    /// subgraph plus seed/budget/traversal debug metadata.
+    async fn query_subgraph(
+        &self,
+        _ctx: &ProjectCtx,
+        req: QuerySubgraphRequest,
+    ) -> Result<QuerySubgraphResult, String> {
+        Ok(QuerySubgraphResult {
+            query: req.query,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            seeds: Vec::new(),
+            inferred_edge_kinds: Vec::new(),
+            budget: QuerySubgraphBudget {
+                requested_tokens: 0,
+                estimated_tokens: 0,
+                truncated: false,
+                omitted_nodes: 0,
+                omitted_edges: 0,
+            },
+            traversal: QuerySubgraphTraversalDebug {
+                max_depth: 0,
+                hub_degree_threshold: 0,
+                hubs_blocked: Vec::new(),
+                skipped_edge_kinds: Vec::new(),
+            },
+            narrowing_hints: Vec::new(),
+        })
+    }
+
     /// Strongly-connected components of size >= `min_size`.
     async fn cycles(
         &self,
@@ -1209,18 +1330,27 @@ pub trait RepoGraphOps: Send + Sync {
     ) -> Result<Vec<CycleGroup>, String>;
 
     /// Bulk dead-symbol enumeration (nodes with zero incoming references).
+    ///
+    /// `workspace` hard-scopes this listing operation: when present, returned
+    /// orphan candidates should be bounded to that workspace.
     async fn orphans(
         &self,
         ctx: &ProjectCtx,
+        workspace: Option<&str>,
         kind_filter: Option<&str>,
         visibility: Option<&str>,
         limit: usize,
     ) -> Result<Vec<OrphanEntry>, String>;
 
     /// Shortest dependency path between two nodes.
+    ///
+    /// `workspace` scopes only endpoint resolution for this traversal operation:
+    /// `from` and `to` should be resolved inside the workspace when present,
+    /// but the shortest-path walk itself must not be constrained.
     async fn path(
         &self,
         ctx: &ProjectCtx,
+        workspace: Option<&str>,
         from: &str,
         to: &str,
         max_depth: Option<usize>,
@@ -1271,9 +1401,14 @@ pub trait RepoGraphOps: Send + Sync {
     /// set of node keys filtered out by `graph_excluded_paths`; both
     /// node and edge filtering happens against this set so the wire
     /// shape is consistent with what the rest of `code_graph` returns.
+    ///
+    /// `workspace` hard-scopes this bounded/listing operation: when present,
+    /// snapshot nodes and the retained induced edges should be bounded to that
+    /// workspace.
     async fn snapshot(
         &self,
         ctx: &ProjectCtx,
+        workspace: Option<&str>,
         node_cap: usize,
         exclusions: &crate::tools::graph_exclusions::GraphExclusions,
     ) -> Result<SnapshotPayload, String>;
@@ -1326,9 +1461,13 @@ pub trait RepoGraphOps: Send + Sync {
     /// List every public (or private/any, per `visibility`) symbol in
     /// the base graph, enriched with fan-in / fan-out and a
     /// "used outside crate" signal.
+    ///
+    /// `workspace` hard-scopes this listing operation: when present, returned
+    /// API-surface symbols should be bounded to that workspace.
     async fn api_surface(
         &self,
         ctx: &ProjectCtx,
+        workspace: Option<&str>,
         module_glob: Option<&str>,
         visibility: Option<&str>,
         limit: usize,
@@ -1414,9 +1553,14 @@ pub trait RepoGraphOps: Send + Sync {
     /// Given entry-point and sink keys (plus queried symbols), return
     /// which queried symbols sit on any shortest path from any entry
     /// to any sink.
+    ///
+    /// `workspace` scopes only seed/entry/sink resolution for this traversal
+    /// operation: seed entries, seed sinks, and queried symbols may be resolved
+    /// within the workspace, but shortest-path walks must remain unconstrained.
     async fn touches_hot_path(
         &self,
         ctx: &ProjectCtx,
+        workspace: Option<&str>,
         seed_entries: &[String],
         seed_sinks: &[String],
         symbols: &[String],

@@ -1,6 +1,6 @@
 use super::*;
 use crate::roles::DispatchContext;
-use djinn_core::models::task::{IssueType, PRIORITY_CRITICAL};
+use djinn_core::models::task::IssueType;
 use djinn_core::models::{TaskStatus, TransitionAction};
 #[cfg(not(test))]
 use djinn_db::AgentRepository;
@@ -281,6 +281,55 @@ impl CoordinatorActor {
         }
     }
 
+    /// Proposal 1omc hard guard: a task may only dispatch under a real user.
+    ///
+    /// Returns `true` when the task has no resolved owner (`created_by_user_id`
+    /// is NULL) or is still attributed to the retired automation sentinel
+    /// (a user row with `github_id == AUTOMATION_SENTINEL_GITHUB_ID`, i.e. `0`).
+    /// Such tasks must NOT consume org-shared credentials under no identity; the
+    /// caller parks them and emits a loud warning so the ownership regression is
+    /// visible instead of silently running ownerless.
+    ///
+    /// Always `false` under `#[cfg(test)]`: the in-process test suite dispatches
+    /// fixtures with no real users seeded, and the production identity invariant
+    /// is exercised by the live MCP/session path, not these unit fixtures.
+    #[cfg(not(test))]
+    async fn task_is_ownerless(&self, task: &djinn_core::models::Task) -> bool {
+        /// Legacy automation service-user marker. The automation user is retired
+        /// (proposal 1omc); any task still pointing at a `github_id == 0` row is
+        /// treated as ownerless.
+        const AUTOMATION_SENTINEL_GITHUB_ID: i64 = 0;
+        let Some(uid) = task.created_by_user_id.as_deref() else {
+            return true;
+        };
+        match djinn_db::UserRepository::new(self.db.clone())
+            .get_by_id(uid)
+            .await
+        {
+            // Creator resolves to the retired automation sentinel → ownerless.
+            Ok(Some(user)) => user.github_id == AUTOMATION_SENTINEL_GITHUB_ID,
+            // Creator id present but no matching user row (dangling reference) →
+            // ownerless; refuse rather than dispatch under a ghost identity.
+            Ok(None) => true,
+            // DB error resolving the creator: fail-closed (refuse) so a transient
+            // lookup failure can't slip an unverified owner past the guard.
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    created_by_user_id = uid,
+                    error = %e,
+                    "CoordinatorActor: ownership guard — failed to resolve task creator; treating as ownerless"
+                );
+                true
+            }
+        }
+    }
+
+    #[cfg(test)]
+    async fn task_is_ownerless(&self, _task: &djinn_core::models::Task) -> bool {
+        false
+    }
+
     /// Find all ready tasks (open, no unresolved blockers, non-epic) and dispatch
     /// those that don't already have an active session.
     pub(super) async fn dispatch_ready_tasks(&mut self, project_filter: Option<&str>) {
@@ -451,6 +500,23 @@ impl CoordinatorActor {
                 tracing::debug!(
                     task_id = %task.short_id,
                     "CoordinatorActor: task already has an active session, skipping dispatch"
+                );
+                continue;
+            }
+            // Proposal 1omc: every dispatch must run under a real user. Refuse to
+            // dispatch a task with no resolved owner (or one still attributed to
+            // the retired automation sentinel, github_id 0). Park it loudly rather
+            // than silently consuming org-shared credentials under no identity —
+            // this surfaces an ownership regression instead of running ownerless.
+            if self.task_is_ownerless(&task).await {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    task_uuid = %task.id,
+                    project_id = %task.project_id,
+                    created_by_user_id = ?task.created_by_user_id,
+                    "CoordinatorActor: REFUSING dispatch — task has no real owner \
+                     (created_by_user_id is NULL or the retired automation sentinel). \
+                     Every task must run under a real user (proposal 1omc); parking it."
                 );
                 continue;
             }
@@ -1098,6 +1164,25 @@ impl CoordinatorActor {
                 continue;
             }
 
+            // Ground-truth liveness gate: if the worker still holds a live RPC
+            // connection for this run, it is alive — just long or quiet — so
+            // never reap it. This is authoritative where the heuristics below
+            // are not: session-row tokens read `0/0` until session *end*, and
+            // for remote K8s workers the host-side slot/activity bookkeeping
+            // (`task_to_slot` / `active_tasks`) can drift out of sync with the
+            // live pod, making the activity gate below false-negative and
+            // reaping a productive worker (it then restarts from scratch and
+            // never converges). A genuinely dead worker — crashed, OOM-killed,
+            // or never scheduled — has no attached connection slot and falls
+            // through to the reap. `None` registry (off-server/tests) skips
+            // this and uses the activity heuristic alone.
+            if let (Some(registry), Some(run_id)) =
+                (self.rpc_registry.as_ref(), session.task_run_id.as_deref())
+                && registry.is_connected(run_id).await
+            {
+                continue;
+            }
+
             // Liveness gate (leak-safe): a worker that has touched activity
             // within the hard cap is alive and productive — its DB row reads
             // `0/0` only because `sessions.tokens_in/out` are flushed at session
@@ -1468,7 +1553,10 @@ impl CoordinatorActor {
     /// the task has no creator, the user made no selection, or none of the
     /// selected models' providers are connected for them — callers then fall
     /// back to the project preference / global priorities.
-    async fn resolve_user_model_priority(&self, created_by_user_id: Option<&str>) -> Vec<String> {
+    pub(super) async fn resolve_user_model_priority(
+        &self,
+        created_by_user_id: Option<&str>,
+    ) -> Vec<String> {
         #[cfg(test)]
         {
             let _ = created_by_user_id;
@@ -1646,6 +1734,42 @@ impl CoordinatorActor {
     ) -> bool {
         if task.reopen_count < REOPEN_INTERVENTION_THRESHOLD {
             return false;
+        }
+
+        // Second strike (terminal): the Planner has ALREADY intervened on this
+        // task at least `MAX_PLANNER_INTERVENTIONS` time(s) and it has STILL
+        // churned back up to the reopen threshold. The reshape/rescope did not
+        // unstick it. Escalating again just calls `reset_intervention_counters`
+        // (reopen_count→0, intervention_count++) and the worker loops anew,
+        // monopolizing the (often single) dispatch slot indefinitely — the txr4
+        // query_subgraph case burned 37 sessions / ~11h / 10 total reopens behind
+        // one gpt-5.5 slot, starving every other ready task. Park it terminally so
+        // the queue drains. The work and its branch persist; the close reason is
+        // recoverable (reopen with sharper scope or a different approach).
+        if task.intervention_count >= MAX_PLANNER_INTERVENTIONS {
+            let reason = format!(
+                "Auto-parked: {} planner intervention(s) failed to break the rework loop \
+                 (intervention_count={}, total_reopen_count={}). The same acceptance criteria kept \
+                 failing across repeated rounds even after the planner reshaped the scope, so \
+                 re-dispatching would only loop again and hold the dispatch slot. Closed to free \
+                 capacity for other ready tasks; the branch and prior work are preserved. Reopen \
+                 with a sharpened scope, a decomposed subtask for the specific unmet criterion, or \
+                 a different model/approach if this work is still wanted.",
+                task.intervention_count, task.intervention_count, task.total_reopen_count,
+            );
+            tracing::warn!(
+                task_id = %task.short_id,
+                intervention_count = task.intervention_count,
+                total_reopen_count = task.total_reopen_count,
+                reopen_count = task.reopen_count,
+                "CoordinatorActor: second-strike — parking unconvergeable task after repeated planner interventions"
+            );
+            // Clear streak/cooldown so the close isn't shadowed by stale backoff
+            // state, then terminally close (ForceClose) with the recoverable reason.
+            self.dispatch_failure_streak.remove(&task.id);
+            self.dispatch_cooldowns.remove(&task.id);
+            self.terminally_fail_task(task, "worker", &reason).await;
+            return true;
         }
 
         // Idempotency guard: have we already routed a Planner for THIS reopen
@@ -1918,304 +2042,6 @@ impl CoordinatorActor {
             DispatchOutcome::Failed => {
                 tracing::debug!(
                     "CoordinatorActor: planner escalation — no model could accept Planner dispatch"
-                );
-            }
-        }
-    }
-
-    /// Dispatch a Planner patrol session at a dynamic interval when:
-    ///   - No Planner session is currently running.
-    ///   - At least one project has dispatch enabled (not paused/unhealthy).
-    ///   - The board has at least one open or in_progress task (skip empty boards).
-    ///   - No open patrol review task already exists for that project.
-    ///
-    /// Per ADR-051 §1 the Planner owns the board patrol (previously Architect).
-    /// The patrol interval is self-scheduled by the planner via the
-    /// `next_patrol_minutes` field in `submit_grooming`. When no schedule exists,
-    /// the default interval (DEFAULT_PLANNER_PATROL_INTERVAL) is used.
-    ///
-    /// Creates a "review" task for visibility, then dispatches the Planner.
-    pub(super) async fn maybe_dispatch_planner_patrol(&mut self) {
-        // Step 0: Check for the most recent patrol_schedule activity to update
-        // the dynamic patrol interval.
-        {
-            let task_repo = self.task_repo();
-            if let Some(minutes) = task_repo
-                .query_activity(ActivityQuery {
-                    event_type: Some("patrol_schedule".to_string()),
-                    limit: 1,
-                    ..Default::default()
-                })
-                .await
-                .ok()
-                .and_then(|a| a.into_iter().next())
-                .and_then(|e| serde_json::from_str::<serde_json::Value>(&e.payload).ok())
-                .and_then(|p| p.get("next_patrol_minutes").and_then(|v| v.as_u64()))
-            {
-                let minutes = (minutes as u32).clamp(
-                    rules::MIN_PLANNER_PATROL_MINUTES,
-                    rules::MAX_PLANNER_PATROL_MINUTES,
-                );
-                let new_interval = Duration::from_secs(u64::from(minutes) * 60);
-                if new_interval != self.next_patrol_interval {
-                    tracing::info!(
-                        old_secs = self.next_patrol_interval.as_secs(),
-                        new_secs = new_interval.as_secs(),
-                        minutes,
-                        "CoordinatorActor: patrol interval updated by planner"
-                    );
-                    self.next_patrol_interval = new_interval;
-                }
-            }
-        }
-
-        // Check if any Planner session is already running. Per ADR-051 §1 the
-        // Planner owns patrol; a single active Planner (patrol, decomposition,
-        // or intervention) is enough to suppress a new patrol dispatch.
-        let session_repo = SessionRepository::new(
-            self.db.clone(),
-            crate::events::event_bus_for(&self.events_tx),
-        );
-        let active_sessions = match session_repo.list_active().await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(error = %e, "CoordinatorActor: patrol — failed to list active sessions");
-                return;
-            }
-        };
-        let planner_running = active_sessions.iter().any(|s| s.agent_type == "planner");
-        if planner_running {
-            tracing::debug!("CoordinatorActor: patrol — Planner already running, skipping");
-            return;
-        }
-        tracing::debug!(
-            sessions = active_sessions.len(),
-            "CoordinatorActor: patrol — no planner session running"
-        );
-        #[cfg(test)]
-        eprintln!(
-            "[patrol] step 1 passed: no planner session. Active sessions: {}",
-            active_sessions.len()
-        );
-
-        // Find a dispatch-enabled project.  The patrol reviews the whole board,
-        // so we only need at least one project that is actively running.
-        let project_repo = ProjectRepository::new(
-            self.db.clone(),
-            crate::events::event_bus_for(&self.events_tx),
-        );
-        let projects = match project_repo.list().await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, "CoordinatorActor: patrol — failed to list projects");
-                return;
-            }
-        };
-        let Some(active_project) = projects.first() else {
-            tracing::debug!("CoordinatorActor: patrol — no projects, skipping");
-            return;
-        };
-        let project_id = active_project.id.clone();
-        tracing::debug!(project_id = %project_id, "CoordinatorActor: patrol — using project");
-        #[cfg(test)]
-        eprintln!("[patrol] step 2: project dispatch enabled, project_id={project_id}");
-
-        // Precondition: skip patrol if there are no non-closed tasks on the
-        // board.  No point patrolling an empty board.
-        let task_repo = TaskRepository::new(
-            self.db.clone(),
-            crate::events::event_bus_for(&self.events_tx),
-        );
-        {
-            let has_active_work = {
-                let mut found = false;
-                // Check every non-closed status so the patrol fires whenever
-                // there is any active work — not just open/in_progress.
-                for status in [
-                    "open",
-                    "in_progress",
-                    "verifying",
-                    "needs_task_review",
-                    "in_task_review",
-                    "approved",
-                    "pr_draft",
-                    "pr_review",
-                    "needs_lead_intervention",
-                    "in_lead_intervention",
-                ] {
-                    let tasks = task_repo.list_by_status(status).await.unwrap_or_default();
-                    // Exclude review-type tasks (patrol tasks themselves) from the count
-                    // to avoid the patrol perpetually triggering because its own task exists.
-                    if tasks.iter().any(|t| t.issue_type != "review") {
-                        found = true;
-                        break;
-                    }
-                }
-                found
-            };
-            if !has_active_work {
-                tracing::debug!("CoordinatorActor: patrol — no active tasks on board, skipping");
-                #[cfg(test)]
-                eprintln!("[patrol] skipping: empty board");
-                return;
-            }
-        }
-
-        // Guard: never create a patrol if one already exists in any non-terminal
-        // state.  Query all review tasks for this project and check for any that
-        // are not yet closed.  This prevents duplicates regardless of status
-        // (open, in_progress, setting_up, verifying, etc.).
-        {
-            let all_reviews = task_repo
-                .list_filtered(djinn_db::ListQuery {
-                    project_id: Some(project_id.clone()),
-                    status: None, // all statuses
-                    issue_type: Some("review".to_string()),
-                    priority: None,
-                    label: None,
-                    text: None,
-                    parent: None,
-                    sort: "created_desc".to_string(),
-                    limit: 50,
-                    offset: 0,
-                })
-                .await;
-            if let Ok(result) = &all_reviews {
-                let active_patrol = result
-                    .tasks
-                    .iter()
-                    .find(|t| t.status != "closed" && t.title.contains("patrol"));
-                if let Some(existing) = active_patrol {
-                    tracing::debug!(
-                        project_id = %project_id,
-                        existing_task = %existing.short_id,
-                        status = %existing.status,
-                        "CoordinatorActor: patrol — non-closed patrol task exists, skipping"
-                    );
-                    #[cfg(test)]
-                    eprintln!(
-                        "[patrol] step 3: non-closed patrol task exists (status={}), skipping",
-                        existing.status
-                    );
-                    return;
-                }
-            }
-        }
-        #[cfg(test)]
-        eprintln!("[patrol] step 3: no existing non-closed patrol task");
-
-        // The patrol runs as the automation service user (its review task is
-        // attributed to automation via create_in_project), so scope planner-role
-        // eligibility to automation's connected providers. Empty → skip BEFORE
-        // creating the review task, so a misconfigured automation never leaves
-        // an orphan patrol task blocking future patrols.
-        let automation_id = djinn_db::UserRepository::new(self.db.clone())
-            .automation_user_id()
-            .await
-            .ok()
-            .flatten();
-        let model_ids = self
-            .resolve_dispatch_models_for_role("planner", automation_id.as_deref())
-            .await;
-        tracing::debug!(model_ids = ?model_ids, "CoordinatorActor: patrol — resolved models");
-        #[cfg(test)]
-        eprintln!("[patrol] step 4: resolved models: {:?}", model_ids);
-        if model_ids.is_empty() {
-            tracing::debug!("CoordinatorActor: patrol — no model configured for planner role");
-            return;
-        }
-
-        // Create a review task for the patrol session.
-        let review_task = match task_repo
-            .create_in_project(
-                &project_id,
-                None,
-                "Planner patrol: board health review",
-                "Automated patrol session to review board health, epic progress, and approach viability.",
-                "Review open epics and tasks for stuck work, missing blockers, and strategic issues.",
-                "review",
-                PRIORITY_CRITICAL,
-                "system",
-                Some("open"),
-                None,
-            )
-            .await
-        {
-            Ok(t) => {
-                #[cfg(test)]
-                eprintln!("[patrol] step 5: review task created: {}", t.id);
-                t
-            }
-            Err(e) => {
-                #[cfg(test)]
-                eprintln!("[patrol] step 5: FAILED to create review task: {e}");
-                tracing::warn!(
-                    error = %e,
-                    project_id = %project_id,
-                    "CoordinatorActor: patrol — failed to create review task"
-                );
-                return;
-            }
-        };
-
-        let Some(project_path) = self.project_path_for_id(&project_id).await else {
-            #[cfg(test)]
-            eprintln!("[patrol] step 8: FAILED to get project path");
-            tracing::warn!(
-                project_id = %project_id,
-                "CoordinatorActor: patrol — project path not found"
-            );
-            return;
-        };
-        #[cfg(test)]
-        eprintln!("[patrol] step 8: project_path={project_path}");
-
-        let task_id = review_task.id.clone();
-        let project_path_owned = project_path.clone();
-        let outcome = self
-            .try_dispatch_to_pool(
-                &review_task.short_id,
-                review_task.created_by_user_id.as_deref(),
-                &model_ids,
-                |pool, model_id| {
-                    let pool = pool.clone();
-                    let tid = task_id.clone();
-                    let pp = project_path_owned.clone();
-                    let mid = model_id.to_owned();
-                    async move { pool.dispatch(&tid, &pp, &mid).await }
-                },
-            )
-            .await;
-
-        match outcome {
-            DispatchOutcome::Dispatched => {
-                tracing::info!(
-                    task_id = %review_task.short_id,
-                    task_uuid = %review_task.id,
-                    project_id = %project_id,
-                    "CoordinatorActor: Planner patrol dispatched"
-                );
-                self.last_dispatched.insert(
-                    review_task.id.clone(),
-                    DispatchMarker {
-                        instant: StdInstant::now(),
-                        role: "planner",
-                    },
-                );
-                self.dispatched += 1;
-                self.publish_status();
-            }
-            DispatchOutcome::AtCapacity => {
-                tracing::debug!(
-                    "CoordinatorActor: patrol — Planner model at capacity, will retry next cycle"
-                );
-            }
-            DispatchOutcome::PoolDead => {
-                tracing::error!("CoordinatorActor: patrol — slot pool actor dead");
-            }
-            DispatchOutcome::Failed => {
-                tracing::debug!(
-                    "CoordinatorActor: patrol — no model could accept Planner dispatch"
                 );
             }
         }

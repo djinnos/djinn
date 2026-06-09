@@ -200,6 +200,7 @@ impl RepoGraphOps for StubRepoGraph {
     async fn ranked(
         &self,
         _ctx: &ProjectCtx,
+        _workspace: Option<&str>,
         _kind_filter: Option<&str>,
         _sort_by: Option<&str>,
         _limit: usize,
@@ -216,6 +217,7 @@ impl RepoGraphOps for StubRepoGraph {
     async fn impact(
         &self,
         _ctx: &ProjectCtx,
+        _workspace: Option<&str>,
         _key: &str,
         _depth: usize,
         _group_by: Option<&str>,
@@ -243,6 +245,7 @@ impl RepoGraphOps for StubRepoGraph {
     async fn orphans(
         &self,
         _ctx: &ProjectCtx,
+        _workspace: Option<&str>,
         _kind_filter: Option<&str>,
         _visibility: Option<&str>,
         _limit: usize,
@@ -252,6 +255,7 @@ impl RepoGraphOps for StubRepoGraph {
     async fn path(
         &self,
         _ctx: &ProjectCtx,
+        _workspace: Option<&str>,
         _from: &str,
         _to: &str,
         _max_depth: Option<usize>,
@@ -295,6 +299,7 @@ impl RepoGraphOps for StubRepoGraph {
     async fn snapshot(
         &self,
         ctx: &ProjectCtx,
+        _workspace: Option<&str>,
         node_cap: usize,
         _exclusions: &crate::tools::graph_exclusions::GraphExclusions,
     ) -> std::result::Result<crate::bridge::SnapshotPayload, String> {
@@ -347,6 +352,7 @@ impl RepoGraphOps for StubRepoGraph {
     async fn api_surface(
         &self,
         _ctx: &ProjectCtx,
+        _workspace: Option<&str>,
         _module_glob: Option<&str>,
         _visibility: Option<&str>,
         _limit: usize,
@@ -421,6 +427,7 @@ impl RepoGraphOps for StubRepoGraph {
     async fn touches_hot_path(
         &self,
         _ctx: &ProjectCtx,
+        _workspace: Option<&str>,
         _seed_entries: &[String],
         _seed_sinks: &[String],
         _symbols: &[String],

@@ -10,6 +10,7 @@ use djinn_db::Database;
 use djinn_provider::catalog::CatalogService;
 use djinn_provider::catalog::health::HealthTracker;
 use djinn_runtime::GraphWarmerService;
+use djinn_supervisor::ConnectionRegistry;
 use djinn_workspace::MirrorManager;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -41,6 +42,11 @@ pub struct CoordinatorDeps {
     /// can clone the ephemeral workspace from the mirror. `None` in test
     /// contexts — the direct-push path bails cleanly in that case.
     pub mirror: Option<Arc<MirrorManager>>,
+    /// Host-side worker RPC connection registry. The zombie reaper consults it
+    /// for ground-truth liveness so a long-running but actively-connected K8s
+    /// worker is never false-reaped. `None` in off-server/test contexts, where
+    /// the reaper falls back to its DB/activity heuristics.
+    pub rpc_registry: Option<Arc<ConnectionRegistry>>,
 }
 
 impl CoordinatorDeps {
@@ -69,6 +75,7 @@ impl CoordinatorDeps {
             graph_warmer: None,
             consolidation_runner: None,
             mirror: None,
+            rpc_registry: None,
         }
     }
 
@@ -85,6 +92,14 @@ impl CoordinatorDeps {
     /// returns a descriptive error instead of crashing.
     pub fn with_mirror(mut self, mirror: Arc<MirrorManager>) -> Self {
         self.mirror = Some(mirror);
+        self
+    }
+
+    /// Inject the host worker RPC connection registry so the zombie reaper can
+    /// gate reaping on real connection liveness instead of drift-prone in-memory
+    /// slot/activity bookkeeping. Off-server tests omit this.
+    pub fn with_rpc_registry(mut self, registry: Arc<ConnectionRegistry>) -> Self {
+        self.rpc_registry = Some(registry);
         self
     }
 }
@@ -140,6 +155,25 @@ pub(super) const PLANNER_INTERVENTION_MARKER: &str = "planner_intervention";
 /// PR/human-review side so internal and external review loops escalate at the
 /// same depth.
 pub(super) const REOPEN_INTERVENTION_THRESHOLD: i64 = 3;
+
+/// Number of completed Planner interventions after which a task that has STILL
+/// churned back up to `REOPEN_INTERVENTION_THRESHOLD` is parked terminally
+/// instead of escalated to the Planner yet again.
+///
+/// Rationale for `1`: the first time a worker loop exceeds the reopen threshold
+/// the Planner gets one pass to reshape it (rescope / decompose / re-spec /
+/// close). `reset_intervention_counters` zeroes `reopen_count` and bumps
+/// `intervention_count` so the sharpened task re-dispatches cleanly. But if the
+/// SAME task climbs back to the threshold a second time, the Planner's reshape
+/// demonstrably did not unstick it — re-escalating only resets the counter and
+/// the worker loops anew, monopolizing the (often single) dispatch slot
+/// indefinitely (the txr4 query_subgraph case: 37 sessions / ~11h / 10 total
+/// reopens, where the worker kept re-doing already-accepted functional wiring
+/// and never wrote the one required unit test even after the Planner narrowed
+/// scope to exactly that). Past this ceiling the coordinator force-closes the
+/// task with a recoverable reason so the queue drains; a human (or a freshly
+/// scoped task against the existing branch) can finish it.
+pub(super) const MAX_PLANNER_INTERVENTIONS: i64 = 1;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct DispatchMarker {

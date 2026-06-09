@@ -434,6 +434,44 @@ impl ConnectionRegistry {
         Self::default()
     }
 
+    /// Ground-truth worker liveness: `true` when a worker has dialed in and
+    /// completed `AuthHello` for `task_run_id` (its slot is present AND
+    /// attached, i.e. an outbound sender was published). A never-scheduled or
+    /// crashed pod has either no slot (deregistered on connection drop) or an
+    /// unattached pending slot, so it reads `false`.
+    ///
+    /// The coordinator's zombie reaper consults this so a long-running but
+    /// actively-connected worker is never false-reaped: session-row tokens
+    /// read `0/0` until session end and the in-memory slot/activity bookkeeping
+    /// can drift for remote K8s pods, but the live RPC connection is authoritative.
+    pub async fn is_connected(&self, task_run_id: &str) -> bool {
+        self.inner
+            .lock()
+            .await
+            .get(task_run_id)
+            .is_some_and(|slot| slot.outbound_tx.is_some())
+    }
+
+    /// Test-only: insert an already-attached slot for `task_run_id` so
+    /// [`is_connected`](Self::is_connected) reports `true` without the full TCP
+    /// `AuthHello` handshake. Used by coordinator reaper tests in other crates,
+    /// hence `pub` (not `cfg(test)`, which wouldn't be visible cross-crate).
+    #[doc(hidden)]
+    pub async fn register_connected_for_test(self: &Arc<Self>, task_run_id: impl Into<String>) {
+        let (events_tx, _events_rx) = mpsc::channel::<StreamEvent>(1);
+        let (outbound_tx, _outbound_rx) = mpsc::channel::<Frame>(1);
+        let (connected_tx, _connected_rx) = watch::channel(true);
+        self.inner.lock().await.insert(
+            task_run_id.into(),
+            ConnSlot {
+                events_tx,
+                outbound_tx: Some(outbound_tx),
+                connected_tx,
+                username: None,
+            },
+        );
+    }
+
     /// Reserve a slot for the given `task_run_id` before the runtime
     /// actually dials the worker.
     ///

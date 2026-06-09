@@ -5,6 +5,7 @@ import { CodeGraphPage } from "@/pages/CodeGraphPage";
 import { projectStore } from "@/stores/projectStore";
 import { useCodeGraphStore } from "@/stores/codeGraphStore";
 import type { Project } from "@/api/types";
+import type { CodeGraphWorkspace } from "@/api/codeGraph";
 
 // Sigma + WebGL aren't worth wiring up in jsdom; we stub the constructor so
 // the smoke test only validates the React surface (project picker shell,
@@ -46,6 +47,9 @@ type SnapshotResponse = { snapshot: Record<string, unknown> };
 const fetchSnapshotMock = vi.fn<
   (project: string, nodeCap?: number) => Promise<SnapshotResponse>
 >();
+const fetchWorkspacesMock = vi.fn<
+  (project: string) => Promise<CodeGraphWorkspace[]>
+>();
 
 vi.mock("@/api/codeGraph", async () => {
   const actual = await vi.importActual<typeof import("@/api/codeGraph")>(
@@ -54,6 +58,7 @@ vi.mock("@/api/codeGraph", async () => {
   return {
     ...actual,
     fetchSnapshot: (...args: [string, number?]) => fetchSnapshotMock(...args),
+    fetchWorkspaces: (project: string) => fetchWorkspacesMock(project),
   };
 });
 
@@ -75,8 +80,11 @@ const projectsFixture: Project[] = [
 describe("CodeGraphPage", () => {
   beforeEach(() => {
     localStorage.clear();
-    fetchSnapshotMock.mockClear();
+    fetchSnapshotMock.mockReset();
+    fetchWorkspacesMock.mockReset();
     useCodeGraphStore.getState().reset();
+    useCodeGraphStore.getState().setSelectedWorkspaceSlug(null);
+    fetchWorkspacesMock.mockResolvedValue([]);
     // Default snapshot fixture: empty graph, no complexity data.
     fetchSnapshotMock.mockImplementation(async () => ({
       snapshot: {
@@ -151,6 +159,148 @@ describe("CodeGraphPage", () => {
       expect(
         screen.getByText(/no graph data yet/i),
       ).toBeInTheDocument();
+    });
+  });
+
+  it("fetches workspaces without blocking snapshot rendering and hides the selector for empty, single, or failed lists", async () => {
+    fetchWorkspacesMock.mockResolvedValueOnce([]);
+    projectStore.setState({
+      projects: projectsFixture,
+      selectedProjectId: "project-a",
+      lastViewPerProject: {},
+    });
+
+    const emptyView = render(<CodeGraphPage />);
+
+    expect(screen.getByTestId("code-graph-canvas")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(fetchWorkspacesMock).toHaveBeenCalledWith("project-a");
+    });
+    await waitFor(() => {
+      expect(screen.queryByLabelText(/select workspace/i)).not.toBeInTheDocument();
+    });
+
+    emptyView.unmount();
+    fetchWorkspacesMock.mockResolvedValueOnce([{ slug: "api" }]);
+    const singleView = render(<CodeGraphPage />);
+    await waitFor(() => {
+      expect(fetchWorkspacesMock).toHaveBeenCalledTimes(2);
+    });
+    await waitFor(() => {
+      expect(screen.queryByLabelText(/select workspace/i)).not.toBeInTheDocument();
+    });
+
+    singleView.unmount();
+    fetchWorkspacesMock.mockRejectedValueOnce(new Error("workspace API down"));
+    render(<CodeGraphPage />);
+    await waitFor(() => {
+      expect(screen.getByText(/workspace api down/i)).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("code-graph-canvas")).toBeInTheDocument();
+  });
+
+  it("shows All plus workspace options and stores selected workspace or All", async () => {
+    fetchWorkspacesMock.mockResolvedValue([
+      { slug: "api", display: "API" },
+      { slug: "web", display: "Web" },
+    ]);
+    projectStore.setState({
+      projects: projectsFixture,
+      selectedProjectId: "project-a",
+      lastViewPerProject: {},
+    });
+
+    render(<CodeGraphPage />);
+
+    const selector = await screen.findByLabelText(/select workspace/i);
+    expect(screen.getByRole("option", { name: "All" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "API" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Web" })).toBeInTheDocument();
+
+    fireEvent.change(selector, { target: { value: "api" } });
+    expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBe("api");
+    expect(fetchSnapshotMock).toHaveBeenCalledTimes(1);
+    expect(fetchSnapshotMock).toHaveBeenLastCalledWith("project-a", 10_000);
+
+    fireEvent.change(selector, { target: { value: "" } });
+    expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBeNull();
+    expect(fetchSnapshotMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists workspace selection across canvas remounts for the same project", async () => {
+    fetchWorkspacesMock.mockResolvedValue([
+      { slug: "api", display: "API" },
+      { slug: "web", display: "Web" },
+    ]);
+    projectStore.setState({
+      projects: projectsFixture,
+      selectedProjectId: "project-a",
+      lastViewPerProject: {},
+    });
+
+    const { rerender } = render(<CodeGraphPage />);
+
+    fireEvent.change(await screen.findByLabelText(/select workspace/i), {
+      target: { value: "web" },
+    });
+    expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBe("web");
+
+    rerender(<CodeGraphPage />);
+
+    expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBe("web");
+    expect(screen.getByLabelText(/select workspace/i)).toHaveValue("web");
+    expect(fetchWorkspacesMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("resets workspace selection when the project changes or the slug is no longer valid", async () => {
+    fetchWorkspacesMock.mockImplementation(async (project) =>
+      project === "project-a"
+        ? [
+            { slug: "api", display: "API" },
+            { slug: "web", display: "Web" },
+          ]
+        : [
+            { slug: "worker", display: "Worker" },
+            { slug: "cli", display: "CLI" },
+          ],
+    );
+    projectStore.setState({
+      projects: projectsFixture,
+      selectedProjectId: "project-a",
+      lastViewPerProject: {},
+    });
+
+    render(<CodeGraphPage />);
+
+    fireEvent.change(await screen.findByLabelText(/select workspace/i), {
+      target: { value: "api" },
+    });
+    expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBe("api");
+
+    fireEvent.change(screen.getByLabelText(/select project/i), {
+      target: { value: "project-b" },
+    });
+
+    await waitFor(() => {
+      expect(fetchWorkspacesMock).toHaveBeenCalledWith("project-b");
+    });
+    expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBeNull();
+
+    fireEvent.change(await screen.findByLabelText(/select workspace/i), {
+      target: { value: "worker" },
+    });
+    expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBe("worker");
+
+    fetchWorkspacesMock.mockResolvedValueOnce([
+      { slug: "api", display: "API" },
+      { slug: "web", display: "Web" },
+    ]);
+    fireEvent.change(screen.getByLabelText(/select project/i), {
+      target: { value: "project-a" },
+    });
+
+    await waitFor(() => {
+      expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBeNull();
     });
   });
 

@@ -62,6 +62,10 @@ describe("codeGraphStore", () => {
     it("starts at the default (max) depth", () => {
       expect(useCodeGraphStore.getState().depthFilter).toBe(DEFAULT_DEPTH);
     });
+
+    it("starts with no selected workspace", () => {
+      expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBeNull();
+    });
   });
 
   describe("setSelection", () => {
@@ -203,9 +207,19 @@ describe("codeGraphStore", () => {
     });
   });
 
+  describe("selectedWorkspaceSlug", () => {
+    it("sets and clears the selected workspace slug", () => {
+      useCodeGraphStore.getState().setSelectedWorkspaceSlug("api");
+      expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBe("api");
+      useCodeGraphStore.getState().setSelectedWorkspaceSlug(null);
+      expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBeNull();
+    });
+  });
+
   describe("reset", () => {
     it("returns every slice to its default", () => {
       const s = useCodeGraphStore.getState();
+      s.setSelectedWorkspaceSlug("api");
       s.setSelection("foo");
       s.setCitations(["a"]);
       s.setToolHighlight(["b"]);
@@ -227,6 +241,7 @@ describe("codeGraphStore", () => {
       expect(after.edgeKindFilters.FileReference).toBe(false);
       expect(after.colorMode).toBe("topology");
       expect(after.complexityAvailable).toBe(false);
+      expect(after.selectedWorkspaceSlug).toBe("api");
     });
   });
 });

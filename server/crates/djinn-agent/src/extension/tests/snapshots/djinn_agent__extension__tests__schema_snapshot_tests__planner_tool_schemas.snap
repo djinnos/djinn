@@ -1,5 +1,6 @@
 ---
 source: crates/djinn-agent/src/extension/tests/schema_snapshot_tests.rs
+assertion_line: 239
 expression: tool_schemas_planner()
 ---
 [
@@ -1456,12 +1457,6 @@ expression: tool_schemas_planner()
         "summary": {
           "type": "string",
           "description": "Optional overall summary of the grooming session"
-        },
-        "next_patrol_minutes": {
-          "type": "integer",
-          "minimum": 5,
-          "maximum": 60,
-          "description": "Planner patrol only (per ADR-051 §1): minutes until the next board-health patrol should run (5-60). Set when the current task is a review-type patrol (`issue_type=\"review\"`, title contains \"patrol\"). Omit for decomposition or intervention sessions."
         },
         "decision": {
           "type": "string",

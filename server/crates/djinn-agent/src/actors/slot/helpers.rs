@@ -1340,6 +1340,7 @@ pub(crate) async fn build_role_code_graph_context(
     let ranked = match graph_ops
         .ranked(
             &ctx,
+            ctx.workspace.as_deref(),
             Some("symbol"),
             Some("pagerank"),
             AUTO_CODE_CONTEXT_RANKED_POOL,
@@ -1590,7 +1591,14 @@ pub(crate) async fn build_reviewer_diff_context(
         // `impact` is BFS-bound; ask for the detailed shape (no group_by)
         // so we can compute (direct, total, modules) ourselves.
         let impact = match graph_ops
-            .impact(&ctx, &sym.uid, REVIEWER_DIFF_IMPACT_DEPTH, None, None)
+            .impact(
+                &ctx,
+                ctx.workspace.as_deref(),
+                &sym.uid,
+                REVIEWER_DIFF_IMPACT_DEPTH,
+                None,
+                None,
+            )
             .await
         {
             Ok(djinn_control_plane::bridge::ImpactResult::Detailed(v)) => v,
@@ -1673,7 +1681,13 @@ pub(crate) async fn build_planner_patrol_context(
         sub_path: None,
     };
     let ranked = graph_ops
-        .ranked(&ctx, Some("file"), Some("pagerank"), 20)
+        .ranked(
+            &ctx,
+            ctx.workspace.as_deref(),
+            Some("file"),
+            Some("pagerank"),
+            20,
+        )
         .await
         .ok()
         .unwrap_or_default();
@@ -1903,6 +1917,7 @@ mod tests {
         async fn ranked(
             &self,
             _: &ProjectCtx,
+            _workspace: Option<&str>,
             _: Option<&str>,
             _: Option<&str>,
             _: usize,
@@ -1917,6 +1932,7 @@ mod tests {
         async fn impact(
             &self,
             _: &ProjectCtx,
+            _workspace: Option<&str>,
             key: &str,
             _: usize,
             _: Option<&str>,
@@ -1953,6 +1969,7 @@ mod tests {
         async fn orphans(
             &self,
             _: &ProjectCtx,
+            _workspace: Option<&str>,
             _: Option<&str>,
             _: Option<&str>,
             _: usize,
@@ -1963,6 +1980,7 @@ mod tests {
         async fn path(
             &self,
             _: &ProjectCtx,
+            _workspace: Option<&str>,
             _: &str,
             _: &str,
             _: Option<usize>,
@@ -2050,6 +2068,7 @@ mod tests {
         async fn api_surface(
             &self,
             _: &ProjectCtx,
+            _workspace: Option<&str>,
             _: Option<&str>,
             _: Option<&str>,
             _: usize,
@@ -2120,6 +2139,7 @@ mod tests {
         async fn touches_hot_path(
             &self,
             _: &ProjectCtx,
+            _workspace: Option<&str>,
             _: &[String],
             _: &[String],
             _: &[String],
@@ -2176,6 +2196,7 @@ mod tests {
         async fn snapshot(
             &self,
             _: &ProjectCtx,
+            _workspace: Option<&str>,
             _: usize,
             _: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
         ) -> Result<djinn_control_plane::bridge::SnapshotPayload, String> {

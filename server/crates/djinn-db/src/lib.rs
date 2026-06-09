@@ -75,8 +75,8 @@ pub use repositories::{
         ProjectRepository,
     },
     project_workspace_graph::{
-        ProjectWorkspaceGraph, ProjectWorkspaceGraphLatest, ProjectWorkspaceGraphRepository,
-        ProjectWorkspaceGraphUpsert,
+        CODELESS_WORKSPACE_SLUG, ProjectWorkspaceGraph, ProjectWorkspaceGraphLatest,
+        ProjectWorkspaceGraphRepository, ProjectWorkspaceGraphUpsert,
     },
     proposal::{
         ProposalCreateInput, ProposalFeedbackCreateInput, ProposalListQuery, ProposalListResult,

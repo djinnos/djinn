@@ -69,6 +69,17 @@ done
 
 "${CARGO_HOME}/bin/rustup" default "${DEFAULT_TOOLCHAIN_VALUE}"
 
+# cargo-nextest: the test runner CI uses (`cargo nextest run`). Pull the
+# prebuilt static binary (no compile) into CARGO_HOME/bin so it's on the baked
+# PATH. Arch-detected; best-effort so a fetch failure never fails the image.
+NEXTEST_PLATFORM="linux"
+case "$(uname -m)" in
+    aarch64 | arm64) NEXTEST_PLATFORM="linux-arm" ;;
+esac
+curl --proto '=https' --tlsv1.2 -LsSf "https://get.nexte.st/latest/${NEXTEST_PLATFORM}" \
+    | tar zxf - -C "${CARGO_HOME}/bin" \
+    || echo "[install-rust] cargo-nextest install failed; skipping (CI uses nextest, task-runs can fall back to 'cargo test')" >&2
+
 # Use `:-` defaults, NOT unconditional exports: the worker runs the agent's
 # shell tool as a LOGIN shell (`bash -lc`), so this fragment is sourced on
 # every command. The K8s pod sets CARGO_HOME=/cache/cargo at runtime (job.rs)
@@ -77,9 +88,19 @@ done
 # the ephemeral image layer, so agent-invoked cargo re-downloads crates COLD
 # every run. The `:-` form keeps the baked default for plain login shells while
 # letting the pod-level override survive.
-cat > /etc/profile.d/10-rust.sh <<'EOF'
-export RUSTUP_HOME="${RUSTUP_HOME:-/usr/local/rustup}"
-export CARGO_HOME="${CARGO_HOME:-/usr/local/cargo}"
-export PATH="${CARGO_HOME}/bin:${PATH}"
+#
+# PATH, however, must point at the BAKED cargo/rustup proxies. Those live at the
+# build-time CARGO_HOME (/usr/local/cargo/bin) regardless of the runtime cache
+# override. Deriving PATH from the (overridden) CARGO_HOME resolved it to
+# /cache/cargo/bin — the PVC cache dir, which holds the registry index/crate
+# sources but NOT the cargo binary — so `cargo` fell off the login-shell PATH
+# entirely and the agent dropped to cold, uncached `rustc` fallbacks (~12-min
+# compiles; also the "cargo: command not found" worker loops). Expand
+# ${CARGO_HOME} at BUILD time for the PATH line (note the unquoted heredoc);
+# keep RUSTUP_HOME/CARGO_HOME runtime-overridable via escaped `\${...}`.
+cat > /etc/profile.d/10-rust.sh <<EOF
+export RUSTUP_HOME="\${RUSTUP_HOME:-/usr/local/rustup}"
+export CARGO_HOME="\${CARGO_HOME:-/usr/local/cargo}"
+export PATH="${CARGO_HOME}/bin:\${PATH}"
 EOF
 chmod 0644 /etc/profile.d/10-rust.sh

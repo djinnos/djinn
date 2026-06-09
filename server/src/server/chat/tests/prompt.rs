@@ -194,6 +194,7 @@ async fn codebase_header_builder_renders_status_hotspots_and_tree() {
         async fn ranked(
             &self,
             _ctx: &ProjectCtx,
+            _workspace: Option<&str>,
             _kind: Option<&str>,
             _sort_by: Option<&str>,
             _limit: usize,
@@ -227,12 +228,13 @@ async fn codebase_header_builder_renders_status_hotspots_and_tree() {
         async fn impact(
             &self,
             ctx: &ProjectCtx,
+            workspace: Option<&str>,
             k: &str,
             d: usize,
             g: Option<&str>,
             mc: Option<f64>,
         ) -> Result<djinn_control_plane::bridge::ImpactResult, String> {
-            StubRepoGraph.impact(ctx, k, d, g, mc).await
+            StubRepoGraph.impact(ctx, workspace, k, d, g, mc).await
         }
         async fn search(
             &self,
@@ -254,20 +256,22 @@ async fn codebase_header_builder_renders_status_hotspots_and_tree() {
         async fn orphans(
             &self,
             ctx: &ProjectCtx,
+            workspace: Option<&str>,
             kf: Option<&str>,
             v: Option<&str>,
             l: usize,
         ) -> Result<Vec<djinn_control_plane::bridge::OrphanEntry>, String> {
-            StubRepoGraph.orphans(ctx, kf, v, l).await
+            StubRepoGraph.orphans(ctx, workspace, kf, v, l).await
         }
         async fn path(
             &self,
             ctx: &ProjectCtx,
+            workspace: Option<&str>,
             f: &str,
             t: &str,
             md: Option<usize>,
         ) -> Result<Option<djinn_control_plane::bridge::PathResult>, String> {
-            StubRepoGraph.path(ctx, f, t, md).await
+            StubRepoGraph.path(ctx, workspace, f, t, md).await
         }
         async fn edges(
             &self,
@@ -322,11 +326,12 @@ async fn codebase_header_builder_renders_status_hotspots_and_tree() {
         async fn api_surface(
             &self,
             ctx: &ProjectCtx,
+            workspace: Option<&str>,
             mg: Option<&str>,
             v: Option<&str>,
             l: usize,
         ) -> Result<Vec<djinn_control_plane::bridge::ApiSurfaceEntry>, String> {
-            StubRepoGraph.api_surface(ctx, mg, v, l).await
+            StubRepoGraph.api_surface(ctx, workspace, mg, v, l).await
         }
         async fn boundary_check(
             &self,
@@ -387,11 +392,14 @@ async fn codebase_header_builder_renders_status_hotspots_and_tree() {
         async fn touches_hot_path(
             &self,
             ctx: &ProjectCtx,
+            workspace: Option<&str>,
             se: &[String],
             ss: &[String],
             s: &[String],
         ) -> Result<Vec<djinn_control_plane::bridge::HotPathHit>, String> {
-            StubRepoGraph.touches_hot_path(ctx, se, ss, s).await
+            StubRepoGraph
+                .touches_hot_path(ctx, workspace, se, ss, s)
+                .await
         }
         async fn coupling(
             &self,
@@ -438,10 +446,11 @@ async fn codebase_header_builder_renders_status_hotspots_and_tree() {
         async fn snapshot(
             &self,
             ctx: &ProjectCtx,
+            workspace: Option<&str>,
             cap: usize,
             ex: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
         ) -> Result<djinn_control_plane::bridge::SnapshotPayload, String> {
-            StubRepoGraph.snapshot(ctx, cap, ex).await
+            StubRepoGraph.snapshot(ctx, workspace, cap, ex).await
         }
     }
 

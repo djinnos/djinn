@@ -237,6 +237,15 @@ exec {bin} warm-graph "{project_id}"
         volumes: Some(volumes),
         node_selector,
         tolerations,
+        // Run as uid 10001 like task-runs (job.rs). The warm pod shares the
+        // /cache cargo target PVC with workers; without this it runs as root
+        // and writes root-owned cargo artifacts the worker (uid 10001) can't
+        // overwrite, corrupting the shared cache.
+        security_context: Some(k8s_openapi::api::core::v1::PodSecurityContext {
+            run_as_user: Some(10001),
+            run_as_group: Some(10001),
+            ..Default::default()
+        }),
         ..PodSpec::default()
     };
 
@@ -345,6 +354,13 @@ mod tests {
 
         let pod = spec.template.spec.as_ref().expect("pod");
         assert_eq!(pod.restart_policy.as_deref(), Some("Never"));
+        // Must run as uid 10001 like task-runs to share the /cache cargo target
+        // PVC without writing root-owned artifacts workers can't overwrite.
+        assert_eq!(
+            pod.security_context.as_ref().and_then(|s| s.run_as_user),
+            Some(10001),
+            "warm pod must run as the worker uid to share the cargo cache safely"
+        );
         assert_eq!(
             pod.service_account_name.as_deref(),
             Some(cfg.service_account.as_str())

@@ -1,6 +1,14 @@
 use crate::Result;
 use crate::database::Database;
 
+/// Synthetic workspace slug used when a project has no indexable code stack.
+///
+/// Such projects have no SCIP workspace to warm and no merged graph blob to
+/// cache, but consumers still need durable freshness showing that the warm
+/// pipeline intentionally found "nothing to index" rather than remaining cold
+/// forever.
+pub const CODELESS_WORKSPACE_SLUG: &str = "__djinn_no_code__";
+
 #[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
 pub struct ProjectWorkspaceGraph {
     pub project_id: String,

@@ -41,6 +41,7 @@ export type CodeGraphOperation =
   | "symbols_at"
   | "diff_touches"
   | "detect_changes"
+  | "workspaces"
   | "snapshot";
 
 /**
@@ -88,6 +89,50 @@ export interface CodeGraphArgs {
   to_sha?: string;
   visibility?: string;
   window_days?: number;
+  /** Optional workspace slug for workspace-aware code graph operations. */
+  workspace?: string;
+}
+
+export interface CodeGraphWorkspace {
+  slug: string;
+  display?: string;
+  root?: string;
+  language?: string;
+  status?: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : undefined;
+}
+
+function normalizeWorkspaceEntry(value: unknown): CodeGraphWorkspace | null {
+  if (!isRecord(value)) return null;
+  const slug = nonEmptyString(value.slug ?? value.workspace_slug ?? value.id);
+  if (!slug) return null;
+  return {
+    slug,
+    display: nonEmptyString(
+      value.display ?? value.display_name ?? value.name ?? value.label,
+    ),
+    root: nonEmptyString(value.root ?? value.root_path ?? value.path),
+    language: nonEmptyString(value.language ?? value.indexer),
+    status: nonEmptyString(value.status ?? value.warm_status),
+  };
+}
+
+export function parseWorkspacesResponse(value: unknown): CodeGraphWorkspace[] {
+  const candidates = isRecord(value) ? value.workspaces : value;
+  if (!Array.isArray(candidates)) return [];
+  return candidates.flatMap((entry) => {
+    const normalized = normalizeWorkspaceEntry(entry);
+    return normalized ? [normalized] : [];
+  });
 }
 
 /**
@@ -195,6 +240,13 @@ export function fetchSnapshot(project: string, nodeCap?: number) {
   return callCodeGraph(project, "snapshot", {
     ...(nodeCap !== undefined ? { limit: nodeCap } : {}),
   });
+}
+
+export async function fetchWorkspaces(
+  project: string,
+): Promise<CodeGraphWorkspace[]> {
+  const response = await callCodeGraph(project, "workspaces");
+  return parseWorkspacesResponse(response);
 }
 
 /**

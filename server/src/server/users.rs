@@ -67,9 +67,6 @@ struct UserResponse {
     is_admin: bool,
     /// Proposal capability role: `proposer` | `pm` | `engineer`.
     role: String,
-    /// True for the synthetic "automation" service user (sentinel github_id).
-    /// The UI labels it and offers the admin "configure automation" surface.
-    is_service: bool,
     last_seen_at: Option<String>,
 }
 
@@ -83,7 +80,6 @@ impl From<&User> for UserResponse {
             is_member_of_org: u.is_member_of_org,
             is_admin: u.is_admin,
             role: u.role.clone(),
-            is_service: u.github_id == djinn_core::AUTOMATION_GITHUB_ID,
             last_seen_at: u.last_seen_at.clone(),
         }
     }

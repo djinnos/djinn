@@ -388,9 +388,8 @@ mod tests {
             last_graph_refresh: StdInstant::now(),
             graph_warmer: None,
             mirror: None,
+            rpc_registry: None,
             prune_tick_counter: 0,
-            last_patrol_completed: StdInstant::now(),
-            next_patrol_interval: rules::DEFAULT_PLANNER_PATROL_INTERVAL,
             throughput_events: HashMap::new(),
             escalation_counts: HashMap::new(),
             pr_status_cache: HashMap::new(),
@@ -609,6 +608,98 @@ mod tests {
                 .iter()
                 .any(|s| s.id == session.id),
             "a session inside the hard-cap window must not be reaped by the backstop"
+        );
+    }
+
+    /// A zero-token session PAST the hard cap is NOT reaped while its worker
+    /// still holds a live RPC connection. This is the K8s false-reap fix: the
+    /// in-memory slot/activity bookkeeping can drift for remote pods (making the
+    /// activity gate false-negative), but a live connection is ground-truth that
+    /// the worker is alive, so the backstop must defer to it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn connected_worker_past_hard_cap_is_not_reaped() {
+        use djinn_db::{CreateSessionParams, SessionRepository};
+
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let (task, _note) = create_task_with_note(&db, &tx, "connected-no-reap").await;
+        sqlx::query("UPDATE tasks SET status = 'in_progress' WHERE id = $1")
+            .bind(&task.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let run_id = "run-connected-1";
+        // `sessions.task_run_id` has an FK to `task_runs`, so seed the run row.
+        sqlx::query(
+            "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status) VALUES ($1, $2, $3, 'manual', 'running')",
+        )
+            .bind(run_id)
+            .bind(&task.project_id)
+            .bind(&task.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+        let session = session_repo
+            .create(CreateSessionParams {
+                project_id: &task.project_id,
+                task_id: Some(&task.id),
+                model: "openai/gpt-5.5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: Some(run_id),
+            })
+            .await
+            .unwrap();
+        // Backdate past the 10-minute hard cap, tokens still 0/0.
+        sqlx::query(
+            "UPDATE sessions SET started_at = to_char(now() AT TIME ZONE 'utc' - interval '20 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
+        )
+            .bind(&session.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        // Wire a registry that reports a LIVE connection for this run.
+        let registry = std::sync::Arc::new(djinn_supervisor::ConnectionRegistry::new());
+        registry.register_connected_for_test(run_id).await;
+        let mut actor = coordinator_actor_for_tests(&db, &tx);
+        actor.rpc_registry = Some(registry.clone());
+
+        actor.reap_zombie_sessions().await;
+
+        assert!(
+            session_repo
+                .list_active()
+                .await
+                .unwrap()
+                .iter()
+                .any(|s| s.id == session.id),
+            "a past-cap session with a live worker connection must NOT be reaped"
+        );
+        let updated = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+            .get(&task.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated.status, "in_progress",
+            "task with a live connected worker must stay in_progress, not be released"
+        );
+
+        // Sanity: once the connection drops, the same session IS reaped.
+        registry.deregister(run_id).await;
+        actor.reap_zombie_sessions().await;
+        assert!(
+            !session_repo
+                .list_active()
+                .await
+                .unwrap()
+                .iter()
+                .any(|s| s.id == session.id),
+            "after the worker connection drops, the past-cap zombie must be reaped"
         );
     }
 
@@ -1487,6 +1578,63 @@ mod tests {
             planner_intervention_markers(&repo, &task.id).await.len(),
             2,
             "one marker per distinct reopen-count value"
+        );
+    }
+
+    /// Second strike: once the Planner has already intervened
+    /// (`intervention_count >= MAX_PLANNER_INTERVENTIONS`) and the task has
+    /// STILL climbed back to the reopen threshold, the coordinator parks it
+    /// terminally instead of escalating to the Planner again — no new marker,
+    /// no new review task, and the task ends up `closed`. This is the loop
+    /// breaker for the txr4 case (rescope didn't help → stop hogging the slot).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn second_strike_parks_task_after_prior_intervention() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let mut actor = coordinator_actor_for_tests(&db, &tx);
+        let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+        // Reach the threshold once, simulate a completed planner intervention
+        // (bumps intervention_count, resets reopen_count), then climb back to the
+        // threshold a second time.
+        let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
+        repo.reset_intervention_counters(&task.id).await.unwrap();
+        for _ in 0..REOPEN_INTERVENTION_THRESHOLD {
+            repo.set_status(&task.id, "closed").await.unwrap();
+            repo.set_status(&task.id, "open").await.unwrap();
+        }
+        let task = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(task.intervention_count, 1, "one prior planner intervention");
+        assert_eq!(task.reopen_count, REOPEN_INTERVENTION_THRESHOLD);
+
+        let handled = actor.maybe_intervene_on_stuck_task(&task).await;
+        assert!(
+            handled,
+            "second strike must handle the task (caller skips worker dispatch)"
+        );
+
+        // Parked terminally — task is closed.
+        let parked = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            parked.status, "closed",
+            "second strike force-closes the task"
+        );
+
+        // No planner intervention marker for this reopen count, and no new
+        // planner review task — the loop is broken, not re-escalated.
+        assert!(
+            !planner_intervention_markers(&repo, &task.id)
+                .await
+                .iter()
+                .any(|m| m["reopen_count"] == REOPEN_INTERVENTION_THRESHOLD),
+            "second strike must not write a new planner intervention marker"
+        );
+        let reviews = repo.list_by_status("open").await.unwrap();
+        assert!(
+            !reviews
+                .iter()
+                .any(|t| t.issue_type == "review" && t.project_id == parked.project_id),
+            "second strike must not create another planner review task"
         );
     }
 }

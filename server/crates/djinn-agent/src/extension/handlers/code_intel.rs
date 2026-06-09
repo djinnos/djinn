@@ -356,7 +356,13 @@ async fn call_code_graph_inner(
         "ranked" => {
             let limit = p.limit.unwrap_or(20);
             let ranked = graph_ops
-                .ranked(ctx, p.kind_filter.as_deref(), p.sort_by.as_deref(), limit)
+                .ranked(
+                    ctx,
+                    ctx.workspace.as_deref(),
+                    p.kind_filter.as_deref(),
+                    p.sort_by.as_deref(),
+                    limit,
+                )
                 .await?;
             serde_json::to_value(&ranked).map_err(|e| format!("serialize error: {e}"))?
         }
@@ -392,7 +398,14 @@ async fn call_code_graph_inner(
                 return Err(format!("invalid min_confidence {c}: must be in [0.0, 1.0]"));
             }
             let impact = graph_ops
-                .impact(ctx, key, depth, p.group_by.as_deref(), p.min_confidence)
+                .impact(
+                    ctx,
+                    ctx.workspace.as_deref(),
+                    key,
+                    depth,
+                    p.group_by.as_deref(),
+                    p.min_confidence,
+                )
                 .await?;
             serde_json::to_value(&impact).map_err(|e| format!("serialize error: {e}"))?
         }
@@ -463,6 +476,7 @@ async fn call_code_graph_inner(
             let orphans = graph_ops
                 .orphans(
                     ctx,
+                    ctx.workspace.as_deref(),
                     p.kind_filter.as_deref(),
                     p.visibility.as_deref(),
                     limit,
@@ -480,7 +494,9 @@ async fn call_code_graph_inner(
                 p.to.as_deref()
                     .filter(|s| !s.is_empty())
                     .ok_or("'to' is required for 'path'")?;
-            let path = graph_ops.path(ctx, from, to, p.max_depth).await?;
+            let path = graph_ops
+                .path(ctx, ctx.workspace.as_deref(), from, to, p.max_depth)
+                .await?;
             serde_json::to_value(&path).map_err(|e| format!("serialize error: {e}"))?
         }
         "edges" => {
@@ -543,7 +559,9 @@ async fn call_code_graph_inner(
             // higher values.
             let node_cap = p.node_cap.or(p.limit).unwrap_or(2000);
             let exclusions = djinn_control_plane::tools::graph_exclusions::GraphExclusions::empty();
-            let result = graph_ops.snapshot(ctx, node_cap, &exclusions).await?;
+            let result = graph_ops
+                .snapshot(ctx, ctx.workspace.as_deref(), node_cap, &exclusions)
+                .await?;
             serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
         }
         "symbols_at" => {
@@ -621,7 +639,13 @@ async fn call_code_graph_inner(
             // this is just dispatch wiring.
             let limit = p.limit.unwrap_or(50);
             let result = graph_ops
-                .api_surface(ctx, p.from_glob.as_deref(), p.visibility.as_deref(), limit)
+                .api_surface(
+                    ctx,
+                    ctx.workspace.as_deref(),
+                    p.from_glob.as_deref(),
+                    p.visibility.as_deref(),
+                    limit,
+                )
                 .await?;
             serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
         }
@@ -702,7 +726,7 @@ async fn call_code_graph_inner(
                     .to_string());
             }
             let result = graph_ops
-                .touches_hot_path(ctx, &entries, &sinks, &queried)
+                .touches_hot_path(ctx, ctx.workspace.as_deref(), &entries, &sinks, &queried)
                 .await?;
             serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
         }
@@ -925,7 +949,14 @@ async fn call_code_graph_inner(
 
             let (direct_result, transitive_result) = tokio::join!(
                 graph_ops.neighbors(ctx, key, Some("incoming"), Some("file"), None),
-                graph_ops.impact(ctx, key, depth, Some("file"), None),
+                graph_ops.impact(
+                    ctx,
+                    ctx.workspace.as_deref(),
+                    key,
+                    depth,
+                    Some("file"),
+                    None
+                ),
             );
             let direct_groups = match direct_result? {
                 djinn_control_plane::bridge::NeighborsResult::Grouped(g) => g,

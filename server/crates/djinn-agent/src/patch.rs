@@ -394,7 +394,10 @@ fn find_chunk_position(lines: &[String], chunk: &Chunk, file_path: &str) -> Resu
 
     Err(format!(
         "could not locate chunk in {file_path}: context anchor '@@ {anchor}' not found in file. \
-         Ensure the @@ line contains text that appears verbatim in the file."
+         The @@ line must contain text that appears VERBATIM in the file. If this is a large \
+         file, a whole-file `read` is TRUNCATED (middle omitted) — don't trust a full read. \
+         Find the target with the `lsp` tool (operation \"definition\") or output_grep, re-read \
+         that exact range with read(offset, limit), and copy the anchor line character-for-character."
     ))
 }
 
@@ -453,14 +456,18 @@ fn apply_single_chunk(
                 }
                 let actual = &lines[actual_idx];
                 if !lines_match(actual, text) {
+                    let mismatch_line = actual_idx + 1;
+                    let reread_offset = mismatch_line.saturating_sub(20);
                     return Err(format!(
-                        "context mismatch at line {}: expected '{}', found '{}'. \
-                         The file on disk does not match your patch context — \
-                         it may have changed since you last read it. Read the \
-                         file again and rebuild the patch from its current content.",
-                        actual_idx + 1,
-                        text,
-                        actual
+                        "context mismatch at line {mismatch_line}: expected '{text}', \
+                         found '{actual}'. Your patch context does not match the file on \
+                         disk. If this is a large file, a whole-file `read` is TRUNCATED \
+                         (middle omitted) so you never saw this region — do NOT re-read \
+                         the whole file. Instead re-read just this range with \
+                         read(file_path, offset={reread_offset}, limit=60), or jump \
+                         straight to the symbol with the `lsp` tool (operation \
+                         \"definition\"/\"references\"), then copy the surrounding lines \
+                         VERBATIM into a fresh patch."
                     ));
                 }
                 output.push(actual.clone());

@@ -253,6 +253,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     // running every indexer when no stack has been persisted yet (fresh
     // project, or a pre-PR-2 deployment).
     let stack_filter = resolve_stack_indexer_filter(ctx, project_id).await;
+    let declared_workspaces = resolve_declared_workspaces(ctx, project_id).await;
 
     let t_indexers = std::time::Instant::now();
     let run = crate::scip_indexer::run_indexers_already_locked(
@@ -260,6 +261,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         &output_dir,
         Some(&target_dir),
         stack_filter.as_deref(),
+        declared_workspaces.as_deref(),
     )
     .await
     .map_err(|e| format!("run_indexers: {e}"))?;
@@ -736,6 +738,49 @@ async fn resolve_stack_indexer_filter<C: WarmContext>(
         None
     } else {
         Some(wanted)
+    }
+}
+
+async fn resolve_declared_workspaces<C: WarmContext>(
+    ctx: &C,
+    project_id: &str,
+) -> Option<Vec<djinn_stack::Workspace>> {
+    use djinn_db::ProjectRepository;
+    use djinn_stack::EnvironmentConfig;
+
+    let repo = ProjectRepository::new(ctx.db().clone(), ctx.event_bus());
+    let raw = match repo.get_environment_config(project_id).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return None,
+        Err(error) => {
+            tracing::warn!(
+                project_id = %project_id,
+                error = %error,
+                "ensure_canonical_graph: failed to load EnvironmentConfig workspaces"
+            );
+            return None;
+        }
+    };
+    if raw.trim().is_empty() || raw.trim() == "{}" {
+        return None;
+    }
+
+    let config: EnvironmentConfig = match serde_json::from_str(&raw) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(
+                project_id = %project_id,
+                error = %error,
+                "ensure_canonical_graph: failed to parse EnvironmentConfig workspaces"
+            );
+            return None;
+        }
+    };
+
+    if config.workspaces.is_empty() {
+        None
+    } else {
+        Some(config.workspaces)
     }
 }
 

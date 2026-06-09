@@ -1047,7 +1047,8 @@ impl AppState {
                 self.inner.lsp.clone(),
             )
             .with_graph_warmer(self.graph_warmer().await)
-            .with_mirror(self.inner.mirror.clone()),
+            .with_mirror(self.inner.mirror.clone())
+            .with_rpc_registry(self.inner.rpc_registry.clone()),
         );
 
         *self.inner.pool.lock().await = Some(pool.clone());
@@ -1074,17 +1075,6 @@ impl AppState {
         if let Err(e) = djinn_provider::bootstrap::bootstrap_env_credentials(&credential_repo).await
         {
             tracing::warn!(error = %e, "failed to bootstrap provider env credentials");
-        }
-
-        // Seed the synthetic "automation" service user that owns
-        // system-initiated work (board patrols, wave-planning, escalations,
-        // future cron). Idempotent. System tasks stamp this user as their
-        // creator so every per-user dispatch axis resolves under it.
-        if let Err(e) = djinn_db::UserRepository::new(self.db().clone())
-            .ensure_automation_user()
-            .await
-        {
-            tracing::warn!(error = %e, "failed to ensure automation service user");
         }
 
         // Load custom providers from DB → merge into in-memory catalog.
