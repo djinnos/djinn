@@ -21,35 +21,35 @@ export const viewport: Viewport = {
 export const metadata: Metadata = {
   metadataBase: new URL("https://djinnai.io"),
   title: {
-    default: "Djinn | AI Development Orchestrator",
+    default: "Djinn | From Proposal to Pull Request",
     template: "%s | Djinn",
   },
-  description: "Manage AI agents like tasks, not terminal windows. Run parallel agents on your machine with any LLM — you review every line before it merges.",
-  keywords: ["AI", "developer tools", "AI coding agents", "local LLM", "AI project management", "kanban", "autonomous development"],
+  description: "Open-source, Kubernetes-native platform where your team proposes and approves work — and AI agents build it. On your cluster, with your models, behind your review.",
+  keywords: ["AI", "developer tools", "AI coding agents", "Kubernetes", "self-hosted", "agent orchestration", "proposals", "autonomous development", "AI spend visibility"],
   authors: [{ name: "Djinn AI, Inc." }],
   creator: "Djinn AI, Inc.",
   openGraph: {
     type: "website",
     locale: "en_US",
     url: "https://djinnai.io",
-    title: "Djinn | AI Development Orchestrator",
-    description: "Manage AI agents like tasks, not terminal windows. Run parallel agents on your machine with any LLM — you review every line before it merges.",
+    title: "Djinn | From Proposal to Pull Request",
+    description: "Open-source, Kubernetes-native platform where your team proposes and approves work — and AI agents build it. On your cluster, with your models, behind your review.",
     siteName: "Djinn",
     images: [
       {
         url: "/kanban.jpg",
         width: 1200,
         height: 630,
-        alt: "Djinn — AI Development Orchestrator",
+        alt: "Djinn — from proposal to pull request",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "Djinn | AI Development Orchestrator",
-    description: "Manage AI agents like tasks, not terminal windows. Parallel execution, any LLM, your machine.",
+    title: "Djinn | From Proposal to Pull Request",
+    description: "Your team proposes and approves the work. AI agents build it — on your cluster, with your models, behind your review.",
     images: ["/kanban.jpg"],
-    creator: "@djinnos", 
+    creator: "@djinnos",
   },
   icons: {
     icon: "/favicon.ico",
@@ -74,14 +74,14 @@ export default function RootLayout({
               "@type": "SoftwareApplication",
               "name": "Djinn",
               "applicationCategory": "DeveloperApplication",
-              "operatingSystem": "macOS, Windows, Linux",
+              "operatingSystem": "Kubernetes (self-hosted)",
               "offers": {
                 "@type": "Offer",
                 "price": "0",
                 "priceCurrency": "USD",
                 "availability": "https://schema.org/InStock"
               },
-              "description": "AI development orchestrator — manage parallel agents on your local machine with any LLM provider. You stay in control.",
+              "description": "Open-source, Kubernetes-native platform where teams propose and approve work and AI agents build it — self-hosted, bring your own models, every change behind human review.",
               "author": {
                 "@type": "Organization",
                 "name": "Djinn AI, Inc.",

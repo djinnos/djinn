@@ -5,9 +5,10 @@
 <h1 align="center">Djinn</h1>
 
 <p align="center">
-  <strong>Manage AI agents, not terminals.</strong>
+  <strong>From proposal to pull request.</strong>
   <br />
-  A Kubernetes-native control plane for AI coding agents. Multi-user, multi-project, multi-model — you review every change before it merges.
+  A Kubernetes-native platform where your team proposes and approves work — and AI agents build it.
+  On your cluster, with your models, behind your review.
 </p>
 
 <p align="center">
@@ -19,9 +20,9 @@
 
 <br />
 
-Djinn turns a kanban board into an agent orchestrator. Organize work across any number of repositories as epics and tasks; Djinn dispatches each task to an AI agent running in its own isolated **Kubernetes Job**, reviews the result against your acceptance criteria, and opens a pull request for you to merge.
+Djinn turns ideas into reviewed, merged code through one governed pipeline. Anyone on the team writes a **proposal** — a living spec, not a chat prompt. Your product folks and engineers discuss it, leave feedback, and sign off. When it graduates, Djinn plans the work, decomposes it into epics and tasks across any number of repositories, and dispatches AI agents — each in its own isolated **Kubernetes Job** — to build it. An AI reviewer checks every result against the acceptance criteria before a pull request is opened. **Nothing ships without your approval.**
 
-Instead of juggling terminal windows and switching between models and repos, you direct work from a board. The `djinn-server` control plane is the single source of truth — the web UI, Claude Code, Cursor, and any MCP client are all just consumers of the same API.
+The `djinn-server` control plane is the single source of truth — the web UI, Claude Code, Cursor, and any MCP client are all just consumers of the same API. And because it all runs on your cluster with your provider credentials, your code and your spend never leave your control.
 
 <br />
 
@@ -46,19 +47,22 @@ Instead of juggling terminal windows and switching between models and repos, you
 ## How it works
 
 ```
-  Create tasks ──▶ Run ──▶ Agents work in parallel ──▶ AI review ──▶ Pull request
-       │            │              │                       │              │
-   Kanban /     Coordinator   One Kubernetes Job       Reviewer agent   You merge
-   epics /      dispatches    per task-run, each       checks your
-   MCP          by priority   in its own isolated      acceptance
-                & dependency   workspace               criteria
+  Propose ──▶ Review & sign off ──▶ Build ──▶ AI review ──▶ Pull request
+     │               │                │            │              │
+  Anyone        Product +      Epics & tasks   Reviewer       You merge
+  writes a      engineering    dispatched as   agent checks
+  spec; AI      discuss,       isolated K8s    acceptance
+  helps refine  iterate,       Jobs, in        criteria;
+  it            sign off       parallel        rejects loop back
 ```
 
-1. **Create tasks** — Features, bugs, tech debt. Organize them as epics with dependencies and blockers across any number of projects.
-2. **Run** — The coordinator dispatches ready tasks by priority and dependency order, gated by each user's per-model concurrency limit.
-3. **Agents work in parallel** — Each task-run executes in its own Kubernetes Job, in a per-project devcontainer image, with an isolated git workspace.
-4. **AI review** — A reviewer agent checks the work against your acceptance criteria; rejected work loops back for another pass.
-5. **Pull request** — Approved work is pushed and a PR is opened via your GitHub App (or squash-merged directly when no App is configured). Nothing ships without your approval.
+1. **Propose** — Anyone writes a proposal: a problem, a goal, acceptance criteria. Proposals are global, collaborative specs that can target any number of projects. Use the editor, or open a proposal-scoped chat and let Djinn draft and refine the spec with you.
+2. **Review & sign off** — The team leaves feedback on the spec; the author (or Djinn) addresses it revision by revision. Reviewers sign off — sign-offs go stale if the spec changes after, so approval always means *this* version.
+3. **Build** — Graduating a proposal turns it into epics and tasks. The coordinator dispatches ready tasks by priority and dependency order, gated by each user's per-model concurrency limit. Each task-run executes in its own Kubernetes Job, in a per-project devcontainer image, with an isolated git workspace. Changed your mind mid-build? Freeze or abort, edit the spec, re-sign, re-graduate.
+4. **AI review** — A reviewer agent checks the work against the proposal's acceptance criteria; rejected work loops back for another pass.
+5. **Pull request** — Approved work is pushed and a PR is opened via your GitHub App. You review, you merge.
+
+Prefer to skip the ceremony? Tasks and epics can also be created directly on the board — the proposal layer is governance you opt into, not a gate you can't route around.
 
 ## Architecture
 
@@ -71,7 +75,7 @@ Djinn is a Rust control plane (`djinn-server`) that acts as a Kubernetes control
         ┌──────────────────────────────────────────────────┐
         │            djinn-server  (control plane)          │
         │  HTTP API · embedded React UI · MCP (/mcp)        │
-        │  coordinator · per-user elastic slot pool         │
+        │  proposals · coordinator · per-user slot pool     │
         │  mirror fetcher · image controller · RPC listener │
         └───────┬─────────────────────┬────────────────────┘
        dispatch │                     │ dispatch
@@ -92,9 +96,9 @@ Djinn is a Rust control plane (`djinn-server`) that acts as a Kubernetes control
 
 | Component | Role |
 |-----------|------|
-| `djinn-server` | Control plane: HTTP API, embedded UI, MCP endpoint, OAuth server, task coordinator, slot pool, repo mirror fetcher, per-project image controller, worker RPC listener. |
+| `djinn-server` | Control plane: HTTP API, embedded UI, MCP endpoint, OAuth server, proposal pipeline, task coordinator, slot pool, repo mirror fetcher, per-project image controller, worker RPC listener. |
 | `djinn-agent-worker` | Runs inside each task-run pod. Drives the agent role sequence stage-by-stage against an isolated `/workspace`, streaming results back over RPC. |
-| Postgres 16 | All state — tasks, epics, sessions, notes, users, encrypted credentials, code-graph cache (JSONB throughout). |
+| Postgres 16 | All state — proposals, tasks, epics, sessions, notes, users, encrypted credentials, code-graph cache (JSONB throughout). |
 | Qdrant | Vector store for code-chunk and note embeddings (semantic + hybrid search). |
 | BuildKit + registry | Builds a per-project devcontainer image (from detected stack) that every task-run for that project runs in. |
 
@@ -167,21 +171,25 @@ Postgres — migrations run automatically in the server's migrate initContainer.
 
 ## Features
 
+### 📋 Proposals: specs, not prompts
+
+Work starts as a written, reviewable spec with acceptance criteria — targeting one project or many. Feedback threads, revision history, and stale-aware sign-offs give product and engineering a shared artifact to argue about *before* tokens are spent. Graduate it to build; freeze or abort mid-build to rework the spec and go again.
+
 ### ⚡ Parallel execution
 
 Each task-run is an isolated Kubernetes Job in its own workspace. Run many agents at once across many repos; scale by adding nodes, not terminal tabs.
 
 ### 📁 Multi-project
 
-Microservices, monorepos, many repositories — Djinn manages them all. Each project gets its own devcontainer image (built from auto-detected stack), task board, code graph, and knowledge base.
+Microservices, monorepos, many repositories — Djinn manages them all. Each project gets its own devcontainer image (built from auto-detected stack), task board, code graph, and knowledge base. A single proposal can drive changes across several of them.
 
-### 🔀 Mix & match models
+### 🔀 Your models, mixed & matched
 
 Djinn owns its own agent loop and talks to providers directly: Anthropic, OpenAI, Google, Fireworks, ChatGPT/Codex and GitHub Copilot (OAuth), Vertex AI, Bedrock, Azure OpenAI, plus any OpenAI-compatible endpoint from the models.dev catalog. Use one model for coding, another for reviews, another for research — configured per user, per project, and per role.
 
 ### 🧠 Persistent memory
 
-Decisions, patterns, and architectural rules live in a searchable, DB-backed knowledge base of linked notes (`[[wikilinks]]`). ADRs are first-class: agents propose them, you accept or reject. Hybrid lexical + semantic search keeps the right context in front of every agent.
+Decisions, patterns, and architectural rules live in a searchable, DB-backed knowledge base of linked notes (`[[wikilinks]]`). Agents extract what they learn from each task and carry it into the next. Hybrid lexical + semantic search keeps the right context in front of every agent.
 
 ### 🔍 Code intelligence
 
@@ -189,15 +197,23 @@ A per-project **code graph** built from SCIP indexers across 8 languages powers 
 
 ### 👥 Multi-user
 
-Self-hosted for your whole team. Each user logs in via GitHub, brings their own provider credentials (encrypted at rest, with org-shared fallback), and has private chat — over a shared board. Admins can manage users and act on their behalf.
+Self-hosted for your whole team. Each user logs in via GitHub, brings their own provider credentials (encrypted at rest, with org-shared fallback), and has private chat — over a shared board. Every task runs under a real user with their model limits. Admins can manage users and act on their behalf.
 
 ### ✅ Built-in review
 
-AI reviewers check each task against your acceptance criteria. You review the finished work and decide when to merge.
+AI reviewers check each task against the proposal's acceptance criteria. You review the finished work and decide when to merge.
+
+## What's next: see where the tokens go
+
+AI engineering spend is opaque almost everywhere — Djinn's pipeline makes it attributable. Because every session belongs to a task, every task to an epic, and every epic to a proposal under a real user, we're building the visibility layer on top:
+
+- **Spend attribution** — tokens and cost per proposal, per project, per model, per user, per role.
+- **Value delivered** — proposals shipped, PRs merged, rework loops, review pass rates — cost next to outcome, not in a separate billing console.
+- **Tracing built in** — every agent session already streams to [Langfuse](https://langfuse.com); the next step is rolling those traces up into answers a team lead can act on.
 
 ## Connect your tools
 
-The server exposes its full surface — tasks, epics, memory, code graph, projects, providers, settings, execution — over **MCP at `POST /mcp`**, served over streamable HTTP and gated by Djinn's own OAuth 2.1 (it federates GitHub for login and issues opaque, audience-bound tokens). Any MCP client connects by pointing at the endpoint and completing the OAuth flow; clients discover the authorization server via the standard `/.well-known/` metadata.
+The server exposes its full surface — proposals, tasks, epics, memory, code graph, projects, providers, settings, execution — over **MCP at `POST /mcp`**, served over streamable HTTP and gated by Djinn's own OAuth 2.1 (it federates GitHub for login and issues opaque, audience-bound tokens). Any MCP client connects by pointing at the endpoint and completing the OAuth flow; clients discover the authorization server via the standard `/.well-known/` metadata.
 
 **Claude Code**
 
@@ -229,11 +245,11 @@ claude mcp add --transport http djinn https://<your-host>/mcp
 
 | Tool group | Examples |
 |-----------|----------|
+| **Proposals** | `proposal_create`, `proposal_show`, `proposal_feedback_add`, `proposal_signoff`, `proposal_graduate`, `proposal_stop_build` |
 | **Tasks** | `task_create`, `task_list`, `task_show`, `task_transition`, `task_claim`, `board_health` |
 | **Epics** | `epic_create`, `epic_list`, `epic_tasks`, `epic_close` |
 | **Memory / notes** | `memory_write`, `memory_read`, `memory_search`, `memory_graph`, `memory_build_context` |
 | **Code graph** | `code_graph_search`, `code_graph_impact`, `code_graph_complexity`, `code_graph_coupling`, `code_graph_cycles` |
-| **Proposals (ADRs)** | `propose_adr_list`, `propose_adr_accept`, `propose_adr_reject` |
 | **Projects** | `project_list`, `project_add_from_github`, `project_environment_config_get`, `get_project_stack` |
 | **Providers** | `provider_catalog`, `provider_models`, `credential_set`, `model_health` |
 | **Settings** | `settings_get`, `settings_set`, `user_settings_get`, `user_settings_set` |
@@ -241,7 +257,7 @@ claude mcp add --transport http djinn https://<your-host>/mcp
 
 ## Configuration
 
-- **[GitHub App setup](docs/GITHUB_APP_SETUP.md)** — connect the server to a GitHub App so repo operations (clone, push, PRs) run under installation tokens and commits are attributed to `djinn-bot[bot]`. Login is federated through the same App.
+- **[GitHub App setup](docs/GITHUB_APP_SETUP.md)** — connect the server to a GitHub App so repo operations (clone, push, PRs) run under installation tokens and commits are attributed correctly. Login is federated through the same App.
 - **Providers** — bootstrap API keys via `secrets.providers.*`, or have each user connect their own under Settings → Models (including OAuth providers like ChatGPT/Codex and Copilot).
 - **Credential vault** — provider credentials are encrypted with AES-256-GCM using the key in `secrets.vaultKey.key`. Keep it stable across upgrades or existing credentials become undecryptable.
 
@@ -267,4 +283,4 @@ The workspace `.cargo/config.toml` defaults `DATABASE_URL` to the `:5433` instan
 
 ## License
 
-Proprietary. © 2026 Djinn AI, Inc. Free to use during beta.
+[Business Source License 1.1](LICENSE). Free to self-host and use in production — the only restriction is offering Djinn itself as a competing hosted service. Each version converts to Apache 2.0 four years after release. © 2026 Djinn AI, Inc.
