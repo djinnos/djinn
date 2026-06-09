@@ -777,7 +777,7 @@ expression: signatures
         },
         "context_filter": {
           "default": null,
-          "description": "Optional coarse context substring for `query_subgraph`.",
+          "description": "Optional coarse context substring for `query_subgraph`. Use this to\nnarrow the natural-language subgraph query to a subsystem, API, type,\nor concern when the initial response is too broad; returned\n`narrowing_hints` may suggest values for this field.",
           "nullable": true,
           "type": "string"
         },
@@ -789,7 +789,7 @@ expression: signatures
         },
         "edge_filters": {
           "default": null,
-          "description": "Optional explicit edge kinds for `query_subgraph`.",
+          "description": "Optional explicit edge kinds for `query_subgraph` traversal. Omit to\nlet the planner infer edge kinds from the question; provide values such\nas calls/imports/returns/reads/writes/implements/extends to narrow the\nbounded subgraph. `edge_kind` is accepted as a single-kind compatibility\nalias when this list is omitted.",
           "items": {
             "type": "string"
           },
@@ -798,7 +798,7 @@ expression: signatures
         },
         "edge_kind": {
           "default": null,
-          "description": "Optional edge-kind filter for `edges`.",
+          "description": "Optional edge-kind filter for `edges`; for `query_subgraph`, a\nsingle-kind compatibility alias used when `edge_filters` is omitted.",
           "nullable": true,
           "type": "string"
         },
@@ -817,13 +817,13 @@ expression: signatures
         },
         "file_filter": {
           "default": null,
-          "description": "Optional path/file substring filter for `query_subgraph`.",
+          "description": "Optional repository-relative path/file substring filter for\n`query_subgraph`. It narrows seed selection and traversal to matching\nfile paths. `file_glob` is also accepted as a compatibility alias and\nis used when `file_filter` is omitted.",
           "nullable": true,
           "type": "string"
         },
         "file_glob": {
           "default": null,
-          "description": "Optional file glob restricting `hotspots` to a subset of paths.",
+          "description": "Optional file glob restricting `hotspots` to a subset of paths. For\n`query_subgraph`, a path-filter compatibility alias used when\n`file_filter` is omitted.",
           "nullable": true,
           "type": "string"
         },
@@ -865,7 +865,7 @@ expression: signatures
         },
         "kind_filter": {
           "default": null,
-          "description": "Kind filter, op-specific:\n- `ranked` / `search` / `cycles` / `orphans`: node kind — `file` or\n  `symbol`.\n- `neighbors`: edge kind — `reads` or `writes` (PR A3). Restricts\n  the response to neighbors connected by `Reads` / `Writes` edges\n  only, so callers can ask for \"who writes to field X\" without\n  post-filtering.",
+          "description": "Kind filter, op-specific:\n- `ranked` / `search` / `cycles` / `orphans`: node kind — `file` or\n  `symbol`.\n- `query_subgraph`: node-kind narrowing for seeds/traversal — `file`\n  or `symbol`.\n- `neighbors`: edge kind — `reads` or `writes` (PR A3). Restricts\n  the response to neighbors connected by `Reads` / `Writes` edges\n  only, so callers can ask for \"who writes to field X\" without\n  post-filtering.",
           "nullable": true,
           "type": "string"
         },
@@ -884,7 +884,7 @@ expression: signatures
         },
         "max_depth": {
           "default": null,
-          "description": "Optional max depth for `path`.",
+          "description": "Optional max depth. For `path`, bounds shortest-path search depth. For\n`query_subgraph`, bounds traversal depth from selected seeds; omit to\nuse the backend default (currently 2). Values are clamped into 0..=8, so 0 means seed\nnodes only and larger values are capped at 8.",
           "format": "int64",
           "nullable": true,
           "type": "integer"
@@ -898,7 +898,7 @@ expression: signatures
         },
         "max_seeds": {
           "default": null,
-          "description": "Maximum seed count for `query_subgraph`.",
+          "description": "Maximum seed count for `query_subgraph`. Omit to use the backend\ndefault (currently 6). Positive values are clamped into 1..=32; zero/negative values\nare rejected. Returned seed debug metadata explains which seeds were\nselected and why.",
           "format": "int64",
           "nullable": true,
           "type": "integer"
@@ -930,7 +930,7 @@ expression: signatures
           "type": "string"
         },
         "operation": {
-          "description": "The operation to perform.\nOne of: `neighbors`, `ranked`, `impact`, `implementations`,\n`search`, `cycles`, `orphans`, `path`, `edges`, `symbols_at`,\n`diff_touches`, `detect_changes`, `describe`, `context`, `status`,\n`snapshot`.",
+          "description": "The operation to perform.\nOne of: `neighbors`, `ranked`, `impact`, `implementations`,\n`search`, `query_subgraph`, `cycles`, `orphans`, `path`, `edges`,\n`symbols_at`, `diff_touches`, `detect_changes`, `describe`,\n`context`, `status`, `snapshot`, and the other graph analysis ops.",
           "type": "string"
         },
         "project": {
@@ -939,7 +939,7 @@ expression: signatures
         },
         "query": {
           "default": null,
-          "description": "Substring query for `search`.",
+          "description": "Query text, op-specific:\n- `search`: substring/name lookup text.\n- `query_subgraph`: required nonblank natural-language question used\n  to pick relevant seeds and infer useful traversal edge kinds.",
           "nullable": true,
           "type": "string"
         },
@@ -1031,7 +1031,7 @@ expression: signatures
         },
         "token_budget": {
           "default": null,
-          "description": "Approximate response token budget for `query_subgraph`.",
+          "description": "Approximate response token budget for `query_subgraph`. Omit to use\nthe backend default (currently about 2000 tokens). Positive values below 1024 are clamped up to 1024,\nvalues above 32000 are clamped down to 32000, and zero/negative values\nare rejected. The result reports budget/truncation state so callers can\nretry with a narrower filter or a different budget.",
           "format": "int64",
           "nullable": true,
           "type": "integer"
@@ -1051,7 +1051,7 @@ expression: signatures
         },
         "workspace": {
           "default": null,
-          "description": "Optional workspace slug used by follow-up workspace-scoped graph ops.",
+          "description": "Optional workspace slug. For `query_subgraph`, scopes seed search and\ntraversal to a warmed workspace when provided; omit to query the\nproject-level graph/default workspace selection.",
           "nullable": true,
           "type": "string"
         }
