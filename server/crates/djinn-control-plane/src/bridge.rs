@@ -1197,6 +1197,17 @@ pub struct ProjectCtx {
 
 #[async_trait]
 pub trait RepoGraphOps: Send + Sync {
+    /// Return workspace slugs that should be suggested for an unknown non-empty
+    /// workspace request, or `None` when the request is absent/known or the
+    /// project does not expose multiple workspace choices.
+    async fn workspace_hint(
+        &self,
+        _ctx: &ProjectCtx,
+        _workspace: Option<&str>,
+    ) -> Result<Option<Vec<String>>, String> {
+        Ok(None)
+    }
+
     /// Neighbors of a file or symbol node (edges in/out). When `group_by` is
     /// `Some("file")`, results are collapsed into per-file rollups.
     ///
