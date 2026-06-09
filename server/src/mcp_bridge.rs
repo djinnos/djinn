@@ -627,6 +627,42 @@ impl RepoGraphBridge {
     }
 }
 
+fn normalize_workspace_prefix(workspace: Option<&str>) -> Option<String> {
+    let slug = workspace?.trim().trim_matches('/').trim();
+    if slug.is_empty() {
+        None
+    } else {
+        Some(format!("{}/", slug.replace('\\', "/")))
+    }
+}
+
+fn repo_graph_node_file_path(node: &djinn_graph::repo_graph::RepoGraphNode) -> Option<String> {
+    node.file_path
+        .as_ref()
+        .map(|path| path.display().to_string())
+}
+
+fn repo_graph_node_matches_workspace(
+    node: &djinn_graph::repo_graph::RepoGraphNode,
+    workspace_prefix: &str,
+) -> bool {
+    repo_graph_node_file_path(node)
+        .as_deref()
+        .is_some_and(|path| path.starts_with(workspace_prefix))
+}
+
+fn active_workspace_prefix(
+    graph: &djinn_graph::repo_graph::RepoDependencyGraph,
+    workspace: Option<&str>,
+) -> Option<String> {
+    let prefix = normalize_workspace_prefix(workspace)?;
+    graph
+        .graph()
+        .node_indices()
+        .any(|idx| repo_graph_node_matches_workspace(graph.node(idx), &prefix))
+        .then_some(prefix)
+}
+
 #[async_trait]
 impl RepoGraphOps for RepoGraphBridge {
     async fn neighbors(
@@ -903,7 +939,7 @@ impl RepoGraphOps for RepoGraphBridge {
     async fn ranked(
         &self,
         ctx: &ProjectCtx,
-        _workspace: Option<&str>,
+        workspace: Option<&str>,
         kind_filter: Option<&str>,
         sort_by: Option<&str>,
         limit: usize,
@@ -920,6 +956,7 @@ impl RepoGraphOps for RepoGraphBridge {
         )
         .await?;
         let exclusions = self.state.mcp_state_graph_exclusions(&ctx.id).await;
+        let workspace_prefix = active_workspace_prefix(&graph, workspace);
         let filter = match kind_filter {
             Some("file") => Some(RepoGraphNodeKind::File),
             Some("symbol") => Some(RepoGraphNodeKind::Symbol),
@@ -938,11 +975,13 @@ impl RepoGraphOps for RepoGraphBridge {
                 if graph_node.is_external {
                     return None;
                 }
+                if let Some(prefix) = workspace_prefix.as_deref()
+                    && !repo_graph_node_matches_workspace(graph_node, prefix)
+                {
+                    return None;
+                }
                 let key = format_node_key(&node.key);
-                let file_hint = graph_node
-                    .file_path
-                    .as_ref()
-                    .map(|p| p.display().to_string());
+                let file_hint = repo_graph_node_file_path(graph_node);
                 // PR F4: apply graph exclusions BEFORE the limit truncate
                 // so the user gets `limit` non-excluded results, not
                 // `limit` raw results minus exclusions.
@@ -1249,7 +1288,7 @@ impl RepoGraphOps for RepoGraphBridge {
     async fn orphans(
         &self,
         ctx: &ProjectCtx,
-        _workspace: Option<&str>,
+        workspace: Option<&str>,
         kind_filter: Option<&str>,
         visibility: Option<&str>,
         limit: usize,
@@ -1262,6 +1301,7 @@ impl RepoGraphOps for RepoGraphBridge {
             &ctx.clone_path,
         )
         .await?;
+        let workspace_prefix = active_workspace_prefix(&graph, workspace);
         let filter = match kind_filter {
             Some("file") => Some(RepoGraphNodeKind::File),
             Some("symbol") => Some(RepoGraphNodeKind::Symbol),
@@ -1299,6 +1339,11 @@ impl RepoGraphOps for RepoGraphBridge {
         let mut out: Vec<OrphanEntry> = Vec::new();
         for idx in raw_nodes {
             let node = graph.node(idx);
+            if let Some(prefix) = workspace_prefix.as_deref()
+                && !repo_graph_node_matches_workspace(node, prefix)
+            {
+                continue;
+            }
             // v8: framework-invoked entry points are not dead code.
             // The detector covers `fn main`, route handlers, tests,
             // python `__main__`, etc. via EntryPointOf edges; SCIP-
@@ -1318,10 +1363,8 @@ impl RepoGraphOps for RepoGraphBridge {
             // legitimately have no incoming production references but
             // aren't "dead". Symbols inside a test file flagged
             // is_test handle the symbol case; this catches FILE nodes.
-            if let Some(path) = node.file_path.as_ref()
-                && djinn_control_plane::tools::graph_exclusions::is_test_path(
-                    &path.display().to_string(),
-                )
+            if let Some(path) = repo_graph_node_file_path(node).as_deref()
+                && djinn_control_plane::tools::graph_exclusions::is_test_path(path)
             {
                 continue;
             }
@@ -1329,7 +1372,7 @@ impl RepoGraphOps for RepoGraphBridge {
                 key: format_node_key(&node.id),
                 kind: format!("{:?}", node.kind).to_lowercase(),
                 display_name: node.display_name.clone(),
-                file: node.file_path.as_ref().map(|p| p.display().to_string()),
+                file: repo_graph_node_file_path(node),
                 visibility: node
                     .visibility
                     .map(|v| v.as_str().to_string())
@@ -1706,7 +1749,7 @@ impl RepoGraphOps for RepoGraphBridge {
     async fn snapshot(
         &self,
         ctx: &ProjectCtx,
-        _workspace: Option<&str>,
+        workspace: Option<&str>,
         node_cap: usize,
         exclusions: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
     ) -> Result<SnapshotPayload, String> {
@@ -1750,8 +1793,9 @@ impl RepoGraphOps for RepoGraphBridge {
             ctx.id.clone(),
             git_head,
             generated_at,
-            node_cap,
             exclusions,
+            workspace,
+            node_cap,
         ))
     }
 
@@ -2074,7 +2118,7 @@ impl RepoGraphOps for RepoGraphBridge {
     async fn api_surface(
         &self,
         ctx: &ProjectCtx,
-        _workspace: Option<&str>,
+        workspace: Option<&str>,
         module_glob: Option<&str>,
         visibility: Option<&str>,
         limit: usize,
@@ -2089,6 +2133,7 @@ impl RepoGraphOps for RepoGraphBridge {
             &ctx.clone_path,
         )
         .await?;
+        let workspace_prefix = active_workspace_prefix(&graph, workspace);
 
         let vis_filter = match visibility {
             None | Some("public") => Some(ScipVisibility::Public),
@@ -2115,12 +2160,17 @@ impl RepoGraphOps for RepoGraphBridge {
             if node.kind != RepoGraphNodeKind::Symbol || node.is_external {
                 continue;
             }
+            if let Some(prefix) = workspace_prefix.as_deref()
+                && !repo_graph_node_matches_workspace(node, prefix)
+            {
+                continue;
+            }
             if let Some(filter) = vis_filter
                 && node.visibility != Some(filter)
             {
                 continue;
             }
-            let file_str = node.file_path.as_ref().map(|p| p.display().to_string());
+            let file_str = repo_graph_node_file_path(node);
             if let Some(matcher) = &module_matcher {
                 let Some(f) = &file_str else { continue };
                 if !matcher.is_match(f) {
@@ -3516,16 +3566,20 @@ impl AppState {
 /// the truncation / exclusion / wire-shape logic without spinning up
 /// the full bridge (which needs `AppState`, a Dolt connection, and a
 /// warmed K8s job).
+#[allow(clippy::too_many_arguments)]
 fn build_snapshot_payload(
     graph: &djinn_graph::repo_graph::RepoDependencyGraph,
     ranking: &djinn_graph::repo_graph::RepoGraphRanking,
     project_id: String,
     git_head: String,
     generated_at: String,
-    node_cap: usize,
     exclusions: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
+    workspace: Option<&str>,
+    node_cap: usize,
 ) -> SnapshotPayload {
     use std::collections::{HashMap, HashSet};
+
+    let workspace_prefix = active_workspace_prefix(graph, workspace);
 
     // Tally totals against the post-exclusion graph so the
     // truncation decision lines up with what the UI actually sees.
@@ -3544,6 +3598,11 @@ fn build_snapshot_payload(
         // imported library symbols, not part of the codebase the UI
         // is rendering.
         if node.is_external {
+            continue;
+        }
+        if let Some(prefix) = workspace_prefix.as_deref()
+            && !repo_graph_node_matches_workspace(node, prefix)
+        {
             continue;
         }
         total_nodes_post_excl += 1;
@@ -3568,6 +3627,11 @@ fn build_snapshot_payload(
         let key = format_node_key(&node.id);
         let file_hint = node.file_path.as_ref().map(|p| p.display().to_string());
         if exclusions.excludes(&key, file_hint.as_deref(), &node.display_name) {
+            continue;
+        }
+        if let Some(prefix) = workspace_prefix.as_deref()
+            && !repo_graph_node_matches_workspace(node, prefix)
+        {
             continue;
         }
         total_nodes_post_excl += 1;
@@ -5284,8 +5348,9 @@ pub(crate) mod graph_bridge_tests {
             "proj-test".to_string(),
             "deadbeef".to_string(),
             "2026-04-28T00:00:00Z".to_string(),
-            2_000,
             &GraphExclusions::empty(),
+            None,
+            2_000,
         );
         assert_eq!(payload.project_id, "proj-test");
         assert_eq!(payload.git_head, "deadbeef");
@@ -5370,8 +5435,9 @@ pub(crate) mod graph_bridge_tests {
             "proj-test".to_string(),
             "deadbeef".to_string(),
             "2026-04-28T00:00:00Z".to_string(),
-            cap,
             &GraphExclusions::empty(),
+            None,
+            cap,
         );
         assert_eq!(payload.node_cap, cap, "node_cap echoed back unchanged");
         assert!(
@@ -5510,8 +5576,9 @@ pub(crate) mod graph_bridge_tests {
             "proj-f3".to_string(),
             "deadbeef".to_string(),
             "2026-04-28T00:00:00Z".to_string(),
-            2_000,
             &GraphExclusions::empty(),
+            None,
+            2_000,
         );
 
         // Every emitted node should carry a community_id (these are
