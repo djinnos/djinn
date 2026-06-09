@@ -774,7 +774,8 @@ mod tests {
             "epic_reopen",
             "project_graph_exclusions_set",
         ] {
-            let annotations = chat_allowed_mcp_tool_annotations(name).expect("allowed write annotated");
+            let annotations =
+                chat_allowed_mcp_tool_annotations(name).expect("allowed write annotated");
             assert_eq!(
                 annotations_tuple(annotations),
                 match name {
@@ -795,7 +796,8 @@ mod tests {
             "epic_show",
             "project_graph_exclusions_get",
         ] {
-            let annotations = chat_allowed_mcp_tool_annotations(name).expect("allowed read annotated");
+            let annotations =
+                chat_allowed_mcp_tool_annotations(name).expect("allowed read annotated");
             assert_eq!(annotations_tuple(annotations), (true, false, true, false));
         }
 

@@ -66,7 +66,34 @@ async fn beat_activity(services: &dyn djinn_supervisor::SupervisorServices, task
     }
 }
 
-pub(super) fn tool_concurrency_safety(tools: &[serde_json::Value]) -> HashMap<String, bool> {
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct ToolRuntimeMetadata {
+    pub read_only: bool,
+    pub destructive: bool,
+    pub idempotent: bool,
+    pub open_world: bool,
+    pub concurrent_safe: bool,
+}
+
+impl ToolRuntimeMetadata {
+    pub(super) fn auto_approval_safe(self) -> bool {
+        self.read_only && self.idempotent && !self.destructive && self.concurrent_safe
+    }
+
+    pub(super) fn retry_safe(self) -> bool {
+        !self.destructive && (self.read_only || self.idempotent)
+    }
+}
+
+pub(super) type ToolRuntimeMetadataMap = HashMap<String, ToolRuntimeMetadata>;
+
+fn schema_bool(tool: &serde_json::Value, key: &str) -> bool {
+    tool.get(key)
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+pub(super) fn tool_runtime_metadata(tools: &[serde_json::Value]) -> ToolRuntimeMetadataMap {
     tools
         .iter()
         .filter_map(|tool| {
@@ -78,28 +105,50 @@ pub(super) fn tool_concurrency_safety(tools: &[serde_json::Value]) -> HashMap<St
                         .and_then(|value| value.get("name"))
                         .and_then(|value| value.as_str())
                 })?;
-            let concurrent_safe = tool
-                .get("concurrent_safe")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false);
-            Some((name.to_string(), concurrent_safe))
+            Some((
+                name.to_string(),
+                ToolRuntimeMetadata {
+                    read_only: schema_bool(tool, "readOnly"),
+                    destructive: schema_bool(tool, "destructive"),
+                    idempotent: schema_bool(tool, "idempotent"),
+                    open_world: schema_bool(tool, "openWorld"),
+                    concurrent_safe: schema_bool(tool, "concurrent_safe"),
+                },
+            ))
         })
         .collect()
 }
 
-pub(super) fn is_tool_concurrent_safe(tool_metadata: &HashMap<String, bool>, name: &str) -> bool {
-    tool_metadata.get(name).copied().unwrap_or(false)
+pub(super) fn is_tool_concurrent_safe(tool_metadata: &ToolRuntimeMetadataMap, name: &str) -> bool {
+    tool_metadata
+        .get(name)
+        .copied()
+        .map(|metadata| metadata.concurrent_safe)
+        .unwrap_or(false)
+}
+
+pub(super) fn is_tool_retry_safe(tool_metadata: &ToolRuntimeMetadataMap, name: &str) -> bool {
+    tool_metadata
+        .get(name)
+        .copied()
+        .map(ToolRuntimeMetadata::retry_safe)
+        .unwrap_or(false)
 }
 
 /// ADR-048 side queries are not a separate protocol primitive.
 ///
 /// In the reply loop architecture they are modeled as ordinary tool calls whose
-/// schema marks them `concurrent_safe=true`, meaning the lookup is read-only and
-/// can be started opportunistically during streaming without blocking other turn
-/// assembly. Their results still flow back through the normal `tool_result`
-/// message on the next user turn so provider tool-call pairing remains valid.
-pub(super) fn is_side_query_tool(tool_metadata: &HashMap<String, bool>, name: &str) -> bool {
-    is_tool_concurrent_safe(tool_metadata, name)
+/// schema marks them explicitly read-only, idempotent, non-destructive, and
+/// `concurrent_safe=true`, meaning the lookup can be started opportunistically
+/// during streaming without mutation risk. Their results still flow back through
+/// the normal `tool_result` message on the next user turn so provider tool-call
+/// pairing remains valid.
+pub(super) fn is_side_query_tool(tool_metadata: &ToolRuntimeMetadataMap, name: &str) -> bool {
+    tool_metadata
+        .get(name)
+        .copied()
+        .map(ToolRuntimeMetadata::auto_approval_safe)
+        .unwrap_or(false)
 }
 
 pub(super) struct ToolDispatchContext<'a> {
@@ -113,6 +162,7 @@ pub(super) struct ToolDispatchContext<'a> {
     pub worktree_path: &'a std::path::Path,
     pub role_name: &'a str,
     pub mcp_registry: Option<&'a crate::mcp_client::McpToolRegistry>,
+    pub tool_metadata: &'a ToolRuntimeMetadataMap,
     pub output_stash: Arc<Mutex<OutputStash>>,
     pub otel_session: Option<&'a telemetry::SessionSpan>,
 }
@@ -125,7 +175,7 @@ pub(super) enum ToolBatch {
 pub(super) fn build_tool_batches<'a>(
     turn_tool_calls: &'a [ContentBlock],
     streaming_dispatched: &HashSet<usize>,
-    tool_metadata: &HashMap<String, bool>,
+    tool_metadata: &ToolRuntimeMetadataMap,
 ) -> (Vec<(usize, &'a ContentBlock)>, Vec<ToolBatch>) {
     let indexed_tool_calls: Vec<(usize, &ContentBlock)> = turn_tool_calls
         .iter()
@@ -173,6 +223,7 @@ pub(super) async fn dispatch_single_tool<'a>(
     worktree_path: &'a std::path::Path,
     role_name: &'a str,
     mcp_registry: Option<&'a crate::mcp_client::McpToolRegistry>,
+    retry_safe: bool,
 ) -> (usize, ContentBlock) {
     if is_stash_tool(&name) {
         let result = handle_stash_tool(&stash, &name, args.as_ref());
@@ -282,7 +333,7 @@ pub(super) async fn dispatch_single_tool<'a>(
         let mut retries = 0u32;
         while retries < 5 {
             match &result {
-                Err(e) if e.contains("database is locked") => {
+                Err(e) if e.contains("database is locked") && retry_safe => {
                     retries += 1;
                     let backoff = std::time::Duration::from_millis(100 * (1 << retries.min(4)));
                     tracing::warn!(
@@ -383,6 +434,7 @@ pub(super) fn make_tool_future<'a>(
         ts
     });
     let stash = Arc::clone(&ctx.output_stash);
+    let retry_safe = is_tool_retry_safe(ctx.tool_metadata, &name);
     dispatch_single_tool(
         idx,
         id,
@@ -397,6 +449,7 @@ pub(super) fn make_tool_future<'a>(
         ctx.worktree_path,
         ctx.role_name,
         ctx.mcp_registry,
+        retry_safe,
     )
 }
 
@@ -404,7 +457,7 @@ pub(super) async fn collect_tool_results(
     turn_tool_calls: &[ContentBlock],
     streaming_results: Vec<(usize, ContentBlock)>,
     streaming_dispatched: &HashSet<usize>,
-    tool_metadata: &HashMap<String, bool>,
+    tool_metadata: &ToolRuntimeMetadataMap,
     ctx: &ToolDispatchContext<'_>,
 ) -> Vec<ContentBlock> {
     let (indexed_tool_calls, batches) =
@@ -469,6 +522,119 @@ mod tests {
     use super::*;
     use crate::output_stash::{MAX_TOOL_RESULT_CHARS, handle_stash_tool};
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn test_tool_schema(
+        name: &str,
+        read_only: Option<bool>,
+        destructive: Option<bool>,
+        idempotent: Option<bool>,
+        open_world: Option<bool>,
+        concurrent_safe: Option<bool>,
+    ) -> serde_json::Value {
+        let mut schema = serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": "test",
+                "parameters": {"type": "object"}
+            }
+        });
+        let obj = schema.as_object_mut().expect("object schema");
+        if let Some(value) = read_only {
+            obj.insert("readOnly".to_string(), serde_json::Value::Bool(value));
+        }
+        if let Some(value) = destructive {
+            obj.insert("destructive".to_string(), serde_json::Value::Bool(value));
+        }
+        if let Some(value) = idempotent {
+            obj.insert("idempotent".to_string(), serde_json::Value::Bool(value));
+        }
+        if let Some(value) = open_world {
+            obj.insert("openWorld".to_string(), serde_json::Value::Bool(value));
+        }
+        if let Some(value) = concurrent_safe {
+            obj.insert(
+                "concurrent_safe".to_string(),
+                serde_json::Value::Bool(value),
+            );
+        }
+        schema
+    }
+
+    #[test]
+    fn runtime_metadata_parses_safety_annotations_and_gates_retry() {
+        let schemas = vec![
+            test_tool_schema(
+                "safe_read",
+                Some(true),
+                Some(false),
+                Some(true),
+                Some(false),
+                Some(true),
+            ),
+            test_tool_schema(
+                "open_read",
+                Some(true),
+                Some(false),
+                Some(true),
+                Some(true),
+                Some(true),
+            ),
+            test_tool_schema(
+                "idempotent_write",
+                Some(false),
+                Some(false),
+                Some(true),
+                Some(false),
+                Some(false),
+            ),
+            test_tool_schema(
+                "non_idempotent_write",
+                Some(false),
+                Some(false),
+                Some(false),
+                Some(false),
+                Some(false),
+            ),
+            test_tool_schema(
+                "destructive",
+                Some(false),
+                Some(true),
+                Some(true),
+                Some(false),
+                Some(false),
+            ),
+            test_tool_schema("missing_metadata", None, None, None, None, None),
+        ];
+        let metadata = tool_runtime_metadata(&schemas);
+
+        assert_eq!(
+            metadata["open_read"],
+            ToolRuntimeMetadata {
+                read_only: true,
+                destructive: false,
+                idempotent: true,
+                open_world: true,
+                concurrent_safe: true,
+            }
+        );
+
+        assert!(is_side_query_tool(&metadata, "safe_read"));
+        assert!(is_side_query_tool(&metadata, "open_read"));
+        assert!(is_tool_retry_safe(&metadata, "safe_read"));
+        assert!(is_tool_retry_safe(&metadata, "open_read"));
+        assert!(is_tool_retry_safe(&metadata, "idempotent_write"));
+
+        assert!(!is_side_query_tool(&metadata, "idempotent_write"));
+        assert!(!is_side_query_tool(&metadata, "non_idempotent_write"));
+        assert!(!is_tool_retry_safe(&metadata, "non_idempotent_write"));
+        assert!(!is_side_query_tool(&metadata, "destructive"));
+        assert!(!is_tool_retry_safe(&metadata, "destructive"));
+        assert!(!is_side_query_tool(&metadata, "missing_metadata"));
+        assert!(!is_tool_retry_safe(&metadata, "missing_metadata"));
+        assert!(!is_side_query_tool(&metadata, "unknown"));
+        assert!(!is_tool_retry_safe(&metadata, "unknown"));
+    }
 
     /// A blocking tool that runs longer than several heartbeat intervals must
     /// keep emitting `touch_activity` so the coordinator's zombie reaper sees a
