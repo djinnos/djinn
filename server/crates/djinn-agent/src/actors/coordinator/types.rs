@@ -156,6 +156,25 @@ pub(super) const PLANNER_INTERVENTION_MARKER: &str = "planner_intervention";
 /// same depth.
 pub(super) const REOPEN_INTERVENTION_THRESHOLD: i64 = 3;
 
+/// Number of completed Planner interventions after which a task that has STILL
+/// churned back up to `REOPEN_INTERVENTION_THRESHOLD` is parked terminally
+/// instead of escalated to the Planner yet again.
+///
+/// Rationale for `1`: the first time a worker loop exceeds the reopen threshold
+/// the Planner gets one pass to reshape it (rescope / decompose / re-spec /
+/// close). `reset_intervention_counters` zeroes `reopen_count` and bumps
+/// `intervention_count` so the sharpened task re-dispatches cleanly. But if the
+/// SAME task climbs back to the threshold a second time, the Planner's reshape
+/// demonstrably did not unstick it — re-escalating only resets the counter and
+/// the worker loops anew, monopolizing the (often single) dispatch slot
+/// indefinitely (the txr4 query_subgraph case: 37 sessions / ~11h / 10 total
+/// reopens, where the worker kept re-doing already-accepted functional wiring
+/// and never wrote the one required unit test even after the Planner narrowed
+/// scope to exactly that). Past this ceiling the coordinator force-closes the
+/// task with a recoverable reason so the queue drains; a human (or a freshly
+/// scoped task against the existing branch) can finish it.
+pub(super) const MAX_PLANNER_INTERVENTIONS: i64 = 1;
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct DispatchMarker {
     pub(super) instant: StdInstant,

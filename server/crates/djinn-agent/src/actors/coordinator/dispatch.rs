@@ -1736,6 +1736,42 @@ impl CoordinatorActor {
             return false;
         }
 
+        // Second strike (terminal): the Planner has ALREADY intervened on this
+        // task at least `MAX_PLANNER_INTERVENTIONS` time(s) and it has STILL
+        // churned back up to the reopen threshold. The reshape/rescope did not
+        // unstick it. Escalating again just calls `reset_intervention_counters`
+        // (reopen_count→0, intervention_count++) and the worker loops anew,
+        // monopolizing the (often single) dispatch slot indefinitely — the txr4
+        // query_subgraph case burned 37 sessions / ~11h / 10 total reopens behind
+        // one gpt-5.5 slot, starving every other ready task. Park it terminally so
+        // the queue drains. The work and its branch persist; the close reason is
+        // recoverable (reopen with sharper scope or a different approach).
+        if task.intervention_count >= MAX_PLANNER_INTERVENTIONS {
+            let reason = format!(
+                "Auto-parked: {} planner intervention(s) failed to break the rework loop \
+                 (intervention_count={}, total_reopen_count={}). The same acceptance criteria kept \
+                 failing across repeated rounds even after the planner reshaped the scope, so \
+                 re-dispatching would only loop again and hold the dispatch slot. Closed to free \
+                 capacity for other ready tasks; the branch and prior work are preserved. Reopen \
+                 with a sharpened scope, a decomposed subtask for the specific unmet criterion, or \
+                 a different model/approach if this work is still wanted.",
+                task.intervention_count, task.intervention_count, task.total_reopen_count,
+            );
+            tracing::warn!(
+                task_id = %task.short_id,
+                intervention_count = task.intervention_count,
+                total_reopen_count = task.total_reopen_count,
+                reopen_count = task.reopen_count,
+                "CoordinatorActor: second-strike — parking unconvergeable task after repeated planner interventions"
+            );
+            // Clear streak/cooldown so the close isn't shadowed by stale backoff
+            // state, then terminally close (ForceClose) with the recoverable reason.
+            self.dispatch_failure_streak.remove(&task.id);
+            self.dispatch_cooldowns.remove(&task.id);
+            self.terminally_fail_task(task, "worker", &reason).await;
+            return true;
+        }
+
         // Idempotency guard: have we already routed a Planner for THIS reopen
         // count? If so, leave it to the in-flight (or already-dispatched)
         // Planner — do not stack interventions.
