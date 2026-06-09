@@ -885,15 +885,23 @@ impl CoordinatorActor {
             let mut selected = Vec::new();
             let mut seen = HashSet::new();
 
-            // Fallback: if "architect" has no configured priorities, use
-            // "worker" priorities so architect dispatch works out-of-the-box.
-            let effective_priorities = self.model_priorities.get(_role).or_else(|| {
-                if _role == "architect" {
-                    self.model_priorities.get("worker")
-                } else {
-                    None
-                }
-            });
+            // Per-role priorities are an OVERRIDE. When a role has none
+            // configured, fall back to the "worker" role's priorities as the
+            // de-facto per-user default model, so EVERY role (planner, lead,
+            // architect, reviewer) is dispatchable out of the box once the user
+            // has connected a model — model preference is effectively global
+            // per user, with per-role config layered on top.
+            //
+            // Previously only "architect" fell back here, so planner/lead
+            // silently resolved to NO model. That made stuck-task Planner
+            // intervention (reopen_count >= REOPEN_INTERVENTION_THRESHOLD) a
+            // no-op ("no model configured for planner role") and let tasks loop
+            // on the same rejected acceptance criterion forever instead of
+            // escalating to a Planner that can decompose/rescope/close them.
+            let effective_priorities = self
+                .model_priorities
+                .get(_role)
+                .or_else(|| self.model_priorities.get("worker"));
 
             if let Some(priority_models) = effective_priorities {
                 for configured in priority_models {
