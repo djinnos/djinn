@@ -77,19 +77,6 @@ impl ProjectWorkspaceGraphRepository {
         Ok(())
     }
 
-    pub async fn has_any_for_project(&self, project_id: &str) -> Result<bool> {
-        self.db.ensure_initialized().await?;
-        let exists = sqlx::query_scalar::<_, bool>(
-            r#"SELECT EXISTS(
-                   SELECT 1 FROM project_workspace_graph WHERE project_id = $1
-               )"#,
-        )
-        .bind(project_id)
-        .fetch_one(self.db.pool())
-        .await?;
-        Ok(exists)
-    }
-
     pub async fn list_for_project(&self, project_id: &str) -> Result<Vec<ProjectWorkspaceGraph>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as::<_, ProjectWorkspaceGraph>(
@@ -101,6 +88,19 @@ impl ProjectWorkspaceGraphRepository {
         .bind(project_id)
         .fetch_all(self.db.pool())
         .await?)
+    }
+
+    pub async fn has_any_for_project(&self, project_id: &str) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        let exists = sqlx::query_scalar::<_, bool>(
+            r#"SELECT EXISTS(
+                   SELECT 1 FROM project_workspace_graph WHERE project_id = $1
+               )"#,
+        )
+        .bind(project_id)
+        .fetch_one(self.db.pool())
+        .await?;
+        Ok(exists)
     }
 
     pub async fn latest_for_project(
@@ -252,6 +252,23 @@ mod tests {
 
         assert!(repo.get("p1", "root").await.expect("get root").is_some());
         assert!(repo.get("p1", "api").await.expect("get api").is_some());
+
+        let rows = repo.list_for_project("p1").await.expect("list");
+        assert_eq!(
+            rows.iter()
+                .map(|r| r.workspace_slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["api", "root"]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_for_project_returns_empty_for_project_without_workspace_rows() {
+        let repo = fresh().await;
+        seed_project(&repo, "p1").await;
+
+        let rows = repo.list_for_project("p1").await.expect("list");
+        assert!(rows.is_empty());
     }
 
     #[tokio::test]

@@ -30,7 +30,7 @@ pub struct CodeGraphParams {
     /// One of: `neighbors`, `ranked`, `impact`, `implementations`,
     /// `search`, `query_subgraph`, `cycles`, `orphans`, `path`, `edges`,
     /// `symbols_at`, `diff_touches`, `detect_changes`, `describe`,
-    /// `context`, `status`, `snapshot`, and the other graph analysis ops.
+    /// `context`, `status`, `snapshot`, `workspaces`, and the other graph analysis ops.
     pub operation: String,
     /// Project identifier — either the UUID (`project_id`) or the
     /// canonical `"owner/repo"` slug. The handler resolves it to the
@@ -4836,6 +4836,18 @@ mod tests {
         let params: CodeGraphParams = serde_json::from_value(json).unwrap();
         assert_eq!(params.operation, "snapshot");
         assert_eq!(params.limit, Some(1500));
+    }
+
+    #[test]
+    fn parses_workspaces_params_without_key_or_query() {
+        let json = serde_json::json!({
+            "operation": "workspaces",
+            "project": "owner/repo",
+        });
+        let params: CodeGraphParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.operation, "workspaces");
+        assert!(params.key.is_none());
+        assert!(params.query.is_none());
     }
 
     #[test]

@@ -5,6 +5,7 @@
 /// because both the trait (djinn-control-plane) and the implementor (djinn-agent) are
 /// external to the server — orphan rule.
 /// AppState is a server-local type so it implements RuntimeOps and GitOps directly.
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -806,6 +807,19 @@ impl RepoGraphOps for RepoGraphBridge {
             project_id: ctx.id.clone(),
             workspaces,
         })
+    }
+
+    async fn workspace_node_counts(
+        &self,
+        ctx: &ProjectCtx,
+    ) -> Result<HashMap<String, usize>, String> {
+        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
+            &self.state,
+            &ctx.id,
+            &ctx.clone_path,
+        )
+        .await?;
+        Ok(graph_workspace_node_counts(&graph).into_iter().collect())
     }
 
     async fn workspace_hint(

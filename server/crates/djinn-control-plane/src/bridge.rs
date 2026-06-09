@@ -447,11 +447,8 @@ pub struct GraphWorkspaceEntry {
     pub slug: String,
     pub name: String,
     pub node_count: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_sha: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub warmed_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
 }
 
@@ -1226,6 +1223,15 @@ pub trait RepoGraphOps: Send + Sync {
             project_id: _ctx.id.clone(),
             workspaces: Vec::new(),
         })
+    }
+
+    /// Return node counts grouped by workspace slug from the warmed graph when
+    /// a graph artifact is available. Implementations should not warm.
+    async fn workspace_node_counts(
+        &self,
+        _ctx: &ProjectCtx,
+    ) -> Result<std::collections::HashMap<String, usize>, String> {
+        Ok(std::collections::HashMap::new())
     }
 
     /// Return workspace slugs that should be suggested for an unknown non-empty
