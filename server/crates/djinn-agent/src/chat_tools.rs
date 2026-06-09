@@ -752,6 +752,31 @@ mod tests {
     }
 
     #[test]
+    fn advertised_chat_extension_schema_names_are_routable() {
+        for name in schema_names(&chat_extension_tool_schemas()) {
+            assert!(
+                is_chat_extension_tool(&name) || is_chat_stash_tool(&name),
+                "advertised chat extension schema `{name}` is not routed by dispatch_chat_tool or OutputStash"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_mcp_allowlist_is_separate_from_advertised_extension_schemas() {
+        let advertised_extension_names = schema_names(&chat_extension_tool_schemas());
+        for name in CHAT_ALLOWED_MCP_TOOLS {
+            assert!(
+                !advertised_extension_names.contains(*name),
+                "chat MCP allowlist entry `{name}` must stay separate from advertised extension schemas"
+            );
+            assert!(
+                !is_chat_extension_tool(name) && !is_chat_stash_tool(name),
+                "chat MCP allowlist entry `{name}` must not be routed by the extension or stash tiers"
+            );
+        }
+    }
+
+    #[test]
     fn chat_allowed_mcp_tools_have_pinned_safety_annotations() {
         for name in CHAT_ALLOWED_MCP_TOOLS {
             let annotations = chat_allowed_mcp_tool_annotations(name)

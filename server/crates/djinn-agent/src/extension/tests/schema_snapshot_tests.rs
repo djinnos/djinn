@@ -44,6 +44,18 @@ fn all_registered_tool_names() -> BTreeSet<String> {
     .collect()
 }
 
+fn schema_name_set(schemas: &[serde_json::Value]) -> BTreeSet<String> {
+    schemas
+        .iter()
+        .filter_map(|schema| {
+            schema
+                .get("name")
+                .and_then(|name| name.as_str())
+                .map(ToString::to_string)
+        })
+        .collect()
+}
+
 fn assert_tool_references_registered(agent_type: AgentType, references: &[ToolReference]) {
     let registered = tool_names_for_agent(agent_type);
     let missing: Vec<String> = references
@@ -155,7 +167,25 @@ fn role_prompts_reference_only_registered_tools() {
 }
 
 #[test]
-fn non_architect_role_registries_do_not_include_code_graph() {
+fn role_schema_snapshots_match_registered_role_name_source() {
+    for (agent_type, schemas) in [
+        (AgentType::Worker, tool_schemas_worker()),
+        (AgentType::Reviewer, tool_schemas_reviewer()),
+        (AgentType::Lead, tool_schemas_lead()),
+        (AgentType::Planner, tool_schemas_planner()),
+        (AgentType::Architect, tool_schemas_architect()),
+    ] {
+        assert_eq!(
+            schema_name_set(&schemas),
+            tool_names_for_agent(agent_type),
+            "{} schema snapshot helpers drifted from the registered role tool-name source",
+            agent_type.as_str()
+        );
+    }
+}
+
+#[test]
+fn adr_050_code_graph_boundary_is_architect_and_chat_only() {
     // ADR-050 keeps `code_graph` on the Architect/Chat surfaces only. Prompt
     // lockstep must not mask a worker/reviewer/lead/planner mention by treating
     // it as valid for those role schema sets.
@@ -165,9 +195,19 @@ fn non_architect_role_registries_do_not_include_code_graph() {
         AgentType::Lead,
         AgentType::Planner,
     ] {
-        assert!(!tool_names_for_agent(agent_type).contains("code_graph"));
+        assert!(
+            !tool_names_for_agent(agent_type).contains("code_graph"),
+            "{} must not expose code_graph per ADR-050",
+            agent_type.as_str()
+        );
     }
     assert!(tool_names_for_agent(AgentType::Architect).contains("code_graph"));
+
+    let chat_names = schema_name_set(&crate::chat_tools::chat_extension_tool_schemas());
+    assert!(
+        chat_names.contains("code_graph"),
+        "chat must expose code_graph per ADR-050"
+    );
 }
 
 #[test]
