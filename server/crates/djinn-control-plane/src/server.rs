@@ -134,7 +134,10 @@ impl DjinnMcpServer {
             .list_all()
             .into_iter()
             .map(|tool| {
-                serde_json::to_value(tool).expect("MCP tool definitions must serialize to JSON")
+                let mut value = serde_json::to_value(tool)
+                    .expect("MCP tool definitions must serialize to JSON");
+                annotate_server_tool_schema_safety(&mut value);
+                value
             })
             .collect()
     }
@@ -218,6 +221,26 @@ impl DjinnMcpServer {
             .await
             .recorded_note_ids()
             .to_vec()
+    }
+}
+
+fn annotate_server_tool_schema_safety(value: &mut serde_json::Value) {
+    if let Some(obj) = value.as_object_mut() {
+        // This first-party server-wide schema path is produced directly by the
+        // rmcp router, not by the agent role schema serializer that owns typed
+        // safety classifications. Publish conservative fail-closed defaults so
+        // host agents can consume explicit retry/approval hints rather than
+        // treating missing metadata as safe.
+        obj.entry("readOnly")
+            .or_insert(serde_json::Value::Bool(false));
+        obj.entry("destructive")
+            .or_insert(serde_json::Value::Bool(true));
+        obj.entry("idempotent")
+            .or_insert(serde_json::Value::Bool(false));
+        obj.entry("openWorld")
+            .or_insert(serde_json::Value::Bool(false));
+        obj.entry("concurrent_safe")
+            .or_insert(serde_json::Value::Bool(false));
     }
 }
 

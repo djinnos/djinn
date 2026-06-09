@@ -5,6 +5,11 @@ expression: signatures
 [
   {
     "name": "agent_create",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$defs": {
         "AnyJson": {}
@@ -136,6 +141,11 @@ expression: signatures
   },
   {
     "name": "agent_list",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -278,6 +288,11 @@ expression: signatures
   },
   {
     "name": "agent_metrics",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -424,6 +439,11 @@ expression: signatures
   },
   {
     "name": "agent_show",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -512,6 +532,11 @@ expression: signatures
   },
   {
     "name": "agent_update",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$defs": {
         "AnyJson": {}
@@ -647,6 +672,11 @@ expression: signatures
   },
   {
     "name": "board_health",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -676,6 +706,11 @@ expression: signatures
   },
   {
     "name": "board_reconcile",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -705,6 +740,11 @@ expression: signatures
   },
   {
     "name": "code_graph",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$defs": {
         "BoundaryRule": {
@@ -1072,6 +1112,11 @@ expression: signatures
   },
   {
     "name": "credential_delete",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -1118,6 +1163,11 @@ expression: signatures
   },
   {
     "name": "credential_list",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -1179,6 +1229,11 @@ expression: signatures
   },
   {
     "name": "credential_set",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -1246,6 +1301,11 @@ expression: signatures
   },
   {
     "name": "epic_add_read_source",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -1293,6 +1353,11 @@ expression: signatures
   },
   {
     "name": "epic_blocked_list",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -1360,6 +1425,11 @@ expression: signatures
   },
   {
     "name": "epic_blockers_list",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -1427,6 +1497,11 @@ expression: signatures
   },
   {
     "name": "epic_close",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -1514,6 +1589,11 @@ expression: signatures
   },
   {
     "name": "epic_count",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -1581,6 +1661,11 @@ expression: signatures
   },
   {
     "name": "epic_create",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -1719,6 +1804,11 @@ expression: signatures
   },
   {
     "name": "epic_delete",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -1761,6 +1851,11 @@ expression: signatures
   },
   {
     "name": "epic_list",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -1914,6 +2009,11 @@ expression: signatures
   },
   {
     "name": "epic_list_read_sources",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -1956,6 +2056,11 @@ expression: signatures
   },
   {
     "name": "epic_remove_read_source",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -2003,6 +2108,11 @@ expression: signatures
   },
   {
     "name": "epic_reopen",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -2090,6 +2200,11 @@ expression: signatures
   },
   {
     "name": "epic_show",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -2193,6 +2308,11 @@ expression: signatures
   },
   {
     "name": "epic_tasks",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -2407,6 +2527,11 @@ expression: signatures
   },
   {
     "name": "epic_update",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -2543,6 +2668,11 @@ expression: signatures
   },
   {
     "name": "execution_kill_task",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -2586,6 +2716,11 @@ expression: signatures
   },
   {
     "name": "get_project_devcontainer_status",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -2681,6 +2816,11 @@ expression: signatures
   },
   {
     "name": "get_project_stack",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -2910,6 +3050,11 @@ expression: signatures
   },
   {
     "name": "github_app_install_url",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "GithubAppInstallUrlParams",
@@ -2935,6 +3080,11 @@ expression: signatures
   },
   {
     "name": "github_app_installations",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "GithubAppInstallationsParams",
@@ -2998,6 +3148,11 @@ expression: signatures
   },
   {
     "name": "github_fetch_file",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -3046,6 +3201,11 @@ expression: signatures
   },
   {
     "name": "github_list_repos",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -3123,6 +3283,11 @@ expression: signatures
   },
   {
     "name": "github_search",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -3171,6 +3336,11 @@ expression: signatures
   },
   {
     "name": "image_create",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$defs": {
         "ObjectJson": {
@@ -3225,6 +3395,11 @@ expression: signatures
   },
   {
     "name": "image_delete",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -3262,6 +3437,11 @@ expression: signatures
   },
   {
     "name": "image_list",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "ImageListParams",
@@ -3337,6 +3517,11 @@ expression: signatures
   },
   {
     "name": "image_set_allowed_presets",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -3383,6 +3568,11 @@ expression: signatures
   },
   {
     "name": "image_update",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$defs": {
         "ObjectJson": {
@@ -3439,6 +3629,11 @@ expression: signatures
   },
   {
     "name": "memory_associations",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -3523,6 +3718,11 @@ expression: signatures
   },
   {
     "name": "memory_broken_links",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -3589,6 +3789,11 @@ expression: signatures
   },
   {
     "name": "memory_build_context",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -3807,6 +4012,11 @@ expression: signatures
   },
   {
     "name": "memory_catalog",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -3840,6 +4050,11 @@ expression: signatures
   },
   {
     "name": "memory_confirm",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -3895,6 +4110,11 @@ expression: signatures
   },
   {
     "name": "memory_delete",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -3932,6 +4152,11 @@ expression: signatures
   },
   {
     "name": "memory_diff",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -3974,6 +4199,11 @@ expression: signatures
   },
   {
     "name": "memory_edit",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -4087,6 +4317,11 @@ expression: signatures
   },
   {
     "name": "memory_extracted_audit",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -4209,6 +4444,11 @@ expression: signatures
   },
   {
     "name": "memory_graph",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -4308,6 +4548,11 @@ expression: signatures
   },
   {
     "name": "memory_health",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -4390,6 +4635,11 @@ expression: signatures
   },
   {
     "name": "memory_history",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -4461,6 +4711,11 @@ expression: signatures
   },
   {
     "name": "memory_list",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -4551,6 +4806,11 @@ expression: signatures
   },
   {
     "name": "memory_move",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -4649,6 +4909,11 @@ expression: signatures
   },
   {
     "name": "memory_orphans",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -4719,6 +4984,11 @@ expression: signatures
   },
   {
     "name": "memory_read",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -4808,6 +5078,11 @@ expression: signatures
   },
   {
     "name": "memory_recent",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -4892,6 +5167,11 @@ expression: signatures
   },
   {
     "name": "memory_repair_embeddings",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -5001,6 +5281,11 @@ expression: signatures
   },
   {
     "name": "memory_search",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -5093,6 +5378,11 @@ expression: signatures
   },
   {
     "name": "memory_task_refs",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -5158,6 +5448,11 @@ expression: signatures
   },
   {
     "name": "memory_write",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -5276,6 +5571,11 @@ expression: signatures
   },
   {
     "name": "model_health",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -5367,6 +5667,11 @@ expression: signatures
   },
   {
     "name": "pr_review_context",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$defs": {
         "BoundaryRule": {
@@ -5526,6 +5831,11 @@ expression: signatures
   },
   {
     "name": "project_add_from_github",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -5609,6 +5919,11 @@ expression: signatures
   },
   {
     "name": "project_branches",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -5650,6 +5965,11 @@ expression: signatures
   },
   {
     "name": "project_config_get",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -5715,6 +6035,11 @@ expression: signatures
   },
   {
     "name": "project_config_set",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -5788,6 +6113,11 @@ expression: signatures
   },
   {
     "name": "project_environment_config_get",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -5849,6 +6179,11 @@ expression: signatures
   },
   {
     "name": "project_environment_config_reset",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -5901,6 +6236,11 @@ expression: signatures
   },
   {
     "name": "project_environment_config_set",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$defs": {
         "ObjectJson": {
@@ -5946,6 +6286,11 @@ expression: signatures
   },
   {
     "name": "project_graph_exclusions_get",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -5996,6 +6341,11 @@ expression: signatures
   },
   {
     "name": "project_graph_exclusions_set",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "Partial-update payload. Either field may be `None` — the repository\nleaves the corresponding column untouched when the caller only wants\nto rewrite one of the two lists.",
@@ -6064,6 +6414,11 @@ expression: signatures
   },
   {
     "name": "project_list",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "properties": {},
       "type": "object"
@@ -6112,6 +6467,11 @@ expression: signatures
   },
   {
     "name": "project_remove",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -6171,6 +6531,11 @@ expression: signatures
   },
   {
     "name": "project_set_image",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -6215,6 +6580,11 @@ expression: signatures
   },
   {
     "name": "project_verification_get",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -6279,6 +6649,11 @@ expression: signatures
   },
   {
     "name": "project_verification_set",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$defs": {
         "VerificationRule": {
@@ -6349,6 +6724,11 @@ expression: signatures
   },
   {
     "name": "project_verification_test",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$defs": {
         "VerificationRule": {
@@ -6418,6 +6798,11 @@ expression: signatures
   },
   {
     "name": "project_verification_test_status",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -6472,6 +6857,11 @@ expression: signatures
   },
   {
     "name": "proposal_add_target",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -6549,6 +6939,11 @@ expression: signatures
   },
   {
     "name": "proposal_create",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$defs": {
         "AcceptanceCriterionItem": {
@@ -6713,6 +7108,11 @@ expression: signatures
   },
   {
     "name": "proposal_delete",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -6745,6 +7145,11 @@ expression: signatures
   },
   {
     "name": "proposal_feedback_add",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -6873,6 +7278,11 @@ expression: signatures
   },
   {
     "name": "proposal_feedback_resolve",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -6983,6 +7393,11 @@ expression: signatures
   },
   {
     "name": "proposal_graduate",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -7100,6 +7515,11 @@ expression: signatures
   },
   {
     "name": "proposal_list",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -7281,6 +7701,11 @@ expression: signatures
   },
   {
     "name": "proposal_remove_target",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -7358,6 +7783,11 @@ expression: signatures
   },
   {
     "name": "proposal_show",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -7729,6 +8159,11 @@ expression: signatures
   },
   {
     "name": "proposal_signoff",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -7846,6 +8281,11 @@ expression: signatures
   },
   {
     "name": "proposal_signoff_clear",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -7963,6 +8403,11 @@ expression: signatures
   },
   {
     "name": "proposal_stop_build",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -8048,6 +8493,11 @@ expression: signatures
   },
   {
     "name": "proposal_update",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$defs": {
         "AcceptanceCriterionItem": {
@@ -8213,6 +8663,11 @@ expression: signatures
   },
   {
     "name": "provider_catalog",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -8325,6 +8780,11 @@ expression: signatures
   },
   {
     "name": "provider_connected",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -8437,6 +8897,11 @@ expression: signatures
   },
   {
     "name": "provider_model_lookup",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -8599,6 +9064,11 @@ expression: signatures
   },
   {
     "name": "provider_models",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -8715,6 +9185,11 @@ expression: signatures
   },
   {
     "name": "provider_models_connected",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -8826,6 +9301,11 @@ expression: signatures
   },
   {
     "name": "provider_oauth_start",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -8925,6 +9405,11 @@ expression: signatures
   },
   {
     "name": "provider_remove",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -8980,6 +9465,11 @@ expression: signatures
   },
   {
     "name": "provider_validate",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -9040,6 +9530,11 @@ expression: signatures
   },
   {
     "name": "retrigger_image_build",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -9074,6 +9569,11 @@ expression: signatures
   },
   {
     "name": "service_list",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -9139,6 +9639,11 @@ expression: signatures
   },
   {
     "name": "service_preset_list",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "ServicePresetListParams",
@@ -9200,6 +9705,11 @@ expression: signatures
   },
   {
     "name": "service_release",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -9244,6 +9754,11 @@ expression: signatures
   },
   {
     "name": "service_request",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -9297,6 +9812,11 @@ expression: signatures
   },
   {
     "name": "session_active",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -9400,6 +9920,11 @@ expression: signatures
   },
   {
     "name": "session_for_task",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -9465,6 +9990,11 @@ expression: signatures
   },
   {
     "name": "session_list",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -9565,6 +10095,11 @@ expression: signatures
   },
   {
     "name": "session_messages",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -9638,6 +10173,11 @@ expression: signatures
   },
   {
     "name": "session_show",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -9712,6 +10252,11 @@ expression: signatures
   },
   {
     "name": "settings_get",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -9798,6 +10343,11 @@ expression: signatures
   },
   {
     "name": "settings_reset",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "SettingsResetParams",
@@ -9827,6 +10377,11 @@ expression: signatures
   },
   {
     "name": "settings_set",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -9882,6 +10437,11 @@ expression: signatures
   },
   {
     "name": "system_ping",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "properties": {},
       "type": "object"
@@ -9906,6 +10466,11 @@ expression: signatures
   },
   {
     "name": "task_activity_list",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -9964,6 +10529,11 @@ expression: signatures
   },
   {
     "name": "task_blocked_list",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -9992,6 +10562,11 @@ expression: signatures
   },
   {
     "name": "task_blockers_list",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -10020,6 +10595,11 @@ expression: signatures
   },
   {
     "name": "task_claim",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -10064,6 +10644,11 @@ expression: signatures
   },
   {
     "name": "task_comment_add",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -10105,6 +10690,11 @@ expression: signatures
   },
   {
     "name": "task_count",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -10154,6 +10744,11 @@ expression: signatures
   },
   {
     "name": "task_create",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$defs": {
         "AcceptanceCriterionItem": {
@@ -10275,6 +10870,11 @@ expression: signatures
   },
   {
     "name": "task_list",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -10577,6 +11177,11 @@ expression: signatures
   },
   {
     "name": "task_memory_refs",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -10605,6 +11210,11 @@ expression: signatures
   },
   {
     "name": "task_ready",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -10649,6 +11259,11 @@ expression: signatures
   },
   {
     "name": "task_show",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -10677,6 +11292,11 @@ expression: signatures
   },
   {
     "name": "task_timeline",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -10894,6 +11514,11 @@ expression: signatures
   },
   {
     "name": "task_transition",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -10945,6 +11570,11 @@ expression: signatures
   },
   {
     "name": "task_update",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$defs": {
         "AcceptanceCriterionItem": {
@@ -11087,6 +11717,11 @@ expression: signatures
   },
   {
     "name": "toolchain_versions",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "ToolchainVersionsParams",
@@ -11119,6 +11754,11 @@ expression: signatures
   },
   {
     "name": "user_settings_get",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -11179,6 +11819,11 @@ expression: signatures
   },
   {
     "name": "user_settings_set",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
