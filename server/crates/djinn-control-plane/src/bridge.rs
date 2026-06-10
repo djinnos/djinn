@@ -455,6 +455,20 @@ pub struct SnapshotNode {
     /// legacy graph artifacts and synthetic/external nodes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
+    /// For community-level snapshots, distinguishes a homogeneous community
+    /// (`"single"`) from communities spanning multiple workspace slugs
+    /// (`"mixed"`) or nodes without workspace metadata (`"unknown"`). Symbol
+    /// snapshots omit this field to preserve the existing wire shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_kind: Option<String>,
+    /// Number of graph nodes represented by this snapshot node. Populated for
+    /// collapsed community nodes; omitted for symbol/file nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_count: Option<usize>,
+    /// Number of original graph edges internal to this community. Populated for
+    /// collapsed community nodes; omitted for symbol/file nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_edge_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -521,9 +535,11 @@ pub struct SnapshotPayload {
 
 /// Requested semantic zoom level for a `code_graph snapshot` response.
 ///
-/// `Symbol` is the existing file/symbol node shape. `Community` is accepted at
-/// the API boundary so callers can share the same parameter ahead of the
-/// community-collapse implementation; it currently falls back to `Symbol`.
+/// `Symbol` is the existing file/symbol node shape. `Community` collapses the
+/// graph to one node per stable `Community.id`, with inter-community edges
+/// aggregated between those stable ids. The default remains `Symbol` for now so
+/// the existing UI is not switched to semantic zoom before its consumer work
+/// lands; tests pin the explicit `level=community` contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotLevel {
     Symbol,
