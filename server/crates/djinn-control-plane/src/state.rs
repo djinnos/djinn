@@ -347,6 +347,16 @@ pub mod stubs {
     pub struct StubRepoGraphOps;
     #[async_trait]
     impl RepoGraphOps for StubRepoGraphOps {
+        async fn workspaces(
+            &self,
+            ctx: &crate::bridge::ProjectCtx,
+        ) -> Result<crate::bridge::WorkspacesResult, String> {
+            Ok(crate::bridge::WorkspacesResult {
+                project_id: ctx.id.clone(),
+                workspaces: vec![],
+            })
+        }
+
         async fn neighbors(
             &self,
             _: &crate::bridge::ProjectCtx,

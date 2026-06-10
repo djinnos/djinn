@@ -14,10 +14,10 @@ use djinn_control_plane::bridge::{
     ApiSurfaceEntry, BoundaryRule, BoundaryViolation, CallerRef, ChangeKind, ChangedRange,
     ComplexityMetrics as WireComplexityMetrics, CoordinatorOps, CoordinatorStatus, CycleGroup,
     CycleMember, DeadSymbolEntry, DeprecatedHit, DetectedChangesResult, DetectedTouchedSymbol,
-    DiffTouchesResult, EdgeCategory, EdgeEntry, GitOps, GraphNeighbor, GraphStatus, HotPathHit,
-    HotspotEntry, ImpactEntry, ImpactResult, LspOps, LspWarning, MetricsAtResult, ModelPoolStatus,
-    NeighborsResult, OrphanEntry, PagerankTier, PathHop, PathResult, PoolStatus, ProcessRef,
-    ProjectCtx, ProvisionServiceRequest, ProvisionedService,
+    DiffTouchesResult, EdgeCategory, EdgeEntry, GitOps, GraphNeighbor, GraphStatus,
+    GraphWorkspaceEntry, HotPathHit, HotspotEntry, ImpactEntry, ImpactResult, LspOps, LspWarning,
+    MetricsAtResult, ModelPoolStatus, NeighborsResult, OrphanEntry, PagerankTier, PathHop,
+    PathResult, PoolStatus, ProcessRef, ProjectCtx, ProvisionServiceRequest, ProvisionedService,
     QuerySubgraphBudget as WireQuerySubgraphBudget, QuerySubgraphEdge as WireQuerySubgraphEdge,
     QuerySubgraphNode as WireQuerySubgraphNode, QuerySubgraphRequest,
     QuerySubgraphResult as WireQuerySubgraphResult,
@@ -26,6 +26,7 @@ use djinn_control_plane::bridge::{
     RelatedSymbol, RepoGraphOps, ResolveOutcome, RunningTaskInfo, RuntimeOps, SearchHit,
     SemanticQueryEmbedding, SlotPoolOps, SnapshotEdge, SnapshotLevel, SnapshotNode,
     SnapshotPayload, SymbolAtHit, SymbolContext, SymbolDescription, SymbolNode, TouchedSymbol,
+    WorkspacesResult,
 };
 use djinn_git::{GitActorHandle, GitError};
 
@@ -702,6 +703,25 @@ fn available_workspace_slugs(graph: &djinn_graph::repo_graph::RepoDependencyGrap
     slugs.into_iter().collect()
 }
 
+fn graph_workspace_node_counts(
+    graph: &djinn_graph::repo_graph::RepoDependencyGraph,
+) -> std::collections::BTreeMap<String, usize> {
+    let mut counts = std::collections::BTreeMap::new();
+    for idx in graph.graph().node_indices() {
+        let node = graph.node(idx);
+        if node.is_external {
+            continue;
+        }
+        let slug = node
+            .workspace
+            .as_deref()
+            .and_then(|s| normalize_workspace_slug(Some(s)))
+            .unwrap_or_else(|| "root".to_string());
+        *counts.entry(slug).or_insert(0) += 1;
+    }
+    counts
+}
+
 fn workspace_hint_from_graph(
     graph: &djinn_graph::repo_graph::RepoDependencyGraph,
     workspace: Option<&str>,
@@ -748,6 +768,58 @@ fn resolve_node_or_err_for_workspace_seed(
 
 #[async_trait]
 impl RepoGraphOps for RepoGraphBridge {
+    async fn workspaces(&self, ctx: &ProjectCtx) -> Result<WorkspacesResult, String> {
+        let mut counts = match djinn_graph::canonical_graph::load_canonical_graph_only(
+            &self.state,
+            &ctx.id,
+            &ctx.clone_path,
+        )
+        .await
+        {
+            Ok(graph) => graph_workspace_node_counts(&graph),
+            Err(err) => {
+                tracing::debug!(
+                    project_id = %ctx.id,
+                    error = %err,
+                    "code_graph workspaces: graph unavailable; returning freshness-only workspaces"
+                );
+                std::collections::BTreeMap::new()
+            }
+        };
+        let freshness = djinn_db::ProjectWorkspaceGraphRepository::new(self.state.db().clone())
+            .list_for_project(&ctx.id)
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut freshness_by_slug = std::collections::BTreeMap::new();
+        for row in freshness {
+            let slug = normalize_workspace_slug(Some(&row.workspace_slug))
+                .unwrap_or(row.workspace_slug.clone());
+            counts.entry(slug.clone()).or_insert(0);
+            freshness_by_slug.insert(slug, row);
+        }
+
+        let workspaces = counts
+            .into_iter()
+            .map(|(slug, node_count)| {
+                let freshness = freshness_by_slug.remove(&slug);
+                GraphWorkspaceEntry {
+                    name: slug.clone(),
+                    slug,
+                    node_count,
+                    commit_sha: freshness.as_ref().map(|row| row.commit_sha.clone()),
+                    warmed_at: freshness.as_ref().map(|row| row.warmed_at.clone()),
+                    status: freshness.as_ref().map(|row| row.status.clone()),
+                }
+            })
+            .collect();
+
+        Ok(WorkspacesResult {
+            project_id: ctx.id.clone(),
+            workspaces,
+        })
+    }
+
     async fn workspace_node_counts(
         &self,
         ctx: &ProjectCtx,
@@ -758,13 +830,7 @@ impl RepoGraphOps for RepoGraphBridge {
             &ctx.clone_path,
         )
         .await?;
-        let mut counts = HashMap::new();
-        for idx in graph.graph().node_indices() {
-            if let Some(workspace) = graph.node(idx).workspace.as_deref() {
-                *counts.entry(workspace.to_string()).or_insert(0) += 1;
-            }
-        }
-        Ok(counts)
+        Ok(graph_workspace_node_counts(&graph).into_iter().collect())
     }
 
     async fn workspace_hint(

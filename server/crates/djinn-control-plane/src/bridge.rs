@@ -440,6 +440,24 @@ pub struct GraphStatus {
     pub commits_since_pin: Option<u64>,
 }
 
+/// One workspace visible to the repository graph, enriched with the latest
+/// per-workspace freshness row when one has been persisted.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GraphWorkspaceEntry {
+    pub slug: String,
+    pub name: String,
+    pub node_count: usize,
+    pub commit_sha: Option<String>,
+    pub warmed_at: Option<String>,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WorkspacesResult {
+    pub project_id: String,
+    pub workspaces: Vec<GraphWorkspaceEntry>,
+}
+
 /// PR D2: snapshot node — one entry in the `snapshot.nodes` array. The
 /// shape is binding (see `code_graph snapshot` inter-PR contract): `id`
 /// is the canonical RepoNodeKey (`"file:..."` / `"symbol:..."`), `kind`
@@ -1240,6 +1258,16 @@ pub struct ProjectCtx {
 
 #[async_trait]
 pub trait RepoGraphOps: Send + Sync {
+    /// Enumerate graph workspaces by combining distinct `RepoGraphNode.workspace`
+    /// tags with persisted per-workspace freshness metadata. Implementations
+    /// should include graph-only and freshness-only workspaces deterministically.
+    async fn workspaces(&self, _ctx: &ProjectCtx) -> Result<WorkspacesResult, String> {
+        Ok(WorkspacesResult {
+            project_id: _ctx.id.clone(),
+            workspaces: Vec::new(),
+        })
+    }
+
     /// Return node counts grouped by workspace slug from the warmed graph when
     /// a graph artifact is available. Implementations should not warm.
     async fn workspace_node_counts(

@@ -52,14 +52,11 @@ impl AnthropicProvider {
             .and_then(|meta| meta.provider_data.as_ref())
             .and_then(|data| data.get(ANTHROPIC_CACHE_BREAKPOINT_KEY))
             .and_then(|value| serde_json::from_value::<CacheBreakpoint>(value.clone()).ok())
-            .map(|breakpoint| {
-                let mut obj = serde_json::Map::new();
-                obj.insert("type".to_string(), json!("ephemeral"));
-                if let Some(kind) = breakpoint.kind {
-                    obj.insert("kind".to_string(), json!(kind));
-                }
-                Value::Object(obj)
-            })
+            // `CacheBreakpoint.kind` is an internal annotation and must not reach
+            // the wire: the API object is exactly `{"type":"ephemeral"}`, and
+            // Anthropic-compatible vendors (MiniMax, GLM) may reject unknown keys
+            // inside `cache_control`.
+            .map(|_| json!({"type": "ephemeral"}))
     }
 
     /// Convert system messages into Anthropic system blocks with cache_control.
@@ -155,20 +152,26 @@ impl AnthropicProvider {
             .and_then(Self::maybe_cache_control)
     }
 
-    fn serialize_tools_for_request(conversation: &Conversation, tools: &[Value]) -> Option<Value> {
+    fn serialize_tools_for_request(
+        tools: &[Value],
+        cache_control: Option<&Value>,
+    ) -> Option<Value> {
         if tools.is_empty() {
             return None;
         }
 
-        let cache_control = Self::tool_definition_cache_control(conversation);
+        // The breakpoint marks the END of a cacheable prefix, so it belongs on
+        // the LAST tool definition — marking the first would cache only that
+        // single tool.
+        let last = tools.len() - 1;
         Some(Value::Array(
             tools
                 .iter()
                 .enumerate()
                 .map(|(index, tool)| {
                     let mut tool_obj = tool.clone();
-                    if index == 0
-                        && let Some(cache_control) = &cache_control
+                    if index == last
+                        && let Some(cache_control) = cache_control
                         && let Some(obj) = tool_obj.as_object_mut()
                     {
                         obj.insert("cache_control".to_string(), cache_control.clone());
@@ -414,11 +417,26 @@ impl AnthropicProvider {
         tool_choice: Option<ToolChoice>,
     ) -> Value {
         let (_system, mut messages) = conversation.to_anthropic_messages();
-        let system_blocks = Self::system_blocks(conversation);
+        let mut system_blocks = Self::system_blocks(conversation);
+
+        // Caching policy. Explicit: the chat layer annotates system messages
+        // with `anthropic_cache_breakpoint` metadata describing the stable
+        // prefix / dynamic tail split (ADR-043 §8). Default: conversations
+        // without that metadata (worker/task sessions assemble their system
+        // prompt as one stable string) still deserve caching — mark the whole
+        // tool array and system prompt plus the trailing message breakpoint.
+        // Gated on non-empty tools so one-shot utility calls (compaction
+        // summaries) don't pay a cache write they will never read back.
+        let explicit_cache = Self::has_cache_metadata(conversation);
+        let default_cache = !explicit_cache && !tools.is_empty();
+
+        if default_cache && let Some(last) = system_blocks.last_mut() {
+            last.cache_control = Some(json!({"type": "ephemeral"}));
+        }
 
         // Message-level cache breakpoint: mark the last message so the full
         // conversation prefix is cacheable across consecutive turns.
-        if Self::has_cache_metadata(conversation) {
+        if explicit_cache || default_cache {
             Self::add_message_cache_breakpoint(&mut messages);
         }
 
@@ -456,7 +474,11 @@ impl AnthropicProvider {
             });
         }
 
-        if let Some(serialized_tools) = Self::serialize_tools_for_request(conversation, tools) {
+        let tool_cache_control = Self::tool_definition_cache_control(conversation)
+            .or_else(|| default_cache.then(|| json!({"type": "ephemeral"})));
+        if let Some(serialized_tools) =
+            Self::serialize_tools_for_request(tools, tool_cache_control.as_ref())
+        {
             body["tools"] = serialized_tools;
 
             let thinking_enabled = body
@@ -523,7 +545,11 @@ impl AnthropicProvider {
     }
 
     fn effective_url(&self) -> String {
-        format!("{}/v1/messages", self.config.base_url.trim_end_matches('/'))
+        // Anthropic-compatible vendors (MiniMax / GLM coding plans) publish
+        // base URLs that already end in `/v1`; don't double the segment.
+        let base = self.config.base_url.trim_end_matches('/');
+        let base = base.strip_suffix("/v1").unwrap_or(base);
+        format!("{base}/v1/messages")
     }
 
     fn extra_headers(&self) -> HeaderMap {
@@ -1051,18 +1077,10 @@ mod tests {
 
         let blocks = AnthropicProvider::system_blocks(&conv);
         assert_eq!(blocks.len(), 4);
-        assert_eq!(
-            blocks[0].cache_control,
-            Some(json!({"type": "ephemeral", "kind": ANTHROPIC_STABLE_PREFIX_KIND}))
-        );
-        assert_eq!(
-            blocks[1].cache_control,
-            Some(json!({"type": "ephemeral", "kind": ANTHROPIC_STABLE_PREFIX_KIND}))
-        );
-        assert_eq!(
-            blocks[2].cache_control,
-            Some(json!({"type": "ephemeral", "kind": ANTHROPIC_STABLE_PREFIX_KIND}))
-        );
+        // `kind` is internal metadata and must NOT leak into the wire object.
+        assert_eq!(blocks[0].cache_control, Some(json!({"type": "ephemeral"})));
+        assert_eq!(blocks[1].cache_control, Some(json!({"type": "ephemeral"})));
+        assert_eq!(blocks[2].cache_control, Some(json!({"type": "ephemeral"})));
         assert_eq!(blocks[3].cache_control, None);
     }
 
@@ -1099,16 +1117,12 @@ mod tests {
         assert_eq!(system.len(), 2);
         assert_eq!(system[0]["text"], "base prompt");
         assert_eq!(system[1]["text"], "repo map");
-        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
-        assert_eq!(
-            system[0]["cache_control"]["kind"],
-            ANTHROPIC_STABLE_PREFIX_KIND
-        );
+        assert_eq!(system[0]["cache_control"], json!({"type": "ephemeral"}));
         assert!(system[1].get("cache_control").is_none());
         assert_eq!(req["tools"][0]["name"], "shell");
         assert_eq!(
-            req["tools"][0]["cache_control"]["kind"],
-            ANTHROPIC_STABLE_PREFIX_KIND
+            req["tools"][0]["cache_control"],
+            json!({"type": "ephemeral"})
         );
     }
 
@@ -1523,10 +1537,12 @@ mod tests {
         assert_eq!(system.len(), 2);
         assert_eq!(system[0]["text"], "base prompt");
         assert_eq!(system[1]["text"], "repo map");
-        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
-        assert_eq!(system[0]["cache_control"]["kind"], "stable_prefix");
+        assert_eq!(system[0]["cache_control"], json!({"type": "ephemeral"}));
         assert!(system[1].get("cache_control").is_none());
-        assert_eq!(req["tools"][0]["cache_control"]["kind"], "stable_prefix");
+        assert_eq!(
+            req["tools"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
     }
 
     // ─── End-to-end prompt assembly → Anthropic request coverage ──────────────
@@ -1571,7 +1587,7 @@ mod tests {
     /// dedicated request-level `tools` block while preserving the system block
     /// ordering from `chat.rs` (base -> project context -> repo map -> dynamic
     /// tail). Stable-prefix `cache_control` appears on the stable system prefix
-    /// and on the first tool-definition entry, but not on the dynamic tail.
+    /// and on the last tool-definition entry, but not on the dynamic tail.
     #[test]
     fn e2e_system_blocks_ordered_with_cache_control() {
         let provider = test_provider();
@@ -1603,14 +1619,16 @@ mod tests {
         assert_eq!(system[2]["text"], client);
 
         for stable_block in &system[..2] {
-            assert_eq!(stable_block["cache_control"]["type"], "ephemeral");
-            assert_eq!(stable_block["cache_control"]["kind"], "stable_prefix");
+            assert_eq!(stable_block["cache_control"], json!({"type": "ephemeral"}));
         }
         assert!(
             system[2].get("cache_control").is_none(),
             "dynamic tail block must not have cache_control"
         );
-        assert_eq!(req["tools"][0]["cache_control"]["kind"], "stable_prefix");
+        assert_eq!(
+            req["tools"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
     }
 
     /// E2E: without tools or dynamic context, a single non-cacheable
@@ -1690,8 +1708,8 @@ mod tests {
         assert_eq!(system[0]["text"], base.trim());
         assert_eq!(system[1]["text"], project_context);
         assert_eq!(system[2]["text"], "be brief");
-        assert_eq!(system[0]["cache_control"]["kind"], "stable_prefix");
-        assert_eq!(system[1]["cache_control"]["kind"], "stable_prefix");
+        assert_eq!(system[0]["cache_control"], json!({"type": "ephemeral"}));
+        assert_eq!(system[1]["cache_control"], json!({"type": "ephemeral"}));
         assert!(system[2].get("cache_control").is_none());
 
         let req_tools = req["tools"].as_array().expect("tools array");
@@ -1735,7 +1753,7 @@ mod tests {
         let provider = test_provider();
         let mut conv = Conversation::default();
         // Six non-empty system text blocks with cache metadata. system_blocks
-        // marks all-but-last (5 cached), the request marks the first tool (1),
+        // marks all-but-last (5 cached), the request marks the last tool (1),
         // and add_message_cache_breakpoint marks the last message (1): 7 raw
         // markers, well over the cap of 4.
         conv.push(crate::message::Message {
@@ -1780,7 +1798,8 @@ mod tests {
         // Highest-priority segments keep their markers: the tool definition (1)
         // and the earliest system blocks (priority after tools).
         assert_eq!(
-            req["tools"][0]["cache_control"]["kind"], ANTHROPIC_STABLE_PREFIX_KIND,
+            req["tools"][0]["cache_control"],
+            json!({"type": "ephemeral"}),
             "the tool definition is the highest-priority cache segment and must keep its marker"
         );
         let system = req["system"].as_array().expect("system array");
@@ -1842,8 +1861,8 @@ mod tests {
         assert!(total <= 4, "expected <= 4 markers, got {total}");
         // Tool and first system block markers preserved exactly.
         assert_eq!(
-            req["tools"][0]["cache_control"]["kind"],
-            ANTHROPIC_STABLE_PREFIX_KIND
+            req["tools"][0]["cache_control"],
+            json!({"type": "ephemeral"})
         );
         assert_eq!(req["system"][0]["cache_control"]["type"], "ephemeral");
     }
@@ -2023,6 +2042,110 @@ mod tests {
         assert!(
             AnthropicProvider::stable_prefix_hash(&body).is_none(),
             "a request with no cache_control markers has no stable prefix to hash"
+        );
+    }
+
+    // ─── Default caching policy (metadata-less agentic conversations) ─────────
+
+    /// Worker/task sessions assemble their system prompt as one plain string
+    /// with no breakpoint metadata. With tools present, the default policy must
+    /// still cache: marker on the last tool, on the (single) system block, and
+    /// the trailing message breakpoint — 3 markers, within the cap of 4.
+    #[test]
+    fn test_default_cache_policy_marks_tools_system_and_trailing_message() {
+        let provider = test_provider();
+        let mut conv = Conversation::default();
+        conv.push(crate::message::Message::system("worker system prompt"));
+        conv.push(crate::message::Message::user("do the task"));
+
+        let tools = vec![
+            json!({"name": "shell", "description": "Run shell", "input_schema": {"type": "object"}}),
+            json!({"name": "read", "description": "Read file", "input_schema": {"type": "object"}}),
+        ];
+
+        let req = provider.build_request(&conv, &tools, None);
+
+        // Marker on the LAST tool only (breakpoint = end of cacheable prefix).
+        assert!(req["tools"][0].get("cache_control").is_none());
+        assert_eq!(
+            req["tools"][1]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+
+        // The single system block is marked, forcing array serialization.
+        let system = req["system"].as_array().expect("system array");
+        assert_eq!(system.len(), 1);
+        assert_eq!(system[0]["text"], "worker system prompt");
+        assert_eq!(system[0]["cache_control"], json!({"type": "ephemeral"}));
+
+        // Trailing message breakpoint present.
+        let messages = req["messages"].as_array().expect("messages");
+        let last_block = messages.last().unwrap()["content"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(last_block["cache_control"], json!({"type": "ephemeral"}));
+
+        assert_eq!(count_cache_markers(&req), 3);
+    }
+
+    /// One-shot utility calls (no tools, no metadata — e.g. compaction
+    /// summaries) must stay unmarked: a cache write that is never read back is
+    /// pure cost.
+    #[test]
+    fn test_default_cache_policy_inactive_without_tools() {
+        let provider = test_provider();
+        let mut conv = Conversation::default();
+        conv.push(crate::message::Message::system("summarise this"));
+        conv.push(crate::message::Message::user("transcript…"));
+
+        let req = provider.build_request(&conv, &[], None);
+        assert_eq!(count_cache_markers(&req), 0);
+        assert!(req["system"].is_string());
+    }
+
+    /// Explicit breakpoint metadata wins over the default policy: the system
+    /// split stays all-but-last (dynamic tail uncached).
+    #[test]
+    fn test_explicit_metadata_overrides_default_policy() {
+        let provider = test_provider();
+        let (conv, tools) = drift_guard_fixture();
+        let req = provider.build_request(&conv, &tools, None);
+
+        let system = req["system"].as_array().expect("system array");
+        assert_eq!(system.len(), 3);
+        assert!(system[0].get("cache_control").is_some());
+        assert!(system[1].get("cache_control").is_some());
+        assert!(
+            system[2].get("cache_control").is_none(),
+            "dynamic tail must stay uncached under the explicit contract"
+        );
+    }
+
+    // ─── effective_url: Anthropic-compatible base URLs ────────────────────────
+
+    #[test]
+    fn test_effective_url_joins_native_and_v1_suffixed_bases() {
+        let mut config = test_anthropic_config();
+        config.base_url = "https://api.anthropic.com".to_string();
+        assert_eq!(
+            AnthropicProvider::new(config.clone()).effective_url(),
+            "https://api.anthropic.com/v1/messages"
+        );
+
+        // MiniMax coding plan publishes a base that already ends in /v1.
+        config.base_url = "https://api.minimax.io/anthropic/v1".to_string();
+        assert_eq!(
+            AnthropicProvider::new(config.clone()).effective_url(),
+            "https://api.minimax.io/anthropic/v1/messages"
+        );
+
+        config.base_url = "https://api.minimax.io/anthropic/v1/".to_string();
+        assert_eq!(
+            AnthropicProvider::new(config).effective_url(),
+            "https://api.minimax.io/anthropic/v1/messages"
         );
     }
 }

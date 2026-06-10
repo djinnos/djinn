@@ -207,6 +207,24 @@ pub static BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         streaming: true,
         max_tokens_default: None,
     },
+    // Anthropic-compatible. Already present in models.dev (`minimax-coding-plan`)
+    // with the right `api` base_url (https://api.minimax.io/anthropic/v1) + model
+    // list (MiniMax-M3, …); listed here only so the env-var bootstrap upserts
+    // MINIMAX_API_KEY into the vault. The coding-plan subscription key only works
+    // on this endpoint and authenticates via Authorization: Bearer.
+    BuiltinProvider {
+        id: "minimax-coding-plan",
+        display_name: "MiniMax Coding Plan",
+        required_env_vars: &["MINIMAX_API_KEY"],
+        oauth_keys: &[],
+        docs_url: "https://platform.minimax.io/docs",
+        merge_into: None,
+        auth_only: false,
+        format_rule: FormatRule::Fixed(FormatFamily::Anthropic),
+        auth_shape: AuthShape::Bearer,
+        streaming: true,
+        max_tokens_default: Some(64_000),
+    },
     // OAuth-only provider whose capabilities are folded into "openai" in the
     // catalog.  Internally still a distinct provider for dispatch & models.
     BuiltinProvider {

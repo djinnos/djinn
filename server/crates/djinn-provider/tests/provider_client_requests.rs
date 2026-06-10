@@ -430,7 +430,13 @@ async fn anthropic_provider_serializes_required_tool_choice_and_headers() {
 
     let body: Value = serde_json::from_slice(&request.body).expect("json body");
     assert_eq!(body["model"], "claude-3-5-sonnet");
-    assert_eq!(body["system"], "You are a helpful assistant.");
+    // No explicit breakpoint metadata + tools present => the default caching
+    // policy marks the system prompt, forcing block-array serialization.
+    assert_eq!(body["system"][0]["text"], "You are a helpful assistant.");
+    assert_eq!(
+        body["system"][0]["cache_control"]["type"], "ephemeral",
+        "default cache policy must mark the metadata-less system prompt"
+    );
     assert_eq!(body["messages"][0]["role"], "user");
     assert_eq!(body["messages"][0]["content"][0]["type"], "text");
     assert_eq!(body["messages"][0]["content"][0]["text"], "List files");
@@ -463,7 +469,7 @@ async fn anthropic_provider_serializes_cache_control_for_stable_system_prefix() 
     let body: Value = serde_json::from_slice(&requests[0].body).expect("json body");
     assert_eq!(body["system"], "Stable system prefix");
     assert_eq!(body["tools"][0]["name"], "shell");
-    assert_eq!(body["tools"][0]["cache_control"]["kind"], "stable_prefix");
+    assert_eq!(body["tools"][0]["cache_control"]["type"], "ephemeral");
 }
 
 #[tokio::test]
@@ -494,10 +500,10 @@ async fn anthropic_provider_applies_cache_control_only_to_stable_prefix_blocks()
     assert_eq!(system[0]["text"], "Stable system prefix");
     assert_eq!(system[1]["text"], "Repository map");
     assert_eq!(system[2]["text"], "Task-specific volatile context");
-    assert_eq!(system[0]["cache_control"]["kind"], "stable_prefix");
-    assert_eq!(system[1]["cache_control"]["kind"], "stable_prefix");
+    assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+    assert_eq!(system[1]["cache_control"]["type"], "ephemeral");
     assert!(system[2].get("cache_control").is_none());
-    assert_eq!(body["tools"][0]["cache_control"]["kind"], "stable_prefix");
+    assert_eq!(body["tools"][0]["cache_control"]["type"], "ephemeral");
 }
 
 #[tokio::test]
@@ -527,9 +533,9 @@ async fn anthropic_provider_preserves_order_when_repo_map_is_absent() {
     assert_eq!(system.len(), 2);
     assert_eq!(system[0]["text"], "Stable system prefix");
     assert_eq!(system[1]["text"], "Task-specific volatile context");
-    assert_eq!(system[0]["cache_control"]["kind"], "stable_prefix");
+    assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
     assert!(system[1].get("cache_control").is_none());
-    assert_eq!(body["tools"][0]["cache_control"]["kind"], "stable_prefix");
+    assert_eq!(body["tools"][0]["cache_control"]["type"], "ephemeral");
 }
 
 #[tokio::test]
@@ -559,9 +565,9 @@ async fn anthropic_provider_preserves_order_when_dynamic_tail_is_absent() {
     assert_eq!(system.len(), 2);
     assert_eq!(system[0]["text"], "Stable system prefix");
     assert_eq!(system[1]["text"], "Repository map");
-    assert_eq!(system[0]["cache_control"]["kind"], "stable_prefix");
+    assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
     assert!(system[1].get("cache_control").is_none());
-    assert_eq!(body["tools"][0]["cache_control"]["kind"], "stable_prefix");
+    assert_eq!(body["tools"][0]["cache_control"]["type"], "ephemeral");
 }
 
 #[tokio::test]
