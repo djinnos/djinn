@@ -469,8 +469,7 @@ pub(crate) async fn run_supervisor_dispatch(
     // mis-attributing an OOM to a "stall". Race the report stream against the
     // runtime's infra-death watch (`watch_infra_death`, a no-op pend-forever on
     // the Test runtime) so a terminally dead Job/Pod is detected within ~15s,
-    // its real death reason captured, and the slot freed promptly. See
-    // memory note `project_*surface*job*death`.
+    // its real death reason captured, and the slot freed promptly.
     let mut infra_death: Option<String> = None;
     let report_result: anyhow::Result<Option<TaskRunReport>> = match bistream_result {
         Ok(bistream) => {
