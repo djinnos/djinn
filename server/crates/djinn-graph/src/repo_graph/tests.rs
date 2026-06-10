@@ -11,7 +11,7 @@
 // pre-split tree (only the indentation and `mod tests {` wrapper
 // have been removed).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use petgraph::visit::EdgeRef;
 use serde::Serialize;
