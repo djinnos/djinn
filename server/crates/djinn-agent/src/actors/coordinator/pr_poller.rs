@@ -525,6 +525,13 @@ impl CoordinatorActor {
                         .await;
                     let blocking =
                         blocking_failed_checks(&blocking_failed, required_contexts.as_deref());
+                    let blocking_names: std::collections::HashSet<&str> =
+                        blocking.iter().map(|cr| cr.name.as_str()).collect();
+                    let advisory: Vec<&CheckRun> = blocking_failed
+                        .iter()
+                        .filter(|cr| !blocking_names.contains(cr.name.as_str()))
+                        .copied()
+                        .collect();
                     if !blocking.is_empty() {
                         tracing::info!(
                             task_id = %task.short_id,
@@ -532,9 +539,15 @@ impl CoordinatorActor {
                             blocking_count = blocking.len(),
                             "PR poller: changes requested AND required CI failing in same tick → logging both feedbacks before single reopen"
                         );
+                    }
+                    // Even when every failure is non-required, the reviewer-
+                    // driven reopen below still spawns a worker — give it the
+                    // advisory list as context rather than nothing.
+                    if !blocking.is_empty() || !advisory.is_empty() {
                         self.log_ci_failure_comment(
                             &task.id,
                             &blocking,
+                            &advisory,
                             pr_url,
                             &current_sha,
                             gh_client,
@@ -1376,9 +1389,14 @@ impl CoordinatorActor {
                                     "PR poller: merge-group run had no failing check runs to surface; feedback stays generic"
                                 );
                             } else {
+                                // A failure-flavored dequeue means GitHub's
+                                // queue itself rejected the group — every
+                                // surfaced failure is treated as blocking;
+                                // no advisory split here.
                                 self.log_ci_failure_comment(
                                     task_id,
                                     &failed,
+                                    &[],
                                     pr_url,
                                     &run.head_sha,
                                     gh_client,
@@ -1669,9 +1687,19 @@ impl CoordinatorActor {
             Some("CI checks failed on PR"),
         )
         .await;
+        // Non-required failures ride along as informational context so the
+        // rework worker knows about them without treating them as blockers.
+        let blocking_names: std::collections::HashSet<&str> =
+            blocking.iter().map(|cr| cr.name.as_str()).collect();
+        let advisory: Vec<&CheckRun> = failed_checks
+            .iter()
+            .filter(|cr| !blocking_names.contains(cr.name.as_str()))
+            .copied()
+            .collect();
         self.log_ci_failure_comment(
             task_id,
             &blocking,
+            &advisory,
             pr_url,
             current_sha,
             gh_client,
@@ -2251,10 +2279,14 @@ impl CoordinatorActor {
     /// This comment becomes part of the activity log that the re-dispatched worker
     /// reads in its system prompt, giving it context about what needs to be fixed.
     #[allow(clippy::too_many_arguments)]
+    // The advisory list is informational context, not a rework driver; it
+    // rides along with the blocking-failure args rather than a bag struct.
+    #[allow(clippy::too_many_arguments)]
     async fn log_ci_failure_comment(
         &self,
         task_id: &str,
         failed_checks: &[&CheckRun],
+        advisory_failed: &[&CheckRun],
         pr_url: &str,
         sha: &str,
         gh_client: &GitHubApiClient,
@@ -2316,6 +2348,10 @@ impl CoordinatorActor {
                  showing the first {MAX_AGGREGATED_CI_RUNS}. Re-run CI after fixing \
                  these to surface any remaining failures._"
             ));
+        }
+
+        if let Some(advisory) = advisory_checks_section(advisory_failed) {
+            sections.push(advisory);
         }
 
         sections.push(format!("\nPR: {pr_url}"));
@@ -2591,7 +2627,19 @@ fn should_auto_resolve_conversations(
 fn dequeue_reason_is_failure(reason: Option<&str>) -> bool {
     match reason {
         None => false,
-        Some(r) => !matches!(r, "BRANCH_INVALIDATED" | "QUEUE_CLEARED" | "DEQUEUED"),
+        // GitHub emits two vocabularies for this reason depending on surface:
+        // SCREAMING_CASE GraphQL-enum style (`CHECKS_FAILED`) and lowercase
+        // snake_case on `RemovedFromMergeQueueEvent` timeline nodes
+        // (`failed_checks`, `merged`) — compare case-insensitively or the
+        // safe-list never matches real events and EVERY dequeue (including a
+        // successful merge) reopens the task for rework. `MERGED` is the
+        // queue's success exit; the next poll tick sees `pr.merged` and closes
+        // the task. Unknown reasons stay conservative-failure so a new GitHub
+        // vocabulary never silently swallows a real eviction.
+        Some(r) => !matches!(
+            r.to_ascii_uppercase().as_str(),
+            "MERGED" | "BRANCH_INVALIDATED" | "QUEUE_CLEARED" | "DEQUEUED"
+        ),
     }
 }
 
@@ -2937,13 +2985,39 @@ fn build_ci_failure_sections(
     (sections, ci_jobs)
 }
 
+/// Render the informational section listing failed checks that are NOT
+/// required (advisory/preview/optional bot gates). These never drive a rework
+/// on their own — the section exists so the worker spawned for a *legitimate*
+/// reopen (required check failed / reviewer requested changes) knows about
+/// them without treating them as blockers to loop on.
+fn advisory_checks_section(advisory_failed: &[&CheckRun]) -> Option<String> {
+    if advisory_failed.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = advisory_failed
+        .iter()
+        .map(|cr| {
+            let conclusion = cr.conclusion.as_deref().unwrap_or("unknown");
+            format!("- {} ({}): {}", cr.name, conclusion, cr.html_url)
+        })
+        .collect();
+    Some(format!(
+        "\n**Non-required checks also failing (informational):**\n{}\n\
+         _These checks do not gate merging and did not trigger this rework. \
+         Do not loop on them — only address one if your change is clearly its \
+         cause._",
+        lines.join("\n")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Task, blocking_failed_checks, build_ci_failure_sections, dequeue_reason_is_failure,
-        effective_review_decision, is_advisory_check_name, is_conversation_resolution_block,
-        is_merge_queue_405, is_racing_unmerged_status, parse_actions_run_id, parse_pr_url,
-        pick_conflict_blocker_sibling, should_auto_resolve_conversations,
+        Task, advisory_checks_section, blocking_failed_checks, build_ci_failure_sections,
+        dequeue_reason_is_failure, effective_review_decision, is_advisory_check_name,
+        is_conversation_resolution_block, is_merge_queue_405, is_racing_unmerged_status,
+        parse_actions_run_id, parse_pr_url, pick_conflict_blocker_sibling,
+        should_auto_resolve_conversations,
     };
     use djinn_provider::github_api::{ActionsJob, ActionsJobStep, CheckRun, GitHubUser, PrReview};
 
@@ -3139,6 +3213,22 @@ mod tests {
     }
 
     #[test]
+    fn advisory_section_empty_for_no_checks() {
+        assert!(advisory_checks_section(&[]).is_none());
+    }
+
+    #[test]
+    fn advisory_section_lists_checks_and_disclaims_blocking() {
+        let sentinel = check("Sentinel");
+        let e2e = check("Partner E2E");
+        let section = advisory_checks_section(&[&sentinel, &e2e]).expect("section");
+        assert!(section.contains("Non-required checks also failing"));
+        assert!(section.contains("Sentinel (failure)"));
+        assert!(section.contains("Partner E2E (failure)"));
+        assert!(section.contains("do not gate merging"));
+    }
+
+    #[test]
     fn advisory_check_names_classified() {
         // The real 1ck3 offenders.
         assert!(is_advisory_check_name(
@@ -3290,8 +3380,16 @@ mod tests {
         assert!(dequeue_reason_is_failure(Some("UNKNOWN_REMOVAL_REASON")));
         assert!(dequeue_reason_is_failure(Some("SOMETHING_NEW")));
 
-        // Non-failures: head moved, queue admin reset, manual intervention.
+        // Lowercase timeline-event vocabulary classifies the same way.
+        assert!(dequeue_reason_is_failure(Some("failed_checks")));
+        assert!(dequeue_reason_is_failure(Some("checks_failed")));
+
+        // Non-failures: merged (queue success), head moved, queue admin
+        // reset, manual intervention — in both vocabularies.
+        assert!(!dequeue_reason_is_failure(Some("MERGED")));
+        assert!(!dequeue_reason_is_failure(Some("merged")));
         assert!(!dequeue_reason_is_failure(Some("BRANCH_INVALIDATED")));
+        assert!(!dequeue_reason_is_failure(Some("branch_invalidated")));
         assert!(!dequeue_reason_is_failure(Some("QUEUE_CLEARED")));
         assert!(!dequeue_reason_is_failure(Some("DEQUEUED")));
         assert!(!dequeue_reason_is_failure(None));

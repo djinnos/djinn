@@ -667,10 +667,19 @@ mod tests {
             &self,
             ctx: &ProjectCtx,
             workspace: Option<&str>,
+            _level: djinn_control_plane::bridge::SnapshotLevel,
             cap: usize,
             ex: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
         ) -> Result<djinn_control_plane::bridge::SnapshotPayload, String> {
-            StubRepoGraph.snapshot(ctx, workspace, cap, ex).await
+            StubRepoGraph
+                .snapshot(
+                    ctx,
+                    workspace,
+                    djinn_control_plane::bridge::SnapshotLevel::Symbol,
+                    cap,
+                    ex,
+                )
+                .await
         }
     }
 

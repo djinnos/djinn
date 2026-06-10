@@ -537,6 +537,33 @@ pub struct SnapshotPayload {
     pub edges: Vec<SnapshotEdge>,
 }
 
+/// Requested semantic zoom level for a `code_graph snapshot` response.
+///
+/// `Symbol` is the existing file/symbol node shape. `Community` is accepted at
+/// the API boundary so callers can share the same parameter ahead of the
+/// community-collapse implementation; it currently falls back to `Symbol`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotLevel {
+    Symbol,
+    Community,
+}
+
+impl SnapshotLevel {
+    pub const VALID_VALUES: &'static str = "symbol, community";
+
+    pub fn parse(value: Option<&str>) -> Result<Self, String> {
+        match value.map(str::trim).filter(|v| !v.is_empty()) {
+            None => Ok(Self::Symbol),
+            Some(value) if value.eq_ignore_ascii_case("symbol") => Ok(Self::Symbol),
+            Some(value) if value.eq_ignore_ascii_case("community") => Ok(Self::Community),
+            Some(value) => Err(format!(
+                "invalid snapshot level '{value}'; expected one of: {}",
+                Self::VALID_VALUES
+            )),
+        }
+    }
+}
+
 /// Typed bridge request for the budgeted natural-language subgraph planner.
 #[derive(Debug, Clone)]
 pub struct QuerySubgraphRequest {
@@ -1461,6 +1488,7 @@ pub trait RepoGraphOps: Send + Sync {
         &self,
         ctx: &ProjectCtx,
         workspace: Option<&str>,
+        level: SnapshotLevel,
         node_cap: usize,
         exclusions: &crate::tools::graph_exclusions::GraphExclusions,
     ) -> Result<SnapshotPayload, String>;

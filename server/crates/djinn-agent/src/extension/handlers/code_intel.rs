@@ -560,7 +560,13 @@ async fn call_code_graph_inner(
             let node_cap = p.node_cap.or(p.limit).unwrap_or(2000);
             let exclusions = djinn_control_plane::tools::graph_exclusions::GraphExclusions::empty();
             let result = graph_ops
-                .snapshot(ctx, ctx.workspace.as_deref(), node_cap, &exclusions)
+                .snapshot(
+                    ctx,
+                    ctx.workspace.as_deref(),
+                    djinn_control_plane::bridge::SnapshotLevel::parse(p.level.as_deref())?,
+                    node_cap,
+                    &exclusions,
+                )
                 .await?;
             serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
         }

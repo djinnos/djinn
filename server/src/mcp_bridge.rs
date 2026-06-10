@@ -768,13 +768,23 @@ fn resolve_node_or_err_for_workspace_seed(
 #[async_trait]
 impl RepoGraphOps for RepoGraphBridge {
     async fn workspaces(&self, ctx: &ProjectCtx) -> Result<WorkspacesResult, String> {
-        let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
+        let mut counts = match djinn_graph::canonical_graph::load_canonical_graph_only(
             &self.state,
             &ctx.id,
             &ctx.clone_path,
         )
-        .await?;
-        let mut counts = graph_workspace_node_counts(&graph);
+        .await
+        {
+            Ok(graph) => graph_workspace_node_counts(&graph),
+            Err(err) => {
+                tracing::debug!(
+                    project_id = %ctx.id,
+                    error = %err,
+                    "code_graph workspaces: graph unavailable; returning freshness-only workspaces"
+                );
+                std::collections::BTreeMap::new()
+            }
+        };
         let freshness = djinn_db::ProjectWorkspaceGraphRepository::new(self.state.db().clone())
             .list_for_project(&ctx.id)
             .await
@@ -1921,6 +1931,7 @@ impl RepoGraphOps for RepoGraphBridge {
         &self,
         ctx: &ProjectCtx,
         workspace: Option<&str>,
+        _level: djinn_control_plane::bridge::SnapshotLevel,
         node_cap: usize,
         exclusions: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
     ) -> Result<SnapshotPayload, String> {
@@ -3819,7 +3830,32 @@ fn build_snapshot_payload(
         }
     }
 
-    let truncated = total_nodes_post_excl > surviving.len();
+    // Cross-workspace edges are the edges the workspace zoom UI most needs to
+    // see. A plain top-N induced subgraph can select one high-rank endpoint and
+    // drop the lower-rank endpoint from a quieter workspace, which makes the
+    // edge vanish entirely. After the initial cap, rescue both endpoints of any
+    // cross-workspace edge touching the selected set. This intentionally may
+    // emit slightly more nodes than `node_cap`; `node_cap` remains the initial
+    // top-N budget echoed to callers, while `truncated` still tells them the
+    // full post-exclusion graph was larger than the initial cap.
+    for edge_ref in graph.graph().edge_references() {
+        let source = edge_ref.source();
+        let target = edge_ref.target();
+        if !pagerank_lookup.contains_key(&source) || !pagerank_lookup.contains_key(&target) {
+            continue;
+        }
+        let source_workspace = graph.node(source).workspace.as_deref();
+        let target_workspace = graph.node(target).workspace.as_deref();
+        if source_workspace == target_workspace {
+            continue;
+        }
+        if surviving.contains(&source) || surviving.contains(&target) {
+            surviving.insert(source);
+            surviving.insert(target);
+        }
+    }
+
+    let truncated = total_nodes_post_excl > node_cap;
 
     // Materialize snapshot nodes in pagerank-sorted order so the wire
     // payload is deterministic and the UI can render
@@ -5845,8 +5881,8 @@ pub(crate) mod graph_bridge_tests {
             payload.total_nodes, cap
         );
         assert!(
-            payload.nodes.len() <= cap,
-            "emitted {} nodes, exceeds cap {}",
+            payload.nodes.len() >= cap,
+            "emitted {} nodes, should include at least the initial cap {}",
             payload.nodes.len(),
             cap
         );
@@ -5867,6 +5903,103 @@ pub(crate) mod graph_bridge_tests {
                 edge.from,
                 edge.to
             );
+        }
+    }
+
+    #[test]
+    fn snapshot_payload_rescues_cross_workspace_endpoint_under_cap() {
+        use djinn_control_plane::tools::graph_exclusions::GraphExclusions;
+        use djinn_graph::repo_graph::{
+            REPO_GRAPH_ARTIFACT_VERSION, RankedRepoGraphNode, RepoDependencyGraph,
+            RepoGraphArtifact, RepoGraphArtifactEdge, RepoGraphEdgeKind, RepoGraphNode,
+            RepoGraphNodeKind, RepoGraphRanking, RepoNodeKey,
+        };
+
+        let mk_node = |name: &str, workspace: &str| RepoGraphNode {
+            id: RepoNodeKey::Symbol(name.to_string()),
+            kind: RepoGraphNodeKind::Symbol,
+            display_name: name.to_string(),
+            language: Some("rust".to_string()),
+            file_path: Some(PathBuf::from(format!("{workspace}/src/{name}.rs"))),
+            symbol: Some(name.to_string()),
+            symbol_kind: None,
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: vec![],
+            signature_parts: None,
+            is_test: false,
+            complexity: None,
+            workspace: Some(workspace.to_string()),
+        };
+        let graph = RepoDependencyGraph::from_artifact(&RepoGraphArtifact {
+            version: REPO_GRAPH_ARTIFACT_VERSION,
+            nodes: vec![
+                mk_node("a_hot_0", "workspace-a"),
+                mk_node("a_hot_1", "workspace-a"),
+                mk_node("a_hot_2", "workspace-a"),
+                mk_node("a_hot_3", "workspace-a"),
+                mk_node("a_hot_4", "workspace-a"),
+                mk_node("b_quiet_endpoint", "workspace-b"),
+            ],
+            edges: vec![RepoGraphArtifactEdge {
+                source: 1,
+                target: 5,
+                kind: RepoGraphEdgeKind::SymbolReference,
+                weight: 1.0,
+                evidence_count: 1,
+                confidence: 0.9,
+                reason: None,
+                step: None,
+            }],
+            symbol_ranges: std::collections::BTreeMap::new(),
+            communities: vec![],
+            processes: vec![],
+        });
+        let ranking = RepoGraphRanking {
+            nodes: graph
+                .graph()
+                .node_indices()
+                .enumerate()
+                .map(|(rank, node_index)| RankedRepoGraphNode {
+                    node_index,
+                    key: graph.node(node_index).id.clone(),
+                    kind: graph.node(node_index).kind,
+                    score: (10 - rank) as f64,
+                    page_rank: (10 - rank) as f64,
+                    structural_weight: 1.0,
+                    inbound_edge_weight: 0.0,
+                    outbound_edge_weight: 0.0,
+                    is_entry_point: false,
+                    entry_point_distance: None,
+                    fused_rank: (10 - rank) as f64,
+                })
+                .collect(),
+        };
+
+        let payload = build_snapshot_payload(
+            &graph,
+            &ranking,
+            "proj-test".to_string(),
+            "deadbeef".to_string(),
+            "2026-04-28T00:00:00Z".to_string(),
+            &GraphExclusions::empty(),
+            None,
+            2,
+        );
+
+        let node_ids: std::collections::HashSet<&str> =
+            payload.nodes.iter().map(|node| node.id.as_str()).collect();
+        assert!(node_ids.contains("symbol:a_hot_1"));
+        assert!(node_ids.contains("symbol:b_quiet_endpoint"));
+        assert!(
+            payload.edges.iter().any(|edge| {
+                edge.from == "symbol:a_hot_1" && edge.to == "symbol:b_quiet_endpoint"
+            })
+        );
+        for edge in &payload.edges {
+            assert!(node_ids.contains(edge.from.as_str()));
+            assert!(node_ids.contains(edge.to.as_str()));
         }
     }
 

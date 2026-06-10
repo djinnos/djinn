@@ -310,6 +310,7 @@ impl RepoGraphOps for StubRepoGraph {
         &self,
         ctx: &ProjectCtx,
         _workspace: Option<&str>,
+        _level: crate::bridge::SnapshotLevel,
         node_cap: usize,
         _exclusions: &crate::tools::graph_exclusions::GraphExclusions,
     ) -> std::result::Result<crate::bridge::SnapshotPayload, String> {
