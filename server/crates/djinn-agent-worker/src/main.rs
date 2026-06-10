@@ -66,6 +66,8 @@ use std::sync::Arc;
 mod lifecycle;
 mod worker_services;
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use djinn_agent::context::AgentContext;
@@ -77,12 +79,31 @@ use djinn_db::{Database, DatabaseConnectConfig, PostgresDatabaseConfig};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_runtime::{ResolvedCredentials, RoleKind, TaskRunSpec, WorkerEvent};
 use djinn_supervisor::{RpcServices, SupervisorServices, TaskRunSupervisor};
-use djinn_workspace::{MirrorManager, Workspace};
+use djinn_workspace::{GitIdentity, MirrorManager, Workspace};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
+
+/// Wall-clock margin subtracted from the Job's `activeDeadlineSeconds` to set
+/// the in-pod soft deadline. The supervisor winds itself down (cancel +
+/// checkpoint commit/push) this far ahead of the kubelet's hard kill so a
+/// slow model never loses work to the deadline. ~10 min covers a checkpoint
+/// commit/push plus the terminal RPC flush with comfortable slack.
+const SOFT_DEADLINE_MARGIN: Duration = Duration::from_secs(600);
+
+/// Floor for the armed soft-deadline interval. For small configured deadlines
+/// (tests, tuned-down installs) `deadline - margin` can underflow or land
+/// implausibly early; clamp so the timer never fires immediately at startup.
+const SOFT_DEADLINE_MIN: Duration = Duration::from_secs(60);
+
+/// Upper bound on the checkpoint commit+push. The Pod's
+/// `terminationGracePeriodSeconds` (default 60s) is the hard window between
+/// SIGTERM and SIGKILL; bound the checkpoint well inside it so a wedged git
+/// operation (locked index, mid-merge) can't eat the whole grace period and
+/// starve the terminal RPC flush.
+const CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(20);
 
 use worker_services::WorkerSupervisorServices;
 
@@ -380,6 +401,20 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     //    that same TCP connection.
     let cancel = CancellationToken::new();
 
+    // Identity used by the SIGTERM / soft-deadline checkpoint, mirroring the
+    // supervisor's post-stage auto-commit: attribute to the task creator,
+    // falling back to the bot for system/patrol tasks (or host/worker skew).
+    let checkpoint_identity = CheckpointIdentity {
+        name: spec
+            .commit_author_name
+            .clone()
+            .unwrap_or_else(|| "djinn-bot".to_string()),
+        email: spec
+            .commit_author_email
+            .clone()
+            .unwrap_or_else(|| "bot@djinn.local".to_string()),
+    };
+
     // Wire SIGTERM / SIGINT into the supervisor's cancel token so the existing
     // `finalize_interrupted` path runs and flushes a terminal
     // `update_task_run_status(Interrupted)` RPC back to the host before the
@@ -387,9 +422,34 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     // graceful-drain SIGTERM kills the runtime mid-flight and the host's
     // task_runs row stays `running` forever.
     //
-    // The K8s Job sets `terminationGracePeriodSeconds=60`, which is the
-    // window we have to drain the RPC before SIGKILL hits.
-    install_termination_handlers(cancel.clone(), args.task_run_id.clone());
+    // Each signal ALSO triggers a best-effort checkpoint (commit + push of
+    // task_branch) so a mid-stage kill doesn't strand the worker's in-flight
+    // commits in the ephemeral clone — the supervisor's own post-stage push
+    // only runs at a stage boundary, which a cancelled mid-stage run never
+    // reaches. The K8s Job sets `terminationGracePeriodSeconds=60`, the window
+    // we have to checkpoint + drain the RPC before SIGKILL hits.
+    install_termination_handlers(
+        cancel.clone(),
+        args.task_run_id.clone(),
+        args.workspace_path.clone(),
+        spec.task_branch.clone(),
+        checkpoint_identity.clone(),
+    );
+
+    // Arm the in-pod soft deadline. The kubelet's `activeDeadlineSeconds` is a
+    // hard backstop that SIGKILLs the Pod with no chance to save work; the soft
+    // deadline fires `margin` ahead of it and drives the SAME graceful path as
+    // SIGTERM (cancel + checkpoint), so the healthy slow-model case winds itself
+    // down rather than being hard-killed. `DJINN_TASK_RUN_DEADLINE_SECONDS` is
+    // set by `build_task_run_job` from the same config value the Job carries;
+    // absent/unparseable → no soft deadline (the kubelet backstop still applies).
+    install_soft_deadline(
+        cancel.clone(),
+        args.task_run_id.clone(),
+        args.workspace_path.clone(),
+        spec.task_branch.clone(),
+        checkpoint_identity,
+    );
 
     let server_addr = args.server_addr.clone();
     let (rpc, background) = RpcServices::connect_tcp(
@@ -491,14 +551,123 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     Ok(())
 }
 
-/// Spawn background listeners for SIGTERM and SIGINT that flip `cancel` when
-/// the kubelet (or operator) signals shutdown. The supervisor body checks
-/// `cancel` between stages, exits its for-loop with `Interrupted`, and runs
-/// `finalize_interrupted` — which calls `update_task_run_status(Interrupted)`
-/// over the still-live RPC channel. The Pod's
-/// `terminationGracePeriodSeconds=60` gives that RPC time to land before
-/// SIGKILL.
-fn install_termination_handlers(cancel: CancellationToken, task_run_id: String) {
+/// Commit author/committer identity for the wind-down checkpoint. Owned
+/// `String`s (not the borrowed [`GitIdentity`]) so it can be cloned into the
+/// detached signal / deadline tasks.
+#[derive(Clone)]
+struct CheckpointIdentity {
+    name: String,
+    email: String,
+}
+
+/// Best-effort "save work before we die" checkpoint: stage + commit any
+/// uncommitted changes on the attached workspace and push `task_branch` to the
+/// mirror, all bounded by [`CHECKPOINT_TIMEOUT`].
+///
+/// Called from the SIGTERM handler and the soft-deadline timer. It races the
+/// supervisor's own (cancelled) shutdown, so it may arrive mid-git-operation —
+/// a locked index, a half-applied merge. Every failure is logged and
+/// swallowed; this function never panics and never blocks past its timeout,
+/// because it runs inside the kubelet's short `terminationGracePeriodSeconds`
+/// window and must leave room for the terminal RPC flush.
+///
+/// Idempotent against the supervisor's pushes: the commit is a no-op on a clean
+/// tree and the push refspec (`task_branch:task_branch`) is a no-op when the
+/// mirror is already current.
+async fn checkpoint_workspace(
+    workspace_path: &Path,
+    task_branch: &str,
+    identity: &CheckpointIdentity,
+    task_run_id: &str,
+) {
+    let ws = match Workspace::attach_existing(workspace_path, task_branch.to_string()) {
+        Ok(ws) => ws,
+        Err(e) => {
+            warn!(
+                task_run_id,
+                branch = task_branch,
+                path = %workspace_path.display(),
+                error = %e,
+                "checkpoint: failed to attach workspace; cannot save in-flight work"
+            );
+            return;
+        }
+    };
+
+    let git_identity = GitIdentity {
+        name: &identity.name,
+        email: &identity.email,
+    };
+    let message = format!("checkpoint: interrupted task-run {task_run_id}");
+
+    let result = tokio::time::timeout(CHECKPOINT_TIMEOUT, async {
+        // Commit is best-effort: a clean tree (worker already committed via
+        // shell) returns Ok(false) and we still push. A failure (locked index
+        // mid-merge) is logged but must not block the push of whatever IS
+        // already committed in the clone.
+        match ws.commit(&message, git_identity).await {
+            Ok(true) => info!(
+                task_run_id,
+                branch = task_branch,
+                "checkpoint: committed uncommitted changes"
+            ),
+            Ok(false) => info!(
+                task_run_id,
+                branch = task_branch,
+                "checkpoint: tree already clean; nothing to commit"
+            ),
+            Err(e) => warn!(
+                task_run_id,
+                branch = task_branch,
+                error = %e,
+                "checkpoint: commit failed (continuing to push already-committed work)"
+            ),
+        }
+        match ws.push_to_origin(task_branch).await {
+            Ok(()) => info!(
+                task_run_id,
+                branch = task_branch,
+                "checkpoint: pushed task_branch to mirror — in-flight work is durable"
+            ),
+            Err(e) => error!(
+                task_run_id,
+                branch = task_branch,
+                error = %e,
+                "checkpoint: push_to_origin failed — in-flight work may be LOST on Pod kill"
+            ),
+        }
+    })
+    .await;
+
+    if result.is_err() {
+        error!(
+            task_run_id,
+            branch = task_branch,
+            timeout_secs = CHECKPOINT_TIMEOUT.as_secs(),
+            "checkpoint: timed out (wedged git operation?); in-flight work may be LOST"
+        );
+    }
+}
+
+/// Spawn background listeners for SIGTERM and SIGINT that flip `cancel` AND run
+/// the wind-down checkpoint when the kubelet (or operator) signals shutdown.
+///
+/// The supervisor body checks `cancel` between stages, exits its for-loop with
+/// `Interrupted`, and runs `finalize_interrupted` — which calls
+/// `update_task_run_status(Interrupted)` over the still-live RPC channel. The
+/// checkpoint (commit + push of `task_branch`) runs alongside that so a
+/// mid-stage kill doesn't strand the worker's commits in the ephemeral clone;
+/// the supervisor's own post-stage push only fires at a stage boundary, which a
+/// cancelled mid-stage run never reaches. The Pod's
+/// `terminationGracePeriodSeconds=60` gives both the checkpoint and the RPC
+/// flush time to land before SIGKILL.
+fn install_termination_handlers(
+    cancel: CancellationToken,
+    task_run_id: String,
+    workspace_path: PathBuf,
+    task_branch: String,
+    identity: CheckpointIdentity,
+) {
     for (kind, label) in [
         (SignalKind::terminate(), "SIGTERM"),
         (SignalKind::interrupt(), "SIGINT"),
@@ -516,17 +685,97 @@ fn install_termination_handlers(cancel: CancellationToken, task_run_id: String) 
         };
         let cancel = cancel.clone();
         let task_run_id = task_run_id.clone();
+        let workspace_path = workspace_path.clone();
+        let task_branch = task_branch.clone();
+        let identity = identity.clone();
         tokio::spawn(async move {
             if stream.recv().await.is_some() {
                 info!(
                     signal = label,
                     task_run_id = %task_run_id,
-                    "received termination signal; cancelling supervisor so the terminal RPC flushes"
+                    "received termination signal; cancelling supervisor + checkpointing work"
                 );
+                // Cancel first so the supervisor stops streaming and starts its
+                // own graceful exit; then checkpoint to save in-flight work.
                 cancel.cancel();
+                checkpoint_workspace(&workspace_path, &task_branch, &identity, &task_run_id).await;
             }
         });
     }
+}
+
+/// Compute when the soft deadline should fire from the configured Job
+/// `activeDeadlineSeconds`: `deadline - margin`, clamped to at least
+/// [`SOFT_DEADLINE_MIN`] so a small configured deadline (tests, tuned-down
+/// installs) doesn't underflow to zero and fire immediately at startup.
+fn soft_deadline_interval(deadline_secs: u64) -> Duration {
+    Duration::from_secs(deadline_secs)
+        .saturating_sub(SOFT_DEADLINE_MARGIN)
+        .max(SOFT_DEADLINE_MIN)
+}
+
+/// Arm an in-pod soft deadline at `configured_deadline - margin`. When it
+/// fires it drives the same graceful wind-down as SIGTERM (cancel + checkpoint)
+/// so a healthy-but-slow run saves its work and exits `Interrupted` BEFORE the
+/// kubelet's hard `activeDeadlineSeconds` SIGKILLs the Pod. An interrupted run
+/// is NOT fed to the host's model circuit-breaker (it is not a model failure),
+/// so a slow model isn't penalised for hitting the wall.
+///
+/// Reads `DJINN_TASK_RUN_DEADLINE_SECONDS` (set by `build_task_run_job` from
+/// the same config the Job's `activeDeadlineSeconds` carries). Absent or
+/// unparseable → no soft deadline; the kubelet backstop still applies. The
+/// armed interval is clamped to at least [`SOFT_DEADLINE_MIN`] so small
+/// configured deadlines (tests) don't fire immediately at startup.
+fn install_soft_deadline(
+    cancel: CancellationToken,
+    task_run_id: String,
+    workspace_path: PathBuf,
+    task_branch: String,
+    identity: CheckpointIdentity,
+) {
+    let deadline_secs = match std::env::var("DJINN_TASK_RUN_DEADLINE_SECONDS") {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(n) => n,
+            Err(e) => {
+                warn!(
+                    value = %v,
+                    error = %e,
+                    "DJINN_TASK_RUN_DEADLINE_SECONDS not a valid u64; soft deadline disabled"
+                );
+                return;
+            }
+        },
+        Err(_) => {
+            // No deadline plumbed (out-of-cluster test, older host). The
+            // kubelet's activeDeadlineSeconds (if any) is the only backstop.
+            return;
+        }
+    };
+
+    let fire_after = soft_deadline_interval(deadline_secs);
+
+    info!(
+        task_run_id = %task_run_id,
+        deadline_secs,
+        soft_deadline_secs = fire_after.as_secs(),
+        "armed in-pod soft deadline"
+    );
+
+    tokio::spawn(async move {
+        tokio::select! {
+            // Already winding down via SIGTERM / normal completion — stand down.
+            _ = cancel.cancelled() => {}
+            _ = tokio::time::sleep(fire_after) => {
+                warn!(
+                    task_run_id = %task_run_id,
+                    soft_deadline_secs = fire_after.as_secs(),
+                    "soft deadline reached; winding down (cancel + checkpoint) before the kubelet hard-kills the Pod"
+                );
+                cancel.cancel();
+                checkpoint_workspace(&workspace_path, &task_branch, &identity, &task_run_id).await;
+            }
+        }
+    });
 }
 
 /// Build the in-Pod `AgentContext` the per-stage executor threads through
@@ -794,4 +1043,135 @@ const _CONTRACT_TOKEN_PATH: &str = "/var/run/secrets/tokens/djinn";
 #[allow(dead_code)]
 fn _assert_contract_workspace_path() -> &'static Path {
     Path::new(_CONTRACT_WORKSPACE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn soft_deadline_subtracts_margin_for_large_deadlines() {
+        // 3h deadline → fires 10 min early (2h50m).
+        let fire = soft_deadline_interval(10_800);
+        assert_eq!(fire, Duration::from_secs(10_800 - 600));
+        assert_eq!(fire, Duration::from_secs(10_200));
+    }
+
+    #[test]
+    fn soft_deadline_clamps_small_deadlines_to_min() {
+        // A deadline at/below the margin would underflow to 0 and fire at
+        // startup; the clamp keeps it at the floor instead.
+        assert_eq!(soft_deadline_interval(0), SOFT_DEADLINE_MIN);
+        assert_eq!(soft_deadline_interval(600), SOFT_DEADLINE_MIN);
+        // Just above margin but still under margin+min → clamped.
+        assert_eq!(soft_deadline_interval(650), SOFT_DEADLINE_MIN);
+    }
+
+    #[test]
+    fn soft_deadline_uses_computed_value_once_above_floor() {
+        // margin + min = 660s; anything above yields deadline - margin.
+        let fire = soft_deadline_interval(700);
+        assert_eq!(fire, Duration::from_secs(100));
+        assert!(fire >= SOFT_DEADLINE_MIN);
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// The wind-down checkpoint commits an uncommitted edit and pushes it to
+    /// the mirror — the durability seam that lets work survive a Pod kill.
+    #[tokio::test]
+    async fn checkpoint_commits_and_pushes_uncommitted_work() {
+        let origin = tempfile::TempDir::new().expect("origin");
+        let op = origin.path();
+        git(op, &["init", "--bare", "-b", "main"]);
+
+        // Seed main + a `task` branch via a working clone we'll treat as the Pod
+        // workspace.
+        let clone = tempfile::TempDir::new().expect("clone");
+        let cp = clone.path();
+        git(cp, &["clone", op.to_str().unwrap(), "."]);
+        std::fs::write(cp.join("base.txt"), "base\n").unwrap();
+        git(cp, &["add", "-A"]);
+        git(cp, &["commit", "-m", "base"]);
+        git(cp, &["push", "origin", "main"]);
+        git(cp, &["checkout", "-b", "task"]);
+
+        // Worker leaves an UNCOMMITTED edit (the lossy case the checkpoint saves).
+        std::fs::write(cp.join("work.txt"), "in-flight\n").unwrap();
+
+        let identity = CheckpointIdentity {
+            name: "djinn-bot".into(),
+            email: "bot@djinn.local".into(),
+        };
+        checkpoint_workspace(cp, "task", &identity, "run-xyz").await;
+
+        // The edit is committed locally...
+        let status = git(cp, &["status", "--porcelain"]);
+        assert!(
+            status.trim().is_empty(),
+            "checkpoint must commit the dirty tree: {status:?}"
+        );
+        // ...and pushed to the mirror under `task`.
+        let remote = git(op, &["rev-parse", "task"]);
+        let local = git(cp, &["rev-parse", "task"]);
+        assert_eq!(
+            remote.trim(),
+            local.trim(),
+            "checkpoint must push task to the mirror"
+        );
+    }
+
+    /// Checkpoint on an already-clean tree is a no-op commit but still pushes
+    /// committed-but-unpushed work (the common case: workers commit via shell).
+    #[tokio::test]
+    async fn checkpoint_pushes_committed_but_unpushed_work() {
+        let origin = tempfile::TempDir::new().expect("origin");
+        let op = origin.path();
+        git(op, &["init", "--bare", "-b", "main"]);
+
+        let clone = tempfile::TempDir::new().expect("clone");
+        let cp = clone.path();
+        git(cp, &["clone", op.to_str().unwrap(), "."]);
+        std::fs::write(cp.join("base.txt"), "base\n").unwrap();
+        git(cp, &["add", "-A"]);
+        git(cp, &["commit", "-m", "base"]);
+        git(cp, &["push", "origin", "main"]);
+        git(cp, &["checkout", "-b", "task"]);
+        // Worker COMMITTED its own work via shell (clean tree), but never pushed.
+        std::fs::write(cp.join("work.txt"), "done\n").unwrap();
+        git(cp, &["add", "-A"]);
+        git(cp, &["commit", "-m", "worker self-commit"]);
+        let local = git(cp, &["rev-parse", "task"]);
+
+        let identity = CheckpointIdentity {
+            name: "djinn-bot".into(),
+            email: "bot@djinn.local".into(),
+        };
+        checkpoint_workspace(cp, "task", &identity, "run-xyz").await;
+
+        let remote = git(op, &["rev-parse", "task"]);
+        assert_eq!(
+            remote.trim(),
+            local.trim(),
+            "checkpoint must push the worker's own commit even on a clean tree"
+        );
+    }
 }
