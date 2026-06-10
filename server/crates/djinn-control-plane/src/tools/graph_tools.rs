@@ -6,6 +6,7 @@
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing::Instrument;
 
 use crate::bridge::{
@@ -455,6 +456,13 @@ pub struct ImpactResponse {
 pub struct SearchResponse {
     pub query: String,
     pub hits: Vec<SearchHit>,
+    /// Populated when the caller passed a non-empty `workspace` slug that
+    /// did not match any node in the graph. Contains the available
+    /// workspace slugs so the caller can recover from a typo or stale
+    /// slug. Absent when the workspace was omitted, known, or the
+    /// project exposes a single workspace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_hint: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
 }
@@ -462,6 +470,13 @@ pub struct SearchResponse {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CyclesResponse {
     pub cycles: Vec<CycleGroup>,
+    /// Populated when the caller passed a non-empty `workspace` slug that
+    /// did not match any node in the graph. Contains the available
+    /// workspace slugs so the caller can recover. Absent when the
+    /// workspace was omitted, known, or the project exposes a single
+    /// workspace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_hint: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
 }
@@ -487,6 +502,13 @@ pub struct PathResponse {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct EdgesResponse {
     pub edges: Vec<EdgeEntry>,
+    /// Populated when the caller passed a non-empty `workspace` slug that
+    /// did not match any node in the graph. Contains the available
+    /// workspace slugs so the caller can recover. Absent when the
+    /// workspace was omitted, known, or the project exposes a single
+    /// workspace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_hint: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<String>,
 }
@@ -1162,6 +1184,72 @@ fn require_globs(params: &CodeGraphParams) -> Result<(&str, &str), String> {
     Ok((from, to))
 }
 
+/// Resolve the effective workspace scope for a `code_graph` op that
+/// consumes the optional `workspace` parameter (pb94 epic).
+///
+/// Centralises the three-outcome contract the epic commits to:
+///
+/// 1. **Empty / unscoped** — caller omitted `workspace` (or sent `""`,
+///    already normalized to `None` upstream). Returns
+///    `WorkspaceScope { workspace: None, hint: None }` and the bridge
+///    runs over the full graph. This matches the pre-pb94 behaviour
+///    and the "omit == `None`" shape locked in by
+///    `CodeGraphParams::normalize()`.
+///
+/// 2. **Valid / known** — requested slug is non-empty and resolves to at
+///    least one node in the graph. Returns
+///    `WorkspaceScope { workspace: Some(slug), hint: None }` and the
+///    bridge hard-filters for listing/bounded ops. **Single-workspace
+///    graphs land here too** — the workspace filter is structurally a
+///    no-op (every node matches) rather than producing a hard-empty
+///    result, per the epic "scoping is a no-op for single-workspace
+///    graphs" requirement.
+///
+/// 3. **Unknown non-empty slug** — requested slug is non-empty and the
+///    graph contains no node in that workspace. Returns
+///    `WorkspaceScope { workspace: None, hint: Some(candidates) }` so
+///    the bridge returns the full/unscoped result AND the caller gets
+///    the candidate list to recover from the typo. Single-candidate
+///    hint lists are suppressed (a "no choice" project never hints).
+///
+/// This helper is the only call site that needs to call
+/// `RepoGraphOps::workspace_hint` — every per-op handler that uses
+/// `workspace` should call this once and feed the result into both the
+/// bridge call (`scope.workspace.as_deref()`) and the response
+/// (`scope.hint`).
+///
+/// `query_subgraph` and a few other ops take `workspace` via their own
+/// request type; they call `workspace_hint` directly to keep their
+/// request DTO independent of the dispatcher.
+pub(crate) async fn resolve_workspace_scope(
+    ops: &Arc<dyn crate::bridge::RepoGraphOps>,
+    ctx: &crate::bridge::ProjectCtx,
+) -> Result<crate::bridge::WorkspaceScope, String> {
+    let requested = ctx.workspace.as_deref();
+    let hint = ops.workspace_hint(ctx, requested).await?;
+    let scope = match hint {
+        // Unknown non-empty slug AND the bridge confirms the project
+        // has multiple workspaces to choose from: degrade to unscoped
+        // and surface the candidate list. `workspace_hint_from_graph`
+        // (in mcp_bridge.rs) gates the `Some(_)` return on
+        // `slugs.len() > 1` so single-workspace graphs land in the
+        // `None` arm below and the workspace is a structural no-op.
+        Some(candidates) => crate::bridge::WorkspaceScope {
+            workspace: None,
+            hint: Some(candidates),
+        },
+        // Known, valid, or no-choice: use the caller's workspace as-is
+        // (or `None` for unscoped callers). The bridge handles
+        // single-workspace graphs transparently — every node matches
+        // the only slug, so the filter is a no-op.
+        None => crate::bridge::WorkspaceScope {
+            workspace: requested.map(str::to_string),
+            hint: None,
+        },
+    };
+    Ok(scope)
+}
+
 fn bounded_optional_usize(
     value: Option<i64>,
     name: &str,
@@ -1643,22 +1731,16 @@ impl DjinnMcpServer {
         // second round-trip. Clamp to 200 to keep the cache lookup
         // cheap and the post-filter linear.
         let fetch_limit = (limit.saturating_mul(4)).clamp(limit, 200);
-        let workspace_hint = self
-            .state
-            .repo_graph()
-            .workspace_hint(ctx, ctx.workspace.as_deref())
-            .await?;
-        let workspace = if workspace_hint.is_some() {
-            None
-        } else {
-            ctx.workspace.as_deref()
-        };
+        // pb94: route workspace resolution through the shared helper so
+        // valid / unknown / single-workspace / empty semantics stay in
+        // one place.
+        let scope = resolve_workspace_scope(self.state.repo_graph(), ctx).await?;
         let nodes = self
             .state
             .repo_graph()
             .ranked(
                 ctx,
-                workspace,
+                scope.workspace.as_deref(),
                 params.kind_filter.as_deref(),
                 params.sort_by.as_deref(),
                 fetch_limit,
@@ -1674,7 +1756,7 @@ impl DjinnMcpServer {
         nodes.truncate(limit);
         Ok(CodeGraphResponse::Ranked(RankedResponse {
             nodes,
-            workspace_hint,
+            workspace_hint: scope.hint,
             next_step: None,
         }))
     }
@@ -1711,22 +1793,19 @@ impl DjinnMcpServer {
         {
             return Err(format!("invalid min_confidence {c}: must be in [0.0, 1.0]"));
         }
-        let workspace_hint = self
-            .state
-            .repo_graph()
-            .workspace_hint(ctx, ctx.workspace.as_deref())
-            .await?;
-        let workspace = if workspace_hint.is_some() {
-            None
-        } else {
-            ctx.workspace.as_deref()
-        };
+        // pb94: `impact` is a TRAVERSAL op — `workspace` scopes only the
+        // seed (the `key`) inside the workspace, the BFS walk itself
+        // must remain unconstrained so cross-workspace blast radius
+        // remains visible. The shared helper returns the effective
+        // scope (which is `None` for unknown slugs so the bridge
+        // resolves `key` from the full graph) and the hint envelope.
+        let scope = resolve_workspace_scope(self.state.repo_graph(), ctx).await?;
         let result = self
             .state
             .repo_graph()
             .impact(
                 ctx,
-                workspace,
+                scope.workspace.as_deref(),
                 key,
                 depth,
                 params.group_by.as_deref(),
@@ -1762,7 +1841,7 @@ impl DjinnMcpServer {
             file_groups,
             risk: Some(risk),
             summary: Some(summary),
-            workspace_hint,
+            workspace_hint: scope.hint,
             next_step: None,
         }))
     }
@@ -1777,6 +1856,12 @@ impl DjinnMcpServer {
         let mode = resolve_search_mode(params.mode.as_deref())?;
         let limit = params.limit.unwrap_or(20) as usize;
         let fetch_limit = (limit.saturating_mul(4)).clamp(limit, 200);
+        // pb94: surface unknown-workspace hints for `search` too so a
+        // caller that mistypes the workspace doesn't get a hard-empty
+        // hit list. The bridge call itself is workspace-agnostic today
+        // (search uses a name index that already spans all workspaces),
+        // so the resolved scope is used purely for the hint envelope.
+        let scope = resolve_workspace_scope(self.state.repo_graph(), ctx).await?;
         // PR B4: dispatch on mode. `name` keeps the pre-PR-B4 fast
         // path; `hybrid` runs the RRF orchestrator on the bridge,
         // which composes lexical + semantic + structural signals and
@@ -1804,6 +1889,7 @@ impl DjinnMcpServer {
         Ok(CodeGraphResponse::Search(SearchResponse {
             query: query.to_string(),
             hits,
+            workspace_hint: scope.hint,
             next_step: None,
         }))
     }
@@ -1885,6 +1971,13 @@ impl DjinnMcpServer {
     ) -> Result<CodeGraphResponse, String> {
         validate_kind_filter(params.kind_filter.as_deref())?;
         let min_size = params.min_size.unwrap_or(2).max(0) as usize;
+        // pb94: surface unknown-workspace hints for `cycles` so a caller
+        // that mistypes the workspace doesn't get a hard-empty result
+        // when the bridge's SCC cache is workspace-agnostic. The
+        // bridge call itself stays workspace-agnostic (the SCC cache
+        // spans the whole graph); the resolved scope is used purely
+        // for the hint envelope.
+        let scope = resolve_workspace_scope(self.state.repo_graph(), ctx).await?;
         // Ask the warmer cache for SCCs with a size floor of 2 so we
         // can still shed an SCC whose surviving members drop below the
         // user-requested `min_size` after exclusion filtering. We
@@ -1916,6 +2009,7 @@ impl DjinnMcpServer {
             .collect();
         Ok(CodeGraphResponse::Cycles(CyclesResponse {
             cycles,
+            workspace_hint: scope.hint,
             next_step: None,
         }))
     }
@@ -1929,22 +2023,16 @@ impl DjinnMcpServer {
         validate_visibility(params.visibility.as_deref())?;
         let limit = params.limit.unwrap_or(50) as usize;
         let fetch_limit = (limit.saturating_mul(4)).clamp(limit, 500);
-        let workspace_hint = self
-            .state
-            .repo_graph()
-            .workspace_hint(ctx, ctx.workspace.as_deref())
-            .await?;
-        let workspace = if workspace_hint.is_some() {
-            None
-        } else {
-            ctx.workspace.as_deref()
-        };
+        // pb94: route workspace resolution through the shared helper so
+        // valid / unknown / single-workspace / empty semantics stay in
+        // one place.
+        let scope = resolve_workspace_scope(self.state.repo_graph(), ctx).await?;
         let orphans = self
             .state
             .repo_graph()
             .orphans(
                 ctx,
-                workspace,
+                scope.workspace.as_deref(),
                 params.kind_filter.as_deref(),
                 params.visibility.as_deref(),
                 fetch_limit,
@@ -1958,7 +2046,7 @@ impl DjinnMcpServer {
             .collect();
         Ok(CodeGraphResponse::Orphans(OrphansResponse {
             orphans,
-            workspace_hint,
+            workspace_hint: scope.hint,
             next_step: None,
         }))
     }
@@ -1970,24 +2058,19 @@ impl DjinnMcpServer {
     ) -> Result<CodeGraphResponse, String> {
         let (from, to) = require_from_to(params)?;
         let max_depth = params.max_depth.map(|v| v.max(0) as usize);
-        let workspace_hint = self
-            .state
-            .repo_graph()
-            .workspace_hint(ctx, ctx.workspace.as_deref())
-            .await?;
-        let workspace = if workspace_hint.is_some() {
-            None
-        } else {
-            ctx.workspace.as_deref()
-        };
+        // pb94: `path` is a TRAVERSAL op — `workspace` scopes only the
+        // `from` and `to` endpoint resolution, the shortest-path walk
+        // itself must remain unconstrained so cross-workspace path
+        // context remains visible.
+        let scope = resolve_workspace_scope(self.state.repo_graph(), ctx).await?;
         let path = self
             .state
             .repo_graph()
-            .path(ctx, workspace, from, to, max_depth)
+            .path(ctx, scope.workspace.as_deref(), from, to, max_depth)
             .await?;
         Ok(CodeGraphResponse::Path(PathResponse {
             path,
-            workspace_hint,
+            workspace_hint: scope.hint,
             next_step: None,
         }))
     }
@@ -1999,6 +2082,13 @@ impl DjinnMcpServer {
     ) -> Result<CodeGraphResponse, String> {
         let (from_glob, to_glob) = require_globs(params)?;
         let limit = params.limit.unwrap_or(100) as usize;
+        // pb94: surface unknown-workspace hints for `edges` so a caller
+        // that mistypes the workspace doesn't get a hard-empty result
+        // when their `from_glob` / `to_glob` only matches edges in the
+        // requested workspace. The bridge call itself stays
+        // workspace-agnostic (edge globs match by path); the resolved
+        // scope is used purely for the hint envelope.
+        let scope = resolve_workspace_scope(self.state.repo_graph(), ctx).await?;
         // Over-fetch so the exclusion post-filter doesn't starve the
         // requested limit. Edges are cheap to drop but we want the
         // returned set to honour `limit` after Tier 1+2 pruning.
@@ -2029,6 +2119,7 @@ impl DjinnMcpServer {
             .collect();
         Ok(CodeGraphResponse::Edges(EdgesResponse {
             edges,
+            workspace_hint: scope.hint,
             next_step: None,
         }))
     }
@@ -2256,22 +2347,16 @@ impl DjinnMcpServer {
     ) -> Result<CodeGraphResponse, String> {
         validate_visibility(params.visibility.as_deref())?;
         let limit = params.limit.unwrap_or(100).max(0) as usize;
-        let workspace_hint = self
-            .state
-            .repo_graph()
-            .workspace_hint(ctx, ctx.workspace.as_deref())
-            .await?;
-        let workspace = if workspace_hint.is_some() {
-            None
-        } else {
-            ctx.workspace.as_deref()
-        };
+        // pb94: route workspace resolution through the shared helper so
+        // valid / unknown / single-workspace / empty semantics stay in
+        // one place.
+        let scope = resolve_workspace_scope(self.state.repo_graph(), ctx).await?;
         let symbols = self
             .state
             .repo_graph()
             .api_surface(
                 ctx,
-                workspace,
+                scope.workspace.as_deref(),
                 params.module_glob.as_deref(),
                 params.visibility.as_deref(),
                 limit.saturating_mul(4).clamp(limit, 500),
@@ -2287,7 +2372,7 @@ impl DjinnMcpServer {
             .collect();
         Ok(CodeGraphResponse::ApiSurface(ApiSurfaceResponse {
             symbols,
-            workspace_hint,
+            workspace_hint: scope.hint,
             next_step: None,
         }))
     }
@@ -2591,24 +2676,24 @@ impl DjinnMcpServer {
             .symbols
             .as_deref()
             .ok_or_else(|| format!("'symbols' is required for operation '{}'", params.operation))?;
-        let workspace_hint = self
-            .state
-            .repo_graph()
-            .workspace_hint(ctx, ctx.workspace.as_deref())
-            .await?;
-        let workspace = if workspace_hint.is_some() {
-            None
-        } else {
-            ctx.workspace.as_deref()
-        };
+        // pb94: `touches_hot_path` is a TRAVERSAL op — `workspace`
+        // scopes only seed/entry/sink resolution, the shortest-path
+        // walk itself must remain unconstrained.
+        let scope = resolve_workspace_scope(self.state.repo_graph(), ctx).await?;
         let hits = self
             .state
             .repo_graph()
-            .touches_hot_path(ctx, workspace, seed_entries, seed_sinks, symbols)
+            .touches_hot_path(
+                ctx,
+                scope.workspace.as_deref(),
+                seed_entries,
+                seed_sinks,
+                symbols,
+            )
             .await?;
         Ok(CodeGraphResponse::TouchesHotPath(TouchesHotPathResponse {
             hits,
-            workspace_hint,
+            workspace_hint: scope.hint,
             next_step: None,
         }))
     }
@@ -2641,20 +2726,20 @@ impl DjinnMcpServer {
             .clamp(1, 10_000);
         let level = SnapshotLevel::parse(params.level.as_deref())?;
         let exclusions = self.load_graph_exclusions(&params.project_id).await;
-        let workspace_hint = self
-            .state
-            .repo_graph()
-            .workspace_hint(ctx, ctx.workspace.as_deref())
-            .await?;
-        let workspace = if workspace_hint.is_some() {
-            None
-        } else {
-            ctx.workspace.as_deref()
-        };
+        // pb94: route workspace resolution through the shared helper so
+        // valid / unknown / single-workspace / empty semantics stay in
+        // one place.
+        let scope = resolve_workspace_scope(self.state.repo_graph(), ctx).await?;
         let mut snapshot = self
             .state
             .repo_graph()
-            .snapshot(ctx, workspace, level, node_cap, &exclusions)
+            .snapshot(
+                ctx,
+                scope.workspace.as_deref(),
+                level,
+                node_cap,
+                &exclusions,
+            )
             .await?;
         // v10: apply the `tests=` filter to the assembled snapshot. The
         // UI defaults to `include` (it toggles test visibility
@@ -2673,7 +2758,7 @@ impl DjinnMcpServer {
         }
         Ok(CodeGraphResponse::Snapshot(SnapshotResponse {
             snapshot,
-            workspace_hint,
+            workspace_hint: scope.hint,
             next_step: None,
         }))
     }
@@ -3506,6 +3591,1034 @@ mod tests {
         assert_eq!(params.workspace, None);
     }
 
+    // ── pb94: workspace scoping semantic tests ─────────────────────────────────
+    //
+    // The acceptance criteria require explicit coverage for:
+    // - empty `workspace: ""` continuing to normalize to `None`
+    // - valid slugs hard-filtering for listing/bounded ops
+    // - valid slugs scoping only seed/endpoint for traversal ops
+    // - unknown non-empty slugs returning full result + structured hint
+    // - single-workspace graphs being a no-op (no surprising hard-empty)
+    //
+    // Each fixture is a thin `RepoGraphOps` impl that records the
+    // workspace arg it sees (so the test can assert "what did the
+    // handler pass downstream?") and returns canned data from the
+    // workspace-aware methods. The fixture's `workspace_hint` is
+    // programmable so the test can simulate single-vs-multi-workspace
+    // graphs and known-vs-unknown slugs.
+
+    /// Programmable workspace fixture: records calls, returns canned
+    /// data, and answers `workspace_hint` according to a test-supplied
+    /// plan. Mirrors the production `workspace_hint` semantics — single
+    /// workspace projects never produce a hint, unknown slugs against
+    /// multi-workspace projects surface the candidate list.
+    #[derive(Clone)]
+    struct WorkspaceFixtureOps {
+        /// Every bridge method that takes a workspace records the slug
+        /// it was called with into a parallel slot so the test can
+        /// assert "the handler passed this to the bridge".
+        seen_workspaces: Arc<Mutex<Vec<Option<String>>>>,
+        /// What `workspace_hint` should return. `Some(candidates)`
+        /// mimics an unknown slug on a multi-workspace graph; `None`
+        /// mimics single-workspace / no-workspace / known-slug cases.
+        hint: Option<Vec<String>>,
+        ranked_nodes: Vec<RankedNode>,
+        impact_result: ImpactResult,
+    }
+
+    impl WorkspaceFixtureOps {
+        fn new(hint: Option<Vec<String>>) -> Self {
+            Self {
+                seen_workspaces: Arc::new(Mutex::new(Vec::new())),
+                hint,
+                ranked_nodes: Vec::new(),
+                impact_result: ImpactResult::Detailed(Vec::new()),
+            }
+        }
+
+        fn with_ranked_and_impact(
+            hint: Option<Vec<String>>,
+            ranked_nodes: Vec<RankedNode>,
+            impact_result: ImpactResult,
+        ) -> Self {
+            Self {
+                seen_workspaces: Arc::new(Mutex::new(Vec::new())),
+                hint,
+                ranked_nodes,
+                impact_result,
+            }
+        }
+
+        fn record_workspace(&self, workspace: Option<&str>) {
+            let mut guard = self.seen_workspaces.lock().expect("seen_workspaces");
+            guard.push(workspace.map(str::to_string));
+        }
+
+        fn seen_workspaces(&self) -> Vec<Option<String>> {
+            self.seen_workspaces
+                .lock()
+                .expect("seen_workspaces")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl RepoGraphOps for WorkspaceFixtureOps {
+        async fn ranked(
+            &self,
+            _: &ProjectCtx,
+            workspace: Option<&str>,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<RankedNode>, String> {
+            self.record_workspace(workspace);
+            Ok(self.ranked_nodes.clone())
+        }
+
+        async fn impact(
+            &self,
+            _: &ProjectCtx,
+            workspace: Option<&str>,
+            _: &str,
+            _: usize,
+            _: Option<&str>,
+            _: Option<f64>,
+        ) -> Result<ImpactResult, String> {
+            self.record_workspace(workspace);
+            Ok(self.impact_result.clone())
+        }
+
+        async fn workspace_hint(
+            &self,
+            _: &ProjectCtx,
+            _: Option<&str>,
+        ) -> Result<Option<Vec<String>>, String> {
+            Ok(self.hint.clone())
+        }
+
+        // The rest are no-ops — these tests don't exercise them. We
+        // still have to satisfy the trait so the dispatcher doesn't
+        // trip when it routes the call.
+        async fn workspaces(
+            &self,
+            ctx: &ProjectCtx,
+        ) -> Result<crate::bridge::WorkspacesResult, String> {
+            Ok(crate::bridge::WorkspacesResult {
+                project_id: ctx.id.clone(),
+                workspaces: Vec::new(),
+            })
+        }
+
+        async fn neighbors(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<NeighborsResult, String> {
+            Ok(NeighborsResult::Detailed(Vec::new()))
+        }
+        async fn implementations(&self, _: &ProjectCtx, _: &str) -> Result<Vec<String>, String> {
+            Ok(Vec::new())
+        }
+        async fn search(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<SearchHit>, String> {
+            Ok(Vec::new())
+        }
+        async fn query_subgraph(
+            &self,
+            _: &ProjectCtx,
+            req: QuerySubgraphRequest,
+        ) -> Result<QuerySubgraphResult, String> {
+            Ok(QuerySubgraphResult {
+                query: req.query,
+                nodes: Vec::new(),
+                edges: Vec::new(),
+                seeds: Vec::new(),
+                inferred_edge_kinds: Vec::new(),
+                budget: QuerySubgraphBudget {
+                    requested_tokens: 0,
+                    estimated_tokens: 0,
+                    truncated: false,
+                    omitted_nodes: 0,
+                    omitted_edges: 0,
+                },
+                traversal: QuerySubgraphTraversalDebug {
+                    max_depth: 0,
+                    hub_degree_threshold: 0,
+                    hubs_blocked: Vec::new(),
+                    skipped_edge_kinds: Vec::new(),
+                },
+                narrowing_hints: Vec::new(),
+            })
+        }
+        async fn cycles(
+            &self,
+            _: &ProjectCtx,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<CycleGroup>, String> {
+            Ok(Vec::new())
+        }
+        async fn orphans(
+            &self,
+            _: &ProjectCtx,
+            workspace: Option<&str>,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<OrphanEntry>, String> {
+            self.record_workspace(workspace);
+            Ok(Vec::new())
+        }
+        async fn path(
+            &self,
+            _: &ProjectCtx,
+            workspace: Option<&str>,
+            _: &str,
+            _: &str,
+            _: Option<usize>,
+        ) -> Result<Option<PathResult>, String> {
+            self.record_workspace(workspace);
+            Ok(None)
+        }
+        async fn edges(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<EdgeEntry>, String> {
+            Ok(Vec::new())
+        }
+        async fn describe(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+        ) -> Result<Option<SymbolDescription>, String> {
+            Ok(None)
+        }
+        async fn context(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+            _: bool,
+        ) -> Result<Option<SymbolContext>, String> {
+            Ok(None)
+        }
+        async fn status(&self, _: &ProjectCtx) -> Result<GraphStatus, String> {
+            Ok(GraphStatus {
+                project_id: "p".to_string(),
+                warmed: false,
+                last_warm_at: None,
+                pinned_commit: None,
+                commits_since_pin: None,
+            })
+        }
+        async fn snapshot(
+            &self,
+            _: &ProjectCtx,
+            workspace: Option<&str>,
+            _: SnapshotLevel,
+            _: usize,
+            _: &crate::tools::graph_exclusions::GraphExclusions,
+        ) -> Result<SnapshotPayload, String> {
+            self.record_workspace(workspace);
+            Ok(SnapshotPayload {
+                project_id: "p".to_string(),
+                git_head: String::new(),
+                generated_at: String::new(),
+                truncated: false,
+                total_nodes: 0,
+                total_edges: 0,
+                node_cap: 0,
+                nodes: Vec::new(),
+                edges: Vec::new(),
+            })
+        }
+        async fn symbols_at(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+            _: u32,
+            _: Option<u32>,
+        ) -> Result<Vec<SymbolAtHit>, String> {
+            Ok(Vec::new())
+        }
+        async fn diff_touches(
+            &self,
+            _: &ProjectCtx,
+            _: &[ChangedRange],
+        ) -> Result<crate::bridge::DiffTouchesResult, String> {
+            unimplemented!()
+        }
+        async fn detect_changes(
+            &self,
+            _: &ProjectCtx,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: &[String],
+        ) -> Result<DetectedChangesResult, String> {
+            unimplemented!()
+        }
+        async fn api_surface(
+            &self,
+            _: &ProjectCtx,
+            workspace: Option<&str>,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<ApiSurfaceEntry>, String> {
+            self.record_workspace(workspace);
+            Ok(Vec::new())
+        }
+        async fn boundary_check(
+            &self,
+            _: &ProjectCtx,
+            _: &[BoundaryRule],
+        ) -> Result<Vec<BoundaryViolation>, String> {
+            Ok(Vec::new())
+        }
+        async fn hotspots(
+            &self,
+            _: &ProjectCtx,
+            _: u32,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<HotspotEntry>, String> {
+            Ok(Vec::new())
+        }
+        async fn complexity(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<ComplexityResult, String> {
+            Ok(ComplexityResult::Functions(Vec::new()))
+        }
+        async fn refactor_candidates(
+            &self,
+            _: &ProjectCtx,
+            _: Option<u32>,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<RefactorCandidate>, String> {
+            Ok(Vec::new())
+        }
+        async fn metrics_at(&self, _: &ProjectCtx) -> Result<MetricsAtResult, String> {
+            unimplemented!()
+        }
+        async fn dead_symbols(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+            _: usize,
+        ) -> Result<Vec<DeadSymbolEntry>, String> {
+            Ok(Vec::new())
+        }
+        async fn deprecated_callers(
+            &self,
+            _: &ProjectCtx,
+            _: usize,
+        ) -> Result<Vec<DeprecatedHit>, String> {
+            Ok(Vec::new())
+        }
+        async fn touches_hot_path(
+            &self,
+            _: &ProjectCtx,
+            workspace: Option<&str>,
+            _: &[String],
+            _: &[String],
+            _: &[String],
+        ) -> Result<Vec<HotPathHit>, String> {
+            self.record_workspace(workspace);
+            Ok(Vec::new())
+        }
+        async fn coupling(
+            &self,
+            _: &ProjectCtx,
+            _: &str,
+            _: usize,
+        ) -> Result<Vec<CouplingEntry>, String> {
+            Ok(Vec::new())
+        }
+        async fn churn(
+            &self,
+            _: &ProjectCtx,
+            _: usize,
+            _: Option<u32>,
+        ) -> Result<Vec<ChurnEntry>, String> {
+            Ok(Vec::new())
+        }
+        async fn coupling_hotspots(
+            &self,
+            _: &ProjectCtx,
+            _: usize,
+            _: Option<u32>,
+            _: usize,
+        ) -> Result<Vec<CoupledPairEntry>, String> {
+            Ok(Vec::new())
+        }
+        async fn coupling_hubs(
+            &self,
+            _: &ProjectCtx,
+            _: usize,
+            _: Option<u32>,
+            _: usize,
+        ) -> Result<Vec<CouplingHubEntry>, String> {
+            Ok(Vec::new())
+        }
+        async fn resolve(
+            &self,
+            _: &ProjectCtx,
+            key: &str,
+            _: Option<&str>,
+        ) -> Result<crate::bridge::ResolveOutcome, String> {
+            // The dispatcher pre-resolves the caller's `key` (or
+            // `from`/`to` for `path`) before routing to the inner op.
+            // Echoing the input back as the resolved uid keeps the
+            // dispatcher from short-circuiting to `NotFound` while
+            // still letting the inner handler see the test's `key`
+            // string.
+            Ok(crate::bridge::ResolveOutcome::Found(key.to_string()))
+        }
+    }
+
+    fn fixture_server(ops: WorkspaceFixtureOps) -> (DjinnMcpServer, WorkspaceFixtureOps) {
+        let db = Database::open_in_memory().expect("open in-memory db");
+        let state = McpState::new(
+            db,
+            EventBus::noop(),
+            CatalogService::new(),
+            HealthTracker::new(),
+            None,
+            None,
+            None,
+            None,
+            Arc::new(crate::state::stubs::StubLspOps),
+            Arc::new(crate::state::stubs::StubRuntimeOps),
+            Arc::new(crate::state::stubs::StubGitOps),
+            Arc::new(ops.clone()),
+        );
+        (DjinnMcpServer::new(state), ops)
+    }
+
+    fn fixture_ctx(workspace: Option<&str>) -> ProjectCtx {
+        ProjectCtx {
+            id: "proj-ws".to_string(),
+            clone_path: "/workspace/repo".to_string(),
+            workspace: workspace.map(str::to_string),
+            sub_path: None,
+        }
+    }
+
+    /// Acceptance criterion: `resolve_workspace_scope` returns
+    /// `(None, None)` when no workspace is requested. Bridge sees
+    /// `None`.
+    #[tokio::test]
+    async fn workspace_scope_unscoped_passes_through() {
+        let ops = WorkspaceFixtureOps::new(None);
+        let (server, _) = fixture_server(ops);
+        let ctx = fixture_ctx(None);
+        let mut params = test_params("ranked");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("unscoped dispatch succeeds");
+        match response {
+            CodeGraphResponse::Ranked(ranked) => {
+                assert!(
+                    ranked.workspace_hint.is_none(),
+                    "no hint when workspace is omitted, got {:?}",
+                    ranked.workspace_hint
+                );
+            }
+            other => panic!("expected ranked, got {other:?}"),
+        }
+    }
+
+    /// Acceptance criterion: empty `workspace: ""` normalizes to `None`
+    /// at the request boundary, same shape as omitting the field.
+    #[tokio::test]
+    async fn workspace_scope_empty_string_normalizes_to_none() {
+        let ops = WorkspaceFixtureOps::new(None);
+        let (server, _) = fixture_server(ops);
+        let ctx = fixture_ctx(None);
+        let mut params = test_params("ranked");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.workspace = Some(String::new());
+        server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("empty-workspace dispatch succeeds");
+        // `normalize()` runs at the dispatcher boundary, so by the
+        // time the bridge saw the request `ctx.workspace` is `None`
+        // and no hint fires.
+    }
+
+    /// Acceptance criterion: for valid slugs the bridge sees the slug
+    /// and no hint is surfaced.
+    #[tokio::test]
+    async fn workspace_scope_known_slug_passes_through_for_listing_op() {
+        let ops = WorkspaceFixtureOps::new(None);
+        let (server, ops) = fixture_server(ops);
+        let ctx = fixture_ctx(Some("server"));
+        let mut params = test_params("ranked");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.workspace = Some("server".to_string());
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("known-slug dispatch succeeds");
+        match response {
+            CodeGraphResponse::Ranked(ranked) => {
+                assert!(ranked.workspace_hint.is_none());
+            }
+            other => panic!("expected ranked, got {other:?}"),
+        }
+        assert_eq!(
+            ops.seen_workspaces(),
+            vec![Some("server".to_string())],
+            "ranked (listing/bounded) hard-filters with the slug"
+        );
+    }
+
+    /// Acceptance criterion: unknown non-empty slug on a
+    /// multi-workspace graph returns the full/unscoped result AND
+    /// surfaces the candidate list. The bridge sees `None` (so it
+    /// returns the unfiltered set).
+    #[tokio::test]
+    async fn workspace_scope_unknown_slug_returns_full_result_plus_hint() {
+        let hint_candidates = vec!["server".to_string(), "ui".to_string()];
+        let ops = WorkspaceFixtureOps::new(Some(hint_candidates.clone()));
+        let (server, ops) = fixture_server(ops);
+        let ctx = fixture_ctx(Some("nope"));
+        let mut params = test_params("ranked");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.workspace = Some("nope".to_string());
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("unknown-slug dispatch succeeds");
+        match response {
+            CodeGraphResponse::Ranked(ranked) => {
+                assert_eq!(
+                    ranked.workspace_hint,
+                    Some(hint_candidates),
+                    "unknown slug surfaces candidate slug list"
+                );
+            }
+            other => panic!("expected ranked, got {other:?}"),
+        }
+        assert_eq!(
+            ops.seen_workspaces(),
+            vec![None],
+            "unknown slug degrades to unscoped at the bridge"
+        );
+    }
+
+    /// Acceptance criterion: single-workspace graphs (the bridge
+    /// returns `None` for the hint) treat the workspace parameter as
+    /// a no-op — bridge sees the slug.
+    #[tokio::test]
+    async fn workspace_scope_single_workspace_is_a_no_op() {
+        // Bridge returns `None` for the hint → the helper treats the
+        // slug as known. The downstream filter still matches every
+        // node (because every node lives in the only workspace) so
+        // there is no hard-empty surprise.
+        let ops = WorkspaceFixtureOps::new(None);
+        let (server, ops) = fixture_server(ops);
+        let ctx = fixture_ctx(Some("server"));
+        let mut params = test_params("orphans");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.workspace = Some("server".to_string());
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("single-workspace dispatch succeeds");
+        match response {
+            CodeGraphResponse::Orphans(orphans) => {
+                assert!(
+                    orphans.workspace_hint.is_none(),
+                    "single-workspace graphs never produce a hint"
+                );
+            }
+            other => panic!("expected orphans, got {other:?}"),
+        }
+        assert_eq!(
+            ops.seen_workspaces(),
+            vec![Some("server".to_string())],
+            "single-workspace graph still passes the slug through"
+        );
+    }
+
+    /// Acceptance criterion: for unknown slugs, the bridge call sees
+    /// `None` (full graph) AND a listing/bounded op also produces the
+    /// hint envelope.
+    #[tokio::test]
+    async fn workspace_scope_orphans_unknown_slug_falls_back_and_hints() {
+        let ops = WorkspaceFixtureOps::new(Some(vec!["server".to_string(), "ui".to_string()]));
+        let (server, ops) = fixture_server(ops);
+        let ctx = fixture_ctx(Some("nope"));
+        let mut params = test_params("orphans");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.workspace = Some("nope".to_string());
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("orphans unknown-slug dispatch succeeds");
+        match response {
+            CodeGraphResponse::Orphans(orphans) => {
+                assert_eq!(
+                    orphans.workspace_hint,
+                    Some(vec!["server".to_string(), "ui".to_string()])
+                );
+            }
+            other => panic!("expected orphans, got {other:?}"),
+        }
+        assert_eq!(
+            ops.seen_workspaces(),
+            vec![None],
+            "orphans (listing) sees unscoped workspace for unknown slug"
+        );
+    }
+
+    /// Acceptance criterion: traversal ops (`impact`, `path`,
+    /// `touches_hot_path`) use the workspace only while resolving
+    /// seeds/endpoints, then traverse the full graph. The bridge
+    /// call sees the slug for known/valid workspaces — the seed
+    /// resolution happens inside the bridge and the walk itself is
+    /// unconstrained at the bridge layer. Unknown slugs still
+    /// produce a hint and the bridge sees `None` (full graph).
+    #[tokio::test]
+    async fn workspace_scope_impact_traversal_resolves_seed_only() {
+        // Case 1: known slug → bridge sees the slug, no hint.
+        let ops = WorkspaceFixtureOps::with_ranked_and_impact(
+            None,
+            Vec::new(),
+            ImpactResult::Detailed(Vec::new()),
+        );
+        let (server, ops) = fixture_server(ops);
+        let ctx = fixture_ctx(Some("server"));
+        let mut params = test_params("impact");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.workspace = Some("server".to_string());
+        params.key = Some("src/foo.rs".to_string());
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("known-slug impact dispatch succeeds");
+        match response {
+            CodeGraphResponse::Impact(impact) => {
+                assert!(
+                    impact.workspace_hint.is_none(),
+                    "known-slug impact surfaces no hint"
+                );
+            }
+            other => panic!("expected impact, got {other:?}"),
+        }
+        assert_eq!(
+            ops.seen_workspaces(),
+            vec![Some("server".to_string())],
+            "impact (traversal) hands the slug to the bridge for seed resolution"
+        );
+
+        // Case 2: unknown slug → bridge sees `None`, hint fires.
+        let ops = WorkspaceFixtureOps::with_ranked_and_impact(
+            Some(vec!["server".to_string(), "ui".to_string()]),
+            Vec::new(),
+            ImpactResult::Detailed(Vec::new()),
+        );
+        let (server, ops) = fixture_server(ops);
+        let ctx = fixture_ctx(Some("nope"));
+        let mut params = test_params("impact");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.workspace = Some("nope".to_string());
+        params.key = Some("src/foo.rs".to_string());
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("unknown-slug impact dispatch succeeds");
+        match response {
+            CodeGraphResponse::Impact(impact) => {
+                assert_eq!(
+                    impact.workspace_hint,
+                    Some(vec!["server".to_string(), "ui".to_string()])
+                );
+            }
+            other => panic!("expected impact, got {other:?}"),
+        }
+        assert_eq!(
+            ops.seen_workspaces(),
+            vec![None],
+            "impact with unknown slug resolves the seed from the full graph"
+        );
+    }
+
+    /// Acceptance criterion: `path` (traversal) follows the same
+    /// seed-only scoping as `impact`. Lock it in independently of
+    /// `impact` so a regression in either is caught.
+    #[tokio::test]
+    async fn workspace_scope_path_traversal_resolves_endpoints_only() {
+        // Case 1: known slug → bridge sees the slug, no hint.
+        let ops = WorkspaceFixtureOps::new(None);
+        let (server, ops) = fixture_server(ops);
+        let ctx = fixture_ctx(Some("server"));
+        let mut params = test_params("path");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.workspace = Some("server".to_string());
+        params.from = Some("src/a.rs".to_string());
+        params.to = Some("src/b.rs".to_string());
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("known-slug path dispatch succeeds");
+        match response {
+            CodeGraphResponse::Path(path) => {
+                assert!(path.workspace_hint.is_none());
+            }
+            other => panic!("expected path, got {other:?}"),
+        }
+        assert_eq!(
+            ops.seen_workspaces(),
+            vec![Some("server".to_string())],
+            "path (traversal) hands the slug to the bridge for endpoint resolution"
+        );
+
+        // Case 2: unknown slug → bridge sees `None`, hint fires.
+        let ops = WorkspaceFixtureOps::new(Some(vec!["server".to_string(), "ui".to_string()]));
+        let (server, ops) = fixture_server(ops);
+        let ctx = fixture_ctx(Some("nope"));
+        let mut params = test_params("path");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.workspace = Some("nope".to_string());
+        params.from = Some("src/a.rs".to_string());
+        params.to = Some("src/b.rs".to_string());
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("unknown-slug path dispatch succeeds");
+        match response {
+            CodeGraphResponse::Path(path) => {
+                assert_eq!(
+                    path.workspace_hint,
+                    Some(vec!["server".to_string(), "ui".to_string()])
+                );
+            }
+            other => panic!("expected path, got {other:?}"),
+        }
+        assert_eq!(
+            ops.seen_workspaces(),
+            vec![None],
+            "path with unknown slug resolves endpoints from the full graph"
+        );
+    }
+
+    /// Acceptance criterion: `snapshot` (listing/bounded) hard-filters
+    /// for valid slugs AND surfaces a hint for unknown slugs.
+    #[tokio::test]
+    async fn workspace_scope_snapshot_listing_hard_filters() {
+        // Case 1: known slug → bridge sees the slug, no hint.
+        let ops = WorkspaceFixtureOps::new(None);
+        let (server, ops) = fixture_server(ops);
+        let ctx = fixture_ctx(Some("server"));
+        let mut params = test_params("snapshot");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.workspace = Some("server".to_string());
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("known-slug snapshot dispatch succeeds");
+        match response {
+            CodeGraphResponse::Snapshot(snapshot) => {
+                assert!(snapshot.workspace_hint.is_none());
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+        assert_eq!(
+            ops.seen_workspaces(),
+            vec![Some("server".to_string())],
+            "snapshot (listing) hard-filters with the slug"
+        );
+
+        // Case 2: unknown slug → bridge sees `None`, hint fires.
+        let ops = WorkspaceFixtureOps::new(Some(vec!["server".to_string(), "ui".to_string()]));
+        let (server, ops) = fixture_server(ops);
+        let ctx = fixture_ctx(Some("nope"));
+        let mut params = test_params("snapshot");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.workspace = Some("nope".to_string());
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("unknown-slug snapshot dispatch succeeds");
+        match response {
+            CodeGraphResponse::Snapshot(snapshot) => {
+                assert_eq!(
+                    snapshot.workspace_hint,
+                    Some(vec!["server".to_string(), "ui".to_string()])
+                );
+            }
+            other => panic!("expected snapshot, got {other:?}"),
+        }
+        assert_eq!(
+            ops.seen_workspaces(),
+            vec![None],
+            "snapshot (listing) sees unscoped workspace for unknown slug"
+        );
+    }
+
+    /// Acceptance criterion: `search` (listing/bounded) surfaces the
+    /// hint envelope for unknown slugs even though the bridge call
+    /// itself is workspace-agnostic today. A future PR may add
+    /// workspace support to `search`; the hint path is the
+    /// immediately user-visible half.
+    #[tokio::test]
+    async fn workspace_scope_search_surfaces_hint_for_unknown_slug() {
+        // Case 1: known slug → no hint.
+        let ops = WorkspaceFixtureOps::new(None);
+        let (server, _) = fixture_server(ops);
+        let ctx = fixture_ctx(Some("server"));
+        let mut params = test_params("search");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.workspace = Some("server".to_string());
+        params.query = Some("login".to_string());
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("known-slug search dispatch succeeds");
+        match response {
+            CodeGraphResponse::Search(search) => {
+                assert!(search.workspace_hint.is_none());
+            }
+            other => panic!("expected search, got {other:?}"),
+        }
+
+        // Case 2: unknown slug → hint fires.
+        let ops = WorkspaceFixtureOps::new(Some(vec!["server".to_string(), "ui".to_string()]));
+        let (server, _) = fixture_server(ops);
+        let ctx = fixture_ctx(Some("nope"));
+        let mut params = test_params("search");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.workspace = Some("nope".to_string());
+        params.query = Some("login".to_string());
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("unknown-slug search dispatch succeeds");
+        match response {
+            CodeGraphResponse::Search(search) => {
+                assert_eq!(
+                    search.workspace_hint,
+                    Some(vec!["server".to_string(), "ui".to_string()])
+                );
+            }
+            other => panic!("expected search, got {other:?}"),
+        }
+    }
+
+    /// Acceptance criterion: `touches_hot_path` (traversal) follows
+    /// the same seed-only scoping as `impact` / `path`.
+    #[tokio::test]
+    async fn workspace_scope_touches_hot_path_traversal_resolves_seeds_only() {
+        // Case 1: known slug → bridge sees the slug, no hint.
+        let ops = WorkspaceFixtureOps::new(None);
+        let (server, ops) = fixture_server(ops);
+        let ctx = fixture_ctx(Some("server"));
+        let mut params = test_params("touches_hot_path");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.workspace = Some("server".to_string());
+        params.seed_entries = Some(vec!["sym:main".to_string()]);
+        params.seed_sinks = Some(vec!["sym:db".to_string()]);
+        params.symbols = Some(vec!["sym:foo".to_string()]);
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("known-slug touches_hot_path dispatch succeeds");
+        match response {
+            CodeGraphResponse::TouchesHotPath(hits) => {
+                assert!(hits.workspace_hint.is_none());
+            }
+            other => panic!("expected touches_hot_path, got {other:?}"),
+        }
+        assert_eq!(
+            ops.seen_workspaces(),
+            vec![Some("server".to_string())],
+            "touches_hot_path hands the slug to the bridge for seed resolution"
+        );
+
+        // Case 2: unknown slug → bridge sees `None`, hint fires.
+        let ops = WorkspaceFixtureOps::new(Some(vec!["server".to_string(), "ui".to_string()]));
+        let (server, ops) = fixture_server(ops);
+        let ctx = fixture_ctx(Some("nope"));
+        let mut params = test_params("touches_hot_path");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.workspace = Some("nope".to_string());
+        params.seed_entries = Some(vec!["sym:main".to_string()]);
+        params.seed_sinks = Some(vec!["sym:db".to_string()]);
+        params.symbols = Some(vec!["sym:foo".to_string()]);
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("unknown-slug touches_hot_path dispatch succeeds");
+        match response {
+            CodeGraphResponse::TouchesHotPath(hits) => {
+                assert_eq!(
+                    hits.workspace_hint,
+                    Some(vec!["server".to_string(), "ui".to_string()])
+                );
+            }
+            other => panic!("expected touches_hot_path, got {other:?}"),
+        }
+        assert_eq!(
+            ops.seen_workspaces(),
+            vec![None],
+            "touches_hot_path with unknown slug resolves seeds from the full graph"
+        );
+    }
+
+    /// Acceptance criterion: empty `workspace: ""` is the same shape
+    /// as omitting `workspace` after `normalize()`. Specifically, the
+    /// `CodeGraphParams::normalize()` helper must clear `workspace =
+    /// Some("")` to `None`. Locks in the `params.workspace.is_none()`
+    /// invariant the dispatcher relies on.
+    #[test]
+    fn normalize_workspace_empty_string_is_none_for_dispatch() {
+        let mut params = test_params("ranked");
+        params.workspace = Some(String::new());
+        params.normalize();
+        assert!(
+            params.workspace.is_none(),
+            "normalize() should clear Some(\"\") to None, got {:?}",
+            params.workspace
+        );
+        // Same shape as omitting workspace in the first place.
+        let params2 = test_params("ranked");
+        assert!(params2.workspace.is_none());
+    }
+
+    /// Acceptance criterion: `cycles` and `edges` (listing/bounded)
+    /// also surface a hint envelope for unknown slugs even though
+    /// the bridge calls themselves stay workspace-agnostic today.
+    /// These ops don't take a workspace arg on the trait, so the
+    /// "seen_workspaces" record stays empty — what matters is the
+    /// hint envelope is populated correctly.
+    #[tokio::test]
+    async fn workspace_scope_cycles_edges_surface_hint_for_unknown_slug() {
+        // cycles: known slug → no hint.
+        let ops = WorkspaceFixtureOps::new(None);
+        let (server, _) = fixture_server(ops);
+        let ctx = fixture_ctx(Some("server"));
+        let mut params = test_params("cycles");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.workspace = Some("server".to_string());
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("known-slug cycles dispatch succeeds");
+        match response {
+            CodeGraphResponse::Cycles(cycles) => {
+                assert!(cycles.workspace_hint.is_none());
+            }
+            other => panic!("expected cycles, got {other:?}"),
+        }
+
+        // cycles: unknown slug → hint fires.
+        let ops = WorkspaceFixtureOps::new(Some(vec!["server".to_string(), "ui".to_string()]));
+        let (server, _) = fixture_server(ops);
+        let ctx = fixture_ctx(Some("nope"));
+        let mut params = test_params("cycles");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.workspace = Some("nope".to_string());
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("unknown-slug cycles dispatch succeeds");
+        match response {
+            CodeGraphResponse::Cycles(cycles) => {
+                assert_eq!(
+                    cycles.workspace_hint,
+                    Some(vec!["server".to_string(), "ui".to_string()])
+                );
+            }
+            other => panic!("expected cycles, got {other:?}"),
+        }
+
+        // edges: known slug → no hint.
+        let ops = WorkspaceFixtureOps::new(None);
+        let (server, _) = fixture_server(ops);
+        let ctx = fixture_ctx(Some("server"));
+        let mut params = test_params("edges");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.workspace = Some("server".to_string());
+        params.from_glob = Some("**/*.rs".to_string());
+        params.to_glob = Some("**/*.rs".to_string());
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("known-slug edges dispatch succeeds");
+        match response {
+            CodeGraphResponse::Edges(edges) => {
+                assert!(edges.workspace_hint.is_none());
+            }
+            other => panic!("expected edges, got {other:?}"),
+        }
+
+        // edges: unknown slug → hint fires.
+        let ops = WorkspaceFixtureOps::new(Some(vec!["server".to_string(), "ui".to_string()]));
+        let (server, _) = fixture_server(ops);
+        let ctx = fixture_ctx(Some("nope"));
+        let mut params = test_params("edges");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.workspace = Some("nope".to_string());
+        params.from_glob = Some("**/*.rs".to_string());
+        params.to_glob = Some("**/*.rs".to_string());
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("unknown-slug edges dispatch succeeds");
+        match response {
+            CodeGraphResponse::Edges(edges) => {
+                assert_eq!(
+                    edges.workspace_hint,
+                    Some(vec!["server".to_string(), "ui".to_string()])
+                );
+            }
+            other => panic!("expected edges, got {other:?}"),
+        }
+    }
+
     /// PR B4: the default `hybrid_search` impl on `RepoGraphOps`
     /// degrades to the structural-only path so test stubs that only
     /// override `search` still serve the hybrid mode (with every hit
@@ -4051,6 +5164,7 @@ mod tests {
                 file: Some("src/auth.rs".to_string()),
                 match_kind: None,
             }],
+            workspace_hint: None,
             next_step: None,
         })
     }
@@ -4059,6 +5173,7 @@ mod tests {
         CodeGraphResponse::Search(SearchResponse {
             query: "auth".to_string(),
             hits: vec![],
+            workspace_hint: None,
             next_step: None,
         })
     }
@@ -4074,6 +5189,7 @@ mod tests {
     fn empty_cycles() -> CodeGraphResponse {
         CodeGraphResponse::Cycles(CyclesResponse {
             cycles: vec![],
+            workspace_hint: None,
             next_step: None,
         })
     }
