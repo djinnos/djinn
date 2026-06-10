@@ -41,6 +41,7 @@ const MAX_HOOKS_PER_PHASE: usize = 64;
 const MAX_VERIFICATION_RULES: usize = 128;
 const MAX_LANGUAGE_LIST: usize = 64;
 const MAX_STRING_LEN: usize = 512;
+const MAX_WORKSPACE_TAGS: usize = 32;
 const MAX_HOOK_SHELL_LEN: usize = 16 * 1024;
 
 #[derive(Debug, Error)]
@@ -65,8 +66,6 @@ pub enum EnvironmentConfigError {
     },
     #[error("duplicate workspace {root:?} ({language})")]
     DuplicateWorkspace { root: String, language: String },
-    #[error("duplicate workspace slug {slug:?}")]
-    DuplicateWorkspaceSlug { slug: String },
     #[error("env var key {key:?} is not a valid identifier ([A-Za-z_][A-Za-z0-9_]*)")]
     InvalidEnvKey { key: String },
     #[error("env var {key:?}: value contains disallowed newline/NUL")]
@@ -529,7 +528,6 @@ fn validate_workspaces(workspaces: &[Workspace]) -> EnvResult<()> {
         });
     }
     let mut seen: HashSet<(&str, &str)> = HashSet::with_capacity(workspaces.len());
-    let mut seen_slugs: HashSet<&str> = HashSet::with_capacity(workspaces.len());
     for ws in workspaces {
         if !seen.insert((ws.root.as_str(), ws.language.as_str())) {
             return Err(EnvironmentConfigError::DuplicateWorkspace {
@@ -541,10 +539,11 @@ fn validate_workspaces(workspaces: &[Workspace]) -> EnvResult<()> {
         validate_path("workspaces[*].root", &ws.root)?;
         if let Some(slug) = &ws.slug {
             validate_identifier("workspaces[*].slug", slug)?;
-            if !seen_slugs.insert(slug.as_str()) {
-                return Err(EnvironmentConfigError::DuplicateWorkspaceSlug { slug: slug.clone() });
-            }
         }
+        if let Some(name) = &ws.name {
+            validate_workspace_name("workspaces[*].name", name)?;
+        }
+        validate_workspace_tags("workspaces[*].tags", &ws.tags)?;
         validate_identifier("workspaces[*].language", &ws.language)?;
         if let Some(t) = &ws.toolchain {
             validate_identifier("workspaces[*].toolchain", t)?;
@@ -555,6 +554,42 @@ fn validate_workspaces(workspaces: &[Workspace]) -> EnvResult<()> {
         if let Some(pm) = &ws.package_manager {
             validate_identifier("workspaces[*].package_manager", pm)?;
         }
+    }
+    Ok(())
+}
+
+fn validate_workspace_name(field: &str, value: &str) -> EnvResult<()> {
+    if value.is_empty() {
+        return Err(EnvironmentConfigError::EmptyValue {
+            field: field.into(),
+        });
+    }
+    if value.len() > MAX_STRING_LEN {
+        return Err(EnvironmentConfigError::TooLong {
+            field: field.into(),
+            len: value.len(),
+            max: MAX_STRING_LEN,
+        });
+    }
+    if value.chars().any(|c| matches!(c, '\n' | '\r' | '\0')) {
+        return Err(EnvironmentConfigError::UnsafeIdentifier {
+            field: field.into(),
+            value: value.into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_workspace_tags(field: &str, tags: &[String]) -> EnvResult<()> {
+    if tags.len() > MAX_WORKSPACE_TAGS {
+        return Err(EnvironmentConfigError::ListTooLong {
+            field: field.into(),
+            len: tags.len(),
+            max: MAX_WORKSPACE_TAGS,
+        });
+    }
+    for tag in tags {
+        validate_identifier(field, tag)?;
     }
     Ok(())
 }
@@ -1118,7 +1153,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_workspace_slugs() {
+    fn accepts_duplicate_workspace_slugs() {
         let mut cfg = valid_minimal();
         cfg.workspaces = vec![
             Workspace {
@@ -1142,11 +1177,7 @@ mod tests {
                 package_manager: Some("pnpm".to_owned()),
             },
         ];
-        let err = cfg.validate().unwrap_err();
-        assert!(matches!(
-            err,
-            EnvironmentConfigError::DuplicateWorkspaceSlug { .. }
-        ));
+        cfg.validate().unwrap();
     }
 
     #[test]
@@ -1167,6 +1198,107 @@ mod tests {
             err,
             EnvironmentConfigError::UnsafeIdentifier { .. }
         ));
+    }
+
+    #[test]
+    fn accepts_human_readable_workspace_name_and_safe_tags() {
+        let mut cfg = valid_minimal();
+        cfg.workspaces = vec![Workspace {
+            slug: Some("api".to_owned()),
+            name: Some("API Server (production)".to_owned()),
+            tags: vec![
+                "backend".to_owned(),
+                "rust_2024".to_owned(),
+                "tier.1".to_owned(),
+            ],
+            root: "server".to_owned(),
+            language: "rust".to_owned(),
+            toolchain: Some("stable".to_owned()),
+            version: None,
+            package_manager: None,
+        }];
+
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_empty_workspace_name() {
+        let mut cfg = valid_minimal();
+        cfg.workspaces = vec![Workspace {
+            slug: None,
+            name: Some(String::new()),
+            tags: Vec::new(),
+            root: "server".to_owned(),
+            language: "rust".to_owned(),
+            toolchain: None,
+            version: None,
+            package_manager: None,
+        }];
+
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, EnvironmentConfigError::EmptyValue { .. }));
+    }
+
+    #[test]
+    fn rejects_workspace_name_with_newline() {
+        let mut cfg = valid_minimal();
+        cfg.workspaces = vec![Workspace {
+            slug: None,
+            name: Some("API\nServer".to_owned()),
+            tags: Vec::new(),
+            root: "server".to_owned(),
+            language: "rust".to_owned(),
+            toolchain: None,
+            version: None,
+            package_manager: None,
+        }];
+
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            EnvironmentConfigError::UnsafeIdentifier { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_workspace_tag() {
+        let mut cfg = valid_minimal();
+        cfg.workspaces = vec![Workspace {
+            slug: None,
+            name: None,
+            tags: vec!["bad tag".to_owned()],
+            root: "server".to_owned(),
+            language: "rust".to_owned(),
+            toolchain: None,
+            version: None,
+            package_manager: None,
+        }];
+
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            EnvironmentConfigError::UnsafeIdentifier { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_too_many_workspace_tags() {
+        let mut cfg = valid_minimal();
+        cfg.workspaces = vec![Workspace {
+            slug: None,
+            name: None,
+            tags: (0..=MAX_WORKSPACE_TAGS)
+                .map(|i| format!("tag{i}"))
+                .collect(),
+            root: "server".to_owned(),
+            language: "rust".to_owned(),
+            toolchain: None,
+            version: None,
+            package_manager: None,
+        }];
+
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, EnvironmentConfigError::ListTooLong { .. }));
     }
 
     #[test]
@@ -1542,6 +1674,53 @@ mod tests {
         assert!(cfg.languages.python.is_none());
         assert!(cfg.languages.go.is_none());
         assert!(cfg.workspaces.is_empty());
+    }
+
+    #[test]
+    fn from_stack_uses_collision_safe_workspace_slugs() {
+        let mut stack = crate::schema::Stack::empty();
+        stack.workspaces = vec![
+            crate::schema::StackWorkspace {
+                root: "packages/api".into(),
+                language: "node".into(),
+                toolchain: None,
+                package_manager: Some("pnpm".into()),
+            },
+            crate::schema::StackWorkspace {
+                root: "packages-api".into(),
+                language: "node".into(),
+                toolchain: None,
+                package_manager: Some("pnpm".into()),
+            },
+            crate::schema::StackWorkspace {
+                root: "packages api".into(),
+                language: "node".into(),
+                toolchain: None,
+                package_manager: Some("pnpm".into()),
+            },
+        ];
+
+        let cfg = EnvironmentConfig::from_stack(&stack);
+        let slugs: Vec<_> = cfg
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.slug.as_deref().unwrap())
+            .collect();
+
+        assert_eq!(
+            slugs,
+            vec![
+                workspace_slug(std::path::Path::new("packages/api")),
+                workspace_slug(std::path::Path::new("packages-api")),
+                workspace_slug(std::path::Path::new("packages api")),
+            ]
+        );
+        assert_eq!(slugs[0], "packages-api-f59bf297");
+        assert_eq!(slugs[1], "packages-api");
+        assert!(slugs[2].starts_with("packages-api-"));
+        assert_ne!(slugs[0], slugs[1]);
+        assert_ne!(slugs[0], slugs[2]);
+        assert_ne!(slugs[1], slugs[2]);
     }
 
     #[test]
