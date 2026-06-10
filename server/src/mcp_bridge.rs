@@ -3749,7 +3749,10 @@ impl AppState {
 /// PR D2: pure helper that builds a `SnapshotPayload` from an already-
 /// loaded canonical graph + ranking, applying the project's
 /// `graph_excluded_paths` filter and capping the surviving population
-/// at `node_cap` (top-PageRank tier wins).
+/// at `node_cap`. Unscoped multi-workspace snapshots reserve enough of
+/// that cap to show each non-empty workspace when possible, then fill the
+/// remainder from the global ranking; scoped snapshots remain hard-filtered
+/// to the requested workspace.
 ///
 /// Extracted from `RepoGraphBridge::snapshot` so unit tests can exercise
 /// the truncation / exclusion / wire-shape logic without spinning up
@@ -3766,14 +3769,14 @@ fn build_snapshot_payload(
     workspace: Option<&str>,
     node_cap: usize,
 ) -> SnapshotPayload {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeMap, HashMap, HashSet};
 
     let workspace_prefix = active_workspace_prefix(graph, workspace);
 
     // Tally totals against the post-exclusion graph so the
     // truncation decision lines up with what the UI actually sees.
     let mut total_nodes_post_excl: usize = 0;
-    let mut surviving: HashSet<petgraph::graph::NodeIndex> = HashSet::new();
+    let mut eligible_nodes: Vec<petgraph::graph::NodeIndex> = Vec::new();
     let mut pagerank_lookup: HashMap<petgraph::graph::NodeIndex, f64> = HashMap::new();
     for ranked_node in &ranking.nodes {
         let node = graph.node(ranked_node.node_index);
@@ -3796,12 +3799,9 @@ fn build_snapshot_payload(
         }
         total_nodes_post_excl += 1;
         pagerank_lookup.insert(ranked_node.node_index, ranked_node.page_rank);
-        // `ranking.nodes` is fused-rank-sorted (PR F4 RRF); collecting
-        // the first `node_cap` survivors promotes entry points and the
-        // shortest-distance neighborhood, not just raw PageRank leaves.
-        if surviving.len() < node_cap {
-            surviving.insert(ranked_node.node_index);
-        }
+        // `ranking.nodes` is fused-rank-sorted (PR F4 RRF); preserve that
+        // order as the global fill order after any fair workspace seeding.
+        eligible_nodes.push(ranked_node.node_index);
     }
 
     // The ranking is built only from indexed nodes; if the graph
@@ -3825,9 +3825,44 @@ fn build_snapshot_payload(
         }
         total_nodes_post_excl += 1;
         pagerank_lookup.insert(idx, 0.0);
-        if surviving.len() < node_cap {
-            surviving.insert(idx);
+        eligible_nodes.push(idx);
+    }
+
+    let mut surviving: HashSet<petgraph::graph::NodeIndex> = HashSet::new();
+
+    if workspace_prefix.is_none() {
+        // Unscoped multi-workspace snapshots must not starve quiet workspaces
+        // simply because one workspace dominates global PageRank. When the cap
+        // can represent all non-empty workspaces, seed one top-ranked node per
+        // workspace in slug order, then use the global ranking for the
+        // remaining budget. BTreeMap gives deterministic slug tie-breaking.
+        let mut by_workspace: BTreeMap<String, Vec<petgraph::graph::NodeIndex>> = BTreeMap::new();
+        for &idx in &eligible_nodes {
+            let node = graph.node(idx);
+            let slug = node
+                .workspace
+                .as_deref()
+                .and_then(|slug| normalize_workspace_slug(Some(slug)))
+                .unwrap_or_else(|| "root".to_string());
+            by_workspace.entry(slug).or_default().push(idx);
         }
+        if by_workspace.len() > 1 && node_cap >= by_workspace.len() {
+            for nodes in by_workspace.values() {
+                if surviving.len() >= node_cap {
+                    break;
+                }
+                if let Some(&idx) = nodes.first() {
+                    surviving.insert(idx);
+                }
+            }
+        }
+    }
+
+    for idx in eligible_nodes.iter().copied() {
+        if surviving.len() >= node_cap {
+            break;
+        }
+        surviving.insert(idx);
     }
 
     // Cross-workspace edges are the edges the workspace zoom UI most needs to
@@ -6001,6 +6036,92 @@ pub(crate) mod graph_bridge_tests {
             assert!(node_ids.contains(edge.from.as_str()));
             assert!(node_ids.contains(edge.to.as_str()));
         }
+    }
+
+    #[test]
+    fn snapshot_payload_preserves_quiet_workspace_when_cap_allows() {
+        use djinn_control_plane::tools::graph_exclusions::GraphExclusions;
+        use djinn_graph::repo_graph::{
+            REPO_GRAPH_ARTIFACT_VERSION, RankedRepoGraphNode, RepoDependencyGraph,
+            RepoGraphArtifact, RepoGraphNode, RepoGraphNodeKind, RepoGraphRanking, RepoNodeKey,
+        };
+
+        let mk_node = |name: &str, workspace: &str| RepoGraphNode {
+            id: RepoNodeKey::Symbol(name.to_string()),
+            kind: RepoGraphNodeKind::Symbol,
+            display_name: name.to_string(),
+            language: Some("rust".to_string()),
+            file_path: Some(PathBuf::from(format!("{workspace}/src/{name}.rs"))),
+            symbol: Some(name.to_string()),
+            symbol_kind: None,
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: vec![],
+            signature_parts: None,
+            is_test: false,
+            complexity: None,
+            workspace: Some(workspace.to_string()),
+        };
+        let graph = RepoDependencyGraph::from_artifact(&RepoGraphArtifact {
+            version: REPO_GRAPH_ARTIFACT_VERSION,
+            nodes: vec![
+                mk_node("a_hot_0", "workspace-a"),
+                mk_node("a_hot_1", "workspace-a"),
+                mk_node("a_hot_2", "workspace-a"),
+                mk_node("a_hot_3", "workspace-a"),
+                mk_node("b_quiet", "workspace-b"),
+            ],
+            edges: vec![],
+            symbol_ranges: std::collections::BTreeMap::new(),
+            communities: vec![],
+            processes: vec![],
+        });
+        let ranking = RepoGraphRanking {
+            nodes: graph
+                .graph()
+                .node_indices()
+                .enumerate()
+                .map(|(rank, node_index)| RankedRepoGraphNode {
+                    node_index,
+                    key: graph.node(node_index).id.clone(),
+                    kind: graph.node(node_index).kind,
+                    score: (10 - rank) as f64,
+                    page_rank: (10 - rank) as f64,
+                    structural_weight: 1.0,
+                    inbound_edge_weight: 0.0,
+                    outbound_edge_weight: 0.0,
+                    is_entry_point: false,
+                    entry_point_distance: None,
+                    fused_rank: (10 - rank) as f64,
+                })
+                .collect(),
+        };
+
+        let payload = build_snapshot_payload(
+            &graph,
+            &ranking,
+            "proj-test".to_string(),
+            "deadbeef".to_string(),
+            "2026-04-28T00:00:00Z".to_string(),
+            &GraphExclusions::empty(),
+            None,
+            2,
+        );
+
+        let workspaces: std::collections::HashSet<&str> = payload
+            .nodes
+            .iter()
+            .filter_map(|node| node.workspace.as_deref())
+            .collect();
+        assert_eq!(payload.nodes.len(), 2);
+        assert!(workspaces.contains("workspace-a"));
+        assert!(workspaces.contains("workspace-b"));
+        assert!(
+            payload.nodes.iter().any(|node| node.id == "symbol:b_quiet"),
+            "quiet workspace should retain a representative node: {:?}",
+            payload.nodes
+        );
     }
 
     /// PR F3 acceptance: when the canonical graph has detected
