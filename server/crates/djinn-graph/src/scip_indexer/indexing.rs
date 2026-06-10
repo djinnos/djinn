@@ -84,13 +84,36 @@ fn workspace_declared_slug(workspace: &djinn_stack::Workspace) -> String {
         })
 }
 
-fn warn_on_workspace_divergence(
-    project_root: &Path,
+/// Pure divergence computation between the declared EnvironmentConfig
+/// workspace slugs and the slugs produced by marker/discovery for the
+/// planned indexer commands. Returned as a single struct so the
+/// structured `tracing::warn!` fields in [`warn_on_workspace_divergence`]
+/// keep their exact `declared_but_not_found` / `found_but_undeclared`
+/// names. Kept `pub(crate)` so in-crate tests can hit it directly
+/// without needing a `tracing` subscriber — the production warning path
+/// still emits one structured log per call.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspaceDivergence {
+    pub declared_but_not_found: Vec<String>,
+    pub found_but_undeclared: Vec<String>,
+}
+
+impl WorkspaceDivergence {
+    fn is_empty(&self) -> bool {
+        self.declared_but_not_found.is_empty() && self.found_but_undeclared.is_empty()
+    }
+}
+
+/// Compute the divergence between declared workspaces and discovered
+/// workspace slugs (one entry per planned indexer command). Returns
+/// [`WorkspaceDivergence::default`] when no declared workspaces were
+/// supplied — the caller short-circuits the warning in that case.
+fn compute_workspace_divergence(
     plans: &[PlannedIndexerCommand],
     declared_workspaces: Option<&[djinn_stack::Workspace]>,
-) {
+) -> WorkspaceDivergence {
     let Some(declared_workspaces) = declared_workspaces else {
-        return;
+        return WorkspaceDivergence::default();
     };
 
     let declared: BTreeSet<String> = declared_workspaces
@@ -102,17 +125,34 @@ fn warn_on_workspace_divergence(
         .iter()
         .map(|plan| plan.workspace_slug.clone())
         .collect();
-    let declared_but_not_found: Vec<_> = declared.difference(&found).cloned().collect();
-    let found_but_undeclared: Vec<_> = found.difference(&declared).cloned().collect();
+    WorkspaceDivergence {
+        declared_but_not_found: declared.difference(&found).cloned().collect(),
+        found_but_undeclared: found.difference(&declared).cloned().collect(),
+    }
+}
 
-    if declared_but_not_found.is_empty() && found_but_undeclared.is_empty() {
+fn warn_on_workspace_divergence(
+    project_root: &Path,
+    plans: &[PlannedIndexerCommand],
+    declared_workspaces: Option<&[djinn_stack::Workspace]>,
+) {
+    if declared_workspaces.is_none() {
         return;
     }
 
+    let divergence = compute_workspace_divergence(plans, declared_workspaces);
+    if divergence.is_empty() {
+        return;
+    }
+
+    // The field names below are part of the structured log contract:
+    // operators grep on `declared_but_not_found` / `found_but_undeclared`
+    // to surface config drift. Do not rename without coordinating with
+    // dashboards / alerting.
     tracing::warn!(
         project_root = %project_root.display(),
-        declared_but_not_found = ?declared_but_not_found,
-        found_but_undeclared = ?found_but_undeclared,
+        declared_but_not_found = ?divergence.declared_but_not_found,
+        found_but_undeclared = ?divergence.found_but_undeclared,
         "SCIP workspace discovery diverged from declared EnvironmentConfig workspaces"
     );
 }
@@ -1115,5 +1155,362 @@ mod tests {
         );
         // SAFETY: serialised by ENV_TEST_LOCK above.
         unsafe { std::env::remove_var("CARGO_TARGET_DIR") };
+    }
+    // -------------------------------------------------------------------
+    // Workspace divergence overlay — declared EnvironmentConfig workspaces
+    // are log-only / additive. Marker/discovery remains authoritative for
+    // what gets indexed, and the structured warning retains the exact
+    // `declared_but_not_found` / `found_but_undeclared` field names.
+    // -------------------------------------------------------------------
+
+    /// A `PlannedIndexerCommand` skeleton that exercises the divergence
+    /// helper without going through filesystem discovery. Mirrors the
+    /// shape `plan_indexer_commands` produces, but with a fixed
+    /// `workspace_slug` so the divergence math is deterministic.
+    fn plan_with_slug(slug: &str) -> PlannedIndexerCommand {
+        PlannedIndexerCommand {
+            indexer: SupportedIndexer::TypeScript,
+            binary_path: PathBuf::from("/tooling/scip-typescript"),
+            args: vec!["index".to_string()],
+            working_directory: PathBuf::from(slug),
+            workspace_root: PathBuf::from(slug),
+            workspace_slug: slug.to_string(),
+            output_path: PathBuf::from(slug).join("out.scip"),
+        }
+    }
+
+    fn declared_workspace(slug: Option<&str>, root: &str) -> djinn_stack::Workspace {
+        djinn_stack::Workspace {
+            slug: slug.map(str::to_owned),
+            name: None,
+            tags: Vec::new(),
+            root: root.to_string(),
+            language: "typescript".to_string(),
+            toolchain: None,
+            version: None,
+            package_manager: None,
+        }
+    }
+
+    /// `None` declared → empty divergence (no warning emitted).
+    #[test]
+    fn compute_workspace_divergence_returns_default_when_no_declared_workspaces() {
+        let plans = vec![plan_with_slug("server"), plan_with_slug("desktop")];
+        let divergence = compute_workspace_divergence(&plans, None);
+        assert_eq!(
+            divergence,
+            WorkspaceDivergence::default(),
+            "no declared list must short-circuit the warning"
+        );
+        assert!(divergence.is_empty());
+    }
+
+    /// Empty `Some([])` declared → still empty divergence; the warning
+    /// must not fire just because the caller passed an empty list (no
+    /// declared set to drift away from).
+    #[test]
+    fn compute_workspace_divergence_empty_declared_list_is_not_divergence() {
+        let plans = vec![plan_with_slug("server")];
+        let empty: &[djinn_stack::Workspace] = &[];
+        let divergence = compute_workspace_divergence(&plans, Some(empty));
+        assert_eq!(
+            divergence,
+            WorkspaceDivergence {
+                declared_but_not_found: vec![],
+                found_but_undeclared: vec!["server".to_string()],
+            },
+            "an empty declared list means nothing was claimed; the discovered set is fully undeclared"
+        );
+    }
+
+    /// `declared_but_not_found` covers the case where the config claims a
+    /// workspace that has no marker files on disk (e.g. a stale
+    /// `EnvironmentConfig` entry from a deleted directory). The
+    /// discovered `server` is declared as well, so the undeclared side
+    /// must stay empty — only the stale claim surfaces.
+    #[test]
+    fn compute_workspace_divergence_reports_declared_but_not_found() {
+        let plans = vec![plan_with_slug("server")];
+        let declared = vec![
+            declared_workspace(Some("server"), "server"), // matches disk
+            declared_workspace(Some("legacy"), "stale/path"), // declared, not on disk
+        ];
+        let divergence = compute_workspace_divergence(&plans, Some(&declared));
+        assert_eq!(
+            divergence.declared_but_not_found,
+            vec!["legacy".to_string()],
+            "explicit declared slug with no matching discovered target must appear in declared_but_not_found"
+        );
+        assert!(
+            divergence.found_but_undeclared.is_empty(),
+            "no extra divergence on the undeclared side: {divergence:?}"
+        );
+        assert!(!divergence.is_empty());
+    }
+
+    /// `found_but_undeclared` covers the case where marker/discovery
+    /// finds a workspace the config hasn't claimed (e.g. a new package
+    /// added under `packages/` that the operator hasn't told
+    /// `EnvironmentConfig` about yet).
+    #[test]
+    fn compute_workspace_divergence_reports_found_but_undeclared() {
+        let plans = vec![
+            plan_with_slug("server"),
+            plan_with_slug("desktop"),
+            plan_with_slug("acqua"),
+        ];
+        // Only `server` is declared; the other two are unindexed-but-on-disk.
+        let declared = vec![declared_workspace(Some("server"), "server")];
+        let divergence = compute_workspace_divergence(&plans, Some(&declared));
+        assert!(
+            divergence.declared_but_not_found.is_empty(),
+            "server is declared and discovered, so declared_but_not_found must be empty"
+        );
+        assert_eq!(
+            divergence.found_but_undeclared,
+            vec!["acqua".to_string(), "desktop".to_string()],
+            "unclaimed discovered workspaces appear in found_but_undeclared (sorted)"
+        );
+    }
+
+    /// Both directions can fire at once — a project whose declared list
+    /// partially overlaps its discovered set.
+    #[test]
+    fn compute_workspace_divergence_reports_both_directions_simultaneously() {
+        let plans = vec![plan_with_slug("server"), plan_with_slug("desktop")];
+        let declared = vec![
+            declared_workspace(Some("server"), "server"), // matches
+            declared_workspace(Some("stale"), "stale/path"), // declared, not on disk
+        ];
+        let divergence = compute_workspace_divergence(&plans, Some(&declared));
+        assert_eq!(divergence.declared_but_not_found, vec!["stale".to_string()]);
+        assert_eq!(divergence.found_but_undeclared, vec!["desktop".to_string()]);
+    }
+
+    /// `slug: None` must fall back to the shared
+    /// `djinn_stack::workspace_slug` derivation, so a `root` of `server`
+    /// maps to the same slug discovery uses for `server/Cargo.toml`.
+    #[test]
+    fn compute_workspace_divergence_uses_fallback_slug_when_unset() {
+        let plans = vec![plan_with_slug("server")];
+        let declared = vec![declared_workspace(None, "server")];
+        let divergence = compute_workspace_divergence(&plans, Some(&declared));
+        assert!(
+            divergence.is_empty(),
+            "fallback slug should match the discovered `server` slug: {divergence:?}"
+        );
+    }
+
+    /// An explicit `slug` in `EnvironmentConfig` is compared as-is — the
+    /// declared side uses the operator's chosen identifier rather than
+    /// the shared derivation. This is how a workspace with a
+    /// sanitisation-conflicting root (e.g. `packages/api`) can be
+    /// tagged with a stable manual slug like `api-prod`.
+    #[test]
+    fn compute_workspace_divergence_uses_explicit_slug_when_set() {
+        let plans = vec![plan_with_slug("packages-api-f59bf297")];
+        let declared = vec![declared_workspace(Some("api-prod"), "packages/api")];
+        let divergence = compute_workspace_divergence(&plans, Some(&declared));
+        assert_eq!(
+            divergence.declared_but_not_found,
+            vec!["api-prod".to_string()],
+            "explicit slug is the source of truth on the declared side"
+        );
+        assert_eq!(
+            divergence.found_but_undeclared,
+            vec!["packages-api-f59bf297".to_string()],
+            "and the shared-derivation slug is the source of truth on the discovered side"
+        );
+    }
+
+    /// Empty-string `slug` should be treated as "not set" so the
+    /// fallback derivation kicks in. (Matches `workspace_declared_slug`.)
+    #[test]
+    fn compute_workspace_divergence_treats_empty_slug_as_unset() {
+        let plans = vec![plan_with_slug("server")];
+        let declared = vec![declared_workspace(Some(""), "server")];
+        let divergence = compute_workspace_divergence(&plans, Some(&declared));
+        assert!(
+            divergence.is_empty(),
+            "empty slug must fall back to shared derivation: {divergence:?}"
+        );
+    }
+
+    /// End-to-end: the divergence math sees one plan per
+    /// `(indexer, discovered workspace)` pair. If the same discovered
+    /// workspace is planned by two indexers, the slug should still
+    /// de-duplicate on the divergence side — the warning is about
+    /// workspace coverage, not about per-indexer plan cardinality.
+    #[test]
+    fn compute_workspace_divergence_dedupes_repeated_plan_slugs() {
+        let plans = vec![
+            PlannedIndexerCommand {
+                indexer: SupportedIndexer::RustAnalyzer,
+                binary_path: PathBuf::from("/tooling/rust-analyzer"),
+                args: vec!["scip".to_string()],
+                working_directory: PathBuf::from("server"),
+                workspace_root: PathBuf::from("server"),
+                workspace_slug: "server".to_string(),
+                output_path: PathBuf::from("server/rust.scip"),
+            },
+            PlannedIndexerCommand {
+                indexer: SupportedIndexer::TypeScript,
+                binary_path: PathBuf::from("/tooling/scip-typescript"),
+                args: vec!["index".to_string()],
+                working_directory: PathBuf::from("server"),
+                workspace_root: PathBuf::from("server"),
+                workspace_slug: "server".to_string(),
+                output_path: PathBuf::from("server/ts.scip"),
+            },
+        ];
+        let declared = vec![
+            declared_workspace(Some("server"), "server"), // matches both plans
+            declared_workspace(Some("stale"), "stale/path"), // declared, not on disk
+        ];
+        let divergence = compute_workspace_divergence(&plans, Some(&declared));
+        assert_eq!(divergence.declared_but_not_found, vec!["stale".to_string()]);
+        assert!(
+            divergence.found_but_undeclared.is_empty(),
+            "server appears in two plans but the warning is slug-scoped, so it must not double-report"
+        );
+    }
+
+    /// `plan_indexer_commands` must NOT add a planned command for a
+    /// declared workspace that has no marker files. The declared config
+    /// is additive / log-only — discovery is the only source of
+    /// `PlannedIndexerCommand`s.
+    #[test]
+    fn plan_indexer_commands_ignores_declared_only_workspaces() {
+        let tmp = tempdir_in_tmp();
+        let project_root = tmp.path().join("djinn");
+        fs::create_dir_all(project_root.join("server")).expect("create server dir");
+        fs::write(
+            project_root.join("server/Cargo.toml"),
+            "[workspace]\nmembers = []\n",
+        )
+        .expect("write rust workspace");
+        let output_root = project_root.join(".djinn/scip");
+
+        let available = vec![IndexerAvailability {
+            indexer: SupportedIndexer::RustAnalyzer,
+            binary: "rust-analyzer".to_string(),
+            path: Some(PathBuf::from("/tooling/rust-analyzer")),
+        }];
+
+        // Declare a workspace that has NO marker files on disk. The
+        // planner must still only produce the `server` plan.
+        let declared = vec![
+            declared_workspace(Some("phantom"), "phantom/never-existed"),
+            declared_workspace(Some("ghost"), "ghost"),
+        ];
+
+        let plans = plan_indexer_commands(&project_root, &output_root, &available, Some(&declared));
+        assert_eq!(
+            plans.len(),
+            1,
+            "declared-only workspaces must not become planned indexer commands"
+        );
+        assert_eq!(plans[0].workspace_slug, "server");
+    }
+
+    /// Mirror of the above: a discovered workspace that was NOT claimed
+    /// in `EnvironmentConfig` must still be planned and indexed. Marker /
+    /// discovery is authoritative; the declared list is metadata, not a
+    /// filter.
+    #[test]
+    fn plan_indexer_commands_plans_undeclared_but_discovered_workspaces() {
+        let tmp = tempdir_in_tmp();
+        let project_root = tmp.path().join("djinn");
+        fs::create_dir_all(project_root.join("server")).expect("create server dir");
+        fs::create_dir_all(project_root.join("desktop")).expect("create desktop dir");
+        fs::write(
+            project_root.join("server/Cargo.toml"),
+            "[workspace]\nmembers = []\n",
+        )
+        .expect("write rust workspace");
+        fs::write(project_root.join("desktop/tsconfig.json"), "{}\n")
+            .expect("write desktop tsconfig");
+        let output_root = project_root.join(".djinn/scip");
+
+        let available = vec![
+            IndexerAvailability {
+                indexer: SupportedIndexer::RustAnalyzer,
+                binary: "rust-analyzer".to_string(),
+                path: Some(PathBuf::from("/tooling/rust-analyzer")),
+            },
+            IndexerAvailability {
+                indexer: SupportedIndexer::TypeScript,
+                binary: "scip-typescript".to_string(),
+                path: Some(PathBuf::from("/tooling/scip-typescript")),
+            },
+        ];
+
+        // Declared config is *narrower* than discovery: only `server` is
+        // listed. `desktop` (TS) is discovered but undeclared and must
+        // still get planned.
+        let declared = vec![declared_workspace(Some("server"), "server")];
+
+        let plans = plan_indexer_commands(&project_root, &output_root, &available, Some(&declared));
+        let slugs: Vec<&str> = plans.iter().map(|p| p.workspace_slug.as_str()).collect();
+        assert!(
+            slugs.contains(&"server"),
+            "declared-and-discovered workspace must be planned: {slugs:?}"
+        );
+        assert!(
+            slugs.contains(&"desktop"),
+            "discovered-but-undeclared workspace must still be planned: {slugs:?}"
+        );
+        assert_eq!(plans.len(), 2);
+    }
+
+    /// End-to-end with both a `slug: None` (fallback) and an explicit
+    /// `slug` declared entry. The fallback-derived entry matches the
+    /// discovered workspace, and the explicit-slug entry is reported as
+    /// `declared_but_not_found` because nothing on disk has that slug.
+    /// Confirms the planner-side contract end-to-end via the
+    /// `tracing::warn!` field names — these would surface in the
+    /// `tracing-subscriber` JSON output the warmer uses.
+    #[test]
+    fn plan_indexer_commands_with_mixed_declared_slugs_exercises_warning_fields() {
+        let tmp = tempdir_in_tmp();
+        let project_root = tmp.path().join("djinn");
+        fs::create_dir_all(project_root.join("server")).expect("create server dir");
+        fs::write(
+            project_root.join("server/Cargo.toml"),
+            "[workspace]\nmembers = []\n",
+        )
+        .expect("write rust workspace");
+        let output_root = project_root.join(".djinn/scip");
+
+        let available = vec![IndexerAvailability {
+            indexer: SupportedIndexer::RustAnalyzer,
+            binary: "rust-analyzer".to_string(),
+            path: Some(PathBuf::from("/tooling/rust-analyzer")),
+        }];
+
+        // 1. `slug: None` → fallback derivation, matches discovered
+        //    `server` slug → no divergence on this side.
+        // 2. `slug: Some("api")` with a `root` of `phantom/api` → no
+        //    marker files on disk under that root, so `api` ends up
+        //    in `declared_but_not_found`.
+        let declared = vec![
+            declared_workspace(None, "server"),
+            declared_workspace(Some("api"), "phantom/api"),
+        ];
+
+        let plans = plan_indexer_commands(&project_root, &output_root, &available, Some(&declared));
+        assert_eq!(plans.len(), 1, "only `server` is on disk");
+        assert_eq!(plans[0].workspace_slug, "server");
+
+        // Now exercise the pure helper on the same inputs to assert the
+        // structured-field contract. `plan_indexer_commands` swallowed
+        // the warning into the global tracing dispatcher; here we
+        // assert exactly what its structured fields would contain.
+        let divergence = compute_workspace_divergence(&plans, Some(&declared));
+        assert_eq!(divergence.declared_but_not_found, vec!["api".to_string()]);
+        assert!(
+            divergence.found_but_undeclared.is_empty(),
+            "server is declared and discovered, so no undeclared side: {divergence:?}"
+        );
     }
 }
