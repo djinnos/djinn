@@ -741,12 +741,36 @@ impl CoordinatorActor {
                         self.conversations_resolved.remove(&task.id);
                     }
                     Err(e) => {
+                        // The GitHub API refused (race on expected head SHA,
+                        // permissions, transient). Don't just warn-and-spin —
+                        // fall back to the same mechanical merge the conflict
+                        // path uses: fetch the mirror fresh, merge target →
+                        // task branch in an ephemeral clone, push to mirror +
+                        // GitHub. Clean merge → the PR refreshes exactly as
+                        // update-branch would have done; real conflict → the
+                        // next tick sees `dirty` and the conflict path (fast
+                        // path, then ConflictRetry) takes over. Either way the
+                        // PR can no longer sit `behind` forever on a wedged
+                        // update-branch call.
                         tracing::warn!(
                             task_id = %task.short_id,
                             pr = pull_number,
                             error = %e,
-                            "PR poller: update-branch failed (will retry next tick)"
+                            "PR poller: update-branch failed — falling back to local mechanical merge"
                         );
+                        if self
+                            .try_auto_merge_before_conflict(
+                                &task.id,
+                                &task.short_id,
+                                &task.project_id,
+                            )
+                            .await
+                        {
+                            self.pr_status_cache.remove(&task.id);
+                            self.merge_fail_count.remove(&task.id);
+                            self.delegated_to_github.remove(&task.id);
+                            self.conversations_resolved.remove(&task.id);
+                        }
                     }
                 }
                 continue;
