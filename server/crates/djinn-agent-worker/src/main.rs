@@ -401,6 +401,15 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     //    that same TCP connection.
     let cancel = CancellationToken::new();
 
+    // The live ephemeral stage clone's path, populated by
+    // `WorkerSupervisorServices::execute_stage` on its first call and read
+    // lazily by the SIGTERM / soft-deadline checkpoint. Created here so the
+    // checkpoint handlers (wired below, BEFORE the RPC connect / services
+    // construction so cancel-on-SIGTERM is armed as early as possible) and the
+    // services impl (constructed after the RPC connect) share the same slot.
+    let captured_workspace_path: Arc<std::sync::Mutex<Option<PathBuf>>> =
+        Arc::new(std::sync::Mutex::new(None));
+
     // Identity used by the SIGTERM / soft-deadline checkpoint, mirroring the
     // supervisor's post-stage auto-commit: attribute to the task creator,
     // falling back to the bot for system/patrol tasks (or host/worker skew).
@@ -431,7 +440,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     install_termination_handlers(
         cancel.clone(),
         args.task_run_id.clone(),
-        args.workspace_path.clone(),
+        captured_workspace_path.clone(),
         spec.task_branch.clone(),
         checkpoint_identity.clone(),
     );
@@ -446,7 +455,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     install_soft_deadline(
         cancel.clone(),
         args.task_run_id.clone(),
-        args.workspace_path.clone(),
+        captured_workspace_path.clone(),
         spec.task_branch.clone(),
         checkpoint_identity,
     );
@@ -488,6 +497,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
         credentials,
         cancel.clone(),
         agent_context,
+        captured_workspace_path,
     ));
 
     // 6. Construct the in-Pod `MirrorManager`. `clone_ephemeral` resolves
@@ -561,8 +571,16 @@ struct CheckpointIdentity {
 }
 
 /// Best-effort "save work before we die" checkpoint: stage + commit any
-/// uncommitted changes on the attached workspace and push `task_branch` to the
-/// mirror, all bounded by [`CHECKPOINT_TIMEOUT`].
+/// uncommitted changes on the LIVE ephemeral stage clone and push `task_branch`
+/// to the mirror, all bounded by [`CHECKPOINT_TIMEOUT`].
+///
+/// The path is read lazily, at fire time, from the `captured_workspace_path`
+/// slot that [`WorkerSupervisorServices`] populates on its first
+/// `execute_stage` call. That is the supervisor's own ephemeral `TempDir`
+/// clone (`MirrorManager::clone_ephemeral`), where every worker commit lands —
+/// NOT the host-materialised `/workspace` bind mount, which the in-pod
+/// supervisor never writes to. If no stage has started yet the slot is `None`
+/// and there is no in-flight work to save, so the checkpoint is a clean no-op.
 ///
 /// Called from the SIGTERM handler and the soft-deadline timer. It races the
 /// supervisor's own (cancelled) shutdown, so it may arrive mid-git-operation —
@@ -575,12 +593,27 @@ struct CheckpointIdentity {
 /// tree and the push refspec (`task_branch:task_branch`) is a no-op when the
 /// mirror is already current.
 async fn checkpoint_workspace(
-    workspace_path: &Path,
+    captured_workspace_path: &std::sync::Mutex<Option<PathBuf>>,
     task_branch: &str,
     identity: &CheckpointIdentity,
     task_run_id: &str,
 ) {
-    let ws = match Workspace::attach_existing(workspace_path, task_branch.to_string()) {
+    let workspace_path = {
+        captured_workspace_path
+            .lock()
+            .expect("captured_workspace_path mutex poisoned")
+            .clone()
+    };
+    let Some(workspace_path) = workspace_path else {
+        info!(
+            task_run_id,
+            branch = task_branch,
+            "checkpoint: no stage has started (no captured workspace); nothing to save"
+        );
+        return;
+    };
+
+    let ws = match Workspace::attach_existing(&workspace_path, task_branch.to_string()) {
         Ok(ws) => ws,
         Err(e) => {
             warn!(
@@ -661,10 +694,16 @@ async fn checkpoint_workspace(
 /// cancelled mid-stage run never reaches. The Pod's
 /// `terminationGracePeriodSeconds=60` gives both the checkpoint and the RPC
 /// flush time to land before SIGKILL.
+///
+/// `captured_workspace_path` is the slot [`WorkerSupervisorServices`] shares;
+/// it is read lazily inside [`checkpoint_workspace`] at signal time, so the
+/// cancel wiring can stay early (before the RPC connect / services
+/// construction) while the checkpoint still sees the live ephemeral stage clone
+/// the supervisor records once stages begin.
 fn install_termination_handlers(
     cancel: CancellationToken,
     task_run_id: String,
-    workspace_path: PathBuf,
+    captured_workspace_path: Arc<std::sync::Mutex<Option<PathBuf>>>,
     task_branch: String,
     identity: CheckpointIdentity,
 ) {
@@ -685,7 +724,7 @@ fn install_termination_handlers(
         };
         let cancel = cancel.clone();
         let task_run_id = task_run_id.clone();
-        let workspace_path = workspace_path.clone();
+        let captured_workspace_path = captured_workspace_path.clone();
         let task_branch = task_branch.clone();
         let identity = identity.clone();
         tokio::spawn(async move {
@@ -698,7 +737,13 @@ fn install_termination_handlers(
                 // Cancel first so the supervisor stops streaming and starts its
                 // own graceful exit; then checkpoint to save in-flight work.
                 cancel.cancel();
-                checkpoint_workspace(&workspace_path, &task_branch, &identity, &task_run_id).await;
+                checkpoint_workspace(
+                    &captured_workspace_path,
+                    &task_branch,
+                    &identity,
+                    &task_run_id,
+                )
+                .await;
             }
         });
     }
@@ -729,7 +774,7 @@ fn soft_deadline_interval(deadline_secs: u64) -> Duration {
 fn install_soft_deadline(
     cancel: CancellationToken,
     task_run_id: String,
-    workspace_path: PathBuf,
+    captured_workspace_path: Arc<std::sync::Mutex<Option<PathBuf>>>,
     task_branch: String,
     identity: CheckpointIdentity,
 ) {
@@ -772,7 +817,13 @@ fn install_soft_deadline(
                     "soft deadline reached; winding down (cancel + checkpoint) before the kubelet hard-kills the Pod"
                 );
                 cancel.cancel();
-                checkpoint_workspace(&workspace_path, &task_branch, &identity, &task_run_id).await;
+                checkpoint_workspace(
+                    &captured_workspace_path,
+                    &task_branch,
+                    &identity,
+                    &task_run_id,
+                )
+                .await;
             }
         }
     });
@@ -1121,7 +1172,8 @@ mod tests {
             name: "djinn-bot".into(),
             email: "bot@djinn.local".into(),
         };
-        checkpoint_workspace(cp, "task", &identity, "run-xyz").await;
+        let captured = std::sync::Mutex::new(Some(cp.to_path_buf()));
+        checkpoint_workspace(&captured, "task", &identity, "run-xyz").await;
 
         // The edit is committed locally...
         let status = git(cp, &["status", "--porcelain"]);
@@ -1165,13 +1217,34 @@ mod tests {
             name: "djinn-bot".into(),
             email: "bot@djinn.local".into(),
         };
-        checkpoint_workspace(cp, "task", &identity, "run-xyz").await;
+        let captured = std::sync::Mutex::new(Some(cp.to_path_buf()));
+        checkpoint_workspace(&captured, "task", &identity, "run-xyz").await;
 
         let remote = git(op, &["rev-parse", "task"]);
         assert_eq!(
             remote.trim(),
             local.trim(),
             "checkpoint must push the worker's own commit even on a clean tree"
+        );
+    }
+
+    /// When no stage has started the captured path is `None` — there is no live
+    /// ephemeral clone and no in-flight work to save, so the checkpoint is a
+    /// clean no-op (no attach, no commit, no push, no panic).
+    #[tokio::test]
+    async fn checkpoint_with_no_captured_path_is_noop() {
+        let identity = CheckpointIdentity {
+            name: "djinn-bot".into(),
+            email: "bot@djinn.local".into(),
+        };
+        // Empty slot: execute_stage never ran, so nothing was captured.
+        let captured: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+        // Must return cleanly without touching the filesystem or panicking.
+        checkpoint_workspace(&captured, "task", &identity, "run-xyz").await;
+        // The slot is unchanged — the no-op path doesn't mutate it.
+        assert!(
+            captured.lock().unwrap().is_none(),
+            "no-op checkpoint must leave the empty captured-path slot untouched"
         );
     }
 }
