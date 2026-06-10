@@ -35,6 +35,10 @@ mod tests;
 // Re-exports for the public API — see `crates/djinn-control-plane/src/
 // tools/graph_tools.rs`, `server/src/mcp_bridge.rs`, `cluster_doc.rs`,
 // `communities.rs`, etc. for the consumer side.
+pub use self::artifact::{
+    RepoGraphArtifact, RepoGraphArtifactEdge, RepoGraphArtifactProcess,
+    RepoGraphArtifactSymbolRange, deserialize_repo_graph_artifact_bincode,
+};
 pub use self::constants::{REPO_GRAPH_ARTIFACT_VERSION, is_test_path};
 pub use self::edge::{RepoGraphEdge, RepoGraphEdgeKind, edge_confidence_floor};
 pub use self::node::{RepoGraphNode, RepoGraphNodeKind, RepoGraphSearchHit, RepoNodeKey};
@@ -62,9 +66,8 @@ use std::path::{Path, PathBuf};
 use petgraph::Direction::{Incoming, Outgoing};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef as PetgraphEdgeRef;
-use serde::{Deserialize, Serialize};
 
-use crate::complexity::{ComplexityMetrics, ComplexityWalker};
+use crate::complexity::ComplexityWalker;
 use crate::scip_parser::{ParsedScipIndex, ScipSymbolKind, ScipVisibility};
 
 /// Stable, reusable repository dependency graph built from normalized SCIP parse output.
@@ -1060,188 +1063,6 @@ fn names_match(scip_display: &str, ts_name: &str) -> bool {
         return true;
     }
     false
-}
-
-/// Minimal serializable artifact capturing the per-file and per-symbol graph
-/// relationships needed for incremental changed-file patch planning.
-///
-/// This is persisted alongside the rendered repo-map cache so that later
-/// operations can recover the dependency graph without re-parsing raw SCIP
-/// outputs.
-///
-/// The `version` field is mandatory in PR A2+. Old blobs that pre-date this
-/// field will fail to bincode-deserialize (positional encoding) and trigger
-/// a re-warm via the `load_cached_artifact` "stale or unreadable" branch in
-/// `canonical_graph.rs`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RepoGraphArtifact {
-    /// Schema version stamp. See [`REPO_GRAPH_ARTIFACT_VERSION`] for the
-    /// current value and the bump history.
-    pub version: u32,
-    pub nodes: Vec<RepoGraphNode>,
-    pub edges: Vec<RepoGraphArtifactEdge>,
-    /// Per-file enclosing-range sidecar, keyed by file path. Each range refers
-    /// to a node by its position in `nodes`. Persisting this here is what
-    /// keeps `symbols_enclosing` non-empty after a cache-hit reload.
-    #[serde(default)]
-    pub symbol_ranges: BTreeMap<PathBuf, Vec<RepoGraphArtifactSymbolRange>>,
-    /// PR F3 community sidecar. Each community references its members
-    /// by their position in [`Self::nodes`]. New in artifact v4 — old
-    /// blobs that lack the field deserialize via `default` to an
-    /// empty vec, which is fine: `community_id(...)` then returns
-    /// `None` until the next warm rebuild repopulates it.
-    #[serde(default)]
-    pub communities: Vec<crate::communities::Community>,
-    /// PR F2: detected execution-flow processes. Each `Process` carries
-    /// node-position references into `nodes`; persisting it here lets
-    /// `processes_for_node` answer queries after a cache-hit reload
-    /// without re-running the detector.
-    #[serde(default)]
-    pub processes: Vec<RepoGraphArtifactProcess>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RepoGraphArtifactV10WithoutWorkspace {
-    version: u32,
-    nodes: Vec<RepoGraphNodeV10WithoutWorkspace>,
-    edges: Vec<RepoGraphArtifactEdge>,
-    #[serde(default)]
-    symbol_ranges: BTreeMap<PathBuf, Vec<RepoGraphArtifactSymbolRange>>,
-    #[serde(default)]
-    communities: Vec<crate::communities::Community>,
-    #[serde(default)]
-    processes: Vec<RepoGraphArtifactProcess>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RepoGraphNodeV10WithoutWorkspace {
-    id: RepoNodeKey,
-    kind: RepoGraphNodeKind,
-    display_name: String,
-    language: Option<String>,
-    file_path: Option<PathBuf>,
-    symbol: Option<String>,
-    symbol_kind: Option<ScipSymbolKind>,
-    is_external: bool,
-    #[serde(default)]
-    visibility: Option<ScipVisibility>,
-    #[serde(default)]
-    signature: Option<String>,
-    #[serde(default)]
-    documentation: Vec<String>,
-    #[serde(default)]
-    signature_parts: Option<crate::scip_parser::ScipSignatureParts>,
-    #[serde(default)]
-    is_test: bool,
-    #[serde(default)]
-    complexity: Option<ComplexityMetrics>,
-}
-
-impl From<RepoGraphArtifactV10WithoutWorkspace> for RepoGraphArtifact {
-    fn from(old: RepoGraphArtifactV10WithoutWorkspace) -> Self {
-        Self {
-            version: old.version,
-            nodes: old.nodes.into_iter().map(RepoGraphNode::from).collect(),
-            edges: old.edges,
-            symbol_ranges: old.symbol_ranges,
-            communities: old.communities,
-            processes: old.processes,
-        }
-    }
-}
-
-impl From<RepoGraphNodeV10WithoutWorkspace> for RepoGraphNode {
-    fn from(old: RepoGraphNodeV10WithoutWorkspace) -> Self {
-        Self {
-            id: old.id,
-            kind: old.kind,
-            display_name: old.display_name,
-            language: old.language,
-            file_path: old.file_path,
-            symbol: old.symbol,
-            symbol_kind: old.symbol_kind,
-            is_external: old.is_external,
-            visibility: old.visibility,
-            signature: old.signature,
-            documentation: old.documentation,
-            signature_parts: old.signature_parts,
-            is_test: old.is_test,
-            complexity: old.complexity,
-            workspace: None,
-        }
-    }
-}
-
-/// Deserialize a repo-graph bincode artifact, accepting both the current v10
-/// node layout (with `workspace`) and pre-workspace v10 blobs that do not carry
-/// the appended node field. The artifact version deliberately remains v10, so
-/// callers on the persisted cache path must use this compatibility seam instead
-/// of raw `bincode::deserialize`.
-pub fn deserialize_repo_graph_artifact_bincode(blob: &[u8]) -> Result<RepoGraphArtifact, String> {
-    match bincode::deserialize::<RepoGraphArtifact>(blob) {
-        Ok(artifact) => Ok(artifact),
-        Err(current_err) => bincode::deserialize::<RepoGraphArtifactV10WithoutWorkspace>(blob)
-            .map(RepoGraphArtifact::from)
-            .map_err(|compat_err| {
-                format!(
-                    "deserialize graph: {current_err}; v10 pre-workspace fallback also failed: {compat_err}"
-                )
-            }),
-    }
-}
-
-/// A serializable directed edge between two graph nodes, identified by their
-/// position in the `nodes` vec of the parent [`RepoGraphArtifact`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RepoGraphArtifactEdge {
-    pub source: usize,
-    pub target: usize,
-    pub kind: RepoGraphEdgeKind,
-    pub weight: f64,
-    pub evidence_count: usize,
-    /// Edge confidence in [0, 1]; mirrors [`RepoGraphEdge::confidence`].
-    /// New in artifact v1 (PR A2).
-    pub confidence: f64,
-    /// Optional reason explaining the confidence value; mirrors
-    /// [`RepoGraphEdge::reason`]. New in artifact v1 (PR A2).
-    pub reason: Option<String>,
-    /// PR F2: 0-indexed step ordinal for [`RepoGraphEdgeKind::StepInProcess`]
-    /// edges. `None` for every other kind. New in artifact v4 (PR F2).
-    #[serde(default)]
-    pub step: Option<i32>,
-}
-
-/// A serializable enclosing range for a symbol definition, identified by the
-/// symbol node's position in the parent [`RepoGraphArtifact::nodes`] vec.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RepoGraphArtifactSymbolRange {
-    pub start_line: u32,
-    pub end_line: u32,
-    pub node: usize,
-}
-
-/// PR F2: serializable form of [`crate::processes::Process`] keyed by
-/// node positions in the parent [`RepoGraphArtifact::nodes`] vec
-/// rather than by `NodeIndex` (which is not stable across artifact
-/// rebuilds). New in artifact v4.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RepoGraphArtifactProcess {
-    /// Stable process id — sha256 of the entry-point uid + step count,
-    /// truncated to 16 hex chars. Mirrors [`crate::processes::Process::id`].
-    pub id: String,
-    /// Human-readable label (entry point's display name + " process").
-    pub label: String,
-    /// Position in `nodes` of the synthetic [`RepoGraphNodeKind::Process`]
-    /// node materialized for this flow.
-    pub process_node: usize,
-    /// Position in `nodes` of the entry-point symbol that originated
-    /// this flow.
-    pub entry_point: usize,
-    /// Position in `nodes` of the last node along the trace.
-    pub terminal: usize,
-    /// Ordered node positions along the trace, including the entry
-    /// point at `[0]` and the terminal at `[step_count - 1]`.
-    pub steps: Vec<usize>,
 }
 
 impl RepoDependencyGraph {

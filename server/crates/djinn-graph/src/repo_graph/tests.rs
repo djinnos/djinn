@@ -17,6 +17,7 @@ use petgraph::visit::EdgeRef;
 use serde::Serialize;
 
 use super::*;
+use crate::complexity::ComplexityMetrics;
 use crate::scip_parser::{
     ParsedScipIndex, ScipFile, ScipMetadata, ScipOccurrence, ScipRange, ScipRelationship,
     ScipRelationshipKind, ScipSymbol, ScipSymbolKind, ScipSymbolRole,
