@@ -60,6 +60,18 @@ pub enum SupervisorFlow {
     ConflictRetry,
     Spike,
     Planning,
+    /// Reviewer-only resume: a prior run's worker stage already completed and
+    /// its commits are durable on the mirror task_branch, but the run died in
+    /// (or before) the reviewer stage — typically a Job-deadline / pod kill of
+    /// the reviewer session. The host resolves this from `ReviewResponse` ONLY
+    /// when a cheap durability check confirms the worker output is present
+    /// (task_branch exists + is ahead of base), so re-running the worker would
+    /// redo identical work. The sequence is `[Reviewer]`; workspace setup still
+    /// clones task_branch first (so the reviewer sees the worker's diff), and
+    /// the reviewer's `task_review_start` pre-stage transition is valid because
+    /// the task is `needs_task_review` on the resume. When the worker output is
+    /// NOT durable the host keeps `ReviewResponse` (full worker redo).
+    ReviewResume,
     /// Lead intervention: a single-stage flow that runs the Lead agent on a
     /// task parked in `needs_lead_intervention`. The Lead inspects the stuck
     /// task and ends with `submit_decision`, which the supervisor maps to the
@@ -82,6 +94,7 @@ impl SupervisorFlow {
             SupervisorFlow::ConflictRetry => "conflict_retry",
             SupervisorFlow::Spike => "spike",
             SupervisorFlow::Planning => "planning",
+            SupervisorFlow::ReviewResume => "review_resume",
             SupervisorFlow::Lead => "lead",
         }
     }
@@ -104,6 +117,11 @@ pub fn role_sequence(flow: SupervisorFlow) -> &'static [RoleKind] {
             // Verifier currently stubbed; matches NewTask shape.
             &[Worker, Reviewer]
         }
+        // Reviewer-only resume: the worker stage already ran on a prior run and
+        // its commits are durable on the mirror task_branch (the host verified
+        // this before choosing the flow). Skip straight to the reviewer, which
+        // reviews the diff cloned from task_branch.
+        SupervisorFlow::ReviewResume => &[Reviewer],
         SupervisorFlow::Spike => &[Architect],
         SupervisorFlow::Planning => &[Planner],
         // Single-stage: the Lead is the only actor. Its `submit_decision`
