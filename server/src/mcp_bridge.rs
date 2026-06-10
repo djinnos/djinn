@@ -24,8 +24,9 @@ use djinn_control_plane::bridge::{
     QuerySubgraphSeedDebug as WireQuerySubgraphSeedDebug,
     QuerySubgraphTraversalDebug as WireQuerySubgraphTraversalDebug, RankedNode, RefactorCandidate,
     RelatedSymbol, RepoGraphOps, ResolveOutcome, RunningTaskInfo, RuntimeOps, SearchHit,
-    SemanticQueryEmbedding, SlotPoolOps, SnapshotEdge, SnapshotNode, SnapshotPayload, SymbolAtHit,
-    SymbolContext, SymbolDescription, SymbolNode, TouchedSymbol, WorkspacesResult,
+    SemanticQueryEmbedding, SlotPoolOps, SnapshotEdge, SnapshotLevel, SnapshotNode,
+    SnapshotPayload, SymbolAtHit, SymbolContext, SymbolDescription, SymbolNode, TouchedSymbol,
+    WorkspacesResult,
 };
 use djinn_git::{GitActorHandle, GitError};
 
@@ -1931,7 +1932,7 @@ impl RepoGraphOps for RepoGraphBridge {
         &self,
         ctx: &ProjectCtx,
         workspace: Option<&str>,
-        _level: djinn_control_plane::bridge::SnapshotLevel,
+        level: SnapshotLevel,
         node_cap: usize,
         exclusions: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
     ) -> Result<SnapshotPayload, String> {
@@ -1977,6 +1978,7 @@ impl RepoGraphOps for RepoGraphBridge {
             generated_at,
             exclusions,
             workspace,
+            level,
             node_cap,
         ))
     }
@@ -3767,8 +3769,22 @@ fn build_snapshot_payload(
     generated_at: String,
     exclusions: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
     workspace: Option<&str>,
+    level: SnapshotLevel,
     node_cap: usize,
 ) -> SnapshotPayload {
+    if level == SnapshotLevel::Community {
+        return build_community_snapshot_payload(
+            graph,
+            ranking,
+            project_id,
+            git_head,
+            generated_at,
+            exclusions,
+            workspace,
+            node_cap,
+        );
+    }
+
     use std::collections::{BTreeMap, HashMap, HashSet};
 
     let workspace_prefix = active_workspace_prefix(graph, workspace);
@@ -3914,6 +3930,9 @@ fn build_snapshot_payload(
                 kind: format!("{:?}", node.kind).to_lowercase(),
                 label,
                 workspace: node.workspace.clone(),
+                workspace_kind: None,
+                member_count: None,
+                internal_edge_count: None,
                 symbol_kind: node
                     .symbol_kind
                     .as_ref()
@@ -3988,6 +4007,188 @@ fn build_snapshot_payload(
         truncated,
         total_nodes: total_nodes_post_excl,
         total_edges: total_edges_post_excl,
+        node_cap,
+        nodes: snapshot_nodes,
+        edges: snapshot_edges,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_community_snapshot_payload(
+    graph: &djinn_graph::repo_graph::RepoDependencyGraph,
+    ranking: &djinn_graph::repo_graph::RepoGraphRanking,
+    project_id: String,
+    git_head: String,
+    generated_at: String,
+    exclusions: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
+    workspace: Option<&str>,
+    node_cap: usize,
+) -> SnapshotPayload {
+    use petgraph::visit::EdgeRef;
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+    struct CommunityAgg {
+        id: String,
+        label: String,
+        members: BTreeSet<petgraph::graph::NodeIndex>,
+        workspaces: BTreeSet<String>,
+        missing_workspace: bool,
+        pagerank_sum: f64,
+        internal_edges: usize,
+    }
+
+    let workspace_prefix = active_workspace_prefix(graph, workspace);
+    let community_meta: HashMap<&str, &djinn_graph::communities::Community> = graph
+        .communities()
+        .iter()
+        .map(|community| (community.id.as_str(), community))
+        .collect();
+    let mut pagerank_lookup: HashMap<petgraph::graph::NodeIndex, f64> = HashMap::new();
+    for ranked_node in &ranking.nodes {
+        pagerank_lookup.insert(ranked_node.node_index, ranked_node.page_rank);
+    }
+
+    let mut eligible_nodes: HashSet<petgraph::graph::NodeIndex> = HashSet::new();
+    let mut communities: BTreeMap<String, CommunityAgg> = BTreeMap::new();
+    for idx in graph.graph().node_indices() {
+        let node = graph.node(idx);
+        let key = format_node_key(&node.id);
+        let file_hint = node.file_path.as_ref().map(|p| p.display().to_string());
+        if node.is_external || exclusions.excludes(&key, file_hint.as_deref(), &node.display_name) {
+            continue;
+        }
+        if let Some(prefix) = workspace_prefix.as_deref()
+            && !repo_graph_node_matches_workspace(node, prefix)
+        {
+            continue;
+        }
+        let Some(community_id) = graph.community_id(idx) else {
+            continue;
+        };
+
+        eligible_nodes.insert(idx);
+        let meta = community_meta.get(community_id).copied();
+        let agg = communities
+            .entry(community_id.to_string())
+            .or_insert_with(|| CommunityAgg {
+                id: community_id.to_string(),
+                label: meta
+                    .map(|community| community.label.clone())
+                    .unwrap_or_else(|| community_id.to_string()),
+                members: BTreeSet::new(),
+                workspaces: BTreeSet::new(),
+                missing_workspace: false,
+                pagerank_sum: 0.0,
+                internal_edges: 0,
+            });
+        agg.members.insert(idx);
+        if let Some(workspace) = node.workspace.as_deref() {
+            agg.workspaces.insert(workspace.to_string());
+        } else {
+            agg.missing_workspace = true;
+        }
+        agg.pagerank_sum += pagerank_lookup.get(&idx).copied().unwrap_or(0.0);
+    }
+
+    type CommunityEdgeKey = (String, String, String);
+    type CommunityEdgeAgg = (f64, Option<String>, usize);
+    let mut edge_aggs: BTreeMap<CommunityEdgeKey, CommunityEdgeAgg> = BTreeMap::new();
+    let mut total_inter_community_edges = 0usize;
+    for edge_ref in graph.graph().edge_references() {
+        let source = edge_ref.source();
+        let target = edge_ref.target();
+        if !eligible_nodes.contains(&source) || !eligible_nodes.contains(&target) {
+            continue;
+        }
+        let Some(source_community) = graph.community_id(source) else {
+            continue;
+        };
+        let Some(target_community) = graph.community_id(target) else {
+            continue;
+        };
+        if source_community == target_community {
+            if let Some(agg) = communities.get_mut(source_community) {
+                agg.internal_edges += 1;
+            }
+            continue;
+        }
+        total_inter_community_edges += 1;
+        let weight = edge_ref.weight();
+        let key = (
+            source_community.to_string(),
+            target_community.to_string(),
+            format!("{:?}", weight.kind),
+        );
+        let entry = edge_aggs.entry(key).or_insert((0.0, None, 0));
+        entry.0 += weight.confidence;
+        if entry.1.is_none() {
+            entry.1 = weight.reason.clone();
+        }
+        entry.2 += 1;
+    }
+
+    let mut snapshot_nodes: Vec<SnapshotNode> = communities
+        .into_values()
+        .filter(|agg| !agg.members.is_empty())
+        .map(|agg| {
+            let (workspace, workspace_kind) = match (agg.workspaces.len(), agg.missing_workspace) {
+                (1, false) => (agg.workspaces.iter().next().cloned(), "single".to_string()),
+                (0, true) => (None, "unknown".to_string()),
+                _ => (None, "mixed".to_string()),
+            };
+            SnapshotNode {
+                id: agg.id.clone(),
+                kind: "community".to_string(),
+                label: agg.label,
+                workspace,
+                workspace_kind: Some(workspace_kind),
+                member_count: Some(agg.members.len()),
+                internal_edge_count: Some(agg.internal_edges),
+                symbol_kind: None,
+                file_path: None,
+                pagerank: agg.pagerank_sum,
+                community_id: Some(agg.id),
+                cognitive: None,
+                is_test: false,
+            }
+        })
+        .collect();
+    snapshot_nodes.sort_by(|a, b| {
+        b.pagerank
+            .total_cmp(&a.pagerank)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    let emitted_ids: HashSet<&str> = snapshot_nodes.iter().map(|node| node.id.as_str()).collect();
+    let mut snapshot_edges: Vec<SnapshotEdge> = edge_aggs
+        .into_iter()
+        .filter_map(|((from, to, kind), (confidence_sum, reason, count))| {
+            if !emitted_ids.contains(from.as_str()) || !emitted_ids.contains(to.as_str()) {
+                return None;
+            }
+            Some(SnapshotEdge {
+                from,
+                to,
+                kind,
+                confidence: (confidence_sum / count as f64).clamp(0.0, 1.0),
+                reason,
+            })
+        })
+        .collect();
+    snapshot_edges.sort_by(|a, b| {
+        a.kind
+            .cmp(&b.kind)
+            .then_with(|| a.from.cmp(&b.from))
+            .then_with(|| a.to.cmp(&b.to))
+    });
+
+    SnapshotPayload {
+        project_id,
+        git_head,
+        generated_at,
+        truncated: false,
+        total_nodes: snapshot_nodes.len(),
+        total_edges: total_inter_community_edges,
         node_cap,
         nodes: snapshot_nodes,
         edges: snapshot_edges,
@@ -4417,6 +4618,7 @@ pub(crate) mod graph_bridge_tests {
             "now".to_string(),
             &djinn_control_plane::tools::graph_exclusions::GraphExclusions::empty(),
             Some("server"),
+            SnapshotLevel::Symbol,
             20,
         );
         assert_eq!(snapshot_payload.total_nodes, 2);
@@ -5812,6 +6014,7 @@ pub(crate) mod graph_bridge_tests {
             "2026-04-28T00:00:00Z".to_string(),
             &GraphExclusions::empty(),
             None,
+            SnapshotLevel::Symbol,
             2_000,
         );
         assert_eq!(payload.project_id, "proj-test");
@@ -5907,6 +6110,7 @@ pub(crate) mod graph_bridge_tests {
             "2026-04-28T00:00:00Z".to_string(),
             &GraphExclusions::empty(),
             None,
+            SnapshotLevel::Symbol,
             cap,
         );
         assert_eq!(payload.node_cap, cap, "node_cap echoed back unchanged");
@@ -6020,6 +6224,7 @@ pub(crate) mod graph_bridge_tests {
             "2026-04-28T00:00:00Z".to_string(),
             &GraphExclusions::empty(),
             None,
+            SnapshotLevel::Symbol,
             2,
         );
 
@@ -6032,6 +6237,154 @@ pub(crate) mod graph_bridge_tests {
                 edge.from == "symbol:a_hot_1" && edge.to == "symbol:b_quiet_endpoint"
             })
         );
+        for edge in &payload.edges {
+            assert!(node_ids.contains(edge.from.as_str()));
+            assert!(node_ids.contains(edge.to.as_str()));
+        }
+    }
+
+    #[test]
+    fn community_snapshot_aggregates_cross_workspace_edges() {
+        use djinn_control_plane::tools::graph_exclusions::GraphExclusions;
+        use djinn_graph::communities::Community;
+        use djinn_graph::repo_graph::{
+            REPO_GRAPH_ARTIFACT_VERSION, RankedRepoGraphNode, RepoDependencyGraph,
+            RepoGraphArtifact, RepoGraphArtifactEdge, RepoGraphEdgeKind, RepoGraphNode,
+            RepoGraphNodeKind, RepoGraphRanking, RepoNodeKey,
+        };
+
+        let mk_node = |name: &str, workspace: &str| RepoGraphNode {
+            id: RepoNodeKey::Symbol(name.to_string()),
+            kind: RepoGraphNodeKind::Symbol,
+            display_name: name.to_string(),
+            language: Some("rust".to_string()),
+            file_path: Some(PathBuf::from(format!("{workspace}/src/{name}.rs"))),
+            symbol: Some(name.to_string()),
+            symbol_kind: None,
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: vec![],
+            signature_parts: None,
+            is_test: false,
+            complexity: None,
+            workspace: Some(workspace.to_string()),
+        };
+
+        let graph = RepoDependencyGraph::from_artifact(&RepoGraphArtifact {
+            version: REPO_GRAPH_ARTIFACT_VERSION,
+            nodes: vec![
+                mk_node("api_entry", "api"),
+                mk_node("api_helper", "api"),
+                mk_node("web_entry", "web"),
+                mk_node("web_helper", "web"),
+            ],
+            edges: vec![
+                RepoGraphArtifactEdge {
+                    source: 0,
+                    target: 1,
+                    kind: RepoGraphEdgeKind::SymbolReference,
+                    weight: 1.0,
+                    evidence_count: 1,
+                    confidence: 0.8,
+                    reason: None,
+                    step: None,
+                },
+                RepoGraphArtifactEdge {
+                    source: 2,
+                    target: 3,
+                    kind: RepoGraphEdgeKind::SymbolReference,
+                    weight: 1.0,
+                    evidence_count: 1,
+                    confidence: 0.8,
+                    reason: None,
+                    step: None,
+                },
+                RepoGraphArtifactEdge {
+                    source: 1,
+                    target: 2,
+                    kind: RepoGraphEdgeKind::SymbolReference,
+                    weight: 1.0,
+                    evidence_count: 1,
+                    confidence: 0.9,
+                    reason: Some("cross-workspace call".to_string()),
+                    step: None,
+                },
+            ],
+            symbol_ranges: std::collections::BTreeMap::new(),
+            communities: vec![
+                Community {
+                    id: "community-api".to_string(),
+                    label: "api".to_string(),
+                    member_ids: vec![0, 1],
+                    cohesion: 0.5,
+                    symbol_count: 2,
+                    keywords: vec!["api".to_string()],
+                },
+                Community {
+                    id: "community-web".to_string(),
+                    label: "web".to_string(),
+                    member_ids: vec![2, 3],
+                    cohesion: 0.5,
+                    symbol_count: 2,
+                    keywords: vec!["web".to_string()],
+                },
+            ],
+            processes: vec![],
+        });
+        let ranking = RepoGraphRanking {
+            nodes: graph
+                .graph()
+                .node_indices()
+                .enumerate()
+                .map(|(rank, node_index)| RankedRepoGraphNode {
+                    node_index,
+                    key: graph.node(node_index).id.clone(),
+                    kind: graph.node(node_index).kind,
+                    score: (10 - rank) as f64,
+                    page_rank: (10 - rank) as f64,
+                    structural_weight: 1.0,
+                    inbound_edge_weight: 0.0,
+                    outbound_edge_weight: 0.0,
+                    is_entry_point: false,
+                    entry_point_distance: None,
+                    fused_rank: (10 - rank) as f64,
+                })
+                .collect(),
+        };
+
+        let payload = build_snapshot_payload(
+            &graph,
+            &ranking,
+            "proj-test".to_string(),
+            "deadbeef".to_string(),
+            "2026-04-28T00:00:00Z".to_string(),
+            &GraphExclusions::empty(),
+            None,
+            SnapshotLevel::Community,
+            1,
+        );
+
+        assert_eq!(payload.nodes.len(), 2);
+        let node_ids: std::collections::HashSet<&str> =
+            payload.nodes.iter().map(|node| node.id.as_str()).collect();
+        assert_eq!(
+            node_ids,
+            std::collections::HashSet::from(["community-api", "community-web"])
+        );
+        assert!(payload.nodes.iter().all(|node| node.kind == "community"));
+        assert!(payload.nodes.iter().any(|node| {
+            node.id == "community-api"
+                && node.workspace.as_deref() == Some("api")
+                && node.workspace_kind.as_deref() == Some("single")
+                && node.member_count == Some(2)
+                && node.internal_edge_count == Some(1)
+        }));
+        assert!(payload.edges.iter().any(|edge| {
+            edge.from == "community-api"
+                && edge.to == "community-web"
+                && edge.kind == "SymbolReference"
+        }));
         for edge in &payload.edges {
             assert!(node_ids.contains(edge.from.as_str()));
             assert!(node_ids.contains(edge.to.as_str()));
@@ -6063,6 +6416,7 @@ pub(crate) mod graph_bridge_tests {
             complexity: None,
             workspace: Some(workspace.to_string()),
         };
+
         let graph = RepoDependencyGraph::from_artifact(&RepoGraphArtifact {
             version: REPO_GRAPH_ARTIFACT_VERSION,
             nodes: vec![
@@ -6106,6 +6460,7 @@ pub(crate) mod graph_bridge_tests {
             "2026-04-28T00:00:00Z".to_string(),
             &GraphExclusions::empty(),
             None,
+            SnapshotLevel::Symbol,
             2,
         );
 
@@ -6231,6 +6586,7 @@ pub(crate) mod graph_bridge_tests {
             "2026-04-28T00:00:00Z".to_string(),
             &GraphExclusions::empty(),
             None,
+            SnapshotLevel::Symbol,
             2_000,
         );
 
