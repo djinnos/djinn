@@ -169,7 +169,23 @@ impl AnthropicProvider {
                 .iter()
                 .enumerate()
                 .map(|(index, tool)| {
-                    let mut tool_obj = tool.clone();
+                    // Convert RMCP tool format to the Anthropic tool shape.
+                    // RMCP: {"name", "description", "inputSchema"}
+                    // Anthropic: {"name", "description", "input_schema"}
+                    // Rebuilt clean either way: a stray camelCase `inputSchema`
+                    // means no `input_schema` reaches the API, which strict
+                    // Anthropic-compatible vendors reject (MiniMax error 2013
+                    // "function name or parameters is empty").
+                    let input_schema = tool
+                        .get("input_schema")
+                        .or_else(|| tool.get("inputSchema"))
+                        .cloned()
+                        .unwrap_or(json!({"type": "object"}));
+                    let mut tool_obj = json!({
+                        "name": tool.get("name").cloned().unwrap_or(json!("")),
+                        "description": tool.get("description").cloned().unwrap_or(json!("")),
+                        "input_schema": input_schema,
+                    });
                     if index == last
                         && let Some(cache_control) = cache_control
                         && let Some(obj) = tool_obj.as_object_mut()
@@ -2147,5 +2163,50 @@ mod tests {
             AnthropicProvider::new(config).effective_url(),
             "https://api.minimax.io/anthropic/v1/messages"
         );
+    }
+
+    // ─── RMCP → Anthropic tool-shape conversion ───────────────────────────────
+
+    /// djinn's tool registry hands providers RMCP-shaped tools
+    /// (`{"name","description","inputSchema"}`). The Anthropic wire format
+    /// requires `input_schema`; the serializer must convert and emit a clean
+    /// object (no stray `inputSchema` key — strict Anthropic-compatible
+    /// vendors reject requests whose tools have no `input_schema`).
+    #[test]
+    fn test_rmcp_tools_converted_to_anthropic_input_schema() {
+        let provider = test_provider();
+        let mut conv = Conversation::default();
+        conv.push(crate::message::Message::user("hello"));
+
+        let tools = vec![json!({
+            "name": "epic_list",
+            "description": "List epics",
+            "inputSchema": {"type": "object", "properties": {"project": {"type": "string"}}}
+        })];
+
+        let req = provider.build_request(&conv, &tools, None);
+        let tool = &req["tools"][0];
+        assert_eq!(tool["name"], "epic_list");
+        assert_eq!(tool["description"], "List epics");
+        assert_eq!(
+            tool["input_schema"]["properties"]["project"]["type"],
+            "string"
+        );
+        assert!(
+            tool.get("inputSchema").is_none(),
+            "camelCase RMCP key must not leak onto the wire"
+        );
+    }
+
+    /// A tool with neither schema key still gets a minimal valid input_schema.
+    #[test]
+    fn test_tool_without_schema_gets_default_input_schema() {
+        let provider = test_provider();
+        let mut conv = Conversation::default();
+        conv.push(crate::message::Message::user("hello"));
+
+        let tools = vec![json!({"name": "ping", "description": "Ping"})];
+        let req = provider.build_request(&conv, &tools, None);
+        assert_eq!(req["tools"][0]["input_schema"], json!({"type": "object"}));
     }
 }

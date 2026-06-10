@@ -525,8 +525,8 @@ pub struct SnapshotEdge {
     pub reason: Option<String>,
 }
 
-/// PR D2: full graph snapshot payload — capped by PageRank tier and
-/// filtered by `graph_excluded_paths`. Wire shape pinned by the
+/// PR D2: full graph snapshot payload — capped with workspace-aware
+/// retention and filtered by `graph_excluded_paths`. Wire shape pinned by the
 /// inter-PR contract (`code_graph snapshot` section): the entire
 /// payload sits under the `snapshot` discriminator field on
 /// `CodeGraphResponse`, so it doesn't collide with `Ranked.nodes` or
@@ -537,8 +537,8 @@ pub struct SnapshotPayload {
     pub git_head: String,
     /// ISO8601 UTC timestamp at which the snapshot was assembled.
     pub generated_at: String,
-    /// `true` when the underlying graph contained more nodes than
-    /// `node_cap`, so the lowest-PageRank tier was dropped.
+    /// `true` when the underlying graph contained more eligible nodes than
+    /// `node_cap`; retention may still promote cross-workspace endpoints.
     pub truncated: bool,
     /// Total node count in the unfiltered, uncapped graph.
     pub total_nodes: usize,
