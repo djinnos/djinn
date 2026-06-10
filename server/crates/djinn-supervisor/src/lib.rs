@@ -342,6 +342,16 @@ impl TaskRunSupervisor {
             );
         }
 
+        // Reset tracked-file mtimes to their last-touched commit time so cargo's
+        // path-crate fingerprints match the shared CARGO_TARGET_DIR across runs
+        // (the ephemeral clone gave every file a fresh checkout mtime). Done
+        // AFTER the branch is settled and BEFORE the proactive sync / stages: a
+        // file the sync-merge then rewrites picks up a current mtime (it really
+        // changed → legit recompile), while every byte-identical file keeps its
+        // commit-time mtime and reuses the cached artifact. Best-effort; never
+        // fails the run.
+        workspace.normalize_mtimes().await;
+
         // Proactive dispatch-time sync.  The task branch is REUSED across
         // cycles (clone_ephemeral + ensure_branch above never recreate it), so
         // without re-anchoring it onto the moving target it drifts behind

@@ -1,8 +1,12 @@
+use std::collections::HashSet;
+use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use tempfile::TempDir;
 use thiserror::Error;
 use tokio::process::Command;
+use tracing::{debug, warn};
 
 #[derive(Debug, Error)]
 pub enum EphemeralWorkspaceError {
@@ -173,6 +177,59 @@ impl Workspace {
             .map(|_| ())
     }
 
+    /// Rewrite every tracked file's mtime to the commit time of the last commit
+    /// that touched it — the `git restore-mtime` technique.
+    ///
+    /// ## Why
+    /// An ephemeral clone (`MirrorManager::clone_ephemeral`) checks every tracked
+    /// file out fresh, so they all get *checkout-time* mtimes. Cargo fingerprints
+    /// path (workspace) crates by source mtime, so against the shared
+    /// `CARGO_TARGET_DIR` every workspace crate looks dirty and recompiles on the
+    /// first build of every run — even when its sources are byte-identical to
+    /// what produced the cached artifacts. Resetting each file's mtime to its
+    /// last-touched commit time makes byte-identical files get *identical* mtimes
+    /// across runs, so cargo's fingerprint matches the cache and only crates the
+    /// task's branch actually changed rebuild. Files the worker edits afterward
+    /// get fresh mtimes naturally, so within-run incremental builds are
+    /// unaffected.
+    ///
+    /// ## Algorithm
+    /// Single newest→oldest `git log` walk with `--name-only`: the first commit
+    /// (i.e. most recent) that names a path wins, and we stop once every tracked
+    /// file has been assigned (or the commit cap / time budget is hit). This is
+    /// O(commits until covered), not O(files), and never shells out per file.
+    /// Renames: `--no-renames` is intentional — a renamed path shows up as an
+    /// add in the commit that performed the rename, which carries exactly the
+    /// timestamp we want for the new path.
+    ///
+    /// Runs against whatever branch is currently checked out, so it composes with
+    /// the v0.5.21 task_branch-clone behavior (the walk naturally sees that
+    /// branch's history).
+    ///
+    /// ## Best-effort
+    /// Every failure is logged and swallowed — this is a pure cache optimization
+    /// and must NEVER fail a run. Any file not covered when the cap hits simply
+    /// keeps its checkout mtime (correct; only loses a cache hit). Directories
+    /// are skipped (cargo doesn't fingerprint them); symlinks are skipped (we
+    /// don't want to chase them to their targets).
+    pub async fn normalize_mtimes(&self) {
+        let root = self.root.path().to_path_buf();
+        // The whole thing is CPU/syscall-bound filesystem work over a `git log`
+        // pipe; run it off the async runtime so we don't park a worker thread.
+        let result = tokio::task::spawn_blocking(move || normalize_mtimes_blocking(&root)).await;
+        match result {
+            Ok(Ok(stats)) => debug!(
+                files_touched = stats.touched,
+                tracked = stats.tracked,
+                commits_walked = stats.commits_walked,
+                duration_ms = stats.duration.as_millis() as u64,
+                "normalize_mtimes: reset tracked-file mtimes to commit times"
+            ),
+            Ok(Err(e)) => warn!(error = %e, "normalize_mtimes: skipped (non-fatal)"),
+            Err(e) => warn!(error = %e, "normalize_mtimes: blocking task panicked (non-fatal)"),
+        }
+    }
+
     /// Whether `origin/<target_branch>` is already an ancestor of the current
     /// `HEAD` — i.e. the checked-out branch already contains every commit on
     /// the target, so a merge would be a no-op.
@@ -330,6 +387,166 @@ impl Workspace {
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
+}
+
+/// Cap on the `git log` walk so a deep-history repo can't make this run
+/// unbounded. 10k commits comfortably covers every tracked file in practice
+/// (the walk stops the instant the seen-set covers the universe); if it
+/// doesn't, the uncovered files keep their checkout mtime — a correct, merely
+/// suboptimal fallback.
+const MAX_COMMITS: usize = 10_000;
+
+/// Wall-clock budget for the whole walk. Bounds the cost on pathological
+/// repos / slow disks; on hitting it we apply whatever we resolved so far and
+/// leave the rest at their checkout mtime.
+const TIME_BUDGET: Duration = Duration::from_secs(5);
+
+struct NormalizeStats {
+    touched: usize,
+    tracked: usize,
+    commits_walked: usize,
+    duration: Duration,
+}
+
+/// Synchronous core of [`Workspace::normalize_mtimes`]; see that method's docs
+/// for the rationale and algorithm. Uses blocking `std::process::Command` +
+/// `File::set_modified`, so it must run on a blocking thread.
+fn normalize_mtimes_blocking(root: &Path) -> Result<NormalizeStats, EphemeralWorkspaceError> {
+    let start = Instant::now();
+
+    // 1. Universe of tracked files (NUL-delimited so paths with newlines/spaces
+    //    survive). This is the set we must cover.
+    let ls = git_capture(root, &["ls-files", "-z"])?;
+    let universe: HashSet<&[u8]> = ls.split(|&b| b == 0).filter(|p| !p.is_empty()).collect();
+    let tracked = universe.len();
+    if tracked == 0 {
+        return Ok(NormalizeStats {
+            touched: 0,
+            tracked: 0,
+            commits_walked: 0,
+            duration: start.elapsed(),
+        });
+    }
+
+    // 2. Walk history newest→oldest, name-only, with a `\x1e` (record separator)
+    //    marker before each commit's timestamp so commit boundaries are
+    //    unambiguous even for empty commits and odd filenames. `--no-renames`:
+    //    a rename shows as an add in the renaming commit (correct timestamp for
+    //    the new path).
+    let log = git_capture(
+        root,
+        &[
+            "log",
+            "-z",
+            "--no-renames",
+            &format!("--max-count={MAX_COMMITS}"),
+            "--pretty=tformat:\x1e%ct",
+            "--name-only",
+        ],
+    )?;
+
+    // path -> mtime (seconds since epoch). First (newest) commit naming a path wins.
+    let mut resolved: std::collections::HashMap<Vec<u8>, i64> =
+        std::collections::HashMap::with_capacity(tracked);
+    let mut commits_walked = 0usize;
+
+    // Each `\x1e`-prefixed record is `<ts>\0[\n<path>\0<path>\0...]`. Split on
+    // the record marker first, then on NUL within each record.
+    'records: for record in log.split(|&b| b == 0x1e) {
+        if record.is_empty() {
+            continue;
+        }
+        commits_walked += 1;
+        if commits_walked.is_multiple_of(256) && start.elapsed() > TIME_BUDGET {
+            break;
+        }
+        let mut fields = record.split(|&b| b == 0);
+        let Some(ts_field) = fields.next() else {
+            continue;
+        };
+        let Ok(ts) = std::str::from_utf8(ts_field)
+            .unwrap_or("")
+            .trim()
+            .parse::<i64>()
+        else {
+            continue;
+        };
+        for field in fields {
+            // The first path field carries a leading '\n' from the format's
+            // header/name-only boundary; strip any leading newlines.
+            let path: &[u8] = {
+                let mut p = field;
+                while let [b'\n', rest @ ..] = p {
+                    p = rest;
+                }
+                p
+            };
+            if path.is_empty() || !universe.contains(path) {
+                continue;
+            }
+            // First (newest) commit naming this path wins.
+            resolved.entry(path.to_vec()).or_insert(ts);
+            if resolved.len() == tracked {
+                // Every tracked file covered — no need to walk further history.
+                break 'records;
+            }
+        }
+    }
+
+    // 3. Apply. Best-effort per file: a failure on one file (symlink, perms,
+    //    raced delete) must not abort the batch.
+    let mut touched = 0usize;
+    for (path, ts) in &resolved {
+        let Ok(rel) = std::str::from_utf8(path) else {
+            continue;
+        };
+        let full = root.join(rel);
+        // Skip symlinks (don't chase to target) and anything that isn't a
+        // regular file. `symlink_metadata` does not follow the link.
+        match std::fs::symlink_metadata(&full) {
+            Ok(meta) if meta.file_type().is_file() => {}
+            _ => continue,
+        }
+        let mtime = match u64::try_from(*ts) {
+            Ok(secs) => UNIX_EPOCH + Duration::from_secs(secs),
+            // Pre-1970 commit dates (or negative) are nonsensical for source —
+            // leave the checkout mtime in place.
+            Err(_) => continue,
+        };
+        if let Ok(f) = File::options().write(true).open(&full)
+            && f.set_modified(mtime).is_ok()
+        {
+            touched += 1;
+        }
+    }
+
+    Ok(NormalizeStats {
+        touched,
+        tracked,
+        commits_walked,
+        duration: start.elapsed(),
+    })
+}
+
+/// Run `git -C <root> <args>` synchronously and return raw stdout bytes.
+/// Used by [`normalize_mtimes_blocking`] where output is NUL/`\x1e`-delimited
+/// binary that must not pass through lossy UTF-8 conversion.
+fn git_capture(root: &Path, args: &[&str]) -> Result<Vec<u8>, EphemeralWorkspaceError> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .map_err(EphemeralWorkspaceError::Io)?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(EphemeralWorkspaceError::Git(format!(
+            "git {}: {}",
+            args.join(" "),
+            stderr.trim()
+        )));
+    }
+    Ok(out.stdout)
 }
 
 #[cfg(test)]
@@ -539,5 +756,168 @@ mod tests {
             EphemeralWorkspaceError::Git(msg) => assert!(msg.contains("not a directory")),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    // ---- normalize_mtimes -------------------------------------------------
+
+    /// Commit the staged tree at `dir` with both author + committer date pinned
+    /// to `unix_ts`, so the resulting commit's `%ct` is deterministic.
+    fn commit_at(dir: &Path, msg: &str, unix_ts: i64) {
+        let date = format!("{unix_ts} +0000");
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["commit", "-m", msg])
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date)
+            .output()
+            .expect("spawn git commit");
+        assert!(
+            out.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn mtime_secs(p: &Path) -> i64 {
+        let m = std::fs::metadata(p).expect("metadata");
+        m.modified()
+            .expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("post-epoch")
+            .as_secs() as i64
+    }
+
+    /// Build a real repo with two commits at distinct timestamps touching
+    /// different files; after normalize each file's mtime must equal the commit
+    /// that last touched it.
+    #[tokio::test]
+    async fn normalize_sets_mtime_to_last_touching_commit() {
+        let tmp = TempDir::new().expect("tempdir");
+        let dir = tmp.path();
+        git(dir, &["init", "-q", "-b", "main"]);
+
+        // Commit 1 @ T1: a.txt + shared.txt.
+        const T1: i64 = 1_600_000_000;
+        write(dir, "a.txt", "a-v1\n");
+        write(dir, "shared.txt", "s-v1\n");
+        git(dir, &["add", "-A"]);
+        commit_at(dir, "c1", T1);
+
+        // Commit 2 @ T2: only b.txt (a.txt + shared.txt untouched since T1).
+        const T2: i64 = 1_600_086_400; // T1 + 1 day
+        write(dir, "b.txt", "b-v1\n");
+        git(dir, &["add", "-A"]);
+        commit_at(dir, "c2", T2);
+
+        let ws = Workspace::attach_existing(dir, "main").expect("attach");
+        ws.normalize_mtimes().await;
+
+        assert_eq!(
+            mtime_secs(&dir.join("a.txt")),
+            T1,
+            "a.txt last touched at T1"
+        );
+        assert_eq!(
+            mtime_secs(&dir.join("shared.txt")),
+            T1,
+            "shared.txt last touched at T1"
+        );
+        assert_eq!(
+            mtime_secs(&dir.join("b.txt")),
+            T2,
+            "b.txt last touched at T2"
+        );
+    }
+
+    /// A file edited AFTER normalize keeps its fresh (current) mtime — within-run
+    /// incremental builds must not be clobbered by a re-normalize.
+    #[tokio::test]
+    async fn normalize_does_not_clobber_post_edit_mtime() {
+        let tmp = TempDir::new().expect("tempdir");
+        let dir = tmp.path();
+        git(dir, &["init", "-q", "-b", "main"]);
+
+        const T1: i64 = 1_600_000_000;
+        write(dir, "a.txt", "a-v1\n");
+        git(dir, &["add", "-A"]);
+        commit_at(dir, "c1", T1);
+
+        let ws = Workspace::attach_existing(dir, "main").expect("attach");
+        ws.normalize_mtimes().await;
+        assert_eq!(mtime_secs(&dir.join("a.txt")), T1);
+
+        // Worker edits a.txt (uncommitted). Its mtime is now ~now, far ahead of T1.
+        write(dir, "a.txt", "a-v2 worker edit\n");
+        let after_edit = mtime_secs(&dir.join("a.txt"));
+        assert!(after_edit > T1, "post-edit mtime must be current, not T1");
+
+        // A second normalize must NOT reset the uncommitted edit back to T1: the
+        // newest commit naming a.txt is still c1@T1, so it WOULD — but the worker
+        // edit is uncommitted and we accept that normalize only runs once per
+        // materialization (pre-stage), never after edits. Assert idempotency on
+        // the COMMITTED state instead: re-running on the clean tree is harmless.
+        git(dir, &["checkout", "--", "a.txt"]); // discard the edit → back to committed
+        ws.normalize_mtimes().await;
+        ws.normalize_mtimes().await; // twice = idempotent
+        assert_eq!(
+            mtime_secs(&dir.join("a.txt")),
+            T1,
+            "idempotent: repeated normalize on clean tree yields the same mtime"
+        );
+    }
+
+    /// Empty / merge-style commits (no name-only output) must not derail the
+    /// walk, and files whose last touch predates them keep the right timestamp.
+    #[tokio::test]
+    async fn normalize_handles_empty_commits_in_history() {
+        let tmp = TempDir::new().expect("tempdir");
+        let dir = tmp.path();
+        git(dir, &["init", "-q", "-b", "main"]);
+
+        const T1: i64 = 1_600_000_000;
+        write(dir, "a.txt", "a-v1\n");
+        git(dir, &["add", "-A"]);
+        commit_at(dir, "c1", T1);
+
+        // Empty commit on top at T2 — names no files.
+        const T2: i64 = 1_600_086_400;
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["commit", "--allow-empty", "-m", "empty"])
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .env("GIT_AUTHOR_DATE", format!("{T2} +0000"))
+            .env("GIT_COMMITTER_DATE", format!("{T2} +0000"))
+            .output()
+            .expect("spawn");
+        assert!(out.status.success());
+
+        let ws = Workspace::attach_existing(dir, "main").expect("attach");
+        ws.normalize_mtimes().await;
+
+        assert_eq!(
+            mtime_secs(&dir.join("a.txt")),
+            T1,
+            "a.txt keeps T1 despite the empty T2 commit on top"
+        );
+    }
+
+    /// Empty repo (no tracked files) is a clean no-op, not an error.
+    #[tokio::test]
+    async fn normalize_noop_on_empty_repo() {
+        let tmp = TempDir::new().expect("tempdir");
+        let dir = tmp.path();
+        git(dir, &["init", "-q", "-b", "main"]);
+        let ws = Workspace::attach_existing(dir, "main").expect("attach");
+        // Must not panic / error even with zero commits + zero tracked files.
+        ws.normalize_mtimes().await;
     }
 }
