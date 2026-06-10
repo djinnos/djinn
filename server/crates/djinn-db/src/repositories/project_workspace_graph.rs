@@ -272,6 +272,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_for_project_returns_rows_sorted_by_workspace_slug() {
+        let repo = fresh().await;
+        seed_project(&repo, "p1").await;
+
+        repo.upsert_many(&[
+            ProjectWorkspaceGraphUpsert {
+                project_id: "p1",
+                workspace_slug: "server",
+                commit_sha: "sha-server",
+                status: "ready",
+            },
+            ProjectWorkspaceGraphUpsert {
+                project_id: "p1",
+                workspace_slug: "api",
+                commit_sha: "sha-api",
+                status: "warming",
+            },
+        ])
+        .await
+        .expect("upsert many");
+
+        let rows = repo.list_for_project("p1").await.expect("list rows");
+        let slugs: Vec<_> = rows.iter().map(|row| row.workspace_slug.as_str()).collect();
+        assert_eq!(slugs, vec!["api", "server"]);
+        assert_eq!(rows[0].commit_sha, "sha-api");
+        assert_eq!(rows[0].status, "warming");
+    }
+
+    #[tokio::test]
     async fn project_existence_and_no_row_behavior() {
         let repo = fresh().await;
         seed_project(&repo, "p1").await;
