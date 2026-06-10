@@ -23,6 +23,7 @@ A task is ready only when:
 - AC are verifiable, objective, and achievable in a single session.
 - Design references **existing** file paths and function/type names (verify with `shell`).
 - Dependencies on sibling tasks are expressed via `blocked_by`.
+- **Tasks that touch the same files are chained, not parallel.** If two tasks in a wave will edit the same file (per their designs), chain them with `blocked_by` — parallel edits to one file guarantee PR merge conflicts and rework loops that cost far more than serialization. This INCLUDES extraction/split tasks: tasks that each extract a different piece OUT OF the same source file all edit that source file and its module root (`mod.rs`/`lib.rs`), so they overlap even though their target files differ — chain the whole split sequence. Only tasks with fully disjoint file sets run in parallel.
 - No AC duplicates verification commands.
 - ADR references included when architectural decisions apply.
 
