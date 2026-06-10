@@ -181,7 +181,11 @@ pub(crate) fn role_for_task_dispatch(
 ///   through worker/reviewer/verifier).
 /// - `status=needs_task_review` / `in_task_review` → [`SupervisorFlow::ReviewResponse`]
 ///   (worker → reviewer → verifier; the planner stage is skipped because the
-///   planner already decided `execute` on a prior run).
+///   planner already decided `execute` on a prior run). The host
+///   (`supervisor_runner::resume_flow`) may further upgrade this to the
+///   reviewer-only [`SupervisorFlow::ReviewResume`] when the worker's commits
+///   are already durable on the mirror task_branch — stage-aware resume after a
+///   reviewer-stage pod kill, skipping the redundant worker redo.
 /// - Any conflict context (merge-conflict or post-review merge-validation) →
 ///   [`SupervisorFlow::ConflictRetry`] (worker → reviewer → verifier; conflict
 ///   fixups bypass the planner).

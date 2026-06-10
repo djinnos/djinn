@@ -350,6 +350,16 @@ fn build_task_run_env(
         // DJINN_MIRROR_ROOT is read by the in-Pod MirrorManager so the
         // worker clones from /mirror without a hard-coded path.
         env_var("DJINN_MIRROR_ROOT", MIRROR_MOUNT_DIR),
+        // Forward the Job's activeDeadlineSeconds so the in-pod supervisor
+        // can arm its OWN soft deadline at `deadline - margin` and wind
+        // itself down gracefully (cancel + checkpoint commit/push) before
+        // the kubelet hard-kills the Pod at the deadline. Without this the
+        // worker is blind to its wall-clock budget and loses in-flight work
+        // to the SIGTERM/SIGKILL. Same i64→string value the Job carries.
+        env_var(
+            "DJINN_TASK_RUN_DEADLINE_SECONDS",
+            &config.task_run_active_deadline_seconds.to_string(),
+        ),
     ];
     // Forward the server's DB configuration so the worker's
     // `bootstrap_warm_database()` opens the same Postgres instance the
@@ -496,7 +506,7 @@ mod tests {
             spec.active_deadline_seconds,
             Some(cfg.task_run_active_deadline_seconds as i64),
         );
-        assert_eq!(spec.active_deadline_seconds, Some(3600));
+        assert_eq!(spec.active_deadline_seconds, Some(10800));
 
         // Pod template mirrors labels.
         let template_labels = spec
@@ -597,6 +607,13 @@ mod tests {
         assert_eq!(
             envs.get("DJINN_MIRROR_ROOT").copied(),
             Some(MIRROR_MOUNT_DIR)
+        );
+        // The in-pod soft-deadline timer reads this; it must equal the Job's
+        // activeDeadlineSeconds so the supervisor's wind-down fires BEFORE the
+        // kubelet hard-kills the Pod.
+        assert_eq!(
+            envs.get("DJINN_TASK_RUN_DEADLINE_SECONDS").copied(),
+            Some(cfg.task_run_active_deadline_seconds.to_string().as_str())
         );
         // DB env vars are gated on the corresponding config fields being
         // `Some`. `for_testing()` leaves them `None`, so they should be

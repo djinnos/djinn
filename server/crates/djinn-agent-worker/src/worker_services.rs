@@ -75,7 +75,12 @@ pub struct WorkerSupervisorServices {
     /// `Mutex<Option<_>>` rather than `OnceLock` because the value is owned
     /// behind `&self` from inside an `async_trait` method and the mutex
     /// guard is dropped before any `.await`.
-    captured_workspace_path: Mutex<Option<PathBuf>>,
+    ///
+    /// Shared via `Arc` with the SIGTERM / soft-deadline checkpoint handlers in
+    /// `main.rs`: the wind-down checkpoint must commit + push the SAME live
+    /// ephemeral clone (the supervisor's `TempDir` clone, not `/workspace`), so
+    /// the handlers read this slot lazily at fire time.
+    captured_workspace_path: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl WorkerSupervisorServices {
@@ -83,18 +88,24 @@ impl WorkerSupervisorServices {
     /// resolved credentials bundle, supervisor cancel token, and the panic-
     /// stub-ish `AgentContext` the in-Pod supervisor threads through the
     /// per-stage executor.
+    ///
+    /// `captured_workspace_path` is created in `main.rs::run_task_run` and
+    /// shared with the SIGTERM / soft-deadline checkpoint handlers so the
+    /// wind-down checkpoint targets the live ephemeral stage clone this impl
+    /// records on its first `execute_stage` call.
     pub fn new(
         rpc: Arc<RpcServices>,
         credentials: ResolvedCredentials,
         cancel: CancellationToken,
         agent_context: AgentContext,
+        captured_workspace_path: Arc<Mutex<Option<PathBuf>>>,
     ) -> Self {
         Self {
             rpc,
             credentials,
             cancel,
             agent_context,
-            captured_workspace_path: Mutex::new(None),
+            captured_workspace_path,
         }
     }
 }

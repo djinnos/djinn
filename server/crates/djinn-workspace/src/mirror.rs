@@ -390,6 +390,76 @@ impl MirrorManager {
 
         Ok(Workspace::new(dir, branch.to_string()))
     }
+
+    /// Cheap host-side check that `branch`'s commits are durably present in the
+    /// mirror AND carry work not already on `base` — i.e. `base` is NOT an
+    /// ancestor-or-equal of `branch`.
+    ///
+    /// Used by the stage-aware-resume decision (`supervisor_runner`): a
+    /// reviewer-stage run that died after the worker already pushed its commits
+    /// to `task_branch` can be resumed at the reviewer instead of redoing the
+    /// worker — but ONLY if that output is actually durable. A missing branch
+    /// (first cycle, or the worker never pushed) or a branch with nothing ahead
+    /// of base means there is no worker diff to review, so the caller must fall
+    /// back to the full worker redo.
+    ///
+    /// Reads the bare mirror directly (no clone): resolves both refs and runs
+    /// `git merge-base --is-ancestor base branch`. `branch` is durably ahead
+    /// when `base` is an ancestor of `branch` but the two are not equal. Any
+    /// resolution failure (mirror missing, branch absent) yields `false` — the
+    /// safe answer is "not durable, redo the worker".
+    pub async fn branch_ahead_of_base(&self, project_id: &str, branch: &str, base: &str) -> bool {
+        let mirror = self.mirror_path(project_id);
+        if !mirror.exists() {
+            return false;
+        }
+        let rev_parse = |refname: String| {
+            let mirror = mirror.clone();
+            async move {
+                run_git_command(
+                    mirror,
+                    vec![
+                        "rev-parse".into(),
+                        "--verify".into(),
+                        "--quiet".into(),
+                        refname,
+                    ],
+                )
+                .await
+                .ok()
+                .map(|o| o.stdout.trim().to_string())
+                .filter(|s| !s.is_empty())
+            }
+        };
+        let (Some(branch_sha), Some(base_sha)) = (
+            rev_parse(format!("refs/heads/{branch}")).await,
+            rev_parse(format!("refs/heads/{base}")).await,
+        ) else {
+            return false;
+        };
+        // Equal heads = no worker diff to review.
+        if branch_sha == base_sha {
+            return false;
+        }
+        // `merge-base --is-ancestor base branch` exits 0 (→ `Ok`) when base is
+        // an ancestor of branch — given the non-equal check above, branch is
+        // then strictly ahead with the worker's commits on top — and exits 1
+        // (→ `Err(CommandFailed { code: 1 })`) when it is not (branch diverged
+        // from / does not contain base). For the resume decision we require the
+        // ancestor relationship: a durable, fast-forwardable worker output the
+        // reviewer can review against base.
+        run_git_command(
+            mirror,
+            vec![
+                "merge-base".into(),
+                "--is-ancestor".into(),
+                base_sha,
+                branch_sha,
+            ],
+        )
+        .await
+        .is_ok()
+    }
 }
 
 /// Is `key` set in the repo config at `mirror`? `git config --get`
@@ -501,5 +571,116 @@ mod gc_tests {
         let mgr = MirrorManager::new(root.path().to_path_buf());
         let err = mgr.gc("does-not-exist").await.unwrap_err();
         assert!(matches!(err, MirrorError::Missing(_)));
+    }
+}
+
+#[cfg(test)]
+mod ahead_of_base_tests {
+    use super::*;
+
+    async fn git(repo: &Path, args: &[&str]) {
+        run_git_command(
+            repo.to_path_buf(),
+            args.iter().map(|s| s.to_string()).collect(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+    }
+
+    /// Build a bare mirror under `{root}/{project_id}.git` seeded with `main`
+    /// and (optionally) a `task` branch one commit ahead. Returns the
+    /// `MirrorManager`.
+    async fn seed_mirror(root: &Path, project_id: &str, with_ahead_task: bool) -> MirrorManager {
+        let mirror = root.join(format!("{project_id}.git"));
+        git(
+            root,
+            &["init", "--bare", "--quiet", mirror.to_str().unwrap()],
+        )
+        .await;
+
+        // Working clone to author commits, then push refs into the bare mirror.
+        let work = TempDir::new().unwrap();
+        git(
+            root,
+            &[
+                "clone",
+                "--quiet",
+                mirror.to_str().unwrap(),
+                work.path().to_str().unwrap(),
+            ],
+        )
+        .await;
+        let wp = work.path();
+        git(wp, &["config", "user.email", "t@t"]).await;
+        git(wp, &["config", "user.name", "t"]).await;
+        git(wp, &["checkout", "-q", "-b", "main"]).await;
+        git(wp, &["commit", "--allow-empty", "-qm", "base"]).await;
+        git(wp, &["push", "-q", "origin", "main"]).await;
+
+        if with_ahead_task {
+            git(wp, &["checkout", "-q", "-b", "task"]).await;
+            git(wp, &["commit", "--allow-empty", "-qm", "worker work"]).await;
+            git(wp, &["push", "-q", "origin", "task"]).await;
+        }
+
+        MirrorManager::new(root.to_path_buf())
+    }
+
+    #[tokio::test]
+    async fn true_when_task_branch_is_ahead_of_base() {
+        let root = TempDir::new().unwrap();
+        let mgr = seed_mirror(root.path(), "p1", true).await;
+        assert!(
+            mgr.branch_ahead_of_base("p1", "task", "main").await,
+            "task branch one commit ahead of main must read as durable"
+        );
+    }
+
+    #[tokio::test]
+    async fn false_when_task_branch_absent() {
+        // First-cycle / worker-never-pushed: no task branch → not durable.
+        let root = TempDir::new().unwrap();
+        let mgr = seed_mirror(root.path(), "p2", false).await;
+        assert!(!mgr.branch_ahead_of_base("p2", "task", "main").await);
+    }
+
+    #[tokio::test]
+    async fn false_when_task_branch_equals_base() {
+        // Worker pushed nothing new (branch == base HEAD) → no diff to review.
+        let root = TempDir::new().unwrap();
+        let mirror = root.path().join("p3.git");
+        git(
+            root.path(),
+            &["init", "--bare", "--quiet", mirror.to_str().unwrap()],
+        )
+        .await;
+        let work = TempDir::new().unwrap();
+        git(
+            root.path(),
+            &[
+                "clone",
+                "--quiet",
+                mirror.to_str().unwrap(),
+                work.path().to_str().unwrap(),
+            ],
+        )
+        .await;
+        let wp = work.path();
+        git(wp, &["config", "user.email", "t@t"]).await;
+        git(wp, &["config", "user.name", "t"]).await;
+        git(wp, &["checkout", "-q", "-b", "main"]).await;
+        git(wp, &["commit", "--allow-empty", "-qm", "base"]).await;
+        git(wp, &["branch", "task"]).await;
+        git(wp, &["push", "-q", "origin", "main", "task"]).await;
+
+        let mgr = MirrorManager::new(root.path().to_path_buf());
+        assert!(!mgr.branch_ahead_of_base("p3", "task", "main").await);
+    }
+
+    #[tokio::test]
+    async fn false_when_mirror_missing() {
+        let root = TempDir::new().unwrap();
+        let mgr = MirrorManager::new(root.path().to_path_buf());
+        assert!(!mgr.branch_ahead_of_base("absent", "task", "main").await);
     }
 }
