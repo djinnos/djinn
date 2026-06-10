@@ -117,7 +117,7 @@ async fn surface_credential_revocation(
 ///   error and still emits `SlotEvent::Free`.
 pub(crate) async fn run_supervisor_dispatch(
     task_id: String,
-    _project_path: String,
+    project_path: String,
     model_id: String,
     app_state: AgentContext,
     kill: CancellationToken,
@@ -624,6 +624,34 @@ pub(crate) async fn run_supervisor_dispatch(
                 runtime = ?runtime_kind,
                 "supervisor dispatch: task-run complete"
             );
+            // Verify BEFORE review. The worker stage completed and the in-pod
+            // supervisor fired `submit_verification` (in_progress → verifying);
+            // the task-run pod is gone and the model slot is about to free. Spawn
+            // the slot-free verification pipeline on the HOST (which owns the
+            // MirrorManager): it checks out the durable task_branch, runs the
+            // scoped verification commands (a cache hit when the commit is
+            // unchanged), and on green transitions verifying → needs_task_review
+            // (re-dispatched as a reviewer-only ReviewResume), on red releases the
+            // task for worker rework with the failure feedback. `spawn_verification`
+            // registers the task in the shared `verifying_tasks` tracker, so the
+            // coordinator's stuck-`verifying` recovery sweep ("no active
+            // verification pipeline") covers a server restart mid-verification.
+            //
+            // Guarded on the outcome (not just the status) so a stale/late report
+            // can't double-spawn: only a clean `WorkerSubmitted` arms it. The
+            // pipeline is idempotent against the cache for an unchanged commit
+            // regardless.
+            if matches!(report.outcome, TaskRunOutcome::WorkerSubmitted) {
+                tracing::info!(
+                    task_id = %task.short_id,
+                    "supervisor dispatch: worker submitted to verification; spawning slot-free verification pipeline"
+                );
+                crate::actors::slot::verification::spawn_verification(
+                    task.id.clone(),
+                    project_path.clone(),
+                    app_state.clone(),
+                );
+            }
             // Feed the model circuit-breaker on a productive run. A terminal
             // outcome that maps to `Completed` (PR opened / closed / escalated)
             // with at least one completed stage means the model produced tokens
@@ -795,6 +823,10 @@ fn report_to_terminal_status(report: &TaskRunReport) -> TaskRunStatus {
     match &report.outcome {
         TaskRunOutcome::PrOpened { .. }
         | TaskRunOutcome::Closed { .. }
+        // The worker stage succeeded and handed off to verification — the
+        // task-run completed cleanly (the verification pipeline runs as a
+        // separate slot-free job on the host).
+        | TaskRunOutcome::WorkerSubmitted
         | TaskRunOutcome::Escalated { .. } => TaskRunStatus::Completed,
         TaskRunOutcome::Failed { .. } => TaskRunStatus::Failed,
         TaskRunOutcome::Interrupted => TaskRunStatus::Interrupted,

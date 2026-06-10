@@ -30,7 +30,8 @@ use std::sync::Arc;
 
 use djinn_core::models::{TaskRunStatus, TaskRunTrigger};
 use djinn_workspace::{
-    EphemeralWorkspaceError, GitIdentity, MergeOutcome, MirrorError, MirrorManager,
+    EphemeralWorkspaceError, GitIdentity, MergeOutcome, MergeParentOutcome, MirrorError,
+    MirrorManager,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -510,6 +511,17 @@ impl TaskRunSupervisor {
         // proper merge commit.  Failures are logged-and-skipped: the worker
         // still runs (just without the merge state), preserving the previous
         // behavior for that path.
+        //
+        // When the pre-merge leaves CONFLICTS for the worker, we snapshot the
+        // exact SHA of `origin/<merge_target>` here (`pending_merge_target_sha`).
+        // The post-worker `WorkerDone` arm uses it to ENFORCE that the worker's
+        // resolution lands as a true two-parent merge commit — workers run
+        // their own git commands and frequently clear `.git/MERGE_HEAD`
+        // (`merge --abort` / `reset` on "unmerged paths") then hand-commit a
+        // single parent, which leaves the branch's merge-base with the target
+        // unchanged so GitHub keeps the PR CONFLICTING forever (the 3hrr loop).
+        // See `Workspace::enforce_merge_parent`.
+        let mut pending_merge_target_sha: Option<String> = None;
         if spec.trigger == TaskRunTrigger::ConflictRetry {
             match workspace.try_merge(&spec.base_branch).await {
                 Ok(MergeOutcome::Clean) => {
@@ -521,12 +533,31 @@ impl TaskRunSupervisor {
                     );
                 }
                 Ok(MergeOutcome::Conflicts { files }) => {
+                    // Snapshot the merge target tip so the post-worker arm can
+                    // re-assert it as the merge's second parent no matter what
+                    // the model does to `.git` state during resolution.
+                    match workspace
+                        .resolve_ref(&format!("origin/{}", spec.base_branch))
+                        .await
+                    {
+                        Ok(sha) => pending_merge_target_sha = Some(sha),
+                        Err(e) => {
+                            tracing::warn!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                target = %spec.base_branch,
+                                error = %e,
+                                "supervisor: ConflictRetry pre-merge could not snapshot merge-target SHA; merge-parent enforcement disabled for this run"
+                            );
+                        }
+                    }
                     info!(
                         task_run_id = %run_id,
                         task_id = %spec.task_id,
                         target = %spec.base_branch,
                         conflict_count = files.len(),
                         conflicting_files = ?files,
+                        merge_target_sha = ?pending_merge_target_sha,
                         "supervisor: ConflictRetry pre-merge left conflicts in worker workspace"
                     );
                 }
@@ -694,6 +725,88 @@ impl TaskRunSupervisor {
                                 );
                             }
                         }
+
+                        // ── Merge-parent guarantee (ConflictRetry only) ─────
+                        //
+                        // On a ConflictRetry run the dispatch-time pre-merge
+                        // staged a conflicted merge of `origin/<merge_target>`
+                        // and snapshotted that tip as `pending_merge_target_sha`.
+                        // The intended path is that the auto-commit above (with
+                        // `.git/MERGE_HEAD` set) records a true two-parent merge.
+                        // But workers run their own git commands and frequently
+                        // clear MERGE_HEAD (`merge --abort` / `reset` on
+                        // "unmerged paths") then hand-commit a single parent —
+                        // the content is right but git history doesn't record
+                        // the merge, so the branch's merge-base with the target
+                        // is unchanged and GitHub keeps the PR CONFLICTING
+                        // forever (the 3hrr infinite-retry loop).
+                        //
+                        // ENFORCE the merge here, regardless of what the model
+                        // did to `.git` state: if the target isn't already an
+                        // ancestor of HEAD, construct a two-parent
+                        // "merge-completion" commit (tree = worker's resolved
+                        // content, parents = [worker HEAD, merge_target_sha]).
+                        // Then assert the ancestor property holds; if it STILL
+                        // fails, fail the stage loudly rather than pushing a
+                        // "resolution" that silently leaves the PR conflicting.
+                        if role_kind == RoleKind::Worker
+                            && let Some(merge_target_sha) = pending_merge_target_sha.as_deref()
+                        {
+                            let identity = GitIdentity {
+                                name: spec.commit_author_name.as_deref().unwrap_or("djinn-bot"),
+                                email: spec
+                                    .commit_author_email
+                                    .as_deref()
+                                    .unwrap_or("bot@djinn.local"),
+                            };
+                            match workspace
+                                .enforce_merge_parent(merge_target_sha, identity)
+                                .await
+                            {
+                                Ok(MergeParentOutcome::AlreadyMerged) => {
+                                    info!(
+                                        task_id = %task.short_id,
+                                        task_run_id = %run_id,
+                                        merge_target_sha,
+                                        "supervisor: ConflictRetry merge parent already recorded by worker auto-commit (MERGE_HEAD survived)"
+                                    );
+                                }
+                                Ok(MergeParentOutcome::Recovered { new_head }) => {
+                                    info!(
+                                        task_id = %task.short_id,
+                                        task_run_id = %run_id,
+                                        merge_target_sha,
+                                        new_head = %new_head,
+                                        "supervisor: ConflictRetry worker lost the merge parent; reconstructed two-parent merge-completion commit"
+                                    );
+                                }
+                                Err(e) => {
+                                    // The resolution could not be turned into a
+                                    // true merge (still-unmerged index, or the
+                                    // ancestor assertion failed). Do NOT push a
+                                    // conflicting "resolution" — fail loudly so
+                                    // the run redispatches as ConflictRetry with
+                                    // the metadata still set.
+                                    tracing::error!(
+                                        task_id = %task.short_id,
+                                        task_run_id = %run_id,
+                                        role = %role_kind.as_str(),
+                                        merge_target_sha,
+                                        error = %e,
+                                        "supervisor: ConflictRetry merge-parent enforcement FAILED — refusing to push an unmerged resolution; failing the stage for redispatch"
+                                    );
+                                    result = Some(TaskRunOutcome::Failed {
+                                        stage: "worker".into(),
+                                        reason: format!(
+                                            "merge-parent enforcement failed: could not record a two-parent merge of {merge_target_sha} (the resolution would leave the PR conflicting): {e}"
+                                        ),
+                                        provider_failure: None,
+                                    });
+                                    break;
+                                }
+                            }
+                        }
+
                         // Push task_branch to the mirror UNCONDITIONALLY after
                         // the stage — not just when the auto-commit above
                         // produced a new commit. Workers frequently commit their
@@ -730,9 +843,21 @@ impl TaskRunSupervisor {
                                 "supervisor: pushed task_branch to mirror after stage (durable)"
                             );
                         }
-                        // Worker finished cleanly → submit_task_review
-                        // (in_progress → needs_task_review). Architect has no
-                        // analogous transition in the current state machine.
+                        // Worker finished cleanly → submit_verification
+                        // (in_progress → verifying). The run ends after this
+                        // stage (the worker-only sequence has no reviewer leg);
+                        // the HOST then spawns the slot-free verification
+                        // pipeline against the durable task_branch. Verification
+                        // green moves verifying → needs_task_review (which the
+                        // coordinator re-dispatches as a reviewer-only
+                        // ReviewResume), verification red releases the task for
+                        // worker rework — so verification runs BETWEEN the
+                        // worker and the reviewer, as designed. (Previously this
+                        // fired `submit_task_review` and an in-pod reviewer leg
+                        // ran back-to-back, so verification only happened later
+                        // at the pre-PR gate — the bug this rewiring fixes.)
+                        // Architect has no analogous transition in the current
+                        // state machine.
                         //
                         // Gate on the cancel token: a stall-kill / preempt can
                         // flip cancel mid-stage and the agent may still emit a
@@ -745,13 +870,13 @@ impl TaskRunSupervisor {
                                 tracing::debug!(
                                     task_run_id = %run_id,
                                     task_id = %spec.task_id,
-                                    "supervisor: run cancelled — skipping submit_task_review (task stays in_progress for redispatch)"
+                                    "supervisor: run cancelled — skipping submit_verification (task stays in_progress for redispatch)"
                                 );
                             } else if let Err(e) = self
                                 .services
                                 .transition_task(
                                     spec.task_id.clone(),
-                                    "submit_task_review".into(),
+                                    "submit_verification".into(),
                                     None,
                                 )
                                 .await
@@ -760,7 +885,7 @@ impl TaskRunSupervisor {
                                     task_run_id = %run_id,
                                     task_id = %spec.task_id,
                                     error = %e,
-                                    "supervisor: post-worker submit_task_review transition skipped"
+                                    "supervisor: post-worker submit_verification transition skipped"
                                 );
                             }
                         }
@@ -1151,12 +1276,38 @@ impl TaskRunSupervisor {
                                 last_stage_role
                             ),
                         },
-                        // The Lead flow only reaches here on the `approve`
-                        // decision (every other lead decision set `result` and
-                        // broke). lead_approve already moved the task to
-                        // `approved`; open_pr pushes the branch and fires
-                        // pr_created (approved → pr_draft), the same terminal
-                        // path as a reviewer approval.
+                        // Worker-only flows (NewTask / ReviewResponse /
+                        // ConflictRetry) end at the worker stage: verification
+                        // runs BEFORE the reviewer now, so there is NO PR to
+                        // open here. The worker already fired `submit_verification`
+                        // (in_progress → verifying) above; signal the host with a
+                        // `WorkerSubmitted` outcome so it spawns the slot-free
+                        // verification pipeline. Detect "the last stage was the
+                        // worker" rather than enumerating the flows so a future
+                        // flow that ends at the worker inherits the right path.
+                        // The PR is opened later, after a reviewer-only
+                        // ReviewResume run that a green verification re-dispatches.
+                        SupervisorFlow::NewTask
+                        | SupervisorFlow::ReviewResponse
+                        | SupervisorFlow::ConflictRetry
+                            if last_stage_role == Some(RoleKind::Worker) =>
+                        {
+                            info!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                flow = ?spec.flow,
+                                "supervisor: worker stage complete; task submitted to verification (no PR opened here)"
+                            );
+                            TaskRunOutcome::WorkerSubmitted
+                        }
+                        // The reviewer-only ReviewResume (and the Lead `approve`
+                        // decision) DO open a PR: ReviewResume's reviewer approved
+                        // the already-verified diff (in_task_review → approved),
+                        // and lead_approve already moved the task to `approved`.
+                        // open_pr pushes the branch and fires pr_created
+                        // (approved → pr_draft). The Lead flow only reaches here on
+                        // the `approve` decision (every other lead decision set
+                        // `result` and broke).
                         SupervisorFlow::NewTask
                         | SupervisorFlow::ReviewResponse
                         | SupervisorFlow::ReviewResume
@@ -1185,6 +1336,9 @@ impl TaskRunSupervisor {
             TaskRunOutcome::PrOpened { .. } | TaskRunOutcome::Closed { .. } => {
                 TaskRunStatus::Completed
             }
+            // The worker stage genuinely succeeded and handed off to the
+            // verification pipeline; the task-run itself completed cleanly.
+            TaskRunOutcome::WorkerSubmitted => TaskRunStatus::Completed,
             TaskRunOutcome::Escalated { .. } => TaskRunStatus::Completed,
             TaskRunOutcome::Failed { .. } => TaskRunStatus::Failed,
             TaskRunOutcome::Interrupted => TaskRunStatus::Interrupted,

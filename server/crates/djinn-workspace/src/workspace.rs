@@ -40,6 +40,22 @@ pub enum MergeOutcome {
     Conflicts { files: Vec<String> },
 }
 
+/// Outcome of [`Workspace::enforce_merge_parent`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeParentOutcome {
+    /// `merge_target_sha` was already an ancestor of HEAD — the worktree's
+    /// commit history already records the merge (either MERGE_HEAD survived
+    /// and the auto-commit produced a real two-parent merge, or a prior run
+    /// already landed it). No new commit created.
+    AlreadyMerged,
+    /// HEAD did not record the merge (the worker cleared `.git/MERGE_HEAD`
+    /// and/or committed a single-parent "resolution"). A synthetic two-parent
+    /// "merge-completion" commit was created — tree identical to the worker's
+    /// resolved content, parents = [worker HEAD, merge_target_sha] — and the
+    /// branch was advanced to it. `new_head` is the SHA of that commit.
+    Recovered { new_head: String },
+}
+
 /// How the workspace's on-disk root is owned.
 ///
 /// `Owned` drops the underlying `TempDir` when the workspace is dropped —
@@ -340,6 +356,168 @@ impl Workspace {
         }
 
         Ok(MergeOutcome::Conflicts { files })
+    }
+
+    /// Resolve a ref / revision to its full commit SHA (`git rev-parse`).
+    ///
+    /// Used to snapshot `origin/<merge_target>` at the moment the supervisor
+    /// stages a conflicted merge for the worker, so the post-worker
+    /// [`Self::enforce_merge_parent`] can re-assert that exact commit as the
+    /// merge's second parent regardless of what the model did to `.git` state.
+    pub async fn resolve_ref(&self, rev: &str) -> Result<String, EphemeralWorkspaceError> {
+        let out = self.run_git(&["rev-parse", rev], &[]).await?;
+        Ok(out.trim().to_string())
+    }
+
+    /// Whether `ancestor` is an ancestor of `descendant` (`git merge-base
+    /// --is-ancestor`). `Ok(true)` when it is, `Ok(false)` when not, `Err`
+    /// on any other git failure (bad rev, etc.).
+    pub async fn is_ancestor(
+        &self,
+        ancestor: &str,
+        descendant: &str,
+    ) -> Result<bool, EphemeralWorkspaceError> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(self.root.path())
+            .args(["merge-base", "--is-ancestor", ancestor, descendant])
+            .output()
+            .await?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                Err(EphemeralWorkspaceError::Git(format!(
+                    "git merge-base --is-ancestor {ancestor} {descendant}: {}",
+                    stderr.trim()
+                )))
+            }
+        }
+    }
+
+    /// Supervisor-owned guarantee that a ConflictRetry resolution lands as a
+    /// TRUE two-parent merge commit — regardless of what the worker did to the
+    /// `.git` state during its session.
+    ///
+    /// ## Why this exists
+    /// On a ConflictRetry run the supervisor stages a conflicted merge of
+    /// `origin/<merge_target>` into the task branch (markers on disk,
+    /// `.git/MERGE_HEAD` set) and lets the worker resolve the content. The
+    /// *intended* path is: worker edits the markers out → post-worker
+    /// auto-commit sees `MERGE_HEAD` and records a two-parent merge commit →
+    /// the branch's merge-base with the target advances → GitHub flips the PR
+    /// back to mergeable.
+    ///
+    /// But workers run their OWN git commands. Many of them, on seeing
+    /// "unmerged paths", run `git merge --abort` / `git reset` (which clears
+    /// `MERGE_HEAD`) and then hand-commit a single-parent "resolution". The
+    /// content is correct, but git history never records the merge: the
+    /// branch's merge-base with the target is unchanged, so GitHub keeps the
+    /// PR `CONFLICTING` forever and the poller re-flags it — an infinite,
+    /// token-burning retry loop (production task 3hrr, commit 9920477a).
+    ///
+    /// ## What it does
+    /// Given the SHA of `origin/<merge_target>` captured when the conflicted
+    /// merge was staged (`merge_target_sha`):
+    /// 1. Stage everything (`git add -A`) so the worker's on-disk resolution —
+    ///    whether committed or merely saved — is reflected in the index/tree.
+    /// 2. If `merge_target_sha` is already an ancestor of HEAD, the merge is
+    ///    already recorded (MERGE_HEAD survived, or a prior run landed it):
+    ///    return [`MergeParentOutcome::AlreadyMerged`]. No new commit.
+    /// 3. Otherwise construct a synthetic two-parent commit:
+    ///    `git write-tree` (current resolved tree) → `git commit-tree <tree>
+    ///    -p HEAD -p <merge_target_sha>` → reset the branch to it. The tree is
+    ///    EXACTLY the worker's resolved content (so the diff is unchanged); the
+    ///    history now records the merge. This works identically whether the
+    ///    worker left the resolution uncommitted, hand-committed a single
+    ///    parent, or aborted the merge — the tree is taken from the worktree
+    ///    either way.
+    ///
+    /// After either outcome the caller MUST verify
+    /// `is_ancestor(merge_target_sha, "HEAD")` holds and fail loudly if not —
+    /// never push a "resolution" that leaves the PR conflicting silently.
+    pub async fn enforce_merge_parent(
+        &self,
+        merge_target_sha: &str,
+        identity: GitIdentity<'_>,
+    ) -> Result<MergeParentOutcome, EphemeralWorkspaceError> {
+        // Refuse to fabricate a merge over a still-conflicted tree. This MUST
+        // be checked BEFORE `git add -A`, because `add -A` would stage the
+        // conflict markers as ordinary resolved content (clearing the unmerged
+        // index entries) and mask an unresolved merge. `ls-files --unmerged`
+        // reports any index entry at stage > 0 — i.e. a path git still
+        // considers conflicted (worker never resolved, MERGE_HEAD still set).
+        let unmerged = self.run_git(&["ls-files", "--unmerged"], &[]).await?;
+        if !unmerged.trim().is_empty() {
+            let paths: Vec<&str> = unmerged
+                .lines()
+                .filter_map(|l| l.split('\t').nth(1))
+                .collect();
+            return Err(EphemeralWorkspaceError::Git(format!(
+                "enforce_merge_parent: index still has unmerged paths: {}",
+                paths.join(", ")
+            )));
+        }
+
+        // Reflect the worker's on-disk resolution (committed or not) into the
+        // index so `write-tree` captures it. Idempotent when the tree is clean.
+        self.run_git(&["add", "-A"], &[]).await?;
+
+        // Already a proper merge? (MERGE_HEAD survived → auto-commit recorded a
+        // two-parent merge; or a prior run already landed it.)
+        if self.is_ancestor(merge_target_sha, "HEAD").await? {
+            return Ok(MergeParentOutcome::AlreadyMerged);
+        }
+
+        // Construct the two-parent "merge-completion" commit. Its tree is the
+        // worker's resolved tree (write-tree of the staged index); its parents
+        // are the worker's current HEAD and the captured merge target.
+        let head_sha = self.run_git(&["rev-parse", "HEAD"], &[]).await?;
+        let head_sha = head_sha.trim().to_string();
+        let tree_sha = self.run_git(&["write-tree"], &[]).await?;
+        let tree_sha = tree_sha.trim().to_string();
+
+        let message = "Merge completion: record two-parent merge after conflict resolution";
+        let commit_out = self
+            .run_git(
+                &[
+                    "commit-tree",
+                    &tree_sha,
+                    "-p",
+                    &head_sha,
+                    "-p",
+                    merge_target_sha,
+                    "-m",
+                    message,
+                ],
+                &[
+                    ("GIT_AUTHOR_NAME", identity.name),
+                    ("GIT_AUTHOR_EMAIL", identity.email),
+                    ("GIT_COMMITTER_NAME", identity.name),
+                    ("GIT_COMMITTER_EMAIL", identity.email),
+                ],
+            )
+            .await?;
+        let new_head = commit_out.trim().to_string();
+
+        // Advance the checked-out branch to the new merge commit, keeping the
+        // worktree/index intact (tree is identical, so this is a pure history
+        // rewrite — no file churn). `reset --soft` moves HEAD + branch ref
+        // without touching the index or working tree.
+        self.run_git(&["reset", "--soft", &new_head], &[]).await?;
+
+        // Defensive post-check: the target MUST now be an ancestor. If git
+        // somehow produced a commit that doesn't record the parent, surface it
+        // loudly rather than returning a false success.
+        if !self.is_ancestor(merge_target_sha, "HEAD").await? {
+            return Err(EphemeralWorkspaceError::Git(format!(
+                "enforce_merge_parent: constructed merge commit {new_head} but \
+                 {merge_target_sha} is still not an ancestor of HEAD"
+            )));
+        }
+
+        Ok(MergeParentOutcome::Recovered { new_head })
     }
 
     /// Push the named branch from this workspace to its `origin` remote.
@@ -724,6 +902,183 @@ mod tests {
             disk.contains("<<<<<<<") && disk.contains("=======") && disk.contains(">>>>>>>"),
             "conflict markers must be present on disk:\n{disk}"
         );
+    }
+
+    // ---- enforce_merge_parent (ConflictRetry guarantee) ------------------
+
+    /// Identity used for the synthetic merge-completion commit in tests.
+    const TEST_IDENT: GitIdentity<'static> = GitIdentity {
+        name: "djinn-bot",
+        email: "bot@djinn.local",
+    };
+
+    /// Set up a conflicted merge of `main` into `task` and return
+    /// `(origin, clone, ws, main_sha)`. The worktree is mid-merge with markers
+    /// on `shared.txt` (MERGE_HEAD set); callers then simulate the worker.
+    async fn conflicted_merge_fixture() -> (TempDir, TempDir, Workspace, String) {
+        let (origin, clone, ws) = fixture();
+        let cp = clone.path();
+        write(cp, "shared.txt", "task-edit\n");
+        git(cp, &["add", "-A"]);
+        git(cp, &["commit", "-m", "task edits shared"]);
+        advance_main(
+            origin.path(),
+            "shared.txt",
+            "main-edit\n",
+            "main edits shared",
+        );
+        // Stage the conflicted merge (fetches origin/main, sets MERGE_HEAD).
+        match ws.try_merge("main").await.expect("merge") {
+            MergeOutcome::Conflicts { .. } => {}
+            other => panic!("expected conflicts, got {other:?}"),
+        }
+        let main_sha = git(cp, &["rev-parse", "origin/main"]).trim().to_string();
+        (origin, clone, ws, main_sha)
+    }
+
+    fn parent_count(dir: &Path) -> usize {
+        let parents = git(dir, &["rev-list", "--parents", "-n", "1", "HEAD"]);
+        // Output is "<sha> <parent1> <parent2> ..."; subtract the commit itself.
+        parents.split_whitespace().count() - 1
+    }
+
+    /// Worker preserved MERGE_HEAD and the post-worker auto-commit recorded a
+    /// real two-parent merge: enforce_merge_parent reports AlreadyMerged.
+    #[tokio::test]
+    async fn enforce_merge_parent_already_merged_when_merge_head_survived() {
+        let (_origin, clone, ws, main_sha) = conflicted_merge_fixture().await;
+        let cp = clone.path();
+        // Worker resolves the markers, leaving MERGE_HEAD intact.
+        write(cp, "shared.txt", "resolved-both\n");
+        // The post-worker auto-commit (MERGE_HEAD set) → real merge commit.
+        ws.commit("resolution", TEST_IDENT).await.expect("commit");
+        assert_eq!(
+            parent_count(cp),
+            2,
+            "auto-commit should be a 2-parent merge"
+        );
+
+        let outcome = ws
+            .enforce_merge_parent(&main_sha, TEST_IDENT)
+            .await
+            .expect("enforce");
+        assert_eq!(outcome, MergeParentOutcome::AlreadyMerged);
+        assert!(
+            ws.is_ancestor(&main_sha, "HEAD").await.expect("anc"),
+            "merge target must be an ancestor"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cp.join("shared.txt")).unwrap(),
+            "resolved-both\n"
+        );
+    }
+
+    /// Worker aborted the merge (cleared MERGE_HEAD) then hand-committed a
+    /// SINGLE-parent "resolution": enforce_merge_parent reconstructs a true
+    /// two-parent merge whose tree equals the worker's resolved content.
+    #[tokio::test]
+    async fn enforce_merge_parent_recovers_when_worker_hand_committed_single_parent() {
+        let (_origin, clone, ws, main_sha) = conflicted_merge_fixture().await;
+        let cp = clone.path();
+        // Worker resolves content, then aborts the merge and commits one parent.
+        write(cp, "shared.txt", "resolved-both\n");
+        git(cp, &["merge", "--abort"]);
+        // merge --abort discards the worktree edit too; re-apply the resolution.
+        write(cp, "shared.txt", "resolved-both\n");
+        git(cp, &["add", "-A"]);
+        git(cp, &["commit", "-m", "single-parent resolution"]);
+        assert_eq!(parent_count(cp), 1, "worker commit is single-parent");
+        assert!(
+            !ws.is_ancestor(&main_sha, "HEAD").await.expect("anc"),
+            "precondition: target not yet an ancestor"
+        );
+
+        let outcome = ws
+            .enforce_merge_parent(&main_sha, TEST_IDENT)
+            .await
+            .expect("enforce");
+        let new_head = match outcome {
+            MergeParentOutcome::Recovered { new_head } => new_head,
+            other => panic!("expected Recovered, got {other:?}"),
+        };
+        assert_eq!(
+            git(cp, &["rev-parse", "HEAD"]).trim(),
+            new_head,
+            "branch must point at the reconstructed merge commit"
+        );
+        assert_eq!(parent_count(cp), 2, "reconstructed commit has two parents");
+        assert!(
+            ws.is_ancestor(&main_sha, "HEAD").await.expect("anc"),
+            "merge target must now be an ancestor"
+        );
+        // Tree is unchanged — the diff equals the worker's resolution.
+        assert_eq!(
+            std::fs::read_to_string(cp.join("shared.txt")).unwrap(),
+            "resolved-both\n"
+        );
+    }
+
+    /// Worker resolved the markers but left the result UNCOMMITTED (no
+    /// MERGE_HEAD because it cleared it, e.g. via reset): enforce_merge_parent
+    /// stages the worktree and records the two-parent merge over it.
+    #[tokio::test]
+    async fn enforce_merge_parent_recovers_when_resolution_uncommitted() {
+        let (_origin, clone, ws, main_sha) = conflicted_merge_fixture().await;
+        let cp = clone.path();
+        // Worker resolved content but then `git reset` cleared MERGE_HEAD and
+        // unstaged everything, leaving the resolution as an uncommitted edit.
+        write(cp, "shared.txt", "resolved-both\n");
+        git(cp, &["add", "-A"]);
+        git(cp, &["reset"]); // unstage + clear MERGE_HEAD, keep worktree
+        let head_before = git(cp, &["rev-parse", "HEAD"]).trim().to_string();
+
+        let outcome = ws
+            .enforce_merge_parent(&main_sha, TEST_IDENT)
+            .await
+            .expect("enforce");
+        let new_head = match outcome {
+            MergeParentOutcome::Recovered { new_head } => new_head,
+            other => panic!("expected Recovered, got {other:?}"),
+        };
+        assert_ne!(new_head, head_before, "a new merge commit was created");
+        assert_eq!(parent_count(cp), 2, "two parents");
+        assert!(
+            ws.is_ancestor(&main_sha, "HEAD").await.expect("anc"),
+            "merge target must now be an ancestor"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cp.join("shared.txt")).unwrap(),
+            "resolved-both\n"
+        );
+        // The first parent is the worker's pre-merge HEAD (content preserved).
+        let first_parent = git(cp, &["rev-parse", "HEAD^1"]).trim().to_string();
+        assert_eq!(first_parent, head_before);
+    }
+
+    /// If the worktree still has UNMERGED paths (worker never resolved), the
+    /// guarantee refuses to fabricate a merge — it errors loudly so the caller
+    /// fails the stage instead of pushing a conflicting "resolution".
+    #[tokio::test]
+    async fn enforce_merge_parent_errors_on_unmerged_index() {
+        let (_origin, clone, ws, main_sha) = conflicted_merge_fixture().await;
+        let cp = clone.path();
+        // Leave the conflict markers in place (worker did nothing).
+        let disk = std::fs::read_to_string(cp.join("shared.txt")).unwrap();
+        assert!(disk.contains("<<<<<<<"), "precondition: markers present");
+
+        let err = ws
+            .enforce_merge_parent(&main_sha, TEST_IDENT)
+            .await
+            .expect_err("must refuse an unmerged tree");
+        match err {
+            EphemeralWorkspaceError::Git(msg) => {
+                assert!(
+                    msg.contains("unmerged"),
+                    "error must mention unmerged paths: {msg}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

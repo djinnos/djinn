@@ -305,8 +305,11 @@ pub(crate) fn render_prompt_for_role(
     let verification_rules_section = match &ctx.verification_rules {
         Some(rules) if !rules.trim().is_empty() => format!(
             "## Verification Rules\n\n\
-             When running build/test commands between edits, match your changed files against \
-             these rules and run the corresponding commands — not full-workspace equivalents.\n\n\
+             These commands run AUTOMATICALLY after your session, against your submitted \
+             tree — do NOT run them yourself. They are listed so you know what will be \
+             checked. Between edits, verify with the narrowest scoped command that covers \
+             your change (e.g. `cargo check -p <crate>`, a single test), never a \
+             workspace-wide build/clippy/test.\n\n\
              {rules}\n"
         ),
         _ => String::new(),
