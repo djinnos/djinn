@@ -873,6 +873,13 @@ mod tests {
                 max_tokens_default: None,
             },
             Expected {
+                id: "minimax-coding-plan",
+                fixed_family: Some(FormatFamily::Anthropic),
+                auth_shape: AuthShape::Bearer,
+                streaming: true,
+                max_tokens_default: Some(64_000),
+            },
+            Expected {
                 id: "chatgpt_codex",
                 fixed_family: Some(FormatFamily::OpenAIResponses),
                 auth_shape: AuthShape::Bearer,

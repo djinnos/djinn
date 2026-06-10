@@ -697,7 +697,9 @@ pub fn format_family_for_provider(
 ) -> djinn_provider::provider::FormatFamily {
     use djinn_provider::provider::FormatFamily;
     let lower = provider_id.to_lowercase();
-    if lower.contains("anthropic") {
+    // MiniMax (incl. the coding-plan providers) only exposes an
+    // Anthropic-compatible endpoint (`https://api.minimax.io/anthropic/v1`).
+    if lower.contains("anthropic") || lower.contains("minimax") {
         FormatFamily::Anthropic
     } else if lower.contains("google") || lower.contains("gemini") || lower.contains("vertex") {
         FormatFamily::Google

@@ -1,4 +1,6 @@
+use djinn_agent::actors::slot::{format_family_for_provider, parse_model_id};
 use djinn_provider::message::{CacheBreakpoint, ContentBlock, Message, MessageMeta, Role};
+use djinn_provider::provider::FormatFamily;
 
 use super::layout::{compose_system_prompt_segments, partition_system_prompt_segments};
 
@@ -6,11 +8,21 @@ pub(in crate::server::chat) const ANTHROPIC_CACHE_BREAKPOINT_KEY: &str =
     "anthropic_cache_breakpoint";
 pub(in crate::server::chat) const ANTHROPIC_STABLE_PREFIX_KIND: &str = "stable_prefix";
 
+/// Whether the model is served over the Anthropic wire format and therefore
+/// consumes `cache_control` breakpoint metadata. Routed through
+/// [`format_family_for_provider`] so Anthropic-compatible vendors (MiniMax
+/// coding plan, …) get the same stable-prefix caching as native Anthropic.
+fn speaks_anthropic_format(model: &str) -> bool {
+    parse_model_id(model).is_ok_and(|(provider_id, model_name)| {
+        format_family_for_provider(&provider_id, &model_name) == FormatFamily::Anthropic
+    })
+}
+
 pub(in crate::server::chat) fn system_message_metadata(
     model: &str,
     has_stable_prefix: bool,
 ) -> Option<MessageMeta> {
-    if model.starts_with("anthropic/") && has_stable_prefix {
+    if speaks_anthropic_format(model) && has_stable_prefix {
         Some(MessageMeta {
             input_tokens: None,
             output_tokens: None,
