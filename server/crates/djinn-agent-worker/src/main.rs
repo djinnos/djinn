@@ -105,6 +105,15 @@ const SOFT_DEADLINE_MIN: Duration = Duration::from_secs(60);
 /// starve the terminal RPC flush.
 const CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// How often the periodic push loop wakes to push `task_branch` to the mirror.
+/// ~3 min is a deliberate middle ground: short enough that an OOM SIGKILL
+/// (which gets NO signal, so the SIGTERM/soft-deadline checkpoint never runs)
+/// strands at most ~3 min of already-committed work, long enough that the
+/// per-tick `git rev-parse` + occasional push add negligible load. The push is
+/// read-only on the working tree (it reads refs/objects only — no add, no
+/// commit), so it never contends with the live agent or cargo.
+const PERIODIC_PUSH_INTERVAL: Duration = Duration::from_secs(180);
+
 use worker_services::WorkerSupervisorServices;
 
 /// Top-level arg parser for the worker binary.
@@ -458,6 +467,21 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
         captured_workspace_path.clone(),
         spec.task_branch.clone(),
         checkpoint_identity,
+    );
+
+    // OOM kills are SIGKILL: no signal, no soft-deadline fire, no checkpoint —
+    // the pod just vanishes with its ephemeral clone. Production task pods were
+    // repeatedly OOM-killed mid-stage (rust-analyzer + rustc + rust-lld blowing
+    // the cgroup limit), losing 30-60 min of in-flight work. The periodic push
+    // is the OOM-proof backstop: every ~3 min it pushes whatever the worker has
+    // ALREADY committed (via its own shell) to the mirror, so an unsignalled
+    // SIGKILL strands at most one interval of committed work. It is PUSH-ONLY
+    // (no commit) so it never mutates HEAD/index under the live agent.
+    install_periodic_push(
+        cancel.clone(),
+        args.task_run_id.clone(),
+        captured_workspace_path.clone(),
+        spec.task_branch.clone(),
     );
 
     let server_addr = args.server_addr.clone();
@@ -824,6 +848,179 @@ fn install_soft_deadline(
                     &task_run_id,
                 )
                 .await;
+            }
+        }
+    });
+}
+
+/// Decide whether the periodic push loop should push this tick.
+///
+/// Pure so it can be unit-tested without git: push iff the local `task_branch`
+/// SHA differs from the last SHA this loop successfully pushed. A `None`
+/// `last_pushed` (first observed SHA this run) always pushes — we can't assume
+/// the mirror is current, and the push refspec is idempotent if it happens to
+/// be. Equal SHAs skip (nothing new since the last successful push).
+fn push_needed(current: &str, last_pushed: Option<&str>) -> bool {
+    match last_pushed {
+        Some(prev) => prev != current,
+        None => true,
+    }
+}
+
+/// Resolve the local SHA of `branch` in the workspace at `path` via
+/// `git rev-parse`. Returns `None` on any failure (branch not yet created, git
+/// busy mid-operation, etc.) — the periodic push loop treats that as "skip this
+/// tick" and retries on the next one. Mirrors the direct-`Command` idiom
+/// [`Workspace::is_up_to_date_with`] uses for git calls that need to
+/// discriminate outcomes rather than fail on every non-zero exit.
+async fn resolve_branch_sha(path: &Path, branch: &str) -> Option<String> {
+    let output = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--verify", "--quiet"])
+        // `<branch>^{commit}` resolves the local branch ref to its commit SHA
+        // and fails cleanly (non-zero, empty stdout under --quiet) if the ref
+        // doesn't exist yet.
+        .arg(format!("{branch}^{{commit}}"))
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if sha.is_empty() { None } else { Some(sha) }
+}
+
+/// Spawn the periodic push loop: every [`PERIODIC_PUSH_INTERVAL`] push
+/// `task_branch` to the mirror IF the local branch head moved since the last
+/// successful push. This is the OOM-proof durability backstop.
+///
+/// OOM kills are SIGKILL — no signal reaches the pod, so neither the SIGTERM
+/// handler nor the soft-deadline timer (which both run [`checkpoint_workspace`])
+/// gets a chance to save work. This loop closes that gap by pushing
+/// already-committed work on a cadence, so an unsignalled SIGKILL strands at
+/// most one interval of committed commits in the (now-gone) ephemeral clone.
+///
+/// PUSH ONLY — this deliberately does NOT commit. Workers commit their own work
+/// via shell frequently during a session, so pushing those commits captures
+/// most of the value with zero behavioural risk. A periodic auto-commit would
+/// mutate HEAD/index under the live agent mid-edit (the model runs `git status`
+/// / `git diff` and would get confused; half-staged states would freeze), so it
+/// is explicitly out of scope — the SIGTERM/soft-deadline checkpoint already
+/// handles uncommitted changes for signal deaths. Do NOT "improve" this into an
+/// add/commit: `git push` is read-only on the working tree (it reads
+/// refs/objects only), which is exactly why it needs no locking against cargo or
+/// the worker's own git invocations.
+///
+/// Behaviour per tick:
+/// - slot is `None` (no stage started yet) → skip silently.
+/// - `git rev-parse` fails (branch absent, git mid-operation) → warn-and-skip,
+///   retry next tick.
+/// - SHA unchanged since the last successful push → skip (debug log).
+/// - SHA changed → `push_to_origin(task_branch)`; on success record the SHA and
+///   log info; on failure warn and leave `last_pushed` unchanged so the next
+///   tick retries. A non-fast-forward rejection (the mirror is somehow ahead —
+///   shouldn't happen for a task branch owned by one run, but a stale prior
+///   push could linger) is tolerated identically: it surfaces as a push error,
+///   we warn and retry. We deliberately do NOT force-push — clobbering the
+///   mirror would risk discarding commits, and the SIGTERM/soft-deadline
+///   checkpoint plus the supervisor's own post-stage push remain the
+///   authoritative paths.
+///
+/// Stands down via `tokio::select!` on `cancel.cancelled()` so it exits cleanly
+/// when the supervisor finishes or any wind-down path cancels.
+fn install_periodic_push(
+    cancel: CancellationToken,
+    task_run_id: String,
+    captured_workspace_path: Arc<std::sync::Mutex<Option<PathBuf>>>,
+    task_branch: String,
+) {
+    tokio::spawn(async move {
+        // SHA this loop last pushed successfully. Kept in local state so we
+        // never have to interrogate the mirror — a no-op push on the first
+        // changed SHA is cheap and the refspec is idempotent anyway.
+        let mut last_pushed: Option<String> = None;
+        let mut ticker = tokio::time::interval(PERIODIC_PUSH_INTERVAL);
+        // The first `tick()` completes immediately; burn it so we wait a full
+        // interval before the first push (a freshly-started stage rarely has
+        // commits in the first 180s, and the supervisor's own pushes cover
+        // boundaries).
+        ticker.tick().await;
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    tracing::debug!(
+                        task_run_id = %task_run_id,
+                        "periodic push: cancelled; standing down"
+                    );
+                    return;
+                }
+                _ = ticker.tick() => {}
+            }
+
+            let workspace_path = {
+                captured_workspace_path
+                    .lock()
+                    .expect("captured_workspace_path mutex poisoned")
+                    .clone()
+            };
+            let Some(workspace_path) = workspace_path else {
+                // No stage has started yet → no ephemeral clone, nothing to
+                // push. Silent: this is the expected state during setup.
+                continue;
+            };
+
+            let Some(current) = resolve_branch_sha(&workspace_path, &task_branch).await else {
+                warn!(
+                    task_run_id = %task_run_id,
+                    branch = %task_branch,
+                    path = %workspace_path.display(),
+                    "periodic push: could not resolve local branch SHA (branch absent or git busy); skipping this tick"
+                );
+                continue;
+            };
+
+            if !push_needed(&current, last_pushed.as_deref()) {
+                tracing::debug!(
+                    task_run_id = %task_run_id,
+                    branch = %task_branch,
+                    sha = %current,
+                    "periodic push: branch head unchanged since last push; skipping"
+                );
+                continue;
+            }
+
+            let ws = match Workspace::attach_existing(&workspace_path, task_branch.clone()) {
+                Ok(ws) => ws,
+                Err(e) => {
+                    warn!(
+                        task_run_id = %task_run_id,
+                        branch = %task_branch,
+                        path = %workspace_path.display(),
+                        error = %e,
+                        "periodic push: failed to attach workspace; skipping this tick"
+                    );
+                    continue;
+                }
+            };
+
+            match ws.push_to_origin(&task_branch).await {
+                Ok(()) => {
+                    last_pushed = Some(current.clone());
+                    info!(
+                        task_run_id = %task_run_id,
+                        branch = %task_branch,
+                        sha = %current,
+                        "periodic push: pushed task_branch to mirror — committed work is durable against OOM"
+                    );
+                }
+                Err(e) => warn!(
+                    task_run_id = %task_run_id,
+                    branch = %task_branch,
+                    error = %e,
+                    "periodic push: push_to_origin failed; will retry next tick"
+                ),
             }
         }
     });
@@ -1225,6 +1422,92 @@ mod tests {
             remote.trim(),
             local.trim(),
             "checkpoint must push the worker's own commit even on a clean tree"
+        );
+    }
+
+    #[test]
+    fn push_needed_pushes_first_observed_sha() {
+        // No prior push this run → we can't assume the mirror is current, so
+        // push (the refspec is idempotent if it already matches).
+        assert!(push_needed("abc123", None));
+    }
+
+    #[test]
+    fn push_needed_skips_unchanged_head() {
+        // Same SHA as the last successful push → nothing new, skip.
+        assert!(!push_needed("abc123", Some("abc123")));
+    }
+
+    #[test]
+    fn push_needed_pushes_when_head_moved() {
+        // Worker committed since the last push → head moved, push.
+        assert!(push_needed("def456", Some("abc123")));
+    }
+
+    /// `resolve_branch_sha` returns the branch's commit SHA and matches
+    /// `git rev-parse`; an absent branch resolves to `None` (skip-this-tick).
+    #[tokio::test]
+    async fn resolve_branch_sha_reads_local_head_and_handles_absent_branch() {
+        let clone = tempfile::TempDir::new().expect("clone");
+        let cp = clone.path();
+        git(cp, &["init", "-b", "main"]);
+        std::fs::write(cp.join("base.txt"), "base\n").unwrap();
+        git(cp, &["add", "-A"]);
+        git(cp, &["commit", "-m", "base"]);
+        git(cp, &["checkout", "-b", "task"]);
+
+        let resolved = resolve_branch_sha(cp, "task").await.expect("resolve task");
+        let expected = git(cp, &["rev-parse", "task"]);
+        assert_eq!(resolved, expected.trim());
+
+        // A branch that doesn't exist → None, not an error.
+        assert!(resolve_branch_sha(cp, "nope").await.is_none());
+    }
+
+    /// The periodic push loop pushes the worker's already-committed work to the
+    /// mirror without committing anything itself — the OOM-proof durability
+    /// seam. Drives one tick by stubbing the tick logic the loop runs.
+    #[tokio::test]
+    async fn periodic_push_pushes_committed_work_without_committing() {
+        let origin = tempfile::TempDir::new().expect("origin");
+        let op = origin.path();
+        git(op, &["init", "--bare", "-b", "main"]);
+
+        let clone = tempfile::TempDir::new().expect("clone");
+        let cp = clone.path();
+        git(cp, &["clone", op.to_str().unwrap(), "."]);
+        std::fs::write(cp.join("base.txt"), "base\n").unwrap();
+        git(cp, &["add", "-A"]);
+        git(cp, &["commit", "-m", "base"]);
+        git(cp, &["push", "origin", "main"]);
+        git(cp, &["checkout", "-b", "task"]);
+        // Worker committed work via shell but never pushed it.
+        std::fs::write(cp.join("work.txt"), "done\n").unwrap();
+        git(cp, &["add", "-A"]);
+        git(cp, &["commit", "-m", "worker self-commit"]);
+        // Leave an UNCOMMITTED edit too: the push must NOT commit it (push-only).
+        std::fs::write(cp.join("dirty.txt"), "uncommitted\n").unwrap();
+
+        let local = git(cp, &["rev-parse", "task"]);
+
+        // One tick of the loop's logic: resolve, decide, attach, push.
+        let current = resolve_branch_sha(cp, "task").await.expect("resolve");
+        assert!(push_needed(&current, None));
+        let ws = Workspace::attach_existing(cp, "task".to_string()).expect("attach");
+        ws.push_to_origin("task").await.expect("push");
+
+        // The committed work reached the mirror...
+        let remote = git(op, &["rev-parse", "task"]);
+        assert_eq!(
+            remote.trim(),
+            local.trim(),
+            "periodic push must push the worker's committed task head to the mirror"
+        );
+        // ...and the uncommitted edit is STILL uncommitted (push-only, no commit).
+        let status = git(cp, &["status", "--porcelain"]);
+        assert!(
+            status.contains("dirty.txt"),
+            "periodic push must not commit uncommitted work: {status:?}"
         );
     }
 

@@ -104,6 +104,33 @@ pub trait SessionRuntime: Send + Sync {
     /// (container removal, socket unlink, tempdir drop).  Consumes the
     /// handle so no further calls can be made against it.
     async fn teardown(&self, handle: RunHandle) -> Result<TaskRunReport, RuntimeError>;
+
+    /// Wait until the run's backing infrastructure has *terminally died*
+    /// (the worker process is gone and cannot reconnect), returning a short
+    /// human-readable reason string (e.g. `"OOMKilled (exit 137)"`,
+    /// `"BackoffLimitExceeded"`).
+    ///
+    /// This is the host-side liveness watch the dispatch runner races against
+    /// the worker's terminal-report stream: when the worker is SIGKILLed (OOM,
+    /// node eviction) the RPC connection can linger half-open, so the report
+    /// stream never closes and the host would otherwise stay blind until the
+    /// generic 30-minute idle stall reaper collected it — mis-attributing an
+    /// OOM to a "stall". A runtime that can observe its backing Job/Pod
+    /// status resolves this future the moment that infra is terminally dead,
+    /// letting the runner finalize the run with the real reason and free the
+    /// slot promptly.
+    ///
+    /// The default implementation never resolves (pends forever): in-process
+    /// runtimes have no separable infra that can die out from under the
+    /// stream, so racing against this future is a no-op for them. Only the
+    /// Kubernetes backend overrides it.
+    ///
+    /// Implementations MUST only resolve on a *terminal* condition — never on
+    /// a transient connection blip or a Pod that might still be scheduling /
+    /// restarting — so a legitimate in-flight run is never declared dead.
+    async fn watch_infra_death(&self, _handle: &RunHandle) -> String {
+        std::future::pending().await
+    }
 }
 
 /// Compile-time assertion that [`SessionRuntime`] is object-safe — any

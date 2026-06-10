@@ -213,6 +213,12 @@ async fn run_verification_pipeline(
     .await
     .map_err(|e| anyhow::anyhow!("verification checkout task branch: {e}"))?;
 
+    // Reset tracked-file mtimes to their last-touched commit time so the
+    // verification build reuses the shared CARGO_TARGET_DIR for byte-identical
+    // workspace crates instead of recompiling everything off fresh checkout
+    // mtimes. Best-effort; never fails verification.
+    workspace.normalize_mtimes().await;
+
     let commit_sha = resolve_head_commit(&workspace_path)?;
 
     // Resolve scoped verification commands (AC-1 through AC-7).
