@@ -459,8 +459,42 @@ pub(crate) async fn run_supervisor_dispatch(
         &bistream_result,
         Err(djinn_runtime::RuntimeError::HandshakeTimeout(_))
     );
+    // When the worker is SIGKILLed mid-stage (a memory-cgroup OOM kill of
+    // rust-analyzer + rustc + rust-lld, a node eviction), its RPC connection
+    // can be left half-open — the kernel reaped the worker's child processes
+    // and wedged the supervisor without a clean TCP FIN, so `events_rx` never
+    // closes and `await_report_from_stream` would block until `kill` fires
+    // (which it won't — the slot isn't being cancelled) or the coordinator's
+    // generic 30-minute idle stall reaper finally collected the session,
+    // mis-attributing an OOM to a "stall". Race the report stream against the
+    // runtime's infra-death watch (`watch_infra_death`, a no-op pend-forever on
+    // the Test runtime) so a terminally dead Job/Pod is detected within ~15s,
+    // its real death reason captured, and the slot freed promptly. See
+    // memory note `project_*surface*job*death`.
+    let mut infra_death: Option<String> = None;
     let report_result: anyhow::Result<Option<TaskRunReport>> = match bistream_result {
-        Ok(bistream) => await_report_from_stream(bistream, &kill).await,
+        Ok(bistream) => {
+            tokio::select! {
+                biased;
+                // The report stream is authoritative for a *clean* exit — a
+                // worker that exits normally flushes its TerminalReport here.
+                // Prefer it (biased) so a Job that flips Failed in the same
+                // instant the worker delivered a report doesn't shadow the
+                // real outcome.
+                res = await_report_from_stream(bistream, &kill) => res,
+                reason = runtime.watch_infra_death(&handle) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        %reason,
+                        runtime = ?runtime_kind,
+                        "supervisor dispatch: worker infra died before terminal report \
+                         (OOM / eviction / Job failure); finalizing run as interrupted"
+                    );
+                    infra_death = Some(reason);
+                    Ok(None)
+                }
+            }
+        }
         Err(e) => Err(anyhow::anyhow!("runtime.attach_stdio failed: {e}")),
     };
 
@@ -522,6 +556,58 @@ pub(crate) async fn run_supervisor_dispatch(
             %model_id,
             "supervisor dispatch: worker handshake timed out; recorded stall + failover"
         );
+    }
+
+    // The infra-death watch fired before any terminal report: the worker Job/Pod
+    // died out-of-band (OOM SIGKILL, node eviction, BackoffLimitExceeded). Surface
+    // the REAL reason where operators look and finalize the orphaned `running`
+    // session row promptly — without this the session lingered `running` (with a
+    // live-looking but half-open RPC connection) until the 30-min idle stall
+    // reaper collected it as a generic "stall", losing the OOM attribution.
+    //
+    // Deliberately does NOT feed the model circuit-breaker: an OOM / eviction /
+    // Job failure is an INFRA death, not evidence the model is bad (mirrors the
+    // zombie-session backstop's reasoning — tripping the breaker here would
+    // auto-disable the often-only model for the whole scope on a memory pinch).
+    // The orphan `task_runs` row was already reaped above; releasing the task for
+    // redispatch is handled by the coordinator's stuck-task reconciler once the
+    // slot frees (this fn returns), exactly as for any other slot-freeing exit.
+    if let Some(reason) = infra_death.as_deref() {
+        let payload = serde_json::json!({
+            "error": format!("Worker infrastructure died before completing the run: {reason}"),
+            "agent_type": "system",
+        })
+        .to_string();
+        let _ = task_repo
+            .log_activity(
+                Some(&task.id),
+                "agent-supervisor",
+                "system",
+                "session_error",
+                &payload,
+            )
+            .await;
+        // Finalize any orphaned `running` session row for this task (status →
+        // interrupted, ended_at set). Idempotent: only touches `running` rows,
+        // so it can't double-finalize a row a late TerminalReport already
+        // flipped to `completed`, and it races harmlessly with the coordinator's
+        // zombie/stall reapers (same single-statement UPDATE-where-running).
+        let session_repo =
+            djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+        match session_repo.interrupt_running_for_task(&task.id).await {
+            Ok(n) if n > 0 => tracing::warn!(
+                task_id = %task.short_id,
+                %reason,
+                sessions = n,
+                "supervisor dispatch: finalized orphaned running session(s) after infra death"
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "supervisor dispatch: failed to finalize session row after infra death"
+            ),
+        }
     }
 
     match (report_result, teardown) {

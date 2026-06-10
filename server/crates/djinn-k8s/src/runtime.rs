@@ -49,8 +49,8 @@ use djinn_runtime::{
 };
 use djinn_supervisor::{ConnectionRegistry, Frame, FramePayload, PendingConnection};
 use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::Secret;
-use kube::api::{Api, DeleteParams, Patch, PatchParams, PostParams};
+use k8s_openapi::api::core::v1::{Pod, Secret};
+use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use serde_json::json;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -100,6 +100,15 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(600);
 const TEARDOWN_POLL_TIMEOUT: Duration = Duration::from_secs(11_400);
 /// Poll interval used inside [`poll_job_terminal_state`].
 const TEARDOWN_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Poll interval for the in-flight infra-death watch
+/// ([`KubernetesRuntime::watch_infra_death`]). Coarser than the teardown poll:
+/// this loop runs for the *entire* lifetime of every in-flight run (racing the
+/// worker's report stream), so it must be cheap on the apiserver — a dead Job
+/// detected ~15s late is still ~two orders of magnitude faster than the 30-min
+/// idle stall reaper it replaces, and well inside the worker's termination
+/// grace + report-flush window for a clean exit.
+const INFRA_DEATH_POLL_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Kubernetes-backed `SessionRuntime`.
 ///
@@ -642,6 +651,152 @@ impl SessionRuntime for KubernetesRuntime {
             stages_completed: Vec::<RoleKind>::new(),
         }))
     }
+
+    /// Host-side liveness watch: resolve the moment the run's backing Job/Pod
+    /// is *terminally dead*, returning the captured death reason.
+    ///
+    /// Why this exists: when the worker container is SIGKILLed mid-stage (a
+    /// memory-cgroup OOM kill of rust-analyzer + rustc + rust-lld, a node
+    /// eviction), the host's RPC connection to the Pod can be left half-open —
+    /// the kernel reaped the worker's child build processes and wedged the
+    /// supervisor without a clean TCP FIN, so the report stream
+    /// (`await_report_from_stream`) never closes. The dispatch runner would
+    /// then block on that stream until the generic 30-minute idle stall reaper
+    /// finally collected the session, mis-attributing an OOM to a "stall" and
+    /// pinning the slot the whole time. Racing this watch against the report
+    /// stream lets the runner finalize the run with the *real* reason
+    /// (`OOMKilled (exit 137)`, `BackoffLimitExceeded`) and free the slot
+    /// within ~15s of the Job dying.
+    ///
+    /// Termination semantics (conservative — only declares death on a
+    /// genuinely terminal condition, never on a scheduling/restart blip):
+    /// - The Pod's `worker` container terminated with a non-zero exit (or an
+    ///   explicit `OOMKilled` reason) → captured BEFORE the Pod is GC'd, since
+    ///   the container exit code / reason is the richest signal and disappears
+    ///   when the Pod object is deleted by the Job's `ttlSecondsAfterFinished`.
+    /// - The Job reports a `Failed` condition / `status.failed > 0`
+    ///   (`backoffLimit: 0` ⇒ a single Pod failure trips `BackoffLimitExceeded`).
+    /// - The Pod was OBSERVED running and is now gone while the Job is also
+    ///   gone (TTL-GC'd after finishing) → the run finished out-of-band and we
+    ///   never saw a report; treat as a terminal disappearance.
+    ///
+    /// A `Succeeded` Job is NOT treated as death — a clean run delivers its
+    /// terminal report over the stream, which the runner prefers; resolving
+    /// here on success would race that and risk a spurious "interrupted".
+    async fn watch_infra_death(&self, handle: &RunHandle) -> String {
+        let Some(job_name) = handle.pod_ref.as_deref() else {
+            // No Job reference (shouldn't happen on the K8s path) — never
+            // resolve, so the runner relies purely on the report stream.
+            return std::future::pending().await;
+        };
+        let ns = &self.config.namespace;
+        let jobs: Api<Job> = Api::namespaced(self.client.clone(), ns);
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), ns);
+        let label_selector = format!("{}={}", crate::job::LABEL_TASK_RUN_ID, handle.task_run_id);
+
+        // Tracks whether we ever observed the worker Pod present. Only a
+        // pod that WAS seen and then disappeared (alongside a gone Job)
+        // counts as a terminal out-of-band death — a pod that simply hasn't
+        // been created yet (scheduling lag) must never trip the watch.
+        let mut pod_seen = false;
+
+        loop {
+            // 1. Richest signal first: the Pod's container terminated state,
+            //    captured before TTL-GC removes the Pod object.
+            match pods
+                .list(&ListParams::default().labels(&label_selector))
+                .await
+            {
+                Ok(list) => {
+                    if let Some(pod) = list.items.first() {
+                        pod_seen = true;
+                        if let Some(reason) = pod_container_death_reason(pod) {
+                            debug!(
+                                task_run_id = %handle.task_run_id,
+                                job = %job_name,
+                                %reason,
+                                "kubernetes_runtime: infra-death watch — worker container terminated"
+                            );
+                            return reason;
+                        }
+                    } else if pod_seen {
+                        // The Pod was here and is now gone. If the Job is also
+                        // gone (TTL-GC after finishing), the run ended
+                        // out-of-band without a report — terminal.
+                        match jobs.get_opt(job_name).await {
+                            Ok(None) => {
+                                debug!(
+                                    task_run_id = %handle.task_run_id,
+                                    job = %job_name,
+                                    "kubernetes_runtime: infra-death watch — pod and job both gone"
+                                );
+                                return "worker Pod and Job disappeared (TTL-GC after \
+                                        out-of-band termination)"
+                                    .to_string();
+                            }
+                            Ok(Some(_)) | Err(_) => {
+                                // Job still present (or a transient apiserver
+                                // error) — fall through to the Job-status
+                                // check, which decides terminal-ness.
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        task_run_id = %handle.task_run_id,
+                        job = %job_name,
+                        error = %e,
+                        "kubernetes_runtime: infra-death watch — pod list failed (continuing)"
+                    );
+                }
+            }
+
+            // 2. Job-condition fallback (covers the case where the Pod object
+            //    was already GC'd before we could read its container state).
+            match jobs.get_opt(job_name).await {
+                Ok(Some(job)) => {
+                    if let Some(reason) = job_failed_reason(&job) {
+                        debug!(
+                            task_run_id = %handle.task_run_id,
+                            job = %job_name,
+                            %reason,
+                            "kubernetes_runtime: infra-death watch — job failed"
+                        );
+                        return reason;
+                    }
+                    // Succeeded / still running: NOT a death. A success is
+                    // delivered over the report stream; keep watching.
+                }
+                Ok(None) => {
+                    // Job is gone. Only terminal if we had previously seen the
+                    // Pod (the run actually started and then disappeared). A
+                    // never-observed Job here is a pre-creation race — keep
+                    // watching rather than declaring a phantom death.
+                    if pod_seen {
+                        debug!(
+                            task_run_id = %handle.task_run_id,
+                            job = %job_name,
+                            "kubernetes_runtime: infra-death watch — job gone after pod observed"
+                        );
+                        return "worker Job disappeared after the Pod was observed \
+                                (TTL-GC after out-of-band termination)"
+                            .to_string();
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        task_run_id = %handle.task_run_id,
+                        job = %job_name,
+                        error = %e,
+                        "kubernetes_runtime: infra-death watch — job get failed (continuing)"
+                    );
+                }
+            }
+
+            tokio::time::sleep(INFRA_DEATH_POLL_INTERVAL).await;
+        }
+    }
 }
 
 impl KubernetesRuntime {
@@ -664,6 +819,68 @@ enum JobTerminal {
     Succeeded,
     Failed(#[allow(dead_code)] String),
     TimedOut,
+}
+
+/// Inspect a Pod for a *terminal worker-container failure* and, if present,
+/// return a human-readable death reason. `None` means the Pod is still
+/// running, succeeded cleanly, or hasn't terminated the worker container yet
+/// — i.e. NOT a death the infra-watch should trip on.
+///
+/// Pure over the Pod object so the OOMKilled / non-zero-exit classification is
+/// unit-testable without a live cluster. Reads the `worker` container's
+/// `state.terminated` (falling back to the first container if the worker name
+/// isn't matched, for forward-compat): an explicit `OOMKilled` reason or any
+/// non-zero exit code is a death; a zero exit (clean success) is not — that
+/// run's terminal report rides the stream and the runner prefers it.
+fn pod_container_death_reason(pod: &Pod) -> Option<String> {
+    let statuses = pod.status.as_ref()?.container_statuses.as_ref()?;
+    let worker = statuses
+        .iter()
+        .find(|c| c.name == "worker")
+        .or_else(|| statuses.first())?;
+    let terminated = worker.state.as_ref()?.terminated.as_ref()?;
+    let exit_code = terminated.exit_code;
+    let reason = terminated.reason.as_deref();
+    if reason == Some("OOMKilled") {
+        // Exit code for an OOM kill is conventionally 137 (128 + SIGKILL).
+        return Some(format!("OOMKilled (exit {exit_code})"));
+    }
+    if exit_code != 0 {
+        return Some(match reason {
+            Some(r) => format!("{r} (exit {exit_code})"),
+            None => format!("worker container exited with code {exit_code}"),
+        });
+    }
+    None
+}
+
+/// Inspect a `Job` for a terminal `Failed` condition and return its reason.
+/// `None` means the Job is still running or succeeded cleanly.
+///
+/// Pure over the Job object so the condition→reason mapping is unit-testable.
+/// Prefers the `Failed` condition's `reason` (e.g. `BackoffLimitExceeded`,
+/// `DeadlineExceeded`) over its free-text `message`; falls back to
+/// `status.failed > 0` with a generic reason when no condition is populated.
+fn job_failed_reason(job: &Job) -> Option<String> {
+    let status = job.status.as_ref()?;
+    let failed_condition = status.conditions.as_ref().and_then(|cs| {
+        cs.iter()
+            .find(|c| c.type_ == "Failed" && c.status == "True")
+    });
+    if let Some(c) = failed_condition {
+        // `reason` is the machine-stable enum (BackoffLimitExceeded, …);
+        // append the human message when it adds detail.
+        return Some(match (c.reason.as_deref(), c.message.as_deref()) {
+            (Some(r), Some(m)) if !m.is_empty() => format!("{r}: {m}"),
+            (Some(r), _) => r.to_string(),
+            (None, Some(m)) if !m.is_empty() => m.to_string(),
+            _ => "job failed".to_string(),
+        });
+    }
+    if status.failed.unwrap_or(0) > 0 {
+        return Some("job failed".to_string());
+    }
+    None
 }
 
 /// Poll a `Job` until its `.status.succeeded` or `.status.failed` condition
@@ -936,6 +1153,204 @@ mod tests {
                 JobTerminal::Succeeded | JobTerminal::Failed(_) | JobTerminal::TimedOut => {}
             }
         }
+    }
+
+    // ── Infra-death decision logic (the predicate the watch trips on) ─────────
+
+    use k8s_openapi::api::batch::v1::{JobCondition, JobStatus};
+    use k8s_openapi::api::core::v1::{
+        ContainerState, ContainerStateTerminated, ContainerStatus, PodStatus,
+    };
+
+    fn pod_with_worker_terminated(
+        exit_code: i32,
+        reason: Option<&str>,
+        container_name: &str,
+    ) -> Pod {
+        Pod {
+            status: Some(PodStatus {
+                container_statuses: Some(vec![ContainerStatus {
+                    name: container_name.to_string(),
+                    state: Some(ContainerState {
+                        terminated: Some(ContainerStateTerminated {
+                            exit_code,
+                            reason: reason.map(str::to_string),
+                            ..ContainerStateTerminated::default()
+                        }),
+                        ..ContainerState::default()
+                    }),
+                    image: String::new(),
+                    image_id: String::new(),
+                    ready: false,
+                    restart_count: 0,
+                    ..ContainerStatus::default()
+                }]),
+                ..PodStatus::default()
+            }),
+            ..Pod::default()
+        }
+    }
+
+    /// An OOM-killed worker container (the production failure: memory-cgroup
+    /// SIGKILL, exit 137, reason OOMKilled) is a death — and the reason string
+    /// names OOM so operators see it in the session_error event.
+    #[test]
+    fn pod_oomkilled_is_a_death() {
+        let pod = pod_with_worker_terminated(137, Some("OOMKilled"), "worker");
+        let reason = pod_container_death_reason(&pod).expect("OOMKilled must be a death");
+        assert!(
+            reason.contains("OOMKilled"),
+            "reason should name OOM: {reason}"
+        );
+        assert!(
+            reason.contains("137"),
+            "reason should carry the exit code: {reason}"
+        );
+    }
+
+    /// Any non-zero exit (crash, SIGKILL past grace, generic Error) is a death.
+    #[test]
+    fn pod_nonzero_exit_is_a_death() {
+        let pod = pod_with_worker_terminated(1, Some("Error"), "worker");
+        let reason = pod_container_death_reason(&pod).expect("non-zero exit must be a death");
+        assert!(reason.contains("Error"));
+        assert!(
+            reason.contains("exit 1"),
+            "reason should carry exit code: {reason}"
+        );
+    }
+
+    /// A clean exit (code 0) is NOT a death — that run's terminal report rides
+    /// the stream and the runner prefers it; tripping the watch here would race
+    /// the real outcome and spuriously mark a healthy run interrupted.
+    #[test]
+    fn pod_clean_exit_is_not_a_death() {
+        let pod = pod_with_worker_terminated(0, Some("Completed"), "worker");
+        assert!(pod_container_death_reason(&pod).is_none());
+    }
+
+    /// A still-running Pod (no terminated state) is not a death — the predicate
+    /// must keep waiting, never declare a phantom death on a live worker.
+    #[test]
+    fn pod_still_running_is_not_a_death() {
+        let pod = Pod {
+            status: Some(PodStatus {
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "worker".to_string(),
+                    state: Some(ContainerState {
+                        running: Some(k8s_openapi::api::core::v1::ContainerStateRunning::default()),
+                        ..ContainerState::default()
+                    }),
+                    image: String::new(),
+                    image_id: String::new(),
+                    ready: true,
+                    restart_count: 0,
+                    ..ContainerStatus::default()
+                }]),
+                ..PodStatus::default()
+            }),
+            ..Pod::default()
+        };
+        assert!(pod_container_death_reason(&pod).is_none());
+    }
+
+    /// A Pod with no status at all (just scheduled, not yet started) is not a
+    /// death.
+    #[test]
+    fn pod_no_status_is_not_a_death() {
+        assert!(pod_container_death_reason(&Pod::default()).is_none());
+    }
+
+    /// When the worker container can't be matched by name (forward-compat for a
+    /// renamed container), fall back to the first container's terminated state.
+    #[test]
+    fn pod_falls_back_to_first_container_when_worker_name_absent() {
+        let pod = pod_with_worker_terminated(137, Some("OOMKilled"), "main");
+        let reason = pod_container_death_reason(&pod).expect("fallback to first container");
+        assert!(reason.contains("OOMKilled"));
+    }
+
+    fn job_with_failed_condition(reason: Option<&str>, message: Option<&str>) -> Job {
+        Job {
+            status: Some(JobStatus {
+                failed: Some(1),
+                conditions: Some(vec![JobCondition {
+                    type_: "Failed".to_string(),
+                    status: "True".to_string(),
+                    reason: reason.map(str::to_string),
+                    message: message.map(str::to_string),
+                    ..JobCondition::default()
+                }]),
+                ..JobStatus::default()
+            }),
+            ..Job::default()
+        }
+    }
+
+    /// `backoffLimit: 0` ⇒ a single Pod failure trips a `Failed` condition with
+    /// reason `BackoffLimitExceeded`; the death reason must surface it (this is
+    /// the production Job-level signal when the Pod object was already GC'd).
+    #[test]
+    fn job_backoff_limit_exceeded_is_a_failure() {
+        let job = job_with_failed_condition(
+            Some("BackoffLimitExceeded"),
+            Some("Job has reached the specified backoff limit"),
+        );
+        let reason = job_failed_reason(&job).expect("failed job must be a failure");
+        assert!(reason.contains("BackoffLimitExceeded"), "reason: {reason}");
+    }
+
+    /// A `Failed` condition whose `status` is not `True` is NOT a failure — only
+    /// an asserted failure trips the predicate.
+    #[test]
+    fn job_failed_condition_false_status_is_not_a_failure() {
+        let job = Job {
+            status: Some(JobStatus {
+                conditions: Some(vec![JobCondition {
+                    type_: "Failed".to_string(),
+                    status: "False".to_string(),
+                    ..JobCondition::default()
+                }]),
+                ..JobStatus::default()
+            }),
+            ..Job::default()
+        };
+        assert!(job_failed_reason(&job).is_none());
+    }
+
+    /// A succeeded Job (no Failed condition, failed count 0) is NOT a failure —
+    /// success is delivered over the report stream, never via the death watch.
+    #[test]
+    fn job_succeeded_is_not_a_failure() {
+        let job = Job {
+            status: Some(JobStatus {
+                succeeded: Some(1),
+                ..JobStatus::default()
+            }),
+            ..Job::default()
+        };
+        assert!(job_failed_reason(&job).is_none());
+    }
+
+    /// `status.failed > 0` with no populated condition still counts as a failure
+    /// (generic fallback) so an unusual apiserver shape can't hide a dead Job.
+    #[test]
+    fn job_failed_count_without_condition_is_a_failure() {
+        let job = Job {
+            status: Some(JobStatus {
+                failed: Some(1),
+                ..JobStatus::default()
+            }),
+            ..Job::default()
+        };
+        assert!(job_failed_reason(&job).is_some());
+    }
+
+    /// A Job with no status (just created) is not a failure — never declare a
+    /// phantom death before the run even starts.
+    #[test]
+    fn job_no_status_is_not_a_failure() {
+        assert!(job_failed_reason(&Job::default()).is_none());
     }
 
     /// Builder-parity invariant: the Secret built by `build_task_run_secret`
