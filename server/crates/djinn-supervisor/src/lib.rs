@@ -658,48 +658,13 @@ impl TaskRunSupervisor {
                                     role = %role_kind.as_str(),
                                     "supervisor: committed worker/architect changes"
                                 );
-                                // Push the new commit to the mirror IMMEDIATELY
-                                // — before the subsequent stage (reviewer) runs
-                                // and before the post-stage transitions fire.
-                                // Without this, the worker's commits live only
-                                // in the ephemeral workspace until open_pr's
-                                // own push_to_origin runs at the very end. If
-                                // anything cancels between now and open_pr
-                                // (server restart, planner kill, cancel-token
-                                // race), the commits are LOST and the host's
-                                // coordinator-tick supervisor_pr_open sees
-                                // the stale mirror task_branch — pushing the
-                                // OLD commit to the PR. Observed on avoy:
-                                // worker fixed CI failure in cycle 2, but PR
-                                // #502 stayed pinned to cycle 1's commit
-                                // because the supervisor body never reached
-                                // its terminal open_pr.
-                                //
-                                // Eager push makes the commit durable to
-                                // the mirror right after the stage that
-                                // produced it. Idempotent (refspec
-                                // task_branch:task_branch). Best-effort —
-                                // a push failure here only means we'll
-                                // re-try at open_pr time; the run keeps
-                                // going.
-                                if let Err(e) = workspace.push_to_origin(&spec.task_branch).await {
-                                    tracing::warn!(
-                                        task_id = %task.short_id,
-                                        task_run_id = %run_id,
-                                        role = %role_kind.as_str(),
-                                        branch = %spec.task_branch,
-                                        error = %e,
-                                        "supervisor: eager push_to_origin failed (open_pr will retry)"
-                                    );
-                                } else {
-                                    tracing::debug!(
-                                        task_id = %task.short_id,
-                                        task_run_id = %run_id,
-                                        role = %role_kind.as_str(),
-                                        branch = %spec.task_branch,
-                                        "supervisor: pushed worker commit to mirror eagerly"
-                                    );
-                                }
+                                // The push that makes this commit durable in the
+                                // mirror happens UNCONDITIONALLY just below the
+                                // match — see the comment there. We no longer
+                                // push inside this arm: workers commonly commit
+                                // their own edits via shell, leaving the tree
+                                // clean and this arm un-taken, yet their work
+                                // still needs pushing. One push site covers both.
                             }
                             Ok(false) => {
                                 tracing::debug!(
@@ -718,6 +683,42 @@ impl TaskRunSupervisor {
                                     "supervisor: workspace.commit failed (continuing to next stage)"
                                 );
                             }
+                        }
+                        // Push task_branch to the mirror UNCONDITIONALLY after
+                        // the stage — not just when the auto-commit above
+                        // produced a new commit. Workers frequently commit their
+                        // own edits via shell during the session, so the tree is
+                        // already clean by the time we get here and
+                        // `workspace.commit` returns Ok(false): the eager push
+                        // inside the Ok(true) arm above is then skipped and the
+                        // worker's commits live only in the ephemeral TempDir,
+                        // lost if the Pod is deadline-killed / evicted before
+                        // open_pr (the only other push). The mirror is a mounted
+                        // PVC so the refspec `task_branch:task_branch` is cheap
+                        // and idempotent when there's nothing new to push.
+                        //
+                        // Loud on failure (error!, not warn!) — a push failure
+                        // here is the durability seam: the worker's progress is
+                        // at risk of loss on kill. Still best-effort: the run
+                        // keeps going (open_pr retries the push), it's just
+                        // visible now.
+                        if let Err(e) = workspace.push_to_origin(&spec.task_branch).await {
+                            tracing::error!(
+                                task_id = %task.short_id,
+                                task_run_id = %run_id,
+                                role = %role_kind.as_str(),
+                                branch = %spec.task_branch,
+                                error = %e,
+                                "supervisor: post-stage push_to_origin failed — worker progress not yet durable in mirror (open_pr will retry)"
+                            );
+                        } else {
+                            tracing::debug!(
+                                task_id = %task.short_id,
+                                task_run_id = %run_id,
+                                role = %role_kind.as_str(),
+                                branch = %spec.task_branch,
+                                "supervisor: pushed task_branch to mirror after stage (durable)"
+                            );
                         }
                         // Worker finished cleanly → submit_task_review
                         // (in_progress → needs_task_review). Architect has no
