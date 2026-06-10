@@ -93,8 +93,11 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(600);
 // The supervisor calls teardown immediately after `attach_stdio` for K8s and then
 // polls the Job for terminal state; if this fires before the worker exits, the
 // task-run is declared a failure and the planner is re-dispatched on a fresh
-// workspace, losing in-progress code changes.
-const TEARDOWN_POLL_TIMEOUT: Duration = Duration::from_secs(3600);
+// workspace, losing in-progress code changes. Must exceed the Job's
+// `activeDeadlineSeconds` (default 10800s) plus the termination grace window so
+// the host keeps polling until the kubelet's own deadline resolves the Pod — a
+// 3h-budget run must not be declared failed by the host an hour in.
+const TEARDOWN_POLL_TIMEOUT: Duration = Duration::from_secs(11_400);
 /// Poll interval used inside [`poll_job_terminal_state`].
 const TEARDOWN_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -871,12 +874,17 @@ mod tests {
     }
 
     /// The teardown poll must cover a full dev session: too short and the
-    /// supervisor reaps in-flight worker pods (bug #18 regression). Allow up
-    /// to 2h so future tuning has headroom.
+    /// supervisor reaps in-flight worker pods (bug #18 regression). It must
+    /// exceed the Job's `activeDeadlineSeconds` (default 10800s) plus the
+    /// termination grace window so the host keeps polling until the kubelet's
+    /// own deadline resolves a long-running Pod; allow up to ~3.5h headroom.
     #[test]
     fn teardown_timeout_is_bounded() {
         assert!(TEARDOWN_POLL_TIMEOUT >= Duration::from_secs(600));
-        assert!(TEARDOWN_POLL_TIMEOUT <= Duration::from_secs(7200));
+        // Must outlast the 3h deadline backstop (+ grace) so a 3h-budget run
+        // is not declared failed by the host while still legitimately running.
+        assert!(TEARDOWN_POLL_TIMEOUT >= Duration::from_secs(10_800));
+        assert!(TEARDOWN_POLL_TIMEOUT <= Duration::from_secs(12_600));
         assert!(TEARDOWN_POLL_INTERVAL < TEARDOWN_POLL_TIMEOUT);
     }
 

@@ -2,10 +2,12 @@ use super::*;
 
 /// How long a `task_run` may stay in `running` without an `ended_at` before
 /// the periodic sweep flips it to `interrupted`. Must comfortably exceed the
-/// K8s Job `activeDeadlineSeconds` (3600s) + `terminationGracePeriodSeconds`
+/// K8s Job `activeDeadlineSeconds` (10800s) + `terminationGracePeriodSeconds`
 /// (60s) + `ttlSecondsAfterFinished` (300s) so we never reap a still-live run
-/// whose pod is mid-termination.
-const STALE_TASK_RUN_THRESHOLD_SECS: i64 = 2 * 60 * 60;
+/// whose pod is mid-termination. Bumped to 4h alongside the deadline raise
+/// (3600→10800): a 3h-budget run that legitimately uses most of its window
+/// must not be reaped out from under itself.
+const STALE_TASK_RUN_THRESHOLD_SECS: i64 = 4 * 60 * 60;
 
 /// Startup-only threshold. Any `task_run` whose `started_at` is older than
 /// this at process boot is from a previous host instance — the worker Pod

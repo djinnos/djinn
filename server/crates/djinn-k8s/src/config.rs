@@ -61,12 +61,20 @@ pub struct KubernetesConfig {
     /// this, a stuck RPC connection or runaway LLM stream can keep the Pod
     /// alive indefinitely — the Job's `ttl_seconds_after_finished` only
     /// fires after the Pod exits, so a hung worker leaks compute forever.
-    /// Default 3600s (1 hour) is generous for normal task runs.
+    /// Default 10800s (3 hours): this is an infra BACKSTOP, not a run
+    /// scheduler. The in-pod supervisor arms its own soft deadline at
+    /// `this - margin` and winds itself down gracefully (cancel + checkpoint
+    /// commit/push) well before the kubelet hard-kills the Pod, so a slow
+    /// model never loses work to the deadline in the healthy case. A 1-hour
+    /// default starved slow providers — a 50-60 min worker stage left no room
+    /// for the reviewer stage and the Pod was deadline-killed mid-review,
+    /// losing every commit — so the backstop is set generously.
     pub task_run_active_deadline_seconds: u64,
     /// `terminationGracePeriodSeconds` on the task-run Pod. K8s default 30s
-    /// is tight when the worker still has a `TerminalReport` frame to
-    /// flush over RPC before SIGTERM is escalated to SIGKILL; truncated
-    /// reports make post-mortem debugging hard. Default 60s.
+    /// is tight: when SIGTERM fires (deadline / eviction / drain) the worker
+    /// must both flush its terminal `TerminalReport` RPC AND run a checkpoint
+    /// commit/push so in-flight work survives the kill. Default 60s gives both
+    /// room before SIGTERM is escalated to SIGKILL.
     pub task_run_termination_grace_period_seconds: i64,
     /// CPU request on the warm Pod container. The canonical-graph pipeline
     /// spawns SCIP indexer subprocesses (rust-analyzer, scip-go, etc.) that
@@ -118,7 +126,7 @@ impl KubernetesConfig {
             warm_job_ttl_seconds: 300,
             warm_job_timeout_seconds: 1800,
             database_url: None,
-            task_run_active_deadline_seconds: 3600,
+            task_run_active_deadline_seconds: 10800,
             task_run_termination_grace_period_seconds: 60,
             warm_cpu_request: "1".into(),
             warm_cpu_limit: "2".into(),
@@ -154,7 +162,7 @@ impl KubernetesConfig {
     /// | `DJINN_K8S_WARM_JOB_TTL_SECONDS` | `warm_job_ttl_seconds` | `300` (parsed as `i32`) |
     /// | `DJINN_K8S_WARM_JOB_TIMEOUT_SECONDS` | `warm_job_timeout_seconds` | `1800` (parsed as `i64`) |
     /// | `DJINN_DATABASE_URL` | `database_url` | _(unset → warm Pod has no fallback; helm chart projects this via the `djinn-server` ConfigMap)_ |
-    /// | `DJINN_K8S_TASK_RUN_ACTIVE_DEADLINE_SECONDS` | `task_run_active_deadline_seconds` | `3600` (parsed as `u64`) |
+    /// | `DJINN_K8S_TASK_RUN_ACTIVE_DEADLINE_SECONDS` | `task_run_active_deadline_seconds` | `10800` (parsed as `u64`) |
     /// | `DJINN_K8S_TASK_RUN_TERMINATION_GRACE_PERIOD_SECONDS` | `task_run_termination_grace_period_seconds` | `60` (parsed as `i64`) |
     /// | `DJINN_K8S_WARM_CPU_REQUEST` | `warm_cpu_request` | `1` |
     /// | `DJINN_K8S_WARM_CPU_LIMIT` | `warm_cpu_limit` | `2` |
