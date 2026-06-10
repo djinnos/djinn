@@ -4,7 +4,8 @@ use djinn_db::{ProjectRepository, SessionRepository, TaskRepository};
 use djinn_git::GitError;
 use djinn_provider::github_api::GitHubApiClient;
 use djinn_provider::github_app::app_id as github_app_id;
-use djinn_workspace::MirrorManager;
+use djinn_provider::github_app::installations::get_installation_token;
+use djinn_workspace::{GitIdentity, MergeOutcome, MirrorManager};
 
 /// Build the HTTPS push URL for a GitHub repo authenticated by a GitHub App
 /// **installation** access token.
@@ -301,6 +302,221 @@ pub(crate) async fn detect_pr_conflict_files(
         }
         Err(e) => Err(e),
     }
+}
+
+/// Outcome of [`try_auto_merge_target_into_task_branch`].
+#[derive(Debug)]
+pub(crate) enum AutoMergeOutcome {
+    /// The merge target folded cleanly into the task branch (or the task
+    /// branch was merely behind / already current). The merge commit was
+    /// pushed to BOTH the mirror and GitHub, so the PR's head now contains the
+    /// target and GitHub will re-evaluate it as mergeable. NO conflict
+    /// metadata should be set and the task should NOT be reopened.
+    AutoMerged,
+    /// A real content conflict remains — the merge left unmerged files. The
+    /// caller proceeds with the normal ConflictRetry flagging (metadata +
+    /// reopen); `build_pr_conflict_reason` re-derives the file list for the
+    /// metadata, so the list is not threaded back here.
+    Conflicts,
+    /// The merge could not be decided mechanically (no App configured, missing
+    /// coords/installation, mirror fetch or git error). The caller falls back
+    /// to its prior behaviour (trial-merge file detection + reopen). Nothing
+    /// was pushed.
+    Indeterminate,
+}
+
+/// Clean-merge fast path at PR-conflict detection.
+///
+/// When GitHub flags a PR `mergeable == false`, this tries to resolve the
+/// situation MECHANICALLY before dispatching any agent: fetch the mirror fresh,
+/// ephemeral-clone the task branch, and `git merge --no-ff` the merge target
+/// into it.
+///
+/// - **Clean merge** (or the branch is merely behind / already current): commit
+///   the merge under the bot identity, push it to the mirror AND force-push the
+///   task branch to GitHub (reusing the same machinery as
+///   [`push_task_branch_to_github`]), so the open PR's head advances and GitHub
+///   re-evaluates it as mergeable. Returns [`AutoMergeOutcome::AutoMerged`].
+///   No worker, no reviewer, no verification — zero agent involvement.
+/// - **Conflict**: returns [`AutoMergeOutcome::Conflicts`] with the file list so
+///   the caller flags `merge_conflict_metadata` + reopens into ConflictRetry.
+/// - **Anything indeterminate** (no App / missing coords / git error): returns
+///   [`AutoMergeOutcome::Indeterminate`]; the caller degrades to prior behaviour.
+///
+/// ## Freshness
+/// The mirror is fetched against GitHub (fresh install token) up front, so the
+/// `origin/<merge_target>` the merge decision uses is the CURRENT remote tip —
+/// a stale mirror would otherwise produce a wrong "clean merge".
+///
+/// ## Idempotency / race-safety
+/// `try_merge` first runs an ancestry no-op guard: if `origin/<merge_target>`
+/// is already an ancestor of the task branch HEAD, there is nothing to merge.
+/// A second concurrent poll tick (or a concurrent run on the same task) that
+/// re-enters here after a prior auto-merge therefore finds the branch already
+/// current and pushes the same SHA — a no-op force-push. The GitHub push reuses
+/// the `is_concurrent_push_race` recovery in `push_task_branch_to_github`'s
+/// sibling logic via a plain `--force` push that's idempotent on identical SHAs.
+pub(crate) async fn try_auto_merge_target_into_task_branch(
+    mirror: &MirrorManager,
+    db: &djinn_db::Database,
+    event_bus: &djinn_core::events::EventBus,
+    project_id: &str,
+    task_short_id: &str,
+    task_branch: &str,
+    merge_target: &str,
+) -> AutoMergeOutcome {
+    if github_app_id().is_err() {
+        return AutoMergeOutcome::Indeterminate;
+    }
+
+    let project_repo = ProjectRepository::new(db.clone(), event_bus.clone());
+
+    let (owner, repo_name) = match project_repo.get_github_coords(project_id).await {
+        Ok(Some(coords)) => coords,
+        _ => return AutoMergeOutcome::Indeterminate,
+    };
+    let installation_id = match project_repo.get_installation_id(project_id).await {
+        Ok(Some(id)) => id,
+        _ => return AutoMergeOutcome::Indeterminate,
+    };
+    let install_token = match get_installation_token(installation_id).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(
+                task_short_id,
+                error = %e,
+                "auto-merge fast path: could not mint installation token; falling back to reopen"
+            );
+            return AutoMergeOutcome::Indeterminate;
+        }
+    };
+
+    // Fetch the mirror fresh against GitHub so `origin/<merge_target>` is the
+    // current remote tip — otherwise a stale mirror would mis-decide the merge.
+    let origin_url = format!(
+        "https://x-access-token:{}@github.com/{}/{}.git",
+        install_token.token, owner, repo_name
+    );
+    if let Err(e) = mirror.fetch_mirror(project_id, &origin_url).await {
+        tracing::warn!(
+            task_short_id,
+            error = %e,
+            "auto-merge fast path: mirror fetch failed; falling back to reopen"
+        );
+        return AutoMergeOutcome::Indeterminate;
+    }
+
+    // Ephemeral clone on the task branch (so the merge lands ONTO it and we can
+    // push the result back as the task branch head).
+    let workspace = match mirror.clone_ephemeral(project_id, task_branch).await {
+        Ok(ws) => ws,
+        Err(e) => {
+            tracing::warn!(
+                task_short_id,
+                branch = task_branch,
+                error = %e,
+                "auto-merge fast path: clone_ephemeral failed; falling back to reopen"
+            );
+            return AutoMergeOutcome::Indeterminate;
+        }
+    };
+
+    // Already current? (origin/<merge_target> is an ancestor of HEAD.) The PR
+    // signal is then stale / merely-behind on GitHub's side; re-pushing the
+    // current head refreshes its mergeability without a merge commit.
+    let already_current = workspace
+        .is_up_to_date_with(merge_target)
+        .await
+        .unwrap_or(false);
+
+    if !already_current {
+        match workspace.try_merge(merge_target).await {
+            Ok(MergeOutcome::Clean) => {
+                let (bot_name, bot_email) = bot_identity();
+                let identity = GitIdentity {
+                    name: &bot_name,
+                    email: &bot_email,
+                };
+                let message = format!("Merge {merge_target} into {task_branch}");
+                match workspace.commit(&message, identity).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        // Staged a non-empty diff but nothing to commit — the
+                        // merge produced no tree change. Treat as already-current.
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            task_short_id,
+                            error = %e,
+                            "auto-merge fast path: merge commit failed; falling back to reopen"
+                        );
+                        return AutoMergeOutcome::Indeterminate;
+                    }
+                }
+            }
+            Ok(MergeOutcome::Conflicts { files }) => {
+                // Real conflict — let the caller flag + reopen into ConflictRetry.
+                tracing::info!(
+                    task_short_id,
+                    conflict_count = files.len(),
+                    conflicting_files = ?files,
+                    "auto-merge fast path: real conflict; deferring to ConflictRetry flow"
+                );
+                return AutoMergeOutcome::Conflicts;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_short_id,
+                    error = %e,
+                    "auto-merge fast path: try_merge errored; falling back to reopen"
+                );
+                return AutoMergeOutcome::Indeterminate;
+            }
+        }
+    }
+
+    // Push the (possibly new) task-branch head to the mirror, then force it to
+    // GitHub so the PR refreshes. A failure on either leg is indeterminate.
+    if let Err(e) = workspace.push_to_origin(task_branch).await {
+        tracing::warn!(
+            task_short_id,
+            branch = task_branch,
+            error = %e,
+            "auto-merge fast path: push to mirror failed; falling back to reopen"
+        );
+        return AutoMergeOutcome::Indeterminate;
+    }
+
+    let push_url = build_app_push_url(&owner, &repo_name, &install_token.token);
+    let wt = workspace.path_buf();
+    let push_result = djinn_git::run_git_command(
+        wt,
+        vec![
+            "push".into(),
+            "--force".into(),
+            push_url,
+            format!("{task_branch}:refs/heads/{task_branch}"),
+        ],
+    )
+    .await;
+    if let Err(e) = push_result {
+        tracing::warn!(
+            task_short_id,
+            branch = task_branch,
+            error = %e,
+            "auto-merge fast path: force-push to GitHub failed; falling back to reopen"
+        );
+        return AutoMergeOutcome::Indeterminate;
+    }
+
+    tracing::info!(
+        task_short_id,
+        branch = task_branch,
+        merge_target,
+        already_current,
+        "auto-merge fast path: merged target into task branch and refreshed PR (no agent dispatch)"
+    );
+    AutoMergeOutcome::AutoMerged
 }
 
 #[cfg(test)]

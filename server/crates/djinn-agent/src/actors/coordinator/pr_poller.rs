@@ -264,6 +264,18 @@ impl CoordinatorActor {
 
             // CI passed (or no CI configured). Check for merge conflicts before undrafting.
             if pr.mergeable == Some(false) {
+                // Clean-merge fast path: try to resolve the conflict
+                // mechanically (merge target → task branch, push) before
+                // dispatching any agent. On success the PR refreshes and we
+                // skip the reopen entirely.
+                if self
+                    .try_auto_merge_before_conflict(&task.id, &task.short_id, &task.project_id)
+                    .await
+                {
+                    self.pr_status_cache.remove(&task.id);
+                    self.pr_draft_first_seen.remove(&task.id);
+                    continue;
+                }
                 tracing::info!(
                     task_id = %task.short_id,
                     pr = pull_number,
@@ -639,6 +651,20 @@ impl CoordinatorActor {
             // No changes requested, CI is green. Check if mergeable and approved.
 
             if pr.mergeable == Some(false) {
+                // Clean-merge fast path: try to resolve the conflict
+                // mechanically (merge target → task branch, push) before
+                // dispatching any agent. On success the PR refreshes and we
+                // skip the reopen entirely.
+                if self
+                    .try_auto_merge_before_conflict(&task.id, &task.short_id, &task.project_id)
+                    .await
+                {
+                    self.pr_status_cache.remove(&task.id);
+                    self.merge_fail_count.remove(&task.id);
+                    self.delegated_to_github.remove(&task.id);
+                    self.conversations_resolved.remove(&task.id);
+                    continue;
+                }
                 tracing::info!(
                     task_id = %task.short_id,
                     pr = pull_number,
@@ -2121,6 +2147,84 @@ impl CoordinatorActor {
                 self.mirror.as_deref(),
             )
             .await;
+        }
+    }
+
+    /// Clean-merge fast path: before flagging a `mergeable == false` PR for
+    /// ConflictRetry, try to resolve it MECHANICALLY (fetch fresh, ephemeral
+    /// merge of the target into the task branch, push the result to mirror +
+    /// GitHub) so the PR refreshes with zero agent involvement.
+    ///
+    /// Returns `true` when the merge landed cleanly and was pushed (the caller
+    /// must NOT set conflict metadata, NOT reopen — the PR is now mergeable).
+    /// Returns `false` for a real conflict OR any indeterminate failure — the
+    /// caller proceeds with its normal flag-and-reopen path. On a clean
+    /// auto-merge an `auto_merged_conflict` activity event is logged.
+    async fn try_auto_merge_before_conflict(
+        &self,
+        task_id: &str,
+        task_short_id: &str,
+        project_id: &str,
+    ) -> bool {
+        let Some(mirror) = self.mirror.as_ref() else {
+            return false;
+        };
+
+        let project_repo = djinn_db::ProjectRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let merge_target = match project_repo.get_config(project_id).await {
+            Ok(Some(cfg)) => cfg.target_branch,
+            _ => "main".to_string(),
+        };
+        let task_branch = format!("task/{task_short_id}");
+
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let outcome = crate::task_merge::try_auto_merge_target_into_task_branch(
+            mirror,
+            &self.db,
+            &event_bus,
+            project_id,
+            task_short_id,
+            &task_branch,
+            &merge_target,
+        )
+        .await;
+
+        match outcome {
+            crate::task_merge::AutoMergeOutcome::AutoMerged => {
+                let payload = serde_json::json!({
+                    "merge_target": merge_target,
+                    "task_branch": task_branch,
+                })
+                .to_string();
+                if let Err(e) = self
+                    .task_repo()
+                    .log_activity(
+                        Some(task_id),
+                        "coordinator",
+                        "system",
+                        "auto_merged_conflict",
+                        &payload,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        task_id = %task_short_id,
+                        error = %e,
+                        "PR poller: failed to log auto_merged_conflict activity"
+                    );
+                }
+                tracing::info!(
+                    task_id = %task_short_id,
+                    merge_target = %merge_target,
+                    "PR poller: auto-merged {merge_target} into task branch; PR refreshed without agent dispatch"
+                );
+                true
+            }
+            crate::task_merge::AutoMergeOutcome::Conflicts
+            | crate::task_merge::AutoMergeOutcome::Indeterminate => false,
         }
     }
 
