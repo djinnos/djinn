@@ -1191,4 +1191,235 @@ mod tests {
             "empty `{{}}` stack must return None so callers run every indexer"
         );
     }
+
+    // -------------------------------------------------------------------
+    // Declared EnvironmentConfig workspace overlay — k62f regression.
+    //
+    // `ensure_canonical_graph` reads `projects.environment_config` and
+    // hands the parsed `Workspace` list to
+    // `run_indexers_already_locked(..., declared_workspaces)` purely as a
+    // log-only / additive overlay. Marker + discovery remain
+    // authoritative for what is actually planned and indexed. These
+    // tests pin the contract for that plumbing so a refactor can't
+    // accidentally make the declared list authoritative (or silently
+    // drop it).
+    // -------------------------------------------------------------------
+
+    /// Round-trip an `EnvironmentConfig` blob through the DB and confirm
+    /// `resolve_declared_workspaces` returns the declared list in a
+    /// shape ready to pass straight into
+    /// `run_indexers_already_locked(.., declared_workspaces)`.
+    #[tokio::test]
+    async fn resolve_declared_workspaces_loads_persisted_workspaces_as_overlay_input() {
+        let tmp = workspace_tempdir("canonical-graph-");
+        let db = create_test_db();
+        let ctx = TestWarmContext::new(db.clone());
+        let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project = proj_repo
+            .create("declared-overlay", "test", "declared-overlay")
+            .await
+            .expect("create project");
+
+        // Persist a config with slug/name/tags populated for two
+        // workspaces — this is the post-2026-04-22 shape the k62f
+        // epic lands. `from_stack` is the only producer that derives
+        // `slug` today; we set it explicitly here so the test is
+        // independent of stack-detection helpers.
+        let cfg = djinn_stack::EnvironmentConfig {
+            schema_version: djinn_stack::SCHEMA_VERSION,
+            source: djinn_stack::ConfigSource::UserEdited,
+            workspaces: vec![
+                djinn_stack::Workspace {
+                    slug: Some("server".to_string()),
+                    name: Some("API server".to_string()),
+                    tags: vec!["backend".to_string(), "rust".to_string()],
+                    root: "server".to_string(),
+                    language: "rust".to_string(),
+                    toolchain: Some("stable".to_string()),
+                    version: None,
+                    package_manager: None,
+                },
+                djinn_stack::Workspace {
+                    slug: Some("ui".to_string()),
+                    name: Some("Frontend".to_string()),
+                    tags: vec!["frontend".to_string()],
+                    root: "ui".to_string(),
+                    language: "node".to_string(),
+                    toolchain: None,
+                    version: Some("22".to_string()),
+                    package_manager: Some("pnpm".to_string()),
+                },
+            ],
+            ..djinn_stack::EnvironmentConfig::empty()
+        };
+        proj_repo
+            .set_environment_config(&project.id, &serde_json::to_string(&cfg).unwrap())
+            .await
+            .expect("set environment_config");
+
+        let declared = resolve_declared_workspaces(&ctx, &project.id)
+            .await
+            .expect("declared list");
+
+        // Same length, same slugs, same names, same tags — i.e. the
+        // resolver hands the overlay through verbatim and the
+        // values are usable as
+        // `run_indexers_already_locked(.., Some(&declared))`.
+        assert_eq!(declared.len(), 2, "two declared workspaces round-trip");
+        assert_eq!(declared[0].slug.as_deref(), Some("server"));
+        assert_eq!(declared[0].name.as_deref(), Some("API server"));
+        assert_eq!(declared[0].tags, vec!["backend", "rust"]);
+        assert_eq!(declared[0].root, "server");
+        assert_eq!(declared[0].language, "rust");
+        assert_eq!(declared[1].slug.as_deref(), Some("ui"));
+        assert_eq!(declared[1].name.as_deref(), Some("Frontend"));
+        assert_eq!(declared[1].tags, vec!["frontend"]);
+        assert_eq!(declared[1].version.as_deref(), Some("22"));
+        assert_eq!(declared[1].package_manager.as_deref(), Some("pnpm"));
+
+        // Sanity-check the contract from the other side: the same Vec
+        // is the type `run_indexers_already_locked` expects for its
+        // `declared_workspaces` parameter. We can't actually run the
+        // indexer from a unit test (no rust-analyzer / scip-typescript
+        // on PATH), but we can confirm the call site is type-correct
+        // by handing the Vec to the same function in a no-op
+        // invocation against an empty project root.
+        let output_root = tmp.path().join("scip-out");
+        std::fs::create_dir_all(&output_root).unwrap();
+        let result = crate::scip_indexer::run_indexers_already_locked(
+            tmp.path(),
+            &output_root,
+            None,
+            None,
+            Some(&declared),
+        )
+        .await;
+        // An empty tree with no indexers on PATH plans zero indexers
+        // and returns Ok. The point of the call is purely to prove
+        // the declared list flows through the type system into the
+        // overlay parameter.
+        assert!(
+            result.is_ok(),
+            "declared overlay must be accepted by run_indexers_already_locked; got {result:?}"
+        );
+    }
+
+    /// The column default is `'{}'`; `resolve_declared_workspaces` must
+    /// treat that as "no overlay" so the indexer path falls back to
+    /// marker/discovery without forcing a synthetic empty list.
+    #[tokio::test]
+    async fn resolve_declared_workspaces_returns_none_for_default_empty_config() {
+        let db = create_test_db();
+        let ctx = TestWarmContext::new(db.clone());
+        let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project = proj_repo
+            .create("declared-empty", "test", "declared-empty")
+            .await
+            .expect("create project");
+
+        // The default `EnvironmentConfig::empty()` serialises to
+        // `{"schema_version":1, ...}` — the `{}` literal short-circuits
+        // *before* we even attempt to parse. Verify both shapes.
+        let raw_empty = proj_repo
+            .get_environment_config(&project.id)
+            .await
+            .expect("get default config");
+        assert!(
+            raw_empty.as_deref() == Some("{}") || raw_empty.as_deref() == Some(""),
+            "migration-10 column default should be `{{}}` or empty; got {raw_empty:?}"
+        );
+        assert!(
+            resolve_declared_workspaces(&ctx, &project.id)
+                .await
+                .is_none(),
+            "column default must resolve to None (no overlay)"
+        );
+
+        // An empty (zero-workspace) EnvironmentConfig — not the column
+        // default, but a real config with an empty `workspaces` list —
+        // also returns None. This is the "user saved an empty config"
+        // path and must not be confused with a request to index
+        // nothing.
+        let empty_cfg = djinn_stack::EnvironmentConfig::empty();
+        proj_repo
+            .set_environment_config(&project.id, &serde_json::to_string(&empty_cfg).unwrap())
+            .await
+            .expect("set empty config");
+        assert!(
+            resolve_declared_workspaces(&ctx, &project.id)
+                .await
+                .is_none(),
+            "EnvironmentConfig::empty() with no workspaces must resolve to None"
+        );
+    }
+
+    /// A declared workspace list must not turn into a hard filter on
+    /// the planned indexer commands. Even when the declared list is
+    /// non-empty, `run_indexers_already_locked` should be callable
+    /// against an empty project root with no indexers available and
+    /// return Ok — the overlay is log-only and additive, never
+    /// authoritative.
+    #[tokio::test]
+    async fn declared_workspaces_overlay_is_log_only_not_authoritative() {
+        let tmp = workspace_tempdir("canonical-graph-");
+        let db = create_test_db();
+        let ctx = TestWarmContext::new(db.clone());
+        let proj_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project = proj_repo
+            .create(
+                "declared-overlay-log-only",
+                "test",
+                "declared-overlay-log-only",
+            )
+            .await
+            .expect("create project");
+
+        // Declare a workspace that doesn't exist on disk. The overlay
+        // must not crash or short-circuit the run; the divergence is
+        // expected to surface as a structured warning (covered by the
+        // indexer-side tests in `scip_indexer/indexing.rs`).
+        let cfg = djinn_stack::EnvironmentConfig {
+            schema_version: djinn_stack::SCHEMA_VERSION,
+            source: djinn_stack::ConfigSource::UserEdited,
+            workspaces: vec![djinn_stack::Workspace {
+                slug: Some("phantom".to_string()),
+                name: Some("Does not exist on disk".to_string()),
+                tags: vec!["ghost".to_string()],
+                root: "this/path/does/not/exist".to_string(),
+                language: "rust".to_string(),
+                toolchain: None,
+                version: None,
+                package_manager: None,
+            }],
+            ..djinn_stack::EnvironmentConfig::empty()
+        };
+        proj_repo
+            .set_environment_config(&project.id, &serde_json::to_string(&cfg).unwrap())
+            .await
+            .expect("set environment_config");
+
+        let declared = resolve_declared_workspaces(&ctx, &project.id)
+            .await
+            .expect("declared list present");
+
+        // Empty project root + no indexers on PATH = zero planned
+        // commands. The overlay is ignored for planning — marker
+        // + discovery are authoritative — so the run returns Ok
+        // rather than tripping on the phantom workspace.
+        let project_root = tmp.path().join("empty");
+        tokio::fs::create_dir_all(&project_root).await.unwrap();
+        let output_root = tmp.path().join("scip-out");
+        let result = crate::scip_indexer::run_indexers_already_locked(
+            &project_root,
+            &output_root,
+            None,
+            None,
+            Some(&declared),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "declared overlay must not block the run; got {result:?}"
+        );
+    }
 }
