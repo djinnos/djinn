@@ -1256,6 +1256,36 @@ pub struct ProjectCtx {
     pub sub_path: Option<String>,
 }
 
+/// Resolved workspace scope for a `RepoGraphOps` call (pb94 epic).
+///
+/// Built by the `code_graph` dispatcher (and chat-side callers) before
+/// invoking a listing/bounded/traversal op. The single source of truth for
+/// the three workspace-parameter outcomes the epic commits to:
+/// - **Empty / unscoped** — caller omitted `workspace` or sent `""`
+///   (already normalized to `None` upstream). `workspace = None`,
+///   `hint = None`. Bridge runs over the full graph.
+/// - **Valid / known** — requested slug is non-empty and the graph has at
+///   least one node (or zero nodes) in that workspace. `workspace = Some(slug)`,
+///   `hint = None`. Single-workspace graphs land here too — the workspace
+///   filter is a structural no-op (matches every node) rather than a
+///   surprising hard-empty result.
+/// - **Unknown non-empty slug** — requested slug is non-empty and the graph
+///   contains no node in that workspace. `workspace = None` (so the bridge
+///   returns the full result), `hint = Some(candidates)` for the caller to
+///   recover. Single-candidate hint lists are suppressed — when the project
+///   exposes exactly one workspace, "I don't know `foo`, did you mean `server`?"
+///   is helpful only if `server` is genuinely a choice.
+#[derive(Debug, Clone, Default)]
+pub struct WorkspaceScope {
+    /// Effective workspace slug to hand to the bridge call. `None` for
+    /// unscoped, unknown, or single-workspace-no-op cases.
+    pub workspace: Option<String>,
+    /// Available workspace candidates to surface to the caller. Set
+    /// only when the requested slug was non-empty AND unknown AND the
+    /// project exposes more than one workspace.
+    pub hint: Option<Vec<String>>,
+}
+
 #[async_trait]
 pub trait RepoGraphOps: Send + Sync {
     /// Enumerate graph workspaces by combining distinct `RepoGraphNode.workspace`
@@ -1280,6 +1310,19 @@ pub trait RepoGraphOps: Send + Sync {
     /// Return workspace slugs that should be suggested for an unknown non-empty
     /// workspace request, or `None` when the request is absent/known or the
     /// project does not expose multiple workspace choices.
+    ///
+    /// Semantics contract (pb94 epic):
+    /// - `None` when the caller did not supply a workspace (omit / `""` after
+    ///   normalization) — the operation should run unscoped.
+    /// - `None` when the requested slug matches at least one node in the
+    ///   graph (i.e. the workspace is real, even if the graph has only one
+    ///   workspace — single-workspace graphs are a no-op rather than a
+    ///   hard-empty filter).
+    /// - `Some(candidates)` when the requested slug is non-empty and matches
+    ///   no node — the operation should run unscoped AND surface the
+    ///   candidate list so the caller can recover.
+    /// - `None` when the project exposes zero or one workspace slugs (a
+    ///   "no choice" project never produces a hint).
     async fn workspace_hint(
         &self,
         _ctx: &ProjectCtx,
