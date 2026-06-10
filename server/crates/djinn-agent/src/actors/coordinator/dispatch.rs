@@ -496,6 +496,23 @@ impl CoordinatorActor {
             {
                 continue;
             }
+            // Defensive guard: NEVER dispatch an agent for a task in a host-owned
+            // transient status. `verifying` in particular is driven by the
+            // slot-free verification pipeline on the host (spawned after the
+            // worker stage submits) — NOT by an agent run. It is already excluded
+            // from the ready set (`list_ready` returns `open` only, and the review
+            // sweep lists only needs_task_review / needs_lead_intervention), but
+            // `flow_for_task_dispatch` / `role_for_task_dispatch` would route a
+            // `verifying` task to the worker (NewTask) if one ever leaked in — so
+            // skip it explicitly. A stuck `verifying` task (no live pipeline) is
+            // recovered by `detect_and_recover_stuck_filtered`, not re-dispatched.
+            if task.status == "verifying" {
+                tracing::debug!(
+                    task_id = %task.short_id,
+                    "CoordinatorActor: skipping dispatch for verifying task (host-owned verification pipeline)"
+                );
+                continue;
+            }
             if active_task_ids.contains(&task.id) {
                 tracing::debug!(
                     task_id = %task.short_id,

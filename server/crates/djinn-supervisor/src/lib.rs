@@ -730,9 +730,21 @@ impl TaskRunSupervisor {
                                 "supervisor: pushed task_branch to mirror after stage (durable)"
                             );
                         }
-                        // Worker finished cleanly → submit_task_review
-                        // (in_progress → needs_task_review). Architect has no
-                        // analogous transition in the current state machine.
+                        // Worker finished cleanly → submit_verification
+                        // (in_progress → verifying). The run ends after this
+                        // stage (the worker-only sequence has no reviewer leg);
+                        // the HOST then spawns the slot-free verification
+                        // pipeline against the durable task_branch. Verification
+                        // green moves verifying → needs_task_review (which the
+                        // coordinator re-dispatches as a reviewer-only
+                        // ReviewResume), verification red releases the task for
+                        // worker rework — so verification runs BETWEEN the
+                        // worker and the reviewer, as designed. (Previously this
+                        // fired `submit_task_review` and an in-pod reviewer leg
+                        // ran back-to-back, so verification only happened later
+                        // at the pre-PR gate — the bug this rewiring fixes.)
+                        // Architect has no analogous transition in the current
+                        // state machine.
                         //
                         // Gate on the cancel token: a stall-kill / preempt can
                         // flip cancel mid-stage and the agent may still emit a
@@ -745,13 +757,13 @@ impl TaskRunSupervisor {
                                 tracing::debug!(
                                     task_run_id = %run_id,
                                     task_id = %spec.task_id,
-                                    "supervisor: run cancelled — skipping submit_task_review (task stays in_progress for redispatch)"
+                                    "supervisor: run cancelled — skipping submit_verification (task stays in_progress for redispatch)"
                                 );
                             } else if let Err(e) = self
                                 .services
                                 .transition_task(
                                     spec.task_id.clone(),
-                                    "submit_task_review".into(),
+                                    "submit_verification".into(),
                                     None,
                                 )
                                 .await
@@ -760,7 +772,7 @@ impl TaskRunSupervisor {
                                     task_run_id = %run_id,
                                     task_id = %spec.task_id,
                                     error = %e,
-                                    "supervisor: post-worker submit_task_review transition skipped"
+                                    "supervisor: post-worker submit_verification transition skipped"
                                 );
                             }
                         }
@@ -1151,12 +1163,38 @@ impl TaskRunSupervisor {
                                 last_stage_role
                             ),
                         },
-                        // The Lead flow only reaches here on the `approve`
-                        // decision (every other lead decision set `result` and
-                        // broke). lead_approve already moved the task to
-                        // `approved`; open_pr pushes the branch and fires
-                        // pr_created (approved → pr_draft), the same terminal
-                        // path as a reviewer approval.
+                        // Worker-only flows (NewTask / ReviewResponse /
+                        // ConflictRetry) end at the worker stage: verification
+                        // runs BEFORE the reviewer now, so there is NO PR to
+                        // open here. The worker already fired `submit_verification`
+                        // (in_progress → verifying) above; signal the host with a
+                        // `WorkerSubmitted` outcome so it spawns the slot-free
+                        // verification pipeline. Detect "the last stage was the
+                        // worker" rather than enumerating the flows so a future
+                        // flow that ends at the worker inherits the right path.
+                        // The PR is opened later, after a reviewer-only
+                        // ReviewResume run that a green verification re-dispatches.
+                        SupervisorFlow::NewTask
+                        | SupervisorFlow::ReviewResponse
+                        | SupervisorFlow::ConflictRetry
+                            if last_stage_role == Some(RoleKind::Worker) =>
+                        {
+                            info!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                flow = ?spec.flow,
+                                "supervisor: worker stage complete; task submitted to verification (no PR opened here)"
+                            );
+                            TaskRunOutcome::WorkerSubmitted
+                        }
+                        // The reviewer-only ReviewResume (and the Lead `approve`
+                        // decision) DO open a PR: ReviewResume's reviewer approved
+                        // the already-verified diff (in_task_review → approved),
+                        // and lead_approve already moved the task to `approved`.
+                        // open_pr pushes the branch and fires pr_created
+                        // (approved → pr_draft). The Lead flow only reaches here on
+                        // the `approve` decision (every other lead decision set
+                        // `result` and broke).
                         SupervisorFlow::NewTask
                         | SupervisorFlow::ReviewResponse
                         | SupervisorFlow::ReviewResume
@@ -1185,6 +1223,9 @@ impl TaskRunSupervisor {
             TaskRunOutcome::PrOpened { .. } | TaskRunOutcome::Closed { .. } => {
                 TaskRunStatus::Completed
             }
+            // The worker stage genuinely succeeded and handed off to the
+            // verification pipeline; the task-run itself completed cleanly.
+            TaskRunOutcome::WorkerSubmitted => TaskRunStatus::Completed,
             TaskRunOutcome::Escalated { .. } => TaskRunStatus::Completed,
             TaskRunOutcome::Failed { .. } => TaskRunStatus::Failed,
             TaskRunOutcome::Interrupted => TaskRunStatus::Interrupted,

@@ -17,7 +17,8 @@ For memory-note changes, inspect notes via the registered memory MCP tools (`mem
 For each acceptance criterion, find evidence in the code:
 
 - Read relevant files, check imports, function signatures, module structure.
-- **If a criterion references a specific command** (e.g. "cargo modules dependencies confirms X"), **run it via `shell`** and check the output. You have shell access — use it for any task-specific verification that goes beyond code inspection.
+- **If a criterion references a specific diagnostic/inspection command** (e.g. `cargo modules dependencies`, `grep`, `git log`, reading a generated file), **run it via `shell`** and check the output. You have shell access — use it for task-specific *inspection* that goes beyond reading the diff.
+- **Do NOT re-run the build/lint/test SUITES** (`cargo build`, `cargo clippy`, `cargo test`/`nextest`, `go test`, `npm test`, etc.). Verification has already run those scoped commands and they passed before this review (that's what moved the task here) — re-running them just burns the session. If an acceptance criterion says "covered by tests", confirm the tests *exist and assert the behavior* by reading them, not by executing the suite.
 
 ```
 ✓ Criterion 1 - MET: {file:line}

@@ -438,6 +438,72 @@ async fn emit_verification_steps(
 /// Keeps the activity log entry and downstream prompts reasonable.
 const MAX_OUTPUT_CHARS: usize = 3000;
 
+/// Overall cap on the error-line distillation for one stream (well under the
+/// ~16KB budget the worker-rework prompt can afford for failure feedback).
+const MAX_DISTILLED_CHARS: usize = 8000;
+
+/// Distill a build/test stream down to its actionable error lines.
+///
+/// Worker rework only needs the *errors*, not the full (often megabyte) build
+/// log: compiler diagnostics, panics, and test failures. We keep the lines that
+/// carry those signals (plus a couple of trailing context lines after each, so
+/// a multi-line `error[E…]` block stays readable) and drop the noise. When no
+/// such lines are found — or distillation would itself overflow — we fall back
+/// to the head+tail `smart_truncate` so the caller never loses everything.
+fn distill_error_lines(text: &str) -> String {
+    if text.trim().is_empty() {
+        return String::new();
+    }
+
+    // Signals that mark a line as worth keeping. Lowercased compare.
+    const NEEDLES: &[&str] = &[
+        "error",
+        "error[",
+        "warning:",
+        "failed",
+        "failure",
+        "panicked",
+        "assertion",
+        "fatal",
+        "cannot find",
+        "expected",
+        "undefined",
+        "unresolved",
+        "test result:",
+    ];
+
+    let lines: Vec<&str> = text.lines().collect();
+    let mut keep = vec![false; lines.len()];
+    for (i, line) in lines.iter().enumerate() {
+        let lc = line.to_ascii_lowercase();
+        if NEEDLES.iter().any(|n| lc.contains(n)) {
+            keep[i] = true;
+            // Keep up to two trailing lines so a multi-line diagnostic block
+            // (the ` --> file:line` / ` | ` continuation rust emits) survives.
+            let ctx_end = (i + 3).min(lines.len());
+            for slot in &mut keep[(i + 1)..ctx_end] {
+                *slot = true;
+            }
+        }
+    }
+
+    let distilled: String = lines
+        .iter()
+        .zip(keep.iter())
+        .filter_map(|(line, &k)| k.then_some(*line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if distilled.trim().is_empty() {
+        // No recognizable error lines — fall back to head+tail truncation so the
+        // worker still gets the tail (where results/errors usually land).
+        return crate::truncate::smart_truncate(text, MAX_OUTPUT_CHARS);
+    }
+    // Cap the distillation itself (a pathological run could emit thousands of
+    // warning lines); smart_truncate preserves the head and the conclusive tail.
+    crate::truncate::smart_truncate(&distilled, MAX_DISTILLED_CHARS)
+}
+
 fn format_verification_failure_feedback(
     result: &crate::verification::service::VerificationResult,
 ) -> String {
@@ -447,8 +513,10 @@ fn format_verification_failure_feedback(
         .chain(result.verification_results.iter())
         .find(|r| r.exit_code != 0);
     if let Some(cmd) = failed {
-        let stdout = crate::truncate::smart_truncate(&cmd.stdout, MAX_OUTPUT_CHARS);
-        let stderr = crate::truncate::smart_truncate(&cmd.stderr, MAX_OUTPUT_CHARS);
+        // Distill to actionable error lines (capped) rather than dumping the raw
+        // build output — the worker rework prompt only needs the diagnostics.
+        let stdout = distill_error_lines(&cmd.stdout);
+        let stderr = distill_error_lines(&cmd.stderr);
         format!(
             "Verification command '{}' (`{}`) failed with exit code {}.\n\nstdout:\n{stdout}\nstderr:\n{stderr}",
             cmd.name, cmd.command, cmd.exit_code,
@@ -519,6 +587,50 @@ mod tests {
 
         assert!(!feedback.contains("omitted"));
         assert!(feedback.contains("error[E0599]: something"));
+    }
+
+    #[test]
+    fn distill_keeps_error_lines_and_drops_noise() {
+        // A long build log where the actionable errors are buried in the middle.
+        let mut lines = vec!["   Compiling foo v0.1.0".to_string()];
+        for i in 0..500 {
+            lines.push(format!("   Compiling crate_{i} v0.1.0"));
+        }
+        lines.push("error[E0308]: mismatched types".to_string());
+        lines.push("   --> src/lib.rs:42:5".to_string());
+        lines.push("    |".to_string());
+        for i in 0..500 {
+            lines.push(format!("    warning noise filler line {i}"));
+        }
+        let text = lines.join("\n");
+
+        let distilled = distill_error_lines(&text);
+        // The buried compiler error and its context line survive.
+        assert!(distilled.contains("error[E0308]: mismatched types"));
+        assert!(distilled.contains("src/lib.rs:42:5"));
+        // The vast majority of plain "Compiling" noise is dropped.
+        assert!(
+            !distilled.contains("Compiling crate_250"),
+            "noise line should be dropped"
+        );
+        // And it stays well under the distillation cap (and the 16KB budget).
+        assert!(distilled.len() <= MAX_DISTILLED_CHARS + 200);
+    }
+
+    #[test]
+    fn distill_falls_back_to_truncation_when_no_error_lines() {
+        // No recognizable error tokens → fall back to head+tail truncation so we
+        // never lose everything.
+        let text = "a".repeat(10_000);
+        let distilled = distill_error_lines(&text);
+        assert!(distilled.len() < 7_000);
+        assert!(distilled.contains("truncated") || distilled.contains("omitted"));
+    }
+
+    #[test]
+    fn distill_empty_is_empty() {
+        assert_eq!(distill_error_lines(""), "");
+        assert_eq!(distill_error_lines("   \n  \n"), "");
     }
 
     #[test]

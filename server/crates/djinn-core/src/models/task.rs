@@ -982,6 +982,82 @@ mod tests {
     }
 
     #[test]
+    fn verify_before_review_walk() {
+        // The intended post-worker walk under the "verify before review"
+        // pipeline: worker submits → verifying → (green) → needs_task_review.
+        // The reviewer leg arrives later as a separate ReviewResume dispatch.
+        let submit = compute_transition(
+            &TransitionAction::SubmitVerification,
+            &TaskStatus::InProgress,
+            None,
+        )
+        .expect("submit_verification from in_progress is valid");
+        assert_eq!(submit.to_status, Some(TaskStatus::Verifying));
+        // The conflict metadata is cleared on entry to verification (a fresh
+        // verify run shouldn't carry a prior cycle's conflict context).
+        assert!(submit.clear_merge_conflict_metadata);
+
+        let pass = compute_transition(
+            &TransitionAction::VerificationPass,
+            &TaskStatus::Verifying,
+            None,
+        )
+        .expect("verification_pass from verifying is valid");
+        assert_eq!(pass.to_status, Some(TaskStatus::NeedsTaskReview));
+        // A clean verification resets the consecutive-failure counter.
+        assert!(pass.reset_verification_failure);
+    }
+
+    #[test]
+    fn verification_fail_returns_to_open_and_increments() {
+        // Red verification releases the task for worker rework and bumps the
+        // failure counter (the escalation ladder consults it).
+        let fail = compute_transition(
+            &TransitionAction::VerificationFail,
+            &TaskStatus::Verifying,
+            None,
+        )
+        .expect("verification_fail from verifying is valid");
+        assert_eq!(fail.to_status, Some(TaskStatus::Open));
+        assert!(fail.increment_verification_failure);
+    }
+
+    #[test]
+    fn verification_actions_invalid_outside_their_source_states() {
+        // Guard rails: the verification entry/exit transitions are only legal
+        // from their intended source states, so a stray dispatch can't walk a
+        // task through verification from the wrong place.
+        assert!(
+            compute_transition(
+                &TransitionAction::VerificationPass,
+                &TaskStatus::InProgress,
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            compute_transition(
+                &TransitionAction::SubmitVerification,
+                &TaskStatus::NeedsTaskReview,
+                None
+            )
+            .is_err()
+        );
+        // submit_task_review remains legal from BOTH in_progress and verifying
+        // (the legacy direct-to-review path stays available for the host /
+        // recovery), so verifying → needs_task_review can also be reached that
+        // way without going through verification_pass.
+        assert!(
+            compute_transition(
+                &TransitionAction::SubmitTaskReview,
+                &TaskStatus::Verifying,
+                None
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn user_override_requires_target_and_applies_target() {
         assert!(
             compute_transition(&TransitionAction::UserOverride, &TaskStatus::Open, None).is_err()
