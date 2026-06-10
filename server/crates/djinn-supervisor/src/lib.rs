@@ -1149,6 +1149,7 @@ impl TaskRunSupervisor {
                         // path as a reviewer approval.
                         SupervisorFlow::NewTask
                         | SupervisorFlow::ReviewResponse
+                        | SupervisorFlow::ReviewResume
                         | SupervisorFlow::ConflictRetry
                         | SupervisorFlow::Lead => {
                             info!(

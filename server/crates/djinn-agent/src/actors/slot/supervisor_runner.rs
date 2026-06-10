@@ -141,21 +141,64 @@ pub(crate) async fn run_supervisor_dispatch(
     let has_review_response =
         matches!(task.status.as_str(), "needs_task_review" | "in_task_review");
 
+    // ── Resolve branches from project config ──────────────────────────────
+    let base_branch = default_target_branch(&task.project_id, &app_state).await;
+    let task_branch = task_branch_name(&task.short_id);
+
     // ── Pick the supervisor flow ──────────────────────────────────────────
-    let flow = crate::roles::flow_for_task_dispatch(&task, has_conflict, has_review_response);
+    let base_flow = crate::roles::flow_for_task_dispatch(&task, has_conflict, has_review_response);
+
+    // ── Stage-aware resume: skip the worker redo when its output is durable ──
+    //
+    // A task that lands back at `needs_task_review` routes to `ReviewResponse`
+    // (worker → reviewer). But the ONLY way a task reaches that status is the
+    // worker having already submitted (`submit_task_review`), so re-running the
+    // worker redoes identical work — the failure mode behind a reviewer-stage
+    // pod kill (Job deadline) redispatching as a fresh ~55-min worker run.
+    //
+    // When the worker's commits are durable on the mirror task_branch (it
+    // exists and is ahead of base — the sibling eager-push makes this hold
+    // after the worker stage), upgrade to the reviewer-only `ReviewResume`
+    // flow so the redispatch reviews the existing diff instead of redoing the
+    // work. This is driven by what DURABLY happened (branch present), not by an
+    // outcome emitted after cancellation — so a cancelled reviewer run never
+    // tricks us into skipping real work (cf. the kw7s cancel-gate precedent).
+    //
+    // The guard is conservative: a missing/empty task_branch (worker never
+    // pushed, first cycle) keeps `ReviewResponse` and the full worker redo.
+    // Provider-failure and genuine reviewer-rejection paths are unaffected —
+    // a rejection moves the task to `open` (→ NewTask worker flow), never to
+    // `needs_task_review`, so it never reaches this branch.
+    let worker_output_durable = matches!(base_flow, SupervisorFlow::ReviewResponse)
+        && match app_state.mirror.as_ref() {
+            Some(mirror) => {
+                mirror
+                    .branch_ahead_of_base(&task.project_id, &task_branch, &base_branch)
+                    .await
+            }
+            None => false,
+        };
+    let flow = resume_flow(base_flow, worker_output_durable);
+    if matches!(flow, SupervisorFlow::ReviewResume) {
+        tracing::info!(
+            task_id = %task.short_id,
+            branch = %task_branch,
+            "supervisor dispatch: worker output durable on task_branch; \
+             resuming at reviewer stage (skipping worker redo)"
+        );
+    }
 
     // ── Map flow → trigger ────────────────────────────────────────────────
     let trigger = if has_conflict {
         TaskRunTrigger::ConflictRetry
-    } else if matches!(flow, SupervisorFlow::ReviewResponse) {
+    } else if matches!(
+        flow,
+        SupervisorFlow::ReviewResponse | SupervisorFlow::ReviewResume
+    ) {
         TaskRunTrigger::ReviewResponse
     } else {
         TaskRunTrigger::NewTask
     };
-
-    // ── Resolve branches from project config ──────────────────────────────
-    let base_branch = default_target_branch(&task.project_id, &app_state).await;
-    let task_branch = task_branch_name(&task.short_id);
 
     // ── Resolve per-role model ids ────────────────────────────────────────
     let mut model_id_per_role: HashMap<RoleKind, String> = HashMap::new();
@@ -643,6 +686,26 @@ pub(crate) async fn run_supervisor_dispatch(
     }
 }
 
+/// Stage-aware-resume decision seam: given the flow the coordinator routed to
+/// and whether the worker's output is durably present on the mirror task_branch,
+/// pick the flow the run actually executes.
+///
+/// Only `ReviewResponse` (the worker→reviewer re-entry, reached exclusively from
+/// `needs_task_review`/`in_task_review` where the worker already submitted) is a
+/// candidate for the reviewer-only `ReviewResume` upgrade, and only when the
+/// worker output is durable. Every other flow — and `ReviewResponse` without
+/// durable output — passes through unchanged so an absent/empty task_branch
+/// falls back to the full worker redo. Kept as a pure free function so the
+/// "resume at reviewer vs redo worker" choice is unit-testable without a DB or
+/// mirror.
+fn resume_flow(base_flow: SupervisorFlow, worker_output_durable: bool) -> SupervisorFlow {
+    if matches!(base_flow, SupervisorFlow::ReviewResponse) && worker_output_durable {
+        SupervisorFlow::ReviewResume
+    } else {
+        base_flow
+    }
+}
+
 fn report_to_terminal_status(report: &TaskRunReport) -> TaskRunStatus {
     match &report.outcome {
         TaskRunOutcome::PrOpened { .. }
@@ -795,6 +858,52 @@ mod tests {
         let chosen = select_terminal_report(None, teardown_stub);
         assert_eq!(chosen.task_run_id, "id-A-transport");
         assert!(chosen.stages_completed.is_empty());
+    }
+
+    // ── Stage-aware resume decision ───────────────────────────────────────────
+
+    #[test]
+    fn resume_flow_upgrades_review_response_to_reviewer_only_when_durable() {
+        // The regression target: a reviewer-stage pod kill leaves the task at
+        // needs_task_review (worker already submitted), which routes to
+        // ReviewResponse (worker→reviewer). With the worker's commits durable on
+        // the mirror task_branch we must resume at the reviewer, NOT redo the
+        // worker.
+        assert_eq!(
+            resume_flow(SupervisorFlow::ReviewResponse, true),
+            SupervisorFlow::ReviewResume
+        );
+        assert_eq!(
+            SupervisorFlow::ReviewResume.role_sequence(),
+            &[djinn_runtime::RoleKind::Reviewer],
+            "ReviewResume must skip the worker stage"
+        );
+    }
+
+    #[test]
+    fn resume_flow_keeps_review_response_when_output_not_durable() {
+        // No durable worker output (task_branch missing / not ahead of base, or
+        // no mirror) → fall back to the full worker redo. Safety guard.
+        assert_eq!(
+            resume_flow(SupervisorFlow::ReviewResponse, false),
+            SupervisorFlow::ReviewResponse
+        );
+    }
+
+    #[test]
+    fn resume_flow_leaves_non_review_response_flows_untouched() {
+        // Only ReviewResponse is a resume candidate. Durability is irrelevant for
+        // every other flow — they must pass through unchanged regardless.
+        for flow in [
+            SupervisorFlow::NewTask,
+            SupervisorFlow::ConflictRetry,
+            SupervisorFlow::Spike,
+            SupervisorFlow::Planning,
+            SupervisorFlow::Lead,
+        ] {
+            assert_eq!(resume_flow(flow, true), flow);
+            assert_eq!(resume_flow(flow, false), flow);
+        }
     }
 
     #[tokio::test]
