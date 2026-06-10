@@ -304,8 +304,8 @@ impl AnthropicProvider {
         );
     }
 
-    /// Compute a cheap, stable hash of the `cache_control`-marked STABLE PREFIX of
-    /// an assembled request body.
+    /// Compute a cheap, stable hash of the genuinely-stable, `cache_control`-marked
+    /// prefix segments of an assembled request body.
     ///
     /// # Why this exists (B3 drift guard)
     ///
@@ -316,19 +316,31 @@ impl AnthropicProvider {
     /// silently turns into a (paid) cache miss with no error surfaced anywhere.
     ///
     /// This hash lets callers (and the regression test below) assert that identical
-    /// logical inputs produce a byte-identical cached prefix. It deliberately hashes
-    /// only the prefix segments that actually carry a `cache_control` marker — the
-    /// tool definitions, the cached system blocks, and the trailing message
-    /// breakpoint's preceding content — in the same descending priority order that
-    /// [`Self::for_each_cache_marker`] visits them, so the hash tracks exactly the
-    /// bytes Anthropic keys its cache on.
+    /// logical inputs produce a byte-identical cached prefix. It hashes only the
+    /// segments that are supposed to be *stable across consecutive turns*: the model
+    /// id, the `cache_control`-marked tool definitions, and the `cache_control`-marked
+    /// system blocks.
+    ///
+    /// # Why the trailing message breakpoint is deliberately excluded
+    ///
+    /// The default/explicit caching policy also marks the *last message* of the
+    /// conversation so the full conversation prefix is cacheable. That breakpoint
+    /// segment changes **every single turn by design** — the conversation grows, so
+    /// the last message (and the block carrying the marker) is different on every
+    /// request. Folding it into this hash made the drift guard fire on every turn for
+    /// every Anthropic-format model, turning a useful "your stable prefix drifted"
+    /// alarm into wall-to-wall noise that masked real drift. Excluding it is correct:
+    /// the trailing breakpoint extends the cache to the conversation tail, but the
+    /// *earlier* tool/system breakpoints still hit, and those are exactly what this
+    /// guard watches for unexpected drift.
     ///
     /// It is intentionally allocation-light: it folds the relevant `serde_json`
     /// values into a `DefaultHasher` field-by-field rather than re-serializing or
     /// cloning the whole body. The value is only stable *within a single process
     /// run* (`DefaultHasher` is not portable), which is all a within-run drift check
-    /// needs. Returns `None` when the request carries no cache markers at all
-    /// (caching inactive — nothing to guard).
+    /// needs. Returns `None` when no stable (tool/system) `cache_control` marker is
+    /// present — caching is either inactive or carried solely by the trailing message
+    /// breakpoint, and in both cases there is no stable prefix worth guarding.
     fn stable_prefix_hash(body: &Value) -> Option<u64> {
         use std::hash::{Hash, Hasher};
 
@@ -403,21 +415,10 @@ impl AnthropicProvider {
             }
         }
 
-        // Trailing message breakpoint: fold the content blocks that carry the
-        // marker. The marker lives on the last block of the last message and closes
-        // the conversation-prefix cache boundary.
-        if let Some(messages) = body.get("messages").and_then(Value::as_array) {
-            for message in messages {
-                if let Some(content) = message.get("content").and_then(Value::as_array) {
-                    for block in content {
-                        if block.get("cache_control").is_some() {
-                            fold(block, &mut hasher);
-                            marked += 1;
-                        }
-                    }
-                }
-            }
-        }
+        // NOTE: the trailing *message* breakpoint is intentionally NOT folded here.
+        // It marks the last message so the conversation tail is cacheable, but that
+        // block changes every turn by design (the conversation grows). Including it
+        // made the drift guard fire on every turn. See the doc comment above.
 
         if marked == 0 {
             return None;
@@ -534,11 +535,16 @@ impl AnthropicProvider {
     }
 
     /// Compare the freshly-assembled stable-prefix hash against this provider
-    /// instance's previous request and `warn!` on an unexpected change. See
-    /// [`Self::stable_prefix_hash`] for what counts as the stable prefix.
+    /// instance's previous request and `warn!` on an unexpected change.
+    ///
+    /// "Stable prefix" here is the model id + cached tool definitions + cached system
+    /// blocks — the segments that are supposed to be identical turn-to-turn. The
+    /// trailing message breakpoint is excluded on purpose: it grows with the
+    /// conversation every turn, so hashing it would make this guard warn constantly
+    /// and mask genuine drift. See [`Self::stable_prefix_hash`] for the full rationale.
     fn check_prefix_drift(&self, body: &Value) {
         let Some(current) = Self::stable_prefix_hash(body) else {
-            return; // no cache markers => nothing to guard
+            return; // no stable (tool/system) cache marker => nothing to guard
         };
         let mut last = match self.last_prefix_hash.lock() {
             Ok(guard) => guard,
@@ -2012,6 +2018,87 @@ mod tests {
             serde_json::to_string(&body_a["tools"]).unwrap(),
             serde_json::to_string(&body_b["tools"]).unwrap(),
             "tool prefix must be unaffected by a dynamic-tail change"
+        );
+        // And, crucially, the stable-prefix HASH must be identical. The trailing
+        // message breakpoint moved to the new last message (different content), but
+        // that segment is deliberately excluded from the hash, so the guard must NOT
+        // see drift here.
+        assert_eq!(
+            AnthropicProvider::stable_prefix_hash(&body_a),
+            AnthropicProvider::stable_prefix_hash(&body_b),
+            "a dynamic-tail (trailing message) change must not move the stable-prefix hash"
+        );
+    }
+
+    /// Regression for the B3 drift-guard bug: two requests that share an identical
+    /// system + tool prefix but differ in their conversation messages — exactly what
+    /// consecutive turns of a growing conversation look like — must hash to the SAME
+    /// stable prefix. Before the fix the hash folded the trailing message breakpoint,
+    /// so this changed every turn and the guard warned on every single request.
+    #[test]
+    fn test_stable_prefix_hash_stable_across_growing_conversation() {
+        let provider = test_provider();
+        let (conv, tools) = drift_guard_fixture();
+
+        // Turn 1: the fixture conversation as-is.
+        let turn_1 = provider.build_request(&conv, &tools, None);
+
+        // Turn 2: the conversation has grown — append an assistant reply and a new
+        // user message, mirroring a real multi-turn session. The trailing breakpoint
+        // now sits on a different message, but system + tools are untouched.
+        let mut grown = conv.clone();
+        grown.push(crate::message::Message::assistant("an assistant reply"));
+        grown.push(crate::message::Message::user(
+            "a follow-up that grows the convo",
+        ));
+        let turn_2 = provider.build_request(&grown, &tools, None);
+
+        // Sanity: the message arrays genuinely differ (otherwise the test is vacuous).
+        assert_ne!(
+            turn_1["messages"], turn_2["messages"],
+            "the two turns must have different messages for this regression to be meaningful"
+        );
+
+        let hash_1 = AnthropicProvider::stable_prefix_hash(&turn_1)
+            .expect("stable tool/system markers present => hash should exist");
+        let hash_2 = AnthropicProvider::stable_prefix_hash(&turn_2)
+            .expect("stable tool/system markers present => hash should exist");
+        assert_eq!(
+            hash_1, hash_2,
+            "identical system+tools across growing conversation turns must hash identically"
+        );
+    }
+
+    /// Companion to the regression above: a mutated system block OR a mutated tool
+    /// definition must still move the hash, so the guard retains its teeth for the
+    /// drift it is actually meant to catch.
+    #[test]
+    fn test_stable_prefix_hash_detects_system_or_tool_mutation() {
+        let provider = test_provider();
+        let (conv, tools) = drift_guard_fixture();
+        let baseline = provider.build_request(&conv, &tools, None);
+        let baseline_hash = AnthropicProvider::stable_prefix_hash(&baseline).unwrap();
+
+        // Mutated system block (the cached project-context text drifts).
+        let mut conv_sys = conv.clone();
+        conv_sys.messages[0].content[1] = ContentBlock::Text {
+            text: "project context / repo map (DRIFTED)".to_string(),
+        };
+        let sys_body = provider.build_request(&conv_sys, &tools, None);
+        assert_ne!(
+            baseline_hash,
+            AnthropicProvider::stable_prefix_hash(&sys_body).unwrap(),
+            "a mutated cached system block must change the stable-prefix hash"
+        );
+
+        // Mutated tool definition (the cached tool schema/description drifts).
+        let mut tools_mut = tools.clone();
+        tools_mut[0]["description"] = json!("Run shell (description drifted)");
+        let tool_body = provider.build_request(&conv, &tools_mut, None);
+        assert_ne!(
+            baseline_hash,
+            AnthropicProvider::stable_prefix_hash(&tool_body).unwrap(),
+            "a mutated cached tool definition must change the stable-prefix hash"
         );
     }
 
