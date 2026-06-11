@@ -6140,8 +6140,391 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
-        "ObjectJson": {
-          "additionalProperties": true,
+        "ClangLanguage": {
+          "properties": {
+            "default_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_version"
+          ],
+          "type": "object"
+        },
+        "ConfigSource": {
+          "description": "How the config landed in the column.\n\n* `AutoDetected` — written by the P5 boot reseed hook from stack detection.\n  Re-writing from detection is OK (config may still be overwritten on the\n  next detector pass until the user edits it).\n* `UserEdited` — saved via the MCP tool or UI. Never reseeded from stack.",
+          "enum": [
+            "auto-detected",
+            "user-edited"
+          ],
+          "type": "string"
+        },
+        "DotnetLanguage": {
+          "properties": {
+            "default_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_version"
+          ],
+          "type": "object"
+        },
+        "EnvironmentConfig": {
+          "additionalProperties": false,
+          "properties": {
+            "agent_mcp_defaults": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "default": {},
+              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "type": "object"
+            },
+            "env": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "type": "object"
+            },
+            "global_skills": {
+              "default": [],
+              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "languages": {
+              "$ref": "#/$defs/Languages",
+              "default": {
+                "clang": null,
+                "dotnet": null,
+                "go": null,
+                "java": null,
+                "node": null,
+                "python": null,
+                "ruby": null,
+                "rust": null
+              }
+            },
+            "lifecycle": {
+              "$ref": "#/$defs/LifecycleHooks",
+              "default": {
+                "post_build": [],
+                "pre_anything": [],
+                "pre_task": [],
+                "pre_verification": []
+              }
+            },
+            "schema_version": {
+              "default": 0,
+              "description": "`0` (the default) is the \"needs reseed\" sentinel — the P5 boot hook\ntreats any config with `schema_version < 1` as an un-seeded row and\nrewrites it from `projects.stack`. `validate()` rejects 0 so that\nuser-submitted configs must declare a real version.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "$ref": "#/$defs/ConfigSource",
+              "default": "auto-detected"
+            },
+            "system_packages": {
+              "default": [],
+              "description": "apt packages installed in the image. Alpine was dropped in the\n2026-04-22 cleanup — every image is `debian:bookworm-slim` now.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "workspaces": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/Workspace"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "GoLanguage": {
+          "properties": {
+            "default_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_version"
+          ],
+          "type": "object"
+        },
+        "HookCommand": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/HookCommand"
+              },
+              "type": "object"
+            }
+          ],
+          "description": "A lifecycle / verification / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
+        },
+        "JavaLanguage": {
+          "properties": {
+            "default_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_version"
+          ],
+          "type": "object"
+        },
+        "Languages": {
+          "additionalProperties": false,
+          "properties": {
+            "clang": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ClangLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            },
+            "dotnet": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DotnetLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            },
+            "go": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/GoLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            },
+            "java": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/JavaLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            },
+            "node": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NodeLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            },
+            "python": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PythonLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            },
+            "ruby": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RubyLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            },
+            "rust": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RustLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            }
+          },
+          "type": "object"
+        },
+        "LifecycleHooks": {
+          "properties": {
+            "post_build": {
+              "default": [],
+              "description": "`RUN` lines appended to the generated Dockerfile. Bundle anything\nyou want baked into the image here (apt packages are the easy path;\ncurl-installs like `protoc` go here).",
+              "items": {
+                "$ref": "#/$defs/HookCommand"
+              },
+              "type": "array"
+            },
+            "pre_anything": {
+              "default": [],
+              "description": "Runs in every Pod djinn starts (warm AND task-run), before any\ndjinn work. The pre-2026-04-22 `pre_warm` field routes here via\nthe serde alias.",
+              "items": {
+                "$ref": "#/$defs/HookCommand"
+              },
+              "type": "array"
+            },
+            "pre_task": {
+              "default": [],
+              "description": "Runs in the task-run Pod before the supervisor starts.",
+              "items": {
+                "$ref": "#/$defs/HookCommand"
+              },
+              "type": "array"
+            },
+            "pre_verification": {
+              "default": [],
+              "description": "Runs once in the task-run Pod, before any verification rule fires.\nTypically `pnpm install` / `cargo build` / similar — commands that\nprepare the workspace so the `verification.rules` commands succeed.\nPreviously lived as `verification.setup`.",
+              "items": {
+                "$ref": "#/$defs/HookCommand"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "NodeLanguage": {
+          "properties": {
+            "default_package_manager": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            },
+            "default_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_version"
+          ],
+          "type": "object"
+        },
+        "PythonLanguage": {
+          "properties": {
+            "default_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_version"
+          ],
+          "type": "object"
+        },
+        "RubyLanguage": {
+          "properties": {
+            "default_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_version"
+          ],
+          "type": "object"
+        },
+        "RustLanguage": {
+          "properties": {
+            "default_toolchain": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_toolchain"
+          ],
+          "type": "object"
+        },
+        "Workspace": {
+          "properties": {
+            "language": {
+              "type": "string"
+            },
+            "name": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            },
+            "package_manager": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            },
+            "root": {
+              "type": "string"
+            },
+            "slug": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            },
+            "tags": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "toolchain": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            },
+            "version": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          "required": [
+            "root",
+            "language"
+          ],
           "type": "object"
         }
       },
@@ -6150,7 +6533,7 @@ expression: signatures
         "config": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ObjectJson"
+              "$ref": "#/$defs/EnvironmentConfig"
             },
             {
               "const": null,
@@ -6206,8 +6589,391 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
-        "ObjectJson": {
-          "additionalProperties": true,
+        "ClangLanguage": {
+          "properties": {
+            "default_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_version"
+          ],
+          "type": "object"
+        },
+        "ConfigSource": {
+          "description": "How the config landed in the column.\n\n* `AutoDetected` — written by the P5 boot reseed hook from stack detection.\n  Re-writing from detection is OK (config may still be overwritten on the\n  next detector pass until the user edits it).\n* `UserEdited` — saved via the MCP tool or UI. Never reseeded from stack.",
+          "enum": [
+            "auto-detected",
+            "user-edited"
+          ],
+          "type": "string"
+        },
+        "DotnetLanguage": {
+          "properties": {
+            "default_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_version"
+          ],
+          "type": "object"
+        },
+        "EnvironmentConfig": {
+          "additionalProperties": false,
+          "properties": {
+            "agent_mcp_defaults": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "default": {},
+              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "type": "object"
+            },
+            "env": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "type": "object"
+            },
+            "global_skills": {
+              "default": [],
+              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "languages": {
+              "$ref": "#/$defs/Languages",
+              "default": {
+                "clang": null,
+                "dotnet": null,
+                "go": null,
+                "java": null,
+                "node": null,
+                "python": null,
+                "ruby": null,
+                "rust": null
+              }
+            },
+            "lifecycle": {
+              "$ref": "#/$defs/LifecycleHooks",
+              "default": {
+                "post_build": [],
+                "pre_anything": [],
+                "pre_task": [],
+                "pre_verification": []
+              }
+            },
+            "schema_version": {
+              "default": 0,
+              "description": "`0` (the default) is the \"needs reseed\" sentinel — the P5 boot hook\ntreats any config with `schema_version < 1` as an un-seeded row and\nrewrites it from `projects.stack`. `validate()` rejects 0 so that\nuser-submitted configs must declare a real version.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "$ref": "#/$defs/ConfigSource",
+              "default": "auto-detected"
+            },
+            "system_packages": {
+              "default": [],
+              "description": "apt packages installed in the image. Alpine was dropped in the\n2026-04-22 cleanup — every image is `debian:bookworm-slim` now.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "workspaces": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/Workspace"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "GoLanguage": {
+          "properties": {
+            "default_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_version"
+          ],
+          "type": "object"
+        },
+        "HookCommand": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/HookCommand"
+              },
+              "type": "object"
+            }
+          ],
+          "description": "A lifecycle / verification / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
+        },
+        "JavaLanguage": {
+          "properties": {
+            "default_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_version"
+          ],
+          "type": "object"
+        },
+        "Languages": {
+          "additionalProperties": false,
+          "properties": {
+            "clang": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ClangLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            },
+            "dotnet": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DotnetLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            },
+            "go": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/GoLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            },
+            "java": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/JavaLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            },
+            "node": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NodeLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            },
+            "python": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PythonLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            },
+            "ruby": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RubyLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            },
+            "rust": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RustLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            }
+          },
+          "type": "object"
+        },
+        "LifecycleHooks": {
+          "properties": {
+            "post_build": {
+              "default": [],
+              "description": "`RUN` lines appended to the generated Dockerfile. Bundle anything\nyou want baked into the image here (apt packages are the easy path;\ncurl-installs like `protoc` go here).",
+              "items": {
+                "$ref": "#/$defs/HookCommand"
+              },
+              "type": "array"
+            },
+            "pre_anything": {
+              "default": [],
+              "description": "Runs in every Pod djinn starts (warm AND task-run), before any\ndjinn work. The pre-2026-04-22 `pre_warm` field routes here via\nthe serde alias.",
+              "items": {
+                "$ref": "#/$defs/HookCommand"
+              },
+              "type": "array"
+            },
+            "pre_task": {
+              "default": [],
+              "description": "Runs in the task-run Pod before the supervisor starts.",
+              "items": {
+                "$ref": "#/$defs/HookCommand"
+              },
+              "type": "array"
+            },
+            "pre_verification": {
+              "default": [],
+              "description": "Runs once in the task-run Pod, before any verification rule fires.\nTypically `pnpm install` / `cargo build` / similar — commands that\nprepare the workspace so the `verification.rules` commands succeed.\nPreviously lived as `verification.setup`.",
+              "items": {
+                "$ref": "#/$defs/HookCommand"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "NodeLanguage": {
+          "properties": {
+            "default_package_manager": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            },
+            "default_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_version"
+          ],
+          "type": "object"
+        },
+        "PythonLanguage": {
+          "properties": {
+            "default_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_version"
+          ],
+          "type": "object"
+        },
+        "RubyLanguage": {
+          "properties": {
+            "default_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_version"
+          ],
+          "type": "object"
+        },
+        "RustLanguage": {
+          "properties": {
+            "default_toolchain": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_toolchain"
+          ],
+          "type": "object"
+        },
+        "Workspace": {
+          "properties": {
+            "language": {
+              "type": "string"
+            },
+            "name": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            },
+            "package_manager": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            },
+            "root": {
+              "type": "string"
+            },
+            "slug": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            },
+            "tags": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "toolchain": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            },
+            "version": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          "required": [
+            "root",
+            "language"
+          ],
           "type": "object"
         }
       },
@@ -6216,7 +6982,7 @@ expression: signatures
         "config": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ObjectJson"
+              "$ref": "#/$defs/EnvironmentConfig"
             },
             {
               "const": null,
@@ -6249,15 +7015,398 @@ expression: signatures
     "concurrent_safe": false,
     "input_schema": {
       "$defs": {
-        "ObjectJson": {
-          "additionalProperties": true,
+        "ClangLanguage": {
+          "properties": {
+            "default_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_version"
+          ],
+          "type": "object"
+        },
+        "ConfigSource": {
+          "description": "How the config landed in the column.\n\n* `AutoDetected` — written by the P5 boot reseed hook from stack detection.\n  Re-writing from detection is OK (config may still be overwritten on the\n  next detector pass until the user edits it).\n* `UserEdited` — saved via the MCP tool or UI. Never reseeded from stack.",
+          "enum": [
+            "auto-detected",
+            "user-edited"
+          ],
+          "type": "string"
+        },
+        "DotnetLanguage": {
+          "properties": {
+            "default_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_version"
+          ],
+          "type": "object"
+        },
+        "EnvironmentConfig": {
+          "additionalProperties": false,
+          "properties": {
+            "agent_mcp_defaults": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "default": {},
+              "description": "Per-agent-role MCP server defaults. Moved here from the pre-cut-over\n`.djinn/settings.json`'s `agent_mcp_defaults` field. The key is a role\nname (e.g. `\"worker\"`, `\"chat\"`) or `\"*\"` for the fallback applied to\nany role with no explicit entry. The value is the list of MCP server\nnames (from root `mcp.json`) that sessions for that role should\nconnect to by default. Specialist role assignments override these.",
+              "type": "object"
+            },
+            "env": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "type": "object"
+            },
+            "global_skills": {
+              "default": [],
+              "description": "Skills injected into every agent prompt regardless of role. Moved here\nfrom the pre-cut-over `.djinn/settings.json`'s `global_skills` field.\nEach entry is a skill file stem (resolved against `.djinn/skills/`).",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "languages": {
+              "$ref": "#/$defs/Languages",
+              "default": {
+                "clang": null,
+                "dotnet": null,
+                "go": null,
+                "java": null,
+                "node": null,
+                "python": null,
+                "ruby": null,
+                "rust": null
+              }
+            },
+            "lifecycle": {
+              "$ref": "#/$defs/LifecycleHooks",
+              "default": {
+                "post_build": [],
+                "pre_anything": [],
+                "pre_task": [],
+                "pre_verification": []
+              }
+            },
+            "schema_version": {
+              "default": 0,
+              "description": "`0` (the default) is the \"needs reseed\" sentinel — the P5 boot hook\ntreats any config with `schema_version < 1` as an un-seeded row and\nrewrites it from `projects.stack`. `validate()` rejects 0 so that\nuser-submitted configs must declare a real version.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "$ref": "#/$defs/ConfigSource",
+              "default": "auto-detected"
+            },
+            "system_packages": {
+              "default": [],
+              "description": "apt packages installed in the image. Alpine was dropped in the\n2026-04-22 cleanup — every image is `debian:bookworm-slim` now.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "workspaces": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/Workspace"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "GoLanguage": {
+          "properties": {
+            "default_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_version"
+          ],
+          "type": "object"
+        },
+        "HookCommand": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/HookCommand"
+              },
+              "type": "object"
+            }
+          ],
+          "description": "A lifecycle / verification / setup command.\n\nShape matches the `LifecycleCommand` enum in\n`server/crates/djinn-agent-worker/src/lifecycle.rs`. In P5, that module's\nlocal enum is replaced with this canonical definition so the on-disk\nconfig JSON round-trips through both sides without a translation layer.\n\nThe three forms follow the devcontainer spec that originally inspired them:\na shell string passed to `/bin/sh -c`, an argv array exec'd directly, or\na named map run in parallel."
+        },
+        "JavaLanguage": {
+          "properties": {
+            "default_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_version"
+          ],
+          "type": "object"
+        },
+        "Languages": {
+          "additionalProperties": false,
+          "properties": {
+            "clang": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ClangLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            },
+            "dotnet": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DotnetLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            },
+            "go": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/GoLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            },
+            "java": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/JavaLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            },
+            "node": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NodeLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            },
+            "python": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PythonLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            },
+            "ruby": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RubyLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            },
+            "rust": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RustLanguage"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "default": null
+            }
+          },
+          "type": "object"
+        },
+        "LifecycleHooks": {
+          "properties": {
+            "post_build": {
+              "default": [],
+              "description": "`RUN` lines appended to the generated Dockerfile. Bundle anything\nyou want baked into the image here (apt packages are the easy path;\ncurl-installs like `protoc` go here).",
+              "items": {
+                "$ref": "#/$defs/HookCommand"
+              },
+              "type": "array"
+            },
+            "pre_anything": {
+              "default": [],
+              "description": "Runs in every Pod djinn starts (warm AND task-run), before any\ndjinn work. The pre-2026-04-22 `pre_warm` field routes here via\nthe serde alias.",
+              "items": {
+                "$ref": "#/$defs/HookCommand"
+              },
+              "type": "array"
+            },
+            "pre_task": {
+              "default": [],
+              "description": "Runs in the task-run Pod before the supervisor starts.",
+              "items": {
+                "$ref": "#/$defs/HookCommand"
+              },
+              "type": "array"
+            },
+            "pre_verification": {
+              "default": [],
+              "description": "Runs once in the task-run Pod, before any verification rule fires.\nTypically `pnpm install` / `cargo build` / similar — commands that\nprepare the workspace so the `verification.rules` commands succeed.\nPreviously lived as `verification.setup`.",
+              "items": {
+                "$ref": "#/$defs/HookCommand"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "NodeLanguage": {
+          "properties": {
+            "default_package_manager": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            },
+            "default_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_version"
+          ],
+          "type": "object"
+        },
+        "PythonLanguage": {
+          "properties": {
+            "default_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_version"
+          ],
+          "type": "object"
+        },
+        "RubyLanguage": {
+          "properties": {
+            "default_version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_version"
+          ],
+          "type": "object"
+        },
+        "RustLanguage": {
+          "properties": {
+            "default_toolchain": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "default_toolchain"
+          ],
+          "type": "object"
+        },
+        "Workspace": {
+          "properties": {
+            "language": {
+              "type": "string"
+            },
+            "name": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            },
+            "package_manager": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            },
+            "root": {
+              "type": "string"
+            },
+            "slug": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            },
+            "tags": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "toolchain": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            },
+            "version": {
+              "default": null,
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          "required": [
+            "root",
+            "language"
+          ],
           "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "config": {
-          "$ref": "#/$defs/ObjectJson",
+          "$ref": "#/$defs/EnvironmentConfig",
           "description": "Full `EnvironmentConfig` JSON blob. Validated server-side via\n`djinn_stack::environment::EnvironmentConfig::validate` before\nanything is written."
         },
         "project": {

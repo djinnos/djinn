@@ -372,6 +372,7 @@ pub struct ProjectEnvironmentConfigGetResponse {
     /// The raw JSON config currently in `projects.environment_config`.
     /// Empty object `{}` when the row hasn't been reseeded yet.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<djinn_stack::environment::EnvironmentConfig>")]
     pub config: Option<ObjectJson>,
     /// The catalog image this project is assigned to, if any (for the picker).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -387,6 +388,7 @@ pub struct ProjectEnvironmentConfigSetParams {
     /// Full `EnvironmentConfig` JSON blob. Validated server-side via
     /// `djinn_stack::environment::EnvironmentConfig::validate` before
     /// anything is written.
+    #[schemars(with = "djinn_stack::environment::EnvironmentConfig")]
     pub config: ObjectJson,
 }
 
@@ -410,6 +412,7 @@ pub struct ProjectEnvironmentConfigResetResponse {
     pub error: Option<String>,
     /// The freshly-generated auto-detected config, on success.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<djinn_stack::environment::EnvironmentConfig>")]
     pub config: Option<ObjectJson>,
 }
 
