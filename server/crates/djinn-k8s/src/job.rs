@@ -488,8 +488,10 @@ fn build_task_run_env(
 ///   `CARGO_INCREMENTAL=0` so it does not accumulate incremental compiler state.
 ///   Task-runs get a deterministic private dir under
 ///   `/cache/cargo-target-runs/<task_run_id>` so they never write the shared base
-///   directly. (Default is <workspace>/target inside the ephemeral clone — also
-///   lost.)
+///   directly or contend on Cargo's shared build-dir lock. The worker may seed
+///   that private run dir from the warm base before cargo starts, then cargo is
+///   free to mutate only the run-local target. (Default is <workspace>/target
+///   inside the ephemeral clone — also lost.)
 /// - SCCACHE_DIR: repos routinely pin `rustc-wrapper = "sccache"` in
 ///   .cargo/config.toml (e.g. the platform repo, which also sets
 ///   CARGO_INCREMENTAL=0 as sccache requires), so cargo invokes sccache
@@ -542,8 +544,11 @@ pub(crate) fn warm_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
     env
 }
 
-/// Cache env vars for task-run Pods. The target dir is private to the task run;
-/// shared cache settings remain identical to warm/verification Pods.
+/// Cache env vars for task-run Pods. The target dir is private to the canonical
+/// task run id, not the generated Kubernetes resource name, so task Pods avoid
+/// the shared Cargo build-dir lock while preserving the warm per-project base as
+/// a read-only seed source. Shared cache settings remain identical to
+/// warm/verification Pods.
 fn task_run_cache_env_vars(project_id: &str, task_run_id: &str) -> Vec<EnvVar> {
     let mut env = common_cache_env_vars(project_id);
     env.push(env_var(
@@ -977,6 +982,16 @@ mod tests {
             envs.get("CARGO_TARGET_DIR").copied(),
             Some(expected_target_dir.as_str()),
             "task-run target dir must be private so task-runs never write the shared warm base"
+        );
+        assert_ne!(
+            envs.get("CARGO_TARGET_DIR").copied(),
+            Some("/cache/cargo-target/proj-xyz"),
+            "task-run target dir must not regress to the shared per-project warm base"
+        );
+        assert_ne!(
+            envs.get("CARGO_TARGET_DIR").copied(),
+            Some("/cache/cargo-target-runs/djinn-taskrun-test"),
+            "task-run target dir must use the canonical task_run_id, not the generated Kubernetes job name"
         );
         assert_eq!(
             envs.get("SCCACHE_DIR").copied(),
