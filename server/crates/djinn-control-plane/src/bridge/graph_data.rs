@@ -951,7 +951,7 @@ pub struct MethodParam {
 /// process-membership index. The shape is fixed up-front so UI
 /// consumers can render the empty list today and progressive-enhance
 /// later.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ProcessRef {
     pub id: String,
     pub label: String,
