@@ -284,6 +284,9 @@ impl RepoDependencyGraph {
                 {
                     continue;
                 }
+                if kind_filter.is_none() && is_default_hidden_synthetic_kind(node.kind) {
+                    continue;
+                }
                 hits.push(RepoGraphSearchHit { node_index, score });
             }
         }
@@ -601,6 +604,7 @@ impl RepoDependencyGraph {
         };
         let idx = self.graph.add_node(node);
         self.node_lookup.insert(key, idx);
+        add_name_index_entry(&mut self.name_index, &self.graph[idx].display_name, idx);
         idx
     }
 
@@ -637,6 +641,7 @@ impl RepoDependencyGraph {
         };
         let idx = self.graph.add_node(node);
         self.node_lookup.insert(key, idx);
+        add_name_index_entry(&mut self.name_index, &self.graph[idx].display_name, idx);
         idx
     }
 
@@ -683,6 +688,7 @@ impl RepoDependencyGraph {
         };
         let idx = self.graph.add_node(node);
         self.node_lookup.insert(key, idx);
+        add_name_index_entry(&mut self.name_index, &self.graph[idx].display_name, idx);
         idx
     }
 
@@ -727,6 +733,7 @@ impl RepoDependencyGraph {
         };
         let idx = self.graph.add_node(node);
         self.node_lookup.insert(key, idx);
+        add_name_index_entry(&mut self.name_index, &self.graph[idx].display_name, idx);
         idx
     }
 
@@ -867,10 +874,25 @@ pub(super) fn build_name_index(
     let mut index: BTreeMap<String, Vec<NodeIndex>> = BTreeMap::new();
     for node_index in graph.node_indices() {
         let node = &graph[node_index];
-        let key = node.display_name.to_lowercase();
-        index.entry(key).or_default().push(node_index);
+        add_name_index_entry(&mut index, &node.display_name, node_index);
     }
     index
+}
+
+fn add_name_index_entry(
+    index: &mut BTreeMap<String, Vec<NodeIndex>>,
+    display_name: &str,
+    node_index: NodeIndex,
+) {
+    let key = display_name.to_lowercase();
+    let indices = index.entry(key).or_default();
+    if !indices.contains(&node_index) {
+        indices.push(node_index);
+    }
+}
+
+pub(crate) fn is_default_hidden_synthetic_kind(kind: RepoGraphNodeKind) -> bool {
+    matches!(kind, RepoGraphNodeKind::Route | RepoGraphNodeKind::Tool)
 }
 
 /// PR F2: build the reverse `node_index → process positions` lookup
