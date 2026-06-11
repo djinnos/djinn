@@ -12,6 +12,48 @@ use petgraph::visit::EdgeRef;
 use super::edge::{RepoGraphEdge, RepoGraphEdgeKind};
 use super::node::{RepoGraphNode, RepoGraphNodeKind, RepoNodeKey};
 
+/// Returns true when a `Route` node is backed by only one extraction evidence
+/// source and has no consumer/client edges.
+///
+/// Route nodes do not currently carry node-level evidence counts, so ranking
+/// filters derive the effective count from adjacent route-extraction edges.
+/// `HandlesRoute`/`Route` edges represent route evidence; incoming `Fetches`
+/// edges represent consumers and disqualify the singleton/no-consumer case.
+pub fn is_singleton_route_without_consumers(
+    graph: &DiGraph<RepoGraphNode, RepoGraphEdge>,
+    node_index: NodeIndex,
+) -> bool {
+    let Some(node) = graph.node_weight(node_index) else {
+        return false;
+    };
+    if node.kind != RepoGraphNodeKind::Route || !matches!(node.id, RepoNodeKey::Route(_)) {
+        return false;
+    }
+
+    let mut evidence_count = 0usize;
+    let mut has_consumers = false;
+
+    for edge in graph.edges_directed(node_index, Incoming) {
+        match edge.weight().kind {
+            RepoGraphEdgeKind::Fetches => has_consumers = true,
+            RepoGraphEdgeKind::HandlesRoute | RepoGraphEdgeKind::Route => {
+                evidence_count += edge.weight().evidence_count.max(1);
+            }
+            _ => {}
+        }
+    }
+    for edge in graph.edges_directed(node_index, Outgoing) {
+        if matches!(
+            edge.weight().kind,
+            RepoGraphEdgeKind::HandlesRoute | RepoGraphEdgeKind::Route
+        ) {
+            evidence_count += edge.weight().evidence_count.max(1);
+        }
+    }
+
+    evidence_count == 1 && !has_consumers
+}
+
 /// Standard sparse PageRank, O((V + E) × iterations) per full pass.
 ///
 /// Replaces `petgraph::algo::page_rank`, whose 0.8.x implementation is

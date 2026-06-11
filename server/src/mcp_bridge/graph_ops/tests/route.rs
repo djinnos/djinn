@@ -132,6 +132,26 @@ fn shape_check_detects_missing_and_extra_response_keys() {
 }
 
 #[test]
+fn shape_check_consumer_uses_fetches_confidence_tier() {
+    let graph = route_fixture_graph();
+    let mut artifact = graph.to_artifact();
+    for edge in &mut artifact.edges {
+        if edge.kind == RepoGraphEdgeKind::Fetches {
+            edge.confidence = 0.2;
+            edge.reason = Some("below-floor string-shape".to_string());
+        }
+    }
+    let graph = RepoDependencyGraph::from_artifact(&artifact);
+
+    let result = routes::test_helpers::shape_check_for_graph(&graph);
+    assert_eq!(result.drifts.len(), 1);
+    let consumer = &result.drifts[0].consumer;
+    assert_eq!(consumer.name, "loadAgents");
+    assert_eq!(consumer.confidence, 0.2);
+    assert_eq!(consumer.confidence_tier, "ambiguous");
+}
+
+#[test]
 fn api_impact_prioritizes_shape_drift_and_empty_graphs_succeed() {
     let graph = route_fixture_graph();
     let result = routes::test_helpers::api_impact_for_graph(&graph);
