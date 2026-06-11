@@ -543,6 +543,7 @@ fn empty_artifact_round_trip() {
         symbol_ranges: BTreeMap::new(),
         communities: Vec::new(),
         processes: vec![],
+        route_exclusion_config: RouteExclusionConfig::default(),
     };
     let json = serde_json::to_string(&empty).expect("serialize empty");
     let restored = RepoDependencyGraph::deserialize_artifact(&json).expect("deserialize empty");
@@ -840,6 +841,62 @@ fn bincode_v10_artifact_without_route_metadata_deserializes_with_none() {
         restored
             .symbol_node("scip-rust pkg src/helper.rs `helper`().")
             .is_some()
+    );
+}
+
+#[test]
+fn route_exclusion_config_default_round_trips_json() {
+    let config = RouteExclusionConfig::default();
+    assert_eq!(
+        config.health_path_globs,
+        vec![
+            "/health", "/healthz", "/ping", "/readyz", "/livez", "/metrics"
+        ]
+    );
+    assert!(config.param_only_paths);
+    assert_eq!(config.min_confidence_for_consumer_edge, 0.5);
+    assert!(config.excluded_frameworks.is_empty());
+
+    let json = serde_json::to_string(&config).expect("serialize config");
+    let restored: RouteExclusionConfig = serde_json::from_str(&json).expect("deserialize config");
+    assert_eq!(restored, config);
+}
+
+#[test]
+fn current_bincode_artifact_without_route_exclusion_config_loads_default() {
+    #[derive(Serialize)]
+    struct V10RepoGraphArtifactWithoutRouteExclusionConfig {
+        version: u32,
+        nodes: Vec<RepoGraphNode>,
+        edges: Vec<RepoGraphArtifactEdge>,
+        symbol_ranges: BTreeMap<PathBuf, Vec<RepoGraphArtifactSymbolRange>>,
+        communities: Vec<crate::communities::Community>,
+        processes: Vec<RepoGraphArtifactProcess>,
+    }
+
+    let graph = RepoDependencyGraph::build(&[fixture_index()]);
+    let artifact = graph.to_artifact();
+    let old_artifact = V10RepoGraphArtifactWithoutRouteExclusionConfig {
+        version: artifact.version,
+        nodes: artifact.nodes.clone(),
+        edges: artifact.edges.clone(),
+        symbol_ranges: artifact.symbol_ranges.clone(),
+        communities: artifact.communities.clone(),
+        processes: artifact.processes.clone(),
+    };
+
+    let encoded = bincode::serialize(&old_artifact)
+        .expect("serialize artifact without route exclusion config");
+    let decoded = deserialize_repo_graph_artifact_bincode(&encoded)
+        .expect("deserialize artifact without route exclusion config");
+
+    assert_eq!(
+        decoded.route_exclusion_config,
+        RouteExclusionConfig::default()
+    );
+    assert_eq!(
+        RepoDependencyGraph::from_artifact(&decoded).node_count(),
+        graph.node_count()
     );
 }
 
