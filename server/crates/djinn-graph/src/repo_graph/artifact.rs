@@ -130,6 +130,11 @@ impl From<RepoGraphNodeV10WithoutWorkspace> for RepoGraphNode {
             is_test: old.is_test,
             complexity: old.complexity,
             workspace: None,
+            // PR s6ch / cs4v: route metadata is additive and not
+            // present in any v10 artifact. Older blobs hydrate as
+            // `None` so the v10 compat path stays open.
+            route_framework: None,
+            route_handler_symbol: None,
         }
     }
 }

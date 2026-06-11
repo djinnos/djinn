@@ -146,6 +146,8 @@ fn multi_workspace_graph() -> RepoDependencyGraph {
             is_test: false,
             complexity: None,
             workspace: Some(workspace.to_string()),
+            route_framework: None,
+            route_handler_symbol: None,
         };
     let mk_edge = |source: usize, target: usize| RepoGraphArtifactEdge {
         source,
@@ -536,6 +538,8 @@ fn score_formula_components() {
         is_test: false,
         complexity: None,
         workspace: None,
+        route_framework: None,
+        route_handler_symbol: None,
     };
     // Both file-path match (User in path) and kind hint ("class")
     // fire. Tiebreaker for Type/Class is 0.05.
@@ -861,6 +865,8 @@ async fn impact_bfs_skips_structural_anchors_but_walks_behavioral_edges() {
         is_test: false,
         complexity: None,
         workspace: None,
+        route_framework: None,
+        route_handler_symbol: None,
     };
     // Three nodes:
     //   [0] target — receives both edges

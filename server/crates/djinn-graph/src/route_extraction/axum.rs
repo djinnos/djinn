@@ -44,7 +44,7 @@ pub fn detect_axum_routes(
     project_root: &Path,
 ) -> RouteExtractionReport {
     let mut report = RouteExtractionReport::default();
-    let candidates: Vec<(NodeIndex, PathBuf)> = graph
+    let candidates: Vec<(PathBuf, Option<String>)> = graph
         .graph()
         .node_indices()
         .filter_map(|idx| {
@@ -56,11 +56,12 @@ pub fn detect_axum_routes(
                 return None;
             }
             let path = node.file_path.clone()?;
-            has_axum_router_reference(graph, idx).then_some((idx, path))
+            let workspace = node.workspace.clone();
+            has_axum_router_reference(graph, idx).then_some((path, workspace))
         })
         .collect();
 
-    for (_file_idx, rel_path) in candidates {
+    for (rel_path, workspace) in candidates {
         let source = match std::fs::read_to_string(project_root.join(&rel_path)) {
             Ok(source) => source,
             Err(_) => {
@@ -77,11 +78,20 @@ pub fn detect_axum_routes(
             } else {
                 0.45
             };
+            let handler_symbol =
+                resolved_handler_node.and_then(|idx| graph.node(idx).symbol.clone());
             let handler_node = resolved_handler_node.unwrap_or_else(|| {
                 graph.ensure_unresolved_route_handler_node(&rel_path, &hit.handler)
             });
             let label = format!("{} {} (axum)", hit.method.to_uppercase(), hit.path);
-            let route_node = graph.ensure_route_node(&label);
+            let route_node = graph.ensure_route_node(
+                &label,
+                &label,
+                Some("rust"),
+                workspace.as_deref(),
+                Some("axum"),
+                handler_symbol.as_deref(),
+            );
             report.routes_added += 1;
             graph.add_handles_route_edge(route_node, handler_node, confidence, &reason);
             report.handles_route_edges_added += 1;
@@ -380,6 +390,8 @@ mod tests {
                 is_test: false,
                 complexity: None,
                 workspace: None,
+                route_framework: None,
+                route_handler_symbol: None,
             });
             for target in [router_pos, routing_pos] {
                 edges.push(artifact_edge(
@@ -431,6 +443,8 @@ mod tests {
             is_test: false,
             complexity: None,
             workspace: None,
+            route_framework: None,
+            route_handler_symbol: None,
         });
         positions.insert(symbol.to_string(), pos);
         pos

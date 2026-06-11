@@ -422,7 +422,12 @@ fn format_member_uid(key: &RepoNodeKey) -> String {
         // the community partition — they're sinks, not first-class
         // members — but a stable uid keeps the format honest.
         RepoNodeKey::Table(name) => format!("table:{name}"),
-        RepoNodeKey::Route(name) => format!("route:{name}"),
+        // PR s6ch / cs4v: route / tool nodes are likewise synthetic
+        // side-channel metadata outside the community partition.
+        // Mirror the `process:` / `table:` prefixing so downstream
+        // uids stay parseable.
+        RepoNodeKey::Route(id) => format!("route:{id}"),
+        RepoNodeKey::Tool(id) => format!("tool:{id}"),
     }
 }
 
@@ -503,8 +508,15 @@ fn derive_keywords(graph: &RepoDependencyGraph, members: &[usize], top_k: usize)
             // Synthetic process nodes (PR F2) shouldn't normally appear
             // here, but fall back to the label if one does.
             RepoGraphNodeKind::Process => node.display_name.clone(),
-            // Synthetic table/route nodes — same fallback.
-            RepoGraphNodeKind::Table | RepoGraphNodeKind::Route => node.display_name.clone(),
+            // Synthetic table nodes — same fallback.
+            RepoGraphNodeKind::Table => node.display_name.clone(),
+            // PR s6ch / cs4v: synthetic route / tool nodes — same
+            // fallback. The community partition excludes them in
+            // practice, but tokenizing the display_name keeps the
+            // match exhaustive and a stray member from producing a
+            // non-deterministic label.
+            RepoGraphNodeKind::Route => node.display_name.clone(),
+            RepoGraphNodeKind::Tool => node.display_name.clone(),
         };
         let mut seen: BTreeSet<String> = BTreeSet::new();
         for token in tokenize_identifier(&raw) {
@@ -627,6 +639,10 @@ mod tests {
             is_test: false,
             complexity: None,
             workspace: None,
+            // PR s6ch / cs4v: route metadata is not applicable to
+            // these placeholder symbol nodes — defaults to `None`.
+            route_framework: None,
+            route_handler_symbol: None,
         };
 
         let nodes = vec![

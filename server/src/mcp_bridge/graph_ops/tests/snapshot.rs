@@ -34,6 +34,8 @@ fn edge_category_table_pr_c1() {
         is_test: false,
         complexity: None,
         workspace: None,
+        route_framework: None,
+        route_handler_symbol: None,
     };
 
     let any_node = mk_node(None);
@@ -468,6 +470,8 @@ fn graph_neighbors_test_node() -> djinn_graph::repo_graph::RepoGraphNode {
         is_test: false,
         complexity: None,
         workspace: None,
+        route_framework: None,
+        route_handler_symbol: None,
     }
 }
 
@@ -645,6 +649,8 @@ fn snapshot_payload_rescues_cross_workspace_endpoint_under_cap() {
         is_test: false,
         complexity: None,
         workspace: Some(workspace.to_string()),
+        route_framework: None,
+        route_handler_symbol: None,
     };
     let graph = RepoDependencyGraph::from_artifact(&RepoGraphArtifact {
         version: REPO_GRAPH_ARTIFACT_VERSION,
@@ -745,6 +751,8 @@ fn community_snapshot_aggregates_cross_workspace_edges() {
         is_test: false,
         complexity: None,
         workspace: Some(workspace.to_string()),
+        route_framework: None,
+        route_handler_symbol: None,
     };
 
     let graph = RepoDependencyGraph::from_artifact(&RepoGraphArtifact {
@@ -889,6 +897,8 @@ fn snapshot_payload_preserves_quiet_workspace_when_cap_allows() {
         is_test: false,
         complexity: None,
         workspace: Some(workspace.to_string()),
+        route_framework: None,
+        route_handler_symbol: None,
     };
 
     let graph = RepoDependencyGraph::from_artifact(&RepoGraphArtifact {
@@ -985,6 +995,8 @@ fn snapshot_payload_populates_community_id_pr_f3() {
         is_test: false,
         complexity: None,
         workspace: None,
+        route_framework: None,
+        route_handler_symbol: None,
     };
     let nodes = vec![
         mk_node("auth_login", "src/auth/login.rs"),

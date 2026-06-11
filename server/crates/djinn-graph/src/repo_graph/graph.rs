@@ -521,6 +521,11 @@ impl RepoDependencyGraph {
             is_test: false,
             complexity: None,
             workspace: None,
+            // PR s6ch / cs4v: route metadata is not applicable to
+            // process nodes — the field set is shared across kinds
+            // so the struct needs the slot but it stays `None`.
+            route_framework: None,
+            route_handler_symbol: None,
         };
         let idx = self.graph.add_node(node);
         self.node_lookup.insert(key, idx);
@@ -552,6 +557,102 @@ impl RepoDependencyGraph {
             is_test: false,
             complexity: None,
             workspace: None,
+            // PR s6ch / cs4v: route metadata is not applicable to
+            // table nodes — the field set is shared across kinds so
+            // the struct needs the slot but it stays `None`.
+            route_framework: None,
+            route_handler_symbol: None,
+        };
+        let idx = self.graph.add_node(node);
+        self.node_lookup.insert(key, idx);
+        idx
+    }
+
+    /// PR s6ch / cs4v: register a synthetic [`RepoGraphNodeKind::Route`]
+    /// node and return its [`NodeIndex`]. Idempotent on `id`. The
+    /// `id` is the stable route id shaped as `"<METHOD> <path>
+    /// (<framework>)"`, e.g. `"GET /api/agents (axum)"`. `framework`
+    /// and `handler_symbol` are stored on the node's `route_framework`
+    /// / `route_handler_symbol` metadata fields so callers can recover
+    /// the handler's [`RepoNodeKey::Symbol`] back-reference without
+    /// walking the graph. The handler-symbol edge itself is stamped
+    /// separately by the route extractor (out of scope for cs4v).
+    #[allow(dead_code)] // cs4v lands the helper ahead of its first caller.
+    pub(crate) fn ensure_route_node(
+        &mut self,
+        id: &str,
+        display_name: &str,
+        language: Option<&str>,
+        workspace: Option<&str>,
+        framework: Option<&str>,
+        handler_symbol: Option<&str>,
+    ) -> NodeIndex {
+        let key = RepoNodeKey::Route(id.to_string());
+        if let Some(&idx) = self.node_lookup.get(&key) {
+            return idx;
+        }
+        let node = RepoGraphNode {
+            id: key.clone(),
+            kind: RepoGraphNodeKind::Route,
+            display_name: display_name.to_string(),
+            language: language.map(str::to_string),
+            file_path: None,
+            symbol: None,
+            symbol_kind: None,
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: Vec::new(),
+            signature_parts: None,
+            is_test: false,
+            complexity: None,
+            workspace: workspace.map(str::to_string),
+            route_framework: framework.map(str::to_string),
+            route_handler_symbol: handler_symbol.map(str::to_string),
+        };
+        let idx = self.graph.add_node(node);
+        self.node_lookup.insert(key, idx);
+        idx
+    }
+
+    /// PR s6ch / cs4v: register a synthetic [`RepoGraphNodeKind::Tool`]
+    /// node and return its [`NodeIndex`]. Idempotent on `id`. The
+    /// `id` is the stable tool id (e.g. `"agents.list"`). No
+    /// extractor lands in cs4v — the helper exists so the graph can
+    /// carry tool nodes when proposal ykcg #6 ships.
+    #[allow(dead_code)] // cs4v lands the helper ahead of its first caller.
+    pub(crate) fn ensure_tool_node(
+        &mut self,
+        id: &str,
+        display_name: &str,
+        language: Option<&str>,
+        workspace: Option<&str>,
+    ) -> NodeIndex {
+        let key = RepoNodeKey::Tool(id.to_string());
+        if let Some(&idx) = self.node_lookup.get(&key) {
+            return idx;
+        }
+        let node = RepoGraphNode {
+            id: key.clone(),
+            kind: RepoGraphNodeKind::Tool,
+            display_name: display_name.to_string(),
+            language: language.map(str::to_string),
+            file_path: None,
+            symbol: None,
+            symbol_kind: None,
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: Vec::new(),
+            signature_parts: None,
+            is_test: false,
+            complexity: None,
+            workspace: workspace.map(str::to_string),
+            // Tool nodes are forward-compatible surface only — no
+            // framework / handler back-reference fields exist on the
+            // shared struct for them.
+            route_framework: None,
+            route_handler_symbol: None,
         };
         let idx = self.graph.add_node(node);
         self.node_lookup.insert(key, idx);
@@ -587,35 +688,6 @@ impl RepoDependencyGraph {
         );
     }
 
-    /// Register a synthetic [`RepoGraphNodeKind::Route`] node and return
-    /// its [`NodeIndex`]. Idempotent on the route label.
-    pub(crate) fn ensure_route_node(&mut self, label: &str) -> NodeIndex {
-        let key = RepoNodeKey::Route(label.to_string());
-        if let Some(&idx) = self.node_lookup.get(&key) {
-            return idx;
-        }
-        let node = RepoGraphNode {
-            id: key.clone(),
-            kind: RepoGraphNodeKind::Route,
-            display_name: label.to_string(),
-            language: None,
-            file_path: None,
-            symbol: None,
-            symbol_kind: None,
-            is_external: false,
-            visibility: None,
-            signature: None,
-            documentation: Vec::new(),
-            signature_parts: None,
-            is_test: false,
-            complexity: None,
-            workspace: None,
-        };
-        let idx = self.graph.add_node(node);
-        self.node_lookup.insert(key, idx);
-        idx
-    }
-
     /// Register a placeholder symbol for a route handler that appeared in
     /// source but could not be matched to a SCIP definition.
     pub(crate) fn ensure_unresolved_route_handler_node(
@@ -644,6 +716,8 @@ impl RepoDependencyGraph {
             is_test: false,
             complexity: None,
             workspace: None,
+            route_framework: None,
+            route_handler_symbol: None,
         };
         let idx = self.graph.add_node(node);
         self.node_lookup.insert(key, idx);
@@ -919,7 +993,16 @@ pub(super) fn is_owned_by_changed_file(
         RepoGraphNodeKind::Process => false,
         // Synthetic table nodes — same: they're rebuilt by the
         // db-access pass on the next warm.
-        RepoGraphNodeKind::Table | RepoGraphNodeKind::Route => false,
+        RepoGraphNodeKind::Table => false,
+        // PR s6ch / cs4v: synthetic route / tool nodes are never
+        // owned by a single source file — the route id is shaped
+        // `METHOD path (framework)` and the handler back-reference
+        // is denormalized, so a file-level changed-file strip
+        // shouldn't drop them. The next warm re-runs the route
+        // extractor from scratch, mirroring the `Process` /
+        // `Table` policy above.
+        RepoGraphNodeKind::Route => false,
+        RepoGraphNodeKind::Tool => false,
     }
 }
 /// True when the node represents a SCIP symbol whose identifier is

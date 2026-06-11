@@ -40,9 +40,20 @@ pub enum RepoNodeKey {
     /// Kept under the same enum so name-index / search / impact ops
     /// surface tables transparently alongside symbols.
     Table(String),
-    /// Synthetic HTTP route node materialized by route extraction. The
-    /// string is the stable route label: `"<METHOD> <path> (axum)"`.
+    /// PR s6ch / cs4v: synthetic node identifying a server-side HTTP
+    /// route (axum / actix / etc.). The string is the stable route id
+    /// shaped as `"<METHOD> <path> (<framework>)"`, e.g.
+    /// `"GET /api/agents (axum)"`. Used as the anchor for
+    /// `HandlesRoute` / `Fetches` edges; materialized by the route
+    /// extractor (out of scope for cs4v — the variant lands first so
+    /// the model is forward-compatible with proposal ykcg).
     Route(String),
+    /// PR s6ch / cs4v: synthetic node identifying an MCP / RPC tool
+    /// handler. The string is the stable tool id (e.g.
+    /// `"agents.list"`). No extractor ships in cs4v — the variant
+    /// exists so the model can carry tool nodes without a follow-up
+    /// schema migration when the proposal lands.
+    Tool(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,9 +73,19 @@ pub enum RepoGraphNodeKind {
     /// `Reads` / `Writes` edges from enclosing function symbols whose
     /// bodies contain raw SQL touching the table.
     Table,
-    /// Synthetic HTTP route materialized by framework-specific route
-    /// extractors. Identity lives in [`RepoNodeKey::Route`].
+    /// PR s6ch / cs4v: synthetic HTTP-route node. Identity lives in
+    /// [`RepoNodeKey::Route`]; the display name is the human-readable
+    /// `"<METHOD> <path> (<framework>)"` form, and the optional
+    /// `route_framework` / `route_handler_symbol` metadata on the
+    /// owning [`RepoGraphNode`] carries the framework slug and the
+    /// handler symbol id. Anchor for `HandlesRoute` (Route → Symbol)
+    /// and `Fetches` (Symbol → Route) edges.
     Route,
+    /// PR s6ch / cs4v: synthetic tool node (MCP / RPC handler). Mirror
+    /// of `Route` for tool-style surfaces. Identity in
+    /// [`RepoNodeKey::Tool`]; metadata in the `display_name` /
+    /// `language` / `workspace` fields on the owning [`RepoGraphNode`].
+    Tool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +143,24 @@ pub struct RepoGraphNode {
     /// repo-graph artifact version bump or cluster-wide re-warm.
     #[serde(default)]
     pub workspace: Option<String>,
+    /// PR s6ch / cs4v: framework slug for a `Route` node (e.g. `"axum"`,
+    /// `"actix-web"`). `None` for File / Symbol / Process / Table /
+    /// Tool nodes — the field is shared across kinds so the `Route`
+    /// metadata can ride on the same struct without widening the enum
+    /// shape. Defaulted to `None` so existing v10 bincode artifacts
+    /// deserialize unchanged.
+    #[serde(default)]
+    pub route_framework: Option<String>,
+    /// PR s6ch / cs4v: stable SCIP-style symbol id of the handler
+    /// function that backs a `Route` node (e.g.
+    /// `"scip-rust pkg src/handlers/agents.rs `list_agents`()."`). The
+    /// handler's full graph node is reachable via [`RepoNodeKey::Symbol`]
+    /// — this field is a denormalized back-reference for cheap lookups
+    /// without an extra graph walk. `None` for File / Symbol / Process
+    /// / Table / Tool nodes. Defaulted to `None` so existing v10
+    /// bincode artifacts deserialize unchanged.
+    #[serde(default)]
+    pub route_handler_symbol: Option<String>,
 }
 
 impl RepoGraphNode {
@@ -160,7 +199,19 @@ impl RepoGraphNode {
             // `Reads`/`Writes` edges from caller symbols. Same tier as
             // `Process` so PageRank doesn't promote them just because
             // many functions touch the same table.
-            RepoGraphNodeKind::Table | RepoGraphNodeKind::Route => SYMBOL_KIND_VARIABLE_MULTIPLIER,
+            RepoGraphNodeKind::Table => SYMBOL_KIND_VARIABLE_MULTIPLIER,
+            // PR s6ch / cs4v: HTTP routes are synthetic side-channel
+            // metadata. They fan out to a single handler symbol and may
+            // be hit by many `Fetches` edges from TS call sites; the
+            // variable-class tier keeps them from outscoring the real
+            // symbol handlers in PageRank. Mirrors `Process` / `Table`.
+            RepoGraphNodeKind::Route => SYMBOL_KIND_VARIABLE_MULTIPLIER,
+            // PR s6ch / cs4v: tool nodes (MCP / RPC handlers) sit in
+            // the same role as `Route` — synthetic side-channel
+            // metadata whose importance should be inherited from the
+            // implementing symbol rather than a standalone PageRank
+            // boost. Variable-class tier for symmetry with `Route`.
+            RepoGraphNodeKind::Tool => SYMBOL_KIND_VARIABLE_MULTIPLIER,
         }
     }
 }
