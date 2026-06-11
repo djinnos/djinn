@@ -105,6 +105,54 @@ fn entry_point_distance_zero_at_entry_point() {
     );
 }
 
+#[test]
+fn route_and_tool_weights_share_variable_tier_without_metadata_rank_boost() {
+    let mut graph = RepoDependencyGraph::build(&[fixture_index()]);
+    let handler_symbol = "scip-rust pkg src/helper.rs `helper`().";
+    let caller_symbol = "scip-rust pkg src/app.rs `main`().";
+    let handler = graph.symbol_node(handler_symbol).expect("handler symbol");
+    let caller = graph.symbol_node(caller_symbol).expect("caller symbol");
+    let route = graph.ensure_route_node(
+        "GET /api/helper (axum)",
+        "GET /api/helper (axum)",
+        Some("rust"),
+        Some("root"),
+        Some("axum"),
+        Some(handler_symbol),
+    );
+    let tool = graph.ensure_tool_node("helper.run", "helper.run", Some("rust"), Some("root"));
+    let process = graph.ensure_process_node("process:helper", "process:helper");
+    let table = graph.ensure_table_node("public.helpers");
+
+    graph.add_handles_route_edge(route, handler, "axum-route-attr", Some(0.95));
+    graph.add_fetches_edge(caller, route, "ts-fetch-literal", Some(0.75));
+
+    let route_weight = graph.node(route).intrinsic_weight();
+    let tool_weight = graph.node(tool).intrinsic_weight();
+    assert_eq!(route_weight, graph.node(process).intrinsic_weight());
+    assert_eq!(route_weight, graph.node(table).intrinsic_weight());
+    assert_eq!(tool_weight, route_weight);
+
+    let ranking = graph.rank();
+    let score_for = |idx| {
+        ranking
+            .nodes
+            .iter()
+            .find(|node| node.node_index == idx)
+            .expect("node ranked")
+            .score
+    };
+    let handler_score = score_for(handler);
+    assert!(
+        handler_score > score_for(route),
+        "route metadata node should not outrank its real handler solely from route edges"
+    );
+    assert!(
+        handler_score > score_for(tool),
+        "tool metadata node should not outrank real symbols from intrinsic weight alone"
+    );
+}
+
 /// PR F4: build a tiny synthetic graph with two symbols at
 /// identical PageRank — one is the entry point, the other is a
 /// helper that lives off to the side. With RRF the entry-point
