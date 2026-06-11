@@ -278,6 +278,9 @@ async fn environment_config_tool_schemas_expose_workspace_metadata() {
     let tools = mcp.all_tool_schemas();
 
     let schema_surfaces = [
+        ("image_create", "inputSchema"),
+        ("image_list", "outputSchema"),
+        ("image_update", "inputSchema"),
         ("project_environment_config_get", "outputSchema"),
         ("project_environment_config_reset", "outputSchema"),
         ("project_environment_config_set", "inputSchema"),
@@ -335,6 +338,9 @@ fn checked_in_mcp_snapshot_exposes_environment_config_workspace_metadata() {
     let tools: Vec<Value> = serde_json::from_str(json_body).expect("MCP schema snapshot is JSON");
 
     let schema_surfaces = [
+        ("image_create", "input_schema"),
+        ("image_list", "output_schema"),
+        ("image_update", "input_schema"),
         ("project_environment_config_get", "output_schema"),
         ("project_environment_config_reset", "output_schema"),
         ("project_environment_config_set", "input_schema"),
