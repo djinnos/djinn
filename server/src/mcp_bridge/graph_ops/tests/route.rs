@@ -116,6 +116,13 @@ fn route_map_returns_handler_consumers_middleware_and_summary() {
         Some("list_agents")
     );
     assert_eq!(entry.consumers[0].name, "loadAgents");
+    let chain = entry.consumers[0]
+        .route_language_chain
+        .as_ref()
+        .expect("route-map consumer includes route language chain");
+    assert_eq!(chain.source_language.as_deref(), Some("typescript"));
+    assert_eq!(chain.target_language.as_deref(), Some("rust"));
+    assert!(chain.is_cross_language);
     assert_eq!(entry.middleware[0].name, "auth");
     assert_eq!(result.summary.total_routes, 1);
     assert_eq!(result.summary.framework_counts.get("axum"), Some(&1));
@@ -149,6 +156,12 @@ fn shape_check_consumer_uses_fetches_confidence_tier() {
     assert_eq!(consumer.name, "loadAgents");
     assert_eq!(consumer.confidence, 0.2);
     assert_eq!(consumer.confidence_tier, "ambiguous");
+    assert!(
+        consumer
+            .route_language_chain
+            .as_ref()
+            .is_some_and(|chain| chain.is_cross_language)
+    );
 }
 
 #[test]
