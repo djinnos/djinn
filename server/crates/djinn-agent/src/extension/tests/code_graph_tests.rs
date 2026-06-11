@@ -264,6 +264,62 @@ async fn code_graph_dispatch_search_requires_query() {
 }
 
 #[tokio::test]
+async fn code_graph_dispatch_query_subgraph_reaches_graph_ops_with_filters() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-query-subgraph-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let result = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "query_subgraph",
+            "project_path": worktree.path().to_string_lossy(),
+            "workspace": "default",
+            "query": "How does auth routing reach middleware?",
+            "context_filter": " auth ",
+            "file_filter": "src/auth",
+            "kind_filter": "symbol",
+            "edge_filters": [" Calls ", "IMPORTS"],
+            "token_budget": 2048,
+            "max_depth": 2,
+            "max_seeds": 4,
+        }),
+        worktree.path(),
+    )
+    .await
+    .expect("query_subgraph should dispatch through graph ops");
+    assert_eq!(
+        result["query_subgraph"]["query"],
+        "How does auth routing reach middleware?"
+    );
+    assert!(
+        result["query_subgraph"]["budget"].is_object(),
+        "query_subgraph response should expose budget/truncation state: {result}"
+    );
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_query_subgraph_requires_nonblank_query() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-query-subgraph-no-query-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let err = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "query_subgraph",
+            "project_path": worktree.path().to_string_lossy(),
+            "query": "   ",
+        }),
+        worktree.path(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("'query' is required for operation 'query_subgraph'"),
+        "query_subgraph without nonblank query should fail, got: {err}"
+    );
+}
+
+#[tokio::test]
 async fn code_graph_dispatch_cycles_reaches_graph_ops() {
     let worktree = crate::test_helpers::test_tempdir("djinn-cg-cycles-");
     let state =

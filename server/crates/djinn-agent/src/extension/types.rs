@@ -362,6 +362,28 @@ pub(super) struct CodeGraphParams {
     pub limit: Option<usize>,
     #[serde(default)]
     pub query: Option<String>,
+    /// Natural-language subgraph query narrowing: coarse subsystem/API/type
+    /// text. Mirrors control-plane `CodeGraphParams::context_filter` for
+    /// `operation: "query_subgraph"`.
+    #[serde(default)]
+    pub context_filter: Option<String>,
+    /// Natural-language subgraph query path/file substring filter. Mirrors
+    /// control-plane `file_filter`; `file_glob` remains a compatibility alias.
+    #[serde(default)]
+    pub file_filter: Option<String>,
+    /// Explicit edge kinds for `query_subgraph` traversal. Omit to let the
+    /// planner infer useful kinds from the question; `edge_kind` remains a
+    /// single-kind compatibility alias.
+    #[serde(default)]
+    pub edge_filters: Option<Vec<String>>,
+    /// Approximate response token budget for `query_subgraph`; positive values
+    /// are clamped at dispatch, zero/negative values are rejected.
+    #[serde(default)]
+    pub token_budget: Option<i64>,
+    /// Maximum seed count for `query_subgraph`; positive values are clamped at
+    /// dispatch, zero/negative values are rejected.
+    #[serde(default)]
+    pub max_seeds: Option<i64>,
     #[serde(default)]
     pub from: Option<String>,
     #[serde(default)]
@@ -491,6 +513,8 @@ impl CodeGraphParams {
         clear(&mut self.direction);
         clear(&mut self.kind_filter);
         clear(&mut self.query);
+        clear(&mut self.context_filter);
+        clear(&mut self.file_filter);
         clear(&mut self.from);
         clear(&mut self.to);
         clear(&mut self.from_glob);

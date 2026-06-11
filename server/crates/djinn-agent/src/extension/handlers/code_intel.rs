@@ -457,6 +457,67 @@ async fn call_code_graph_inner(
                 serde_json::to_value(&hits).map_err(|e| format!("serialize error: {e}"))?
             }
         }
+        "query_subgraph" => {
+            let query = p
+                .query
+                .as_deref()
+                .map(str::trim)
+                .filter(|q| !q.is_empty())
+                .ok_or("'query' is required for operation 'query_subgraph'")?;
+
+            let token_budget =
+                bounded_optional_usize(p.token_budget, "token_budget", 1_024, 32_000, false)?;
+            let max_seeds = bounded_optional_usize(p.max_seeds, "max_seeds", 1, 32, false)?;
+            let max_depth = p.max_depth.map(|d| d.clamp(0, 8));
+
+            let edge_filter = p
+                .edge_filters
+                .clone()
+                .unwrap_or_else(|| p.edge_kind.clone().into_iter().collect())
+                .into_iter()
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            let file_filter = p
+                .file_filter
+                .as_deref()
+                .or(p.file_glob.as_deref())
+                .or(p.file_path.as_deref())
+                .or(p.from_glob.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+
+            let request = djinn_control_plane::bridge::QuerySubgraphRequest {
+                query: query.to_string(),
+                workspace: ctx
+                    .workspace
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+                context_filter: p
+                    .context_filter
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+                file_filter,
+                kind_filter: p
+                    .kind_filter
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+                edge_filter,
+                token_budget,
+                max_depth,
+                max_seeds,
+            };
+            let result = graph_ops.query_subgraph(ctx, request).await?;
+            serde_json::json!({ "query_subgraph": result })
+        }
         "cycles" => {
             let min_size = p.min_size.unwrap_or(2);
             // v8: default kind_filter to "symbol" when unspecified.
@@ -1039,7 +1100,7 @@ async fn call_code_graph_inner(
             return Err(format!(
                 "unknown code_graph operation '{other}': expected one of \
                  'neighbors', 'ranked', 'impact', 'implementations', \
-                 'search', 'cycles', 'orphans', 'path', 'edges', \
+                 'search', 'query_subgraph', 'cycles', 'orphans', 'path', 'edges', \
                  'describe', 'context', 'capabilities', 'blast_radius', \
                  'boundary_check', 'cochange', 'churn', 'hotspots', \
                  'complexity', 'refactor_candidates', 'api_surface', 'metrics_at', 'dead_symbols', \
@@ -1050,6 +1111,29 @@ async fn call_code_graph_inner(
         }
     };
     Ok(result)
+}
+
+fn bounded_optional_usize(
+    value: Option<i64>,
+    name: &str,
+    min: usize,
+    max: usize,
+    allow_zero: bool,
+) -> Result<Option<usize>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value < 0 || (value == 0 && !allow_zero) {
+        return Err(format!(
+            "invalid {name} {value}: expected positive integer{}",
+            if allow_zero { " or 0" } else { "" }
+        ));
+    }
+    let value = value as usize;
+    if value == 0 && allow_zero {
+        return Ok(Some(0));
+    }
+    Ok(Some(value.clamp(min, max)))
 }
 
 /// v8: classify a [`djinn_control_plane::bridge::FileGroupEntry`] list
@@ -1195,7 +1279,7 @@ fn code_graph_capabilities() -> serde_json::Value {
     serde_json::json!({
         "operations": [
             "neighbors", "ranked", "impact", "implementations",
-            "search", "cycles", "orphans", "path", "edges",
+            "search", "query_subgraph", "cycles", "orphans", "path", "edges",
             "describe", "context", "capabilities", "blast_radius",
             "boundary_check", "cochange", "churn", "hotspots",
             "complexity", "refactor_candidates", "api_surface", "metrics_at", "dead_symbols",

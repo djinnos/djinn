@@ -356,7 +356,7 @@ expression: tool_schemas_architect()
   },
   {
     "name": "code_graph",
-    "description": "Query the SCIP-built repository dependency graph. Set `operation` to one of the enum values; most ops accept optional filters (kind_filter, group_by, limit, min_confidence). WHEN TO USE: capabilities = cheap discovery of supported ops/params/defaults before spending graph budget; search = find candidate files/symbols by substring when you do not know a key; describe = inspect one exact file/symbol key; neighbors = direct callers/callees/imports around a known key; impact = bounded transitive dependents for what-breaks-if-this-changes; context = compact bucketed incoming/outgoing context for a symbol; ranked/cycles/orphans/path/edges = broader structural queries; symbols_at/diff_touches/detect_changes = line range to touched symbols; status/metrics_at/snapshot/workspaces = graph health/introspection; api_surface/dead_symbols/deprecated_callers = public surface health; boundary_check/blast_radius/touches_hot_path = change-impact analysis; hotspots/cochange/churn/coupling_hubs = git-coupling × PageRank centrality; complexity/refactor_candidates = budget-conscious discovery of risky/refactorable code. AFTER THIS: after capabilities call the chosen op with only required fields; after search pass a returned key to describe, neighbors, context, or impact; after describe call neighbors or context for relationships, or impact for dependents; after neighbors call describe on important nodes or impact to expand beyond direct edges; after impact call blast_radius or boundary_check for review/test planning; after context call describe/impact on highlighted neighbors.",
+    "description": "Query the SCIP-built repository dependency graph. Set `operation` to one of the enum values; most ops accept optional filters (kind_filter, group_by, limit, min_confidence). WHEN TO USE: capabilities = cheap discovery of supported ops/params/defaults before spending graph budget; query_subgraph = ask a natural-language question in `query` and get a token-budgeted focused subgraph with narrowing hints; search = find candidate files/symbols by substring when you do not know a key; describe = inspect one exact file/symbol key; neighbors = direct callers/callees/imports around a known key; impact = bounded transitive dependents for what-breaks-if-this-changes; context = compact bucketed incoming/outgoing context for a symbol; ranked/cycles/orphans/path/edges = broader structural queries; symbols_at/diff_touches/detect_changes = line range to touched symbols; status/metrics_at/snapshot/workspaces = graph health/introspection; api_surface/dead_symbols/deprecated_callers = public surface health; boundary_check/blast_radius/touches_hot_path = change-impact analysis; hotspots/cochange/churn/coupling_hubs = git-coupling × PageRank centrality; complexity/refactor_candidates = budget-conscious discovery of risky/refactorable code. AFTER THIS: after capabilities call the chosen op with only required fields; after query_subgraph inspect returned seeds/budget/truncation and retry with context_filter, file_filter, edge_filters, max_depth/max_seeds, or token_budget if too broad; after search pass a returned key to describe, neighbors, context, or impact; after describe call neighbors or context for relationships, or impact for dependents; after neighbors call describe on important nodes or impact to expand beyond direct edges; after impact call blast_radius or boundary_check for review/test planning; after context call describe/impact on highlighted neighbors.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -372,6 +372,7 @@ expression: tool_schemas_architect()
             "impact",
             "implementations",
             "search",
+            "query_subgraph",
             "cycles",
             "orphans",
             "path",
@@ -399,7 +400,7 @@ expression: tool_schemas_architect()
             "workspaces",
             "capabilities"
           ],
-          "description": "Graph query to perform. Start with capabilities for cheap supported-op discovery, search when you need a key, describe/context for one key, neighbors for direct edges, and impact for bounded transitive dependents."
+          "description": "Graph query to perform. Start with capabilities for cheap supported-op discovery; use query_subgraph with natural-language query for a focused token-budgeted subgraph; use search when you need a key, describe/context for one key, neighbors for direct edges, and impact for bounded transitive dependents."
         },
         "project": {
           "type": "string",
@@ -423,7 +424,7 @@ expression: tool_schemas_architect()
             "file",
             "symbol"
           ],
-          "description": "Node kind filter for ranked/search/cycles/orphans"
+          "description": "Node kind filter for ranked/search/cycles/orphans and query_subgraph seed/traversal narrowing"
         },
         "limit": {
           "type": "integer",
@@ -432,7 +433,32 @@ expression: tool_schemas_architect()
         },
         "query": {
           "type": "string",
-          "description": "Substring query for search. After search, feed returned keys to describe, neighbors, context, or impact."
+          "description": "Substring query for search, or the required natural-language question for operation='query_subgraph'. After search, feed returned keys to describe, neighbors, context, or impact."
+        },
+        "context_filter": {
+          "type": "string",
+          "description": "Optional coarse subsystem/API/type/concern substring for operation='query_subgraph'. Use returned narrowing_hints to choose values when the first response is too broad."
+        },
+        "file_filter": {
+          "type": "string",
+          "description": "Optional repository-relative path/file substring for operation='query_subgraph'. Narrows seed selection and traversal; file_glob is also accepted as a compatibility alias."
+        },
+        "edge_filters": {
+          "type": "array",
+          "description": "Optional explicit edge kinds for operation='query_subgraph' traversal (for example calls, imports, returns, reads, writes, implements, extends). Omit to let the planner infer useful kinds from query; edge_kind is accepted as a single-kind alias.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "token_budget": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Approximate response token budget for operation='query_subgraph'. Omit for backend default (~2000); positive values clamp to 1024..=32000 and the response reports budget/truncation state plus narrowing_hints."
+        },
+        "max_seeds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum seed count for operation='query_subgraph'. Omit for backend default (~6); positive values clamp to 1..=32. Seed debug metadata explains which seeds were selected."
         },
         "from": {
           "type": "string",
@@ -505,12 +531,12 @@ expression: tool_schemas_architect()
         },
         "max_depth": {
           "type": "integer",
-          "minimum": 1,
-          "description": "Maximum depth for path"
+          "minimum": 0,
+          "description": "Maximum depth for path, or operation='query_subgraph' traversal depth from selected seeds (0 = seed nodes only; clamped to 0..=8 for query_subgraph)"
         },
         "edge_kind": {
           "type": "string",
-          "description": "Edge-kind filter for edges"
+          "description": "Edge-kind filter for edges; for query_subgraph, a single-kind compatibility alias when edge_filters is omitted"
         },
         "file": {
           "type": "string",
@@ -573,7 +599,7 @@ expression: tool_schemas_architect()
         },
         "file_glob": {
           "type": "string",
-          "description": "File-path glob restricting hotspots to a subset of files"
+          "description": "File-path glob restricting hotspots to a subset of files; for query_subgraph, compatibility alias for file_filter"
         },
         "rules": {
           "type": "array",
