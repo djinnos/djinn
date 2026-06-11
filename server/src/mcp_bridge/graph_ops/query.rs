@@ -397,6 +397,9 @@ impl RepoGraphBridge {
                 if graph_node.is_external {
                     return None;
                 }
+                if graph_node.is_route_or_tool() {
+                    return None;
+                }
                 if let Some(prefix) = workspace_prefix.as_deref()
                     && !shared::repo_graph_node_matches_workspace(graph_node, prefix)
                 {
