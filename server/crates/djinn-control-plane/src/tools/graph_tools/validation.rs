@@ -87,11 +87,13 @@ pub(crate) fn validate_flow_kind_filter(kind_filter: Option<&str>) -> Result<(),
     }
 }
 
-/// Tuple of (route_id, method, path) selectors that identify a single
-/// route. Factored out of [`require_route_selector`]'s return type so
-/// the per-op handlers can destructure it without tripping
-/// `clippy::type_complexity` on the 3-tuple of `Option<&str>`s.
-pub(crate) type RouteSelector<'a> = (Option<&'a str>, Option<&'a str>, Option<&'a str>);
+/// Selectors that identify a single route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RouteSelector<'a> {
+    pub(crate) route_id: Option<&'a str>,
+    pub(crate) method: Option<&'a str>,
+    pub(crate) path: Option<&'a str>,
+}
 
 pub(crate) fn require_route_selector(
     params: &CodeGraphParams,
@@ -100,7 +102,11 @@ pub(crate) fn require_route_selector(
     let method = params.method.as_deref().filter(|s| !s.is_empty());
     let path = params.path.as_deref().filter(|s| !s.is_empty());
     if route_id.is_some() || (method.is_some() && path.is_some()) {
-        Ok((route_id, method, path))
+        Ok(RouteSelector {
+            route_id,
+            method,
+            path,
+        })
     } else {
         Err(format!(
             "'route_id' or both 'method' and 'path' are required for operation '{}'",

@@ -824,19 +824,19 @@
         assert!(require_route_selector(&params).is_err());
 
         params.route_id = Some("route-1".to_string());
-        let (route_id, method, path) = require_route_selector(&params).unwrap();
-        assert_eq!(route_id, Some("route-1"));
-        assert_eq!(method, None);
-        assert_eq!(path, None);
+        let selector = require_route_selector(&params).unwrap();
+        assert_eq!(selector.route_id, Some("route-1"));
+        assert_eq!(selector.method, None);
+        assert_eq!(selector.path, None);
 
         let mut params = test_params("api_impact");
         params.method = Some("GET".to_string());
         assert!(require_route_selector(&params).is_err());
         params.path = Some("/users/:id".to_string());
-        let (route_id, method, path) = require_route_selector(&params).unwrap();
-        assert_eq!(route_id, None);
-        assert_eq!(method, Some("GET"));
-        assert_eq!(path, Some("/users/:id"));
+        let selector = require_route_selector(&params).unwrap();
+        assert_eq!(selector.route_id, None);
+        assert_eq!(selector.method, Some("GET"));
+        assert_eq!(selector.path, Some("/users/:id"));
     }
 
     #[test]
