@@ -481,6 +481,7 @@ pub(super) fn build_related_symbol(node: &RepoGraphNode, confidence: f64) -> Rel
         kind: kind_label(node),
         file_path,
         confidence,
+        confidence_tier: "extracted".to_string(),
     }
 }
 
