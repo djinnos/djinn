@@ -93,7 +93,7 @@ pub fn detect_axum_routes(
                 handler_symbol.as_deref(),
             );
             report.routes_added += 1;
-            graph.add_handles_route_edge(route_node, handler_node, confidence, &reason);
+            graph.add_handles_route_edge(route_node, handler_node, &reason, Some(confidence));
             report.handles_route_edges_added += 1;
             hit.route_node = Some(route_node);
             hit.handler_node = Some(handler_node);
