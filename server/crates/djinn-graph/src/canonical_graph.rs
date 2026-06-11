@@ -55,6 +55,37 @@ pub fn derive_graph_caches(
     (pagerank, sccs)
 }
 
+fn run_route_extraction_post_processor(
+    graph: &mut crate::repo_graph::RepoDependencyGraph,
+    project_root: &Path,
+) -> Option<crate::route_extraction::RouteExtractionReport> {
+    if !crate::route_extraction::route_detection_enabled() {
+        return None;
+    }
+
+    let report = crate::route_extraction::detect_routes(graph, project_root);
+    for (file, messages) in &report.file_failures {
+        for message in messages {
+            tracing::warn!(
+                file = %file.display(),
+                error = %message,
+                "ensure_canonical_graph: route_extraction skipped file/error"
+            );
+        }
+    }
+    tracing::info!(
+        route_nodes = report.route_nodes_added,
+        handles_route_edges = report.handles_route_edges_added,
+        fetches_edges = report.fetches_edges_added,
+        unmatched_fetch_count = report.unmatched_fetch_count,
+        unresolved_consumer_count = report.unresolved_consumer_count,
+        skipped_files = report.skipped_files.len(),
+        "ensure_canonical_graph: route_extraction pass complete"
+    );
+
+    Some(report)
+}
+
 /// Public entrypoint invoked by `djinn-agent-worker warm-graph
 /// <project_id>` (Phase 3 PR 8 §6.4).  The caller provides a minimal
 /// [`WarmContext`] (DB + event bus + indexer lock); this function
@@ -297,28 +328,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
                     "ensure_canonical_graph: db_access pass complete"
                 );
             }
-            if crate::route_extraction::route_detection_enabled() {
-                let report =
-                    crate::route_extraction::detect_routes(&mut graph, &project_root_for_blocking);
-                for (file, messages) in &report.file_failures {
-                    for message in messages {
-                        tracing::warn!(
-                            file = %file.display(),
-                            error = %message,
-                            "ensure_canonical_graph: route_extraction skipped file/error"
-                        );
-                    }
-                }
-                tracing::info!(
-                    route_nodes = report.route_nodes_added,
-                    handles_route_edges = report.handles_route_edges_added,
-                    fetches_edges = report.fetches_edges_added,
-                    unmatched_fetch_count = report.unmatched_fetch_count,
-                    unresolved_consumer_count = report.unresolved_consumer_count,
-                    skipped_files = report.skipped_files.len(),
-                    "ensure_canonical_graph: route_extraction pass complete"
-                );
-            }
+            let _ = run_route_extraction_post_processor(&mut graph, &project_root_for_blocking);
             let build_ms = t_build.elapsed().as_millis() as u64;
             let node_count = graph.node_count();
             let edge_count = graph.edge_count();
@@ -1009,6 +1019,46 @@ mod tests {
         }
 
         assert_eq!(distinct_workspace_slugs(&graph), vec!["root".to_string()]);
+    }
+
+    #[test]
+    fn route_extraction_post_processor_respects_disabled_env_gate() {
+        let _guard = crate::route_extraction::ROUTE_DETECTION_ENV_LOCK
+            .lock()
+            .unwrap();
+        let tmp = workspace_tempdir("route-extraction-gate-");
+        let project_root = tmp.path();
+        std::fs::create_dir_all(project_root.join("src")).unwrap();
+        std::fs::write(
+            project_root.join("src/routes.rs"),
+            "Router::new().route(\"/api/agents\", get(list_agents))",
+        )
+        .unwrap();
+
+        let mut index = build_test_parsed_index_fixture();
+        index.files.clear();
+        index.files.push(crate::scip_parser::ScipFile {
+            language: "rust".to_string(),
+            relative_path: PathBuf::from("src/routes.rs"),
+            definitions: vec![],
+            references: vec![],
+            occurrences: vec![],
+            symbols: vec![],
+        });
+        let mut graph = crate::repo_graph::RepoDependencyGraph::build(&[index]);
+
+        // SAFETY: test-only env mutation is serialized by ROUTE_DETECTION_ENV_LOCK.
+        unsafe { std::env::set_var("DJINN_ROUTE_DETECTION", "0") };
+        let report = run_route_extraction_post_processor(&mut graph, project_root);
+        unsafe { std::env::remove_var("DJINN_ROUTE_DETECTION") };
+
+        assert!(report.is_none());
+        assert!(
+            graph
+                .graph()
+                .node_weights()
+                .all(|node| { node.kind != crate::repo_graph::RepoGraphNodeKind::Route })
+        );
     }
 
     #[tokio::test]

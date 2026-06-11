@@ -28,14 +28,18 @@ pub struct RouteExtractionReport {
 /// Env-gate for route extraction. Default is on; set to `0`/`false`/`off`/`no`
 /// to skip the pass.
 pub fn route_detection_enabled() -> bool {
-    !matches!(
-        std::env::var("DJINN_ROUTE_DETECTION")
-            .ok()
-            .as_deref()
-            .map(|s| s.to_ascii_lowercase()),
-        Some(ref v) if matches!(v.as_str(), "0" | "false" | "off" | "no")
-    )
+    match std::env::var("DJINN_ROUTE_DETECTION") {
+        Ok(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        Err(_) => true,
+    }
 }
+
+#[cfg(test)]
+pub(crate) static ROUTE_DETECTION_ENV_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
 /// Run server-side axum extraction first, then TypeScript fetch consumers so
 /// consumer edges can resolve against the already-materialized Route nodes.
@@ -435,6 +439,7 @@ mod tests {
 
     #[test]
     fn route_detection_env_defaults_on_and_can_be_disabled() {
+        let _guard = ROUTE_DETECTION_ENV_LOCK.lock().unwrap();
         // SAFETY: test-only env mutation is scoped to this assertion.
         unsafe { std::env::remove_var("DJINN_ROUTE_DETECTION") };
         assert!(route_detection_enabled());
