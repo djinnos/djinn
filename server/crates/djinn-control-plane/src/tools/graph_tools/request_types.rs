@@ -15,9 +15,17 @@ pub struct CodeGraphParams {
     /// server-managed clone path via `djinn_core::paths::project_dir`
     /// before dispatching to the graph backend.
     pub project: String,
-    /// Optional workspace slug. For `query_subgraph`, scopes seed search and
-    /// traversal to a warmed workspace when provided; omit to query the
-    /// project-level graph/default workspace selection.
+    /// Optional workspace slug. Empty string is normalized to omitted. Use
+    /// `operation = "workspaces"` to enumerate valid slugs and metadata
+    /// (`slug`, `name`, `node_count`, `commit_sha`, `warmed_at`, `status`).
+    /// Known workspaces hard-scope listing/bounded ops such as `ranked`,
+    /// `orphans`, `snapshot`, and `api_surface`. Traversal ops such as
+    /// `impact`, `path`, `touches_hot_path`, and `query_subgraph` use the
+    /// workspace only while resolving seeds/endpoints, then keep the traversal
+    /// cross-workspace so blast radius stays visible. Unknown non-empty slugs
+    /// return unscoped results with `workspace_hint` candidate slugs where the
+    /// response type supports hints; single-workspace graphs treat the parameter
+    /// as a no-op.
     #[serde(default)]
     pub workspace: Option<String>,
     /// Resolved absolute filesystem path. Populated by the `code_graph`

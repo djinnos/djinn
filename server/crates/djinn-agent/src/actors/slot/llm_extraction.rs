@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 //! LLM-powered knowledge extraction from completed sessions.
 //!
 //! After structural extraction builds the `SessionTaxonomy`, this module feeds

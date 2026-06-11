@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
