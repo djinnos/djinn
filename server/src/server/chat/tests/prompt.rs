@@ -189,6 +189,8 @@ async fn codebase_header_builder_renders_status_hotspots_and_tree() {
                 last_warm_at: Some("2026-04-28T00:00:00Z".into()),
                 pinned_commit: Some("deadbeef00".into()),
                 commits_since_pin: Some(0),
+                route_parity_enabled: true,
+                route_exclusion_config: serde_json::json!({}),
             })
         }
         async fn ranked(

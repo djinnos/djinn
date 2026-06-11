@@ -397,6 +397,9 @@ impl RepoGraphBridge {
                 if graph_node.is_external {
                     return None;
                 }
+                if graph_node.is_route_or_tool() {
+                    return None;
+                }
                 if let Some(prefix) = workspace_prefix.as_deref()
                     && !shared::repo_graph_node_matches_workspace(graph_node, prefix)
                 {
@@ -1165,6 +1168,11 @@ impl RepoGraphBridge {
                 last_warm_at: None,
                 pinned_commit: None,
                 commits_since_pin: None,
+                route_parity_enabled: djinn_graph::route_extraction::route_parity_enabled(),
+                route_exclusion_config: serde_json::to_value(
+                    djinn_graph::repo_graph::RouteExclusionConfig::default(),
+                )
+                .unwrap_or_else(|_| serde_json::Value::Null),
             });
         };
 
@@ -1178,8 +1186,20 @@ impl RepoGraphBridge {
             project_id: ctx.id.clone(),
             warmed: true,
             last_warm_at: Some(row.built_at),
-            pinned_commit: Some(row.commit_sha),
+            pinned_commit: Some(row.commit_sha.clone()),
             commits_since_pin,
+            route_parity_enabled: djinn_graph::route_extraction::route_parity_enabled(),
+            route_exclusion_config:
+                djinn_graph::repo_graph::deserialize_repo_graph_artifact_bincode(&row.graph_blob)
+                    .map(|artifact| serde_json::to_value(artifact.route_exclusion_config).ok())
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| {
+                        serde_json::to_value(
+                            djinn_graph::repo_graph::RouteExclusionConfig::default(),
+                        )
+                        .unwrap_or_else(|_| serde_json::Value::Null)
+                    }),
         })
     }
 }

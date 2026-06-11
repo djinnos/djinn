@@ -259,6 +259,8 @@ pub struct GraphStatus {
     pub last_warm_at: Option<String>,
     pub pinned_commit: Option<String>,
     pub commits_since_pin: Option<u64>,
+    pub route_parity_enabled: bool,
+    pub route_exclusion_config: serde_json::Value,
 }
 
 /// One workspace visible to the repository graph, enriched with the latest
@@ -897,6 +899,9 @@ pub struct RelatedSymbol {
     /// Confidence carried by the underlying edge (PR A2 — propagates to
     /// the UI so weak references can be visually de-emphasized).
     pub confidence: f64,
+    /// Model-level confidence tier derived from the underlying graph edge.
+    /// Stable snake_case string: `extracted`, `inferred`, or `ambiguous`.
+    pub confidence_tier: String,
 }
 
 /// PR C1: structured method metadata. Populated only when the upstream
