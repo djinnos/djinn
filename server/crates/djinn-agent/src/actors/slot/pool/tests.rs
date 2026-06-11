@@ -9,7 +9,7 @@ use crate::test_helpers;
 
 use super::super::{ModelSlotConfig, SlotHandle, SlotPoolConfig};
 use super::actor::SlotPool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RunnerSignal {
@@ -29,6 +29,125 @@ fn test_app_state() -> (
     let app_state = test_helpers::agent_context_from_db(db, cancel.clone());
     let temp = test_helpers::test_tempdir("djinn-slot-pool-");
     (app_state, cancel, temp)
+}
+
+#[derive(Clone)]
+struct RecordingRuntimeOps {
+    calls: Arc<Mutex<Vec<String>>>,
+    fail_teardown: bool,
+}
+
+impl RecordingRuntimeOps {
+    fn new(fail_teardown: bool) -> Self {
+        Self {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            fail_teardown,
+        }
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().expect("calls mutex").clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl djinn_control_plane::bridge::RuntimeOps for RecordingRuntimeOps {
+    async fn apply_settings(&self, _: &djinn_core::models::DjinnSettings) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn embed_memory_query(
+        &self,
+        _: &str,
+    ) -> Result<Option<djinn_control_plane::bridge::SemanticQueryEmbedding>, String> {
+        Ok(None)
+    }
+
+    async fn reset_runtime_settings(&self) {}
+
+    async fn persist_model_health_state(&self) {}
+
+    async fn apply_environment_config(
+        &self,
+        _: &str,
+        _: &djinn_stack::environment::EnvironmentConfig,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn trigger_mirror_refresh(&self, _: &str) {}
+
+    async fn apply_user_model_change(&self) {}
+
+    async fn dispatch_verification_test(&self, _: &str, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn enqueue_image_build(&self, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn trigger_graph_warm(&self, _: &str) {}
+
+    async fn provision_backing_service(
+        &self,
+        _: djinn_control_plane::bridge::ProvisionServiceRequest,
+    ) -> Result<djinn_control_plane::bridge::ProvisionedService, String> {
+        Err("not used".to_string())
+    }
+
+    async fn release_backing_service(&self, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn teardown_taskrun_job(&self, task_run_id: &str) -> Result<(), String> {
+        self.calls
+            .lock()
+            .expect("calls mutex")
+            .push(task_run_id.to_string());
+        if self.fail_teardown {
+            Err("synthetic teardown failure".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn cleanup_task_branches(&self, _: &str) {}
+}
+
+async fn seed_running_session_with_task_run(
+    app_state: &crate::context::AgentContext,
+    _task_title: &str,
+    task_run_id: &str,
+) -> String {
+    let project = test_helpers::create_test_project(&app_state.db).await;
+    let epic = test_helpers::create_test_epic(&app_state.db, &project.id).await;
+    let task = test_helpers::create_test_task(&app_state.db, &project.id, &epic.id).await;
+    let task_id = task.id.clone();
+    djinn_db::TaskRunRepository::new(app_state.db.clone())
+        .create(djinn_db::CreateTaskRunParams {
+            id: task_run_id,
+            project_id: &project.id,
+            task_id: &task_id,
+            trigger_type: "test",
+            status: None,
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .expect("task_run create should succeed");
+    djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone())
+        .create(djinn_db::CreateSessionParams {
+            project_id: &project.id,
+            task_id: Some(&task_id),
+            model: "model-a",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(task_run_id),
+        })
+        .await
+        .expect("session create should succeed");
+    task_id
 }
 
 fn model(model_id: &str, max_slots: u32, roles: &[&str]) -> ModelSlotConfig {
@@ -704,6 +823,112 @@ async fn kill_and_pause_are_routed_to_the_correct_task_slot() {
     }
 
     wait_until_no_sessions(&pool, &["task-kill".into(), "task-pause".into()]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kill_session_tears_down_taskrun_job_and_ignores_teardown_errors() {
+    let (mut app_state, cancel, _temp) = test_app_state();
+    let runtime = RecordingRuntimeOps::new(true);
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+    let task_id = seed_running_session_with_task_run(&app_state, "kill teardown", "run-kill").await;
+    let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
+    let config = make_config(
+        vec![model("model-a", 1, &["worker"])],
+        &[("worker", vec!["model-a"])],
+    );
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel,
+        config,
+        test_slot_factory(Duration::from_secs(10), signal_tx),
+    );
+
+    pool.dispatch(&task_id, "/tmp/project", "model-a")
+        .await
+        .expect("dispatch should succeed");
+    pool.kill_session(&task_id)
+        .await
+        .expect("teardown failure must not fail kill_session");
+
+    assert!(
+        runtime.calls().iter().any(|call| call == "run-kill"),
+        "kill_session should attempt task-run Job teardown"
+    );
+    wait_until_no_sessions(&pool, &[task_id]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evict_session_tears_down_taskrun_job_before_reclaiming_slot() {
+    let (mut app_state, cancel, _temp) = test_app_state();
+    let runtime = RecordingRuntimeOps::new(false);
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+    let task_id =
+        seed_running_session_with_task_run(&app_state, "evict teardown", "run-evict").await;
+    let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
+    let config = make_config(
+        vec![model("model-a", 1, &["worker"])],
+        &[("worker", vec!["model-a"])],
+    );
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel,
+        config,
+        test_slot_factory(Duration::from_secs(10), signal_tx),
+    );
+
+    pool.dispatch(&task_id, "/tmp/project", "model-a")
+        .await
+        .expect("dispatch should succeed");
+    pool.evict_session(&task_id)
+        .await
+        .expect("evict_session should succeed");
+
+    assert!(
+        runtime.calls().iter().any(|call| call == "run-evict"),
+        "evict_session should attempt task-run Job teardown"
+    );
+    assert!(
+        !pool
+            .has_session(&task_id)
+            .await
+            .expect("has_session should succeed"),
+        "evict_session should still reclaim the task mapping"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupt_all_tears_down_each_running_taskrun_job() {
+    let (mut app_state, cancel, _temp) = test_app_state();
+    let runtime = RecordingRuntimeOps::new(false);
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+    let task_a = seed_running_session_with_task_run(&app_state, "interrupt a", "run-int-a").await;
+    let task_b = seed_running_session_with_task_run(&app_state, "interrupt b", "run-int-b").await;
+    let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
+    let config = make_config(
+        vec![model("model-a", 2, &["worker"])],
+        &[("worker", vec!["model-a"])],
+    );
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel,
+        config,
+        test_slot_factory(Duration::from_secs(10), signal_tx),
+    );
+
+    pool.dispatch(&task_a, "/tmp/project", "model-a")
+        .await
+        .expect("dispatch A should succeed");
+    pool.dispatch(&task_b, "/tmp/project", "model-a")
+        .await
+        .expect("dispatch B should succeed");
+    pool.interrupt_all("test interrupt")
+        .await
+        .expect("interrupt_all should succeed");
+
+    let calls = runtime.calls();
+    assert!(calls.iter().any(|call| call == "run-int-a"));
+    assert!(calls.iter().any(|call| call == "run-int-b"));
+    wait_until_no_sessions(&pool, &[task_a, task_b]).await;
 }
 
 /// Regression: a slot that is still busy must never wedge dispatch even if it
