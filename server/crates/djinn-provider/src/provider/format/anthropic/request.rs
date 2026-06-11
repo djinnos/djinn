@@ -156,23 +156,7 @@ impl AnthropicProvider {
                 .iter()
                 .enumerate()
                 .map(|(index, tool)| {
-                    // Convert RMCP tool format to the Anthropic tool shape.
-                    // RMCP: {"name", "description", "inputSchema"}
-                    // Anthropic: {"name", "description", "input_schema"}
-                    // Rebuilt clean either way: a stray camelCase `inputSchema`
-                    // means no `input_schema` reaches the API, which strict
-                    // Anthropic-compatible vendors reject (MiniMax error 2013
-                    // "function name or parameters is empty").
-                    let input_schema = tool
-                        .get("input_schema")
-                        .or_else(|| tool.get("inputSchema"))
-                        .cloned()
-                        .unwrap_or(json!({"type": "object"}));
-                    let mut tool_obj = json!({
-                        "name": tool.get("name").cloned().unwrap_or(json!("")),
-                        "description": tool.get("description").cloned().unwrap_or(json!("")),
-                        "input_schema": input_schema,
-                    });
+                    let mut tool_obj = super::convert_tool(tool);
                     if index == last
                         && let Some(cache_control) = cache_control
                         && let Some(obj) = tool_obj.as_object_mut()
