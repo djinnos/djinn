@@ -683,6 +683,10 @@ impl RepoDependencyGraph {
         };
         let idx = self.graph.add_node(node);
         self.node_lookup.insert(key, idx);
+        self.name_index
+            .entry(display_name.to_lowercase())
+            .or_default()
+            .push(idx);
         idx
     }
 

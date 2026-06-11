@@ -24,6 +24,19 @@ use crate::scip_parser::{ScipSymbolKind, ScipVisibility};
 use super::edge::RepoGraphEdgeKind;
 use super::node::{RepoGraphNode, RepoGraphNodeKind, RepoNodeKey};
 
+/// Public wire shape for first-class HTTP route metadata.
+///
+/// Downstream graph-ops serialize this compact reference instead of
+/// re-deriving route fields from [`RepoGraphNode`] identity/display strings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteRef {
+    pub id: String,
+    pub method: String,
+    pub path: String,
+    pub framework: String,
+    pub handler_label: Option<String>,
+}
+
 /// Minimal serializable artifact capturing the per-file and per-symbol graph
 /// relationships needed for incremental changed-file patch planning.
 ///
