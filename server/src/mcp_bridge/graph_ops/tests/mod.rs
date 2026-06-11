@@ -195,6 +195,7 @@ fn multi_workspace_graph() -> RepoDependencyGraph {
         symbol_ranges: std::collections::BTreeMap::new(),
         communities: vec![],
         processes: vec![],
+        route_exclusion_config: Default::default(),
     };
     RepoDependencyGraph::from_artifact(&artifact)
 }
@@ -910,6 +911,7 @@ async fn impact_bfs_skips_structural_anchors_but_walks_behavioral_edges() {
         symbol_ranges: std::collections::BTreeMap::new(),
         communities: vec![],
         processes: vec![],
+        route_exclusion_config: Default::default(),
     };
     let graph = RepoDependencyGraph::from_artifact(&artifact);
     let target_idx = graph

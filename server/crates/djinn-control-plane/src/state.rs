@@ -487,6 +487,8 @@ pub mod stubs {
                 last_warm_at: None,
                 pinned_commit: None,
                 commits_since_pin: None,
+                route_parity_enabled: true,
+                route_exclusion_config: serde_json::json!({}),
             })
         }
         async fn snapshot(

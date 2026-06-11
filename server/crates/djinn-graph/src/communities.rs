@@ -691,6 +691,7 @@ mod tests {
             symbol_ranges: BTreeMap::new(),
             communities: Vec::new(),
             processes: Vec::new(),
+            route_exclusion_config: Default::default(),
         };
         RepoDependencyGraph::from_artifact(&artifact)
     }
@@ -705,6 +706,7 @@ mod tests {
             symbol_ranges: BTreeMap::new(),
             communities: Vec::new(),
             processes: Vec::new(),
+            route_exclusion_config: Default::default(),
         };
         let graph = RepoDependencyGraph::from_artifact(&artifact);
         assert!(detect_communities(&graph).is_empty());

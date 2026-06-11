@@ -440,6 +440,7 @@ mod tests {
             symbol_ranges: BTreeMap::new(),
             communities: Vec::new(),
             processes: Vec::new(),
+            route_exclusion_config: Default::default(),
         };
         RepoDependencyGraph::from_artifact(&artifact)
     }
