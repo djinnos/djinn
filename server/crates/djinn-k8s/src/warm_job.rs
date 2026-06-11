@@ -137,9 +137,10 @@ exec {bin} warm-graph "{project_id}"
         env.push(env_var("DJINN_DATABASE_URL", url));
     }
     // Route the Rust toolchain caches (CARGO_HOME/CARGO_TARGET_DIR/SCCACHE_DIR)
-    // to the /cache PVC, identical to the task-run Pod, so the warmer primes the
-    // exact per-project dirs the task-runs reuse. Single-sourced in job.rs to
-    // avoid the task-run-updated-but-warm-missed drift that bit DJINN_*_URL.
+    // to the /cache PVC. Warm Pods own the shared per-project target base;
+    // task-run Pods use private run target dirs but keep the same shared
+    // CARGO_HOME/SCCACHE settings. Single-sourced in job.rs to avoid the
+    // task-run-updated-but-warm-missed drift that bit DJINN_*_URL.
     // Needs the cache volume mounted below.
     env.extend(crate::job::cache_env_vars(project_id));
 
@@ -435,8 +436,8 @@ mod tests {
         );
         assert!(!envs.contains_key("DJINN_MYSQL_URL"));
 
-        // Rust cache routing must match the task-run Pod so the warmer primes
-        // the per-project dirs task-runs reuse (single-sourced via
+        // Warm cache routing must keep the shared per-project target base while
+        // task-run Pods use private run target dirs (single-sourced via
         // job::cache_env_vars).
         assert_eq!(envs.get("CARGO_HOME").copied(), Some("/cache/cargo"));
         assert_eq!(
