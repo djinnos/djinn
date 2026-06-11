@@ -1491,6 +1491,29 @@ impl CoordinatorActor {
                 continue;
             }
 
+            // Grace period: the task enters `verifying` when the in-pod
+            // supervisor fires `submit_verification`, but the host only
+            // registers the pipeline in the tracker after the pod's
+            // WorkerSubmitted report arrives and `spawn_verification` runs —
+            // a window of seconds on every run. A sweep tick landing inside
+            // it flipped freshly-verifying tasks straight back to `open`
+            // (observed: gx2q recovered 0.8s after entering verifying →
+            // spurious full worker redo). Only recover tasks that have sat
+            // in `verifying` well past any plausible report+spawn latency.
+            // Timestamps are `YYYY-MM-DDTHH:MM:SS.mmmZ` strings, lexically
+            // comparable — same cutoff idiom as `reap_stale_task_runs`.
+            const VERIFYING_RECOVERY_GRACE_SECS: i64 = 180;
+            let cutoff = time::OffsetDateTime::now_utc()
+                - time::Duration::seconds(VERIFYING_RECOVERY_GRACE_SECS);
+            let format = time::macros::format_description!(
+                "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+            );
+            if let Ok(cutoff_iso) = cutoff.format(&format)
+                && task.updated_at.as_str() > cutoff_iso.as_str()
+            {
+                continue;
+            }
+
             match repo
                 .transition(
                     &task.id,
