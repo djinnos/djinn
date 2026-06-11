@@ -12,8 +12,8 @@
         ApiSurfaceEntry, BoundaryRule, BoundaryViolation, ChangedRange, ChurnEntry,
         ComplexityResult, CoupledPairEntry, CouplingEntry, CouplingHubEntry, CycleGroup,
         DeadSymbolEntry, DeprecatedHit, DetectedChangesResult, DiffTouchesResult, EdgeEntry,
-        GraphStatus, HotPathHit, HotspotEntry, ImpactResult, MetricsAtResult, NeighborsResult,
-        OrphanEntry, PathResult, ProjectCtx, QuerySubgraphBudget, QuerySubgraphEdge,
+        GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry, ImpactResult, MetricsAtResult,
+        NeighborsResult, OrphanEntry, PathResult, ProjectCtx, QuerySubgraphBudget, QuerySubgraphEdge,
         QuerySubgraphNode, QuerySubgraphRequest, QuerySubgraphResult, QuerySubgraphSeedDebug,
         QuerySubgraphTraversalDebug, RankedNode, RefactorCandidate, RepoGraphOps, ResolveOutcome,
         SearchHit, SnapshotPayload, SymbolAtHit, SymbolContext, SymbolDescription,
@@ -45,12 +45,23 @@
         async fn neighbors(
             &self,
             _: &ProjectCtx,
-            _: &str,
+            key: &str,
             _: Option<&str>,
             _: Option<&str>,
             _: Option<&str>,
         ) -> Result<NeighborsResult, String> {
-            unreachable!("query_subgraph tests should not call neighbors")
+            if self.response.nodes.iter().any(|node| node.uid == key) {
+                Ok(NeighborsResult::Detailed(vec![GraphNeighbor {
+                    key: key.to_string(),
+                    kind: "symbol".to_string(),
+                    display_name: "follow-up accepted stable UID".to_string(),
+                    edge_kind: "symbol_reference".to_string(),
+                    edge_weight: 1.0,
+                    direction: "outgoing".to_string(),
+                }]))
+            } else {
+                Err(format!("unexpected query_subgraph follow-up UID: {key}"))
+            }
         }
 
         async fn ranked(
@@ -144,18 +155,57 @@
         async fn describe(
             &self,
             _: &ProjectCtx,
-            _: &str,
+            key: &str,
         ) -> Result<Option<SymbolDescription>, String> {
-            unreachable!("query_subgraph tests should not call describe")
+            Ok(self
+                .response
+                .nodes
+                .iter()
+                .find(|node| node.uid == key)
+                .map(|node| SymbolDescription {
+                    key: key.to_string(),
+                    kind: node.kind.clone(),
+                    display_name: node.display_name.clone(),
+                    signature: None,
+                    documentation: None,
+                    file: node.file_path.clone(),
+                    start_line: None,
+                    end_line: None,
+                    fan_in: node.degree,
+                    fan_out: node.degree,
+                    visibility: None,
+                    is_external: false,
+                    is_entry_point: false,
+                    is_test: false,
+                    complexity: None,
+                }))
         }
 
         async fn context(
             &self,
             _: &ProjectCtx,
-            _: &str,
+            key: &str,
             _: bool,
         ) -> Result<Option<SymbolContext>, String> {
-            unreachable!("query_subgraph tests should not call context")
+            let Some(node) = self.response.nodes.iter().find(|node| node.uid == key) else {
+                return Ok(None);
+            };
+            Ok(Some(SymbolContext {
+                symbol: crate::bridge::SymbolNode {
+                    uid: key.to_string(),
+                    name: node.display_name.clone(),
+                    kind: node.kind.clone(),
+                    file_path: node.file_path.clone().unwrap_or_default(),
+                    start_line: 0,
+                    end_line: 0,
+                    content: None,
+                    method_metadata: None,
+                    complexity: None,
+                },
+                incoming: Default::default(),
+                outgoing: Default::default(),
+                processes: Vec::new(),
+            }))
         }
 
         async fn status(&self, _: &ProjectCtx) -> Result<GraphStatus, String> {
@@ -324,10 +374,14 @@
         async fn resolve(
             &self,
             _: &ProjectCtx,
-            _: &str,
+            key: &str,
             _: Option<&str>,
         ) -> Result<ResolveOutcome, String> {
-            Ok(ResolveOutcome::NotFound)
+            if self.response.nodes.iter().any(|node| node.uid == key) {
+                Ok(ResolveOutcome::Found(key.to_string()))
+            } else {
+                Ok(ResolveOutcome::NotFound)
+            }
         }
     }
 
@@ -1103,6 +1157,97 @@
                 uid.starts_with("file:") || uid.starts_with("symbol:"),
                 "seed UID must use canonical follow-up-op prefix, got {uid}"
             );
+        }
+    }
+
+    /// Acceptance criterion #4 (stronger cross-layer check) — the
+    /// exact UID strings returned by `query_subgraph` must be
+    /// accepted by existing follow-up operations without stripping
+    /// prefixes or re-resolving display names. This exercises the
+    /// same control-plane dispatcher path an agent uses when it
+    /// chains `query_subgraph` -> `describe` / `context` /
+    /// `neighbors`.
+    #[tokio::test]
+    async fn query_subgraph_returned_uid_is_accepted_by_followup_operations() {
+        let graph = RecordingQuerySubgraphOps::new(query_subgraph_broad_canned_response());
+        let (server, _) = query_subgraph_test_server(graph);
+        let ctx = query_subgraph_ctx();
+        let mut query = test_params("query_subgraph");
+        query.project_id = "proj-query-subgraph".to_string();
+        query.project_path = "/workspace/repo".to_string();
+        query.query = Some("everything related to auth".to_string());
+
+        let response = server
+            .dispatch_code_graph(&ctx, &mut query)
+            .await
+            .expect("query_subgraph dispatch succeeds");
+        let uid = match response {
+            CodeGraphResponse::QuerySubgraph(resp) => resp
+                .query_subgraph
+                .nodes
+                .iter()
+                .find(|node| node.uid.starts_with("symbol:"))
+                .or_else(|| resp.query_subgraph.nodes.first())
+                .expect("canned query_subgraph response emits at least one UID")
+                .uid
+                .clone(),
+            other => panic!("expected query_subgraph response, got {other:?}"),
+        };
+        assert!(
+            uid.starts_with("file:") || uid.starts_with("symbol:"),
+            "fixture UID must use the canonical follow-up prefix, got {uid}"
+        );
+
+        let mut describe = test_params("describe");
+        describe.project_id = "proj-query-subgraph".to_string();
+        describe.project_path = "/workspace/repo".to_string();
+        describe.key = Some(uid.clone());
+        match server
+            .dispatch_code_graph(&ctx, &mut describe)
+            .await
+            .expect("describe accepts query_subgraph UID")
+        {
+            CodeGraphResponse::Describe(resp) => {
+                let description = resp.description.expect("describe resolves returned UID");
+                assert_eq!(description.key, uid);
+            }
+            other => panic!("expected describe response, got {other:?}"),
+        }
+
+        let mut context = test_params("context");
+        context.project_id = "proj-query-subgraph".to_string();
+        context.project_path = "/workspace/repo".to_string();
+        context.key = Some(uid.clone());
+        match server
+            .dispatch_code_graph(&ctx, &mut context)
+            .await
+            .expect("context accepts query_subgraph UID")
+        {
+            CodeGraphResponse::Context(resp) => {
+                assert_eq!(resp.symbol_context.symbol.uid, uid);
+            }
+            other => panic!("expected context response, got {other:?}"),
+        }
+
+        let mut neighbors = test_params("neighbors");
+        neighbors.project_id = "proj-query-subgraph".to_string();
+        neighbors.project_path = "/workspace/repo".to_string();
+        neighbors.key = Some(uid.clone());
+        match server
+            .dispatch_code_graph(&ctx, &mut neighbors)
+            .await
+            .expect("neighbors accepts query_subgraph UID")
+        {
+            CodeGraphResponse::Neighbors(resp) => {
+                assert_eq!(resp.key, uid);
+                assert!(
+                    resp.neighbors
+                        .as_ref()
+                        .is_some_and(|neighbors| !neighbors.is_empty()),
+                    "neighbors follow-up should return the fixture response"
+                );
+            }
+            other => panic!("expected neighbors response, got {other:?}"),
         }
     }
 
