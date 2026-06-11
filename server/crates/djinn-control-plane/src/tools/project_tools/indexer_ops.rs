@@ -114,6 +114,9 @@ pub struct ProjectGraphExclusionsGetParams {
 /// leaves the corresponding column untouched when the caller only wants
 /// to rewrite one of the two lists.
 #[derive(Deserialize, JsonSchema)]
+#[schemars(
+    description = "Partial-update payload. Either field may be `None` — the repository\nleaves the corresponding column untouched when the caller only wants\nto rewrite one of the two lists."
+)]
 pub struct ProjectGraphExclusionsSetParams {
     pub project: String,
     /// When present, replaces `graph_excluded_paths` wholesale. Empty
