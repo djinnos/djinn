@@ -22,6 +22,7 @@ use crate::complexity::ComplexityMetrics;
 use crate::scip_parser::{ScipSymbolKind, ScipVisibility};
 
 use super::edge::RepoGraphEdgeKind;
+use super::edge::{EdgeConfidenceTier, edge_confidence_tier};
 use super::node::{RepoGraphNode, RepoGraphNodeKind, RepoNodeKey};
 
 /// Minimal serializable artifact capturing the per-file and per-symbol graph
@@ -176,6 +177,12 @@ pub struct RepoGraphArtifactEdge {
     /// edges. `None` for every other kind. New in artifact v4 (PR F2).
     #[serde(default)]
     pub step: Option<i32>,
+}
+
+impl RepoGraphArtifactEdge {
+    pub fn confidence_tier(&self) -> EdgeConfidenceTier {
+        edge_confidence_tier(self.kind, self.confidence, self.reason.as_deref())
+    }
 }
 
 /// A serializable enclosing range for a symbol definition, identified by the

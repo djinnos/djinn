@@ -40,7 +40,10 @@ pub use self::artifact::{
     RepoGraphArtifactSymbolRange, deserialize_repo_graph_artifact_bincode,
 };
 pub use self::constants::{REPO_GRAPH_ARTIFACT_VERSION, is_test_path};
-pub use self::edge::{RepoGraphEdge, RepoGraphEdgeKind, edge_confidence_floor};
+pub use self::edge::{
+    EdgeConfidenceTier, RepoGraphEdge, RepoGraphEdgeKind, edge_confidence_floor,
+    edge_confidence_tier, promote_fetches_confidence_with_import_evidence,
+};
 pub use self::graph::{RepoDependencyGraph, SymbolRange};
 pub use self::node::{RepoGraphNode, RepoGraphNodeKind, RepoGraphSearchHit, RepoNodeKey};
 pub use self::ranking::{RankedRepoGraphNode, RepoGraphRanking};

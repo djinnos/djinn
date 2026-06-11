@@ -5,13 +5,14 @@ use serde::{Deserialize, Serialize};
 
 use super::constants::{
     EDGE_CONFIDENCE_CONTAINS_DEFINITION, EDGE_CONFIDENCE_DECLARED_IN_FILE, EDGE_CONFIDENCE_DEFINES,
-    EDGE_CONFIDENCE_ENTRY_POINT_OF, EDGE_CONFIDENCE_EXTENDS, EDGE_CONFIDENCE_FILE_REFERENCE,
-    EDGE_CONFIDENCE_IMPLEMENTS, EDGE_CONFIDENCE_MEMBER_OF, EDGE_CONFIDENCE_READS,
-    EDGE_CONFIDENCE_STEP_IN_PROCESS, EDGE_CONFIDENCE_SYMBOL_REFERENCE,
-    EDGE_CONFIDENCE_TYPE_DEFINES, EDGE_CONFIDENCE_WRITES, EDGE_WEIGHT_DEFINES,
-    EDGE_WEIGHT_DEFINITION_TO_FILE, EDGE_WEIGHT_ENTRY_POINT_OF, EDGE_WEIGHT_EXTENDS,
-    EDGE_WEIGHT_FILE_REFERENCE, EDGE_WEIGHT_FILE_TO_DEFINITION, EDGE_WEIGHT_IMPLEMENTS,
-    EDGE_WEIGHT_MEMBER_OF, EDGE_WEIGHT_STEP_IN_PROCESS, EDGE_WEIGHT_SYMBOL_REFERENCE,
+    EDGE_CONFIDENCE_ENTRY_POINT_OF, EDGE_CONFIDENCE_EXTENDS, EDGE_CONFIDENCE_FETCHES,
+    EDGE_CONFIDENCE_FILE_REFERENCE, EDGE_CONFIDENCE_IMPLEMENTS, EDGE_CONFIDENCE_MEMBER_OF,
+    EDGE_CONFIDENCE_READS, EDGE_CONFIDENCE_ROUTE, EDGE_CONFIDENCE_STEP_IN_PROCESS,
+    EDGE_CONFIDENCE_SYMBOL_REFERENCE, EDGE_CONFIDENCE_TYPE_DEFINES, EDGE_CONFIDENCE_WRITES,
+    EDGE_WEIGHT_DEFINES, EDGE_WEIGHT_DEFINITION_TO_FILE, EDGE_WEIGHT_ENTRY_POINT_OF,
+    EDGE_WEIGHT_EXTENDS, EDGE_WEIGHT_FETCHES, EDGE_WEIGHT_FILE_REFERENCE,
+    EDGE_WEIGHT_FILE_TO_DEFINITION, EDGE_WEIGHT_IMPLEMENTS, EDGE_WEIGHT_MEMBER_OF,
+    EDGE_WEIGHT_ROUTE, EDGE_WEIGHT_STEP_IN_PROCESS, EDGE_WEIGHT_SYMBOL_REFERENCE,
     EDGE_WEIGHT_TYPE_DEFINES,
 };
 
@@ -84,6 +85,35 @@ pub enum RepoGraphEdgeKind {
     /// process membership is computed from SCIP-derived edges, so it's
     /// as deterministic as the source graph.
     StepInProcess,
+    /// Inferred server-side route relationship (for example a handler or file
+    /// participating in a framework route). Ordinary string-shape matches are
+    /// suggestions and classify as [`EdgeConfidenceTier::Inferred`].
+    Route,
+    /// Inferred client/server fetch relationship. Plain URL-literal matches are
+    /// suggestions; matches stamped with explicit import evidence are promoted
+    /// by [`promote_fetches_confidence_with_import_evidence`] and classify as
+    /// [`EdgeConfidenceTier::Extracted`].
+    Fetches,
+}
+
+/// Model-level confidence tier for graph edges.
+///
+/// This is deliberately computed from persisted `kind` / `confidence` /
+/// `reason` rather than stored on [`RepoGraphEdge`] or
+/// [`crate::repo_graph::RepoGraphArtifactEdge`], so existing v10 bincode
+/// artifacts remain readable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeConfidenceTier {
+    Extracted,
+    Inferred,
+    Ambiguous,
+}
+
+impl RepoGraphEdge {
+    pub fn confidence_tier(&self) -> EdgeConfidenceTier {
+        edge_confidence_tier(self.kind, self.confidence, self.reason.as_deref())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -123,6 +153,8 @@ pub fn edge_confidence_floor(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::SymbolReference => EDGE_CONFIDENCE_SYMBOL_REFERENCE,
         RepoGraphEdgeKind::Reads => EDGE_CONFIDENCE_READS,
         RepoGraphEdgeKind::Writes => EDGE_CONFIDENCE_WRITES,
+        RepoGraphEdgeKind::Route => EDGE_CONFIDENCE_ROUTE,
+        RepoGraphEdgeKind::Fetches => EDGE_CONFIDENCE_FETCHES,
         RepoGraphEdgeKind::Extends => EDGE_CONFIDENCE_EXTENDS,
         RepoGraphEdgeKind::Implements => EDGE_CONFIDENCE_IMPLEMENTS,
         RepoGraphEdgeKind::TypeDefines => EDGE_CONFIDENCE_TYPE_DEFINES,
@@ -131,6 +163,70 @@ pub fn edge_confidence_floor(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::MemberOf => EDGE_CONFIDENCE_MEMBER_OF,
         RepoGraphEdgeKind::StepInProcess => EDGE_CONFIDENCE_STEP_IN_PROCESS,
     }
+}
+
+pub fn edge_confidence_tier(
+    kind: RepoGraphEdgeKind,
+    confidence: f64,
+    reason: Option<&str>,
+) -> EdgeConfidenceTier {
+    let floor = edge_confidence_floor(kind);
+    let reason_lc = reason.unwrap_or_default().to_ascii_lowercase();
+    if confidence + f64::EPSILON < floor
+        || reason_lc.contains("ambiguous")
+        || reason_lc.contains("suppressed")
+        || reason_lc.contains("below-floor")
+    {
+        return EdgeConfidenceTier::Ambiguous;
+    }
+
+    match kind {
+        RepoGraphEdgeKind::Fetches
+            if is_fetches_import_evidence_reason(&reason_lc) && confidence >= 0.9 =>
+        {
+            EdgeConfidenceTier::Extracted
+        }
+        RepoGraphEdgeKind::Route | RepoGraphEdgeKind::Fetches => EdgeConfidenceTier::Inferred,
+        RepoGraphEdgeKind::ContainsDefinition
+        | RepoGraphEdgeKind::DeclaredInFile
+        | RepoGraphEdgeKind::SymbolReference
+        | RepoGraphEdgeKind::Writes
+        | RepoGraphEdgeKind::EntryPointOf
+        | RepoGraphEdgeKind::MemberOf
+        | RepoGraphEdgeKind::StepInProcess
+            if confidence >= 0.9 =>
+        {
+            EdgeConfidenceTier::Extracted
+        }
+        _ => EdgeConfidenceTier::Inferred,
+    }
+}
+
+fn is_fetches_import_evidence_reason(reason_lc: &str) -> bool {
+    reason_lc.contains("import-evidence")
+        || reason_lc.contains("import evidence")
+        || reason_lc.contains("explicit-import")
+}
+
+/// Apply the import-evidence promotion contract for `Fetches` edges.
+///
+/// Callers that match a URL literal to a known imported route/client symbol
+/// should use this helper before materializing the edge. It lifts the match
+/// above 0.9 and stamps a reason that [`edge_confidence_tier`] recognizes as
+/// extracted while leaving plain string-shape `Fetches` matches inferred.
+pub fn promote_fetches_confidence_with_import_evidence(
+    confidence: f64,
+    reason: Option<&str>,
+) -> (f64, String) {
+    let promoted = confidence.max(0.91);
+    let reason = match reason.filter(|value| !value.trim().is_empty()) {
+        Some(value) if is_fetches_import_evidence_reason(&value.to_ascii_lowercase()) => {
+            value.to_string()
+        }
+        Some(value) => format!("{value}; import-evidence"),
+        None => "import-evidence".to_string(),
+    };
+    (promoted, reason)
 }
 
 /// PR F1: public wrapper around the per-kind weight table so the
@@ -152,6 +248,8 @@ pub(crate) fn edge_weight(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::SymbolReference
         | RepoGraphEdgeKind::Reads
         | RepoGraphEdgeKind::Writes => EDGE_WEIGHT_SYMBOL_REFERENCE,
+        RepoGraphEdgeKind::Route => EDGE_WEIGHT_ROUTE,
+        RepoGraphEdgeKind::Fetches => EDGE_WEIGHT_FETCHES,
         RepoGraphEdgeKind::Extends => EDGE_WEIGHT_EXTENDS,
         RepoGraphEdgeKind::Implements => EDGE_WEIGHT_IMPLEMENTS,
         RepoGraphEdgeKind::TypeDefines => EDGE_WEIGHT_TYPE_DEFINES,
@@ -159,5 +257,60 @@ pub(crate) fn edge_weight(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::EntryPointOf => EDGE_WEIGHT_ENTRY_POINT_OF,
         RepoGraphEdgeKind::MemberOf => EDGE_WEIGHT_MEMBER_OF,
         RepoGraphEdgeKind::StepInProcess => EDGE_WEIGHT_STEP_IN_PROCESS,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confidence_tier_classifies_extracted_inferred_and_ambiguous_edges() {
+        assert_eq!(
+            edge_confidence_tier(RepoGraphEdgeKind::ContainsDefinition, 0.95, None),
+            EdgeConfidenceTier::Extracted
+        );
+        assert_eq!(
+            edge_confidence_tier(RepoGraphEdgeKind::Route, 0.78, Some("string-shape")),
+            EdgeConfidenceTier::Inferred
+        );
+        assert_eq!(
+            edge_confidence_tier(RepoGraphEdgeKind::Route, 0.70, Some("string-shape")),
+            EdgeConfidenceTier::Ambiguous
+        );
+        assert_eq!(
+            edge_confidence_tier(RepoGraphEdgeKind::Fetches, 0.80, Some("ambiguous-path")),
+            EdgeConfidenceTier::Ambiguous
+        );
+    }
+
+    #[test]
+    fn fetches_import_evidence_promotes_to_extracted() {
+        let (confidence, reason) = promote_fetches_confidence_with_import_evidence(
+            EDGE_CONFIDENCE_FETCHES,
+            Some("url-literal"),
+        );
+        assert!(confidence > 0.9);
+        assert!(reason.contains("import-evidence"));
+        assert_eq!(
+            edge_confidence_tier(RepoGraphEdgeKind::Fetches, confidence, Some(&reason)),
+            EdgeConfidenceTier::Extracted
+        );
+    }
+
+    #[test]
+    fn confidence_tier_serde_uses_stable_snake_case_names() {
+        assert_eq!(
+            serde_json::to_string(&EdgeConfidenceTier::Extracted).expect("serialize"),
+            "\"extracted\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EdgeConfidenceTier::Inferred).expect("serialize"),
+            "\"inferred\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EdgeConfidenceTier::Ambiguous).expect("serialize"),
+            "\"ambiguous\""
+        );
     }
 }

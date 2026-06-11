@@ -106,6 +106,12 @@ pub(crate) const EDGE_CONFIDENCE_DEFINES: f64 = 0.85;
 // a one-tier penalty.
 pub(crate) const EDGE_CONFIDENCE_READS: f64 = 0.85;
 pub(crate) const EDGE_CONFIDENCE_WRITES: f64 = 0.90;
+// Inferred route/API edges are string-shape signals unless an extractor stamps
+// stronger evidence in the edge reason. Keep their floor below deterministic
+// SCIP edges so the confidence tier can distinguish inferred suggestions from
+// extracted graph facts without adding persisted fields to artifacts.
+pub(crate) const EDGE_CONFIDENCE_ROUTE: f64 = 0.75;
+pub(crate) const EDGE_CONFIDENCE_FETCHES: f64 = 0.75;
 // PR F1: floor for `EntryPointOf` edges. The detector itself records
 // per-hit confidence in [0.6, 0.95] depending on signal strength
 // (`fn main`, SCIP `Test` role → 0.95; file-path heuristics → 0.7;
@@ -131,6 +137,8 @@ pub(crate) const EDGE_WEIGHT_DEFINITION_TO_FILE: f64 = 4.0;
 pub(crate) const EDGE_WEIGHT_FILE_TO_DEFINITION: f64 = 1.5;
 pub(crate) const EDGE_WEIGHT_FILE_REFERENCE: f64 = 2.5;
 pub(crate) const EDGE_WEIGHT_SYMBOL_REFERENCE: f64 = 3.5;
+pub(crate) const EDGE_WEIGHT_ROUTE: f64 = 2.0;
+pub(crate) const EDGE_WEIGHT_FETCHES: f64 = 2.0;
 pub(crate) const EDGE_WEIGHT_EXTENDS: f64 = 2.0;
 pub(crate) const EDGE_WEIGHT_IMPLEMENTS: f64 = 2.5;
 pub(crate) const EDGE_WEIGHT_TYPE_DEFINES: f64 = 1.75;

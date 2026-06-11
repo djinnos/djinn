@@ -985,6 +985,29 @@
     }
 
     #[test]
+    fn edge_entry_serializes_confidence_tier_contract() {
+        let json = serde_json::to_value(EdgeEntry {
+            from: "file:ui/src/api.ts".to_string(),
+            to: "route:GET /api/users".to_string(),
+            edge_kind: "Fetches".to_string(),
+            edge_weight: 2.0,
+            confidence: 0.91,
+            confidence_tier: "extracted".to_string(),
+            reason: Some("url-literal; import-evidence".to_string()),
+        })
+        .expect("serialize EdgeEntry");
+        assert_eq!(
+            json.get("confidence_tier").and_then(|v| v.as_str()),
+            Some("extracted")
+        );
+        assert_eq!(json.get("confidence").and_then(|v| v.as_f64()), Some(0.91));
+        assert_eq!(
+            json.get("reason").and_then(|v| v.as_str()),
+            Some("url-literal; import-evidence")
+        );
+    }
+
+    #[test]
     fn parses_describe_params_from_json() {
         let json = serde_json::json!({
             "operation": "describe",

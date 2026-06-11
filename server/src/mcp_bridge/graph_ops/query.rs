@@ -241,6 +241,8 @@ impl RepoGraphBridge {
                     Ok(RepoGraphEdgeKind::SymbolReference)
                 }
                 "reads" | "read" => Ok(RepoGraphEdgeKind::Reads),
+                "route" | "routes" => Ok(RepoGraphEdgeKind::Route),
+                "fetches" | "fetch" => Ok(RepoGraphEdgeKind::Fetches),
                 "writes" | "write" => Ok(RepoGraphEdgeKind::Writes),
                 "extends" | "extend" => Ok(RepoGraphEdgeKind::Extends),
                 "implements" | "implement" => Ok(RepoGraphEdgeKind::Implements),
@@ -311,6 +313,7 @@ impl RepoGraphBridge {
                     to_uid: edge.to_uid,
                     kind: edge_label(edge.kind),
                     confidence: edge.confidence,
+                    confidence_tier: format!("{:?}", edge.confidence_tier).to_ascii_lowercase(),
                     reason: edge.reason,
                 })
                 .collect(),
@@ -903,6 +906,10 @@ impl RepoGraphBridge {
                 to: dst_key,
                 edge_kind: kind_label,
                 edge_weight: edge_ref.weight().weight,
+                confidence: edge_ref.weight().confidence,
+                confidence_tier: format!("{:?}", edge_ref.weight().confidence_tier())
+                    .to_ascii_lowercase(),
+                reason: edge_ref.weight().reason.clone(),
             });
             if out.len() >= limit {
                 break;

@@ -21,7 +21,8 @@ use petgraph::visit::EdgeRef;
 use serde::{Deserialize, Serialize};
 
 use crate::repo_graph::{
-    RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind, RepoNodeKey,
+    EdgeConfidenceTier, RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind,
+    RepoNodeKey,
 };
 
 const DEFAULT_TOKEN_BUDGET: usize = 2_000;
@@ -183,6 +184,7 @@ pub struct QuerySubgraphEdge {
     pub to_uid: String,
     pub kind: RepoGraphEdgeKind,
     pub confidence: f64,
+    pub confidence_tier: EdgeConfidenceTier,
     pub reason: Option<String>,
 }
 
@@ -454,6 +456,15 @@ pub fn infer_edge_intent(query: &str) -> Vec<RepoGraphEdgeKind> {
     if contains_any(&q, &["read", "reads", "select", "loads", "fetches"]) {
         add(RepoGraphEdgeKind::Reads);
     }
+    if contains_any(&q, &["route", "routes", "router", "endpoint", "endpoints"]) {
+        add(RepoGraphEdgeKind::Route);
+    }
+    if contains_any(
+        &q,
+        &["fetch", "fetches", "request", "requests", "url", "api call"],
+    ) {
+        add(RepoGraphEdgeKind::Fetches);
+    }
     if contains_any(
         &q,
         &[
@@ -504,6 +515,8 @@ pub fn infer_edge_intent(query: &str) -> Vec<RepoGraphEdgeKind> {
             RepoGraphEdgeKind::Extends,
             RepoGraphEdgeKind::TypeDefines,
             RepoGraphEdgeKind::Defines,
+            RepoGraphEdgeKind::Route,
+            RepoGraphEdgeKind::Fetches,
         ];
     }
     kinds
@@ -739,6 +752,7 @@ fn render_edge(
         to_uid: stable_node_uid(graph.node(target)),
         kind: edge.kind,
         confidence: edge.confidence,
+        confidence_tier: edge.confidence_tier(),
         reason: edge.reason.clone(),
     }
 }
@@ -1108,6 +1122,16 @@ mod tests {
         assert!(
             imports.contains(&RepoGraphEdgeKind::FileReference),
             "imports phrasing must include FileReference, got {imports:?}"
+        );
+        assert_eq!(
+            infer_edge_intent("which route handles this endpoint"),
+            vec![RepoGraphEdgeKind::Route],
+            "route phrasing must collapse to Route"
+        );
+        let fetches = infer_edge_intent("which client fetches this url");
+        assert!(
+            fetches.contains(&RepoGraphEdgeKind::Fetches),
+            "fetches phrasing must include Fetches, got {fetches:?}"
         );
     }
 
