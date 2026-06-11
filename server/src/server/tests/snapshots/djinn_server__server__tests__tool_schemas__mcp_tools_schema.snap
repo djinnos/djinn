@@ -999,7 +999,7 @@ expression: signatures
         },
         "path": {
           "default": null,
-          "description": "Exact route path selector for `shape_check`/`api_impact` when\n`route_id` is omitted.",
+          "description": "Exact route path for `shape_check` / `api_impact` when `route_id` is\nnot supplied.",
           "nullable": true,
           "type": "string"
         },
