@@ -388,6 +388,10 @@ mod tests {
             is_test: false,
             complexity: None,
             workspace: None,
+            // PR s6ch / cs4v: route metadata is not applicable to
+            // these placeholder symbol nodes — defaults to `None`.
+            route_framework: None,
+            route_handler_symbol: None,
         };
 
         let nodes = vec![

@@ -407,6 +407,14 @@ pub fn stable_node_uid(node: &RepoGraphNode) -> String {
         RepoNodeKey::Symbol(symbol) => format!("symbol:{symbol}"),
         RepoNodeKey::Process(id) => format!("process:{id}"),
         RepoNodeKey::Table(name) => format!("table:{name}"),
+        // PR s6ch / cs4v: route / tool nodes are synthetic side-channel
+        // metadata, but the stable uid keeps `stable_node_uid`
+        // exhaustive across the new key variants. Prefix mirrors
+        // `process:` / `table:` so the resulting string stays
+        // parseable by downstream consumers that split on the first
+        // colon.
+        RepoNodeKey::Route(id) => format!("route:{id}"),
+        RepoNodeKey::Tool(id) => format!("tool:{id}"),
     }
 }
 
@@ -759,6 +767,10 @@ mod tests {
             is_test: false,
             complexity: None,
             workspace: Some("root".to_string()),
+            // PR s6ch / cs4v: route metadata is not applicable to
+            // these placeholder symbol nodes — defaults to `None`.
+            route_framework: None,
+            route_handler_symbol: None,
         }
     }
 
