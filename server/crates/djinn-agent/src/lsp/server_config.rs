@@ -59,6 +59,23 @@ pub(super) fn server_for_path(path: &Path) -> Option<ServerDef> {
     }
 }
 
+/// Server-specific LSP `initializationOptions`.
+///
+/// rust-analyzer: disable flycheck (`checkOnSave`). Our client sends
+/// `didChangeWatchedFiles` on every agent file touch, and each trigger makes
+/// rust-analyzer run `cargo check --workspace --all-targets` into the shared
+/// per-project CARGO_TARGET_DIR — a full workspace+tests compile that holds
+/// the cargo build-dir lock and starves every other task pod's cargo
+/// commands (observed wedging 3 of 4 pods on the VPS). The agent runs its
+/// own `cargo check` constantly, so flycheck is redundant; rust-analyzer's
+/// native diagnostics (type errors etc.) still publish without it.
+pub(super) fn initialization_options(server_id: &str) -> Option<serde_json::Value> {
+    match server_id {
+        "rust-analyzer" => Some(serde_json::json!({ "checkOnSave": false })),
+        _ => None,
+    }
+}
+
 /// Djinn-managed binary directory for auto-installed LSP servers.
 pub(super) fn djinn_bin_dir() -> PathBuf {
     dirs::data_dir()
@@ -295,6 +312,13 @@ mod tests {
     fn server_for_unknown_extension() {
         assert!(server_for_path(Path::new("/foo/bar.txt")).is_none());
         assert!(server_for_path(Path::new("/foo/bar")).is_none());
+    }
+
+    #[test]
+    fn rust_analyzer_disables_flycheck() {
+        let opts = initialization_options("rust-analyzer").unwrap();
+        assert_eq!(opts["checkOnSave"], serde_json::json!(false));
+        assert!(initialization_options("gopls").is_none());
     }
 
     #[test]
