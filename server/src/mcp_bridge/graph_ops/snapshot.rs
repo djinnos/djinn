@@ -957,6 +957,9 @@ impl RepoGraphBridge {
             if exclusions.excludes(&key, file.as_deref(), &node.display_name) {
                 continue;
             }
+            if node.is_route_or_tool() || graph.is_singleton_route_without_consumers(node_index) {
+                continue;
+            }
             kept.push(node_index);
             let td = graph
                 .graph()
