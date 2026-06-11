@@ -104,7 +104,12 @@ mod tests {
         let file = worktree.join("server/crates/foo/src/lib.rs");
         write(&file, "");
 
-        let root = find_root(&file, worktree, &["Cargo.toml"], RootStrategy::CargoWorkspace);
+        let root = find_root(
+            &file,
+            worktree,
+            &["Cargo.toml"],
+            RootStrategy::CargoWorkspace,
+        );
         assert_eq!(root, Some(worktree.join("server")));
 
         // Nearest strategy still picks the member crate.
@@ -127,7 +132,12 @@ mod tests {
         let file = worktree.join("crates/foo/src/lib.rs");
         write(&file, "");
 
-        let root = find_root(&file, worktree, &["Cargo.toml"], RootStrategy::CargoWorkspace);
+        let root = find_root(
+            &file,
+            worktree,
+            &["Cargo.toml"],
+            RootStrategy::CargoWorkspace,
+        );
         assert_eq!(root, Some(worktree.to_path_buf()));
     }
 
@@ -142,7 +152,12 @@ mod tests {
         let file = worktree.join("app/src/main.rs");
         write(&file, "");
 
-        let root = find_root(&file, worktree, &["Cargo.toml"], RootStrategy::CargoWorkspace);
+        let root = find_root(
+            &file,
+            worktree,
+            &["Cargo.toml"],
+            RootStrategy::CargoWorkspace,
+        );
         assert_eq!(root, Some(worktree.join("app")));
     }
 }
