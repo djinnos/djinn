@@ -84,6 +84,12 @@ pub enum RepoGraphEdgeKind {
     /// process membership is computed from SCIP-derived edges, so it's
     /// as deterministic as the source graph.
     StepInProcess,
+    /// Synthetic edge linking an HTTP [`RepoGraphNodeKind::Route`] to the
+    /// server-side handler symbol that services it.
+    HandlesRoute,
+    /// Synthetic edge linking a client-side caller symbol to a known
+    /// server-side [`RepoGraphNodeKind::Route`].
+    Fetches,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -130,6 +136,8 @@ pub fn edge_confidence_floor(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::EntryPointOf => EDGE_CONFIDENCE_ENTRY_POINT_OF,
         RepoGraphEdgeKind::MemberOf => EDGE_CONFIDENCE_MEMBER_OF,
         RepoGraphEdgeKind::StepInProcess => EDGE_CONFIDENCE_STEP_IN_PROCESS,
+        RepoGraphEdgeKind::HandlesRoute => 0.90,
+        RepoGraphEdgeKind::Fetches => 0.70,
     }
 }
 
@@ -159,5 +167,8 @@ pub(crate) fn edge_weight(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::EntryPointOf => EDGE_WEIGHT_ENTRY_POINT_OF,
         RepoGraphEdgeKind::MemberOf => EDGE_WEIGHT_MEMBER_OF,
         RepoGraphEdgeKind::StepInProcess => EDGE_WEIGHT_STEP_IN_PROCESS,
+        RepoGraphEdgeKind::HandlesRoute | RepoGraphEdgeKind::Fetches => {
+            EDGE_WEIGHT_SYMBOL_REFERENCE
+        }
     }
 }
