@@ -63,6 +63,8 @@ pub struct CodeGraphParams {
     /// - `search`: substring/name lookup text.
     /// - `query_subgraph`: required nonblank natural-language question used
     ///   to pick relevant seeds and infer useful traversal edge kinds.
+    /// - `flow`: required nonblank natural-language question used to find
+    ///   matching execution-flow/process steps.
     #[serde(default)]
     pub query: Option<String>,
     /// Optional coarse context substring for `query_subgraph`. Use this to
@@ -103,12 +105,31 @@ pub struct CodeGraphParams {
     /// Destination node for `path`.
     #[serde(default)]
     pub to: Option<String>,
+    /// HTTP method for route-aware ops (`route_map`, `shape_check`,
+    /// `api_impact`) when `route_id` is not supplied.
+    #[serde(default)]
+    pub method: Option<String>,
+    /// Exact route path for `shape_check` / `api_impact` when `route_id` is
+    /// not supplied.
+    #[serde(default)]
+    pub path: Option<String>,
     /// Source path glob for `edges`.
     #[serde(default)]
     pub from_glob: Option<String>,
     /// Destination path glob for `edges`.
     #[serde(default)]
     pub to_glob: Option<String>,
+    /// Stable route id for route-aware ops. For `shape_check` and
+    /// `api_impact`, callers must provide either `route_id` or both
+    /// `method` and `path`.
+    #[serde(default)]
+    pub route_id: Option<String>,
+    /// Route path glob for `route_map` discovery.
+    #[serde(default)]
+    pub path_glob: Option<String>,
+    /// Optional route framework filter for `route_map` discovery.
+    #[serde(default)]
+    pub framework: Option<String>,
     /// Minimum SCC size for `cycles` (default 2).
     #[serde(default)]
     pub min_size: Option<i64>,
@@ -224,6 +245,10 @@ pub struct CodeGraphParams {
     /// the body shipped over MCP.
     #[serde(default)]
     pub include_content: Option<bool>,
+    /// Include optional response keys while computing `shape_check` drift.
+    /// Default false.
+    #[serde(default)]
+    pub include_optional: Option<bool>,
     /// Semantic zoom level for `snapshot`: `symbol` keeps the existing
     /// file/symbol-node payload shape; `community` is accepted for forward
     /// compatibility with the collapsed community view.
@@ -281,8 +306,13 @@ impl CodeGraphParams {
         clear(&mut self.file_filter);
         clear(&mut self.from);
         clear(&mut self.to);
+        clear(&mut self.method);
+        clear(&mut self.path);
         clear(&mut self.from_glob);
         clear(&mut self.to_glob);
+        clear(&mut self.route_id);
+        clear(&mut self.path_glob);
+        clear(&mut self.framework);
         clear(&mut self.visibility);
         clear(&mut self.sort_by);
         clear(&mut self.group_by);

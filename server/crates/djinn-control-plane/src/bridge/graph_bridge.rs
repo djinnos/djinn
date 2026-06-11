@@ -175,6 +175,70 @@ pub trait RepoGraphOps: Send + Sync {
         })
     }
 
+    /// Route graph surface stub. Follow-up route extraction tasks will resolve
+    /// route nodes and walk HandlesRoute/Fetches/EntryPointOf edges; until then
+    /// an empty route set with a zero summary is the production-safe success
+    /// shape for graphs without route/process data.
+    async fn route_map(
+        &self,
+        _ctx: &ProjectCtx,
+        _route_id: Option<&str>,
+        _method: Option<&str>,
+        _path_glob: Option<&str>,
+        _framework: Option<&str>,
+        _limit: usize,
+    ) -> Result<RouteMapResult, String> {
+        Ok(RouteMapResult::default())
+    }
+
+    /// Route response-shape drift surface stub. Implementation tasks will
+    /// populate route shape keys and consumer drift; empty graphs return an
+    /// empty shape/drift result rather than a not-found error.
+    async fn shape_check(
+        &self,
+        _ctx: &ProjectCtx,
+        _route_id: Option<&str>,
+        _method: Option<&str>,
+        _path: Option<&str>,
+        _include_optional: bool,
+    ) -> Result<ShapeCheckResult, String> {
+        Ok(ShapeCheckResult {
+            route_shape: RouteShape {
+                route: None,
+                response_keys: Vec::new(),
+            },
+            drifts: Vec::new(),
+        })
+    }
+
+    /// Route API-impact surface stub. Follow-up work will combine impact and
+    /// shape-check scoring; until route data exists, return no impacted
+    /// consumers.
+    async fn api_impact(
+        &self,
+        _ctx: &ProjectCtx,
+        _route_id: Option<&str>,
+        _method: Option<&str>,
+        _path: Option<&str>,
+        _min_confidence: f64,
+        _limit: usize,
+    ) -> Result<ApiImpactResult, String> {
+        Ok(ApiImpactResult::default())
+    }
+
+    /// Execution-flow search surface stub. The implementation task will reuse
+    /// hybrid_search + process memberships; graphs without process data return
+    /// an empty hit list.
+    async fn flow(
+        &self,
+        _ctx: &ProjectCtx,
+        _query: &str,
+        _kind_filter: Option<&str>,
+        _limit: usize,
+    ) -> Result<FlowResult, String> {
+        Ok(FlowResult::default())
+    }
+
     /// Strongly-connected components of size >= `min_size`.
     async fn cycles(
         &self,

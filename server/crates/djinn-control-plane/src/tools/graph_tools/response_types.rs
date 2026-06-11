@@ -407,6 +407,34 @@ pub struct QuerySubgraphResponse {
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct RouteMapResponse {
+    pub route_map: RouteMapResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ShapeCheckResponse {
+    pub shape_check: ShapeCheckResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ApiImpactResponse {
+    pub api_impact: ApiImpactResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FlowResponse {
+    pub flow: FlowResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum CodeGraphResponse {
     Neighbors(NeighborsResponse),
@@ -452,4 +480,8 @@ pub enum CodeGraphResponse {
     /// Discriminator field `snapshot`.
     Snapshot(SnapshotResponse),
     QuerySubgraph(QuerySubgraphResponse),
+    RouteMap(RouteMapResponse),
+    ShapeCheck(ShapeCheckResponse),
+    ApiImpact(ApiImpactResponse),
+    Flow(FlowResponse),
 }

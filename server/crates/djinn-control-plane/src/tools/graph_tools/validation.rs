@@ -15,6 +15,37 @@ pub(crate) fn validate_direction(direction: Option<&str>) -> Result<(), String> 
     }
 }
 
+pub(crate) fn validate_flow_kind_filter(kind_filter: Option<&str>) -> Result<(), String> {
+    if let Some(k) = kind_filter {
+        match k {
+            "process" | "step" => Ok(()),
+            _ => Err(format!(
+                "invalid kind_filter '{k}' for flow: expected 'process' or 'step'"
+            )),
+        }
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) type RouteSelector<'a> = (Option<&'a str>, Option<&'a str>, Option<&'a str>);
+
+pub(crate) fn require_route_selector(
+    params: &CodeGraphParams,
+) -> Result<RouteSelector<'_>, String> {
+    let route_id = params.route_id.as_deref().filter(|s| !s.is_empty());
+    let method = params.method.as_deref().filter(|s| !s.is_empty());
+    let path = params.path.as_deref().filter(|s| !s.is_empty());
+    if route_id.is_some() || (method.is_some() && path.is_some()) {
+        Ok((route_id, method, path))
+    } else {
+        Err(format!(
+            "'route_id' or both 'method' and 'path' are required for operation '{}'",
+            params.operation
+        ))
+    }
+}
+
 pub(crate) fn validate_kind_filter(kind_filter: Option<&str>) -> Result<(), String> {
     if let Some(k) = kind_filter {
         match k {
