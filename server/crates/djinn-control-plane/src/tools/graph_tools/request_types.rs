@@ -339,6 +339,11 @@ impl CodeGraphParams {
         clear(&mut self.level);
         clear(&mut self.target);
         clear(&mut self.tests);
+        clear(&mut self.route_id);
+        clear(&mut self.method);
+        clear(&mut self.path);
+        clear(&mut self.path_glob);
+        clear(&mut self.framework);
     }
 }
 

@@ -2,6 +2,7 @@ use async_trait::async_trait;
 
 use super::graph_data::*;
 
+#[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait RepoGraphOps: Send + Sync {
     /// Enumerate graph workspaces by combining distinct `RepoGraphNode.workspace`
@@ -184,6 +185,7 @@ pub trait RepoGraphOps: Send + Sync {
         _ctx: &ProjectCtx,
         _route_id: Option<&str>,
         _method: Option<&str>,
+        _path: Option<&str>,
         _path_glob: Option<&str>,
         _framework: Option<&str>,
         _limit: usize,
