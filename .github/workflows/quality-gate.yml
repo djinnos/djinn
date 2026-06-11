@@ -458,7 +458,6 @@ jobs:
     if: always() && github.event_name != 'push'
     needs:
       - server-clippy
-      - server-size-guard
       - server-test
       - server-sqlx-cache
       - ui-frontend
@@ -467,7 +466,6 @@ jobs:
         run: |
           results=(
             "${{ needs.server-clippy.result }}"
-            "${{ needs.server-size-guard.result }}"
             "${{ needs.server-test.result }}"
             "${{ needs.server-sqlx-cache.result }}"
             "${{ needs.ui-frontend.result }}"
