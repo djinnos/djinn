@@ -87,9 +87,15 @@ pub(crate) fn validate_flow_kind_filter(kind_filter: Option<&str>) -> Result<(),
     }
 }
 
+/// Tuple of (route_id, method, path) selectors that identify a single
+/// route. Factored out of [`require_route_selector`]'s return type so
+/// the per-op handlers can destructure it without tripping
+/// `clippy::type_complexity` on the 3-tuple of `Option<&str>`s.
+pub(crate) type RouteSelector<'a> = (Option<&'a str>, Option<&'a str>, Option<&'a str>);
+
 pub(crate) fn require_route_selector(
     params: &CodeGraphParams,
-) -> Result<(Option<&str>, Option<&str>, Option<&str>), String> {
+) -> Result<RouteSelector<'_>, String> {
     let route_id = params.route_id.as_deref().filter(|s| !s.is_empty());
     let method = params.method.as_deref().filter(|s| !s.is_empty());
     let path = params.path.as_deref().filter(|s| !s.is_empty());
