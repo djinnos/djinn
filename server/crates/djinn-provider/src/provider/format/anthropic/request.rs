@@ -1,26 +1,20 @@
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
-use crate::message::ContentBlock;
-use crate::message::{CacheBreakpoint, Conversation};
+use crate::message::{CacheBreakpoint, ContentBlock, Conversation};
 use crate::provider::client::ApiClient;
 use crate::provider::{ProviderConfig, ToolChoice};
 
-use super::cache::MAX_CACHE_CONTROL_MARKERS;
-
-const ANTHROPIC_CACHE_BREAKPOINT_KEY: &str = "anthropic_cache_breakpoint";
-#[cfg(test)]
-const ANTHROPIC_STABLE_PREFIX_KIND: &str = "stable_prefix";
-
+use super::cache::{ANTHROPIC_CACHE_BREAKPOINT_KEY, MAX_CACHE_CONTROL_MARKERS};
 #[derive(Debug, Clone, PartialEq)]
-struct AnthropicSystemBlock {
-    text: String,
-    cache_control: Option<Value>,
+pub(super) struct AnthropicSystemBlock {
+    pub(super) text: String,
+    pub(super) cache_control: Option<Value>,
 }
 
 pub struct AnthropicProvider {
-    config: ProviderConfig,
-    client: ApiClient,
+    pub(super) config: ProviderConfig,
+    pub(super) client: ApiClient,
     /// Hash of the `cache_control`-marked stable prefix from this provider
     /// instance's previous request, used by the B3 drift guard to detect a
     /// supposedly-stable prefix mutating across consecutive turns. `Mutex` because
@@ -74,7 +68,7 @@ impl AnthropicProvider {
     /// The final system block must remain uncached because it represents the
     /// dynamic tail. Non-Anthropic providers ignore this metadata and continue to
     /// serialize the same content as plain text.
-    fn system_blocks(conversation: &Conversation) -> Vec<AnthropicSystemBlock> {
+    pub(super) fn system_blocks(conversation: &Conversation) -> Vec<AnthropicSystemBlock> {
         conversation
             .messages
             .iter()
@@ -113,7 +107,7 @@ impl AnthropicProvider {
             .collect()
     }
 
-    fn serialize_system_blocks(blocks: &[AnthropicSystemBlock]) -> Option<Value> {
+    pub(super) fn serialize_system_blocks(blocks: &[AnthropicSystemBlock]) -> Option<Value> {
         if blocks.is_empty() {
             return None;
         }
@@ -162,23 +156,7 @@ impl AnthropicProvider {
                 .iter()
                 .enumerate()
                 .map(|(index, tool)| {
-                    // Convert RMCP tool format to the Anthropic tool shape.
-                    // RMCP: {"name", "description", "inputSchema"}
-                    // Anthropic: {"name", "description", "input_schema"}
-                    // Rebuilt clean either way: a stray camelCase `inputSchema`
-                    // means no `input_schema` reaches the API, which strict
-                    // Anthropic-compatible vendors reject (MiniMax error 2013
-                    // "function name or parameters is empty").
-                    let input_schema = tool
-                        .get("input_schema")
-                        .or_else(|| tool.get("inputSchema"))
-                        .cloned()
-                        .unwrap_or(json!({"type": "object"}));
-                    let mut tool_obj = json!({
-                        "name": tool.get("name").cloned().unwrap_or(json!("")),
-                        "description": tool.get("description").cloned().unwrap_or(json!("")),
-                        "input_schema": input_schema,
-                    });
+                    let mut tool_obj = super::convert_tool(tool);
                     if index == last
                         && let Some(cache_control) = cache_control
                         && let Some(obj) = tool_obj.as_object_mut()
@@ -334,7 +312,7 @@ impl AnthropicProvider {
     /// needs. Returns `None` when no stable (tool/system) `cache_control` marker is
     /// present — caching is either inactive or carried solely by the trailing message
     /// breakpoint, and in both cases there is no stable prefix worth guarding.
-    fn stable_prefix_hash(body: &Value) -> Option<u64> {
+    pub(super) fn stable_prefix_hash(body: &Value) -> Option<u64> {
         use std::hash::{Hash, Hasher};
 
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -420,7 +398,7 @@ impl AnthropicProvider {
         Some(hasher.finish())
     }
 
-    fn build_request(
+    pub(super) fn build_request(
         &self,
         conversation: &Conversation,
         tools: &[Value],
@@ -559,7 +537,7 @@ impl AnthropicProvider {
         *last = Some(current);
     }
 
-    fn effective_url(&self) -> String {
+    pub(super) fn effective_url(&self) -> String {
         // Anthropic-compatible vendors (MiniMax / GLM coding plans) publish
         // base URLs that already end in `/v1`; don't double the segment.
         let base = self.config.base_url.trim_end_matches('/');
@@ -567,7 +545,7 @@ impl AnthropicProvider {
         format!("{base}/v1/messages")
     }
 
-    fn extra_headers(&self) -> HeaderMap {
+    pub(super) fn extra_headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
 
         // Anthropic version header (always required)
@@ -579,10 +557,3 @@ impl AnthropicProvider {
         headers
     }
 }
-
-mod request {
-    pub(super) use super::AnthropicProvider;
-}
-
-#[path = "streaming.rs"]
-mod streaming;
