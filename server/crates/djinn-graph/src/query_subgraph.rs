@@ -407,6 +407,7 @@ pub fn stable_node_uid(node: &RepoGraphNode) -> String {
         RepoNodeKey::Symbol(symbol) => format!("symbol:{symbol}"),
         RepoNodeKey::Process(id) => format!("process:{id}"),
         RepoNodeKey::Table(name) => format!("table:{name}"),
+        RepoNodeKey::Route(name) => format!("route:{name}"),
     }
 }
 

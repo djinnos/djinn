@@ -40,6 +40,9 @@ pub enum RepoNodeKey {
     /// Kept under the same enum so name-index / search / impact ops
     /// surface tables transparently alongside symbols.
     Table(String),
+    /// Synthetic HTTP route node materialized by route extraction. The
+    /// string is the stable route label: `"<METHOD> <path> (axum)"`.
+    Route(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +62,9 @@ pub enum RepoGraphNodeKind {
     /// `Reads` / `Writes` edges from enclosing function symbols whose
     /// bodies contain raw SQL touching the table.
     Table,
+    /// Synthetic HTTP route materialized by framework-specific route
+    /// extractors. Identity lives in [`RepoNodeKey::Route`].
+    Route,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,7 +160,7 @@ impl RepoGraphNode {
             // `Reads`/`Writes` edges from caller symbols. Same tier as
             // `Process` so PageRank doesn't promote them just because
             // many functions touch the same table.
-            RepoGraphNodeKind::Table => SYMBOL_KIND_VARIABLE_MULTIPLIER,
+            RepoGraphNodeKind::Table | RepoGraphNodeKind::Route => SYMBOL_KIND_VARIABLE_MULTIPLIER,
         }
     }
 }

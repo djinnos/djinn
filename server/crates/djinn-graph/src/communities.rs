@@ -422,6 +422,7 @@ fn format_member_uid(key: &RepoNodeKey) -> String {
         // the community partition — they're sinks, not first-class
         // members — but a stable uid keeps the format honest.
         RepoNodeKey::Table(name) => format!("table:{name}"),
+        RepoNodeKey::Route(name) => format!("route:{name}"),
     }
 }
 
@@ -502,8 +503,8 @@ fn derive_keywords(graph: &RepoDependencyGraph, members: &[usize], top_k: usize)
             // Synthetic process nodes (PR F2) shouldn't normally appear
             // here, but fall back to the label if one does.
             RepoGraphNodeKind::Process => node.display_name.clone(),
-            // Synthetic table nodes — same fallback.
-            RepoGraphNodeKind::Table => node.display_name.clone(),
+            // Synthetic table/route nodes — same fallback.
+            RepoGraphNodeKind::Table | RepoGraphNodeKind::Route => node.display_name.clone(),
         };
         let mut seen: BTreeSet<String> = BTreeSet::new();
         for token in tokenize_identifier(&raw) {

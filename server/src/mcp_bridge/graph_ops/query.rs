@@ -225,6 +225,7 @@ impl RepoGraphBridge {
                 Some("symbol") => Ok(Some(RepoGraphNodeKind::Symbol)),
                 Some("process") => Ok(Some(RepoGraphNodeKind::Process)),
                 Some("table") => Ok(Some(RepoGraphNodeKind::Table)),
+                Some("route") => Ok(Some(RepoGraphNodeKind::Route)),
                 Some(other) => Err(format!("invalid kind_filter '{other}' for query_subgraph")),
             }
         }
@@ -240,6 +241,8 @@ impl RepoGraphBridge {
                 "symbol_reference" | "symbolreference" | "calls" | "call" | "references" => {
                     Ok(RepoGraphEdgeKind::SymbolReference)
                 }
+                "handles_route" | "handlesroute" => Ok(RepoGraphEdgeKind::HandlesRoute),
+                "fetches" => Ok(RepoGraphEdgeKind::Fetches),
                 "reads" | "read" => Ok(RepoGraphEdgeKind::Reads),
                 "writes" | "write" => Ok(RepoGraphEdgeKind::Writes),
                 "extends" | "extend" => Ok(RepoGraphEdgeKind::Extends),
@@ -947,6 +950,8 @@ impl RepoGraphBridge {
                     | RepoGraphEdgeKind::Extends
                     | RepoGraphEdgeKind::TypeDefines
                     | RepoGraphEdgeKind::Defines
+                    | RepoGraphEdgeKind::HandlesRoute
+                    | RepoGraphEdgeKind::Fetches
             )
         };
         let fan_in = graph
