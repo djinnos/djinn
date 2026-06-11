@@ -428,6 +428,13 @@ pub struct ApiImpactResponse {
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FlowResponse {
+    pub flow: FlowResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum CodeGraphResponse {
     Neighbors(NeighborsResponse),
@@ -476,4 +483,5 @@ pub enum CodeGraphResponse {
     RouteMap(RouteMapResponse),
     ShapeCheck(ShapeCheckResponse),
     ApiImpact(ApiImpactResponse),
+    Flow(FlowResponse),
 }

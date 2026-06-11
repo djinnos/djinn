@@ -1059,6 +1059,19 @@ pub struct ApiImpactResult {
     pub impacts: Vec<ApiImpactEntry>,
 }
 
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FlowHit {
+    pub process: ProcessRef,
+    pub matched_step: RelatedSymbol,
+    pub matched_step_index: i32,
+    pub rrf_score: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct FlowResult {
+    pub hits: Vec<FlowHit>,
+}
+
 /// A ranked disambiguation candidate emitted by the `code_graph`
 /// `resolve` op (PR C2). When `code_graph` cannot resolve a caller-supplied
 /// key (`User`, `helper`, `MyClass`) to a single graph node, the dispatcher

@@ -162,6 +162,7 @@ pub(crate) fn next_step_slot(response: &mut CodeGraphResponse) -> &mut Option<St
         CodeGraphResponse::RouteMap(r) => &mut r.next_step,
         CodeGraphResponse::ShapeCheck(r) => &mut r.next_step,
         CodeGraphResponse::ApiImpact(r) => &mut r.next_step,
+        CodeGraphResponse::Flow(r) => &mut r.next_step,
     }
 }
 

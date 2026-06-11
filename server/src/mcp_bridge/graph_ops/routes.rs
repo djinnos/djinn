@@ -37,7 +37,7 @@ impl RepoGraphBridge {
             &ctx.clone_path,
         )
         .await?;
-        let seeds = resolve_route_seeds(
+        Ok(route_map_on_graph(
             &graph,
             route_id,
             method,
@@ -45,13 +45,7 @@ impl RepoGraphBridge {
             path_glob,
             framework,
             limit.max(1),
-        );
-        let summary = route_summary(&graph);
-        let routes = seeds
-            .into_iter()
-            .map(|seed| route_map_entry(&graph, &seed))
-            .collect();
-        Ok(RouteMapResult { routes, summary })
+        ))
     }
 
     pub(super) async fn shape_check(
@@ -83,7 +77,7 @@ impl RepoGraphBridge {
         route_id: Option<&str>,
         method: Option<&str>,
         path: Option<&str>,
-        min_confidence: Option<f64>,
+        min_confidence: f64,
         limit: usize,
     ) -> Result<ApiImpactResult, String> {
         let graph = djinn_graph::canonical_graph::load_canonical_graph_only(
@@ -97,9 +91,29 @@ impl RepoGraphBridge {
             route_id,
             method,
             path,
-            min_confidence.unwrap_or(0.5),
-            limit,
+            min_confidence,
+            limit.max(1),
         ))
+    }
+}
+
+fn route_map_on_graph(
+    graph: &RepoDependencyGraph,
+    route_id: Option<&str>,
+    method: Option<&str>,
+    path: Option<&str>,
+    path_glob: Option<&str>,
+    framework: Option<&str>,
+    limit: usize,
+) -> RouteMapResult {
+    let seeds = resolve_route_seeds(graph, route_id, method, path, path_glob, framework, limit);
+    let routes = seeds
+        .into_iter()
+        .map(|seed| route_map_entry(graph, &seed))
+        .collect::<Vec<_>>();
+    RouteMapResult {
+        routes,
+        summary: route_summary(graph),
     }
 }
 
@@ -172,32 +186,38 @@ fn route_matches(
     path_glob: Option<&str>,
     framework: Option<&str>,
 ) -> bool {
-    if let Some(framework) = framework.filter(|s| !s.trim().is_empty()) {
-        if node.route_framework.as_deref() != Some(framework) {
-            return false;
-        }
+    if let Some(framework) = non_empty(framework)
+        && node.route_framework.as_deref() != Some(framework)
+    {
+        return false;
     }
+
     let rid = route_id_string(node);
-    if let Some(route_id) = route_id.filter(|s| !s.trim().is_empty()) {
+    if let Some(route_id) = non_empty(route_id) {
         return rid == route_id || format_node_key(&node.id) == route_id;
     }
+
     let (route_method, route_path) = split_route_id(&rid);
-    if let Some(method) = method.filter(|s| !s.trim().is_empty()) {
+    if let Some(method) = non_empty(method) {
         if route_method.as_deref() != Some(&method.to_ascii_uppercase()) {
             return false;
         }
     }
-    if let Some(path) = path.filter(|s| !s.trim().is_empty()) {
+    if let Some(path) = non_empty(path) {
         if route_path.as_deref() != Some(path) {
             return false;
         }
     }
-    if let Some(glob) = path_glob.filter(|s| !s.trim().is_empty()) {
+    if let Some(glob) = non_empty(path_glob) {
         return route_path
             .as_deref()
             .is_some_and(|p| glob_match(glob, p) || glob_match(glob, &rid));
     }
     true
+}
+
+fn non_empty(input: Option<&str>) -> Option<&str> {
+    input.map(str::trim).filter(|s| !s.is_empty())
 }
 
 fn handler_for_route(graph: &RepoDependencyGraph, route: NodeIndex) -> Option<NodeIndex> {
@@ -279,15 +299,18 @@ fn shape_check_on_graph(
     route_id: Option<&str>,
     method: Option<&str>,
     path: Option<&str>,
-    _include_optional: bool,
+    include_optional: bool,
 ) -> ShapeCheckResult {
-    let mut seeds = resolve_route_seeds(graph, route_id, method, path, None, None, usize::MAX);
-    let Some(seed) = seeds.pop() else {
+    let Some(seed) = resolve_route_seeds(graph, route_id, method, path, None, None, 1)
+        .into_iter()
+        .next()
+    else {
         return ShapeCheckResult::default();
     };
+
     let handler_shape = seed
         .handler
-        .map(|idx| extract_shape(graph.node(idx)))
+        .map(|idx| extract_shape(graph.node(idx), include_optional))
         .unwrap_or_default();
     let route_shape = RouteShape {
         route: route_ref(graph.node(seed.route)),
@@ -297,7 +320,7 @@ fn shape_check_on_graph(
         .consumers
         .iter()
         .filter_map(|consumer| {
-            let consumer_shape = extract_shape(graph.node(*consumer));
+            let consumer_shape = extract_shape(graph.node(*consumer), include_optional);
             drift_for_consumer(graph.node(*consumer), &handler_shape, &consumer_shape)
         })
         .collect::<Vec<_>>();
@@ -316,8 +339,10 @@ fn api_impact_on_graph(
     min_confidence: f64,
     limit: usize,
 ) -> ApiImpactResult {
-    let seeds = resolve_route_seeds(graph, route_id, method, path, None, None, usize::MAX);
-    let Some(seed) = seeds.first() else {
+    let Some(seed) = resolve_route_seeds(graph, route_id, method, path, None, None, 1)
+        .into_iter()
+        .next()
+    else {
         return ApiImpactResult::default();
     };
     let shape = shape_check_on_graph(graph, route_id, method, path, false);
@@ -380,7 +405,7 @@ fn risk_for(drift: Option<&ShapeDrift>, depth: usize) -> (String, String) {
         };
         return (
             tier.to_string(),
-            format!("shape drift ({drift_count} issue(s)) overlaps direct route consumer"),
+            format!("shape drift ({drift_count} issue(s)) overlaps route consumer"),
         );
     }
     if depth <= 1 {
@@ -423,10 +448,10 @@ fn drift_for_consumer(
     for key in handler_keys.intersection(&consumer_keys) {
         let server = handler_shape.get(key).and_then(|f| f.type_name.as_deref());
         let client = consumer_shape.get(key).and_then(|f| f.type_name.as_deref());
-        if let (Some(server), Some(client)) = (server, client) {
-            if !server.eq_ignore_ascii_case(client) {
-                type_mismatches.push(format!("{key}: server {server}, consumer {client}"));
-            }
+        if let (Some(server), Some(client)) = (server, client)
+            && !server.eq_ignore_ascii_case(client)
+        {
+            type_mismatches.push(format!("{key}: server {server}, consumer {client}"));
         }
     }
     if missing_keys.is_empty() && extra_keys.is_empty() && type_mismatches.is_empty() {
@@ -441,50 +466,96 @@ fn drift_for_consumer(
     }
 }
 
-fn extract_shape(node: &RepoGraphNode) -> BTreeMap<String, ShapeField> {
+fn extract_shape(node: &RepoGraphNode, include_optional: bool) -> BTreeMap<String, ShapeField> {
     let mut fields = BTreeMap::new();
     if let Some(parts) = &node.signature_parts {
         if let Some(ret) = &parts.return_type {
-            merge_shape_text(&mut fields, ret);
+            merge_shape_text(&mut fields, ret, include_optional);
         }
     }
     if let Some(sig) = &node.signature {
-        merge_shape_text(&mut fields, sig);
+        merge_shape_text(&mut fields, sig, include_optional);
     }
     for doc in &node.documentation {
-        merge_shape_text(&mut fields, doc);
+        merge_shape_text(&mut fields, doc, include_optional);
     }
     fields
 }
 
-fn merge_shape_text(fields: &mut BTreeMap<String, ShapeField>, text: &str) {
-    for segment in text.split(['{', '}', '(', ')', '[', ']', ';', '\n']) {
-        for raw in segment.split(',') {
+fn merge_shape_text(fields: &mut BTreeMap<String, ShapeField>, text: &str, include_optional: bool) {
+    for between in brace_segments(text) {
+        for raw in between.split(',') {
             let Some((key, ty)) = raw.split_once(':') else {
                 continue;
             };
             let key = clean_ident(key);
-            if key.is_empty() || key.len() > 64 {
+            if !is_shape_key(&key) {
+                continue;
+            }
+            let optional = raw.contains('?');
+            if optional && !include_optional {
                 continue;
             }
             let ty = clean_type(ty);
             fields.entry(key.clone()).or_insert(ShapeField {
                 name: key,
                 type_name: (!ty.is_empty()).then_some(ty),
-                optional: raw.contains('?'),
+                optional,
             });
         }
-        for token in segment.split('.') {
-            let key = clean_ident(token);
-            if !key.is_empty() && key.len() <= 64 {
+    }
+
+    for marker in ["response.", "body.", "json.", "data."] {
+        let mut rest = text;
+        while let Some(pos) = rest.find(marker) {
+            let tail = &rest[pos + marker.len()..];
+            let key = tail
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '?')
+                .collect::<String>();
+            let key = clean_ident(&key);
+            if is_shape_key(&key) {
                 fields.entry(key.clone()).or_insert(ShapeField {
                     name: key,
                     type_name: None,
                     optional: false,
                 });
             }
+            rest = &tail[tail.len().min(1)..];
         }
     }
+}
+
+fn brace_segments(text: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut start = None;
+    for (idx, ch) in text.char_indices() {
+        match ch {
+            '{' => start = Some(idx + ch.len_utf8()),
+            '}' => {
+                if let Some(s) = start.take()
+                    && s <= idx
+                {
+                    segments.push(&text[s..idx]);
+                }
+            }
+            _ => {}
+        }
+    }
+    segments
+}
+
+fn is_shape_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 64
+        && key
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && !matches!(
+            key,
+            "Json" | "Result" | "Option" | "Vec" | "response_shape" | "uses" | "response"
+        )
 }
 
 fn clean_ident(input: &str) -> String {
@@ -589,14 +660,7 @@ pub(super) mod test_helpers {
     use super::*;
 
     pub(crate) fn route_map_for_graph(graph: &RepoDependencyGraph) -> RouteMapResult {
-        let seeds = resolve_route_seeds(graph, None, None, None, None, None, 20);
-        RouteMapResult {
-            routes: seeds
-                .into_iter()
-                .map(|seed| route_map_entry(graph, &seed))
-                .collect(),
-            summary: route_summary(graph),
-        }
+        route_map_on_graph(graph, None, None, None, None, None, 20)
     }
 
     pub(crate) fn shape_check_for_graph(graph: &RepoDependencyGraph) -> ShapeCheckResult {

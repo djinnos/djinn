@@ -5,9 +5,9 @@ use djinn_control_plane::bridge::{
     ApiImpactResult, ApiSurfaceEntry, BoundaryRule, BoundaryViolation, CallerRef, ChangeKind,
     ChangedRange, ChurnEntry, ComplexityResult, CoupledPairEntry, CouplingEntry, CouplingHubEntry,
     CycleGroup, CycleMember, DeadSymbolEntry, DeprecatedHit, DetectedChangesResult,
-    DetectedTouchedSymbol, DiffTouchesResult, EdgeCategory, EdgeEntry, GraphNeighbor, GraphStatus,
-    GraphWorkspaceEntry, HotPathHit, HotspotEntry, ImpactResult, MetricsAtResult, NeighborsResult,
-    OrphanEntry, PathHop, PathResult, ProcessRef, ProjectCtx,
+    DetectedTouchedSymbol, DiffTouchesResult, EdgeCategory, EdgeEntry, FlowResult, GraphNeighbor,
+    GraphStatus, GraphWorkspaceEntry, HotPathHit, HotspotEntry, ImpactResult, MetricsAtResult,
+    NeighborsResult, OrphanEntry, PathHop, PathResult, ProcessRef, ProjectCtx,
     QuerySubgraphBudget as WireQuerySubgraphBudget, QuerySubgraphEdge as WireQuerySubgraphEdge,
     QuerySubgraphNode as WireQuerySubgraphNode, QuerySubgraphRequest,
     QuerySubgraphResult as WireQuerySubgraphResult,
@@ -27,6 +27,7 @@ use super::graph_neighbors::{
 use super::{build_snapshot_payload, refactor, shared};
 use crate::server::AppState;
 
+mod flow;
 mod insights;
 mod query;
 mod routes;
@@ -86,6 +87,16 @@ impl RepoGraphOps for RepoGraphBridge {
         req: QuerySubgraphRequest,
     ) -> Result<WireQuerySubgraphResult, String> {
         RepoGraphBridge::query_subgraph(self, ctx, req).await
+    }
+
+    async fn flow(
+        &self,
+        ctx: &ProjectCtx,
+        query: &str,
+        kind_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<FlowResult, String> {
+        RepoGraphBridge::flow(self, ctx, query, kind_filter, limit).await
     }
 
     async fn ranked(
@@ -168,7 +179,7 @@ impl RepoGraphOps for RepoGraphBridge {
         route_id: Option<&str>,
         method: Option<&str>,
         path: Option<&str>,
-        min_confidence: Option<f64>,
+        min_confidence: f64,
         limit: usize,
     ) -> Result<ApiImpactResult, String> {
         RepoGraphBridge::api_impact(self, ctx, route_id, method, path, min_confidence, limit).await

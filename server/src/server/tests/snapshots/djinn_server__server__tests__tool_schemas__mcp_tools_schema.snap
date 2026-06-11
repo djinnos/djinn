@@ -867,6 +867,12 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "framework": {
+          "default": null,
+          "description": "Optional framework filter for `route_map` (for example `axum`,\n`express`, or `rails`).",
+          "nullable": true,
+          "type": "string"
+        },
         "from": {
           "default": null,
           "description": "Source node for `path`.",
@@ -897,6 +903,12 @@ expression: signatures
           "nullable": true,
           "type": "boolean"
         },
+        "include_optional": {
+          "default": null,
+          "description": "Include optional response fields when computing `shape_check` drift.\nDefaults to `false`.",
+          "nullable": true,
+          "type": "boolean"
+        },
         "key": {
           "default": null,
           "description": "The node key to query (file path or SCIP symbol string).\nRequired for `neighbors`, `impact`, `implementations`, and `describe`.",
@@ -905,7 +917,7 @@ expression: signatures
         },
         "kind_filter": {
           "default": null,
-          "description": "Kind filter, op-specific:\n- `ranked` / `search` / `cycles` / `orphans`: node kind — `file` or\n  `symbol`.\n- `query_subgraph`: node-kind narrowing for seeds/traversal — `file`\n  or `symbol`.\n- `neighbors`: edge kind — `reads` or `writes` (PR A3). Restricts\n  the response to neighbors connected by `Reads` / `Writes` edges\n  only, so callers can ask for \"who writes to field X\" without\n  post-filtering.",
+          "description": "Kind filter, op-specific:\n- `ranked` / `search` / `cycles` / `orphans`: node kind — `file` or\n  `symbol`.\n- `query_subgraph`: node-kind narrowing for seeds/traversal — `file`\n  or `symbol`.\n- `neighbors`: edge kind — `reads` or `writes` (PR A3). Restricts\n  the response to neighbors connected by `Reads` / `Writes` edges\n  only, so callers can ask for \"who writes to field X\" without\n  post-filtering.\n- `flow`: flow-hit tier — `process` or `step`.",
           "nullable": true,
           "type": "string"
         },
@@ -923,7 +935,7 @@ expression: signatures
         },
         "limit": {
           "default": null,
-          "description": "Maximum results for `ranked`/`search`/`orphans`/`edges`/`neighbors`\n(default 20) or max traversal depth for `impact` (default 3).",
+          "description": "Maximum results for list operations. Defaults are op-specific:\n`ranked`/`search`/`neighbors`/`flow` default 20, `route_map`/\n`api_impact` default 50, `edges` default 100. For `impact`, this is\nmax traversal depth (default 3). Negative values are treated as zero by\nlegacy ops; new route/API/flow ops reject negative limits.",
           "format": "int64",
           "nullable": true,
           "type": "integer"
@@ -948,6 +960,12 @@ expression: signatures
           "format": "int64",
           "nullable": true,
           "type": "integer"
+        },
+        "method": {
+          "default": null,
+          "description": "HTTP method selector for route-aware ops. Optional for `route_map`;\nrequired with `path` when `shape_check`/`api_impact` omit `route_id`.",
+          "nullable": true,
+          "type": "string"
         },
         "min_confidence": {
           "default": null,
@@ -979,13 +997,31 @@ expression: signatures
           "description": "The operation to perform.\nOne of: `neighbors`, `ranked`, `impact`, `implementations`,\n`search`, `query_subgraph`, `cycles`, `orphans`, `path`, `edges`,\n`symbols_at`, `diff_touches`, `detect_changes`, `describe`,\n`context`, `status`, `snapshot`, `workspaces`, and the other graph analysis ops.",
           "type": "string"
         },
+        "path": {
+          "default": null,
+          "description": "Exact route path selector for `shape_check`/`api_impact` when\n`route_id` is omitted.",
+          "nullable": true,
+          "type": "string"
+        },
+        "path_glob": {
+          "default": null,
+          "description": "Route path glob filter for `route_map`.",
+          "nullable": true,
+          "type": "string"
+        },
         "project": {
           "description": "Project identifier — either the UUID (`project_id`) or the\ncanonical `\"owner/repo\"` slug. The handler resolves it to the\nserver-managed clone path via `djinn_core::paths::project_dir`\nbefore dispatching to the graph backend.",
           "type": "string"
         },
         "query": {
           "default": null,
-          "description": "Query text, op-specific:\n- `search`: substring/name lookup text.\n- `query_subgraph`: required nonblank natural-language question used\n  to pick relevant seeds and infer useful traversal edge kinds.",
+          "description": "Query text, op-specific:\n- `search`: substring/name lookup text.\n- `query_subgraph`: required nonblank natural-language question used\n  to pick relevant seeds and infer useful traversal edge kinds.\n- `flow`: required nonblank natural-language query re-ranked over\n  process/step matches.",
+          "nullable": true,
+          "type": "string"
+        },
+        "route_id": {
+          "default": null,
+          "description": "Route identifier for `route_map` filters and as one selector form for\n`shape_check`/`api_impact`. For `shape_check`/`api_impact`, callers\nmust provide either `route_id` or both `method` and exact `path`.",
           "nullable": true,
           "type": "string"
         },

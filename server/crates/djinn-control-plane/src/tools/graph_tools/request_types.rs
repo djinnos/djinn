@@ -53,16 +53,22 @@ pub struct CodeGraphParams {
     ///   the response to neighbors connected by `Reads` / `Writes` edges
     ///   only, so callers can ask for "who writes to field X" without
     ///   post-filtering.
+    /// - `flow`: flow-hit tier — `process` or `step`.
     #[serde(default)]
     pub kind_filter: Option<String>,
-    /// Maximum results for `ranked`/`search`/`orphans`/`edges`/`neighbors`
-    /// (default 20) or max traversal depth for `impact` (default 3).
+    /// Maximum results for list operations. Defaults are op-specific:
+    /// `ranked`/`search`/`neighbors`/`flow` default 20, `route_map`/
+    /// `api_impact` default 50, `edges` default 100. For `impact`, this is
+    /// max traversal depth (default 3). Negative values are treated as zero by
+    /// legacy ops; new route/API/flow ops reject negative limits.
     #[serde(default)]
     pub limit: Option<i64>,
     /// Query text, op-specific:
     /// - `search`: substring/name lookup text.
     /// - `query_subgraph`: required nonblank natural-language question used
     ///   to pick relevant seeds and infer useful traversal edge kinds.
+    /// - `flow`: required nonblank natural-language query re-ranked over
+    ///   process/step matches.
     #[serde(default)]
     pub query: Option<String>,
     /// Optional coarse context substring for `query_subgraph`. Use this to
@@ -162,6 +168,30 @@ pub struct CodeGraphParams {
     /// `file_filter` is omitted.
     #[serde(default)]
     pub file_glob: Option<String>,
+    /// Route identifier for `route_map` filters and as one selector form for
+    /// `shape_check`/`api_impact`. For `shape_check`/`api_impact`, callers
+    /// must provide either `route_id` or both `method` and exact `path`.
+    #[serde(default)]
+    pub route_id: Option<String>,
+    /// HTTP method selector for route-aware ops. Optional for `route_map`;
+    /// required with `path` when `shape_check`/`api_impact` omit `route_id`.
+    #[serde(default)]
+    pub method: Option<String>,
+    /// Exact route path selector for `shape_check`/`api_impact` when
+    /// `route_id` is omitted.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Route path glob filter for `route_map`.
+    #[serde(default)]
+    pub path_glob: Option<String>,
+    /// Optional framework filter for `route_map` (for example `axum`,
+    /// `express`, or `rails`).
+    #[serde(default)]
+    pub framework: Option<String>,
+    /// Include optional response fields when computing `shape_check` drift.
+    /// Defaults to `false`.
+    #[serde(default)]
+    pub include_optional: Option<bool>,
     /// Boundary rules for `boundary_check`.
     #[serde(default)]
     pub rules: Option<Vec<BoundaryRule>>,
@@ -254,18 +284,6 @@ pub struct CodeGraphParams {
     /// test-handling.
     #[serde(default)]
     pub tests: Option<String>,
-    #[serde(default)]
-    pub route_id: Option<String>,
-    #[serde(default)]
-    pub method: Option<String>,
-    #[serde(default)]
-    pub path: Option<String>,
-    #[serde(default)]
-    pub path_glob: Option<String>,
-    #[serde(default)]
-    pub framework: Option<String>,
-    #[serde(default)]
-    pub include_optional: Option<bool>,
 }
 
 impl CodeGraphParams {
@@ -303,6 +321,11 @@ impl CodeGraphParams {
         clear(&mut self.module_glob);
         clear(&mut self.confidence);
         clear(&mut self.file_glob);
+        clear(&mut self.route_id);
+        clear(&mut self.method);
+        clear(&mut self.path);
+        clear(&mut self.path_glob);
+        clear(&mut self.framework);
         clear(&mut self.kind_hint);
         clear(&mut self.from_sha);
         clear(&mut self.to_sha);

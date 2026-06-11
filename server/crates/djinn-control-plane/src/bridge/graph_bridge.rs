@@ -175,7 +175,9 @@ pub trait RepoGraphOps: Send + Sync {
         })
     }
 
-    /// Strongly-connected components of size >= `min_size`.
+    /// Map HTTP route declarations to handlers, middleware, and observed
+    /// consumers. Default is a successful empty result so older graph artifacts
+    /// without route nodes remain queryable.
     async fn route_map(
         &self,
         _ctx: &ProjectCtx,
@@ -189,6 +191,8 @@ pub trait RepoGraphOps: Send + Sync {
         Ok(RouteMapResult::default())
     }
 
+    /// Compare a route handler's response shape with observed consumers.
+    /// The route is identified by `route_id` or by exact `(method, path)`.
     async fn shape_check(
         &self,
         _ctx: &ProjectCtx,
@@ -200,18 +204,34 @@ pub trait RepoGraphOps: Send + Sync {
         Ok(ShapeCheckResult::default())
     }
 
+    /// Rank consumers impacted by a route/API shape change. The route is
+    /// identified by `route_id` or by exact `(method, path)`.
     async fn api_impact(
         &self,
         _ctx: &ProjectCtx,
         _route_id: Option<&str>,
         _method: Option<&str>,
         _path: Option<&str>,
-        _min_confidence: Option<f64>,
+        _min_confidence: f64,
         _limit: usize,
     ) -> Result<ApiImpactResult, String> {
         Ok(ApiImpactResult::default())
     }
 
+    /// Search process/step flow descriptions using the existing search
+    /// pipeline, returning matched process steps. Default is empty for graphs
+    /// with no process nodes.
+    async fn flow(
+        &self,
+        _ctx: &ProjectCtx,
+        _query: &str,
+        _kind_filter: Option<&str>,
+        _limit: usize,
+    ) -> Result<FlowResult, String> {
+        Ok(FlowResult::default())
+    }
+
+    /// Strongly-connected components of size >= `min_size`.
     async fn cycles(
         &self,
         ctx: &ProjectCtx,
