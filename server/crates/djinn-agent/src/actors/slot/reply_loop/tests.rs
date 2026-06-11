@@ -1,0 +1,1152 @@
+use super::error_handling::supports_tool_choice_required;
+use super::persistence::serialize_llm_input;
+use super::turn::{ReplyLoopContext, run_reply_loop};
+use crate::output_stash::extract_stash_content;
+use crate::test_helpers;
+use djinn_core::message::Role;
+use djinn_db::repositories::session::CreateSessionParams;
+use djinn_db::{SessionMessageRepository, SessionRepository};
+use djinn_provider::message::{ContentBlock, Conversation, Message};
+use djinn_provider::provider::ToolChoice;
+use djinn_provider::provider::{LlmProvider, StreamEvent, TokenUsage};
+use futures::stream;
+use std::collections::VecDeque;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
+
+// ── MockLlmProvider ───────────────────────────────────────────────────────
+
+/// Pre-scripted response: text (optional) + tool calls + token counts.
+struct MockResponse {
+    text: Option<String>,
+    tool_calls: Vec<ContentBlock>,
+    input_tokens: u32,
+    output_tokens: u32,
+}
+
+impl MockResponse {
+    fn text_only(text: &str, input_tokens: u32) -> Self {
+        Self {
+            text: Some(text.to_string()),
+            tool_calls: vec![],
+            input_tokens,
+            output_tokens: 10,
+        }
+    }
+
+    fn tool_call(id: &str, name: &str, input_tokens: u32) -> Self {
+        Self {
+            text: None,
+            tool_calls: vec![ContentBlock::ToolUse {
+                id: id.to_string(),
+                name: name.to_string(),
+                input: serde_json::json!({}),
+            }],
+            input_tokens,
+            output_tokens: 10,
+        }
+    }
+}
+
+/// An `LlmProvider` that pops from a fixed queue of `MockResponse`s.
+/// When the queue is empty it returns a text-only "fallback done" response
+/// so that the loop always terminates.
+struct MockProvider {
+    responses: Arc<Mutex<VecDeque<MockResponse>>>,
+}
+
+impl MockProvider {
+    fn new(responses: Vec<MockResponse>) -> Self {
+        Self {
+            responses: Arc::new(Mutex::new(responses.into())),
+        }
+    }
+
+    fn remaining(&self) -> usize {
+        self.responses.lock().unwrap().len()
+    }
+}
+
+impl LlmProvider for MockProvider {
+    fn name(&self) -> &str {
+        "mock"
+    }
+
+    fn stream<'a>(
+        &'a self,
+        _conversation: &'a Conversation,
+        _tools: &'a [serde_json::Value],
+        _tool_choice: Option<ToolChoice>,
+    ) -> Pin<
+        Box<
+            dyn futures::Future<
+                    Output = anyhow::Result<
+                        Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>>,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let responses = Arc::clone(&self.responses);
+        Box::pin(async move {
+            let resp = responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| MockResponse::text_only("fallback done", 50));
+
+            let mut events: Vec<anyhow::Result<StreamEvent>> = vec![];
+            if let Some(text) = resp.text {
+                events.push(Ok(StreamEvent::Delta(ContentBlock::Text { text })));
+            }
+            for tc in resp.tool_calls {
+                events.push(Ok(StreamEvent::Delta(tc)));
+            }
+            events.push(Ok(StreamEvent::Usage(TokenUsage {
+                input: resp.input_tokens,
+                output: resp.output_tokens,
+                ..Default::default()
+            })));
+            events.push(Ok(StreamEvent::Done));
+
+            Ok(Box::pin(stream::iter(events))
+                as Pin<
+                    Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                >)
+        })
+    }
+}
+
+// ── Test helpers ──────────────────────────────────────────────────────────
+
+/// Returns (context, project_path, task_id, session_id, cancel).
+async fn make_context() -> (
+    crate::context::AgentContext,
+    String,
+    String,
+    String,
+    CancellationToken,
+) {
+    let cancel = CancellationToken::new();
+    let db = test_helpers::create_test_db();
+    let ctx = test_helpers::agent_context_from_db(db.clone(), cancel.clone());
+    let project = test_helpers::create_test_project(&db).await;
+    let epic = test_helpers::create_test_epic(&db, &project.id).await;
+    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    // Create a real session row so session_messages FK constraint is satisfied.
+    let session_repo = SessionRepository::new(db.clone(), ctx.event_bus.clone());
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &project.id,
+            task_id: Some(&task.id),
+            model: "test/mock-model",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+        })
+        .await
+        .expect("create session");
+    let project_path = djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
+        .to_string_lossy()
+        .into_owned();
+    (ctx, project_path, task.id, session.id, cancel)
+}
+
+async fn count_persisted_messages(
+    app_state: &crate::context::AgentContext,
+    session_id: &str,
+) -> usize {
+    let repo = SessionMessageRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    repo.load_conversation(session_id)
+        .await
+        .map(|c| c.messages.len())
+        .unwrap_or(0)
+}
+
+// ── extract_stash_content tests ────────────────────────────────────────────
+
+#[test]
+fn extract_stash_content_shell_extracts_stdout() {
+    let value = serde_json::json!({
+        "ok": true,
+        "exit_code": 0,
+        "stdout": "line 1\nline 2\nline 3\n",
+        "stderr": "",
+        "workdir": "/tmp"
+    });
+    let result = extract_stash_content("shell", &value).unwrap();
+    assert!(result.contains("line 1"));
+    assert!(result.contains("line 3"));
+    assert!(!result.contains("workdir"));
+    assert!(!result.contains("exit code"));
+}
+
+#[test]
+fn extract_stash_content_shell_includes_stderr_and_exit_code() {
+    let value = serde_json::json!({
+        "ok": false,
+        "exit_code": 1,
+        "stdout": "building...\n",
+        "stderr": "error: failed\n",
+        "workdir": "/tmp"
+    });
+    let result = extract_stash_content("shell", &value).unwrap();
+    assert!(result.contains("building..."));
+    assert!(result.contains("--- stderr ---"));
+    assert!(result.contains("error: failed"));
+    assert!(result.contains("[exit code: 1]"));
+}
+
+#[test]
+fn extract_stash_content_non_shell_returns_none() {
+    let value = serde_json::json!({"tasks": []});
+    assert!(extract_stash_content("task_list", &value).is_none());
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────
+
+/// A single ToolUse turn above the compaction threshold triggers compaction,
+/// persists messages to DB, and replaces the conversation. The session then
+/// continues with the compacted context and ends normally.
+#[tokio::test]
+async fn proactive_compaction_fires_when_current_context_exceeds_threshold() {
+    // context_window = 10,000 → threshold = 8,000 tokens
+    let context_window = 10_000_i64;
+
+    // Turn 1: ToolUse + 8,500 input tokens → above threshold → compaction fires.
+    //         Tool dispatch is skipped when compaction fires (conversation replaced).
+    // Turn 2: compaction LLM call → summary text returned.
+    // Turn 3: "Continue with the task." → text-only → ends session.
+    let provider = MockProvider::new(vec![
+        MockResponse::tool_call("t1", "nonexistent_tool", 8_500),
+        MockResponse::text_only("Summary: worked on the task using shell tools.", 200),
+        MockResponse::text_only("Completed the task.", 300),
+    ]);
+
+    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+    let test_services = test_helpers::test_services();
+    let worktree_path = std::path::PathBuf::from("/tmp");
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &[],
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            app_state: &app_state,
+            services: &test_services,
+            mcp_registry: None,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    // Session should end successfully (compacted + continued).
+    assert!(result.is_ok(), "expected ok, got: {:?}", result);
+
+    // All 3 mock responses were consumed.
+    assert_eq!(
+        provider.remaining(),
+        0,
+        "all mock responses should be consumed"
+    );
+
+    // Messages were persisted to DB before compaction.
+    let persisted = count_persisted_messages(&app_state, &session_id).await;
+    assert!(
+        persisted > 0,
+        "expected session messages persisted before compaction, got 0"
+    );
+
+    // Conversation was replaced by compaction then continued.
+    // Expected: [system, summary_user, ack_assistant, last_user_task,
+    //            continue_user, final_assistant] = 6 messages.
+    // The key check is that it's much smaller than an uncompacted session
+    // and that the system prompt is first.
+    assert!(
+        conv.messages.len() <= 7,
+        "conversation should be compact after compaction, got {} messages",
+        conv.messages.len()
+    );
+    assert_eq!(
+        conv.messages[0].role,
+        djinn_provider::message::Role::System,
+        "first message should still be the system prompt"
+    );
+}
+
+/// Compaction must NOT fire based on the cumulative sum of input tokens across
+/// turns.  Even if the running sum exceeds the threshold, only the current
+/// turn's input token count (the actual context window fill) matters.
+///
+/// Pattern: each turn adds tokens at a rate that would push the SUM above the
+/// threshold quickly, but the actual context (latest generation input) stays
+/// well below 80%.
+#[tokio::test]
+async fn no_compaction_when_sum_large_but_current_context_small() {
+    // context_window = 10,000 → threshold = 8,000 tokens
+    let context_window = 10_000_i64;
+
+    // Turn 1: ToolUse + 7,500 input  (sum=7_500, current=7_500 → below threshold)
+    // Turn 2: ToolUse + 7,800 input  (sum=15_300, current=7_800 → below threshold)
+    //   With the OLD sum-based check: sum 15,300 > 8,000 → compaction would wrongly fire.
+    //   With the NEW current-context check: 7,800 < 8,000 → no compaction. ✓
+    // Turn 3: text-only "done" + 100 input  (ends session normally)
+    let provider = MockProvider::new(vec![
+        MockResponse::tool_call("t1", "nonexistent_tool", 7_500),
+        MockResponse::tool_call("t2", "nonexistent_tool", 7_800),
+        MockResponse::text_only("Completed.", 100),
+    ]);
+
+    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+    let test_services = test_helpers::test_services();
+    let worktree_path = std::path::PathBuf::from("/tmp");
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &[],
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            app_state: &app_state,
+            services: &test_services,
+            mcp_registry: None,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    assert!(result.is_ok(), "expected ok, got: {:?}", result);
+    assert_eq!(
+        provider.remaining(),
+        0,
+        "all 3 mock responses should be consumed"
+    );
+
+    // No compaction should have fired. Persisted message count is no
+    // longer the signal (the reply loop now persists every turn to the DB
+    // regardless of compaction); instead assert the conversation was never
+    // replaced by a summary — every turn is still present: system + initial
+    // user + two tool-call turns with their results + the final text turn.
+    assert!(
+        conv.messages.len() >= 6,
+        "compaction should not have fired — expected the full conversation, got {} messages",
+        conv.messages.len()
+    );
+    assert_eq!(
+        conv.messages[0].role,
+        djinn_provider::message::Role::System,
+        "first message should still be the original system prompt (not a summary)"
+    );
+
+    // Per-turn persistence: every non-system message is durably stored
+    // (the system prompt is intentionally skipped).
+    let persisted = count_persisted_messages(&app_state, &session_id).await;
+    assert_eq!(
+        persisted,
+        conv.messages.len() - 1,
+        "expected every non-system message persisted per-turn, got {persisted}"
+    );
+}
+
+/// Reactive compaction fires when the provider itself signals a
+/// context-length error.  The session compacts and retries successfully.
+#[tokio::test]
+async fn reactive_compaction_on_context_length_error() {
+    let context_window = 10_000_i64;
+
+    // Provider behaviour:
+    //   • Turn 1: ToolUse + small tokens (below threshold).
+    //   • Turn 2 attempt: context_length error mid-stream → reactive compaction triggered.
+    //   • Compaction call: summary returned.
+    //   • Turn 2 retry: text-only → session ends.
+    //
+    // We simulate the context-length error by injecting an error event
+    // BEFORE the ToolUse delta, so the stream init itself fails.
+    struct ErrorOnSecondCallProvider {
+        call_count: Arc<Mutex<u32>>,
+        inner: MockProvider,
+    }
+
+    impl LlmProvider for ErrorOnSecondCallProvider {
+        fn name(&self) -> &str {
+            "mock-error"
+        }
+
+        fn stream<'a>(
+            &'a self,
+            conversation: &'a Conversation,
+            tools: &'a [serde_json::Value],
+            tool_choice: Option<ToolChoice>,
+        ) -> Pin<
+            Box<
+                dyn futures::Future<
+                        Output = anyhow::Result<
+                            Pin<
+                                Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                            >,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            let count = Arc::clone(&self.call_count);
+            let inner = &self.inner;
+            let turn = {
+                let mut n = count.lock().unwrap();
+                *n += 1;
+                *n
+            };
+            if turn == 2 {
+                // Simulate a context-length-exceeded error on stream init.
+                Box::pin(async move { Err(anyhow::anyhow!("context_length exceeded")) })
+            } else {
+                inner.stream(conversation, tools, tool_choice)
+            }
+        }
+    }
+
+    let inner = MockProvider::new(vec![
+        // Call 1: normal ToolUse turn.
+        MockResponse::tool_call("t1", "nonexistent_tool", 500),
+        // Call 2 would error (handled above).
+        // Call 3: compaction LLM summary.
+        MockResponse::text_only("Summary: used nonexistent_tool.", 100),
+        // Call 4: continuation after compaction.
+        MockResponse::text_only("Done.", 120),
+    ]);
+    let provider = ErrorOnSecondCallProvider {
+        call_count: Arc::new(Mutex::new(0)),
+        inner,
+    };
+
+    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+    let test_services = test_helpers::test_services();
+    let worktree_path = std::path::PathBuf::from("/tmp");
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &[],
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            app_state: &app_state,
+            services: &test_services,
+            mcp_registry: None,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "expected ok after reactive compaction, got: {:?}",
+        result
+    );
+
+    // Messages are persisted per-turn (independent of the reactive
+    // compaction that fired on the context-length error).
+    let persisted = count_persisted_messages(&app_state, &session_id).await;
+    assert!(
+        persisted > 0,
+        "expected session messages persisted per-turn"
+    );
+}
+
+#[test]
+fn serialize_llm_input_preserves_system_tools_and_full_history_order() {
+    let mut conversation = Conversation::new();
+    conversation.push(Message::system("You are a worker."));
+    conversation.push(Message::user("First request"));
+    conversation.push(Message::assistant("First reply"));
+    conversation.push(Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: "tool_1".into(),
+            name: "shell".into(),
+            input: serde_json::json!({"command": "pwd"}),
+        }],
+        metadata: None,
+    });
+    conversation.push(Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "tool_1".into(),
+            content: vec![ContentBlock::text("/tmp")],
+            is_error: false,
+        }],
+        metadata: None,
+    });
+    conversation.push(Message::user("Second request"));
+
+    let tools = vec![serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "shell",
+            "description": "Run shell commands",
+            "parameters": {"type": "object"}
+        }
+    })];
+
+    let input = serialize_llm_input(&conversation, &tools);
+
+    assert_eq!(input["tools"], serde_json::json!(tools));
+    let messages = input["messages"].as_array().expect("messages array");
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[0]["content"], "You are a worker.");
+    assert_eq!(messages[1]["role"], "user");
+    assert_eq!(messages[1]["content"], "First request");
+    assert_eq!(messages[2]["role"], "assistant");
+    assert_eq!(messages[2]["content"], "First reply");
+    assert_eq!(messages[3]["role"], "assistant");
+    assert_eq!(messages[3]["tool_calls"][0]["id"], "tool_1");
+    assert_eq!(messages[4]["role"], "tool");
+    assert_eq!(messages[4]["tool_call_id"], "tool_1");
+    assert_eq!(messages[5]["role"], "user");
+    assert_eq!(messages[5]["content"], "Second request");
+}
+
+#[test]
+fn serialize_llm_input_preserves_parallel_tool_call_order() {
+    let mut conversation = Conversation::new();
+    conversation.push(Message::system("You are a worker."));
+    conversation.push(Message::user("Do three things at once"));
+
+    // Assistant returns 3 parallel tool calls in a single message.
+    conversation.push(Message {
+        role: Role::Assistant,
+        content: vec![
+            ContentBlock::ToolUse {
+                id: "tc_a".into(),
+                name: "shell".into(),
+                input: serde_json::json!({"command": "echo A"}),
+            },
+            ContentBlock::ToolUse {
+                id: "tc_b".into(),
+                name: "memory_search".into(),
+                input: serde_json::json!({"query": "foo"}),
+            },
+            ContentBlock::ToolUse {
+                id: "tc_c".into(),
+                name: "task_list".into(),
+                input: serde_json::json!({}),
+            },
+        ],
+        metadata: None,
+    });
+
+    // Tool results come back in a single user message (same order).
+    conversation.push(Message {
+        role: Role::User,
+        content: vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "tc_a".into(),
+                content: vec![ContentBlock::text("A")],
+                is_error: false,
+            },
+            ContentBlock::ToolResult {
+                tool_use_id: "tc_b".into(),
+                content: vec![ContentBlock::text("found: bar")],
+                is_error: false,
+            },
+            ContentBlock::ToolResult {
+                tool_use_id: "tc_c".into(),
+                content: vec![ContentBlock::text("[]")],
+                is_error: false,
+            },
+        ],
+        metadata: None,
+    });
+
+    conversation.push(Message::user("Now summarize"));
+
+    let tools = vec![serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "shell",
+            "description": "Run shell commands",
+            "parameters": {"type": "object"}
+        }
+    })];
+
+    let input = serialize_llm_input(&conversation, &tools);
+    let messages = input["messages"].as_array().expect("messages array");
+
+    // system, user, assistant(3 tool_calls), tool(A), tool(B), tool(C), user
+    assert_eq!(messages.len(), 7);
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[1]["role"], "user");
+    assert_eq!(messages[1]["content"], "Do three things at once");
+
+    // Assistant message with 3 tool_calls in order.
+    assert_eq!(messages[2]["role"], "assistant");
+    let tool_calls = messages[2]["tool_calls"].as_array().expect("tool_calls");
+    assert_eq!(tool_calls.len(), 3);
+    assert_eq!(tool_calls[0]["id"], "tc_a");
+    assert_eq!(tool_calls[1]["id"], "tc_b");
+    assert_eq!(tool_calls[2]["id"], "tc_c");
+
+    // Tool results in matching order.
+    assert_eq!(messages[3]["role"], "tool");
+    assert_eq!(messages[3]["tool_call_id"], "tc_a");
+    assert_eq!(messages[3]["content"], "A");
+
+    assert_eq!(messages[4]["role"], "tool");
+    assert_eq!(messages[4]["tool_call_id"], "tc_b");
+    assert_eq!(messages[4]["content"], "found: bar");
+
+    assert_eq!(messages[5]["role"], "tool");
+    assert_eq!(messages[5]["tool_call_id"], "tc_c");
+    assert_eq!(messages[5]["content"], "[]");
+
+    assert_eq!(messages[6]["role"], "user");
+    assert_eq!(messages[6]["content"], "Now summarize");
+}
+
+// ── Finalize tool + nudge loop tests ──────────────────────────────────────
+
+fn dummy_tool_schema(name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "function",
+        "function": { "name": name, "description": "test", "parameters": {"type": "object"} }
+    })
+}
+
+/// Session ends immediately when the finalize tool is called.
+/// The payload is captured on the output.
+#[tokio::test]
+async fn finalize_tool_call_ends_session_and_captures_payload() {
+    let tools = vec![dummy_tool_schema("submit_work")];
+
+    let provider = MockProvider::new(vec![MockResponse {
+        text: None,
+        tool_calls: vec![ContentBlock::ToolUse {
+            id: "fin1".to_string(),
+            name: "submit_work".to_string(),
+            input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+        }],
+        input_tokens: 100,
+        output_tokens: 10,
+    }]);
+
+    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+    let test_services = test_helpers::test_services();
+    let worktree_path = std::path::PathBuf::from("/tmp");
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &tools,
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            app_state: &app_state,
+            services: &test_services,
+            mcp_registry: None,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    assert!(result.is_ok(), "expected ok, got: {:?}", result);
+    assert_eq!(provider.remaining(), 0, "finalize response consumed");
+    assert!(
+        output.finalize_payload.is_some(),
+        "finalize payload should be captured"
+    );
+    assert_eq!(
+        output.finalize_payload.unwrap()["summary"],
+        "done",
+        "payload should contain summary"
+    );
+}
+
+/// A text-only response without a finalize call injects a nudge and continues.
+/// After 3 consecutive nudges the session fails.
+#[tokio::test]
+async fn text_only_without_finalize_triggers_nudge_then_fails() {
+    let tools = vec![dummy_tool_schema("submit_work")];
+
+    // 3 text-only responses → MAX_NUDGE_ATTEMPTS exceeded → error.
+    let provider = MockProvider::new(vec![
+        MockResponse::text_only("I think I'm done.", 100),
+        MockResponse::text_only("Still think I'm done.", 110),
+        MockResponse::text_only("Yes, definitely done.", 120),
+        // The 4th turn is never reached because we fail after 3 nudges.
+    ]);
+
+    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+    let test_services = test_helpers::test_services();
+    let worktree_path = std::path::PathBuf::from("/tmp");
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &tools,
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            app_state: &app_state,
+            services: &test_services,
+            mcp_registry: None,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    assert!(result.is_err(), "expected error after nudge exhaustion");
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("consecutive text-only"),
+        "error should mention consecutive text-only responses"
+    );
+}
+
+/// A nudge resets after a successful tool call.
+/// Pattern: text-only (nudge 1) → tool call (resets) → text-only (nudge 1) → finalize (ok).
+#[tokio::test]
+async fn nudge_count_resets_after_tool_call() {
+    let tools = vec![
+        dummy_tool_schema("some_tool"),
+        dummy_tool_schema("submit_work"),
+    ];
+
+    let provider = MockProvider::new(vec![
+        // Turn 1: text-only → nudge 1
+        MockResponse::text_only("hmm", 100),
+        // Turn 2: real tool call → resets nudge count
+        MockResponse::tool_call("tc1", "some_tool", 110),
+        // Turn 3: text-only → nudge 1 again (not 2)
+        MockResponse::text_only("ok", 120),
+        // Turn 4: finalize → session complete
+        MockResponse {
+            text: None,
+            tool_calls: vec![ContentBlock::ToolUse {
+                id: "fin1".to_string(),
+                name: "submit_work".to_string(),
+                input: serde_json::json!({"task_id": "t1", "summary": "all done"}),
+            }],
+            input_tokens: 130,
+            output_tokens: 10,
+        },
+    ]);
+
+    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+    let test_services = test_helpers::test_services();
+    let worktree_path = std::path::PathBuf::from("/tmp");
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &tools,
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            app_state: &app_state,
+            services: &test_services,
+            mcp_registry: None,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    assert!(result.is_ok(), "expected ok, got: {:?}", result);
+    assert_eq!(provider.remaining(), 0, "all responses consumed");
+    assert!(output.finalize_payload.is_some(), "finalize payload set");
+}
+
+#[tokio::test]
+async fn tool_choice_required_for_supported_providers() {
+    use std::sync::Mutex;
+
+    let tools = vec![dummy_tool_schema("submit_work")];
+
+    struct RecordingProvider {
+        recorded_choices: Arc<Mutex<Vec<Option<ToolChoice>>>>,
+        inner: MockProvider,
+    }
+
+    impl LlmProvider for RecordingProvider {
+        fn name(&self) -> &str {
+            "recording"
+        }
+        fn stream<'a>(
+            &'a self,
+            conversation: &'a Conversation,
+            tools: &'a [serde_json::Value],
+            tool_choice: Option<ToolChoice>,
+        ) -> Pin<
+            Box<
+                dyn futures::Future<
+                        Output = anyhow::Result<
+                            Pin<
+                                Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                            >,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            self.recorded_choices.lock().unwrap().push(tool_choice);
+            self.inner.stream(conversation, tools, tool_choice)
+        }
+    }
+
+    let inner = MockProvider::new(vec![
+        MockResponse::tool_call("tc1", "nonexistent_tool", 100),
+        MockResponse {
+            text: None,
+            tool_calls: vec![ContentBlock::ToolUse {
+                id: "fin1".to_string(),
+                name: "submit_work".to_string(),
+                input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+            }],
+            input_tokens: 110,
+            output_tokens: 10,
+        },
+    ]);
+    let recorded = Arc::new(Mutex::new(Vec::<Option<ToolChoice>>::new()));
+    let provider = RecordingProvider {
+        recorded_choices: Arc::clone(&recorded),
+        inner,
+    };
+
+    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+    let test_services = test_helpers::test_services();
+    let worktree_path = std::path::PathBuf::from("/tmp");
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, _output, _, _, _, _) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &tools,
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "openai/gpt-5.4",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            app_state: &app_state,
+            services: &test_services,
+            mcp_registry: None,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    assert!(result.is_ok(), "expected ok, got: {:?}", result);
+
+    let choices = recorded.lock().unwrap();
+    assert_eq!(choices.len(), 2, "two turns recorded");
+    for (i, choice) in choices.iter().enumerate() {
+        assert!(
+            matches!(choice, Some(ToolChoice::Required)),
+            "turn {i}: expected ToolChoice::Required, got {:?}",
+            choice
+        );
+    }
+}
+
+/// Unsupported providers (e.g. synthetic/Kimi) get ToolChoice::Auto
+/// to avoid 400 errors from reasoning models that reject "required".
+#[tokio::test]
+async fn tool_choice_auto_for_unsupported_providers() {
+    assert!(!supports_tool_choice_required("synthetic/Kimi-K2.5"));
+    assert!(!supports_tool_choice_required("synthetic/GLM-4.7"));
+    assert!(!supports_tool_choice_required("deepinfra/some-model"));
+    assert!(supports_tool_choice_required("openai/gpt-5.4"));
+    assert!(supports_tool_choice_required("anthropic/claude-sonnet-4-5"));
+    assert!(supports_tool_choice_required("chatgpt_codex/codex-mini"));
+}
+
+// ── G9: graceful MAX_STEPS wind-down ──────────────────────────────────────
+
+/// Concatenate every text block across all messages with the given role.
+fn role_text(conv: &Conversation, role: djinn_provider::message::Role) -> String {
+    conv.messages
+        .iter()
+        .filter(|m| m.role == role)
+        .flat_map(|m| m.content.iter().filter_map(|b| b.as_text()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Hitting the step cap injects the wind-down directive (NOT an immediate
+/// hard error) and grants exactly one final turn for the summary, which is
+/// captured before the loop ends gracefully (Ok).
+#[tokio::test]
+async fn max_step_cap_injects_wind_down_and_ends_gracefully() {
+    // Cap the loop at 3 turns so we don't drive 1000 mock turns. Passed
+    // explicitly via `max_turns_override` rather than a process-global env
+    // var so concurrent tests can't race each other's cap.
+    let tools = vec![dummy_tool_schema("submit_work")];
+
+    // Turns 1..=3: tool calls keep the loop running up to the cap.
+    // Turn 4 (the single granted wind-down turn): text-only summary → ends.
+    let provider = MockProvider::new(vec![
+        MockResponse::tool_call("t1", "nonexistent_tool", 100),
+        MockResponse::tool_call("t2", "nonexistent_tool", 110),
+        MockResponse::tool_call("t3", "nonexistent_tool", 120),
+        MockResponse::text_only(
+            "Summary: (1) completed steps A and B. (2) C remains. \
+             (3) next: finish C.",
+            130,
+        ),
+    ]);
+
+    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+    let test_services = test_helpers::test_services();
+    let worktree_path = std::path::PathBuf::from("/tmp");
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &tools,
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            app_state: &app_state,
+            services: &test_services,
+            mcp_registry: None,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: Some(3),
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "step cap should wind down gracefully, got: {:?}",
+        result
+    );
+    // The wind-down turn consumed the 4th mock response → all consumed.
+    assert_eq!(
+        provider.remaining(),
+        0,
+        "the single wind-down turn should run (4th response consumed)"
+    );
+
+    // Exactly ONE wind-down directive was injected (one extra turn, not a loop).
+    let injected = conv
+        .messages
+        .iter()
+        .filter(|m| {
+            m.role == Role::User
+                && m.content
+                    .iter()
+                    .filter_map(|b| b.as_text())
+                    .any(|t| t.contains("You are out of steps"))
+        })
+        .count();
+    assert_eq!(injected, 1, "wind-down directive injected exactly once");
+
+    // The agent's hand-off summary was captured (persisted into the conversation).
+    let assistant_text = role_text(&conv, Role::Assistant);
+    assert!(
+        assistant_text.contains("Summary:") && assistant_text.contains("next:"),
+        "wind-down summary should be captured, got: {assistant_text:?}"
+    );
+}
+
+/// If the agent ignores the wind-down directive and keeps calling tools
+/// (never reaching a terminal text-only/finalize action), the loop falls
+/// back to the existing hard-error behavior after exactly one extra turn.
+#[tokio::test]
+async fn max_step_wind_down_ignored_falls_back_to_hard_error() {
+    // Cap explicitly via `max_turns_override` (no process-global env var,
+    // which would race concurrent tests).
+    let tools = vec![dummy_tool_schema("submit_work")];
+
+    // Turns 1..=3 fill the cap; turn 4 (wind-down) is ALSO a tool call →
+    // not terminal → next cap check hard-errors. The MockProvider's
+    // text-only fallback is never reached because we error first.
+    let provider = MockProvider::new(vec![
+        MockResponse::tool_call("t1", "nonexistent_tool", 100),
+        MockResponse::tool_call("t2", "nonexistent_tool", 110),
+        MockResponse::tool_call("t3", "nonexistent_tool", 120),
+        MockResponse::tool_call("t4", "nonexistent_tool", 130),
+    ]);
+
+    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+    let test_services = test_helpers::test_services();
+    let worktree_path = std::path::PathBuf::from("/tmp");
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &tools,
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            app_state: &app_state,
+            services: &test_services,
+            mcp_registry: None,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: Some(3),
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "ignoring the wind-down should fall back to the hard error"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("max turns") && err.contains("wind-down"),
+        "error should mention the hard cap and the attempted wind-down, got: {err}"
+    );
+
+    // Wind-down was injected exactly once even though it was ignored —
+    // the extension is strictly one turn, never an unbounded loop.
+    let injected = conv
+        .messages
+        .iter()
+        .filter(|m| {
+            m.role == Role::User
+                && m.content
+                    .iter()
+                    .filter_map(|b| b.as_text())
+                    .any(|t| t.contains("You are out of steps"))
+        })
+        .count();
+    assert_eq!(
+        injected, 1,
+        "wind-down injected exactly once, then hard-errors"
+    );
+}
