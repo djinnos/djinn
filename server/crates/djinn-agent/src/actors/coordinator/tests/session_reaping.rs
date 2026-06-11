@@ -445,3 +445,118 @@ async fn stall_killed_prunes_sessions_absent_from_active() {
         "stall_killed entries for sessions absent from list_active() must be pruned"
     );
 }
+
+fn taskrun_job_ref(task_run_id: &str) -> djinn_control_plane::bridge::TaskrunJobRef {
+    djinn_control_plane::bridge::TaskrunJobRef {
+        job_name: format!("djinn-taskrun-{task_run_id}"),
+        task_run_id: task_run_id.to_string(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn taskrun_job_backstop_deletes_absent_and_finalized_rows_only() {
+    use djinn_core::models::SessionStatus;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "taskrun-job-backstop").await;
+
+    let finalized_run_id = "run-finalized-backstop";
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, ended_at)
+         VALUES ($1, $2, $3, 'manual', 'completed', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))",
+    )
+    .bind(finalized_run_id)
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let live_run_id = "run-live-backstop";
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status)
+         VALUES ($1, $2, $3, 'manual', 'running')",
+    )
+    .bind(live_run_id)
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let live_session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(live_run_id),
+        })
+        .await
+        .unwrap();
+
+    let completed_session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(finalized_run_id),
+        })
+        .await
+        .unwrap();
+    session_repo
+        .update(&completed_session.id, SessionStatus::Completed, 1, 1, 0, 0)
+        .await
+        .unwrap();
+
+    let runtime = RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![
+        taskrun_job_ref("run-absent-backstop"),
+        taskrun_job_ref(finalized_run_id),
+        taskrun_job_ref(live_run_id),
+    ]);
+    let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+
+    health::reap_orphaned_taskrun_jobs(&db, &app_state, "test").await;
+
+    assert_eq!(
+        runtime.calls(),
+        vec![
+            "run-absent-backstop".to_string(),
+            finalized_run_id.to_string(),
+        ],
+        "backstop must delete absent/finalized Jobs and preserve live running task-runs"
+    );
+    assert!(
+        session_repo
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .any(|session| session.id == live_session.id),
+        "live running session must be preserved"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn taskrun_job_backstop_continues_after_delete_failure() {
+    let db = test_helpers::create_test_db();
+    let runtime = RecordingRuntimeOps::new(true).with_taskrun_jobs(vec![
+        taskrun_job_ref("missing-one"),
+        taskrun_job_ref("missing-two"),
+    ]);
+    let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+
+    health::reap_orphaned_taskrun_jobs(&db, &app_state, "test").await;
+
+    assert_eq!(
+        runtime.calls(),
+        vec!["missing-one".to_string(), "missing-two".to_string()],
+        "teardown failures are best-effort and must not stop the sweep"
+    );
+}
