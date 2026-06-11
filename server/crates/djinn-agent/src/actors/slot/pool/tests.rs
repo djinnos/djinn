@@ -157,6 +157,40 @@ async fn seed_running_session_with_task_run(
     task_id
 }
 
+async fn seed_running_session_with_task_run_in_project(
+    app_state: &crate::context::AgentContext,
+    project_id: &str,
+    task_run_id: &str,
+) -> String {
+    let epic = test_helpers::create_test_epic(&app_state.db, project_id).await;
+    let task = test_helpers::create_test_task(&app_state.db, project_id, &epic.id).await;
+    let task_id = task.id.clone();
+    djinn_db::TaskRunRepository::new(app_state.db.clone())
+        .create(djinn_db::CreateTaskRunParams {
+            id: task_run_id,
+            project_id,
+            task_id: &task_id,
+            trigger_type: "test",
+            status: None,
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .expect("task_run create should succeed");
+    djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone())
+        .create(djinn_db::CreateSessionParams {
+            project_id,
+            task_id: Some(&task_id),
+            model: "model-a",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(task_run_id),
+        })
+        .await
+        .expect("session create should succeed");
+    task_id
+}
+
 fn model(model_id: &str, max_slots: u32, roles: &[&str]) -> ModelSlotConfig {
     ModelSlotConfig {
         model_id: model_id.to_string(),
@@ -1051,43 +1085,21 @@ async fn interrupt_project_tears_down_each_affected_taskrun_job() {
     let (mut app_state, cancel, _temp) = test_app_state();
     let runtime = RecordingRuntimeOps::new(false);
     app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+    let project = test_helpers::create_test_project(&app_state.db).await;
+    let other_project = test_helpers::create_test_project(&app_state.db).await;
+    let project_id = project.id.clone();
+    let other_project_id = other_project.id.clone();
     let task_a =
-        seed_running_session_with_task_run(&app_state, "proj a task a", "run-proj-a").await;
+        seed_running_session_with_task_run_in_project(&app_state, &project_id, "run-proj-a").await;
     let task_b =
-        seed_running_session_with_task_run(&app_state, "proj a task b", "run-proj-b").await;
+        seed_running_session_with_task_run_in_project(&app_state, &project_id, "run-proj-b").await;
     let task_other =
-        seed_running_session_with_task_run(&app_state, "other proj", "run-other").await;
+        seed_running_session_with_task_run_in_project(&app_state, &other_project_id, "run-other")
+            .await;
 
-    // Look up the project of `task_a` BEFORE the pool consumes
-    // `app_state`. Each `seed_running_session_with_task_run` call
-    // creates a fresh project, so each task lives in its own project
-    // — the scoped interrupt tears down exactly the task whose project
-    // id we target and leaves the others alone.
-    let project_id_a =
-        djinn_db::TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone())
-            .get(&task_a)
-            .await
-            .expect("task get should succeed")
-            .expect("task should exist")
-            .project_id;
-    let project_id_b =
-        djinn_db::TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone())
-            .get(&task_b)
-            .await
-            .expect("task get should succeed")
-            .expect("task should exist")
-            .project_id;
-    let project_id_other =
-        djinn_db::TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone())
-            .get(&task_other)
-            .await
-            .expect("task get should succeed")
-            .expect("task should exist")
-            .project_id;
-    // Sanity: each task lives in its own project (a, b, other).
-    assert_ne!(project_id_a, project_id_b);
-    assert_ne!(project_id_a, project_id_other);
-    assert_ne!(project_id_b, project_id_other);
+    // Sanity: two affected tasks share one project, while the third task lives
+    // in a different project and must survive the scoped interrupt.
+    assert_ne!(project_id, other_project_id);
 
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
@@ -1111,44 +1123,35 @@ async fn interrupt_project_tears_down_each_affected_taskrun_job() {
         .await
         .expect("dispatch other should succeed");
 
-    // First scoped interrupt: only `task_a`'s project matches. The
-    // other two tasks live in different projects and must be left
-    // alone.
-    pool.interrupt_project(&project_id_a, "test project interrupt A")
+    pool.interrupt_project(&project_id, "test project interrupt")
         .await
-        .expect("interrupt_project(a) should succeed");
+        .expect("interrupt_project should succeed");
 
     let calls = runtime.calls();
     assert!(
         calls.iter().any(|call| call == "run-proj-a"),
-        "task a (project {project_id_a}) should be torn down"
+        "task a (project {project_id}) should be torn down"
     );
-    assert!(
-        !calls.iter().any(|call| call == "run-proj-b"),
-        "task b (project {project_id_b}) must NOT be torn down by interrupt_project(a)"
-    );
-    assert!(
-        !calls.iter().any(|call| call == "run-other"),
-        "task other (project {project_id_other}) must NOT be torn down"
-    );
-    wait_until_no_sessions(&pool, &[task_a.clone(), task_b.clone(), task_other.clone()]).await;
-
-    // Second scoped interrupt: targeting `task_b`'s project tears it
-    // down. The "other" task is still left alone.
-    pool.interrupt_project(&project_id_b, "test project interrupt B")
-        .await
-        .expect("interrupt_project(b) should succeed");
-
-    let calls = runtime.calls();
     assert!(
         calls.iter().any(|call| call == "run-proj-b"),
-        "task b (project {project_id_b}) should be torn down by the second call"
+        "task b (project {project_id}) should be torn down"
     );
     assert!(
         !calls.iter().any(|call| call == "run-other"),
-        "task other (project {project_id_other}) must STILL not be torn down"
+        "task other (project {other_project_id}) must NOT be torn down"
     );
-    wait_until_no_sessions(&pool, &[task_b, task_other]).await;
+    wait_until_no_sessions(&pool, &[task_a, task_b]).await;
+    assert!(
+        pool.has_session(&task_other)
+            .await
+            .expect("has_session should succeed"),
+        "unrelated project task should still be running"
+    );
+
+    pool.interrupt_all("test cleanup")
+        .await
+        .expect("cleanup interrupt_all should succeed");
+    wait_until_no_sessions(&pool, &[task_other]).await;
 }
 
 /// `evict_session` for a task whose session has no `task_run_id` (e.g. a
@@ -1352,18 +1355,12 @@ fn slot_pool_lifecycle_does_not_import_djinn_k8s_directly() {
     );
 }
 
-/// The `SlotEvent::Killed` path is the canonical "kill actually kills"
-/// funnel: when the slot's lifecycle wind-down emits a `Killed` event,
-/// the pool's `handle_slot_event` MUST call the teardown primitive
-/// (the Pod is the K8s resource being killed — not the in-process
-/// slot itself). This is the same code path exercised by
-/// `pool.kill_session` and `pool.interrupt_all`, but we drive it
-/// through `kill_session` here (the public, supported entry point)
-/// and assert the recording captured the teardown. The single call
-/// proves the `Killed` event handler in `handle_slot_event` is wired
-/// to teardown (a regression that drops the `Killed`-arm teardown
-/// would leave this test failing even though the kill itself still
-/// completes).
+/// The `SlotEvent::Killed` path is the backstop for kill routes that bypass
+/// `kill_session`/`evict_session`: when a slot lifecycle directly reports a
+/// killed task, the pool must still delete the task-run Job before settling the
+/// session row. Drive the actor method directly so this coverage is independent
+/// of the public `kill_session` path, which intentionally performs an earlier
+/// teardown and settlement to avoid duplicate Kubernetes deletes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn slot_event_killed_tears_down_taskrun_job() {
     let (mut app_state, cancel, _temp) = test_app_state();
@@ -1377,37 +1374,34 @@ async fn slot_event_killed_tears_down_taskrun_job() {
         vec![model("model-a", 1, &["worker"])],
         &[("worker", vec!["model-a"])],
     );
-    let pool = SlotPoolHandle::spawn_with_factory(
+    let (_pool_tx, pool_rx) = mpsc::channel(8);
+    let mut pool = SlotPool::new_with_factory(
+        pool_rx,
         app_state,
         cancel,
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
     );
 
-    pool.dispatch(&task_id, "/tmp/project", "model-a")
+    pool.test_dispatch(&task_id, "/tmp/project", "model-a")
         .await
         .expect("dispatch should succeed");
+    let slot_id = pool
+        .test_slot_of(&task_id)
+        .expect("task should hold a slot");
 
-    pool.kill_session(&task_id)
-        .await
-        .expect("kill_session should succeed");
-    wait_until_no_sessions(&pool, std::slice::from_ref(&task_id)).await;
+    pool.test_handle_slot_event(super::super::SlotEvent::Killed {
+        slot_id,
+        model_id: "model-a".to_string(),
+        task_id: task_id.clone(),
+    })
+    .await;
 
-    // The teardown must be invoked from the `Killed` event handler in
-    // `handle_slot_event` — `kill_session` itself only kills the
-    // SLOT (cancels the run_token), and the slot's wind-down emits
-    // `SlotEvent::Killed` which the pool turns into the teardown
-    // call. If that handler drops the teardown, the recording here
-    // would be empty.
     assert!(
         runtime.calls().iter().any(|call| call == "run-killed"),
         "SlotEvent::Killed handler must tear down the task-run Job (saw calls: {:?})",
         runtime.calls()
     );
-    // Exactly one teardown: the `kill_session` path doesn't double-
-    // invoke. (A second call would mean the `Killed` event handler
-    // AND `kill_session` both fire teardown — a regression that
-    // would spam the K8s API on every kill.)
     let count = runtime
         .calls()
         .iter()
@@ -1415,6 +1409,6 @@ async fn slot_event_killed_tears_down_taskrun_job() {
         .count();
     assert_eq!(
         count, 1,
-        "kill_session → SlotEvent::Killed must invoke teardown exactly once (saw {count} calls)"
+        "SlotEvent::Killed must invoke teardown exactly once (saw {count} calls)"
     );
 }
