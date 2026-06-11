@@ -86,9 +86,9 @@ pub enum RepoGraphEdgeKind {
     /// as deterministic as the source graph.
     StepInProcess,
     /// PR s6ch / ykcg: synthetic edge from a first-class HTTP `Route`
-    /// node to the `Symbol` node that handles it. Stamped by future
-    /// server-side route extractors with per-edge confidence and a
-    /// detector reason such as `"axum-route-attr"`.
+    /// node to the `Symbol` node that handles it. Stamped by route
+    /// extractors with per-edge confidence and a detector reason such as
+    /// `"axum-route-attr"`.
     HandlesRoute,
     /// PR s6ch / ykcg: synthetic edge from a client/caller `Symbol` to
     /// the HTTP `Route` it fetches. Consumer-side route matching is

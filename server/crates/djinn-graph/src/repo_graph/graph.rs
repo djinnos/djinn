@@ -760,6 +760,42 @@ impl RepoDependencyGraph {
         );
     }
 
+    /// Register a placeholder symbol for a route handler that appeared in
+    /// source but could not be matched to a SCIP definition.
+    pub(crate) fn ensure_unresolved_route_handler_node(
+        &mut self,
+        file_path: &Path,
+        handler: &str,
+    ) -> NodeIndex {
+        let symbol = format!("axum-unresolved-handler:{}:{handler}", file_path.display());
+        let key = RepoNodeKey::Symbol(symbol.clone());
+        if let Some(&idx) = self.node_lookup.get(&key) {
+            return idx;
+        }
+        let node = RepoGraphNode {
+            id: key.clone(),
+            kind: RepoGraphNodeKind::Symbol,
+            display_name: handler.to_string(),
+            language: Some("rust".to_string()),
+            file_path: Some(file_path.to_path_buf()),
+            symbol: Some(symbol),
+            symbol_kind: None,
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: Vec::new(),
+            signature_parts: None,
+            is_test: false,
+            complexity: None,
+            workspace: None,
+            route_framework: None,
+            route_handler_symbol: None,
+        };
+        let idx = self.graph.add_node(node);
+        self.node_lookup.insert(key, idx);
+        idx
+    }
+
     /// Shortest dependency path between two nodes using A* over edge weights.
     pub fn shortest_path(
         &self,

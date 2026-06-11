@@ -7,7 +7,6 @@ use std::time::Duration;
 use rmcp::Json;
 
 use crate::context::AgentContext;
-use crate::lsp::format_diagnostics_xml;
 use crate::lsp::{SymbolQuery, parse_symbol_kind_filter};
 use crate::mcp_client::McpToolRegistry;
 use djinn_control_plane::tools::agent_tools::{
