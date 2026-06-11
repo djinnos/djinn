@@ -63,7 +63,7 @@ pub(super) async fn get_request_refs(
 ) -> Result<(ClientStdin, PendingResponses, Arc<AtomicU64>, OpenedFiles), String> {
     let server = server_for_path(path)
         .ok_or_else(|| format!("no LSP server configured for {}", path.display()))?;
-    let root = find_root(path, worktree, server.root_markers)
+    let root = find_root(path, worktree, server.root_markers, server.root_strategy)
         .ok_or_else(|| format!("could not find project root for {}", path.display()))?;
     let key = format!("{}::{}", server.id, root.display());
 

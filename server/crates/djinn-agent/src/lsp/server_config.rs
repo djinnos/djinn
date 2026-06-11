@@ -1,12 +1,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+use super::workspace::RootStrategy;
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ServerDef {
     pub(super) id: &'static str,
     /// The binary name (first element) and fixed args.
     pub(super) cmd: &'static [&'static str],
     pub(super) root_markers: &'static [&'static str],
+    /// How to pick the project root among marker-bearing ancestors.
+    pub(super) root_strategy: RootStrategy,
     /// How to install this server if it's not found on PATH.
     install: InstallMethod,
 }
@@ -27,24 +31,28 @@ pub(super) fn server_for_path(path: &Path) -> Option<ServerDef> {
             id: "rust-analyzer",
             cmd: &["rust-analyzer"],
             root_markers: &["Cargo.toml"],
+            root_strategy: RootStrategy::CargoWorkspace,
             install: InstallMethod::RustAnalyzer,
         }),
         Some("go") => Some(ServerDef {
             id: "gopls",
             cmd: &["gopls"],
             root_markers: &["go.mod"],
+            root_strategy: RootStrategy::Nearest,
             install: InstallMethod::GoInstall("golang.org/x/tools/gopls"),
         }),
         Some("ts") | Some("tsx") | Some("js") | Some("jsx") => Some(ServerDef {
             id: "typescript-language-server",
             cmd: &["typescript-language-server", "--stdio"],
             root_markers: &["package.json", "tsconfig.json"],
+            root_strategy: RootStrategy::Nearest,
             install: InstallMethod::Npm(&["typescript-language-server", "typescript"]),
         }),
         Some("py") => Some(ServerDef {
             id: "pyright",
             cmd: &["pyright-langserver", "--stdio"],
             root_markers: &["pyproject.toml", "setup.py"],
+            root_strategy: RootStrategy::Nearest,
             install: InstallMethod::Npm(&["pyright"]),
         }),
         _ => None,

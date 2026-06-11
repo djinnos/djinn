@@ -26,6 +26,30 @@ async fn lsp_manager_touch_file_no_server_for_txt() {
 }
 
 #[tokio::test]
+async fn diagnostics_xml_notes_indexing_client() {
+    use std::sync::atomic::Ordering;
+
+    let mgr = LspManager::new();
+    let tmp = crate::test_helpers::test_tempdir("djinn-lsp-indexing-");
+    let (key, client) = super::spawn_fake_client(&tmp.path().display().to_string()).await;
+    client.ready.store(false, Ordering::SeqCst);
+    mgr.inner.lock().await.clients.insert(key, client);
+
+    assert!(mgr.indexing(tmp.path()).await);
+    let xml = mgr.diagnostics_xml(tmp.path()).await;
+    assert!(xml.contains("still indexing"), "got: {xml}");
+
+    // Once the client reports quiescent, the note disappears.
+    for client in mgr.inner.lock().await.clients.values() {
+        client.ready.store(true, Ordering::SeqCst);
+    }
+    assert!(!mgr.indexing(tmp.path()).await);
+    assert_eq!(mgr.diagnostics_xml(tmp.path()).await, "");
+
+    mgr.shutdown_all().await;
+}
+
+#[tokio::test]
 async fn opened_files_tracks_versions() {
     let opened: OpenedFiles = Arc::new(Mutex::new(HashMap::new()));
     let uri = "file:///test.rs".to_string();

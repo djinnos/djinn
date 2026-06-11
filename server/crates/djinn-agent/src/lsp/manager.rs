@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -90,7 +91,8 @@ impl LspManager {
             return;
         };
 
-        let Some(root) = find_root(path, worktree, server.root_markers) else {
+        let Some(root) = find_root(path, worktree, server.root_markers, server.root_strategy)
+        else {
             tracing::warn!(path = %path.display(), server = server.id, "lsp: could not find project root");
             return;
         };
@@ -129,7 +131,7 @@ impl LspManager {
             let inner = self.inner.lock().await;
             inner.clients.get(&key).map(clone_client_refs)
         };
-        let Some((stdin, diagnostics, opened)) = client else {
+        let Some((stdin, diagnostics, opened, ready)) = client else {
             return;
         };
 
@@ -206,6 +208,13 @@ impl LspManager {
         }
 
         if wait_for_diagnostics {
+            // While the server is still indexing it cannot produce
+            // diagnostics for this file — waiting just stalls every
+            // write/edit/patch by the full timeout for nothing.
+            if !ready.load(Ordering::SeqCst) {
+                tracing::info!(uri = %uri, "lsp: server still indexing, skipping diagnostic wait");
+                return;
+            }
             let start = Instant::now();
             let deadline = start + Duration::from_secs(3);
             let debounce = Duration::from_millis(150);
@@ -294,6 +303,33 @@ impl LspManager {
             "lsp: diagnostics() called"
         );
         out
+    }
+
+    /// True if any LSP client rooted under `worktree` is still indexing
+    /// (its diagnostics are not yet trustworthy).
+    pub async fn indexing(&self, worktree: &Path) -> bool {
+        let worktree_str = worktree.to_string_lossy();
+        let inner = self.inner.lock().await;
+        inner.clients.iter().any(|(key, client)| {
+            key.split_once("::")
+                .map(|(_, root)| root.starts_with(worktree_str.as_ref()))
+                .unwrap_or(false)
+                && !client.ready.load(Ordering::SeqCst)
+        })
+    }
+
+    /// Diagnostics for `worktree` formatted for tool responses. While a
+    /// server is still indexing, an explicit status note replaces the
+    /// silently-empty (and misleading) result.
+    pub async fn diagnostics_xml(&self, worktree: &Path) -> String {
+        let mut xml = super::diagnostics::format_diagnostics_xml(self.diagnostics(worktree).await);
+        if self.indexing(worktree).await {
+            xml.push_str(
+                "<diagnostics-status>language server is still indexing; \
+                 diagnostics may be missing or incomplete</diagnostics-status>\n",
+            );
+        }
+        xml
     }
 
     /// Return any warnings about missing/broken LSP servers.
