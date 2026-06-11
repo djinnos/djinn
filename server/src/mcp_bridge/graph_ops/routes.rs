@@ -21,6 +21,7 @@ struct RouteSeed {
 }
 
 impl RepoGraphBridge {
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn route_map(
         &self,
         ctx: &ProjectCtx,

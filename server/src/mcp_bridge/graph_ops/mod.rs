@@ -146,6 +146,7 @@ impl RepoGraphOps for RepoGraphBridge {
         RepoGraphBridge::hybrid_search(self, ctx, query, kind_filter, limit).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn route_map(
         &self,
         ctx: &ProjectCtx,
