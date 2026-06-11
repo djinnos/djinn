@@ -51,19 +51,31 @@ fn synthetic_source_scoped_key(
     source_file: Option<&Path>,
     workspace: Option<&str>,
     low_entropy_discriminator: Option<&str>,
+    unique_discriminator: usize,
 ) -> String {
-    let Some(source_file) = source_file else {
-        return id.to_string();
-    };
-    let mut key = format!("{prefix}:{id} @ {}", source_file.display());
+    let mut key = id.to_string();
+    if let Some(source_file) = source_file {
+        key.push_str(" @ ");
+        key.push_str(&source_file.display().to_string());
+    } else {
+        key.push_str(" @ <unresolved-source>");
+    }
     if let Some(workspace) = workspace {
         key.push_str(" [workspace=");
         key.push_str(workspace);
         key.push(']');
+    } else if prefix == "tool" {
+        key.push_str(" [workspace=<unresolved>]");
     }
-    if label_entropy(id) < SYNTHETIC_LABEL_ENTROPY_MERGE_THRESHOLD {
+
+    let can_merge_same_source = source_file.is_some()
+        && (prefix != "tool" || workspace.is_some())
+        && label_entropy(id) >= SYNTHETIC_LABEL_ENTROPY_MERGE_THRESHOLD;
+    if !can_merge_same_source {
         key.push_str(" #");
         key.push_str(low_entropy_discriminator.unwrap_or("unresolved"));
+        key.push(':');
+        key.push_str(&unique_discriminator.to_string());
     }
     key
 }
@@ -718,7 +730,14 @@ impl RepoDependencyGraph {
         framework: Option<&str>,
         handler_symbol: Option<&str>,
     ) -> NodeIndex {
-        let route_id = synthetic_source_scoped_key("route", id, source_file, None, handler_symbol);
+        let route_id = synthetic_source_scoped_key(
+            "route",
+            id,
+            source_file,
+            None,
+            handler_symbol,
+            self.graph.node_count(),
+        );
         let key = RepoNodeKey::Route(route_id);
         if let Some(&idx) = self.node_lookup.get(&key) {
             return idx;
@@ -762,7 +781,14 @@ impl RepoDependencyGraph {
         workspace: Option<&str>,
         source_file: Option<&Path>,
     ) -> NodeIndex {
-        let tool_id = synthetic_source_scoped_key("tool", id, source_file, workspace, None);
+        let tool_id = synthetic_source_scoped_key(
+            "tool",
+            id,
+            source_file,
+            workspace,
+            None,
+            self.graph.node_count(),
+        );
         let key = RepoNodeKey::Tool(tool_id);
         if let Some(&idx) = self.node_lookup.get(&key) {
             return idx;
@@ -1235,7 +1261,7 @@ mod tests {
             "GET /api/agents",
             Some("rust"),
             Some("root"),
-            None,
+            Some(Path::new("src/routes.rs")),
             Some("axum"),
             Some("scip-rust pkg handlers `list_agents`()."),
         );
@@ -1348,6 +1374,34 @@ mod tests {
     }
 
     #[test]
+    fn routes_without_handler_source_do_not_merge() {
+        let mut graph = RepoDependencyGraph::build(&[]);
+        let first = graph.ensure_route_node(
+            "GET /api/status (axum)",
+            "GET /api/status (axum)",
+            Some("rust"),
+            Some("api"),
+            None,
+            Some("axum"),
+            None,
+        );
+        let second = graph.ensure_route_node(
+            "GET /api/status (axum)",
+            "GET /api/status (axum)",
+            Some("rust"),
+            Some("api"),
+            None,
+            Some("axum"),
+            None,
+        );
+
+        assert_ne!(
+            first, second,
+            "route merges require a known handler source_file"
+        );
+    }
+
+    #[test]
     fn tool_dedup_is_scoped_to_source_file_and_workspace() {
         let mut graph = RepoDependencyGraph::build(&[]);
         let first = graph.ensure_tool_node(
@@ -1390,6 +1444,30 @@ mod tests {
         assert_ne!(
             first, other_workspace,
             "tools from different workspaces/projects must never merge"
+        );
+    }
+
+    #[test]
+    fn tools_without_workspace_do_not_merge_across_unknown_projects() {
+        let mut graph = RepoDependencyGraph::build(&[]);
+        let first = graph.ensure_tool_node(
+            "agents.list",
+            "agents.list",
+            Some("rust"),
+            None,
+            Some(Path::new("src/tools/agents.rs")),
+        );
+        let second = graph.ensure_tool_node(
+            "agents.list",
+            "agents.list",
+            Some("rust"),
+            None,
+            Some(Path::new("src/tools/agents.rs")),
+        );
+
+        assert_ne!(
+            first, second,
+            "tool merges require an explicit same-workspace/project scope"
         );
     }
 }

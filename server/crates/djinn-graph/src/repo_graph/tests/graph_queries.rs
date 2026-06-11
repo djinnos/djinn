@@ -201,7 +201,7 @@ fn default_search_and_query_subgraph_skip_route_tool_but_explicit_route_filter_f
         "helper",
         Some("rust"),
         Some("root"),
-        None,
+        Some(Path::new("src/helper.rs")),
         Some("axum"),
         Some(handler_symbol),
     );
@@ -257,7 +257,7 @@ fn default_search_and_query_subgraph_skip_route_tool_but_explicit_route_filter_f
         route_subgraph
             .nodes
             .iter()
-            .any(|node| node.uid == "route:GET /api/helper (axum)")
+            .any(|node| node.uid == "route:GET /api/helper (axum) @ src/helper.rs")
     );
     assert_eq!(graph.node(tool).kind, RepoGraphNodeKind::Tool);
 }

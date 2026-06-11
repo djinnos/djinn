@@ -217,7 +217,7 @@ fn route_and_tool_nodes_round_trip_with_metadata() {
         "GET /api/agents (axum)",
         Some("rust"),
         Some("api"),
-        None,
+        Some(Path::new("src/routes/agents.rs")),
         Some("axum"),
         Some("scip-rust pkg src/routes/agents.rs `list_agents`()."),
     );
@@ -226,13 +226,13 @@ fn route_and_tool_nodes_round_trip_with_metadata() {
         "agents.list",
         Some("rust"),
         Some("api"),
-        None,
+        Some(Path::new("src/tools/agents.rs")),
     );
 
     let route_node = graph.node(route);
     assert_eq!(
         route_node.id,
-        RepoNodeKey::Route("GET /api/agents (axum)".to_string())
+        RepoNodeKey::Route("GET /api/agents (axum) @ src/routes/agents.rs".to_string())
     );
     assert_eq!(route_node.kind, RepoGraphNodeKind::Route);
     assert_eq!(route_node.display_name, "GET /api/agents (axum)");
@@ -245,7 +245,10 @@ fn route_and_tool_nodes_round_trip_with_metadata() {
     );
 
     let tool_node = graph.node(tool);
-    assert_eq!(tool_node.id, RepoNodeKey::Tool("agents.list".to_string()));
+    assert_eq!(
+        tool_node.id,
+        RepoNodeKey::Tool("agents.list @ src/tools/agents.rs [workspace=api]".to_string())
+    );
     assert_eq!(tool_node.kind, RepoGraphNodeKind::Tool);
     assert_eq!(tool_node.display_name, "agents.list");
     assert_eq!(tool_node.language.as_deref(), Some("rust"));
@@ -264,12 +267,16 @@ fn route_and_tool_nodes_round_trip_with_metadata() {
     let restored = RepoDependencyGraph::deserialize_artifact(&json).expect("deserialize");
     let restored_route = restored
         .node_lookup
-        .get(&RepoNodeKey::Route("GET /api/agents (axum)".to_string()))
+        .get(&RepoNodeKey::Route(
+            "GET /api/agents (axum) @ src/routes/agents.rs".to_string(),
+        ))
         .copied()
         .expect("route lookup should survive artifact round trip");
     let restored_tool = restored
         .node_lookup
-        .get(&RepoNodeKey::Tool("agents.list".to_string()))
+        .get(&RepoNodeKey::Tool(
+            "agents.list @ src/tools/agents.rs [workspace=api]".to_string(),
+        ))
         .copied()
         .expect("tool lookup should survive artifact round trip");
 
@@ -298,7 +305,7 @@ fn mixed_route_tool_artifact_bincode_round_trip_preserves_route_edges() {
         "GET /api/helper (axum)",
         Some("rust"),
         Some("api"),
-        None,
+        Some(Path::new("src/helper.rs")),
         Some("axum"),
         Some(handler_symbol),
     );
