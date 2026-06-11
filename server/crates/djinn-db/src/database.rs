@@ -4,10 +4,62 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{DbError, DbResult};
 use crate::migrations;
+
+/// Default number of concurrent background full-text "fan-out" searches
+/// (post-session knowledge extraction novelty checks + note consolidation
+/// dedup scans). These run `ts_rank()` over the notes GIN index and each one
+/// holds a pooled connection for ~1s; when dozens fire at once (many sessions
+/// finishing together) they saturate the sqlx pool and starve the interactive
+/// subsystems (dispatch, PR poller, SSE). This semaphore bounds them so the
+/// background work can never consume more than a small slice of the pool.
+///
+/// Tunable via `DJINN_BG_SEARCH_CONCURRENCY`.
+const DEFAULT_BG_SEARCH_CONCURRENCY: usize = 3;
+
+/// Default sqlx pool `max_connections` for the long-lived server pool.
+///
+/// 32 gives reads + concurrent writers headroom for the workspace's expected
+/// concurrency (coordinator, mirror-fetcher, KB watcher, MCP tools, PR poller).
+/// Tunable via `DJINN_DB_MAX_CONNECTIONS` for ops headroom on larger nodes.
+const DEFAULT_MAX_CONNECTIONS: u32 = 32;
+
+fn resolve_max_connections(default: u32) -> u32 {
+    match std::env::var("DJINN_DB_MAX_CONNECTIONS") {
+        Ok(raw) => match raw.trim().parse::<u32>() {
+            Ok(n) if n > 0 => n,
+            _ => {
+                tracing::warn!(
+                    raw = %raw,
+                    default,
+                    "DJINN_DB_MAX_CONNECTIONS is not a positive integer; using default"
+                );
+                default
+            }
+        },
+        Err(_) => default,
+    }
+}
+
+fn resolve_bg_search_concurrency() -> usize {
+    match std::env::var("DJINN_BG_SEARCH_CONCURRENCY") {
+        Ok(raw) => match raw.trim().parse::<usize>() {
+            Ok(n) if n > 0 => n,
+            _ => {
+                tracing::warn!(
+                    raw = %raw,
+                    default = DEFAULT_BG_SEARCH_CONCURRENCY,
+                    "DJINN_BG_SEARCH_CONCURRENCY is not a positive integer; using default"
+                );
+                DEFAULT_BG_SEARCH_CONCURRENCY
+            }
+        },
+        Err(_) => DEFAULT_BG_SEARCH_CONCURRENCY,
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,6 +139,11 @@ pub struct Database {
     capabilities: DatabaseBackendCapabilities,
     initialized: Arc<OnceCell<()>>,
     test_branch: Option<Arc<TestDbInit>>,
+    /// Process-wide bound on concurrent background full-text fan-out searches.
+    /// Shared across every `Database` clone (and therefore every repository
+    /// constructed from this handle) so all background `ts_rank()` scans
+    /// contend for the same small permit set instead of saturating the pool.
+    bg_search_semaphore: Arc<Semaphore>,
 }
 
 /// Postgres template-clone test isolation: per-test `djinn_test_<uuid>`
@@ -148,10 +205,9 @@ impl Database {
     /// Open a database using an explicit backend selection seam.
     pub fn open_with_config(config: DatabaseConnectConfig) -> DbResult<Self> {
         match config {
-            // 32 max connections gives reads + concurrent writers headroom
-            // for the workspace's expected concurrency (coordinator,
-            // mirror-fetcher, KB watcher, MCP tools, PR poller).
-            DatabaseConnectConfig::Postgres(pg) => Self::open_postgres(&pg, 32),
+            DatabaseConnectConfig::Postgres(pg) => {
+                Self::open_postgres(&pg, resolve_max_connections(DEFAULT_MAX_CONNECTIONS))
+            }
         }
     }
 
@@ -189,6 +245,19 @@ impl Database {
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Acquire a permit from the background full-text search semaphore.
+    ///
+    /// Latency-insensitive background fan-out (post-session extraction novelty
+    /// checks, note consolidation dedup scans, co-access flush) must call this
+    /// and hold the returned permit for the duration of its DB work so it can
+    /// never starve the interactive pool. The permit is released on drop. This
+    /// only fails if the semaphore was closed, which never happens for a live
+    /// `Database`, so callers can treat a hold failure as "run unbounded"
+    /// rather than aborting the background job.
+    pub async fn background_search_permit(&self) -> Option<OwnedSemaphorePermit> {
+        self.bg_search_semaphore.clone().acquire_owned().await.ok()
     }
 
     pub fn postgres_pool(&self) -> Option<&PgPool> {
@@ -273,6 +342,7 @@ impl Database {
             },
             initialized: Arc::new(OnceCell::new()),
             test_branch,
+            bg_search_semaphore: Arc::new(Semaphore::new(resolve_bg_search_concurrency())),
         })
     }
 
@@ -637,6 +707,88 @@ mod tests {
             message.contains("missing migrations"),
             "expected error to call out the missing version list, got: {message}",
         );
+    }
+
+    #[test]
+    fn resolve_bg_search_concurrency_rejects_zero_and_garbage() {
+        // SAFETY: single-threaded test; no other thread reads this env var here.
+        unsafe { std::env::set_var("DJINN_BG_SEARCH_CONCURRENCY", "0") };
+        assert_eq!(
+            resolve_bg_search_concurrency(),
+            DEFAULT_BG_SEARCH_CONCURRENCY
+        );
+        unsafe { std::env::set_var("DJINN_BG_SEARCH_CONCURRENCY", "not-a-number") };
+        assert_eq!(
+            resolve_bg_search_concurrency(),
+            DEFAULT_BG_SEARCH_CONCURRENCY
+        );
+        unsafe { std::env::set_var("DJINN_BG_SEARCH_CONCURRENCY", "4") };
+        assert_eq!(resolve_bg_search_concurrency(), 4);
+        unsafe { std::env::remove_var("DJINN_BG_SEARCH_CONCURRENCY") };
+        assert_eq!(
+            resolve_bg_search_concurrency(),
+            DEFAULT_BG_SEARCH_CONCURRENCY
+        );
+    }
+
+    #[test]
+    fn resolve_max_connections_rejects_zero_and_garbage() {
+        // SAFETY: single-threaded test; no other thread reads this env var here.
+        unsafe { std::env::set_var("DJINN_DB_MAX_CONNECTIONS", "0") };
+        assert_eq!(resolve_max_connections(32), 32);
+        unsafe { std::env::set_var("DJINN_DB_MAX_CONNECTIONS", "garbage") };
+        assert_eq!(resolve_max_connections(32), 32);
+        unsafe { std::env::set_var("DJINN_DB_MAX_CONNECTIONS", "64") };
+        assert_eq!(resolve_max_connections(32), 64);
+        unsafe { std::env::remove_var("DJINN_DB_MAX_CONNECTIONS") };
+        assert_eq!(resolve_max_connections(32), 32);
+    }
+
+    /// The background-search semaphore must hard-cap how many fan-out searches
+    /// run at once. Drive N tasks through `background_search_permit()` and
+    /// assert the observed in-flight count never exceeds the configured permit
+    /// count. Pure tokio — no DB needed (we only exercise the permit gate).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn background_search_permit_never_exceeds_configured_concurrency() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const PERMITS: usize = 3;
+        const TASKS: usize = 40;
+
+        // Build a Database whose only live machinery is the semaphore. We set
+        // the env knob so the constructed semaphore has exactly PERMITS permits.
+        // SAFETY: set before constructing; this test owns the var window.
+        unsafe { std::env::set_var("DJINN_BG_SEARCH_CONCURRENCY", PERMITS.to_string()) };
+        let semaphore = Arc::new(Semaphore::new(resolve_bg_search_concurrency()));
+        unsafe { std::env::remove_var("DJINN_BG_SEARCH_CONCURRENCY") };
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_seen = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..TASKS {
+            let sem = semaphore.clone();
+            let in_flight = in_flight.clone();
+            let max_seen = max_seen.clone();
+            handles.push(tokio::spawn(async move {
+                let _permit = sem.acquire_owned().await.expect("permit");
+                let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                max_seen.fetch_max(now, Ordering::SeqCst);
+                // Hold the permit briefly so contention is real.
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+        for handle in handles {
+            handle.await.expect("task join");
+        }
+
+        assert!(
+            max_seen.load(Ordering::SeqCst) <= PERMITS,
+            "background fan-out exceeded the {PERMITS}-permit bound: saw {}",
+            max_seen.load(Ordering::SeqCst)
+        );
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

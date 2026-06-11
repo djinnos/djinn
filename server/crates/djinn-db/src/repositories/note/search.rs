@@ -198,6 +198,12 @@ impl NoteRepository {
     ) -> Result<Vec<NoteDedupCandidate>> {
         self.db.ensure_initialized().await?;
 
+        // This dedup lexical scan runs a `ts_rank()` fan-out during background
+        // post-session knowledge extraction (one per extracted note). Bound it
+        // with the same background-search permit consolidation uses so a burst
+        // of finishing sessions can't saturate the interactive pool.
+        let _permit = self.db.background_search_permit().await;
+
         self.dedup_lexical_candidates(project_id, folder, note_type, text, limit as i64)
             .await
     }
