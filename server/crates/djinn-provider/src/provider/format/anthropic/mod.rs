@@ -18,3 +18,4 @@ use request::AnthropicSystemBlock;
 pub(crate) use serde_json::{Value, json};
 #[allow(unused_imports)]
 pub(crate) use streaming::{ToolAcc, parse_anthropic_event};
+pub(crate) use tools::convert_tool;
