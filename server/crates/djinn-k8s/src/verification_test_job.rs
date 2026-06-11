@@ -101,11 +101,12 @@ exec {bin} verify-test "{test_id}"
     if let Some(url) = config.database_url.as_deref() {
         env.push(env_var("DJINN_DATABASE_URL", url));
     }
-    // Route the Rust toolchain caches to the /cache PVC. Verification uses the
-    // shared per-project target base like warm Pods; task-runs use private run
+    // Route the Rust toolchain caches to the /cache PVC. Verification-test Pods
+    // intentionally write the same shared per-project target base as warm Pods
+    // with incremental compilation disabled; task-run Pods use private run
     // target dirs but keep the same shared CARGO_HOME/SCCACHE settings.
     // Single-sourced in job.rs; needs the cache volume below.
-    env.extend(crate::job::cache_env_vars(project_id));
+    env.extend(crate::job::warm_cache_env_vars(project_id));
 
     let container = Container {
         name: "verify-test".to_string(),
@@ -288,7 +289,8 @@ mod tests {
                 .iter()
                 .any(|m| m.name == crate::job::VOLUME_CACHE && m.read_only == Some(false))
         );
-        // Verification keeps shared CARGO_HOME/SCCACHE routing while using the warm base target dir.
+        // Verification keeps shared CARGO_HOME/SCCACHE routing while using the
+        // warm/verification-owned base target dir with incremental disabled.
         let envs: BTreeMap<&str, &str> = c
             .env
             .as_ref()
@@ -298,9 +300,21 @@ mod tests {
             .collect();
         assert_eq!(envs.get("CARGO_HOME").copied(), Some("/cache/cargo"));
         assert_eq!(
+            envs.get("CARGO_TARGET_DIR").copied(),
+            Some("/cache/cargo-target/proj-xyz"),
+            "verification-test jobs must write the shared warm/verification cargo target base"
+        );
+        assert_eq!(
+            envs.get("CARGO_INCREMENTAL").copied(),
+            Some("0"),
+            "shared base writers must not persist incremental compiler state"
+        );
+        assert_eq!(
             envs.get("SCCACHE_DIR").copied(),
             Some("/cache/sccache/proj-xyz")
         );
+        assert_eq!(envs.get("SCCACHE_CACHE_SIZE").copied(), Some("20G"));
+        assert_eq!(envs.get("SQLX_OFFLINE").copied(), Some("true"));
     }
 
     #[test]
