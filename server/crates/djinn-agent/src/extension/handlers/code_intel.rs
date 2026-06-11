@@ -1257,6 +1257,8 @@ fn hybrid_search_diagnostic(query: &str) -> serde_json::Value {
 ///   classifier (v8 PR) can resolve when SCIP roles are absent.
 /// - `repo_graph_artifact_version`: bincode schema stamp; mismatches
 ///   force a re-warm.
+/// - `query_subgraph`: natural-language subgraph contract, including required
+///   query field, optional narrowing/budget fields, clamps, and response shape.
 fn code_graph_capabilities() -> serde_json::Value {
     // env-flag readers — kept inline so this crate doesn't take a
     // dep on djinn-graph just for capability introspection.
@@ -1290,6 +1292,34 @@ fn code_graph_capabilities() -> serde_json::Value {
         "default_search_mode": std::env::var("DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE")
             .unwrap_or_else(|_| "name".to_string()),
         "available_search_modes": ["name", "hybrid"],
+        "query_subgraph": {
+            "operation": "query_subgraph",
+            "required": ["query"],
+            "query": "Natural-language question text; must be nonblank.",
+            "optional_filters": {
+                "workspace": "Scope seed search/traversal to a warmed workspace when provided.",
+                "context_filter": "Coarse subsystem/API/type/concern substring for narrowing broad questions.",
+                "file_filter": "Repository-relative path/file substring; file_glob/file_path/from_glob are compatibility aliases.",
+                "kind_filter": "Node-kind narrowing for seeds/traversal (file or symbol).",
+                "edge_filters": "Explicit traversal edge kinds such as calls, imports, returns, reads, writes, implements, extends; edge_kind is the single-kind alias.",
+                "max_depth": "Traversal depth from selected seeds; 0 keeps seed nodes only. Values clamp to 0..=8.",
+                "max_seeds": "Maximum selected seeds. Omit for backend default (~6); positive values clamp to 1..=32.",
+                "token_budget": "Approximate response token budget. Omit for backend default (~2000); positive values clamp to 1024..=32000."
+            },
+            "invalid": "Blank query, zero/negative token_budget, and zero/negative max_seeds are rejected before graph dispatch.",
+            "response": {
+                "wrapper": "query_subgraph",
+                "fields": [
+                    "query", "nodes", "edges", "seeds", "inferred_edge_kinds",
+                    "budget", "traversal", "narrowing_hints"
+                ],
+                "budget_fields": [
+                    "requested_tokens", "estimated_tokens", "truncated",
+                    "omitted_nodes", "omitted_edges"
+                ],
+                "retry_guidance": "If truncated or too broad, retry with context_filter, file_filter, edge_filters, lower max_depth/max_seeds, or a different token_budget."
+            }
+        },
         "env_features": {
             // Defaults match the on-by-default behavior in djinn-graph.
             "entry_point_detection": env_on("DJINN_ENTRY_POINT_DETECTION", true),

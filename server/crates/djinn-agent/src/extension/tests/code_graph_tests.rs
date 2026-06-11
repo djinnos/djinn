@@ -994,6 +994,10 @@ async fn code_graph_dispatch_capabilities_returns_introspection_payload() {
         obj.contains_key("default_filters"),
         "missing default_filters"
     );
+    assert!(
+        obj.contains_key("query_subgraph"),
+        "missing query_subgraph capability contract"
+    );
 
     // capabilities itself must list itself, otherwise clients can't
     // discover the op via probing.
@@ -1007,6 +1011,48 @@ async fn code_graph_dispatch_capabilities_returns_introspection_payload() {
 
     // Artifact version stamp matches the v8 bump.
     assert_eq!(obj["repo_graph_artifact_version"], 8);
+
+    // Natural-language subgraph queries must be discoverable without
+    // consulting the external MCP schema snapshot. This locks the chat-facing
+    // parameter mirror to the final control-plane names and narrowing semantics.
+    let subgraph = obj["query_subgraph"]
+        .as_object()
+        .expect("query_subgraph capability must be object");
+    assert_eq!(subgraph["operation"], "query_subgraph");
+    assert_eq!(subgraph["required"], serde_json::json!(["query"]));
+    for field in [
+        "workspace",
+        "context_filter",
+        "file_filter",
+        "kind_filter",
+        "edge_filters",
+        "max_depth",
+        "max_seeds",
+        "token_budget",
+    ] {
+        assert!(
+            subgraph["optional_filters"].get(field).is_some(),
+            "query_subgraph capability missing optional filter {field}: {result}"
+        );
+    }
+    let response_fields = subgraph["response"]["fields"]
+        .as_array()
+        .expect("response fields must be array");
+    for field in [
+        "nodes",
+        "edges",
+        "seeds",
+        "budget",
+        "traversal",
+        "narrowing_hints",
+    ] {
+        assert!(
+            response_fields
+                .iter()
+                .any(|value| value.as_str() == Some(field)),
+            "query_subgraph response capability missing {field}: {result}"
+        );
+    }
 
     // Languages we ship a tree-sitter classifier for.
     let langs = obj["access_classifier_languages"]
