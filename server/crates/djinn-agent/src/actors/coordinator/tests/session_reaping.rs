@@ -362,7 +362,7 @@ async fn stall_timeout_tears_down_taskrun_job_through_slot_pool_kill_path() {
         .await
         .unwrap();
     sqlx::query(
-        "UPDATE sessions SET started_at = to_char(now() AT TIME ZONE 'utc' - interval '20 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
+        "UPDATE sessions SET started_at = to_char(now() AT TIME ZONE 'utc' - interval '40 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
     )
     .bind(&session.id)
     .execute(db.pool())
@@ -372,6 +372,12 @@ async fn stall_timeout_tears_down_taskrun_job_through_slot_pool_kill_path() {
     let runtime = RecordingRuntimeOps::new(true);
     let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
     app_state.runtime_ops = Some(std::sync::Arc::new(runtime.clone()));
+    let activity = app_state.register_activity(&task.id);
+    let old = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().saturating_sub(40 * 60))
+        .unwrap_or(0);
+    activity.store(old, std::sync::atomic::Ordering::Relaxed);
     let cancel = CancellationToken::new();
     let pool = SlotPoolHandle::spawn_with_factory(
         app_state,
