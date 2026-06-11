@@ -432,8 +432,8 @@ impl MirrorManager {
     }
 
     /// Cheap host-side check that `branch`'s commits are durably present in the
-    /// mirror AND carry work not already on `base` — i.e. `base` is NOT an
-    /// ancestor-or-equal of `branch`.
+    /// mirror AND carry work not already on `base` — i.e. `branch` has at least
+    /// one commit beyond its merge-base with `base`.
     ///
     /// Used by the stage-aware-resume decision (`supervisor_runner`): a
     /// reviewer-stage run that died after the worker already pushed its commits
@@ -443,11 +443,19 @@ impl MirrorManager {
     /// of base means there is no worker diff to review, so the caller must fall
     /// back to the full worker redo.
     ///
+    /// `base` having moved on does NOT invalidate the worker's output. This
+    /// deliberately does NOT require `base` to be an ancestor of `branch`
+    /// (fast-forwardability): on a busy board some other task's PR merges into
+    /// base during nearly every review-cycle run, so an is-ancestor probe reads
+    /// "diverged" on each redispatch and the worker redo loops forever — a
+    /// livelock where fleet throughput itself wedges every review-stage task
+    /// (the t9wi/32bk wedge, 2026-06-11). The reviewer reviews the diff against
+    /// the merge-base; integrating a moved base is the merge/PR stage's job.
+    ///
     /// Reads the bare mirror directly (no clone): resolves both refs and runs
-    /// `git merge-base --is-ancestor base branch`. `branch` is durably ahead
-    /// when `base` is an ancestor of `branch` but the two are not equal. Any
-    /// resolution failure (mirror missing, branch absent) yields `false` — the
-    /// safe answer is "not durable, redo the worker".
+    /// `git rev-list --count base..branch`. Any resolution failure (mirror
+    /// missing, branch absent) yields `false` — the safe answer is "not
+    /// durable, redo the worker".
     pub async fn branch_ahead_of_base(&self, project_id: &str, branch: &str, base: &str) -> bool {
         let mirror = self.mirror_path(project_id);
         if !mirror.exists() {
@@ -481,24 +489,23 @@ impl MirrorManager {
         if branch_sha == base_sha {
             return false;
         }
-        // `merge-base --is-ancestor base branch` exits 0 (→ `Ok`) when base is
-        // an ancestor of branch — given the non-equal check above, branch is
-        // then strictly ahead with the worker's commits on top — and exits 1
-        // (→ `Err(CommandFailed { code: 1 })`) when it is not (branch diverged
-        // from / does not contain base). For the resume decision we require the
-        // ancestor relationship: a durable, fast-forwardable worker output the
-        // reviewer can review against base.
+        // `rev-list --count base..branch` counts commits reachable from
+        // `branch` but not from `base` — the worker's durable output beyond
+        // the merge-base. Any positive count means there is a diff for the
+        // reviewer, regardless of whether `base` has since moved on (the
+        // branch may be "behind" base and still carry reviewable work).
         run_git_command(
             mirror,
             vec![
-                "merge-base".into(),
-                "--is-ancestor".into(),
-                base_sha,
-                branch_sha,
+                "rev-list".into(),
+                "--count".into(),
+                format!("{base_sha}..{branch_sha}"),
             ],
         )
         .await
-        .is_ok()
+        .ok()
+        .and_then(|o| o.stdout.trim().parse::<u64>().ok())
+        .is_some_and(|ahead| ahead > 0)
     }
 }
 
@@ -673,6 +680,42 @@ mod ahead_of_base_tests {
         assert!(
             mgr.branch_ahead_of_base("p1", "task", "main").await,
             "task branch one commit ahead of main must read as durable"
+        );
+    }
+
+    #[tokio::test]
+    async fn true_when_base_advanced_past_task_branch() {
+        // The review-cycle livelock case (t9wi/32bk, 2026-06-11): the worker
+        // pushed durable commits, then ANOTHER task's PR merged into base, so
+        // base is no longer an ancestor of the task branch. The worker output
+        // is still durable and reviewable — this must read as durable, or
+        // every redispatch on a busy board redoes the worker forever.
+        let root = TempDir::new().unwrap();
+        let mgr = seed_mirror(root.path(), "p5", true).await;
+
+        // Advance base past the point the task branch forked from.
+        let work = TempDir::new().unwrap();
+        git(
+            root.path(),
+            &[
+                "clone",
+                "--quiet",
+                root.path().join("p5.git").to_str().unwrap(),
+                work.path().to_str().unwrap(),
+            ],
+        )
+        .await;
+        let wp = work.path();
+        git(wp, &["config", "user.email", "t@t"]).await;
+        git(wp, &["config", "user.name", "t"]).await;
+        git(wp, &["checkout", "-q", "main"]).await;
+        git(wp, &["commit", "--allow-empty", "-qm", "other task merged"]).await;
+        git(wp, &["push", "-q", "origin", "main"]).await;
+
+        assert!(
+            mgr.branch_ahead_of_base("p5", "task", "main").await,
+            "a task branch with durable commits must read as durable even \
+             when base has moved on (diverged ≠ no work to review)"
         );
     }
 
