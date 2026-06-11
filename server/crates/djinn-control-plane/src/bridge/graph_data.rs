@@ -897,6 +897,9 @@ pub struct RelatedSymbol {
     /// Confidence carried by the underlying edge (PR A2 — propagates to
     /// the UI so weak references can be visually de-emphasized).
     pub confidence: f64,
+    /// Model-level confidence tier derived from the underlying graph edge.
+    /// Stable snake_case string: `extracted`, `inferred`, or `ambiguous`.
+    pub confidence_tier: String,
 }
 
 /// PR C1: structured method metadata. Populated only when the upstream

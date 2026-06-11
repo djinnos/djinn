@@ -322,7 +322,13 @@ fn shape_check_on_graph(
         .iter()
         .filter_map(|consumer| {
             let consumer_shape = extract_shape(graph.node(*consumer), include_optional);
-            drift_for_consumer(graph.node(*consumer), &handler_shape, &consumer_shape)
+            drift_for_consumer(
+                graph,
+                seed.route,
+                *consumer,
+                &handler_shape,
+                &consumer_shape,
+            )
         })
         .collect::<Vec<_>>();
     drifts.sort_by(|a, b| a.consumer.uid.cmp(&b.consumer.uid));
@@ -362,7 +368,7 @@ fn api_impact_on_graph(
         by_uid.insert(
             uid,
             ApiImpactEntry {
-                consumer: symbol_ref(node, 1.0),
+                consumer: route_consumer_ref(graph, seed.route, *consumer),
                 risk_tier,
                 reason,
             },
@@ -431,7 +437,9 @@ fn risk_rank(tier: &str) -> u8 {
 }
 
 fn drift_for_consumer(
-    consumer: &RepoGraphNode,
+    graph: &RepoDependencyGraph,
+    route: NodeIndex,
+    consumer: NodeIndex,
     handler_shape: &BTreeMap<String, ShapeField>,
     consumer_shape: &BTreeMap<String, ShapeField>,
 ) -> Option<ShapeDrift> {
@@ -459,7 +467,7 @@ fn drift_for_consumer(
         None
     } else {
         Some(ShapeDrift {
-            consumer: symbol_ref(consumer, 1.0),
+            consumer: route_consumer_ref(graph, route, consumer),
             missing_keys,
             extra_keys,
             type_mismatches,
@@ -608,6 +616,35 @@ fn symbol_ref(node: &RepoGraphNode, confidence: f64) -> RelatedSymbol {
         kind: kind_label_for_node(node).to_string(),
         file_path: shared::repo_graph_node_file_path(node),
         confidence,
+        confidence_tier: "extracted".to_string(),
+    }
+}
+
+fn route_consumer_ref(
+    graph: &RepoDependencyGraph,
+    route: NodeIndex,
+    consumer: NodeIndex,
+) -> RelatedSymbol {
+    let consumer_node = graph.node(consumer);
+    let Some(fetches_edge) = graph
+        .graph()
+        .edges_connecting(consumer, route)
+        .find(|edge| {
+            edge.weight().kind == RepoGraphEdgeKind::Fetches
+                && edge.source() == consumer
+                && edge.target() == route
+        })
+    else {
+        return symbol_ref(consumer_node, 1.0);
+    };
+    let edge = fetches_edge.weight();
+    RelatedSymbol {
+        uid: format_node_key(&consumer_node.id),
+        name: consumer_node.display_name.clone(),
+        kind: kind_label_for_node(consumer_node).to_string(),
+        file_path: shared::repo_graph_node_file_path(consumer_node),
+        confidence: edge.confidence,
+        confidence_tier: format!("{:?}", edge.confidence_tier()).to_ascii_lowercase(),
     }
 }
 
