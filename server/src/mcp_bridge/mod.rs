@@ -117,6 +117,20 @@ impl RuntimeOps for AppState {
             .map_err(|e| e.to_string())
     }
 
+    async fn teardown_taskrun_job(&self, task_run_id: &str) -> Result<(), String> {
+        let client = kube::Client::try_default()
+            .await
+            .map_err(|e| format!("task-run Job teardown requires a kube client: {e}"))?;
+        let config = djinn_k8s::KubernetesConfig::from_env();
+        djinn_k8s::runtime::delete_taskrun_job_foreground(
+            &client,
+            &config.namespace,
+            task_run_id,
+        )
+        .await
+        .map_err(|e| format!("delete task-run Job: {e}"))
+    }
+
     async fn cleanup_task_branches(&self, task_id: &str) {
         let mirror = self.mirror();
         djinn_agent::task_merge::cleanup_task_branches_post_close(

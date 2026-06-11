@@ -269,6 +269,12 @@ impl bridge::RuntimeOps for AgentRuntimeOps {
     async fn release_backing_service(&self, _instance_id: &str) -> Result<(), String> {
         Ok(())
     }
+    async fn teardown_taskrun_job(&self, _task_run_id: &str) -> Result<(), String> {
+        // Task-run Job deletion is owned by the server-side AppState impl via
+        // the K8s graph warmer. Agent-internal/test contexts have no kube
+        // client, so this is an idempotent no-op stub.
+        Ok(())
+    }
     async fn cleanup_task_branches(&self, _task_id: &str) {
         // Branch/PR cleanup needs the mirror manager, which the agent-internal
         // runtime doesn't own — only the server-side AppState impl does. The
