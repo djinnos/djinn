@@ -975,8 +975,13 @@ async fn code_graph_dispatch_capabilities_returns_introspection_payload() {
         "capabilities op must list itself in `operations`"
     );
 
-    // Artifact version stamp matches the v8 bump.
-    assert_eq!(obj["repo_graph_artifact_version"], 8);
+    // Artifact version stamp follows the canonical repo-graph artifact schema.
+    assert_eq!(obj["repo_graph_artifact_version"], 10);
+
+    assert!(
+        ops.iter().any(|o| o.as_str() == Some("workspaces")),
+        "workspaces op must be listed in capabilities"
+    );
 
     // Languages we ship a tree-sitter classifier for.
     let langs = obj["access_classifier_languages"]

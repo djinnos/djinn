@@ -1258,7 +1258,7 @@ fn code_graph_capabilities() -> serde_json::Value {
             "db_access_detection": env_opt_in("DJINN_DB_ACCESS_DETECTION"),
         },
         "access_classifier_languages": ["rust", "go", "python", "typescript", "javascript"],
-        "repo_graph_artifact_version": 8,
+        "repo_graph_artifact_version": 10,
         "filter_tiers": {
             "tier_1_module_artifacts": "always-on; SCIP module-tree synthetic nodes (`crate/`, `…/MODULE.`)",
             "tier_1_5_generated_and_mocks": "always-on; *.pb.go, *.gen.*, *_mock.go, mock_*.go, **/__mocks__/**, *.snap",

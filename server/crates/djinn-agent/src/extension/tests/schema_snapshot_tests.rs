@@ -231,6 +231,11 @@ fn code_graph_schema_embeds_workflow_guidance() {
         "refactor_candidates",
         "workspaces",
         "workspace_hint",
+        "available-workspace",
+        "node_count",
+        "commit_sha",
+        "warmed_at",
+        "status",
     ] {
         assert!(
             description.contains(operation),
