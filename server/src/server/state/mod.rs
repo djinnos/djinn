@@ -1050,6 +1050,7 @@ impl AppState {
             )
             .with_graph_warmer(self.graph_warmer().await)
             .with_mirror(self.inner.mirror.clone())
+            .with_runtime_ops(Arc::new(self.clone()))
             .with_rpc_registry(self.inner.rpc_registry.clone()),
         );
 
