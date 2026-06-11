@@ -78,6 +78,9 @@ pub fn detect_axum_routes(
             } else {
                 0.45
             };
+            let handler_source_file = resolved_handler_node
+                .and_then(|idx| graph.node(idx).file_path.clone())
+                .unwrap_or_else(|| rel_path.clone());
             let handler_symbol =
                 resolved_handler_node.and_then(|idx| graph.node(idx).symbol.clone());
             let handler_node = resolved_handler_node.unwrap_or_else(|| {
@@ -89,6 +92,7 @@ pub fn detect_axum_routes(
                 &label,
                 Some("rust"),
                 workspace.as_deref(),
+                Some(handler_source_file.as_path()),
                 Some("axum"),
                 handler_symbol.as_deref(),
             );

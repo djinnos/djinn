@@ -117,10 +117,11 @@ fn route_and_tool_weights_share_variable_tier_without_metadata_rank_boost() {
         "GET /api/helper (axum)",
         Some("rust"),
         Some("root"),
+        None,
         Some("axum"),
         Some(handler_symbol),
     );
-    let tool = graph.ensure_tool_node("helper.run", "helper.run", Some("rust"), Some("root"));
+    let tool = graph.ensure_tool_node("helper.run", "helper.run", Some("rust"), Some("root"), None);
     let process = graph.ensure_process_node("process:helper", "process:helper");
     let table = graph.ensure_table_node("public.helpers");
 

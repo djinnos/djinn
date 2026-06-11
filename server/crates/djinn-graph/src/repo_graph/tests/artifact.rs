@@ -217,10 +217,17 @@ fn route_and_tool_nodes_round_trip_with_metadata() {
         "GET /api/agents (axum)",
         Some("rust"),
         Some("api"),
+        None,
         Some("axum"),
         Some("scip-rust pkg src/routes/agents.rs `list_agents`()."),
     );
-    let tool = graph.ensure_tool_node("agents.list", "agents.list", Some("rust"), Some("api"));
+    let tool = graph.ensure_tool_node(
+        "agents.list",
+        "agents.list",
+        Some("rust"),
+        Some("api"),
+        None,
+    );
 
     let route_node = graph.node(route);
     assert_eq!(
@@ -291,10 +298,11 @@ fn mixed_route_tool_artifact_bincode_round_trip_preserves_route_edges() {
         "GET /api/helper (axum)",
         Some("rust"),
         Some("api"),
+        None,
         Some("axum"),
         Some(handler_symbol),
     );
-    let _tool = graph.ensure_tool_node("helper.run", "helper.run", Some("rust"), Some("api"));
+    let _tool = graph.ensure_tool_node("helper.run", "helper.run", Some("rust"), Some("api"), None);
     let handler = graph
         .symbol_node(handler_symbol)
         .expect("fixture helper symbol");

@@ -201,10 +201,11 @@ fn default_search_and_query_subgraph_skip_route_tool_but_explicit_route_filter_f
         "helper",
         Some("rust"),
         Some("root"),
+        None,
         Some("axum"),
         Some(handler_symbol),
     );
-    let tool = graph.ensure_tool_node("helper.run", "helper", Some("rust"), Some("root"));
+    let tool = graph.ensure_tool_node("helper.run", "helper", Some("rust"), Some("root"), None);
     graph.add_handles_route_edge(route, handler, "axum-route-attr", Some(0.95));
     graph.add_fetches_edge(caller, route, "ts-fetch-literal", Some(0.75));
 
