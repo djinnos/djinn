@@ -1,20 +1,6 @@
 use super::*;
 
 impl CoordinatorActor {
-    /// Resolve the set of merge-gating (required) check contexts for a PR,
-    /// preferring GitHub's authoritative per-PR `isRequired` answer.
-    ///
-    /// Source precedence:
-    /// 1. GraphQL `required_check_contexts_for_pr` — reflects branch protection,
-    ///    **rulesets**, and the merge queue exactly as the PR-page "Required"
-    ///    badge does. An authoritative `Some(..)` (including an empty set) is
-    ///    used as-is: empty means nothing is required, so no failure blocks.
-    /// 2. Classic `list_required_status_checks` (branch-protection REST) — only
-    ///    when GraphQL is unreadable (no head commit / transport error). This
-    ///    returns 404→`None` for ruleset-only repos, which is the historical
-    ///    blind spot the GraphQL source closes.
-    /// 3. `None` — neither source could answer, so the caller falls back to the
-    ///    advisory-name heuristic in [`blocking_failed_checks`].
     pub(in crate::actors::coordinator) async fn resolve_required_contexts(
         &self,
         gh_client: &GitHubApiClient,
@@ -314,134 +300,38 @@ impl CoordinatorActor {
         self.delegated_to_github.remove(&task.id);
         self.conversations_resolved.remove(&task.id);
     }
-
-    /// Log a comment on the task with details about which CI checks failed,
-    /// including the actual job logs from GitHub so the worker can fix them.
-    ///
-    /// This comment becomes part of the activity log that the re-dispatched worker
-    /// reads in its system prompt, giving it context about what needs to be fixed.
-    #[allow(clippy::too_many_arguments)]
-    // The advisory list is informational context, not a rework driver; it
-    // rides along with the blocking-failure args rather than a bag struct.
-    #[allow(clippy::too_many_arguments)]
-    pub(in crate::actors::coordinator) async fn log_ci_failure_comment(
-        &self,
-        task_id: &str,
-        failed_checks: &[&CheckRun],
-        advisory_failed: &[&CheckRun],
-        pr_url: &str,
-        sha: &str,
-        gh_client: &GitHubApiClient,
-        owner: &str,
-        repo: &str,
-    ) {
-        // A PR's failures often span *multiple* workflow runs (e.g. a separate
-        // `CI` run and a `Release` run on the same SHA). Aggregating only the
-        // first run's jobs/steps drops the rest, so the worker fixes one and the
-        // others keep failing on the next push. Collect every distinct failing
-        // workflow run (bounded by `MAX_AGGREGATED_CI_RUNS`) and union their
-        // jobs into a single feedback comment.
-        let mut run_ids: Vec<u64> = Vec::new();
-        for cr in failed_checks {
-            if let Some(rid) = parse_actions_run_id(&cr.html_url)
-                && !run_ids.contains(&rid)
-            {
-                run_ids.push(rid);
-            }
-        }
-
-        let capped = run_ids.len() > MAX_AGGREGATED_CI_RUNS;
-        if capped {
-            tracing::warn!(
-                task_id,
-                total_failing_runs = run_ids.len(),
-                cap = MAX_AGGREGATED_CI_RUNS,
-                "PR poller: more failing workflow runs than the aggregation cap; \
-                 truncating CI-failure feedback to the first {MAX_AGGREGATED_CI_RUNS} runs"
-            );
-            run_ids.truncate(MAX_AGGREGATED_CI_RUNS);
-        }
-
-        // Fetch jobs for each run and union them, de-duping by job id so the same
-        // job reported under multiple check runs of one run isn't double-counted.
-        let mut all_jobs: Vec<ActionsJob> = Vec::new();
-        let mut seen_job_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        let mut any_fetched = false;
-        for rid in &run_ids {
-            if let Ok(jobs) = gh_client.list_run_jobs(owner, repo, *rid).await {
-                any_fetched = true;
-                for job in jobs {
-                    if seen_job_ids.insert(job.id) {
-                        all_jobs.push(job);
-                    }
-                }
-            }
-        }
-
-        // `None` means "no run jobs available at all" → fall back to listing
-        // raw check-run names. An empty-but-fetched list is still `Some`.
-        let jobs: Option<&[ActionsJob]> = if any_fetched { Some(&all_jobs) } else { None };
-
-        let (mut sections, ci_jobs) = build_ci_failure_sections(jobs, failed_checks);
-
-        if capped {
-            sections.push(format!(
-                "\n_Note: more than {MAX_AGGREGATED_CI_RUNS} workflow runs failed; \
-                 showing the first {MAX_AGGREGATED_CI_RUNS}. Re-run CI after fixing \
-                 these to surface any remaining failures._"
-            ));
-        }
-
-        if let Some(advisory) = advisory_checks_section(advisory_failed) {
-            sections.push(advisory);
-        }
-
-        sections.push(format!("\nPR: {pr_url}"));
-
-        let body = format!(
-            "**CI checks failed on PR** (commit `{sha}`)\n\n{sections}",
-            sha = &sha[..sha.len().min(12)],
-            sections = sections.join("\n"),
-        );
-
-        let payload = serde_json::json!({
-            "body": body,
-            "ci_jobs": ci_jobs,
-            "owner": owner,
-            "repo": repo,
-        })
-        .to_string();
-        let task_repo = self.task_repo();
-        if let Err(e) = task_repo
-            .log_activity(
-                Some(task_id),
-                "pr_poller",
-                "verification",
-                "comment",
-                &payload,
-            )
-            .await
-        {
-            tracing::warn!(
-                task_id,
-                error = %e,
-                "PR poller: failed to log CI failure comment"
-            );
-        }
-    }
 }
-
-/// Recognise the merge-queue 405 from a REST `PUT /pulls/{n}/merge` error.
-///
-/// GitHub returns `405 Method Not Allowed` with body
-/// `"Pull Request is in the merge queue."` when a queue-enabled repo
-/// receives a direct merge call for a PR the queue is already handling.
-/// We treat this as "GitHub is handling it" rather than a failure.
 pub(in crate::actors::coordinator) fn is_merge_queue_405(err: &anyhow::Error) -> bool {
     let msg = format!("{err}");
     msg.contains("405") && msg.contains("merge queue")
 }
 
+/// Recognise the "conversation must be resolved" 405 from a REST
+/// `PUT /pulls/{n}/merge` error.
+///
+/// When a repo enforces branch protection's "A conversation must be resolved
+/// before this pull request can be merged" rule and a PR has unresolved
+/// review threads, GitHub rejects the direct merge with:
+/// `405 Method Not Allowed: {"message":"Repository rule violations found\n\nA
+/// conversation must be resolved before this pull request can be merged.\n\n"}`.
+///
+/// This is neither the merge-queue 405 ([`is_merge_queue_405`]) nor a
+/// `mergeable == false` signal, so without this discriminator it falls into
+/// the generic "merge failed, retry" arm and loops forever. We match the real
+/// payload case-insensitively: a 405 that mentions a conversation needing
+/// resolution (also accepting the "Repository rule violations" + "conversation"
+
+/// Heuristic: is this check-run name an *advisory* (non-merge-gating) check?
+///
+/// Used only as a fallback when we couldn't read the branch's required-status-
+/// check contexts from branch protection (no protection configured, or the
+/// installation lacks the permission). Matches the common preview/deploy
+/// integrations whose failures cannot be fixed by a code diff (Vercel/Netlify
+/// deploy previews, preview-environment provisioning, etc.).
+///
+/// Matching is case-insensitive and substring-based so it catches the various
+/// per-app context names GitHub emits (e.g. `Vercel – acme-portal`,
+/// `PR Preview Environment Setup / setup-preview`).
 pub(in crate::actors::coordinator) fn is_advisory_check_name(name: &str) -> bool {
     let lower = name.to_lowercase();
     const ADVISORY_MARKERS: &[&str] = &[
@@ -488,6 +378,10 @@ pub(in crate::actors::coordinator) fn blocking_failed_checks<'a>(
     }
 }
 
+/// Parse a GitHub Actions workflow-run id out of a check-run's `html_url`.
+///
+/// URLs look like `https://github.com/{owner}/{repo}/actions/runs/{run_id}/...`.
+/// Returns `None` for URLs that don't carry a run id (e.g. non-Actions checks).
 pub(in crate::actors::coordinator) fn parse_actions_run_id(html_url: &str) -> Option<u64> {
     html_url
         .split("/actions/runs/")

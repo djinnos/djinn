@@ -1,70 +1,6 @@
 use super::*;
 
 impl CoordinatorActor {
-    /// Resolve every unresolved review thread on a PR via GraphQL.
-    ///
-    /// Idempotent: GitHub no-ops an already-resolved thread and it won't
-    /// reappear in the unresolved list, so repeated calls converge. Returns the
-    /// number of threads resolved this call, or `None` if the *listing* failed
-    /// (caller should retry next tick). `Some(0)` means there were no
-    /// unresolved threads to begin with.
-    ///
-    /// The caller decides WHEN this is appropriate. It is only ever invoked
-    /// when the PR is APPROVED: an explicit approval is the override signal that
-    /// the reviewer's inline comments are non-blocking. Shared by the direct
-    /// REST-merge 405 path and the GitHub-managed auto-merge observe path so
-    /// both enforce the same policy.
-    pub(in crate::actors::coordinator) async fn resolve_unresolved_conversations(
-        &self,
-        gh_client: &GitHubApiClient,
-        owner: &str,
-        repo: &str,
-        pull_number: u64,
-        task_short_id: &str,
-    ) -> Option<usize> {
-        let ids = match gh_client
-            .list_unresolved_review_thread_ids(owner, repo, pull_number)
-            .await
-        {
-            Ok(ids) => ids,
-            Err(e) => {
-                tracing::warn!(
-                    task_id = %task_short_id,
-                    pr = pull_number,
-                    error = %e,
-                    "PR poller: failed to list unresolved review threads"
-                );
-                return None;
-            }
-        };
-
-        let mut resolved = 0;
-        for tid in &ids {
-            match gh_client.resolve_review_thread(tid).await {
-                Ok(()) => resolved += 1,
-                Err(re) => tracing::warn!(
-                    task_id = %task_short_id,
-                    pr = pull_number,
-                    thread = %tid,
-                    error = %re,
-                    "PR poller: resolve_review_thread failed"
-                ),
-            }
-        }
-        Some(resolved)
-    }
-
-    /// Observe the merge-queue / auto-merge state for a PR we've delegated
-    /// to GitHub's auto-merge.
-    ///
-    /// Three outcomes:
-    /// - PR is queued or auto-merge is still waiting on conditions → log
-    ///   once at DEBUG, return. No API spend beyond the state fetch.
-    /// - Queue evicted the PR (`UNMERGEABLE` or a failure-flavored
-    ///   `DequeuedEvent`) → fetch dequeue diagnostics, attach as PR review
-    ///   feedback, transition the task with `PrCiFailed`.
-    /// - State fetch failed → log warn, retry next tick.
-    #[allow(clippy::too_many_arguments)]
     pub(in crate::actors::coordinator) async fn observe_auto_merge_state(
         &mut self,
         gh_client: &GitHubApiClient,
@@ -380,41 +316,81 @@ impl CoordinatorActor {
         self.delegated_to_github.remove(task_id);
     }
 
-    /// Clean-merge fast path: before flagging a `mergeable == false` PR for
-    /// ConflictRetry, try to resolve it MECHANICALLY (fetch fresh, ephemeral
-    /// merge of the target into the task branch, push the result to mirror +
-    /// GitHub) so the PR refreshes with zero agent involvement.
-    ///
-    /// Returns `true` when the merge landed cleanly and was pushed (the caller
-    /// must NOT set conflict metadata, NOT reopen — the PR is now mergeable).
-    /// Returns `false` for a real conflict OR any indeterminate failure — the
-    /// caller proceeds with its normal flag-and-reopen path. On a clean
-    /// auto-merge an `auto_merged_conflict` activity event is logged.
-    pub(in crate::actors::coordinator) async fn try_auto_merge_before_conflict(
-        &self,
+    pub(in crate::actors::coordinator) fn poll_auto_merge_fast_path(
+        &mut self,
         task_id: &str,
         task_short_id: &str,
         project_id: &str,
-    ) -> bool {
-        let Some(mirror) = self.mirror.as_ref() else {
-            return false;
-        };
+    ) -> AutoMergeFastPathState {
+        // No mirror configured (tests / off-server) → behave as the old
+        // synchronous `false`: skip the fast path, reopen immediately.
+        if self.mirror.is_none() {
+            return AutoMergeFastPathState::Reopen;
+        }
 
-        let project_repo = djinn_db::ProjectRepository::new(
-            self.db.clone(),
-            crate::events::event_bus_for(&self.events_tx),
-        );
+        // Consult+mutate the shared tracker atomically under one lock via the
+        // pure `decide_auto_merge_tick` seam: a completed entry is consumed and
+        // returned, an in-flight entry short-circuits (skip), and an absent entry
+        // is marked in-flight so a re-entrant tick (or the sibling draft/review
+        // callsite) can't double-spawn.
+        let decision = {
+            let mut guard = self.auto_merge_tracker.lock().unwrap();
+            decide_auto_merge_tick(&mut guard, task_id)
+        };
+        match decision {
+            AutoMergeTickDecision::Return(state) => return state,
+            AutoMergeTickDecision::Spawn => {}
+        }
+
+        // Spawn the heavy merge off the actor tick. It records its terminal state
+        // back into the tracker and clears the in-flight flag; the next tick
+        // consumes it via the match above.
+        let mirror = self.mirror.clone().expect("mirror checked Some above");
+        let db = self.db.clone();
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let tracker = self.auto_merge_tracker.clone();
+        let task_id = task_id.to_string();
+        let task_short_id = task_short_id.to_string();
+        let project_id = project_id.to_string();
+        tokio::spawn(async move {
+            let final_state = Self::run_auto_merge_fast_path(
+                &mirror,
+                &db,
+                &event_bus,
+                &task_id,
+                &task_short_id,
+                &project_id,
+            )
+            .await;
+            tracker.lock().unwrap().insert(task_id, final_state);
+        });
+
+        AutoMergeFastPathState::InFlight
+    }
+
+    /// The heavy, slot-free body of the clean-merge fast path — runs in a spawned
+    /// background task (NOT on the coordinator tick). Returns the terminal
+    /// [`AutoMergeFastPathState`] the poller consumes next tick. Takes only
+    /// `'static`-cloneable handles (mirror `Arc`, db, event bus) so it can detach.
+    pub(in crate::actors::coordinator) async fn run_auto_merge_fast_path(
+        mirror: &Arc<djinn_workspace::MirrorManager>,
+        db: &djinn_db::Database,
+        event_bus: &djinn_core::events::EventBus,
+        task_id: &str,
+        task_short_id: &str,
+        project_id: &str,
+    ) -> AutoMergeFastPathState {
+        let project_repo = djinn_db::ProjectRepository::new(db.clone(), event_bus.clone());
         let merge_target = match project_repo.get_config(project_id).await {
             Ok(Some(cfg)) => cfg.target_branch,
             _ => "main".to_string(),
         };
         let task_branch = format!("task/{task_short_id}");
 
-        let event_bus = crate::events::event_bus_for(&self.events_tx);
         let outcome = crate::task_merge::try_auto_merge_target_into_task_branch(
             mirror,
-            &self.db,
-            &event_bus,
+            db,
+            event_bus,
             project_id,
             task_short_id,
             &task_branch,
@@ -429,8 +405,8 @@ impl CoordinatorActor {
                     "task_branch": task_branch,
                 })
                 .to_string();
-                if let Err(e) = self
-                    .task_repo()
+                let task_repo = TaskRepository::new(db.clone(), event_bus.clone());
+                if let Err(e) = task_repo
                     .log_activity(
                         Some(task_id),
                         "coordinator",
@@ -449,12 +425,12 @@ impl CoordinatorActor {
                 tracing::info!(
                     task_id = %task_short_id,
                     merge_target = %merge_target,
-                    "PR poller: auto-merged {merge_target} into task branch; PR refreshed without agent dispatch"
+                    "PR poller: auto-merged {merge_target} into task branch (background); PR refreshed without agent dispatch"
                 );
-                true
+                AutoMergeFastPathState::Merged
             }
             crate::task_merge::AutoMergeOutcome::Conflicts
-            | crate::task_merge::AutoMergeOutcome::Indeterminate => false,
+            | crate::task_merge::AutoMergeOutcome::Indeterminate => AutoMergeFastPathState::Reopen,
         }
     }
 
@@ -525,247 +501,56 @@ impl CoordinatorActor {
             Err(_) => FALLBACK.to_string(),
         }
     }
+}
+/// What the PR poller should do with a `mergeable == false` task this tick,
+/// decided purely from the clean-merge fast-path tracker state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AutoMergeTickDecision {
+    /// Return this terminal/in-flight state to the caller without spawning.
+    Return(AutoMergeFastPathState),
+    /// No attempt recorded — the caller should spawn the background merge (the
+    /// entry has already been marked `InFlight` by this function).
+    Spawn,
+}
 
-    /// Reactive conflict auto-blocker: when `task`'s PR is flagged
-    /// `mergeable == false`, try to make it WAIT for the racing same-epic
-    /// sibling that is landing on main, instead of re-dispatching it straight
-    /// back into the moving-main loop.
-    ///
-    /// This runs ALONGSIDE the `PrConflict` reopen (it does not replace it).
-    /// The reopen already moves the task to `open`; this just adds a blocker
-    /// edge so the readiness gate holds it until the sibling merges
-    /// (`PrMerge` → `closed`), at which point re-dispatch branches from a main
-    /// that already contains the sibling's work.
-    ///
-    /// Conservative + graceful-degrading. An edge is added ONLY when attribution
-    /// is unambiguous (exactly one racing same-epic sibling). It falls back to
-    /// today's behaviour — no edge — when there are zero racing siblings (the
-    /// conflict is against already-merged main, nothing to wait on), more than
-    /// one candidate (ambiguous), the task has no epic, or adding the edge would
-    /// create a cycle (rejected by `update_blockers_atomic`'s cycle detection,
-    /// caught here and skipped). It never blocks on a closed/merged sibling and
-    /// never deadlocks.
-    pub(in crate::actors::coordinator) async fn add_conflict_blocker_for_sibling(
-        &self,
-        task: &Task,
-    ) {
-        let Some(epic_id) = task.epic_id.as_deref() else {
-            // No epic → no siblings to attribute the conflict to.
-            return;
-        };
-
-        let task_repo = self.task_repo();
-        let siblings = match task_repo.list_by_epic(epic_id).await {
-            Ok(siblings) => siblings,
-            Err(e) => {
-                tracing::warn!(
-                    task_id = %task.short_id,
-                    epic_id,
-                    error = %e,
-                    "PR poller: conflict auto-blocker: failed to list epic siblings; skipping (plain reopen only)"
-                );
-                return;
-            }
-        };
-
-        let Some(sibling_id) = pick_conflict_blocker_sibling(&task.id, &siblings) else {
-            // Zero or >1 racing siblings → ambiguous / nothing to wait on.
-            // Fall back to plain reopen (no edge).
-            let racing = siblings
-                .iter()
-                .filter(|s| s.id != task.id && is_racing_unmerged_status(&s.status))
-                .count();
-            tracing::info!(
-                task_id = %task.short_id,
-                epic_id,
-                racing_sibling_count = racing,
-                "PR poller: conflict auto-blocker: not exactly one racing same-epic sibling → plain reopen, no blocker added"
-            );
-            return;
-        };
-
-        match task_repo
-            .update_blockers_atomic(&task.id, std::slice::from_ref(&sibling_id), &[])
-            .await
-        {
-            Ok(()) => {
-                let blocked_on_short = siblings
-                    .iter()
-                    .find(|s| s.id == sibling_id)
-                    .map(|s| s.short_id.as_str())
-                    .unwrap_or("?");
-                tracing::info!(
-                    task_id = %task.short_id,
-                    epic_id,
-                    blocked_on = blocked_on_short,
-                    "PR poller: conflict auto-blocker: added blocker on racing same-epic sibling; task will wait for it to merge before re-dispatch"
-                );
-            }
-            Err(e) => {
-                // Cycle (or any other DB error) → graceful degradation: the
-                // task already reopened via PrConflict; we simply skip the edge.
-                tracing::info!(
-                    task_id = %task.short_id,
-                    epic_id,
-                    error = %e,
-                    "PR poller: conflict auto-blocker: could not add edge (likely a cycle) → plain reopen, no blocker added"
-                );
-            }
+/// Pure state-machine seam for the offloaded clean-merge fast path. Given the
+/// shared tracker and a task id, decide-and-mutate atomically (the caller holds
+/// the lock):
+///
+/// - `InFlight` present → `Return(InFlight)` (skip this tick; a merge is running —
+///   this is the guard that stops repeated ticks over a slow merge from
+///   double-firing the heavy git work or double-dispatching the task).
+/// - `Merged`/`Reopen` present → consume (remove) it and `Return` it (the next
+///   conflict on the same task re-arms a fresh attempt).
+/// - absent → mark `InFlight` and return `Spawn` (first attempt this cycle).
+///
+/// Kept free + pure so the guard contract is unit-testable without a DB, mirror,
+/// or actor.
+pub(crate) fn decide_auto_merge_tick(
+    tracker: &mut std::collections::HashMap<String, AutoMergeFastPathState>,
+    task_id: &str,
+) -> AutoMergeTickDecision {
+    match tracker.get(task_id).cloned() {
+        Some(AutoMergeFastPathState::InFlight) => {
+            AutoMergeTickDecision::Return(AutoMergeFastPathState::InFlight)
         }
-    }
-
-    /// Resolve a user identity + live GitHub session that can act as an
-    /// auto-approver for the given task's PR.
-    ///
-    /// Resolution rule:
-    ///   * If the task HAS a `created_by_user_id` (a human owns it), the
-    ///     approval is governed **solely** by that owner's setting. We use
-    ///     them only if they have `auto_approve_prs = true` and a live
-    ///     session; otherwise we return `None` and the PR waits for a
-    ///     manual approval. We do NOT fall back to another user — approving
-    ///     someone else's task with your own toggle is exactly the
-    ///     multi-user leak this guards against (an admin with auto-approve
-    ///     on must not silently approve other devs' PRs).
-    ///   * Only when `created_by_user_id` is NULL (background-agent-spawned
-    ///     tasks — Planner / Architect / auto-breakdown output that no human
-    ///     owns) do we fall back to any user with `auto_approve_prs = true`
-    ///     and a non-expired session, most-recently-updated first, so those
-    ///     PRs don't sit in `pr_review` forever.
-    ///
-    /// Returns `None` when the resolved owner hasn't opted in / has no live
-    /// session, or (for unattributed tasks) when nobody opted in. Logs the
-    /// outcome at debug for visibility.
-    pub(in crate::actors::coordinator) async fn find_auto_approver_session(
-        &self,
-        task_id: &str,
-        task_short_id: &str,
-    ) -> Option<(String, djinn_db::UserAuthSessionRecord)> {
-        let us_repo = UserSettingsRepository::new(self.db.clone());
-        let sa_repo = SessionAuthRepository::new(self.db.clone());
-
-        // If the task has a human owner, the decision is governed *solely*
-        // by that owner's setting — never fall back to another user.
-        if let Some(user_id) = self.task_created_by_user_id(task_id).await {
-            let toggle = match us_repo.get_or_default(&user_id).await {
-                Ok(s) => s.auto_approve_prs,
-                Err(e) => {
-                    tracing::warn!(
-                        task_id = %task_short_id,
-                        user_id = %user_id,
-                        error = %e,
-                        "PR poller: user_settings read failed for task owner; leaving PR for manual approval"
-                    );
-                    return None;
-                }
-            };
-            if !toggle {
-                tracing::debug!(
-                    task_id = %task_short_id,
-                    user_id = %user_id,
-                    "PR poller: task owner has not opted into auto-approval; leaving PR for manual approval"
-                );
-                return None;
-            }
-            match sa_repo.latest_token_for_user(&user_id).await {
-                Ok(Some(session)) => return Some((user_id, session)),
-                Ok(None) => {
-                    tracing::debug!(
-                        task_id = %task_short_id,
-                        user_id = %user_id,
-                        "PR poller: task owner opted in but has no live session; leaving PR for manual approval"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        task_id = %task_short_id,
-                        user_id = %user_id,
-                        error = %e,
-                        "PR poller: session lookup failed for task owner; leaving PR for manual approval"
-                    );
-                }
-            }
-            return None;
+        Some(state @ (AutoMergeFastPathState::Merged | AutoMergeFastPathState::Reopen)) => {
+            tracker.remove(task_id);
+            AutoMergeTickDecision::Return(state)
         }
-
-        // Unattributed task (created_by_user_id IS NULL — background-agent
-        // output). Fall back to any opted-in user with a live session.
-        let candidates = match us_repo.list_users_with_auto_approve().await {
-            Ok(ids) => ids,
-            Err(e) => {
-                tracing::warn!(
-                    task_id = %task_short_id,
-                    error = %e,
-                    "PR poller: list_users_with_auto_approve failed; skipping fallback approver"
-                );
-                return None;
-            }
-        };
-        for uid in candidates {
-            match sa_repo.latest_token_for_user(&uid).await {
-                Ok(Some(session)) => {
-                    tracing::debug!(
-                        task_id = %task_short_id,
-                        user_id = %uid,
-                        "PR poller: selected fallback auto-approver"
-                    );
-                    return Some((uid, session));
-                }
-                Ok(None) => continue,
-                Err(e) => {
-                    tracing::warn!(
-                        task_id = %task_short_id,
-                        user_id = %uid,
-                        error = %e,
-                        "PR poller: session lookup failed for fallback approver candidate"
-                    );
-                }
-            }
-        }
-
-        tracing::debug!(
-            task_id = %task_short_id,
-            "PR poller: no eligible auto-approver (nobody opted in with a live session)"
-        );
-        None
-    }
-
-    /// Side-query for the task's `created_by_user_id` column. The `Task`
-    /// model deliberately does not expose this column (added by migration 3
-    /// for attribution; only repositories and the auto-approve path need it),
-    /// so the auto-approve branch reads it directly here. Returns `None` for
-    /// background-agent-created tasks (column is NULL) or on DB error.
-    pub(in crate::actors::coordinator) async fn task_created_by_user_id(
-        &self,
-        task_id: &str,
-    ) -> Option<String> {
-        match sqlx::query_scalar!(
-            "SELECT created_by_user_id FROM tasks WHERE id = $1",
-            task_id,
-        )
-        .fetch_optional(self.db.pool())
-        .await
-        {
-            Ok(Some(opt)) => opt,
-            Ok(None) => None,
-            Err(e) => {
-                tracing::warn!(
-                    task_id = %task_id,
-                    error = %e,
-                    "PR poller: failed to read created_by_user_id; treating as unattributed"
-                );
-                None
-            }
+        None => {
+            tracker.insert(task_id.to_string(), AutoMergeFastPathState::InFlight);
+            AutoMergeTickDecision::Spawn
         }
     }
 }
 
-pub(in crate::actors::coordinator) fn should_auto_resolve_conversations(
-    has_approved: bool,
-    merge_state_status: Option<&str>,
-    already_resolved_this_sha: bool,
-) -> bool {
-    has_approved && merge_state_status == Some("BLOCKED") && !already_resolved_this_sha
-}
+/// Recognise the merge-queue 405 from a REST `PUT /pulls/{n}/merge` error.
+///
+/// GitHub returns `405 Method Not Allowed` with body
+/// `"Pull Request is in the merge queue."` when a queue-enabled repo
+/// receives a direct merge call for a PR the queue is already handling.
+/// We treat this as "GitHub is handling it" rather than a failure.
 
 /// Determine if a `DequeuedEvent.reason` indicates a real failure that
 /// should kick the task back into the worker loop.

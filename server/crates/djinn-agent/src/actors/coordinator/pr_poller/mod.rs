@@ -1,5 +1,5 @@
 use djinn_core::models::{Task, TransitionAction};
-use djinn_db::{ActivityQuery, SessionAuthRepository, UserSettingsRepository};
+use djinn_db::{ActivityQuery, SessionAuthRepository, TaskRepository, UserSettingsRepository};
 use djinn_provider::github_api::{
     ActionsJob, CheckRun, DbBackedRefresher, GitHubApiClient, MergeMethod, PrReview,
     PrReviewFeedback, PrState, PullRequest, UserTokenExpired,
@@ -61,25 +61,30 @@ mod conversation_resolution;
 mod installation;
 mod pr_commands;
 mod pr_review_handlers;
+mod pr_review_watcher;
 mod pr_watcher;
 mod state;
 
 #[cfg(test)]
 mod tests;
 
-pub(in crate::actors::coordinator) use ci_helpers::{blocking_failed_checks, is_merge_queue_405};
-pub(in crate::actors::coordinator) use conversation_resolution::is_conversation_resolution_block;
-pub(in crate::actors::coordinator) use installation::resolve_installation_client;
-pub(in crate::actors::coordinator) use pr_commands::enable_auto_merge_best_effort;
-pub(crate) use pr_review_handlers::parse_pr_url;
-pub(in crate::actors::coordinator) use pr_review_handlers::{
-    effective_review_decision, is_racing_unmerged_status, pick_conflict_blocker_sibling,
-};
-
-#[cfg(test)]
 use ci_helpers::{
-    advisory_checks_section, build_ci_failure_sections, is_advisory_check_name,
+    advisory_checks_section, blocking_failed_checks, build_ci_failure_sections, is_merge_queue_405,
     parse_actions_run_id,
 };
+use conversation_resolution::{
+    is_conversation_resolution_block, should_auto_resolve_conversations,
+};
+use installation::resolve_installation_client;
+use pr_commands::enable_auto_merge_best_effort;
+#[allow(unused_imports)]
+pub(crate) use pr_commands::{AutoMergeTickDecision, decide_auto_merge_tick};
+use pr_review_handlers::effective_review_decision;
+pub(crate) use pr_review_handlers::parse_pr_url;
+
 #[cfg(test)]
-use pr_commands::{dequeue_reason_is_failure, should_auto_resolve_conversations};
+use ci_helpers::{is_advisory_check_name, is_failing_conclusion};
+#[cfg(test)]
+use pr_commands::dequeue_reason_is_failure;
+#[cfg(test)]
+use pr_review_handlers::is_racing_unmerged_status;

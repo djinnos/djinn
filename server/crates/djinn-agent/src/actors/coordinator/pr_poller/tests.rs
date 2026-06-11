@@ -1,11 +1,102 @@
 use super::{
-    Task, advisory_checks_section, blocking_failed_checks, build_ci_failure_sections,
+    AutoMergeFastPathState, AutoMergeTickDecision, Task, advisory_checks_section,
+    blocking_failed_checks, build_ci_failure_sections, decide_auto_merge_tick,
     dequeue_reason_is_failure, effective_review_decision, is_advisory_check_name,
     is_conversation_resolution_block, is_merge_queue_405, is_racing_unmerged_status,
     parse_actions_run_id, parse_pr_url, pick_conflict_blocker_sibling,
     should_auto_resolve_conversations,
 };
 use djinn_provider::github_api::{ActionsJob, ActionsJobStep, CheckRun, GitHubUser, PrReview};
+use std::collections::HashMap;
+
+// ── Offloaded clean-merge fast-path guard ─────────────────────────────────
+
+#[test]
+fn auto_merge_first_tick_spawns_and_marks_inflight() {
+    // No tracker entry → spawn the background merge and mark in-flight so the
+    // heavy git work runs off the actor tick.
+    let mut tracker: HashMap<String, AutoMergeFastPathState> = HashMap::new();
+    let decision = decide_auto_merge_tick(&mut tracker, "task-1");
+    assert_eq!(decision, AutoMergeTickDecision::Spawn);
+    assert_eq!(
+        tracker.get("task-1"),
+        Some(&AutoMergeFastPathState::InFlight),
+        "first tick must mark the task in-flight"
+    );
+}
+
+#[test]
+fn auto_merge_inflight_tick_skips_without_respawn() {
+    // The guard: while a merge is in flight, repeated ticks must NOT spawn a
+    // second background merge or double-dispatch — they just skip the task.
+    let mut tracker: HashMap<String, AutoMergeFastPathState> = HashMap::new();
+    tracker.insert("task-1".into(), AutoMergeFastPathState::InFlight);
+    let decision = decide_auto_merge_tick(&mut tracker, "task-1");
+    assert_eq!(
+        decision,
+        AutoMergeTickDecision::Return(AutoMergeFastPathState::InFlight),
+        "an in-flight task must be skipped, never re-spawned"
+    );
+    // Still exactly one entry, still in-flight.
+    assert_eq!(tracker.len(), 1);
+    assert_eq!(
+        tracker.get("task-1"),
+        Some(&AutoMergeFastPathState::InFlight)
+    );
+}
+
+#[test]
+fn auto_merge_completed_states_are_consumed() {
+    // A completed background attempt (Merged or Reopen) is returned to the
+    // poller AND removed, so the next conflict on the same task re-arms a
+    // fresh attempt (next tick will Spawn again).
+    for state in [
+        AutoMergeFastPathState::Merged,
+        AutoMergeFastPathState::Reopen,
+    ] {
+        let mut tracker: HashMap<String, AutoMergeFastPathState> = HashMap::new();
+        tracker.insert("task-1".into(), state.clone());
+        let decision = decide_auto_merge_tick(&mut tracker, "task-1");
+        assert_eq!(decision, AutoMergeTickDecision::Return(state));
+        assert!(
+            tracker.get("task-1").is_none(),
+            "completed state must be consumed so a later conflict re-arms"
+        );
+        // The very next tick (still mergeable==false) re-arms a fresh attempt.
+        let next = decide_auto_merge_tick(&mut tracker, "task-1");
+        assert_eq!(next, AutoMergeTickDecision::Spawn);
+    }
+}
+
+#[test]
+fn auto_merge_full_cycle_inflight_then_reopen_then_respawn() {
+    // End-to-end guard walk for one conflicting PR: spawn → (background still
+    // running) skip → background records Reopen → poller consumes Reopen
+    // (falls through to reopen) → a fresh conflict re-arms.
+    let mut tracker: HashMap<String, AutoMergeFastPathState> = HashMap::new();
+
+    // Tick 1: first sight of the conflict → spawn.
+    assert_eq!(
+        decide_auto_merge_tick(&mut tracker, "t"),
+        AutoMergeTickDecision::Spawn
+    );
+
+    // Tick 2: merge still running → skip, no second spawn.
+    assert_eq!(
+        decide_auto_merge_tick(&mut tracker, "t"),
+        AutoMergeTickDecision::Return(AutoMergeFastPathState::InFlight)
+    );
+
+    // Background task finishes with a real conflict.
+    tracker.insert("t".into(), AutoMergeFastPathState::Reopen);
+
+    // Tick 3: consume Reopen → poller proceeds to its flag-and-reopen flow.
+    assert_eq!(
+        decide_auto_merge_tick(&mut tracker, "t"),
+        AutoMergeTickDecision::Return(AutoMergeFastPathState::Reopen)
+    );
+    assert!(tracker.is_empty());
+}
 
 /// Minimal `PrReview` builder for the effective-decision tests.
 fn review(author: &str, state: &str, submitted_at: &str) -> PrReview {

@@ -593,7 +593,26 @@ impl TaskRunSupervisor {
                 // in the target status, which is `InvalidTransition` on
                 // the second call but functionally idempotent.
                 let pre_stage_action: Option<&'static str> = match role_kind {
-                    RoleKind::Worker => Some("start"),
+                    // The Worker enters from one of two source states depending
+                    // on the flow: a fresh/reopened task is `open` (walk
+                    // `start`), but a `ReviewResponse` redo re-enters from
+                    // `needs_task_review` (the worker already submitted once and
+                    // its branch wasn't durable, so the host routed a redo rather
+                    // than a reviewer-only resume). `start` is legal ONLY from
+                    // `open`, so on the redo it no-op'd and the task stayed at
+                    // `needs_task_review` — the post-worker `submit_verification`
+                    // (legal only from `in_progress`) then also no-op'd and
+                    // verification was skipped before review (task u4fx). Walk
+                    // `resume_worker` (needs_task_review → in_progress) on the
+                    // redo so `submit_verification` succeeds, exactly like the
+                    // NewTask path.
+                    RoleKind::Worker => {
+                        if matches!(spec.flow, SupervisorFlow::ReviewResponse) {
+                            Some("resume_worker")
+                        } else {
+                            Some("start")
+                        }
+                    }
                     RoleKind::Reviewer => Some("task_review_start"),
                     // Planner grooms open planning/review tasks. Move them
                     // open → in_progress so (a) the host coordinator stops
