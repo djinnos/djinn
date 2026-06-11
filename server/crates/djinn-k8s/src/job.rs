@@ -457,17 +457,18 @@ fn build_task_run_env(
     env.push(env_var("GIT_CONFIG_KEY_0", "safe.directory"));
     env.push(env_var("GIT_CONFIG_VALUE_0", "*"));
 
-    env.extend(cache_env_vars(project_id));
+    env.extend(task_run_cache_env_vars(project_id, task_run_id_str));
     env
 }
 
-/// Runtime env vars routing the Rust toolchain caches to the persistent
-/// `/cache` PVC, shared by BOTH the task-run Pod (`build_task_run_env`) and the
-/// warm Pod (`warm_job::build_warm_job`) so the warmer primes exactly the
-/// per-project dirs the task-runs reuse. Single-sourced here on purpose: the DB
-/// env once drifted because the task-run path was updated and the warm path was
-/// missed (see the comment in warm_job.rs) — keeping cache routing in one place
-/// makes that class of drift impossible.
+/// Runtime env vars routing the shared Rust toolchain caches to the persistent
+/// `/cache` PVC. Warm/verification Pods use the per-project base target dir via
+/// `cache_env_vars`; task-run Pods use `task_run_cache_env_vars` so their
+/// writable target dir is private per task run while still sharing registry and
+/// sccache settings. The common cache routing stays single-sourced here on
+/// purpose: the DB env once drifted because the task-run path was updated and
+/// the warm path was missed (see the comment in warm_job.rs) — keeping shared
+/// cache routing in one place makes that class of drift less likely.
 ///
 /// Set at RUNTIME, not as image ENV, on purpose: the image must keep CARGO_HOME
 /// at the baked /usr/local/cargo so install-rust.sh's cargo/rustc proxies stay
@@ -482,11 +483,11 @@ fn build_task_run_env(
 ///   crate@version, so it is safe to SHARE across projects (like Go's module
 ///   cache) — common crates download once. (Image default /usr/local/cargo is
 ///   an image layer that loses runtime-downloaded crates when the Pod dies.)
-/// - CARGO_TARGET_DIR: compiled artifacts are workspace-specific, so they are
-///   namespaced per project. cargo flocks the target dir, so two concurrent
-///   runs on the SAME project serialize on the build lock (correct — no
-///   corruption); different projects use different dirs and build in parallel.
-///   (Default is <workspace>/target inside the ephemeral clone — also lost.)
+/// - CARGO_TARGET_DIR: compiled artifacts are workspace-specific. The shared
+///   warm/verification base is namespaced per project; task-runs get a
+///   deterministic private dir under `/cache/cargo-target-runs/<task_run_id>` so
+///   they never write the shared base directly. (Default is <workspace>/target
+///   inside the ephemeral clone — also lost.)
 /// - SCCACHE_DIR: repos routinely pin `rustc-wrapper = "sccache"` in
 ///   .cargo/config.toml (e.g. the platform repo, which also sets
 ///   CARGO_INCREMENTAL=0 as sccache requires), so cargo invokes sccache
@@ -498,13 +499,9 @@ fn build_task_run_env(
 ///   multiple concurrent server processes sharing one directory, and Pods share
 ///   the /cache PVC, so a single /cache/sccache would risk multi-writer
 ///   corruption across projects.
-pub(crate) fn cache_env_vars(project_id: &str) -> Vec<EnvVar> {
+fn common_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
     vec![
         env_var("CARGO_HOME", &format!("{CACHE_MOUNT_DIR}/cargo")),
-        env_var(
-            "CARGO_TARGET_DIR",
-            &format!("{CACHE_MOUNT_DIR}/cargo-target/{project_id}"),
-        ),
         env_var(
             "SCCACHE_DIR",
             &format!("{CACHE_MOUNT_DIR}/sccache/{project_id}"),
@@ -520,6 +517,28 @@ pub(crate) fn cache_env_vars(project_id: &str) -> Vec<EnvVar> {
         // because it never sources cache_env_vars.
         env_var("SQLX_OFFLINE", "true"),
     ]
+}
+
+/// Cache env vars for warm/verification Pods that own the shared per-project
+/// target base.
+pub(crate) fn cache_env_vars(project_id: &str) -> Vec<EnvVar> {
+    let mut env = common_cache_env_vars(project_id);
+    env.push(env_var(
+        "CARGO_TARGET_DIR",
+        &format!("{CACHE_MOUNT_DIR}/cargo-target/{project_id}"),
+    ));
+    env
+}
+
+/// Cache env vars for task-run Pods. The target dir is private to the task run;
+/// shared cache settings remain identical to warm/verification Pods.
+fn task_run_cache_env_vars(project_id: &str, task_run_id: &str) -> Vec<EnvVar> {
+    let mut env = common_cache_env_vars(project_id);
+    env.push(env_var(
+        "CARGO_TARGET_DIR",
+        &format!("{CACHE_MOUNT_DIR}/cargo-target-runs/{task_run_id}"),
+    ));
+    env
 }
 
 fn env_var(name: &str, value: &str) -> EnvVar {
@@ -912,14 +931,16 @@ mod tests {
     /// Cargo caches must be routed to the persistent /cache PVC so Rust
     /// task-runs don't recompile the whole dependency graph cold every time.
     /// CARGO_HOME is shared (content-addressed registry); CARGO_TARGET_DIR is
-    /// namespaced per project so different workspaces don't collide.
+    /// private per task run so task-run Pods never write the shared warm base.
     #[test]
-    fn routes_cargo_caches_to_cache_pvc_per_project() {
+    fn routes_cargo_caches_to_private_task_run_target_dir() {
         let cfg = KubernetesConfig::for_testing();
+        let task_run_id = Uuid::now_v7();
+        let expected_target_dir = format!("/cache/cargo-target-runs/{task_run_id}");
 
         let job = build_task_run_job(
             &cfg,
-            &Uuid::now_v7(),
+            &task_run_id,
             "proj-xyz",
             "djinn-taskrun-test",
             "registry.example:5000/djinn-project-p:abc123def456",
@@ -942,8 +963,8 @@ mod tests {
         assert_eq!(envs.get("CARGO_HOME").copied(), Some("/cache/cargo"));
         assert_eq!(
             envs.get("CARGO_TARGET_DIR").copied(),
-            Some("/cache/cargo-target/proj-xyz"),
-            "target dir must be namespaced per project to avoid cross-workspace collisions"
+            Some(expected_target_dir.as_str()),
+            "task-run target dir must be private so task-runs never write the shared warm base"
         );
         assert_eq!(
             envs.get("SCCACHE_DIR").copied(),
