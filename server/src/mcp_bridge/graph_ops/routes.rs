@@ -199,15 +199,15 @@ fn route_matches(
     }
 
     let (route_method, route_path) = split_route_id(&rid);
-    if let Some(method) = non_empty(method) {
-        if route_method.as_deref() != Some(&method.to_ascii_uppercase()) {
-            return false;
-        }
+    if let Some(method) = non_empty(method)
+        && route_method.as_deref() != Some(&method.to_ascii_uppercase())
+    {
+        return false;
     }
-    if let Some(path) = non_empty(path) {
-        if route_path.as_deref() != Some(path) {
-            return false;
-        }
+    if let Some(path) = non_empty(path)
+        && route_path.as_deref() != Some(path)
+    {
+        return false;
     }
     if let Some(glob) = non_empty(path_glob) {
         return route_path
@@ -469,10 +469,10 @@ fn drift_for_consumer(
 
 fn extract_shape(node: &RepoGraphNode, include_optional: bool) -> BTreeMap<String, ShapeField> {
     let mut fields = BTreeMap::new();
-    if let Some(parts) = &node.signature_parts {
-        if let Some(ret) = &parts.return_type {
-            merge_shape_text(&mut fields, ret, include_optional);
-        }
+    if let Some(parts) = &node.signature_parts
+        && let Some(ret) = &parts.return_type
+    {
+        merge_shape_text(&mut fields, ret, include_optional);
     }
     if let Some(sig) = &node.signature {
         merge_shape_text(&mut fields, sig, include_optional);
@@ -627,18 +627,18 @@ fn glob_match(pattern: &str, value: &str) -> bool {
     let mut parts = pattern.split('*').peekable();
     let anchored_start = !pattern.starts_with('*');
     let anchored_end = !pattern.ends_with('*');
-    if let Some(first) = parts.next() {
-        if !first.is_empty() {
-            if anchored_start {
-                let Some(stripped) = rest.strip_prefix(first) else {
-                    return false;
-                };
-                rest = stripped;
-            } else if let Some(pos) = rest.find(first) {
-                rest = &rest[pos + first.len()..];
-            } else {
+    if let Some(first) = parts.next()
+        && !first.is_empty()
+    {
+        if anchored_start {
+            let Some(stripped) = rest.strip_prefix(first) else {
                 return false;
-            }
+            };
+            rest = stripped;
+        } else if let Some(pos) = rest.find(first) {
+            rest = &rest[pos + first.len()..];
+        } else {
+            return false;
         }
     }
     let mut last = "";
