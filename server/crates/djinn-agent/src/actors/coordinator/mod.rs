@@ -47,7 +47,9 @@ mod wave;
 
 // Re-export public types so the external API is unchanged.
 pub use handle::CoordinatorHandle;
-pub use types::{CoordinatorDeps, CoordinatorError, CoordinatorStatus, VerificationTracker};
+pub use types::{
+    AutoMergeTracker, CoordinatorDeps, CoordinatorError, CoordinatorStatus, VerificationTracker,
+};
 
 // Re-export internal types for sibling submodules that use `use super::*;`.
 use actor::CoordinatorActor;
@@ -381,6 +383,7 @@ mod tests {
             dispatch_cooldowns: HashMap::new(),
             dispatch_failure_streak: HashMap::new(),
             verification_tracker: VerificationTracker::default(),
+            auto_merge_tracker: AutoMergeTracker::default(),
             consolidation_runner: Arc::new(consolidation::DbConsolidationRunner::new(db.clone())),
             last_stale_sweep: StdInstant::now(),
             last_auto_dispatch_sweep: StdInstant::now(),

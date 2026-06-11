@@ -172,9 +172,30 @@ pub(crate) async fn run_supervisor_dispatch(
     let worker_output_durable = matches!(base_flow, SupervisorFlow::ReviewResponse)
         && match app_state.mirror.as_ref() {
             Some(mirror) => {
-                mirror
-                    .branch_ahead_of_base(&task.project_id, &task_branch, &base_branch)
-                    .await
+                // This runs in the dispatch path. The durability probe is a few
+                // git subprocesses against the mirror (read-only, no lock), but a
+                // wedged git op (a locked / huge mirror) would otherwise stall the
+                // dispatch pass — and with multiple ReviewResponse candidates per
+                // pass that latency is sequential. Bound it: a timeout (or any
+                // probe failure) conservatively yields `false`, i.e. keep the full
+                // worker redo rather than risk skipping it on a stale read.
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    mirror.branch_ahead_of_base(&task.project_id, &task_branch, &base_branch),
+                )
+                .await
+                {
+                    Ok(durable) => durable,
+                    Err(_) => {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            branch = %task_branch,
+                            "supervisor dispatch: branch_ahead_of_base durability probe timed out \
+                             (>10s); keeping full worker redo (ReviewResponse)"
+                        );
+                        false
+                    }
+                }
             }
             None => false,
         };

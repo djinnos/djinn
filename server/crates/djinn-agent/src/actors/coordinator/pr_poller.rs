@@ -1,5 +1,5 @@
 use djinn_core::models::{Task, TransitionAction};
-use djinn_db::{ActivityQuery, SessionAuthRepository, UserSettingsRepository};
+use djinn_db::{ActivityQuery, SessionAuthRepository, TaskRepository, UserSettingsRepository};
 use djinn_provider::github_api::{
     ActionsJob, CheckRun, DbBackedRefresher, GitHubApiClient, MergeMethod, PrReview,
     PrReviewFeedback, PrState, PullRequest, UserTokenExpired,
@@ -264,17 +264,23 @@ impl CoordinatorActor {
 
             // CI passed (or no CI configured). Check for merge conflicts before undrafting.
             if pr.mergeable == Some(false) {
-                // Clean-merge fast path: try to resolve the conflict
-                // mechanically (merge target → task branch, push) before
-                // dispatching any agent. On success the PR refreshes and we
-                // skip the reopen entirely.
-                if self
-                    .try_auto_merge_before_conflict(&task.id, &task.short_id, &task.project_id)
-                    .await
-                {
-                    self.pr_status_cache.remove(&task.id);
-                    self.pr_draft_first_seen.remove(&task.id);
-                    continue;
+                // Clean-merge fast path (offloaded): try to resolve the conflict
+                // mechanically (merge target → task branch, push) in a background
+                // task before dispatching any agent. `Merged` → the PR refreshes
+                // and we skip the reopen; `InFlight` → skip this tick and
+                // re-evaluate next tick (the heavy merge must not block the
+                // coordinator); `Reopen` → fall through to the agent rework flow.
+                match self.poll_auto_merge_fast_path(&task.id, &task.short_id, &task.project_id) {
+                    AutoMergeFastPathState::Merged => {
+                        self.pr_status_cache.remove(&task.id);
+                        self.pr_draft_first_seen.remove(&task.id);
+                        continue;
+                    }
+                    AutoMergeFastPathState::InFlight => {
+                        // Background merge running — don't reopen, don't double-fire.
+                        continue;
+                    }
+                    AutoMergeFastPathState::Reopen => {}
                 }
                 tracing::info!(
                     task_id = %task.short_id,
@@ -651,19 +657,21 @@ impl CoordinatorActor {
             // No changes requested, CI is green. Check if mergeable and approved.
 
             if pr.mergeable == Some(false) {
-                // Clean-merge fast path: try to resolve the conflict
-                // mechanically (merge target → task branch, push) before
-                // dispatching any agent. On success the PR refreshes and we
-                // skip the reopen entirely.
-                if self
-                    .try_auto_merge_before_conflict(&task.id, &task.short_id, &task.project_id)
-                    .await
-                {
-                    self.pr_status_cache.remove(&task.id);
-                    self.merge_fail_count.remove(&task.id);
-                    self.delegated_to_github.remove(&task.id);
-                    self.conversations_resolved.remove(&task.id);
-                    continue;
+                // Clean-merge fast path (offloaded): try to resolve the conflict
+                // mechanically in a background task before dispatching any agent.
+                // `Merged` → PR refreshed, skip reopen; `InFlight` → skip this
+                // tick (heavy merge must not block the coordinator); `Reopen` →
+                // fall through to the agent rework flow.
+                match self.poll_auto_merge_fast_path(&task.id, &task.short_id, &task.project_id) {
+                    AutoMergeFastPathState::Merged => {
+                        self.pr_status_cache.remove(&task.id);
+                        self.merge_fail_count.remove(&task.id);
+                        self.delegated_to_github.remove(&task.id);
+                        self.conversations_resolved.remove(&task.id);
+                        continue;
+                    }
+                    AutoMergeFastPathState::InFlight => continue,
+                    AutoMergeFastPathState::Reopen => {}
                 }
                 tracing::info!(
                     task_id = %task.short_id,
@@ -756,16 +764,23 @@ impl CoordinatorActor {
                             task_id = %task.short_id,
                             pr = pull_number,
                             error = %e,
-                            "PR poller: update-branch failed — falling back to local mechanical merge"
+                            "PR poller: update-branch failed — falling back to local mechanical merge (background)"
                         );
-                        if self
-                            .try_auto_merge_before_conflict(
+                        // Offloaded fallback: a clean background merge bumps the
+                        // head exactly as update-branch would have. On `Merged`
+                        // clear the per-SHA caches; `InFlight`/`Reopen` just wait
+                        // for the next tick (a real conflict surfaces as `dirty`
+                        // and the conflict path takes over then). Either way the
+                        // PR can no longer sit `behind` forever, and the merge no
+                        // longer blocks the tick.
+                        if matches!(
+                            self.poll_auto_merge_fast_path(
                                 &task.id,
                                 &task.short_id,
                                 &task.project_id,
-                            )
-                            .await
-                        {
+                            ),
+                            AutoMergeFastPathState::Merged
+                        ) {
                             self.pr_status_cache.remove(&task.id);
                             self.merge_fail_count.remove(&task.id);
                             self.delegated_to_github.remove(&task.id);
@@ -2155,6 +2170,16 @@ impl CoordinatorActor {
             );
             return;
         }
+        // Drop any clean-merge fast-path tracker entry for a now-terminal task,
+        // so a background merge that finished after the PR closed doesn't leave a
+        // dangling `Merged`/`Reopen` entry that is never consumed. Bounded leak
+        // either way (entries are consumed on read), but kept tidy here.
+        if matches!(
+            cleanup_action,
+            TransitionAction::PrMerge | TransitionAction::ForceClose
+        ) {
+            self.auto_merge_tracker.lock().unwrap().remove(task_id);
+        }
         // Branch hygiene: once the task is closed (merged or force-closed via
         // any pr_poller path), delete the task branch on both the local mirror
         // and the GitHub remote.  Without this, stale `task/<short_id>` refs
@@ -2179,36 +2204,103 @@ impl CoordinatorActor {
     /// merge of the target into the task branch, push the result to mirror +
     /// GitHub) so the PR refreshes with zero agent involvement.
     ///
-    /// Returns `true` when the merge landed cleanly and was pushed (the caller
-    /// must NOT set conflict metadata, NOT reopen — the PR is now mergeable).
-    /// Returns `false` for a real conflict OR any indeterminate failure — the
-    /// caller proceeds with its normal flag-and-reopen path. On a clean
-    /// auto-merge an `auto_merged_conflict` activity event is logged.
-    async fn try_auto_merge_before_conflict(
-        &self,
+    /// The mechanical merge (fresh mirror fetch + `clone_ephemeral` of a large
+    /// repo + merge + push to mirror & GitHub) can take tens of seconds. It used
+    /// to run INLINE on the single-threaded coordinator tick, so a conflicting PR
+    /// wedged the whole actor: the PR poller ticked once in ~20 minutes, approved
+    /// tasks sat without their PR opened, and dispatch "hung till it recovered"
+    /// (observed live on v0.5.26). The heavy work is now OFFLOADED to a spawned
+    /// background task; this method is a cheap, non-blocking per-tick decision:
+    ///
+    /// - [`AutoMergeFastPathState::Merged`] — a prior background attempt landed a
+    ///   clean merge and pushed it (the old `true` path). The caller skips the
+    ///   reopen; GitHub re-evaluates the PR as mergeable. An `auto_merged_conflict`
+    ///   activity event was logged by the background task.
+    /// - [`AutoMergeFastPathState::Reopen`] — a prior attempt hit a real conflict
+    ///   or could not run (the old `false` path). The caller proceeds with its
+    ///   normal flag-and-reopen flow.
+    /// - [`AutoMergeFastPathState::InFlight`] — either an attempt is still running,
+    ///   OR this tick just spawned one. The caller SKIPS the task this tick (no
+    ///   reopen, no double-dispatch) and re-evaluates next tick. The per-task
+    ///   in-flight guard means repeated ticks over a slow merge never double-fire.
+    ///
+    /// Completed (`Merged`/`Reopen`) states are CONSUMED here (removed from the
+    /// tracker) so the next conflict on the same task re-arms a fresh attempt.
+    fn poll_auto_merge_fast_path(
+        &mut self,
         task_id: &str,
         task_short_id: &str,
         project_id: &str,
-    ) -> bool {
-        let Some(mirror) = self.mirror.as_ref() else {
-            return false;
-        };
+    ) -> AutoMergeFastPathState {
+        // No mirror configured (tests / off-server) → behave as the old
+        // synchronous `false`: skip the fast path, reopen immediately.
+        if self.mirror.is_none() {
+            return AutoMergeFastPathState::Reopen;
+        }
 
-        let project_repo = djinn_db::ProjectRepository::new(
-            self.db.clone(),
-            crate::events::event_bus_for(&self.events_tx),
-        );
+        // Consult+mutate the shared tracker atomically under one lock via the
+        // pure `decide_auto_merge_tick` seam: a completed entry is consumed and
+        // returned, an in-flight entry short-circuits (skip), and an absent entry
+        // is marked in-flight so a re-entrant tick (or the sibling draft/review
+        // callsite) can't double-spawn.
+        let decision = {
+            let mut guard = self.auto_merge_tracker.lock().unwrap();
+            decide_auto_merge_tick(&mut guard, task_id)
+        };
+        match decision {
+            AutoMergeTickDecision::Return(state) => return state,
+            AutoMergeTickDecision::Spawn => {}
+        }
+
+        // Spawn the heavy merge off the actor tick. It records its terminal state
+        // back into the tracker and clears the in-flight flag; the next tick
+        // consumes it via the match above.
+        let mirror = self.mirror.clone().expect("mirror checked Some above");
+        let db = self.db.clone();
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let tracker = self.auto_merge_tracker.clone();
+        let task_id = task_id.to_string();
+        let task_short_id = task_short_id.to_string();
+        let project_id = project_id.to_string();
+        tokio::spawn(async move {
+            let final_state = Self::run_auto_merge_fast_path(
+                &mirror,
+                &db,
+                &event_bus,
+                &task_id,
+                &task_short_id,
+                &project_id,
+            )
+            .await;
+            tracker.lock().unwrap().insert(task_id, final_state);
+        });
+
+        AutoMergeFastPathState::InFlight
+    }
+
+    /// The heavy, slot-free body of the clean-merge fast path — runs in a spawned
+    /// background task (NOT on the coordinator tick). Returns the terminal
+    /// [`AutoMergeFastPathState`] the poller consumes next tick. Takes only
+    /// `'static`-cloneable handles (mirror `Arc`, db, event bus) so it can detach.
+    async fn run_auto_merge_fast_path(
+        mirror: &Arc<djinn_workspace::MirrorManager>,
+        db: &djinn_db::Database,
+        event_bus: &djinn_core::events::EventBus,
+        task_id: &str,
+        task_short_id: &str,
+        project_id: &str,
+    ) -> AutoMergeFastPathState {
+        let project_repo = djinn_db::ProjectRepository::new(db.clone(), event_bus.clone());
         let merge_target = match project_repo.get_config(project_id).await {
             Ok(Some(cfg)) => cfg.target_branch,
             _ => "main".to_string(),
         };
         let task_branch = format!("task/{task_short_id}");
 
-        let event_bus = crate::events::event_bus_for(&self.events_tx);
         let outcome = crate::task_merge::try_auto_merge_target_into_task_branch(
             mirror,
-            &self.db,
-            &event_bus,
+            db,
+            event_bus,
             project_id,
             task_short_id,
             &task_branch,
@@ -2223,8 +2315,8 @@ impl CoordinatorActor {
                     "task_branch": task_branch,
                 })
                 .to_string();
-                if let Err(e) = self
-                    .task_repo()
+                let task_repo = TaskRepository::new(db.clone(), event_bus.clone());
+                if let Err(e) = task_repo
                     .log_activity(
                         Some(task_id),
                         "coordinator",
@@ -2243,12 +2335,12 @@ impl CoordinatorActor {
                 tracing::info!(
                     task_id = %task_short_id,
                     merge_target = %merge_target,
-                    "PR poller: auto-merged {merge_target} into task branch; PR refreshed without agent dispatch"
+                    "PR poller: auto-merged {merge_target} into task branch (background); PR refreshed without agent dispatch"
                 );
-                true
+                AutoMergeFastPathState::Merged
             }
             crate::task_merge::AutoMergeOutcome::Conflicts
-            | crate::task_merge::AutoMergeOutcome::Indeterminate => false,
+            | crate::task_merge::AutoMergeOutcome::Indeterminate => AutoMergeFastPathState::Reopen,
         }
     }
 
@@ -2676,6 +2768,49 @@ async fn resolve_installation_client(
                 "PR poller: failed to read installation_id for project"
             );
             None
+        }
+    }
+}
+
+/// What the PR poller should do with a `mergeable == false` task this tick,
+/// decided purely from the clean-merge fast-path tracker state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AutoMergeTickDecision {
+    /// Return this terminal/in-flight state to the caller without spawning.
+    Return(AutoMergeFastPathState),
+    /// No attempt recorded — the caller should spawn the background merge (the
+    /// entry has already been marked `InFlight` by this function).
+    Spawn,
+}
+
+/// Pure state-machine seam for the offloaded clean-merge fast path. Given the
+/// shared tracker and a task id, decide-and-mutate atomically (the caller holds
+/// the lock):
+///
+/// - `InFlight` present → `Return(InFlight)` (skip this tick; a merge is running —
+///   this is the guard that stops repeated ticks over a slow merge from
+///   double-firing the heavy git work or double-dispatching the task).
+/// - `Merged`/`Reopen` present → consume (remove) it and `Return` it (the next
+///   conflict on the same task re-arms a fresh attempt).
+/// - absent → mark `InFlight` and return `Spawn` (first attempt this cycle).
+///
+/// Kept free + pure so the guard contract is unit-testable without a DB, mirror,
+/// or actor.
+pub(crate) fn decide_auto_merge_tick(
+    tracker: &mut std::collections::HashMap<String, AutoMergeFastPathState>,
+    task_id: &str,
+) -> AutoMergeTickDecision {
+    match tracker.get(task_id).cloned() {
+        Some(AutoMergeFastPathState::InFlight) => {
+            AutoMergeTickDecision::Return(AutoMergeFastPathState::InFlight)
+        }
+        Some(state @ (AutoMergeFastPathState::Merged | AutoMergeFastPathState::Reopen)) => {
+            tracker.remove(task_id);
+            AutoMergeTickDecision::Return(state)
+        }
+        None => {
+            tracker.insert(task_id.to_string(), AutoMergeFastPathState::InFlight);
+            AutoMergeTickDecision::Spawn
         }
     }
 }
@@ -3141,13 +3276,104 @@ fn advisory_checks_section(advisory_failed: &[&CheckRun]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Task, advisory_checks_section, blocking_failed_checks, build_ci_failure_sections,
+        AutoMergeFastPathState, AutoMergeTickDecision, Task, advisory_checks_section,
+        blocking_failed_checks, build_ci_failure_sections, decide_auto_merge_tick,
         dequeue_reason_is_failure, effective_review_decision, is_advisory_check_name,
         is_conversation_resolution_block, is_merge_queue_405, is_racing_unmerged_status,
         parse_actions_run_id, parse_pr_url, pick_conflict_blocker_sibling,
         should_auto_resolve_conversations,
     };
     use djinn_provider::github_api::{ActionsJob, ActionsJobStep, CheckRun, GitHubUser, PrReview};
+    use std::collections::HashMap;
+
+    // ── Offloaded clean-merge fast-path guard ─────────────────────────────────
+
+    #[test]
+    fn auto_merge_first_tick_spawns_and_marks_inflight() {
+        // No tracker entry → spawn the background merge and mark in-flight so the
+        // heavy git work runs off the actor tick.
+        let mut tracker: HashMap<String, AutoMergeFastPathState> = HashMap::new();
+        let decision = decide_auto_merge_tick(&mut tracker, "task-1");
+        assert_eq!(decision, AutoMergeTickDecision::Spawn);
+        assert_eq!(
+            tracker.get("task-1"),
+            Some(&AutoMergeFastPathState::InFlight),
+            "first tick must mark the task in-flight"
+        );
+    }
+
+    #[test]
+    fn auto_merge_inflight_tick_skips_without_respawn() {
+        // The guard: while a merge is in flight, repeated ticks must NOT spawn a
+        // second background merge or double-dispatch — they just skip the task.
+        let mut tracker: HashMap<String, AutoMergeFastPathState> = HashMap::new();
+        tracker.insert("task-1".into(), AutoMergeFastPathState::InFlight);
+        let decision = decide_auto_merge_tick(&mut tracker, "task-1");
+        assert_eq!(
+            decision,
+            AutoMergeTickDecision::Return(AutoMergeFastPathState::InFlight),
+            "an in-flight task must be skipped, never re-spawned"
+        );
+        // Still exactly one entry, still in-flight.
+        assert_eq!(tracker.len(), 1);
+        assert_eq!(
+            tracker.get("task-1"),
+            Some(&AutoMergeFastPathState::InFlight)
+        );
+    }
+
+    #[test]
+    fn auto_merge_completed_states_are_consumed() {
+        // A completed background attempt (Merged or Reopen) is returned to the
+        // poller AND removed, so the next conflict on the same task re-arms a
+        // fresh attempt (next tick will Spawn again).
+        for state in [
+            AutoMergeFastPathState::Merged,
+            AutoMergeFastPathState::Reopen,
+        ] {
+            let mut tracker: HashMap<String, AutoMergeFastPathState> = HashMap::new();
+            tracker.insert("task-1".into(), state.clone());
+            let decision = decide_auto_merge_tick(&mut tracker, "task-1");
+            assert_eq!(decision, AutoMergeTickDecision::Return(state));
+            assert!(
+                tracker.get("task-1").is_none(),
+                "completed state must be consumed so a later conflict re-arms"
+            );
+            // The very next tick (still mergeable==false) re-arms a fresh attempt.
+            let next = decide_auto_merge_tick(&mut tracker, "task-1");
+            assert_eq!(next, AutoMergeTickDecision::Spawn);
+        }
+    }
+
+    #[test]
+    fn auto_merge_full_cycle_inflight_then_reopen_then_respawn() {
+        // End-to-end guard walk for one conflicting PR: spawn → (background still
+        // running) skip → background records Reopen → poller consumes Reopen
+        // (falls through to reopen) → a fresh conflict re-arms.
+        let mut tracker: HashMap<String, AutoMergeFastPathState> = HashMap::new();
+
+        // Tick 1: first sight of the conflict → spawn.
+        assert_eq!(
+            decide_auto_merge_tick(&mut tracker, "t"),
+            AutoMergeTickDecision::Spawn
+        );
+
+        // Tick 2: merge still running → skip, no second spawn.
+        assert_eq!(
+            decide_auto_merge_tick(&mut tracker, "t"),
+            AutoMergeTickDecision::Return(AutoMergeFastPathState::InFlight)
+        );
+
+        // Background task finishes with a real conflict.
+        tracker.insert("t".into(), AutoMergeFastPathState::Reopen);
+
+        // Tick 3: consume Reopen → poller proceeds to its flag-and-reopen flow.
+        assert_eq!(
+            decide_auto_merge_tick(&mut tracker, "t"),
+            AutoMergeTickDecision::Return(AutoMergeFastPathState::Reopen)
+        );
+        assert!(tracker.is_empty());
+    }
 
     /// Minimal `PrReview` builder for the effective-decision tests.
     fn review(author: &str, state: &str, submitted_at: &str) -> PrReview {

@@ -424,28 +424,52 @@ impl NoteConsolidationRepository {
             return Ok(Vec::new());
         };
 
-        // Postgres ts_rank() returns float4 (f32). Use 0.0 floor.
-        let mysql_threshold: f32 = 0.0;
+        // ts_rank() scores are strictly positive for real matches, so a 0.0
+        // floor keeps every genuine hit while dropping non-matches.
+        let score_threshold: f64 = 0.0;
         let _ = DEDUP_SCORE_THRESHOLD;
 
+        // Consolidation runs as a latency-insensitive background sweep that
+        // fans this exact `ts_rank()` scan out across every (project,
+        // note_type) group for every session with provenance. When dozens of
+        // sessions finish together this stampedes the sqlx pool (each scan
+        // holds a connection ~1s) and starves dispatch / PR-poller / SSE. Hold
+        // a background-search permit for the duration so the fan-out can never
+        // consume more than the configured slice of the pool. Best-effort: if
+        // the semaphore is somehow unavailable we still run (correctness over
+        // throttling).
+        let _permit = self.db.background_search_permit().await;
+
+        // Compute `websearch_to_tsquery(...)` and `ts_rank(...)` exactly once in
+        // a CTE, then apply the rank threshold + ordering on the materialized
+        // column. The previous form evaluated the tsquery + a full `ts_rank`
+        // three times per row (SELECT, WHERE > $5, ORDER BY), which dominated
+        // the ~1s cost. The `@@` membership test in the CTE stays GIN-index
+        // eligible.
         sqlx::query_as!(
             NoteDedupCandidate,
-            r#"SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.abstract AS abstract_, n.overview,
-                    ts_rank(n.search_vector, websearch_to_tsquery('english', $1))::float8 AS "score!: f64"
-             FROM notes n
-             WHERE n.search_vector @@ websearch_to_tsquery('english', $1)
-               AND n.project_id = $2
-               AND n.folder = $3
-               AND n.note_type = $4
-               AND n.storage = 'db'
-               AND ts_rank(n.search_vector, websearch_to_tsquery('english', $1)) > $5
-             ORDER BY ts_rank(n.search_vector, websearch_to_tsquery('english', $1)) DESC
-             LIMIT $6"#,
+            r#"WITH ranked AS (
+                 SELECT n.id, n.permalink, n.title, n.folder, n.note_type,
+                        n.abstract AS abstract_, n.overview,
+                        ts_rank(n.search_vector, websearch_to_tsquery('english', $1))::float8 AS score
+                 FROM notes n
+                 WHERE n.search_vector @@ websearch_to_tsquery('english', $1)
+                   AND n.project_id = $2
+                   AND n.folder = $3
+                   AND n.note_type = $4
+                   AND n.storage = 'db'
+               )
+               SELECT id, permalink, title, folder, note_type, abstract_, overview,
+                      score AS "score!: f64"
+               FROM ranked
+               WHERE score > $5
+               ORDER BY score DESC
+               LIMIT $6"#,
             safe_query,
             project_id,
             folder,
             note_type,
-            mysql_threshold,
+            score_threshold,
             DEDUP_LIMIT
         )
         .fetch_all(self.db.pool())

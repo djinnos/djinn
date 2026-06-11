@@ -75,6 +75,12 @@ pub(super) struct CoordinatorActor {
     pub(super) dispatch_failure_streak: HashMap<String, u32>,
     /// Shared tracker for in-flight verification background tasks.
     pub(super) verification_tracker: VerificationTracker,
+    /// Per-task state of the PR poller's offloaded clean-merge fast path. The
+    /// heavy mechanical merge (fetch + ephemeral clone + merge + push) runs in a
+    /// spawned background task instead of inline on this tick; the poller reads
+    /// this map to decide skip / reopen / resolved each tick. See
+    /// [`AutoMergeFastPathState`].
+    pub(super) auto_merge_tracker: AutoMergeTracker,
     pub(super) consolidation_runner: Arc<dyn ConsolidationRunner>,
     pub(super) last_stale_sweep: StdInstant,
     /// ADR-051 §7 — timestamp of the last auto-dispatch safety-net sweep.
@@ -213,6 +219,7 @@ impl CoordinatorActor {
             dispatch_cooldowns: HashMap::new(),
             dispatch_failure_streak: HashMap::new(),
             verification_tracker,
+            auto_merge_tracker: Arc::new(std::sync::Mutex::new(HashMap::new())),
             consolidation_runner: consolidation_runner
                 .unwrap_or_else(|| Arc::new(DbConsolidationRunner::new(db.clone()))),
             last_stale_sweep: StdInstant::now(),

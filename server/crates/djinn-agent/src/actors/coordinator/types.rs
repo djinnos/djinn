@@ -20,6 +20,35 @@ use tokio_util::sync::CancellationToken;
 /// detection so it can distinguish live pipelines from orphans after restart.
 pub type VerificationTracker = Arc<std::sync::Mutex<HashSet<String>>>;
 
+/// State of the PR-poller's mechanical clean-merge fast path for one task.
+///
+/// The fast path (`try_auto_merge_target_into_task_branch`: fresh mirror fetch +
+/// ephemeral clone + merge + push to mirror & GitHub) can take tens of seconds on
+/// a large repo. Running it inline on the single-threaded coordinator tick wedged
+/// the whole actor — the PR poller ticked once in 20 minutes and dispatch
+/// "hung till it recovered". It is now offloaded to a spawned background task; the
+/// poller consults this per-task state each tick instead of blocking on the merge.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AutoMergeFastPathState {
+    /// A background merge attempt is running. The poller skips the task this
+    /// tick (no reopen, no second spawn) and re-evaluates next tick.
+    InFlight,
+    /// The background attempt completed by landing a clean merge and pushing it.
+    /// GitHub will re-evaluate the PR as mergeable; the poller consumes this and
+    /// skips the reopen (the old synchronous `true` path).
+    Merged,
+    /// The background attempt found a real conflict (or could not run: no App,
+    /// missing coords, git error). The poller consumes this and falls through to
+    /// its normal flag-and-reopen path (the old synchronous `false` path).
+    Reopen,
+}
+
+/// Shared map of in-flight / just-completed clean-merge fast-path attempts, keyed
+/// by task id. Written by the spawned background merge task, read+consumed by the
+/// PR poller on the coordinator tick. `Arc<Mutex<..>>` so the detached task can
+/// record its outcome without touching `&mut self`.
+pub type AutoMergeTracker = Arc<std::sync::Mutex<HashMap<String, AutoMergeFastPathState>>>;
+
 pub struct CoordinatorDeps {
     pub events_tx: broadcast::Sender<DjinnEventEnvelope>,
     pub cancel: CancellationToken,
