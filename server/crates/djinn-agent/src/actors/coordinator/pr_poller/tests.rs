@@ -1,0 +1,703 @@
+use super::{
+    AutoMergeFastPathState, AutoMergeTickDecision, Task, advisory_checks_section,
+    blocking_failed_checks, build_ci_failure_sections, decide_auto_merge_tick,
+    dequeue_reason_is_failure, effective_review_decision, is_advisory_check_name,
+    is_conversation_resolution_block, is_merge_queue_405, is_racing_unmerged_status,
+    parse_actions_run_id, parse_pr_url, pick_conflict_blocker_sibling,
+    should_auto_resolve_conversations,
+};
+use djinn_provider::github_api::{ActionsJob, ActionsJobStep, CheckRun, GitHubUser, PrReview};
+use std::collections::HashMap;
+
+// ── Offloaded clean-merge fast-path guard ─────────────────────────────────
+
+#[test]
+fn auto_merge_first_tick_spawns_and_marks_inflight() {
+    // No tracker entry → spawn the background merge and mark in-flight so the
+    // heavy git work runs off the actor tick.
+    let mut tracker: HashMap<String, AutoMergeFastPathState> = HashMap::new();
+    let decision = decide_auto_merge_tick(&mut tracker, "task-1");
+    assert_eq!(decision, AutoMergeTickDecision::Spawn);
+    assert_eq!(
+        tracker.get("task-1"),
+        Some(&AutoMergeFastPathState::InFlight),
+        "first tick must mark the task in-flight"
+    );
+}
+
+#[test]
+fn auto_merge_inflight_tick_skips_without_respawn() {
+    // The guard: while a merge is in flight, repeated ticks must NOT spawn a
+    // second background merge or double-dispatch — they just skip the task.
+    let mut tracker: HashMap<String, AutoMergeFastPathState> = HashMap::new();
+    tracker.insert("task-1".into(), AutoMergeFastPathState::InFlight);
+    let decision = decide_auto_merge_tick(&mut tracker, "task-1");
+    assert_eq!(
+        decision,
+        AutoMergeTickDecision::Return(AutoMergeFastPathState::InFlight),
+        "an in-flight task must be skipped, never re-spawned"
+    );
+    // Still exactly one entry, still in-flight.
+    assert_eq!(tracker.len(), 1);
+    assert_eq!(
+        tracker.get("task-1"),
+        Some(&AutoMergeFastPathState::InFlight)
+    );
+}
+
+#[test]
+fn auto_merge_completed_states_are_consumed() {
+    // A completed background attempt (Merged or Reopen) is returned to the
+    // poller AND removed, so the next conflict on the same task re-arms a
+    // fresh attempt (next tick will Spawn again).
+    for state in [
+        AutoMergeFastPathState::Merged,
+        AutoMergeFastPathState::Reopen,
+    ] {
+        let mut tracker: HashMap<String, AutoMergeFastPathState> = HashMap::new();
+        tracker.insert("task-1".into(), state.clone());
+        let decision = decide_auto_merge_tick(&mut tracker, "task-1");
+        assert_eq!(decision, AutoMergeTickDecision::Return(state));
+        assert!(
+            !tracker.contains_key("task-1"),
+            "completed state must be consumed so a later conflict re-arms"
+        );
+        // The very next tick (still mergeable==false) re-arms a fresh attempt.
+        let next = decide_auto_merge_tick(&mut tracker, "task-1");
+        assert_eq!(next, AutoMergeTickDecision::Spawn);
+    }
+}
+
+#[test]
+fn auto_merge_full_cycle_inflight_then_reopen_then_respawn() {
+    // End-to-end guard walk for one conflicting PR: spawn → (background still
+    // running) skip → background records Reopen → poller consumes Reopen
+    // (falls through to reopen) → a fresh conflict re-arms.
+    let mut tracker: HashMap<String, AutoMergeFastPathState> = HashMap::new();
+
+    // Tick 1: first sight of the conflict → spawn.
+    assert_eq!(
+        decide_auto_merge_tick(&mut tracker, "t"),
+        AutoMergeTickDecision::Spawn
+    );
+
+    // Tick 2: merge still running → skip, no second spawn.
+    assert_eq!(
+        decide_auto_merge_tick(&mut tracker, "t"),
+        AutoMergeTickDecision::Return(AutoMergeFastPathState::InFlight)
+    );
+
+    // Background task finishes with a real conflict.
+    tracker.insert("t".into(), AutoMergeFastPathState::Reopen);
+
+    // Tick 3: consume Reopen → poller proceeds to its flag-and-reopen flow.
+    assert_eq!(
+        decide_auto_merge_tick(&mut tracker, "t"),
+        AutoMergeTickDecision::Return(AutoMergeFastPathState::Reopen)
+    );
+    assert!(tracker.is_empty());
+}
+
+/// Minimal `PrReview` builder for the effective-decision tests.
+fn review(author: &str, state: &str, submitted_at: &str) -> PrReview {
+    PrReview {
+        id: 1,
+        user: Some(GitHubUser {
+            login: author.to_string(),
+            id: 1,
+        }),
+        state: state.to_string(),
+        submitted_at: Some(submitted_at.to_string()),
+        html_url: String::new(),
+        body: String::new(),
+    }
+}
+
+#[test]
+fn effective_decision_latest_approval_supersedes_stale_changes_requested() {
+    // Exact task-2sq6 shape: the same reviewer left COMMENTED twice, then
+    // CHANGES_REQUESTED, then dismissed it three times, then APPROVED on the
+    // current head. GitHub's reviewDecision is APPROVED — ours must agree,
+    // NOT keep matching the stale 17:35:01 CHANGES_REQUESTED entry.
+    let reviews = vec![
+        review("claude", "COMMENTED", "2026-06-01T17:34:53Z"),
+        review("claude", "COMMENTED", "2026-06-01T17:34:57Z"),
+        review("claude", "CHANGES_REQUESTED", "2026-06-01T17:35:01Z"),
+        review("claude", "DISMISSED", "2026-06-01T19:03:50Z"),
+        review("claude", "DISMISSED", "2026-06-01T19:17:56Z"),
+        review("claude", "DISMISSED", "2026-06-01T19:34:10Z"),
+        review("claude", "APPROVED", "2026-06-01T20:11:37Z"),
+    ];
+    let (changes_requested, has_approved) = effective_review_decision(&reviews);
+    assert!(
+        !changes_requested,
+        "a superseded CHANGES_REQUESTED must not force rework once the same reviewer approves"
+    );
+    assert!(has_approved, "latest standing review is APPROVED");
+}
+
+#[test]
+fn effective_decision_standing_changes_requested_still_blocks() {
+    // Reviewer requested changes and hasn't approved since → still blocks.
+    let reviews = vec![
+        review("claude", "COMMENTED", "2026-06-01T17:34:53Z"),
+        review("claude", "APPROVED", "2026-06-01T18:00:00Z"),
+        review("claude", "CHANGES_REQUESTED", "2026-06-01T19:00:00Z"),
+    ];
+    let (changes_requested, has_approved) = effective_review_decision(&reviews);
+    assert!(
+        changes_requested,
+        "latest standing review is CHANGES_REQUESTED"
+    );
+    assert!(!has_approved);
+}
+
+#[test]
+fn effective_decision_is_per_reviewer() {
+    // One reviewer approved on the current head; another still has an
+    // outstanding change request → the PR is blocked (any blocker blocks).
+    let reviews = vec![
+        review("alice", "APPROVED", "2026-06-01T20:00:00Z"),
+        review("bob", "CHANGES_REQUESTED", "2026-06-01T19:00:00Z"),
+    ];
+    let (changes_requested, has_approved) = effective_review_decision(&reviews);
+    assert!(changes_requested, "bob's outstanding change request blocks");
+    assert!(has_approved, "alice approved");
+}
+
+#[test]
+fn effective_decision_dismissed_clears_standing() {
+    // A lone CHANGES_REQUESTED later DISMISSED leaves no standing → neither
+    // blocks nor approves (falls through to the merge-eligibility path).
+    let reviews = vec![
+        review("claude", "CHANGES_REQUESTED", "2026-06-01T17:00:00Z"),
+        review("claude", "DISMISSED", "2026-06-01T18:00:00Z"),
+    ];
+    let (changes_requested, has_approved) = effective_review_decision(&reviews);
+    assert!(!changes_requested);
+    assert!(!has_approved);
+}
+
+#[test]
+fn effective_decision_ignores_commented_only() {
+    // COMMENTED reviews are informational — never gating.
+    let reviews = vec![
+        review("claude", "COMMENTED", "2026-06-01T17:00:00Z"),
+        review("claude", "COMMENTED", "2026-06-01T18:00:00Z"),
+    ];
+    assert_eq!(effective_review_decision(&reviews), (false, false));
+}
+
+/// Minimal `Task` builder for the sibling-attribution heuristic tests.
+/// Only `id` and `status` are load-bearing; everything else is filler.
+fn task(id: &str, status: &str) -> Task {
+    Task {
+        id: id.to_string(),
+        project_id: "p".to_string(),
+        short_id: id.to_string(),
+        epic_id: Some("ep".to_string()),
+        title: String::new(),
+        description: String::new(),
+        design: String::new(),
+        issue_type: "task".to_string(),
+        status: status.to_string(),
+        priority: 0,
+        owner: String::new(),
+        labels: "[]".to_string(),
+        acceptance_criteria: "[]".to_string(),
+        reopen_count: 0,
+        continuation_count: 0,
+        verification_failure_count: 0,
+        total_reopen_count: 0,
+        total_verification_failure_count: 0,
+        intervention_count: 0,
+        last_intervention_at: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+        closed_at: None,
+        close_reason: None,
+        merge_commit_sha: None,
+        pr_url: None,
+        merge_conflict_metadata: None,
+        memory_refs: "[]".to_string(),
+        agent_type: None,
+        created_by_user_id: None,
+        unresolved_blocker_count: 0,
+    }
+}
+
+#[test]
+fn racing_status_classification() {
+    // Post-implementation, unmerged → racing.
+    assert!(is_racing_unmerged_status("approved"));
+    assert!(is_racing_unmerged_status("pr_draft"));
+    assert!(is_racing_unmerged_status("pr_review"));
+    // Pre-implementation / terminal → NOT racing (nothing to wait on, or
+    // would never release the block).
+    assert!(!is_racing_unmerged_status("open"));
+    assert!(!is_racing_unmerged_status("in_progress"));
+    assert!(!is_racing_unmerged_status("closed"));
+}
+
+#[test]
+fn picks_single_racing_sibling() {
+    // Exactly one racing same-epic sibling → unambiguous → block on it.
+    let siblings = vec![
+        task("self", "open"),
+        task("peer", "pr_review"),
+        task("done", "closed"),
+    ];
+    assert_eq!(
+        pick_conflict_blocker_sibling("self", &siblings),
+        Some("peer".to_string())
+    );
+}
+
+#[test]
+fn no_block_when_zero_racing_siblings() {
+    // Conflict is against already-merged main (sibling closed) → nothing to
+    // wait on → fall back to plain reopen.
+    let siblings = vec![task("self", "open"), task("done", "closed")];
+    assert_eq!(pick_conflict_blocker_sibling("self", &siblings), None);
+}
+
+#[test]
+fn no_block_when_multiple_racing_siblings() {
+    // Two racing siblings → ambiguous attribution → don't guess.
+    let siblings = vec![
+        task("self", "open"),
+        task("peer1", "pr_review"),
+        task("peer2", "approved"),
+    ];
+    assert_eq!(pick_conflict_blocker_sibling("self", &siblings), None);
+}
+
+#[test]
+fn never_blocks_on_self() {
+    // The task itself, even in a racing state, is never a candidate.
+    let siblings = vec![task("self", "pr_review")];
+    assert_eq!(pick_conflict_blocker_sibling("self", &siblings), None);
+}
+
+fn check(name: &str) -> CheckRun {
+    CheckRun {
+        id: 1,
+        name: name.to_string(),
+        status: "completed".to_string(),
+        conclusion: Some("failure".to_string()),
+        html_url: "https://github.com/o/r/runs/1".to_string(),
+    }
+}
+
+#[test]
+fn advisory_section_empty_for_no_checks() {
+    assert!(advisory_checks_section(&[]).is_none());
+}
+
+#[test]
+fn advisory_section_lists_checks_and_disclaims_blocking() {
+    let sentinel = check("Sentinel");
+    let e2e = check("Partner E2E");
+    let section = advisory_checks_section(&[&sentinel, &e2e]).expect("section");
+    assert!(section.contains("Non-required checks also failing"));
+    assert!(section.contains("Sentinel (failure)"));
+    assert!(section.contains("Partner E2E (failure)"));
+    assert!(section.contains("do not gate merging"));
+}
+
+#[test]
+fn advisory_check_names_classified() {
+    // The real 1ck3 offenders.
+    assert!(is_advisory_check_name(
+        "PR Preview Environment Setup / setup-preview"
+    ));
+    assert!(is_advisory_check_name("Vercel – acme-portal"));
+    assert!(is_advisory_check_name("Vercel – admin-portal"));
+    assert!(is_advisory_check_name("Netlify deploy"));
+    assert!(is_advisory_check_name("Cloudflare Pages"));
+    assert!(is_advisory_check_name("Deployment to staging"));
+
+    // Required checks must NOT be classified as advisory.
+    assert!(!is_advisory_check_name("Sentinel"));
+    assert!(!is_advisory_check_name("unit tests"));
+    assert!(!is_advisory_check_name("ci / build"));
+    assert!(!is_advisory_check_name("lint"));
+}
+
+#[test]
+fn blocking_filter_uses_required_contexts_when_present() {
+    let preview = check("Vercel – acme-portal");
+    let unit = check("unit tests");
+    let failed = vec![&preview, &unit];
+    // Branch protection lists only "unit tests" + "Sentinel" as required.
+    let required = vec!["unit tests".to_string(), "Sentinel".to_string()];
+
+    let blocking = blocking_failed_checks(&failed, Some(&required));
+    assert_eq!(blocking.len(), 1);
+    assert_eq!(blocking[0].name, "unit tests");
+}
+
+#[test]
+fn blocking_filter_empty_when_only_non_required_fail() {
+    // The exact 1ck3 shape: required checks (unit tests / Sentinel) are
+    // GREEN — only preview/Vercel checks failed, so none of the *failed*
+    // checks are in the required set.
+    let preview = check("PR Preview Environment Setup / setup-preview");
+    let vercel = check("Vercel – acme-portal");
+    let failed = vec![&preview, &vercel];
+    let required = vec!["unit tests".to_string(), "Sentinel".to_string()];
+
+    let blocking = blocking_failed_checks(&failed, Some(&required));
+    assert!(
+        blocking.is_empty(),
+        "no required check failed → nothing should trigger rework"
+    );
+}
+
+#[test]
+fn blocking_filter_falls_back_to_heuristic_without_contexts() {
+    let preview = check("Vercel – acme-portal");
+    let unit = check("unit tests");
+    let failed = vec![&preview, &unit];
+
+    // No branch-protection contexts available → name-pattern heuristic.
+    let blocking = blocking_failed_checks(&failed, None);
+    assert_eq!(blocking.len(), 1);
+    assert_eq!(blocking[0].name, "unit tests");
+}
+
+#[test]
+fn blocking_filter_heuristic_keeps_unknown_checks_as_blocking() {
+    // Conservative fallback: an unrecognised check is treated as blocking
+    // so we never silently swallow a real failure.
+    let mystery = check("some-custom-gate");
+    let failed = vec![&mystery];
+    let blocking = blocking_failed_checks(&failed, None);
+    assert_eq!(
+        blocking.len(),
+        1,
+        "unknown checks must be treated as blocking"
+    );
+}
+
+#[test]
+fn blocking_filter_heuristic_drops_only_advisory() {
+    let preview = check("Deploy Preview");
+    let vercel = check("Vercel – portal");
+    let failed = vec![&preview, &vercel];
+    let blocking = blocking_failed_checks(&failed, None);
+    assert!(blocking.is_empty());
+}
+
+#[test]
+fn is_merge_queue_405_matches_real_payload() {
+    let err = anyhow::anyhow!(
+        r#"merge_pull_request failed (405 Method Not Allowed): {{"message":"Pull Request is in the merge queue.","status":"405"}}"#
+    );
+    assert!(is_merge_queue_405(&err));
+}
+
+#[test]
+fn is_merge_queue_405_ignores_unrelated_405s() {
+    let err = anyhow::anyhow!("merge_pull_request failed (405): {{\"message\":\"locked\"}}");
+    assert!(!is_merge_queue_405(&err));
+}
+
+#[test]
+fn is_merge_queue_405_ignores_other_status_codes() {
+    let err =
+        anyhow::anyhow!("merge_pull_request failed (422): Pull Request is in the merge queue.");
+    // Not a 405 — must not match.
+    assert!(!is_merge_queue_405(&err));
+}
+
+#[test]
+fn is_conversation_resolution_block_matches_real_payload() {
+    // The exact production payload: a 405 whose body carries the repo-rule
+    // "conversation must be resolved" violation.
+    let err = anyhow::anyhow!(
+        "merge_pull_request failed (405 Method Not Allowed): {{\"message\":\"Repository rule violations found\\n\\nA conversation must be resolved before this pull request can be merged.\\n\\n\",\"status\":\"405\"}}"
+    );
+    assert!(is_conversation_resolution_block(&err));
+}
+
+#[test]
+fn is_conversation_resolution_block_ignores_merge_queue_405() {
+    // The merge-queue 405 is a different 405 and must NOT be treated as a
+    // conversation-resolution block (it has its own handler).
+    let err = anyhow::anyhow!(
+        r#"merge_pull_request failed (405 Method Not Allowed): {{"message":"Pull Request is in the merge queue.","status":"405"}}"#
+    );
+    assert!(!is_conversation_resolution_block(&err));
+}
+
+#[test]
+fn is_conversation_resolution_block_ignores_generic_405() {
+    let err = anyhow::anyhow!("merge_pull_request failed (405): {{\"message\":\"locked\"}}");
+    assert!(!is_conversation_resolution_block(&err));
+}
+
+#[test]
+fn is_conversation_resolution_block_ignores_other_status_codes() {
+    // Same wording but not a 405 → not our case.
+    let err = anyhow::anyhow!(
+        "merge_pull_request failed (409): A conversation must be resolved before this pull request can be merged."
+    );
+    assert!(!is_conversation_resolution_block(&err));
+}
+
+#[test]
+fn dequeue_reasons_classified_correctly() {
+    // Failures: anything not on the safe-list.
+    assert!(dequeue_reason_is_failure(Some("CHECKS_FAILED")));
+    assert!(dequeue_reason_is_failure(Some("MERGE_CONFLICT")));
+    assert!(dequeue_reason_is_failure(Some("NO_RESPONSE")));
+    assert!(dequeue_reason_is_failure(Some("NOT_QUEUEABLE")));
+    assert!(dequeue_reason_is_failure(Some("ROLL_BACK")));
+    assert!(dequeue_reason_is_failure(Some("UNKNOWN_REMOVAL_REASON")));
+    assert!(dequeue_reason_is_failure(Some("SOMETHING_NEW")));
+
+    // Lowercase timeline-event vocabulary classifies the same way.
+    assert!(dequeue_reason_is_failure(Some("failed_checks")));
+    assert!(dequeue_reason_is_failure(Some("checks_failed")));
+
+    // Non-failures: merged (queue success), head moved, queue admin
+    // reset, manual intervention — in both vocabularies.
+    assert!(!dequeue_reason_is_failure(Some("MERGED")));
+    assert!(!dequeue_reason_is_failure(Some("merged")));
+    assert!(!dequeue_reason_is_failure(Some("BRANCH_INVALIDATED")));
+    assert!(!dequeue_reason_is_failure(Some("branch_invalidated")));
+    assert!(!dequeue_reason_is_failure(Some("QUEUE_CLEARED")));
+    assert!(!dequeue_reason_is_failure(Some("DEQUEUED")));
+    assert!(!dequeue_reason_is_failure(None));
+}
+
+#[test]
+fn parses_standard_pr_url() {
+    let result = parse_pr_url("https://github.com/djinnos/server/pull/42");
+    assert_eq!(
+        result,
+        Some(("djinnos".to_string(), "server".to_string(), 42))
+    );
+}
+
+#[test]
+fn parses_pr_url_with_trailing_fragment() {
+    let result = parse_pr_url("https://github.com/owner/repo/pull/7#discussion");
+    assert_eq!(result, Some(("owner".to_string(), "repo".to_string(), 7)));
+}
+
+#[test]
+fn rejects_non_pr_url() {
+    assert_eq!(parse_pr_url("https://github.com/owner/repo/issues/1"), None);
+}
+
+#[test]
+fn rejects_non_github_url() {
+    assert_eq!(parse_pr_url("https://gitlab.com/owner/repo/pull/1"), None);
+}
+
+// ---- CI-failure aggregation (E3) -------------------------------------
+
+fn check_run(name: &str, run_id: u64) -> CheckRun {
+    CheckRun {
+        id: run_id * 100 + name.len() as u64,
+        name: name.to_string(),
+        status: "completed".to_string(),
+        conclusion: Some("failure".to_string()),
+        html_url: format!("https://github.com/o/r/actions/runs/{run_id}/job/{run_id}9"),
+    }
+}
+
+fn failed_step(name: &str, number: u64) -> ActionsJobStep {
+    ActionsJobStep {
+        name: name.to_string(),
+        status: "completed".to_string(),
+        conclusion: Some("failure".to_string()),
+        number,
+    }
+}
+
+fn failed_job(id: u64, name: &str, workflow: &str, steps: Vec<ActionsJobStep>) -> ActionsJob {
+    ActionsJob {
+        id,
+        name: name.to_string(),
+        status: "completed".to_string(),
+        conclusion: Some("failure".to_string()),
+        html_url: format!("https://github.com/o/r/actions/runs/x/job/{id}"),
+        workflow_name: Some(workflow.to_string()),
+        steps,
+    }
+}
+
+#[test]
+fn parse_actions_run_id_extracts_id() {
+    assert_eq!(
+        parse_actions_run_id("https://github.com/o/r/actions/runs/123456/job/99"),
+        Some(123456)
+    );
+    // Non-Actions check-run URL carries no run id.
+    assert_eq!(
+        parse_actions_run_id("https://github.com/o/r/checks/abc"),
+        None
+    );
+}
+
+#[test]
+fn ci_failure_sections_single_run() {
+    // Baseline: one run with one failing job/step still renders correctly.
+    let jobs = vec![failed_job(
+        10,
+        "build",
+        "CI",
+        vec![failed_step("cargo build", 3)],
+    )];
+    let checks = [check_run("CI / build", 100)];
+    let refs: Vec<&CheckRun> = checks.iter().collect();
+    let (sections, ci_jobs) = build_ci_failure_sections(Some(&jobs), &refs);
+
+    let body = sections.join("\n");
+    assert!(body.contains("**Workflow:** CI"), "{body}");
+    assert!(body.contains("**Failed job:** build"), "{body}");
+    assert!(body.contains("**Failed step:** cargo build"), "{body}");
+    assert!(body.contains("ci_job_log(job_id=10"), "{body}");
+    assert_eq!(ci_jobs.len(), 1);
+    assert_eq!(ci_jobs[0]["job_id"].as_u64(), Some(10));
+}
+
+#[test]
+fn ci_failure_sections_unions_multiple_runs() {
+    // Failures spread across two workflow runs (CI + Release): BOTH must be
+    // represented, not just the first — this is the core E3 fix.
+    let jobs = vec![
+        failed_job(10, "build", "CI", vec![failed_step("cargo build", 3)]),
+        failed_job(
+            20,
+            "publish",
+            "Release",
+            vec![failed_step("cargo publish", 5)],
+        ),
+    ];
+    let checks = [
+        check_run("CI / build", 100),
+        check_run("Release / publish", 200),
+    ];
+    let refs: Vec<&CheckRun> = checks.iter().collect();
+    let (sections, ci_jobs) = build_ci_failure_sections(Some(&jobs), &refs);
+
+    let body = sections.join("\n");
+    // Both workflows headered.
+    assert!(body.contains("**Workflow:** CI"), "{body}");
+    assert!(body.contains("**Workflow:** Release"), "{body}");
+    // Both jobs + steps present.
+    assert!(body.contains("**Failed job:** build"), "{body}");
+    assert!(body.contains("**Failed job:** publish"), "{body}");
+    assert!(body.contains("cargo build"), "{body}");
+    assert!(body.contains("cargo publish"), "{body}");
+    // Both ci_jobs entries (the structured payload the worker consumes).
+    assert_eq!(ci_jobs.len(), 2);
+    let ids: Vec<u64> = ci_jobs
+        .iter()
+        .map(|j| j["job_id"].as_u64().unwrap())
+        .collect();
+    assert!(ids.contains(&10) && ids.contains(&20), "{ids:?}");
+    // Hint lines reference both jobs.
+    assert!(body.contains("ci_job_log(job_id=10"), "{body}");
+    assert!(body.contains("ci_job_log(job_id=20"), "{body}");
+}
+
+#[test]
+fn ci_failure_sections_dedups_identical_jobs() {
+    // The caller de-dups by job id; verify a duplicate job id collapses to
+    // a single entry (defends the grouping invariant).
+    let jobs = vec![
+        failed_job(10, "build", "CI", vec![failed_step("cargo build", 3)]),
+        failed_job(10, "build", "CI", vec![failed_step("cargo build", 3)]),
+    ];
+    // Simulate the caller's de-dup so the helper sees deduped input.
+    let mut seen = std::collections::HashSet::new();
+    let deduped: Vec<ActionsJob> = jobs.into_iter().filter(|j| seen.insert(j.id)).collect();
+    let refs: Vec<&CheckRun> = Vec::new();
+    let (_sections, ci_jobs) = build_ci_failure_sections(Some(&deduped), &refs);
+    assert_eq!(ci_jobs.len(), 1);
+}
+
+#[test]
+fn ci_failure_run_cap_bounds_aggregation() {
+    // The run cap is MAX_AGGREGATED_CI_RUNS. Emulate the caller's run-id
+    // collection + truncation and assert it bounds the number of runs and
+    // flags the cap, while keeping every run under the cap represented.
+    let cap = super::MAX_AGGREGATED_CI_RUNS;
+    let checks: Vec<CheckRun> = (0..(cap as u64 + 3))
+        .map(|i| check_run(&format!("wf{i} / job"), 1000 + i))
+        .collect();
+    let refs: Vec<&CheckRun> = checks.iter().collect();
+
+    let mut run_ids: Vec<u64> = Vec::new();
+    for cr in &refs {
+        if let Some(rid) = parse_actions_run_id(&cr.html_url)
+            && !run_ids.contains(&rid)
+        {
+            run_ids.push(rid);
+        }
+    }
+    let capped = run_ids.len() > cap;
+    assert!(capped, "should exceed the cap with {} runs", run_ids.len());
+    run_ids.truncate(cap);
+    assert_eq!(run_ids.len(), cap, "run ids bounded to the cap");
+}
+
+#[test]
+fn ci_failure_sections_fallback_when_no_jobs() {
+    // No Actions job data → fall back to listing raw check-run names.
+    let checks = [check_run("lint", 100)];
+    let refs: Vec<&CheckRun> = checks.iter().collect();
+    let (sections, ci_jobs) = build_ci_failure_sections(None, &refs);
+    let body = sections.join("\n");
+    assert!(body.contains("**lint**"), "{body}");
+    assert!(ci_jobs.is_empty());
+}
+
+#[test]
+fn auto_resolve_conversations_gate() {
+    // The #287 case: approved PR, auto-merge armed, GitHub reports BLOCKED
+    // (require-conversation-resolution holding the merge), not yet resolved
+    // for this SHA → fire.
+    assert!(should_auto_resolve_conversations(
+        true,
+        Some("BLOCKED"),
+        false
+    ));
+
+    // Not approved → never auto-resolve (the rule is a legitimate gate when
+    // there's no approval override).
+    assert!(!should_auto_resolve_conversations(
+        false,
+        Some("BLOCKED"),
+        false
+    ));
+
+    // Not BLOCKED → some non-conversation condition is still in flight
+    // (waiting on checks / behind base / draft), leave threads alone.
+    for st in [
+        Some("CLEAN"),
+        Some("UNSTABLE"),
+        Some("BEHIND"),
+        Some("DRAFT"),
+        Some("UNKNOWN"),
+        None,
+    ] {
+        assert!(
+            !should_auto_resolve_conversations(true, st, false),
+            "merge_state {st:?} must not trigger auto-resolve"
+        );
+    }
+
+    // Already resolved for this SHA → don't re-query every tick while a
+    // different rule (e.g. pending CODEOWNERS review) keeps it BLOCKED.
+    assert!(!should_auto_resolve_conversations(
+        true,
+        Some("BLOCKED"),
+        true
+    ));
+}
