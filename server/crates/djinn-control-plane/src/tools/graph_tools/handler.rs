@@ -219,7 +219,7 @@ impl DjinnMcpServer {
                  'refactor_candidates', 'metrics_at', \
                  'dead_symbols', 'deprecated_callers', 'touches_hot_path', \
                  'coupling', 'churn', 'coupling_hotspots', 'coupling_hubs', \
-                 'snapshot'"
+                 .snapshot, route_map, shape_check, api_impact."
             )),
         }
     }

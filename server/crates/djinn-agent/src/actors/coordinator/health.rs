@@ -23,6 +23,7 @@ pub(super) async fn sweep_stale_resources(
     app_state: &crate::context::AgentContext,
 ) {
     reap_stale_task_runs(db).await;
+    reap_orphaned_taskrun_jobs(db, app_state, "periodic").await;
 
     let project_repo = ProjectRepository::new(db.clone(), app_state.event_bus.clone());
     let task_repo = TaskRepository::new(db.clone(), app_state.event_bus.clone());
@@ -105,6 +106,143 @@ pub(super) async fn sweep_stale_resources(
             }
         }
     }
+}
+
+// ─── K8s task-run Job backstop ───────────────────────────────────────────────
+
+/// Reconcile runtime task-run Jobs against DB truth and foreground-delete Jobs
+/// for task-runs that are absent or already finalized.
+///
+/// This is intentionally a runtime-bridge policy, not a Kubernetes policy: the
+/// coordinator sees only [`djinn_control_plane::bridge::TaskrunJobRef`] values
+/// and calls [`djinn_control_plane::bridge::RuntimeOps::teardown_taskrun_job`].
+/// Inline teardown, stall reaping, and zombie recovery own currently-running
+/// rows; this backstop only cleans Jobs with no live DB owner.
+pub(super) async fn reap_orphaned_taskrun_jobs(
+    db: &djinn_db::Database,
+    app_state: &crate::context::AgentContext,
+    reason: &'static str,
+) {
+    let Some(runtime_ops) = app_state.runtime_ops.as_ref() else {
+        return;
+    };
+
+    let jobs = match runtime_ops.list_taskrun_jobs().await {
+        Ok(jobs) => jobs,
+        Err(e) => {
+            tracing::warn!(error = %e, reason, "CoordinatorActor: failed to list task-run Jobs for backstop reap");
+            return;
+        }
+    };
+
+    let task_run_repo = djinn_db::repositories::task_run::TaskRunRepository::new(db.clone());
+
+    for job in jobs {
+        let task_run_id = job.task_run_id.trim();
+        if task_run_id.is_empty() {
+            tracing::warn!(
+                job_name = %job.job_name,
+                reason,
+                "CoordinatorActor: task-run Job inventory returned an empty task_run_id; skipping"
+            );
+            continue;
+        }
+
+        let task_run = match task_run_repo.get(task_run_id).await {
+            Ok(row) => row,
+            Err(e) => {
+                tracing::warn!(
+                    job_name = %job.job_name,
+                    task_run_id = %task_run_id,
+                    error = %e,
+                    reason,
+                    "CoordinatorActor: failed to load task_run for task-run Job backstop reap"
+                );
+                continue;
+            }
+        };
+
+        let sessions = match list_sessions_for_task_run(db, task_run_id).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(
+                    job_name = %job.job_name,
+                    task_run_id = %task_run_id,
+                    error = %e,
+                    reason,
+                    "CoordinatorActor: failed to load sessions for task-run Job backstop reap"
+                );
+                continue;
+            }
+        };
+
+        if should_keep_taskrun_job(task_run.as_ref(), &sessions) {
+            continue;
+        }
+
+        if let Err(e) = runtime_ops.teardown_taskrun_job(task_run_id).await {
+            tracing::warn!(
+                job_name = %job.job_name,
+                task_run_id = %task_run_id,
+                error = %e,
+                reason,
+                "CoordinatorActor: task-run Job backstop teardown failed; continuing sweep"
+            );
+            continue;
+        }
+
+        tracing::info!(
+            job_name = %job.job_name,
+            task_run_id = %task_run_id,
+            reason,
+            "CoordinatorActor: backstop reaped orphaned task-run Job"
+        );
+    }
+}
+
+async fn list_sessions_for_task_run(
+    db: &djinn_db::Database,
+    task_run_id: &str,
+) -> djinn_db::Result<Vec<djinn_core::models::SessionRecord>> {
+    db.ensure_initialized().await?;
+    Ok(sqlx::query_as::<_, djinn_core::models::SessionRecord>(
+        r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+            status, tokens_in, tokens_out,
+            cache_read_tokens, cache_write_tokens, task_run_id, title
+         FROM sessions WHERE task_run_id = $1 ORDER BY started_at DESC"#,
+    )
+    .bind(task_run_id)
+    .fetch_all(db.pool())
+    .await?)
+}
+
+/// Startup/rollout pass for the task-run Job backstop. Server boot first marks
+/// previously-running sessions interrupted via `interrupt_stale_sessions_on_startup`;
+/// the coordinator then runs this immediate reconcile before waiting for the
+/// normal stale-resource interval. The helper is idempotent and safe if startup
+/// ordering changes: if the session row is still running, the Job is preserved;
+/// if the row was interrupted/finalized or is absent, the Job is deleted.
+pub(super) async fn reap_orphaned_taskrun_jobs_for_startup(
+    db: &djinn_db::Database,
+    app_state: &crate::context::AgentContext,
+) {
+    tracing::info!("CoordinatorActor: running startup task-run Job backstop reconcile");
+    reap_orphaned_taskrun_jobs(db, app_state, "startup").await;
+}
+
+fn should_keep_taskrun_job(
+    task_run: Option<&djinn_core::models::TaskRunRecord>,
+    sessions: &[djinn_core::models::SessionRecord],
+) -> bool {
+    let has_live_session = sessions
+        .iter()
+        .any(|session| session.status == "running" && session.ended_at.is_none());
+
+    if let Some(task_run) = task_run {
+        return task_run.status == "running" && task_run.ended_at.is_none() && has_live_session;
+    }
+
+    has_live_session
 }
 
 // ─── Note association pruning ────────────────────────────────────────────────

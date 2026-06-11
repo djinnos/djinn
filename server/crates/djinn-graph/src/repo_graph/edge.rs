@@ -7,13 +7,13 @@ use super::constants::{
     EDGE_CONFIDENCE_CONTAINS_DEFINITION, EDGE_CONFIDENCE_DECLARED_IN_FILE, EDGE_CONFIDENCE_DEFINES,
     EDGE_CONFIDENCE_ENTRY_POINT_OF, EDGE_CONFIDENCE_EXTENDS, EDGE_CONFIDENCE_FETCHES,
     EDGE_CONFIDENCE_FILE_REFERENCE, EDGE_CONFIDENCE_HANDLES_ROUTE, EDGE_CONFIDENCE_IMPLEMENTS,
-    EDGE_CONFIDENCE_MEMBER_OF, EDGE_CONFIDENCE_READS, EDGE_CONFIDENCE_STEP_IN_PROCESS,
-    EDGE_CONFIDENCE_SYMBOL_REFERENCE, EDGE_CONFIDENCE_TYPE_DEFINES, EDGE_CONFIDENCE_WRITES,
-    EDGE_WEIGHT_DEFINES, EDGE_WEIGHT_DEFINITION_TO_FILE, EDGE_WEIGHT_ENTRY_POINT_OF,
-    EDGE_WEIGHT_EXTENDS, EDGE_WEIGHT_FETCHES, EDGE_WEIGHT_FILE_REFERENCE,
-    EDGE_WEIGHT_FILE_TO_DEFINITION, EDGE_WEIGHT_HANDLES_ROUTE, EDGE_WEIGHT_IMPLEMENTS,
-    EDGE_WEIGHT_MEMBER_OF, EDGE_WEIGHT_STEP_IN_PROCESS, EDGE_WEIGHT_SYMBOL_REFERENCE,
-    EDGE_WEIGHT_TYPE_DEFINES,
+    EDGE_CONFIDENCE_MEMBER_OF, EDGE_CONFIDENCE_READS, EDGE_CONFIDENCE_ROUTE,
+    EDGE_CONFIDENCE_STEP_IN_PROCESS, EDGE_CONFIDENCE_SYMBOL_REFERENCE,
+    EDGE_CONFIDENCE_TYPE_DEFINES, EDGE_CONFIDENCE_WRITES, EDGE_WEIGHT_DEFINES,
+    EDGE_WEIGHT_DEFINITION_TO_FILE, EDGE_WEIGHT_ENTRY_POINT_OF, EDGE_WEIGHT_EXTENDS,
+    EDGE_WEIGHT_FETCHES, EDGE_WEIGHT_FILE_REFERENCE, EDGE_WEIGHT_FILE_TO_DEFINITION,
+    EDGE_WEIGHT_HANDLES_ROUTE, EDGE_WEIGHT_IMPLEMENTS, EDGE_WEIGHT_MEMBER_OF, EDGE_WEIGHT_ROUTE,
+    EDGE_WEIGHT_STEP_IN_PROCESS, EDGE_WEIGHT_SYMBOL_REFERENCE, EDGE_WEIGHT_TYPE_DEFINES,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -91,10 +91,30 @@ pub enum RepoGraphEdgeKind {
     /// `"axum-route-attr"`.
     HandlesRoute,
     /// PR s6ch / ykcg: synthetic edge from a client/caller `Symbol` to
-    /// the HTTP `Route` it fetches. Consumer-side route matching is
-    /// inferential, so its confidence floor is lower than
-    /// [`RepoGraphEdgeKind::HandlesRoute`].
+    /// the HTTP `Route` it fetches. Plain URL-literal matches are suggestions;
+    /// matches stamped with explicit import evidence are promoted by
+    /// [`promote_fetches_confidence_with_import_evidence`] and classify as
+    /// [`EdgeConfidenceTier::Extracted`].
     Fetches,
+    /// Inferred route relationship used by string/shape-based route matchers.
+    /// Ordinary route string-shape matches classify as [`EdgeConfidenceTier::Inferred`].
+    /// Appended after the v10 route-extraction variants to preserve existing
+    /// bincode discriminants for `HandlesRoute` and `Fetches`.
+    Route,
+}
+
+/// Model-level confidence tier for graph edges.
+///
+/// This is deliberately computed from persisted `kind` / `confidence` /
+/// `reason` rather than stored on [`RepoGraphEdge`] or
+/// [`crate::repo_graph::RepoGraphArtifactEdge`], so existing bincode artifacts
+/// remain readable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeConfidenceTier {
+    Extracted,
+    Inferred,
+    Ambiguous,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -120,6 +140,12 @@ pub struct RepoGraphEdge {
     pub step: Option<i32>,
 }
 
+impl RepoGraphEdge {
+    pub fn confidence_tier(&self) -> EdgeConfidenceTier {
+        edge_confidence_tier(self.kind, self.confidence, self.reason.as_deref())
+    }
+}
+
 /// Initial confidence floor for an edge of the given kind.
 ///
 /// See the constants block at the top of this module for the table; the
@@ -143,7 +169,73 @@ pub fn edge_confidence_floor(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::StepInProcess => EDGE_CONFIDENCE_STEP_IN_PROCESS,
         RepoGraphEdgeKind::HandlesRoute => EDGE_CONFIDENCE_HANDLES_ROUTE,
         RepoGraphEdgeKind::Fetches => EDGE_CONFIDENCE_FETCHES,
+        RepoGraphEdgeKind::Route => EDGE_CONFIDENCE_ROUTE,
     }
+}
+
+pub fn edge_confidence_tier(
+    kind: RepoGraphEdgeKind,
+    confidence: f64,
+    reason: Option<&str>,
+) -> EdgeConfidenceTier {
+    let floor = edge_confidence_floor(kind);
+    let reason_lc = reason.unwrap_or_default().to_ascii_lowercase();
+    if confidence + f64::EPSILON < floor
+        || reason_lc.contains("ambiguous")
+        || reason_lc.contains("suppressed")
+        || reason_lc.contains("below-floor")
+    {
+        return EdgeConfidenceTier::Ambiguous;
+    }
+
+    match kind {
+        RepoGraphEdgeKind::Fetches
+            if is_fetches_import_evidence_reason(&reason_lc) && confidence >= 0.9 =>
+        {
+            EdgeConfidenceTier::Extracted
+        }
+        RepoGraphEdgeKind::Route | RepoGraphEdgeKind::Fetches => EdgeConfidenceTier::Inferred,
+        RepoGraphEdgeKind::ContainsDefinition
+        | RepoGraphEdgeKind::DeclaredInFile
+        | RepoGraphEdgeKind::SymbolReference
+        | RepoGraphEdgeKind::Writes
+        | RepoGraphEdgeKind::EntryPointOf
+        | RepoGraphEdgeKind::MemberOf
+        | RepoGraphEdgeKind::StepInProcess
+        | RepoGraphEdgeKind::HandlesRoute
+            if confidence >= 0.9 =>
+        {
+            EdgeConfidenceTier::Extracted
+        }
+        _ => EdgeConfidenceTier::Inferred,
+    }
+}
+
+fn is_fetches_import_evidence_reason(reason_lc: &str) -> bool {
+    reason_lc.contains("import-evidence")
+        || reason_lc.contains("import evidence")
+        || reason_lc.contains("explicit-import")
+}
+
+/// Apply the import-evidence promotion contract for `Fetches` edges.
+///
+/// Callers that match a URL literal to a known imported route/client symbol
+/// should use this helper before materializing the edge. It lifts the match
+/// above 0.9 and stamps a reason that [`edge_confidence_tier`] recognizes as
+/// extracted while leaving plain string-shape `Fetches` matches inferred.
+pub fn promote_fetches_confidence_with_import_evidence(
+    confidence: f64,
+    reason: Option<&str>,
+) -> (f64, String) {
+    let promoted = confidence.max(0.91);
+    let reason = match reason.filter(|value| !value.trim().is_empty()) {
+        Some(value) if is_fetches_import_evidence_reason(&value.to_ascii_lowercase()) => {
+            value.to_string()
+        }
+        Some(value) => format!("{value}; import-evidence"),
+        None => "import-evidence".to_string(),
+    };
+    (promoted, reason)
 }
 
 /// PR F1: public wrapper around the per-kind weight table so the
@@ -174,6 +266,7 @@ pub(crate) fn edge_weight(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::StepInProcess => EDGE_WEIGHT_STEP_IN_PROCESS,
         RepoGraphEdgeKind::HandlesRoute => EDGE_WEIGHT_HANDLES_ROUTE,
         RepoGraphEdgeKind::Fetches => EDGE_WEIGHT_FETCHES,
+        RepoGraphEdgeKind::Route => EDGE_WEIGHT_ROUTE,
     }
 }
 
@@ -191,22 +284,92 @@ mod tests {
             serde_json::to_string(&RepoGraphEdgeKind::Fetches).expect("serialize kind"),
             "\"fetches\""
         );
+        assert_eq!(
+            serde_json::to_string(&RepoGraphEdgeKind::Route).expect("serialize kind"),
+            "\"route\""
+        );
     }
 
     #[test]
     fn route_edge_confidence_and_weight_rows_are_pinned() {
         let handles_confidence = edge_confidence_floor(RepoGraphEdgeKind::HandlesRoute);
+        let route_confidence = edge_confidence_floor(RepoGraphEdgeKind::Route);
         let fetches_confidence = edge_confidence_floor(RepoGraphEdgeKind::Fetches);
 
         assert!(handles_confidence > fetches_confidence);
+        assert!(handles_confidence > route_confidence);
         assert!((handles_confidence - EDGE_CONFIDENCE_HANDLES_ROUTE).abs() < f64::EPSILON);
         assert!((fetches_confidence - EDGE_CONFIDENCE_FETCHES).abs() < f64::EPSILON);
+        assert!((route_confidence - EDGE_CONFIDENCE_ROUTE).abs() < f64::EPSILON);
         assert!(
             (edge_weight(RepoGraphEdgeKind::HandlesRoute) - EDGE_WEIGHT_HANDLES_ROUTE).abs()
                 < f64::EPSILON
         );
         assert!(
             (edge_weight(RepoGraphEdgeKind::Fetches) - EDGE_WEIGHT_FETCHES).abs() < f64::EPSILON
+        );
+        assert!((edge_weight(RepoGraphEdgeKind::Route) - EDGE_WEIGHT_ROUTE).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn confidence_tier_classifies_extracted_inferred_and_ambiguous_edges() {
+        assert_eq!(
+            edge_confidence_tier(RepoGraphEdgeKind::ContainsDefinition, 0.95, None),
+            EdgeConfidenceTier::Extracted
+        );
+        assert_eq!(
+            edge_confidence_tier(
+                RepoGraphEdgeKind::HandlesRoute,
+                0.90,
+                Some("axum-router-new")
+            ),
+            EdgeConfidenceTier::Extracted
+        );
+        assert_eq!(
+            edge_confidence_tier(RepoGraphEdgeKind::Route, 0.78, Some("string-shape")),
+            EdgeConfidenceTier::Inferred
+        );
+        assert_eq!(
+            edge_confidence_tier(RepoGraphEdgeKind::Fetches, 0.80, Some("url-literal")),
+            EdgeConfidenceTier::Inferred
+        );
+        assert_eq!(
+            edge_confidence_tier(RepoGraphEdgeKind::Route, 0.70, Some("string-shape")),
+            EdgeConfidenceTier::Ambiguous
+        );
+        assert_eq!(
+            edge_confidence_tier(RepoGraphEdgeKind::Fetches, 0.80, Some("ambiguous-path")),
+            EdgeConfidenceTier::Ambiguous
+        );
+    }
+
+    #[test]
+    fn fetches_import_evidence_promotes_to_extracted() {
+        let (confidence, reason) = promote_fetches_confidence_with_import_evidence(
+            EDGE_CONFIDENCE_FETCHES,
+            Some("url-literal"),
+        );
+        assert!(confidence > 0.9);
+        assert!(reason.contains("import-evidence"));
+        assert_eq!(
+            edge_confidence_tier(RepoGraphEdgeKind::Fetches, confidence, Some(&reason)),
+            EdgeConfidenceTier::Extracted
+        );
+    }
+
+    #[test]
+    fn confidence_tier_serde_uses_stable_snake_case_names() {
+        assert_eq!(
+            serde_json::to_string(&EdgeConfidenceTier::Extracted).expect("serialize"),
+            "\"extracted\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EdgeConfidenceTier::Inferred).expect("serialize"),
+            "\"inferred\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EdgeConfidenceTier::Ambiguous).expect("serialize"),
+            "\"ambiguous\""
         );
     }
 }

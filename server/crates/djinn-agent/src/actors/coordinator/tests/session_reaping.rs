@@ -451,10 +451,7 @@ async fn stall_killed_prunes_sessions_absent_from_active() {
 /// Reaping must delete the task-run Job even when the slot pool has no live
 /// mapping for the task — the (likely leaked) slot was already reclaimed
 /// before the backstop ticked, so the only authoritative reference to the
-/// pod is the DB session row's `task_run_id`. Without this, a K8s pod that
-/// outlives the host's `task_to_slot` entry leaks indefinitely (its
-/// `activeDeadlineSeconds` is the only thing that ever stops it, and only
-/// after the full 3h budget).
+/// pod is the DB session row's `task_run_id`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reap_zombie_session_with_no_slot_mapping_still_tears_down_taskrun_job() {
     use djinn_db::{CreateSessionParams, SessionRepository};
@@ -491,7 +488,6 @@ async fn reap_zombie_session_with_no_slot_mapping_still_tears_down_taskrun_job()
         })
         .await
         .unwrap();
-    // Backdate past the 10-minute hard cap, tokens still 0/0.
     sqlx::query(
         "UPDATE sessions SET started_at = to_char(now() AT TIME ZONE 'utc' - interval '20 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
     )
@@ -502,11 +498,6 @@ async fn reap_zombie_session_with_no_slot_mapping_still_tears_down_taskrun_job()
 
     let runtime = RecordingRuntimeOps::new(false);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
-    // Critical: do NOT dispatch the task, so the slot pool has no
-    // `task_to_slot` mapping for `task.id`. `pool.has_session` returns
-    // false, `pool.session_for_task` returns Ok(None), and the pool
-    // cannot surface the task-run id on its own — the reap MUST get it
-    // from the DB session row.
     actor.runtime_ops = Some(std::sync::Arc::new(runtime.clone()));
 
     actor.reap_zombie_sessions().await;
@@ -536,13 +527,6 @@ async fn reap_zombie_session_with_no_slot_mapping_still_tears_down_taskrun_job()
     );
 }
 
-/// When the task-run Job teardown itself fails (e.g. transient kube API
-/// error, RBAC miss, 5xx), the DB-side recovery must still proceed:
-/// `reap_zombie_sessions` must NOT abort the sweep on a teardown error —
-/// session row finalization and task release are more important than the
-/// pod cleanup, and the periodic sweep will retry the teardown next tick.
-/// This is the explicit contract behind
-/// `teardown_zombie_taskrun_job`'s `tracing::warn!` + return.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reap_zombie_session_continues_recovery_when_teardown_fails() {
     use djinn_db::{CreateSessionParams, SessionRepository};
@@ -587,9 +571,6 @@ async fn reap_zombie_session_continues_recovery_when_teardown_fails() {
     .await
     .unwrap();
 
-    // fail_teardown=true: the recording RuntimeOps returns an Err on every
-    // teardown_taskrun_job call. The reap must still finalize the session
-    // row and release the task.
     let runtime = RecordingRuntimeOps::new(true);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.runtime_ops = Some(std::sync::Arc::new(runtime.clone()));
@@ -599,7 +580,7 @@ async fn reap_zombie_session_continues_recovery_when_teardown_fails() {
     assert_eq!(
         runtime.calls(),
         vec![run_id.to_string()],
-        "teardown must be attempted (logged as failure) even when it errors"
+        "teardown must be attempted even when it errors"
     );
     assert!(
         !session_repo
@@ -621,12 +602,6 @@ async fn reap_zombie_session_continues_recovery_when_teardown_fails() {
     );
 }
 
-/// A past-cap zombie whose session row carries `task_run_id = NULL` is
-/// still reaped (the row is finalized, the task is released), but
-/// teardown is NOT invoked — there is no Job to delete when no
-/// task-run was ever issued (e.g. a worker that crashed during the
-/// pre-dispatch handshake). The sweep must not error and must not panic
-/// on the absent task_run_id.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reap_zombie_session_without_task_run_id_is_reaped_without_teardown() {
     use djinn_db::{CreateSessionParams, SessionRepository};
@@ -687,5 +662,217 @@ async fn reap_zombie_session_without_task_run_id_is_reaped_without_teardown() {
     assert_eq!(
         updated.status, "open",
         "task must still be released for redispatch even when no task-run Job exists"
+    );
+}
+
+fn taskrun_job_ref(task_run_id: &str) -> djinn_control_plane::bridge::TaskrunJobRef {
+    djinn_control_plane::bridge::TaskrunJobRef {
+        job_name: format!("djinn-taskrun-{task_run_id}"),
+        task_run_id: task_run_id.to_string(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn taskrun_job_backstop_deletes_absent_and_finalized_rows_only() {
+    use djinn_core::models::SessionStatus;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "taskrun-job-backstop").await;
+
+    let finalized_run_id = "run-finalized-backstop";
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, ended_at)
+         VALUES ($1, $2, $3, 'manual', 'completed', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))",
+    )
+    .bind(finalized_run_id)
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let live_run_id = "run-live-backstop";
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status)
+         VALUES ($1, $2, $3, 'manual', 'running')",
+    )
+    .bind(live_run_id)
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let live_session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(live_run_id),
+        })
+        .await
+        .unwrap();
+
+    let completed_session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(finalized_run_id),
+        })
+        .await
+        .unwrap();
+    session_repo
+        .update(&completed_session.id, SessionStatus::Completed, 1, 1, 0, 0)
+        .await
+        .unwrap();
+
+    let interrupted_run_id = "run-interrupted-backstop";
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status)
+         VALUES ($1, $2, $3, 'manual', 'running')",
+    )
+    .bind(interrupted_run_id)
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let interrupted_session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(interrupted_run_id),
+        })
+        .await
+        .unwrap();
+    session_repo
+        .update(
+            &interrupted_session.id,
+            SessionStatus::Interrupted,
+            1,
+            1,
+            0,
+            0,
+        )
+        .await
+        .unwrap();
+
+    let runtime = RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![
+        taskrun_job_ref("run-absent-backstop"),
+        taskrun_job_ref(finalized_run_id),
+        taskrun_job_ref(interrupted_run_id),
+        taskrun_job_ref(live_run_id),
+    ]);
+    let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+
+    health::reap_orphaned_taskrun_jobs(&db, &app_state, "test").await;
+
+    assert_eq!(
+        runtime.calls(),
+        vec![
+            "run-absent-backstop".to_string(),
+            finalized_run_id.to_string(),
+            interrupted_run_id.to_string(),
+        ],
+        "backstop must delete absent/finalized/interrupted-session Jobs and preserve live running task-runs"
+    );
+    assert!(
+        session_repo
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .any(|session| session.id == live_session.id),
+        "live running session must be preserved"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_resource_sweep_runs_taskrun_job_backstop() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "periodic-backstop-wiring").await;
+    let periodic_run_id = "periodic-finalized";
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, ended_at)
+         VALUES ($1, $2, $3, 'manual', 'completed', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))",
+    )
+    .bind(periodic_run_id)
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let runtime =
+        RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![taskrun_job_ref(periodic_run_id)]);
+    let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+
+    health::sweep_stale_resources(&db, &app_state).await;
+
+    assert_eq!(
+        runtime.calls(),
+        vec![periodic_run_id.to_string()],
+        "periodic stale-resource sweep must run the K8s task-run Job backstop"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reconcile_runs_taskrun_job_backstop() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "startup-backstop-wiring").await;
+    let startup_run_id = "startup-finalized";
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, ended_at)
+         VALUES ($1, $2, $3, 'manual', 'completed', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))",
+    )
+    .bind(startup_run_id)
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let runtime =
+        RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![taskrun_job_ref(startup_run_id)]);
+    let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+
+    health::reap_orphaned_taskrun_jobs_for_startup(&db, &app_state).await;
+
+    assert_eq!(
+        runtime.calls(),
+        vec![startup_run_id.to_string()],
+        "startup reconcile must run the K8s task-run Job backstop before periodic intervals"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn taskrun_job_backstop_continues_after_delete_failure() {
+    let db = test_helpers::create_test_db();
+    let runtime = RecordingRuntimeOps::new(true).with_taskrun_jobs(vec![
+        taskrun_job_ref("missing-one"),
+        taskrun_job_ref("missing-two"),
+    ]);
+    let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+
+    health::reap_orphaned_taskrun_jobs(&db, &app_state, "test").await;
+
+    assert_eq!(
+        runtime.calls(),
+        vec!["missing-one".to_string(), "missing-two".to_string()],
+        "teardown failures are best-effort and must not stop the sweep"
     );
 }

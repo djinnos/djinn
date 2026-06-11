@@ -1188,13 +1188,19 @@ impl AppState {
     pub async fn become_leader(&self) {
         tracing::info!("become_leader: starting active coordinator subsystems");
 
-        // Coordinator + slot pool (the dispatch engine) + runtime settings.
-        self.initialize_agents().await;
-
         // Finalize any sessions left in `running` from a previous leader. Safe
         // now (and only now): we hold the lock, so the previous leader is gone
         // and any `running` row is genuinely orphaned.
+        //
+        // This intentionally runs before spawning the coordinator: the
+        // coordinator's startup task-run Job backstop immediately reconciles K8s
+        // Jobs against these interrupted rows, so boot cleanup does not have to
+        // wait for the long periodic stale-resource sweep. The backstop remains
+        // idempotent if this ordering changes and observes a still-running row.
         self.interrupt_stale_sessions_on_startup().await;
+
+        // Coordinator + slot pool (the dispatch engine) + runtime settings.
+        self.initialize_agents().await;
 
         // Prune stale verification cache entries (>7 days old).
         self.prune_verification_cache_on_startup().await;

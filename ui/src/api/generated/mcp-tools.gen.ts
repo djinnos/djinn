@@ -374,6 +374,11 @@ export namespace CodeGraphInputSchema {
    */
   file_glob?: string
   /**
+   * Optional framework filter for `route_map` (for example `axum`,
+   * `express`, or `rails`).
+   */
+  framework?: string
+  /**
    * Source node for `path`.
    */
   from?: string
@@ -402,6 +407,11 @@ export namespace CodeGraphInputSchema {
    */
   include_content?: boolean
   /**
+   * Include optional response fields when computing `shape_check` drift.
+   * Defaults to `false`.
+   */
+  include_optional?: boolean
+  /**
    * The node key to query (file path or SCIP symbol string).
    * Required for `neighbors`, `impact`, `implementations`, and `describe`.
    */
@@ -416,6 +426,7 @@ export namespace CodeGraphInputSchema {
    *   the response to neighbors connected by `Reads` / `Writes` edges
    *   only, so callers can ask for "who writes to field X" without
    *   post-filtering.
+   * - `flow`: flow-hit tier — `process` or `step`.
    */
   kind_filter?: string
   /**
@@ -433,8 +444,11 @@ export namespace CodeGraphInputSchema {
    */
   level?: string
   /**
-   * Maximum results for `ranked`/`search`/`orphans`/`edges`/`neighbors`
-   * (default 20) or max traversal depth for `impact` (default 3).
+   * Maximum results for list operations. Defaults are op-specific:
+   * `ranked`/`search`/`neighbors`/`flow` default 20, `route_map`/
+   * `api_impact` default 50, `edges` default 100. For `impact`, this is
+   * max traversal depth (default 3). Negative values are treated as zero by
+   * legacy ops; new route/API/flow ops reject negative limits.
    */
   limit?: number
   /**
@@ -487,6 +501,11 @@ export namespace CodeGraphInputSchema {
    */
   module_glob?: string
   /**
+   * HTTP method selector for route-aware ops. Optional for `route_map`;
+   * required with `path` when `shape_check`/`api_impact` omit `route_id`.
+   */
+  method?: string
+  /**
    * The operation to perform.
    * One of: `neighbors`, `ranked`, `impact`, `implementations`,
    * `search`, `query_subgraph`, `cycles`, `orphans`, `path`, `edges`,
@@ -502,12 +521,29 @@ export namespace CodeGraphInputSchema {
    */
   project: string
   /**
+   * Exact route path selector for `shape_check`/`api_impact` when
+   * `route_id` is omitted.
+   */
+  path?: string
+  /**
+   * Route path glob filter for `route_map`.
+   */
+  path_glob?: string
+  /**
    * Query text, op-specific:
    * - `search`: substring/name lookup text.
    * - `query_subgraph`: required nonblank natural-language question used
    *   to pick relevant seeds and infer useful traversal edge kinds.
+   * - `flow`: required nonblank natural-language query re-ranked over
+   *   process/step matches.
    */
   query?: string
+  /**
+   * Route identifier for `route_map` filters and as one selector form for
+   * `shape_check`/`api_impact`. For `shape_check`/`api_impact`, callers
+   * must provide either `route_id` or both `method` and exact `path`.
+   */
+  route_id?: string
   /**
    * Boundary rules for `boundary_check`.
    */
