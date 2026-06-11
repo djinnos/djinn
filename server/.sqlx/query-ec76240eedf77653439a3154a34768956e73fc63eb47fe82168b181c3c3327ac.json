@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT n.id, n.permalink, n.title, n.folder, n.note_type, n.abstract AS abstract_, n.overview,\n                    ts_rank(n.search_vector, websearch_to_tsquery('english', $1))::float8 AS \"score!: f64\"\n             FROM notes n\n             WHERE n.search_vector @@ websearch_to_tsquery('english', $1)\n               AND n.project_id = $2\n               AND n.folder = $3\n               AND n.note_type = $4\n               AND n.storage = 'db'\n               AND ts_rank(n.search_vector, websearch_to_tsquery('english', $1)) > $5\n             ORDER BY ts_rank(n.search_vector, websearch_to_tsquery('english', $1)) DESC\n             LIMIT $6",
+  "query": "WITH ranked AS (\n                 SELECT n.id, n.permalink, n.title, n.folder, n.note_type,\n                        n.abstract AS abstract_, n.overview,\n                        ts_rank(n.search_vector, websearch_to_tsquery('english', $1))::float8 AS score\n                 FROM notes n\n                 WHERE n.search_vector @@ websearch_to_tsquery('english', $1)\n                   AND n.project_id = $2\n                   AND n.folder = $3\n                   AND n.note_type = $4\n                   AND n.storage = 'db'\n               )\n               SELECT id, permalink, title, folder, note_type, abstract_, overview,\n                      score AS \"score!: f64\"\n               FROM ranked\n               WHERE score > $5\n               ORDER BY score DESC\n               LIMIT $6",
   "describe": {
     "columns": [
       {
@@ -50,7 +50,7 @@
         "Text",
         "Text",
         "Text",
-        "Float4",
+        "Float8",
         "Int8"
       ]
     },
@@ -65,5 +65,5 @@
       null
     ]
   },
-  "hash": "ddd707049f532161e01e14f5de27fdccad46891f45f83b418dff64c62bf71ebb"
+  "hash": "ec76240eedf77653439a3154a34768956e73fc63eb47fe82168b181c3c3327ac"
 }

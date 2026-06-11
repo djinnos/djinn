@@ -249,6 +249,17 @@ impl std::fmt::Display for TaskStatus {
 #[serde(rename_all = "snake_case")]
 pub enum TransitionAction {
     Start,
+    /// Worker re-entry from `needs_task_review` (the reviewer-response redo
+    /// path). A task lands at `needs_task_review` only after the worker already
+    /// submitted; when its branch is NOT durable the host routes a worker redo
+    /// (`ReviewResponse`), but the worker can't walk `start` (legal only from
+    /// `open`) so the run never moved off `needs_task_review` and the post-worker
+    /// `submit_verification` (legal only from `in_progress`) no-op'd — verification
+    /// was skipped and the task got review-dispatched without it. This action
+    /// walks `needs_task_review → in_progress` so the redo ends with a legal
+    /// `submit_verification`, identical to the `NewTask` path. No AC/blocker gate
+    /// (the task already passed `start` once).
+    ResumeWorker,
     SubmitVerification,
     VerificationPass,
     VerificationFail,
@@ -319,6 +330,7 @@ impl TransitionAction {
     pub fn parse(s: &str) -> Result<Self> {
         match s {
             "start" => Ok(Self::Start),
+            "resume_worker" => Ok(Self::ResumeWorker),
             "submit_verification" => Ok(Self::SubmitVerification),
             "verification_pass" => Ok(Self::VerificationPass),
             "verification_fail" => Ok(Self::VerificationFail),
@@ -434,6 +446,19 @@ pub fn compute_transition(
         TransitionAction::Start => {
             if *from != TaskStatus::Open {
                 return bad("start is only valid from open");
+            }
+            TransitionApply::simple(TaskStatus::InProgress)
+        }
+
+        TransitionAction::ResumeWorker => {
+            // Worker redo re-entry from a non-durable `needs_task_review`. Only
+            // legal from `needs_task_review`; carries no AC/blocker gate (unlike
+            // `Start`) because the task already cleared those when it first
+            // started. Lands at `in_progress` so the post-worker
+            // `submit_verification` walk succeeds and verification runs before
+            // the next review — same as the `NewTask` path.
+            if *from != TaskStatus::NeedsTaskReview {
+                return bad("resume_worker is only valid from needs_task_review");
             }
             TransitionApply::simple(TaskStatus::InProgress)
         }
@@ -832,8 +857,9 @@ mod tests {
         TaskStatus::Closed,
     ];
 
-    const ACTIONS: [TransitionAction; 29] = [
+    const ACTIONS: [TransitionAction; 30] = [
         TransitionAction::Start,
+        TransitionAction::ResumeWorker,
         TransitionAction::SubmitVerification,
         TransitionAction::VerificationPass,
         TransitionAction::VerificationFail,
@@ -867,6 +893,9 @@ mod tests {
     fn expected_status(action: &TransitionAction, from: &TaskStatus) -> Option<TaskStatus> {
         match (action, from) {
             (TransitionAction::Start, TaskStatus::Open) => Some(TaskStatus::InProgress),
+            (TransitionAction::ResumeWorker, TaskStatus::NeedsTaskReview) => {
+                Some(TaskStatus::InProgress)
+            }
             (TransitionAction::SubmitVerification, TaskStatus::InProgress) => {
                 Some(TaskStatus::Verifying)
             }
@@ -1006,6 +1035,62 @@ mod tests {
         assert_eq!(pass.to_status, Some(TaskStatus::NeedsTaskReview));
         // A clean verification resets the consecutive-failure counter.
         assert!(pass.reset_verification_failure);
+    }
+
+    #[test]
+    fn review_response_worker_redo_walk_reaches_verifying() {
+        // Regression for the skipped-verifying hop (task u4fx): a non-durable
+        // `needs_task_review` routes a worker redo. The worker pre-stage can't
+        // walk `start` (legal only from `open`), so the supervisor uses
+        // `resume_worker` to move `needs_task_review → in_progress`; the
+        // post-worker `submit_verification` then succeeds and the task enters
+        // `verifying` — verification runs before the next review, exactly like
+        // the NewTask path.
+        let resume = compute_transition(
+            &TransitionAction::ResumeWorker,
+            &TaskStatus::NeedsTaskReview,
+            None,
+        )
+        .expect("resume_worker from needs_task_review is valid");
+        assert_eq!(resume.to_status, Some(TaskStatus::InProgress));
+
+        let submit = compute_transition(
+            &TransitionAction::SubmitVerification,
+            &resume.to_status.clone().expect("resume sets status"),
+            None,
+        )
+        .expect("submit_verification from in_progress (after resume) is valid");
+        assert_eq!(submit.to_status, Some(TaskStatus::Verifying));
+
+        // And the green leg continues to needs_task_review, ready for the
+        // reviewer-only ReviewResume dispatch.
+        let pass = compute_transition(
+            &TransitionAction::VerificationPass,
+            &TaskStatus::Verifying,
+            None,
+        )
+        .expect("verification_pass from verifying is valid");
+        assert_eq!(pass.to_status, Some(TaskStatus::NeedsTaskReview));
+    }
+
+    #[test]
+    fn resume_worker_invalid_outside_needs_task_review() {
+        // `resume_worker` is the redo-only re-entry; it must NOT be a backdoor
+        // into in_progress from any other state (e.g. open uses `start` with its
+        // AC/blocker gate; verifying/in_task_review have their own legal exits).
+        for from in [
+            TaskStatus::Open,
+            TaskStatus::InProgress,
+            TaskStatus::Verifying,
+            TaskStatus::InTaskReview,
+            TaskStatus::Approved,
+            TaskStatus::Closed,
+        ] {
+            assert!(
+                compute_transition(&TransitionAction::ResumeWorker, &from, None).is_err(),
+                "resume_worker must be invalid from {from:?}"
+            );
+        }
     }
 
     #[test]
