@@ -229,6 +229,16 @@ impl KubernetesRuntime {
     pub fn registry(&self) -> &Arc<ConnectionRegistry> {
         &self.registry
     }
+
+    /// Foreground-delete the canonical task-run Job for `task_run_id`.
+    ///
+    /// This is the layering-safe primitive exposed through server/runtime
+    /// bridges for lifecycle code that knows only the task-run id. It reuses
+    /// the same `delete_job_foreground` helper as `cancel`/`teardown`, so
+    /// Kubernetes 404/not-found is idempotent success.
+    pub async fn teardown_taskrun_job(&self, task_run_id: &str) -> Result<(), kube::Error> {
+        delete_taskrun_job_foreground(&self.client, &self.config.namespace, task_run_id).await
+    }
 }
 
 #[async_trait]
@@ -1047,6 +1057,23 @@ pub(crate) async fn bridge_pending_to_bistream(
     });
 
     Ok(bistream)
+}
+
+/// Canonical Kubernetes Job name for a task-run id.
+pub fn taskrun_job_name(task_run_id: &str) -> String {
+    format!("djinn-taskrun-{task_run_id}")
+}
+
+/// Delete the canonical task-run Job with foreground propagation, treating 404
+/// as success for idempotency. Public for server-side components that own a
+/// kube client but do not hold a `KubernetesRuntime` instance.
+pub async fn delete_taskrun_job_foreground(
+    client: &kube::Client,
+    namespace: &str,
+    task_run_id: &str,
+) -> Result<(), kube::Error> {
+    let job_name = taskrun_job_name(task_run_id);
+    delete_job_foreground(client, namespace, &job_name, 30).await
 }
 
 /// Delete a Job with `Foreground` propagation and the given grace period,

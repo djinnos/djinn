@@ -161,6 +161,9 @@ impl RuntimeOps for StubRuntime {
     async fn release_backing_service(&self, _instance_id: &str) -> Result<(), String> {
         Ok(())
     }
+    async fn teardown_taskrun_job(&self, _task_run_id: &str) -> Result<(), String> {
+        Ok(())
+    }
     async fn cleanup_task_branches(&self, _task_id: &str) {}
 }
 

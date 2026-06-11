@@ -85,6 +85,11 @@ pub trait RuntimeOps: Send + Sync {
     ) -> Result<ProvisionedService, String>;
     /// Tear down a provisioned backing service (best-effort).
     async fn release_backing_service(&self, instance_id: &str) -> Result<(), String>;
+    /// Foreground-delete the canonical Kubernetes task-run Job
+    /// (`djinn-taskrun-{task_run_id}`). Best-effort/idempotent: runtimes with a
+    /// kube client treat 404/not-found as success; runtimes without kube may
+    /// no-op or return a clear unsupported error.
+    async fn teardown_taskrun_job(&self, task_run_id: &str) -> Result<(), String>;
     /// Delete a closed task's branch on the local mirror and the GitHub remote
     /// (which auto-closes any PR still open on that head). Best-effort: errors
     /// are logged, never surfaced. Used by `proposal_stop_build`'s abort cascade

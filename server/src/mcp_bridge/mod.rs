@@ -117,6 +117,17 @@ impl RuntimeOps for AppState {
             .map_err(|e| e.to_string())
     }
 
+    async fn teardown_taskrun_job(&self, task_run_id: &str) -> Result<(), String> {
+        // The K8s graph warmer is the server component that owns the live kube
+        // client; the in-process warmer's default impl returns a clear
+        // unsupported error for dev/test runtimes without Kubernetes.
+        self.graph_warmer()
+            .await
+            .teardown_taskrun_job(task_run_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn cleanup_task_branches(&self, task_id: &str) {
         let mirror = self.mirror();
         djinn_agent::task_merge::cleanup_task_branches_post_close(
