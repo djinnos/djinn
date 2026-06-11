@@ -112,6 +112,13 @@ impl djinn_control_plane::bridge::RuntimeOps for RecordingRuntimeOps {
         }
     }
 
+    async fn list_taskrun_jobs(
+        &self,
+    ) -> Result<Vec<djinn_control_plane::bridge::TaskrunJobRef>, String> {
+        // Agent-internal test fakes don't track a kube inventory.
+        Ok(Vec::new())
+    }
+
     async fn cleanup_task_branches(&self, _: &str) {}
 }
 
