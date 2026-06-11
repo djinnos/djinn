@@ -77,6 +77,30 @@ async fn stalled_model_recovers_after_cooldown_expires() {
 
 // ── Zombie-session DB-truth backstop ─────────────────────────────────────
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn taskrun_job_backstop_skips_empty_task_run_id_inventory_entry() {
+    let db = test_helpers::create_test_db();
+    let runtime = RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![
+        djinn_control_plane::bridge::TaskrunJobRef {
+            job_name: "djinn-taskrun-empty".to_string(),
+            task_run_id: "".to_string(),
+        },
+        djinn_control_plane::bridge::TaskrunJobRef {
+            job_name: "djinn-taskrun-whitespace".to_string(),
+            task_run_id: "   ".to_string(),
+        },
+    ]);
+    let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.runtime_ops = Some(std::sync::Arc::new(runtime.clone()));
+
+    health::reap_orphaned_taskrun_jobs(&db, &app_state, "test").await;
+
+    assert!(
+        runtime.calls().is_empty(),
+        "malformed task-run inventory entries without a usable task_run_id must be skipped"
+    );
+}
+
 /// Regression for the xh6f wedge: a session stuck `running` with zero
 /// tokens past the hard cap is reaped purely on DB truth — the row is
 /// finalized and the task released for redispatch — even when the
