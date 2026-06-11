@@ -118,17 +118,14 @@ impl RuntimeOps for AppState {
     }
 
     async fn teardown_taskrun_job(&self, task_run_id: &str) -> Result<(), String> {
-        let client = kube::Client::try_default()
+        // The K8s graph warmer is the server component that owns the live kube
+        // client; the in-process warmer's default impl returns a clear
+        // unsupported error for dev/test runtimes without Kubernetes.
+        self.graph_warmer()
             .await
-            .map_err(|e| format!("task-run Job teardown requires a kube client: {e}"))?;
-        let config = djinn_k8s::KubernetesConfig::from_env();
-        djinn_k8s::runtime::delete_taskrun_job_foreground(
-            &client,
-            &config.namespace,
-            task_run_id,
-        )
-        .await
-        .map_err(|e| format!("delete task-run Job: {e}"))
+            .teardown_taskrun_job(task_run_id)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn cleanup_task_branches(&self, task_id: &str) {
