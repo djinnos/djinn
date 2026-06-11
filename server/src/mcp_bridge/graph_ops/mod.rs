@@ -89,41 +89,6 @@ impl RepoGraphOps for RepoGraphBridge {
         RepoGraphBridge::query_subgraph(self, ctx, req).await
     }
 
-    async fn route_map(
-        &self,
-        ctx: &ProjectCtx,
-        route_id: Option<&str>,
-        method: Option<&str>,
-        path_glob: Option<&str>,
-        framework: Option<&str>,
-        limit: usize,
-    ) -> Result<RouteMapResult, String> {
-        RepoGraphBridge::route_map(self, ctx, route_id, method, path_glob, framework, limit).await
-    }
-
-    async fn shape_check(
-        &self,
-        ctx: &ProjectCtx,
-        route_id: Option<&str>,
-        method: Option<&str>,
-        path: Option<&str>,
-        include_optional: bool,
-    ) -> Result<ShapeCheckResult, String> {
-        RepoGraphBridge::shape_check(self, ctx, route_id, method, path, include_optional).await
-    }
-
-    async fn api_impact(
-        &self,
-        ctx: &ProjectCtx,
-        route_id: Option<&str>,
-        method: Option<&str>,
-        path: Option<&str>,
-        min_confidence: f64,
-        limit: usize,
-    ) -> Result<ApiImpactResult, String> {
-        RepoGraphBridge::api_impact(self, ctx, route_id, method, path, min_confidence, limit).await
-    }
-
     async fn flow(
         &self,
         ctx: &ProjectCtx,
@@ -179,6 +144,46 @@ impl RepoGraphOps for RepoGraphBridge {
         limit: usize,
     ) -> Result<Vec<SearchHit>, String> {
         RepoGraphBridge::hybrid_search(self, ctx, query, kind_filter, limit).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn route_map(
+        &self,
+        ctx: &ProjectCtx,
+        route_id: Option<&str>,
+        method: Option<&str>,
+        path: Option<&str>,
+        path_glob: Option<&str>,
+        framework: Option<&str>,
+        limit: usize,
+    ) -> Result<RouteMapResult, String> {
+        RepoGraphBridge::route_map(
+            self, ctx, route_id, method, path, path_glob, framework, limit,
+        )
+        .await
+    }
+
+    async fn shape_check(
+        &self,
+        ctx: &ProjectCtx,
+        route_id: Option<&str>,
+        method: Option<&str>,
+        path: Option<&str>,
+        include_optional: bool,
+    ) -> Result<ShapeCheckResult, String> {
+        RepoGraphBridge::shape_check(self, ctx, route_id, method, path, include_optional).await
+    }
+
+    async fn api_impact(
+        &self,
+        ctx: &ProjectCtx,
+        route_id: Option<&str>,
+        method: Option<&str>,
+        path: Option<&str>,
+        min_confidence: f64,
+        limit: usize,
+    ) -> Result<ApiImpactResult, String> {
+        RepoGraphBridge::api_impact(self, ctx, route_id, method, path, min_confidence, limit).await
     }
 
     async fn cycles(
