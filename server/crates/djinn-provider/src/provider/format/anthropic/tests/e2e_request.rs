@@ -15,11 +15,11 @@
 //!   unchanged)
 //!
 //! Local helper `build_system_message_for_test` moves with the e2e tests
-//! that use it. The `count_cache_markers` helper lives in the shared shim
-//! (`tests/mod.rs`) because both this file and `cache.rs` use it.
+//! that use it. The `count_cache_markers` helper moves with the cache-control
+//! cap tests that use it.
 
+use super::test_provider;
 use super::*;
-use super::{count_cache_markers, test_provider};
 use crate::message::{Conversation, Message};
 
 // ─── End-to-end prompt assembly → Anthropic request coverage ──────────────
@@ -58,6 +58,35 @@ fn build_system_message_for_test(
         content,
         metadata,
     }
+}
+
+/// Count every `cache_control` marker present across tools, system blocks,
+/// and message content in a serialized request body.
+fn count_cache_markers(body: &Value) -> usize {
+    let mut count = 0;
+    if let Some(tools) = body.get("tools").and_then(Value::as_array) {
+        count += tools
+            .iter()
+            .filter(|t| t.get("cache_control").is_some())
+            .count();
+    }
+    if let Some(system) = body.get("system").and_then(Value::as_array) {
+        count += system
+            .iter()
+            .filter(|b| b.get("cache_control").is_some())
+            .count();
+    }
+    if let Some(messages) = body.get("messages").and_then(Value::as_array) {
+        for message in messages {
+            if let Some(content) = message.get("content").and_then(Value::as_array) {
+                count += content
+                    .iter()
+                    .filter(|b| b.get("cache_control").is_some())
+                    .count();
+            }
+        }
+    }
+    count
 }
 
 /// E2E: with repo map present, Anthropic keeps tool definitions in the

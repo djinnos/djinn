@@ -30,9 +30,8 @@
 //!                    `drift_guard_fixture` local helper.
 //!
 //! The 3 shared helpers (`spawn_sse_server`, `test_anthropic_config`,
-//! `test_provider`) plus the `count_cache_markers` helper are defined here
-//! and marked `pub(super)` so the 4 sibling test files can reach them via
-//! `use super::spawn_sse_server;` etc.
+//! `test_provider`) are defined here and marked `pub(super)` so the 4 sibling
+//! test files can reach them via `use super::spawn_sse_server;` etc.
 
 #[allow(unused_imports)]
 pub use super::*;
@@ -98,35 +97,4 @@ pub(super) fn test_anthropic_config() -> ProviderConfig {
 /// Build an `AnthropicProvider` wired to the `test_anthropic_config()`.
 pub(super) fn test_provider() -> AnthropicProvider {
     AnthropicProvider::new(test_anthropic_config())
-}
-
-/// Count every `cache_control` marker present across tools, system blocks,
-/// and message content in a serialized request body. Used by the
-/// cache-control cap tests in `e2e_request` and the default-cache-policy
-/// tests in `cache`, so it lives in the shared shim.
-pub(super) fn count_cache_markers(body: &Value) -> usize {
-    let mut count = 0;
-    if let Some(tools) = body.get("tools").and_then(Value::as_array) {
-        count += tools
-            .iter()
-            .filter(|t| t.get("cache_control").is_some())
-            .count();
-    }
-    if let Some(system) = body.get("system").and_then(Value::as_array) {
-        count += system
-            .iter()
-            .filter(|b| b.get("cache_control").is_some())
-            .count();
-    }
-    if let Some(messages) = body.get("messages").and_then(Value::as_array) {
-        for message in messages {
-            if let Some(content) = message.get("content").and_then(Value::as_array) {
-                count += content
-                    .iter()
-                    .filter(|b| b.get("cache_control").is_some())
-                    .count();
-            }
-        }
-    }
-    count
 }

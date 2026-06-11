@@ -18,12 +18,10 @@
 //!   (rmcp-converted-to-anthropic-input-schema, default-input-schema)
 //!
 //! Local helper `drift_guard_fixture` moves with the stable-prefix-hash
-//! tests that use it. The `count_cache_markers` helper lives in the shared
-//! shim (`tests/mod.rs`) because both this file and `e2e_request.rs` use
-//! it.
+//! tests that use it.
 
 use super::*;
-use super::{count_cache_markers, test_anthropic_config, test_provider};
+use super::{test_anthropic_config, test_provider};
 use crate::message::Conversation;
 
 // ─── B3: cache stable-prefix drift guard ──────────────────────────────────
@@ -62,6 +60,35 @@ fn drift_guard_fixture() -> (Conversation, Vec<Value>) {
         "input_schema": {"type": "object"}
     })];
     (conv, tools)
+}
+
+/// Count every `cache_control` marker present across tools, system blocks,
+/// and message content in a serialized request body.
+fn count_cache_markers(body: &Value) -> usize {
+    let mut count = 0;
+    if let Some(tools) = body.get("tools").and_then(Value::as_array) {
+        count += tools
+            .iter()
+            .filter(|t| t.get("cache_control").is_some())
+            .count();
+    }
+    if let Some(system) = body.get("system").and_then(Value::as_array) {
+        count += system
+            .iter()
+            .filter(|b| b.get("cache_control").is_some())
+            .count();
+    }
+    if let Some(messages) = body.get("messages").and_then(Value::as_array) {
+        for message in messages {
+            if let Some(content) = message.get("content").and_then(Value::as_array) {
+                count += content
+                    .iter()
+                    .filter(|b| b.get("cache_control").is_some())
+                    .count();
+            }
+        }
+    }
+    count
 }
 
 /// Determinism: identical logical inputs must produce a byte-identical cached
