@@ -525,6 +525,67 @@ async fn call_code_graph_inner(
                 json_with_optional_workspace_hint("hits", hits, scope.hint)?
             }
         }
+        "query_subgraph" => {
+            let query = p
+                .query
+                .as_deref()
+                .map(str::trim)
+                .filter(|q| !q.is_empty())
+                .ok_or("'query' is required for operation 'query_subgraph'")?;
+
+            let token_budget =
+                bounded_optional_usize(p.token_budget, "token_budget", 1_024, 32_000, false)?;
+            let max_seeds = bounded_optional_usize(p.max_seeds, "max_seeds", 1, 32, false)?;
+            let max_depth = p.max_depth.map(|d| d.clamp(0, 8));
+
+            let edge_filter = p
+                .edge_filters
+                .clone()
+                .unwrap_or_else(|| p.edge_kind.clone().into_iter().collect())
+                .into_iter()
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            let file_filter = p
+                .file_filter
+                .as_deref()
+                .or(p.file_glob.as_deref())
+                .or(p.file_path.as_deref())
+                .or(p.from_glob.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+
+            let request = djinn_control_plane::bridge::QuerySubgraphRequest {
+                query: query.to_string(),
+                workspace: ctx
+                    .workspace
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+                context_filter: p
+                    .context_filter
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+                file_filter,
+                kind_filter: p
+                    .kind_filter
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+                edge_filter,
+                token_budget,
+                max_depth,
+                max_seeds,
+            };
+            let result = graph_ops.query_subgraph(ctx, request).await?;
+            serde_json::json!({ "query_subgraph": result })
+        }
         "cycles" => {
             let min_size = p.min_size.unwrap_or(2);
             // v8: default kind_filter to "symbol" when unspecified.
@@ -1097,7 +1158,7 @@ async fn call_code_graph_inner(
             return Err(format!(
                 "unknown code_graph operation '{other}': expected one of \
                  'neighbors', 'ranked', 'impact', 'implementations', \
-                 'search', 'cycles', 'orphans', 'path', 'edges', \
+                 'search', 'query_subgraph', 'cycles', 'orphans', 'path', 'edges', \
                  'describe', 'context', 'capabilities', 'blast_radius', \
                  'boundary_check', 'cochange', 'churn', 'hotspots', \
                  'complexity', 'refactor_candidates', 'api_surface', 'metrics_at', 'dead_symbols', \
@@ -1108,6 +1169,29 @@ async fn call_code_graph_inner(
         }
     };
     Ok(result)
+}
+
+fn bounded_optional_usize(
+    value: Option<i64>,
+    name: &str,
+    min: usize,
+    max: usize,
+    allow_zero: bool,
+) -> Result<Option<usize>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value < 0 || (value == 0 && !allow_zero) {
+        return Err(format!(
+            "invalid {name} {value}: expected positive integer{}",
+            if allow_zero { " or 0" } else { "" }
+        ));
+    }
+    let value = value as usize;
+    if value == 0 && allow_zero {
+        return Ok(Some(0));
+    }
+    Ok(Some(value.clamp(min, max)))
 }
 
 /// v8: classify a [`djinn_control_plane::bridge::FileGroupEntry`] list
@@ -1231,6 +1315,8 @@ fn hybrid_search_diagnostic(query: &str) -> serde_json::Value {
 ///   classifier (v8 PR) can resolve when SCIP roles are absent.
 /// - `repo_graph_artifact_version`: bincode schema stamp; mismatches
 ///   force a re-warm.
+/// - `query_subgraph`: natural-language subgraph contract, including required
+///   query field, optional narrowing/budget fields, clamps, and response shape.
 fn code_graph_capabilities() -> serde_json::Value {
     // env-flag readers — kept inline so this crate doesn't take a
     // dep on djinn-graph just for capability introspection.
@@ -1253,7 +1339,7 @@ fn code_graph_capabilities() -> serde_json::Value {
     serde_json::json!({
         "operations": [
             "neighbors", "ranked", "impact", "implementations",
-            "search", "cycles", "orphans", "path", "edges",
+            "search", "query_subgraph", "cycles", "orphans", "path", "edges",
             "describe", "context", "capabilities", "blast_radius",
             "boundary_check", "cochange", "churn", "hotspots",
             "complexity", "refactor_candidates", "api_surface", "metrics_at", "dead_symbols",
@@ -1264,6 +1350,34 @@ fn code_graph_capabilities() -> serde_json::Value {
         "default_search_mode": std::env::var("DJINN_CODE_GRAPH_SEARCH_DEFAULT_MODE")
             .unwrap_or_else(|_| "name".to_string()),
         "available_search_modes": ["name", "hybrid"],
+        "query_subgraph": {
+            "operation": "query_subgraph",
+            "required": ["query"],
+            "query": "Natural-language question text; must be nonblank.",
+            "optional_filters": {
+                "workspace": "Scope seed search/traversal to a warmed workspace when provided.",
+                "context_filter": "Coarse subsystem/API/type/concern substring for narrowing broad questions.",
+                "file_filter": "Repository-relative path/file substring; file_glob/file_path/from_glob are compatibility aliases.",
+                "kind_filter": "Node-kind narrowing for seeds/traversal (file or symbol).",
+                "edge_filters": "Explicit traversal edge kinds such as calls, imports, returns, reads, writes, implements, extends; edge_kind is the single-kind alias.",
+                "max_depth": "Traversal depth from selected seeds; 0 keeps seed nodes only. Values clamp to 0..=8.",
+                "max_seeds": "Maximum selected seeds. Omit for backend default (~6); positive values clamp to 1..=32.",
+                "token_budget": "Approximate response token budget. Omit for backend default (~2000); positive values clamp to 1024..=32000."
+            },
+            "invalid": "Blank query, zero/negative token_budget, and zero/negative max_seeds are rejected before graph dispatch.",
+            "response": {
+                "wrapper": "query_subgraph",
+                "fields": [
+                    "query", "nodes", "edges", "seeds", "inferred_edge_kinds",
+                    "budget", "traversal", "narrowing_hints"
+                ],
+                "budget_fields": [
+                    "requested_tokens", "estimated_tokens", "truncated",
+                    "omitted_nodes", "omitted_edges"
+                ],
+                "retry_guidance": "If truncated or too broad, retry with context_filter, file_filter, edge_filters, lower max_depth/max_seeds, or a different token_budget."
+            }
+        },
         "env_features": {
             // Defaults match the on-by-default behavior in djinn-graph.
             "entry_point_detection": env_on("DJINN_ENTRY_POINT_DETECTION", true),
