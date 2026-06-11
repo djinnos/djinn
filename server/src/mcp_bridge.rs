@@ -14,12 +14,11 @@ use djinn_control_plane::bridge::{
     ApiSurfaceEntry, BoundaryRule, BoundaryViolation, CallerRef, ChangeKind, ChangedRange,
     CoordinatorOps, CycleGroup, CycleMember, DeadSymbolEntry, DeprecatedHit, DetectedChangesResult,
     DetectedTouchedSymbol, DiffTouchesResult, EdgeCategory, EdgeEntry, GitOps, GraphNeighbor,
-    GraphStatus, GraphWorkspaceEntry, HotPathHit, HotspotEntry, ImpactEntry, ImpactResult,
-    MetricsAtResult, NeighborsResult, OrphanEntry, PagerankTier, PathHop, PathResult, ProcessRef,
-    ProjectCtx, ProvisionServiceRequest, ProvisionedService,
-    QuerySubgraphBudget as WireQuerySubgraphBudget, QuerySubgraphEdge as WireQuerySubgraphEdge,
-    QuerySubgraphNode as WireQuerySubgraphNode, QuerySubgraphRequest,
-    QuerySubgraphResult as WireQuerySubgraphResult,
+    GraphStatus, GraphWorkspaceEntry, HotPathHit, HotspotEntry, ImpactResult, MetricsAtResult,
+    NeighborsResult, OrphanEntry, PathHop, PathResult, ProcessRef, ProjectCtx,
+    ProvisionServiceRequest, ProvisionedService, QuerySubgraphBudget as WireQuerySubgraphBudget,
+    QuerySubgraphEdge as WireQuerySubgraphEdge, QuerySubgraphNode as WireQuerySubgraphNode,
+    QuerySubgraphRequest, QuerySubgraphResult as WireQuerySubgraphResult,
     QuerySubgraphSeedDebug as WireQuerySubgraphSeedDebug,
     QuerySubgraphTraversalDebug as WireQuerySubgraphTraversalDebug, RankedNode, RefactorCandidate,
     RelatedSymbol, RepoGraphOps, ResolveOutcome, RuntimeOps, SearchHit, SemanticQueryEmbedding,
@@ -34,12 +33,13 @@ mod bridges;
 pub(crate) mod graph_neighbors;
 pub(crate) mod hybrid_search;
 pub(crate) mod refactor;
+mod shared;
 
 use self::bridges::{CoordinatorBridge, LspBridge, SlotPoolBridge};
 use self::graph_neighbors::{
     build_method_metadata, build_related_symbol, classify_edge_category, format_node_key,
     group_impact_by_file, group_neighbors_by_file, kind_label_for_node, read_symbol_content,
-    resolve_node_or_err, resolve_node_with_hint, resolve_node_with_hint_and_filter,
+    resolve_node_or_err, resolve_node_with_hint,
 };
 
 // ── AppState → RuntimeOps + GitOps + mcp_state() ─────────────────────────────
@@ -250,143 +250,6 @@ impl RepoGraphBridge {
     }
 }
 
-fn normalize_workspace_slug(workspace: Option<&str>) -> Option<String> {
-    let slug = workspace?.trim().trim_matches('/').trim();
-    if slug.is_empty() {
-        None
-    } else {
-        Some(slug.replace('\\', "/"))
-    }
-}
-
-fn normalize_workspace_prefix(workspace: Option<&str>) -> Option<String> {
-    normalize_workspace_slug(workspace).map(|slug| format!("{slug}/"))
-}
-
-fn repo_graph_node_file_path(node: &djinn_graph::repo_graph::RepoGraphNode) -> Option<String> {
-    node.file_path
-        .as_ref()
-        .map(|path| path.display().to_string())
-}
-
-fn repo_graph_node_matches_workspace(
-    node: &djinn_graph::repo_graph::RepoGraphNode,
-    workspace_slug: &str,
-) -> bool {
-    if node
-        .workspace
-        .as_deref()
-        .is_some_and(|slug| slug.trim().trim_matches('/').eq(workspace_slug))
-    {
-        return true;
-    }
-    let Some(workspace_prefix) = normalize_workspace_prefix(Some(workspace_slug)) else {
-        return false;
-    };
-    repo_graph_node_file_path(node)
-        .as_deref()
-        .is_some_and(|path| path.starts_with(&workspace_prefix))
-}
-
-fn active_workspace_prefix(
-    graph: &djinn_graph::repo_graph::RepoDependencyGraph,
-    workspace: Option<&str>,
-) -> Option<String> {
-    let slug = normalize_workspace_slug(workspace)?;
-    graph
-        .graph()
-        .node_indices()
-        .any(|idx| repo_graph_node_matches_workspace(graph.node(idx), &slug))
-        .then_some(slug)
-}
-
-fn available_workspace_slugs(graph: &djinn_graph::repo_graph::RepoDependencyGraph) -> Vec<String> {
-    let mut slugs = std::collections::BTreeSet::new();
-    for idx in graph.graph().node_indices() {
-        let node = graph.node(idx);
-        if let Some(slug) = node
-            .workspace
-            .as_deref()
-            .and_then(|s| normalize_workspace_slug(Some(s)))
-        {
-            slugs.insert(slug);
-            continue;
-        }
-        if let Some(path) = repo_graph_node_file_path(node) {
-            let path = path.trim().trim_matches('/').replace('\\', "/");
-            if let Some((first, _rest)) = path.split_once('/')
-                && !first.is_empty()
-            {
-                slugs.insert(first.to_string());
-            }
-        }
-    }
-    slugs.into_iter().collect()
-}
-
-fn graph_workspace_node_counts(
-    graph: &djinn_graph::repo_graph::RepoDependencyGraph,
-) -> std::collections::BTreeMap<String, usize> {
-    let mut counts = std::collections::BTreeMap::new();
-    for idx in graph.graph().node_indices() {
-        let node = graph.node(idx);
-        if node.is_external {
-            continue;
-        }
-        let slug = node
-            .workspace
-            .as_deref()
-            .and_then(|s| normalize_workspace_slug(Some(s)))
-            .unwrap_or_else(|| "root".to_string());
-        *counts.entry(slug).or_insert(0) += 1;
-    }
-    counts
-}
-
-fn workspace_hint_from_graph(
-    graph: &djinn_graph::repo_graph::RepoDependencyGraph,
-    workspace: Option<&str>,
-) -> Option<Vec<String>> {
-    let requested = normalize_workspace_slug(workspace)?;
-    if graph
-        .graph()
-        .node_indices()
-        .any(|idx| repo_graph_node_matches_workspace(graph.node(idx), &requested))
-    {
-        return None;
-    }
-    let slugs = available_workspace_slugs(graph);
-    (slugs.len() > 1).then_some(slugs)
-}
-
-fn resolve_node_or_err_for_workspace_seed(
-    graph: &djinn_graph::repo_graph::RepoDependencyGraph,
-    key: &str,
-    workspace: Option<&str>,
-) -> Result<petgraph::graph::NodeIndex, String> {
-    let outcome = match active_workspace_prefix(graph, workspace) {
-        Some(workspace_slug) => resolve_node_with_hint_and_filter(graph, key, None, |node| {
-            repo_graph_node_matches_workspace(node, &workspace_slug)
-        }),
-        None => resolve_node_with_hint(graph, key, None),
-    };
-
-    match outcome {
-        self::graph_neighbors::ResolveOutcome::Found(idx) => Ok(idx),
-        self::graph_neighbors::ResolveOutcome::Ambiguous(candidates) => Err(format!(
-            "node '{key}' is ambiguous: {} candidates (e.g. {})",
-            candidates.len(),
-            candidates
-                .first()
-                .map(|c| c.uid.as_str())
-                .unwrap_or("<none>")
-        )),
-        self::graph_neighbors::ResolveOutcome::NotFound => {
-            Err(format!("node '{key}' not found in graph"))
-        }
-    }
-}
-
 #[async_trait]
 impl RepoGraphOps for RepoGraphBridge {
     async fn workspaces(&self, ctx: &ProjectCtx) -> Result<WorkspacesResult, String> {
@@ -397,7 +260,7 @@ impl RepoGraphOps for RepoGraphBridge {
         )
         .await
         {
-            Ok(graph) => graph_workspace_node_counts(&graph),
+            Ok(graph) => shared::graph_workspace_node_counts(&graph),
             Err(err) => {
                 tracing::debug!(
                     project_id = %ctx.id,
@@ -414,7 +277,7 @@ impl RepoGraphOps for RepoGraphBridge {
 
         let mut freshness_by_slug = std::collections::BTreeMap::new();
         for row in freshness {
-            let slug = normalize_workspace_slug(Some(&row.workspace_slug))
+            let slug = shared::normalize_workspace_slug(Some(&row.workspace_slug))
                 .unwrap_or(row.workspace_slug.clone());
             counts.entry(slug.clone()).or_insert(0);
             freshness_by_slug.insert(slug, row);
@@ -451,7 +314,9 @@ impl RepoGraphOps for RepoGraphBridge {
             &ctx.clone_path,
         )
         .await?;
-        Ok(graph_workspace_node_counts(&graph).into_iter().collect())
+        Ok(shared::graph_workspace_node_counts(&graph)
+            .into_iter()
+            .collect())
     }
 
     async fn workspace_hint(
@@ -465,7 +330,7 @@ impl RepoGraphOps for RepoGraphBridge {
             &ctx.clone_path,
         )
         .await?;
-        Ok(workspace_hint_from_graph(&graph, workspace))
+        Ok(shared::workspace_hint_from_graph(&graph, workspace))
     }
 
     async fn neighbors(
@@ -759,7 +624,7 @@ impl RepoGraphOps for RepoGraphBridge {
         )
         .await?;
         let exclusions = self.state.mcp_state_graph_exclusions(&ctx.id).await;
-        let workspace_prefix = active_workspace_prefix(&graph, workspace);
+        let workspace_prefix = shared::active_workspace_prefix(&graph, workspace);
         let filter = match kind_filter {
             Some("file") => Some(RepoGraphNodeKind::File),
             Some("symbol") => Some(RepoGraphNodeKind::Symbol),
@@ -779,12 +644,12 @@ impl RepoGraphOps for RepoGraphBridge {
                     return None;
                 }
                 if let Some(prefix) = workspace_prefix.as_deref()
-                    && !repo_graph_node_matches_workspace(graph_node, prefix)
+                    && !shared::repo_graph_node_matches_workspace(graph_node, prefix)
                 {
                     return None;
                 }
                 let key = format_node_key(&node.key);
-                let file_hint = repo_graph_node_file_path(graph_node);
+                let file_hint = shared::repo_graph_node_file_path(graph_node);
                 // PR F4: apply graph exclusions BEFORE the limit truncate
                 // so the user gets `limit` non-excluded results, not
                 // `limit` raw results minus exclusions.
@@ -811,7 +676,7 @@ impl RepoGraphOps for RepoGraphBridge {
                 // node belongs to multiple — that's the "most upstream"
                 // membership, which makes the bucket label the entry
                 // point closest to this node.
-                let process_id = pick_lowest_ordinal_process_id(&graph, node.node_index);
+                let process_id = shared::pick_lowest_ordinal_process_id(&graph, node.node_index);
                 let community_id = graph.community_id(node.node_index).map(|s| s.to_string());
                 Some(RankedNode {
                     key,
@@ -928,8 +793,8 @@ impl RepoGraphOps for RepoGraphBridge {
         // can land on nodes the user has explicitly excluded
         // (vendored mirrors, generated dirs).
         let exclusions = self.state.mcp_state_graph_exclusions(&ctx.id).await;
-        let start = resolve_node_or_err_for_workspace_seed(&graph, key, workspace)?;
-        let raw = impact_bfs(&graph, start, max_depth, min_confidence);
+        let start = shared::resolve_node_or_err_for_workspace_seed(&graph, key, workspace)?;
+        let raw = shared::impact_bfs(&graph, start, max_depth, min_confidence);
         let result: Vec<_> = raw
             .into_iter()
             .filter(|(idx, _)| {
@@ -1104,7 +969,7 @@ impl RepoGraphOps for RepoGraphBridge {
             &ctx.clone_path,
         )
         .await?;
-        let workspace_prefix = active_workspace_prefix(&graph, workspace);
+        let workspace_prefix = shared::active_workspace_prefix(&graph, workspace);
         let filter = match kind_filter {
             Some("file") => Some(RepoGraphNodeKind::File),
             Some("symbol") => Some(RepoGraphNodeKind::Symbol),
@@ -1143,7 +1008,7 @@ impl RepoGraphOps for RepoGraphBridge {
         for idx in raw_nodes {
             let node = graph.node(idx);
             if let Some(prefix) = workspace_prefix.as_deref()
-                && !repo_graph_node_matches_workspace(node, prefix)
+                && !shared::repo_graph_node_matches_workspace(node, prefix)
             {
                 continue;
             }
@@ -1166,7 +1031,7 @@ impl RepoGraphOps for RepoGraphBridge {
             // legitimately have no incoming production references but
             // aren't "dead". Symbols inside a test file flagged
             // is_test handle the symbol case; this catches FILE nodes.
-            if let Some(path) = repo_graph_node_file_path(node).as_deref()
+            if let Some(path) = shared::repo_graph_node_file_path(node).as_deref()
                 && djinn_control_plane::tools::graph_exclusions::is_test_path(path)
             {
                 continue;
@@ -1175,7 +1040,7 @@ impl RepoGraphOps for RepoGraphBridge {
                 key: format_node_key(&node.id),
                 kind: format!("{:?}", node.kind).to_lowercase(),
                 display_name: node.display_name.clone(),
-                file: repo_graph_node_file_path(node),
+                file: shared::repo_graph_node_file_path(node),
                 visibility: node
                     .visibility
                     .map(|v| v.as_str().to_string())
@@ -1202,8 +1067,8 @@ impl RepoGraphOps for RepoGraphBridge {
             &ctx.clone_path,
         )
         .await?;
-        let from_idx = resolve_node_or_err_for_workspace_seed(&graph, from, workspace)?;
-        let to_idx = resolve_node_or_err_for_workspace_seed(&graph, to, workspace)?;
+        let from_idx = shared::resolve_node_or_err_for_workspace_seed(&graph, from, workspace)?;
+        let to_idx = shared::resolve_node_or_err_for_workspace_seed(&graph, to, workspace)?;
         let path = match graph.shortest_path(from_idx, to_idx, max_depth) {
             Some(p) => p,
             None => return Ok(None),
@@ -1785,7 +1650,7 @@ impl RepoGraphOps for RepoGraphBridge {
         // *symbol* nodes (file nodes' pagerank is structurally inflated
         // by the `ContainsDefinition` fan-out, so mixing them in
         // produces tier thresholds that flag every method as Low).
-        let tier_thresholds = quartile_thresholds(&ranking);
+        let tier_thresholds = shared::quartile_thresholds(&ranking);
         let pagerank_lookup: BTreeMap<petgraph::graph::NodeIndex, f64> = ranking
             .nodes
             .iter()
@@ -1872,10 +1737,10 @@ impl RepoGraphOps for RepoGraphBridge {
             // out of the per-file `symbol_ranges` sidecar via the
             // public `symbols_enclosing` API (no direct getter), so
             // probe a max-window to collect the entry.
-            let (start_line, end_line) = symbol_range_for_node(&graph, *idx, file_pb);
+            let (start_line, end_line) = shared::symbol_range_for_node(&graph, *idx, file_pb);
 
             let pagerank = pagerank_lookup.get(idx).copied().unwrap_or(0.0);
-            let pagerank_tier = bucket_pagerank(&tier_thresholds, pagerank);
+            let pagerank_tier = shared::bucket_pagerank(&tier_thresholds, pagerank);
 
             touched_symbols.push(DetectedTouchedSymbol {
                 uid: format_node_key(&node.id),
@@ -1899,8 +1764,8 @@ impl RepoGraphOps for RepoGraphBridge {
         // Stable, reviewer-friendly order: tier desc, then file path,
         // then start line.
         touched_symbols.sort_by(|a, b| {
-            tier_rank(a.pagerank_tier)
-                .cmp(&tier_rank(b.pagerank_tier))
+            shared::tier_rank(a.pagerank_tier)
+                .cmp(&shared::tier_rank(b.pagerank_tier))
                 .then_with(|| a.file_path.cmp(&b.file_path))
                 .then_with(|| a.start_line.cmp(&b.start_line))
                 .then_with(|| a.uid.cmp(&b.uid))
@@ -1942,7 +1807,7 @@ impl RepoGraphOps for RepoGraphBridge {
             &ctx.clone_path,
         )
         .await?;
-        let workspace_prefix = active_workspace_prefix(&graph, workspace);
+        let workspace_prefix = shared::active_workspace_prefix(&graph, workspace);
 
         let vis_filter = match visibility {
             None | Some("public") => Some(ScipVisibility::Public),
@@ -1970,7 +1835,7 @@ impl RepoGraphOps for RepoGraphBridge {
                 continue;
             }
             if let Some(prefix) = workspace_prefix.as_deref()
-                && !repo_graph_node_matches_workspace(node, prefix)
+                && !shared::repo_graph_node_matches_workspace(node, prefix)
             {
                 continue;
             }
@@ -1979,7 +1844,7 @@ impl RepoGraphOps for RepoGraphBridge {
             {
                 continue;
             }
-            let file_str = repo_graph_node_file_path(node);
+            let file_str = shared::repo_graph_node_file_path(node);
             if let Some(matcher) = &module_matcher {
                 let Some(f) = &file_str else { continue };
                 if !matcher.is_match(f) {
@@ -1988,7 +1853,7 @@ impl RepoGraphOps for RepoGraphBridge {
             }
             let key = format_node_key(&node.id);
             // Self-crate = the SCIP `<tool> <scheme> <crate-name> ...` token.
-            let own_crate = node.symbol.as_deref().and_then(scip_crate_name);
+            let own_crate = node.symbol.as_deref().and_then(shared::scip_crate_name);
             let mut used_outside_crate = false;
             let mut fan_in = 0usize;
             for edge in graph
@@ -1999,7 +1864,7 @@ impl RepoGraphOps for RepoGraphBridge {
                 if !used_outside_crate && own_crate.is_some() {
                     let src = graph.node(edge.source());
                     if let Some(src_sym) = src.symbol.as_deref()
-                        && let Some(src_crate) = scip_crate_name(src_sym)
+                        && let Some(src_crate) = shared::scip_crate_name(src_sym)
                         && Some(src_crate) != own_crate
                     {
                         used_outside_crate = true;
@@ -2464,7 +2329,7 @@ impl RepoGraphOps for RepoGraphBridge {
         // bound. Files outside the top 500 churned default to 0
         // (which yields a negative z_churn — correct for "this file
         // changes less than average").
-        let since = since_days_to_cutoff(Some(since_days_window));
+        let since = shared::since_days_to_cutoff(Some(since_days_window));
         let churn_repo = CommitFileChangeRepository::new(self.state.db().clone());
         let churn_rows = churn_repo
             .churn(&ctx.id, 500, since.as_deref())
@@ -2801,7 +2666,7 @@ impl RepoGraphOps for RepoGraphBridge {
             // v1: text-scan signature + documentation for deprecation markers.
             // The SCIP parser does not yet set an explicit `deprecated` flag —
             // extending `ScipSymbol` to carry one is left for a later pass.
-            if !is_deprecated_text(node.signature.as_deref(), &node.documentation) {
+            if !shared::is_deprecated_text(node.signature.as_deref(), &node.documentation) {
                 continue;
             }
             let dep_key = format_node_key(&node.id);
@@ -2873,7 +2738,7 @@ impl RepoGraphOps for RepoGraphBridge {
         // The queried symbols remain unscoped so callers can ask whether
         // cross-workspace nodes sit on any in-workspace entry→sink path.
         let resolve_seed = |key: &str| -> Option<petgraph::graph::NodeIndex> {
-            resolve_node_or_err_for_workspace_seed(&graph, key, workspace).ok()
+            shared::resolve_node_or_err_for_workspace_seed(&graph, key, workspace).ok()
         };
         let resolve_symbol = |key: &str| -> Option<petgraph::graph::NodeIndex> {
             resolve_node_or_err(&graph, key).ok()
@@ -2997,7 +2862,7 @@ impl RepoGraphOps for RepoGraphBridge {
         use djinn_control_plane::bridge::ChurnEntry;
         use djinn_db::CommitFileChangeRepository;
 
-        let since = since_days_to_cutoff(since_days);
+        let since = shared::since_days_to_cutoff(since_days);
         let repo = CommitFileChangeRepository::new(self.state.db().clone());
         let rows = repo
             .churn(&ctx.id, limit.max(1), since.as_deref())
@@ -3025,7 +2890,7 @@ impl RepoGraphOps for RepoGraphBridge {
         use djinn_control_plane::bridge::CoupledPairEntry;
         use djinn_db::CommitFileChangeRepository;
 
-        let since = since_days_to_cutoff(since_days);
+        let since = shared::since_days_to_cutoff(since_days);
         let repo = CommitFileChangeRepository::new(self.state.db().clone());
         let rows = repo
             .top_coupled_pairs(
@@ -3057,7 +2922,7 @@ impl RepoGraphOps for RepoGraphBridge {
         use djinn_control_plane::bridge::CouplingHubEntry;
         use djinn_db::CommitFileChangeRepository;
 
-        let since = since_days_to_cutoff(since_days);
+        let since = shared::since_days_to_cutoff(since_days);
         let repo = CommitFileChangeRepository::new(self.state.db().clone());
         // Over-fetch 2000 pairs for stable hub aggregation — the SQL
         // sort is the work here, the limit is cheap.
@@ -3110,100 +2975,6 @@ impl RepoGraphOps for RepoGraphBridge {
     }
 }
 
-/// Render a `since_days` window as an ISO-8601 UTC lower bound
-/// (`YYYY-MM-DDTHH:MM:SSZ`). Stored `committed_at` timestamps use the
-/// same fixed-width format, so a lexicographic string comparison on
-/// the SQL side resolves the window correctly — no chrono dependency.
-fn since_days_to_cutoff(since_days: Option<u32>) -> Option<String> {
-    since_days.map(|d| {
-        let clamped = d.clamp(1, 3650) as u64;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let cutoff = now.saturating_sub(clamped * 86_400);
-        format_utc_iso8601(cutoff)
-    })
-}
-
-/// Format a Unix timestamp (seconds since epoch) as ISO-8601 UTC with
-/// second resolution (`YYYY-MM-DDTHH:MM:SSZ`). Used to render a
-/// `since_days` cutoff for the `churn` op into the same lexical shape
-/// our stored `committed_at` uses, so a string comparison on the SQL
-/// side resolves the window correctly.
-fn format_utc_iso8601(secs: u64) -> String {
-    // Civil-from-Unix conversion via Howard Hinnant's algorithm
-    // (public domain). Avoids a chrono dependency for the single
-    // timestamp format we need.
-    let days = (secs / 86_400) as i64;
-    let rem_seconds = secs % 86_400;
-    let hour = (rem_seconds / 3600) as u32;
-    let minute = ((rem_seconds % 3600) / 60) as u32;
-    let second = (rem_seconds % 60) as u32;
-
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = (yoe as i64) + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let y = if m <= 2 { y + 1 } else { y };
-
-    format!("{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}Z")
-}
-
-/// Extract the SCIP crate-name token from a symbol identifier.
-///
-/// SCIP symbols have the shape:
-/// `<scheme> <manager> <package-name> <version> <descriptors>`
-///
-/// Example: `scip-rust cargo my-crate 0.1.0 foo/Bar#`
-///
-/// This helper returns the `<package-name>` slot (`my-crate`). Locals
-/// (symbols of shape `local <id>`) and any symbol with fewer than four
-/// leading tokens return `None`, signaling "no crate identity" to the
-/// caller (who then conservatively skips the cross-crate check).
-fn scip_crate_name(symbol: &str) -> Option<&str> {
-    if symbol.starts_with("local ") || symbol.is_empty() {
-        return None;
-    }
-    let mut parts = symbol.split_whitespace();
-    let _scheme = parts.next()?;
-    let _manager = parts.next()?;
-    let package = parts.next()?;
-    // Ensure there's at least one more token — the version — so we're
-    // not mis-reading a malformed short header as a package name.
-    let _version = parts.next()?;
-    if package.is_empty() || package == "." {
-        return None;
-    }
-    Some(package)
-}
-
-/// Scan a symbol's signature + documentation text for a `#[deprecated]`
-/// or `@deprecated` marker.
-///
-/// `@deprecated` matching is case-insensitive so the common JSDoc and
-/// Python-docstring conventions both engage. `#[deprecated` does not
-/// require a closing bracket — Rust allows both the bare
-/// `#[deprecated]` and `#[deprecated(...)]` forms.
-fn is_deprecated_text(signature: Option<&str>, documentation: &[String]) -> bool {
-    if let Some(sig) = signature
-        && (sig.contains("#[deprecated") || sig.to_lowercase().contains("@deprecated"))
-    {
-        return true;
-    }
-    for line in documentation {
-        if line.contains("#[deprecated") || line.to_lowercase().contains("@deprecated") {
-            return true;
-        }
-    }
-    false
-}
-
 impl AppState {
     /// Helper for graph handlers in this module: compiles a
     /// [`GraphExclusions`] predicate for the given project id,
@@ -3220,126 +2991,6 @@ impl AppState {
             _ => GraphExclusions::empty(),
         }
     }
-}
-
-/// PR F4: pick the [`djinn_graph::processes::Process`] id whose member
-/// list places `node` at the lowest step ordinal (most upstream). When
-/// the node sits in two flows — say it's `step=0` in process A and
-/// `step=5` in process B — process A wins because it identifies this
-/// v8: BFS used by `impact` and its tests. Walks Incoming edges from
-/// `start` up to `max_depth`, returning each visited node with the
-/// depth at which it was first reached.
-///
-/// Two filters cut the BFS frontier so transitive impact reflects
-/// load-bearing propagation, not "every node anchored to the queried
-/// file":
-///
-/// * **Behavioral-edge whitelist.** Only edges that actually carry
-///   "if this changes, that breaks" semantics propagate the BFS:
-///   `Reads`, `Writes`, `SymbolReference`, `FileReference` (the
-///   file→file dependency edge that drives file-level impact),
-///   `Implements`, `Extends`, `TypeDefines`, `Defines`. Pure
-///   structural anchors (`ContainsDefinition` = "file contains this
-///   symbol", `DeclaredInFile` = "this symbol lives in this file")
-///   and synthetic side-channel edges (`MemberOf`, `StepInProcess`,
-///   `EntryPointOf`) are skipped — they connect everything that
-///   contains everything, not "this changes when that changes".
-/// * **Confidence floor.** Defaults to 0.85 when the caller passes
-///   `None`; pass `Some(0.0)` to opt back into the full set.
-fn impact_bfs(
-    graph: &djinn_graph::repo_graph::RepoDependencyGraph,
-    start: petgraph::graph::NodeIndex,
-    max_depth: usize,
-    min_confidence: Option<f64>,
-) -> Vec<(petgraph::graph::NodeIndex, ImpactEntry)> {
-    use djinn_graph::repo_graph::RepoGraphEdgeKind;
-    let propagates = |kind: RepoGraphEdgeKind| match kind {
-        RepoGraphEdgeKind::Reads
-        | RepoGraphEdgeKind::Writes
-        | RepoGraphEdgeKind::SymbolReference
-        | RepoGraphEdgeKind::FileReference
-        | RepoGraphEdgeKind::Implements
-        | RepoGraphEdgeKind::Extends
-        | RepoGraphEdgeKind::TypeDefines
-        | RepoGraphEdgeKind::Defines => true,
-        RepoGraphEdgeKind::ContainsDefinition
-        | RepoGraphEdgeKind::DeclaredInFile
-        | RepoGraphEdgeKind::MemberOf
-        | RepoGraphEdgeKind::StepInProcess
-        | RepoGraphEdgeKind::EntryPointOf => false,
-    };
-    let confidence_threshold = min_confidence.unwrap_or(0.85);
-
-    let mut visited = std::collections::HashSet::new();
-    visited.insert(start);
-    let mut queue = std::collections::VecDeque::new();
-    queue.push_back((start, 0usize));
-    let mut result: Vec<(petgraph::graph::NodeIndex, ImpactEntry)> = Vec::new();
-
-    while let Some((current, depth)) = queue.pop_front() {
-        if depth > 0 {
-            let node = graph.node(current);
-            result.push((
-                current,
-                ImpactEntry {
-                    key: format_node_key(&node.id),
-                    depth,
-                    file_path: node.file_path.as_ref().map(|p| p.display().to_string()),
-                },
-            ));
-        }
-        if depth < max_depth {
-            for edge in graph
-                .graph()
-                .edges_directed(current, petgraph::Direction::Incoming)
-            {
-                if !propagates(edge.weight().kind) {
-                    continue;
-                }
-                if edge.weight().confidence < confidence_threshold {
-                    continue;
-                }
-                let source = edge.source();
-                if visited.insert(source) {
-                    queue.push_back((source, depth + 1));
-                }
-            }
-        }
-    }
-    result
-}
-
-/// node as an entry point (or near-entry), which is the more
-/// actionable bucket label for the UI.
-///
-/// Returns `None` when the node is not a step in any process. Ties on
-/// step ordinal are broken by `Process::id` (lex asc) so the result
-/// is deterministic across rebuilds.
-fn pick_lowest_ordinal_process_id(
-    graph: &djinn_graph::repo_graph::RepoDependencyGraph,
-    node: petgraph::graph::NodeIndex,
-) -> Option<String> {
-    let processes = graph.processes_for_node(node);
-    if processes.is_empty() {
-        return None;
-    }
-    let mut best: Option<(usize, &str)> = None;
-    for proc in processes {
-        let step_ord = proc
-            .steps
-            .iter()
-            .position(|step| *step == node)
-            .unwrap_or(usize::MAX);
-        match best {
-            None => best = Some((step_ord, proc.id.as_str())),
-            Some((cur_ord, cur_id)) => {
-                if step_ord < cur_ord || (step_ord == cur_ord && proc.id.as_str() < cur_id) {
-                    best = Some((step_ord, proc.id.as_str()));
-                }
-            }
-        }
-    }
-    best.map(|(_, id)| id.to_string())
 }
 
 impl AppState {
@@ -3412,7 +3063,7 @@ fn build_snapshot_payload(
 
     use std::collections::{BTreeMap, HashMap, HashSet};
 
-    let workspace_prefix = active_workspace_prefix(graph, workspace);
+    let workspace_prefix = shared::active_workspace_prefix(graph, workspace);
 
     // Tally totals against the post-exclusion graph so the
     // truncation decision lines up with what the UI actually sees.
@@ -3434,7 +3085,7 @@ fn build_snapshot_payload(
             continue;
         }
         if let Some(prefix) = workspace_prefix.as_deref()
-            && !repo_graph_node_matches_workspace(node, prefix)
+            && !shared::repo_graph_node_matches_workspace(node, prefix)
         {
             continue;
         }
@@ -3460,7 +3111,7 @@ fn build_snapshot_payload(
             continue;
         }
         if let Some(prefix) = workspace_prefix.as_deref()
-            && !repo_graph_node_matches_workspace(node, prefix)
+            && !shared::repo_graph_node_matches_workspace(node, prefix)
         {
             continue;
         }
@@ -3483,7 +3134,7 @@ fn build_snapshot_payload(
             let slug = node
                 .workspace
                 .as_deref()
-                .and_then(|slug| normalize_workspace_slug(Some(slug)))
+                .and_then(|slug| shared::normalize_workspace_slug(Some(slug)))
                 .unwrap_or_else(|| "root".to_string());
             by_workspace.entry(slug).or_default().push(idx);
         }
@@ -3662,7 +3313,7 @@ fn build_community_snapshot_payload(
         internal_edges: usize,
     }
 
-    let workspace_prefix = active_workspace_prefix(graph, workspace);
+    let workspace_prefix = shared::active_workspace_prefix(graph, workspace);
     let community_meta: HashMap<&str, &djinn_graph::communities::Community> = graph
         .communities()
         .iter()
@@ -3683,7 +3334,7 @@ fn build_community_snapshot_payload(
             continue;
         }
         if let Some(prefix) = workspace_prefix.as_deref()
-            && !repo_graph_node_matches_workspace(node, prefix)
+            && !shared::repo_graph_node_matches_workspace(node, prefix)
         {
             continue;
         }
@@ -3820,136 +3471,91 @@ fn build_community_snapshot_payload(
     }
 }
 
-/// Quartile thresholds for PageRank tiering, computed once per
-/// `detect_changes` call.
-///
-/// Returns `(q33, q67)` from the symbol-only PageRank distribution:
-/// scores ≥ q67 → High, q33..q67 → Medium, < q33 → Low.
-///
-/// Symbol nodes only because file nodes' PageRank is structurally
-/// inflated by the `ContainsDefinition` fan-out (every symbol
-/// declares-in its file), so mixing them in produces thresholds
-/// that flag every method as Low and every file as High.
-fn quartile_thresholds(ranking: &djinn_graph::repo_graph::RepoGraphRanking) -> (f64, f64) {
-    use djinn_graph::repo_graph::RepoGraphNodeKind;
-    let mut scores: Vec<f64> = ranking
-        .nodes
-        .iter()
-        .filter(|n| matches!(n.kind, RepoGraphNodeKind::Symbol))
-        .map(|n| n.page_rank)
-        .collect();
-    scores.sort_by(|a, b| a.total_cmp(b));
-    if scores.is_empty() {
-        return (0.0, 0.0);
-    }
-    // Use 1/3 and 2/3 quantiles — three roughly equal-sized buckets.
-    // True quartiles would split four ways; we want three (High /
-    // Medium / Low) so 33rd and 67th percentiles are the right cuts.
-    let q33_idx = (scores.len() as f64 * 0.34).floor() as usize;
-    let q67_idx = (scores.len() as f64 * 0.67).floor() as usize;
-    let q33 = scores[q33_idx.min(scores.len() - 1)];
-    let q67 = scores[q67_idx.min(scores.len() - 1)];
-    (q33, q67)
-}
-
-fn bucket_pagerank(thresholds: &(f64, f64), score: f64) -> PagerankTier {
-    let (q33, q67) = *thresholds;
-    if score >= q67 {
-        PagerankTier::High
-    } else if score >= q33 {
-        PagerankTier::Medium
-    } else {
-        PagerankTier::Low
-    }
-}
-
-fn tier_rank(t: PagerankTier) -> u8 {
-    match t {
-        PagerankTier::High => 0,
-        PagerankTier::Medium => 1,
-        PagerankTier::Low => 2,
-    }
-}
-
-/// Resolve the (start_line, end_line) enclosing range for a touched
-/// symbol. Falls back to (0, 0) when the per-file `symbol_ranges`
-/// sidecar is empty (cache-restored graph) — see
-/// `RepoDependencyGraph::range_for_node` for the limitation.
-fn symbol_range_for_node(
-    graph: &djinn_graph::repo_graph::RepoDependencyGraph,
-    idx: petgraph::graph::NodeIndex,
-    file: &std::path::Path,
-) -> (u32, u32) {
-    graph.range_for_node(idx, file).unwrap_or((0, 0))
-}
-
 #[cfg(test)]
 mod detect_changes_helper_tests {
-    use super::{bucket_pagerank, quartile_thresholds, tier_rank};
+    use super::shared;
     use djinn_control_plane::bridge::PagerankTier;
 
     #[test]
     fn bucket_pagerank_uses_q33_q67() {
         let thresholds = (0.10, 0.20);
-        assert_eq!(bucket_pagerank(&thresholds, 0.05), PagerankTier::Low);
-        assert_eq!(bucket_pagerank(&thresholds, 0.10), PagerankTier::Medium);
-        assert_eq!(bucket_pagerank(&thresholds, 0.15), PagerankTier::Medium);
-        assert_eq!(bucket_pagerank(&thresholds, 0.20), PagerankTier::High);
-        assert_eq!(bucket_pagerank(&thresholds, 0.99), PagerankTier::High);
+        assert_eq!(
+            shared::bucket_pagerank(&thresholds, 0.05),
+            PagerankTier::Low
+        );
+        assert_eq!(
+            shared::bucket_pagerank(&thresholds, 0.10),
+            PagerankTier::Medium
+        );
+        assert_eq!(
+            shared::bucket_pagerank(&thresholds, 0.15),
+            PagerankTier::Medium
+        );
+        assert_eq!(
+            shared::bucket_pagerank(&thresholds, 0.20),
+            PagerankTier::High
+        );
+        assert_eq!(
+            shared::bucket_pagerank(&thresholds, 0.99),
+            PagerankTier::High
+        );
     }
 
     #[test]
     fn tier_rank_orders_high_first() {
-        assert!(tier_rank(PagerankTier::High) < tier_rank(PagerankTier::Medium));
-        assert!(tier_rank(PagerankTier::Medium) < tier_rank(PagerankTier::Low));
+        assert!(shared::tier_rank(PagerankTier::High) < shared::tier_rank(PagerankTier::Medium));
+        assert!(shared::tier_rank(PagerankTier::Medium) < shared::tier_rank(PagerankTier::Low));
     }
 
     #[test]
     fn quartile_thresholds_handles_empty_ranking() {
         let ranking = djinn_graph::repo_graph::RepoGraphRanking { nodes: vec![] };
-        assert_eq!(quartile_thresholds(&ranking), (0.0, 0.0));
+        assert_eq!(shared::quartile_thresholds(&ranking), (0.0, 0.0));
     }
 }
 
 #[cfg(test)]
 mod helper_tests {
-    use super::{is_deprecated_text, scip_crate_name};
+    use super::shared;
 
     #[test]
     fn scip_crate_name_extracts_cargo_package() {
         let sym = "scip-rust cargo my-crate 0.1.0 foo/Bar#";
-        assert_eq!(scip_crate_name(sym), Some("my-crate"));
+        assert_eq!(shared::scip_crate_name(sym), Some("my-crate"));
     }
 
     #[test]
     fn scip_crate_name_extracts_go_module() {
         let sym = "scip-go gomod github.com/acme/foo v1 pkg/Thing#";
-        assert_eq!(scip_crate_name(sym), Some("github.com/acme/foo"));
+        assert_eq!(shared::scip_crate_name(sym), Some("github.com/acme/foo"));
     }
 
     #[test]
     fn scip_crate_name_returns_none_for_short_input() {
-        assert_eq!(scip_crate_name(""), None);
-        assert_eq!(scip_crate_name("scip-rust"), None);
-        assert_eq!(scip_crate_name("scip-rust cargo"), None);
-        assert_eq!(scip_crate_name("scip-rust cargo pkg"), None);
+        assert_eq!(shared::scip_crate_name(""), None);
+        assert_eq!(shared::scip_crate_name("scip-rust"), None);
+        assert_eq!(shared::scip_crate_name("scip-rust cargo"), None);
+        assert_eq!(shared::scip_crate_name("scip-rust cargo pkg"), None);
     }
 
     #[test]
     fn scip_crate_name_skips_locals_and_dot_placeholder() {
         // Local symbols have no crate identity.
-        assert_eq!(scip_crate_name("local 42"), None);
+        assert_eq!(shared::scip_crate_name("local 42"), None);
         // Some SCIP scheme/manager slots use "." when missing — and
         // the package slot does the same. In that case we have no
         // identity to compare against.
         let sym = "scip-rust cargo . 0.1.0 foo/Bar#";
-        assert_eq!(scip_crate_name(sym), None);
+        assert_eq!(shared::scip_crate_name(sym), None);
     }
 
     #[test]
     fn is_deprecated_text_matches_rust_attribute() {
-        assert!(is_deprecated_text(Some("#[deprecated] fn foo()"), &[]));
-        assert!(is_deprecated_text(
+        assert!(shared::is_deprecated_text(
+            Some("#[deprecated] fn foo()"),
+            &[]
+        ));
+        assert!(shared::is_deprecated_text(
             Some(r#"#[deprecated(since = "0.1", note = "use bar")] fn foo()"#),
             &[]
         ));
@@ -3958,13 +3564,13 @@ mod helper_tests {
     #[test]
     fn is_deprecated_text_matches_jsdoc_marker_case_insensitive() {
         let doc = vec!["/**".into(), " * @Deprecated use `bar` instead".into()];
-        assert!(is_deprecated_text(None, &doc));
+        assert!(shared::is_deprecated_text(None, &doc));
     }
 
     #[test]
     fn is_deprecated_text_ignores_unrelated_text() {
         let doc = vec!["A documented symbol.".into()];
-        assert!(!is_deprecated_text(Some("fn foo()"), &doc));
+        assert!(!shared::is_deprecated_text(Some("fn foo()"), &doc));
     }
 }
 
@@ -3976,7 +3582,7 @@ pub(crate) mod graph_bridge_tests {
     // The bridge crate's `ResolveOutcome` (String) is different — we
     // never use it directly in these tests.
     use crate::mcp_bridge::graph_neighbors::{ResolveOutcome, resolve_node, resolve_node_or_err};
-    use djinn_control_plane::bridge::ComplexityMetrics as WireComplexityMetrics;
+    use djinn_control_plane::bridge::{ComplexityMetrics as WireComplexityMetrics, ImpactEntry};
     use djinn_graph::repo_graph::{RepoDependencyGraph, RepoNodeKey};
     use djinn_graph::scip_parser::{
         ParsedScipIndex, ScipFile, ScipMetadata, ScipOccurrence, ScipRange, ScipRelationship,
@@ -4174,17 +3780,20 @@ pub(crate) mod graph_bridge_tests {
         let graph = multi_workspace_graph();
 
         assert_eq!(
-            workspace_hint_from_graph(&graph, Some("nonexistent")),
+            shared::workspace_hint_from_graph(&graph, Some("nonexistent")),
             Some(vec!["desktop".to_string(), "server".to_string()])
         );
-        assert_eq!(workspace_hint_from_graph(&graph, Some("server")), None);
-        assert_eq!(workspace_hint_from_graph(&graph, Some("")), None);
+        assert_eq!(
+            shared::workspace_hint_from_graph(&graph, Some("server")),
+            None
+        );
+        assert_eq!(shared::workspace_hint_from_graph(&graph, Some("")), None);
     }
 
     #[test]
     fn valid_workspace_restricts_listing_style_graph_ops() {
         let graph = multi_workspace_graph();
-        let workspace = active_workspace_prefix(&graph, Some("server"))
+        let workspace = shared::active_workspace_prefix(&graph, Some("server"))
             .expect("server workspace should be active");
 
         let ranked_kept: Vec<String> = graph
@@ -4193,7 +3802,7 @@ pub(crate) mod graph_bridge_tests {
             .iter()
             .filter_map(|ranked| {
                 let node = graph.node(ranked.node_index);
-                repo_graph_node_matches_workspace(node, &workspace)
+                shared::repo_graph_node_matches_workspace(node, &workspace)
                     .then(|| node.display_name.clone())
             })
             .collect();
@@ -4209,7 +3818,7 @@ pub(crate) mod graph_bridge_tests {
             .into_iter()
             .filter_map(|idx| {
                 let node = graph.node(idx);
-                repo_graph_node_matches_workspace(node, &workspace)
+                shared::repo_graph_node_matches_workspace(node, &workspace)
                     .then(|| node.display_name.clone())
             })
             .collect();
@@ -4225,7 +3834,7 @@ pub(crate) mod graph_bridge_tests {
             .filter_map(|idx| {
                 let node = graph.node(idx);
                 (node.visibility == Some(djinn_graph::scip_parser::ScipVisibility::Public)
-                    && repo_graph_node_matches_workspace(node, &workspace))
+                    && shared::repo_graph_node_matches_workspace(node, &workspace))
                 .then(|| node.display_name.clone())
             })
             .collect();
@@ -4266,8 +3875,8 @@ pub(crate) mod graph_bridge_tests {
         let sink = "scip-rust pkg server/src/sink.rs `sink`().";
 
         let sink_idx =
-            resolve_node_or_err_for_workspace_seed(&graph, sink, Some("server")).unwrap();
-        let impact_keys: Vec<String> = impact_bfs(&graph, sink_idx, 3, Some(0.0))
+            shared::resolve_node_or_err_for_workspace_seed(&graph, sink, Some("server")).unwrap();
+        let impact_keys: Vec<String> = shared::impact_bfs(&graph, sink_idx, 3, Some(0.0))
             .into_iter()
             .map(|(_, entry)| entry.key)
             .collect();
@@ -4279,7 +3888,7 @@ pub(crate) mod graph_bridge_tests {
         );
 
         let entry_idx =
-            resolve_node_or_err_for_workspace_seed(&graph, entry, Some("server")).unwrap();
+            shared::resolve_node_or_err_for_workspace_seed(&graph, entry, Some("server")).unwrap();
         let path = graph
             .shortest_path(entry_idx, sink_idx, Some(4))
             .expect("server seeds should connect through desktop shared node");
@@ -4302,7 +3911,7 @@ pub(crate) mod graph_bridge_tests {
         );
 
         assert!(
-            resolve_node_or_err_for_workspace_seed(&graph, shared, Some("server")).is_err(),
+            shared::resolve_node_or_err_for_workspace_seed(&graph, shared, Some("server")).is_err(),
             "workspace scoping should apply to traversal seeds, even though the walk itself is unscoped"
         );
     }
@@ -4881,7 +4490,7 @@ pub(crate) mod graph_bridge_tests {
             .symbol_node("symbol:target")
             .expect("target should resolve");
 
-        let result = impact_bfs(&graph, target_idx, 3, Some(0.0));
+        let result = shared::impact_bfs(&graph, target_idx, 3, Some(0.0));
         let keys: Vec<&str> = result.iter().map(|(_, e)| e.key.as_str()).collect();
         assert!(
             keys.iter().any(|k| k.contains("symbol:behavioral")),
@@ -4905,7 +4514,7 @@ pub(crate) mod graph_bridge_tests {
 
         // A floor above the highest possible confidence drops
         // everything — proves the threshold is honored.
-        let strict = impact_bfs(&graph, helper_idx, 3, Some(1.5));
+        let strict = shared::impact_bfs(&graph, helper_idx, 3, Some(1.5));
         assert!(
             strict.is_empty(),
             "min_confidence above 1.0 must collapse the frontier to empty"
@@ -4916,7 +4525,7 @@ pub(crate) mod graph_bridge_tests {
         // — fixture's app.rs ↔ helper.rs FileReference at 0.85
         // qualifies, so default-walked result contains the helper
         // file's caller file.
-        let with_default = impact_bfs(&graph, helper_idx, 3, None);
+        let with_default = shared::impact_bfs(&graph, helper_idx, 3, None);
         let keys: Vec<&str> = with_default.iter().map(|(_, e)| e.key.as_str()).collect();
         assert!(
             keys.iter().any(|k| k.contains("src/app.rs")),
