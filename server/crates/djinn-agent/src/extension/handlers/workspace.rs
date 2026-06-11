@@ -358,7 +358,7 @@ pub(crate) async fn call_write(
                 .await;
 
             state.lsp.touch_file(worktree_path, &path, true).await;
-            let diag_xml = format_diagnostics_xml(state.lsp.diagnostics(worktree_path).await);
+            let diag_xml = state.lsp.diagnostics_xml(worktree_path).await;
 
             let response = serde_json::json!({
                 "ok": true,
@@ -440,7 +440,7 @@ pub(crate) async fn call_edit(
                 .await;
 
             state.lsp.touch_file(worktree_path, &path, true).await;
-            let diag_xml = format_diagnostics_xml(state.lsp.diagnostics(worktree_path).await);
+            let diag_xml = state.lsp.diagnostics_xml(worktree_path).await;
 
             let mut result = serde_json::json!({
                 "ok": true,
@@ -536,7 +536,7 @@ pub(crate) async fn call_apply_patch(
         }));
     }
 
-    let diag_xml = format_diagnostics_xml(state.lsp.diagnostics(worktree_path).await);
+    let diag_xml = state.lsp.diagnostics_xml(worktree_path).await;
 
     let response = serde_json::json!({
         "ok": true,
