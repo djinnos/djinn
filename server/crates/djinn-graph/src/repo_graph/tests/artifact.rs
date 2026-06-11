@@ -209,6 +209,78 @@ fn build_stamps_workspace_from_parsed_index() {
 }
 
 #[test]
+fn route_and_tool_nodes_round_trip_with_metadata() {
+    let mut graph = RepoDependencyGraph::build(&[]);
+
+    let route = graph.ensure_route_node(
+        "GET /api/agents (axum)",
+        "GET /api/agents (axum)",
+        Some("rust"),
+        Some("api"),
+        Some("axum"),
+        Some("scip-rust pkg src/routes/agents.rs `list_agents`()."),
+    );
+    let tool = graph.ensure_tool_node("agents.list", "agents.list", Some("rust"), Some("api"));
+
+    let route_node = graph.node(route);
+    assert_eq!(
+        route_node.id,
+        RepoNodeKey::Route("GET /api/agents (axum)".to_string())
+    );
+    assert_eq!(route_node.kind, RepoGraphNodeKind::Route);
+    assert_eq!(route_node.display_name, "GET /api/agents (axum)");
+    assert_eq!(route_node.language.as_deref(), Some("rust"));
+    assert_eq!(route_node.workspace.as_deref(), Some("api"));
+    assert_eq!(route_node.route_framework.as_deref(), Some("axum"));
+    assert_eq!(
+        route_node.route_handler_symbol.as_deref(),
+        Some("scip-rust pkg src/routes/agents.rs `list_agents`().")
+    );
+
+    let tool_node = graph.node(tool);
+    assert_eq!(tool_node.id, RepoNodeKey::Tool("agents.list".to_string()));
+    assert_eq!(tool_node.kind, RepoGraphNodeKind::Tool);
+    assert_eq!(tool_node.display_name, "agents.list");
+    assert_eq!(tool_node.language.as_deref(), Some("rust"));
+    assert_eq!(tool_node.workspace.as_deref(), Some("api"));
+    assert_eq!(tool_node.route_framework, None);
+    assert_eq!(tool_node.route_handler_symbol, None);
+
+    let json = graph
+        .serialize_artifact()
+        .expect("serialize route/tool graph");
+    assert!(json.contains("\"kind\":\"route\""));
+    assert!(json.contains("\"kind\":\"tool\""));
+    assert!(json.contains("\"route_framework\":\"axum\""));
+    assert!(json.contains("\"route_handler_symbol\""));
+
+    let restored = RepoDependencyGraph::deserialize_artifact(&json).expect("deserialize");
+    let restored_route = restored
+        .node_lookup
+        .get(&RepoNodeKey::Route("GET /api/agents (axum)".to_string()))
+        .copied()
+        .expect("route lookup should survive artifact round trip");
+    let restored_tool = restored
+        .node_lookup
+        .get(&RepoNodeKey::Tool("agents.list".to_string()))
+        .copied()
+        .expect("tool lookup should survive artifact round trip");
+
+    assert_eq!(
+        restored.node(restored_route).route_framework.as_deref(),
+        Some("axum")
+    );
+    assert_eq!(
+        restored
+            .node(restored_route)
+            .route_handler_symbol
+            .as_deref(),
+        Some("scip-rust pkg src/routes/agents.rs `list_agents`().")
+    );
+    assert_eq!(restored.node(restored_tool).kind, RepoGraphNodeKind::Tool);
+}
+
+#[test]
 fn artifact_json_round_trip_preserves_graph() {
     let graph = RepoDependencyGraph::build(&[fixture_index()]);
     let json = graph.serialize_artifact().expect("serialize");
