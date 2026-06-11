@@ -254,6 +254,18 @@ pub struct CodeGraphParams {
     /// test-handling.
     #[serde(default)]
     pub tests: Option<String>,
+    #[serde(default)]
+    pub route_id: Option<String>,
+    #[serde(default)]
+    pub method: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub path_glob: Option<String>,
+    #[serde(default)]
+    pub framework: Option<String>,
+    #[serde(default)]
+    pub include_optional: Option<bool>,
 }
 
 impl CodeGraphParams {
@@ -298,6 +310,11 @@ impl CodeGraphParams {
         clear(&mut self.level);
         clear(&mut self.target);
         clear(&mut self.tests);
+        clear(&mut self.route_id);
+        clear(&mut self.method);
+        clear(&mut self.path);
+        clear(&mut self.path_glob);
+        clear(&mut self.framework);
     }
 }
 

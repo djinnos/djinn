@@ -876,7 +876,7 @@ pub enum EdgeCategory {
 /// [`EdgeCategory`] in [`SymbolContext::incoming`] / `outgoing`. The shape
 /// mirrors [`GraphNeighbor`] but carries the category-aware view used by
 /// the 360° symbol panel.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct RelatedSymbol {
     /// Stable RepoNodeKey (`"symbol:..."` or `"file:..."`). Pass back as
     /// `key` for follow-up `context` / `impact` calls.
@@ -982,6 +982,81 @@ pub struct SymbolContext {
     pub outgoing: BTreeMap<EdgeCategory, Vec<RelatedSymbol>>,
     /// F2 stub — empty until process membership lands.
     pub processes: Vec<ProcessRef>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct RouteRef {
+    pub uid: String,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framework: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct RouteSummary {
+    pub total_routes: usize,
+    pub framework_counts: BTreeMap<String, usize>,
+    pub handler_counts: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct RouteMapEntry {
+    pub route: RouteRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handler: Option<RelatedSymbol>,
+    pub middleware: Vec<RelatedSymbol>,
+    pub consumers: Vec<RelatedSymbol>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct RouteMapResult {
+    pub routes: Vec<RouteMapEntry>,
+    pub summary: RouteSummary,
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct ShapeField {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_name: Option<String>,
+    #[serde(default)]
+    pub optional: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct RouteShape {
+    pub route: RouteRef,
+    pub response_fields: Vec<ShapeField>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct ShapeDrift {
+    pub consumer: RelatedSymbol,
+    pub missing_keys: Vec<String>,
+    pub extra_keys: Vec<String>,
+    pub type_mismatches: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct ShapeCheckResult {
+    pub route_shape: RouteShape,
+    pub drifts: Vec<ShapeDrift>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct ApiImpactEntry {
+    pub consumer: RelatedSymbol,
+    pub risk_tier: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct ApiImpactResult {
+    pub impacts: Vec<ApiImpactEntry>,
 }
 
 /// A ranked disambiguation candidate emitted by the `code_graph`

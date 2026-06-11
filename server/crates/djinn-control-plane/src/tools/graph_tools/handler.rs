@@ -179,6 +179,9 @@ impl DjinnMcpServer {
             "impact" => self.code_graph_impact(ctx, params).await,
             "search" => self.code_graph_search(ctx, params).await,
             "query_subgraph" => self.code_graph_query_subgraph(ctx, params).await,
+            "route_map" => self.code_graph_route_map(ctx, params).await,
+            "shape_check" => self.code_graph_shape_check(ctx, params).await,
+            "api_impact" => self.code_graph_api_impact(ctx, params).await,
             "cycles" => self.code_graph_cycles(ctx, params).await,
             "orphans" => self.code_graph_orphans(ctx, params).await,
             "path" => self.code_graph_path(ctx, params).await,
@@ -214,7 +217,7 @@ impl DjinnMcpServer {
                  'refactor_candidates', 'metrics_at', \
                  'dead_symbols', 'deprecated_callers', 'touches_hot_path', \
                  'coupling', 'churn', 'coupling_hotspots', 'coupling_hubs', \
-                 'snapshot'"
+                 .snapshot, route_map, shape_check, api_impact."
             )),
         }
     }

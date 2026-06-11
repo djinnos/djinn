@@ -2,18 +2,20 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use djinn_control_plane::bridge::{
-    ApiSurfaceEntry, BoundaryRule, BoundaryViolation, CallerRef, ChangeKind, ChangedRange,
-    ChurnEntry, ComplexityResult, CoupledPairEntry, CouplingEntry, CouplingHubEntry, CycleGroup,
-    CycleMember, DeadSymbolEntry, DeprecatedHit, DetectedChangesResult, DetectedTouchedSymbol,
-    DiffTouchesResult, EdgeCategory, EdgeEntry, GraphNeighbor, GraphStatus, GraphWorkspaceEntry,
-    HotPathHit, HotspotEntry, ImpactResult, MetricsAtResult, NeighborsResult, OrphanEntry, PathHop,
-    PathResult, ProcessRef, ProjectCtx, QuerySubgraphBudget as WireQuerySubgraphBudget,
-    QuerySubgraphEdge as WireQuerySubgraphEdge, QuerySubgraphNode as WireQuerySubgraphNode,
-    QuerySubgraphRequest, QuerySubgraphResult as WireQuerySubgraphResult,
+    ApiImpactResult, ApiSurfaceEntry, BoundaryRule, BoundaryViolation, CallerRef, ChangeKind,
+    ChangedRange, ChurnEntry, ComplexityResult, CoupledPairEntry, CouplingEntry, CouplingHubEntry,
+    CycleGroup, CycleMember, DeadSymbolEntry, DeprecatedHit, DetectedChangesResult,
+    DetectedTouchedSymbol, DiffTouchesResult, EdgeCategory, EdgeEntry, GraphNeighbor, GraphStatus,
+    GraphWorkspaceEntry, HotPathHit, HotspotEntry, ImpactResult, MetricsAtResult, NeighborsResult,
+    OrphanEntry, PathHop, PathResult, ProcessRef, ProjectCtx,
+    QuerySubgraphBudget as WireQuerySubgraphBudget, QuerySubgraphEdge as WireQuerySubgraphEdge,
+    QuerySubgraphNode as WireQuerySubgraphNode, QuerySubgraphRequest,
+    QuerySubgraphResult as WireQuerySubgraphResult,
     QuerySubgraphSeedDebug as WireQuerySubgraphSeedDebug,
     QuerySubgraphTraversalDebug as WireQuerySubgraphTraversalDebug, RankedNode, RefactorCandidate,
-    RelatedSymbol, RepoGraphOps, ResolveOutcome, SearchHit, SnapshotLevel, SnapshotPayload,
-    SymbolAtHit, SymbolContext, SymbolDescription, SymbolNode, TouchedSymbol, WorkspacesResult,
+    RelatedSymbol, RepoGraphOps, ResolveOutcome, RouteMapResult, SearchHit, ShapeCheckResult,
+    SnapshotLevel, SnapshotPayload, SymbolAtHit, SymbolContext, SymbolDescription, SymbolNode,
+    TouchedSymbol, WorkspacesResult,
 };
 use petgraph::visit::EdgeRef;
 
@@ -27,6 +29,7 @@ use crate::server::AppState;
 
 mod insights;
 mod query;
+mod routes;
 mod snapshot;
 #[cfg(test)]
 mod tests;
@@ -130,6 +133,45 @@ impl RepoGraphOps for RepoGraphBridge {
         limit: usize,
     ) -> Result<Vec<SearchHit>, String> {
         RepoGraphBridge::hybrid_search(self, ctx, query, kind_filter, limit).await
+    }
+
+    async fn route_map(
+        &self,
+        ctx: &ProjectCtx,
+        route_id: Option<&str>,
+        method: Option<&str>,
+        path: Option<&str>,
+        path_glob: Option<&str>,
+        framework: Option<&str>,
+        limit: usize,
+    ) -> Result<RouteMapResult, String> {
+        RepoGraphBridge::route_map(
+            self, ctx, route_id, method, path, path_glob, framework, limit,
+        )
+        .await
+    }
+
+    async fn shape_check(
+        &self,
+        ctx: &ProjectCtx,
+        route_id: Option<&str>,
+        method: Option<&str>,
+        path: Option<&str>,
+        include_optional: bool,
+    ) -> Result<ShapeCheckResult, String> {
+        RepoGraphBridge::shape_check(self, ctx, route_id, method, path, include_optional).await
+    }
+
+    async fn api_impact(
+        &self,
+        ctx: &ProjectCtx,
+        route_id: Option<&str>,
+        method: Option<&str>,
+        path: Option<&str>,
+        min_confidence: Option<f64>,
+        limit: usize,
+    ) -> Result<ApiImpactResult, String> {
+        RepoGraphBridge::api_impact(self, ctx, route_id, method, path, min_confidence, limit).await
     }
 
     async fn cycles(
