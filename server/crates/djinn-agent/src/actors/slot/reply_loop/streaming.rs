@@ -305,7 +305,7 @@ pub(super) async fn consume_provider_stream(
 }
 
 fn runtime_fs_diagnostics(project_path: &str, worktree_path: &std::path::Path) -> String {
-    super::runtime_fs_diagnostics(project_path, worktree_path)
+    super::super::runtime_fs_diagnostics(project_path, worktree_path)
 }
 
 fn runtime_env_diagnostics(
@@ -313,5 +313,5 @@ fn runtime_env_diagnostics(
     project_path: &str,
     worktree_path: &std::path::Path,
 ) -> String {
-    super::runtime_env_diagnostics(session_id, project_path, worktree_path)
+    super::super::runtime_env_diagnostics(session_id, project_path, worktree_path)
 }

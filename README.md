@@ -33,14 +33,20 @@ The `djinn-server` control plane is the single source of truth — the web UI, C
 </p>
 
 <p align="center">
-  <a href="https://github.com/djinnos/djinn/blob/main/.github/assets/epics.jpg?raw=true">
-    <img src="https://github.com/djinnos/djinn/blob/main/.github/assets/epics.jpg?raw=true" width="800" alt="Djinn Roadmap — Epic dependency graph with tasks and blockers" />
+  <a href="https://github.com/djinnos/djinn/blob/main/.github/assets/proposals.jpg?raw=true">
+    <img src="https://github.com/djinnos/djinn/blob/main/.github/assets/proposals.jpg?raw=true" width="800" alt="Djinn Proposals — living specs moving from draft through review and sign-off to build" />
   </a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/djinnos/djinn/blob/main/.github/assets/memory.jpg?raw=true">
-    <img src="https://github.com/djinnos/djinn/blob/main/.github/assets/memory.jpg?raw=true" width="800" alt="Djinn Memory Graph — Knowledge base visualization with connected notes" />
+  <a href="https://github.com/djinnos/djinn/blob/main/.github/assets/roadmap.jpg?raw=true">
+    <img src="https://github.com/djinnos/djinn/blob/main/.github/assets/roadmap.jpg?raw=true" width="800" alt="Djinn Roadmap — Epic dependency graph with tasks and blockers" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/djinnos/djinn/blob/main/.github/assets/code-graph.jpg?raw=true">
+    <img src="https://github.com/djinnos/djinn/blob/main/.github/assets/code-graph.jpg?raw=true" width="800" alt="Djinn Code Graph — per-project symbol graph powering impact analysis and code intelligence" />
   </a>
 </p>
 
