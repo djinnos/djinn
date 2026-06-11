@@ -19,6 +19,10 @@ async fn pre_resolve_chat_key(
     ctx: &ProjectCtx,
     params: &mut CodeGraphParams,
 ) -> Result<Option<serde_json::Value>, String> {
+    if !should_pre_resolve_chat_key(params) {
+        return Ok(None);
+    }
+
     let single_key_ops = [
         "neighbors",
         "impact",
@@ -93,6 +97,16 @@ async fn pre_resolve_chat_key(
     }
 
     Ok(None)
+}
+
+pub(in crate::extension) fn should_pre_resolve_chat_key(params: &CodeGraphParams) -> bool {
+    // Workspace-aware traversal ops use `workspace` only while resolving the
+    // seed/endpoint and then intentionally keep the graph walk cross-workspace.
+    // The bridge methods for those ops own that seed-scoped resolution. If the
+    // chat extension pre-resolves a short name here with no workspace argument,
+    // it can turn a valid workspace-local seed into an ambiguous or wrong
+    // global symbol before the backend sees the requested slug.
+    !(params.workspace.is_some() && matches!(params.operation.as_str(), "impact" | "path"))
 }
 
 pub(crate) async fn call_lsp(

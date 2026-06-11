@@ -994,3 +994,54 @@ async fn code_graph_dispatch_capabilities_returns_introspection_payload() {
         );
     }
 }
+
+#[test]
+fn code_graph_workspace_traversal_keeps_seed_resolution_in_backend() {
+    let mut impact: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "impact",
+        "workspace": "server",
+        "key": "Handler",
+    }))
+    .expect("impact params parse");
+    impact.normalize();
+    assert!(
+        !should_pre_resolve_chat_key(&impact),
+        "workspace-scoped impact must let RepoGraphOps resolve the seed inside the workspace"
+    );
+
+    let mut path: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "path",
+        "workspace": "server",
+        "from": "Handler",
+        "to": "Database",
+    }))
+    .expect("path params parse");
+    path.normalize();
+    assert!(
+        !should_pre_resolve_chat_key(&path),
+        "workspace-scoped path must let RepoGraphOps resolve endpoints inside the workspace"
+    );
+
+    let mut unscoped: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "impact",
+        "workspace": "",
+        "key": "Handler",
+    }))
+    .expect("unscoped params parse");
+    unscoped.normalize();
+    assert!(
+        should_pre_resolve_chat_key(&unscoped),
+        "empty workspace normalizes away, preserving legacy chat pre-resolution"
+    );
+
+    let mut listing: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "ranked",
+        "workspace": "server",
+    }))
+    .expect("listing params parse");
+    listing.normalize();
+    assert!(
+        should_pre_resolve_chat_key(&listing),
+        "listing/bounded ops can still use normal dispatch; only traversal seeds are special"
+    );
+}
