@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::repo_graph::{
     EdgeConfidenceTier, RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind,
-    RepoNodeKey,
+    RepoNodeKey, RouteEdgeLanguageChain,
 };
 
 const DEFAULT_TOKEN_BUDGET: usize = 2_000;
@@ -186,6 +186,8 @@ pub struct QuerySubgraphEdge {
     pub confidence: f64,
     pub confidence_tier: EdgeConfidenceTier,
     pub reason: Option<String>,
+    pub route_language_chain: Option<RouteEdgeLanguageChain>,
+    pub is_cross_language_route_edge: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -787,6 +789,8 @@ fn render_edge(
         confidence: edge.confidence,
         confidence_tier: edge.confidence_tier(),
         reason: edge.reason.clone(),
+        route_language_chain: graph.route_edge_language_chain(source, target, edge.kind),
+        is_cross_language_route_edge: graph.is_cross_language_route_edge(source, target, edge.kind),
     }
 }
 

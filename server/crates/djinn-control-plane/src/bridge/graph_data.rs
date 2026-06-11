@@ -902,6 +902,20 @@ pub struct RelatedSymbol {
     /// Model-level confidence tier derived from the underlying graph edge.
     /// Stable snake_case string: `extracted`, `inferred`, or `ambiguous`.
     pub confidence_tier: String,
+    /// Compat-safe audit metadata for route consumer edges. Present for
+    /// `Fetches`/route links so UI/API consumers can display the language chain
+    /// (for example TypeScript → Rust) without changing persisted graph edges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_language_chain: Option<RouteLanguageChain>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct RouteLanguageChain {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_language: Option<String>,
+    pub is_cross_language: bool,
 }
 
 /// PR C1: structured method metadata. Populated only when the upstream
