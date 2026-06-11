@@ -42,4 +42,4 @@ Generated paths are ignored: any path matching `**/generated/**` and any file ma
 
 ## CI wiring
 
-`.github/workflows/quality-gate.yml` calls this from the `server-size-guard` job when `changes.outputs.server == 'true'` for PR and merge-queue server changes.
+`.github/workflows/quality-gate.yml` runs `server-size-guard` when `needs.changes.outputs.server == 'true' && github.event_name != 'push'`.
