@@ -1,45 +1,53 @@
 # Scripts
 
-## What it is
+## Rust size guard
 
-Lightweight guard that flags Rust source files in `server/crates/**` and `server/src/**` exceeding the size guideline (~1,500 lines / ~50 KB).
+Lightweight guard for Rust source files under `server/crates/**` and `server/src/**`. A file fails when it exceeds either size threshold.
 
-## How to run locally
+### CI gate
 
-```sh
-./scripts/check-file-size.sh
-```
-
-Example invocation:
+`.github/workflows/quality-gate.yml` runs the `server-size-guard` job for PR and merge-queue server changes. The job computes added, modified, and renamed files with `git diff --name-only --diff-filter=AMR` and pipes that list to changed-file mode:
 
 ```sh
-MAX_LINES=1200 MAX_BYTES=45000 ./scripts/check-file-size.sh
+./scripts/check-file-size.sh --files-from-stdin
 ```
 
-Example output snippet:
+CI is a regression guard for new or edited Rust files; it does not full-tree scan every legacy file on each PR.
 
-```text
-FAIL  server/crates/example/src/lib.rs  (1700 lines, 68030 bytes)
-Found 1 oversized file(s) under MAX_LINES=1500 / MAX_BYTES=51200.
+### Run locally
+
+Changed-file mode, matching CI input style:
+
+```sh
+printf '%s\n' server/crates/foo/src/lib.rs | ./scripts/check-file-size.sh --files-from-stdin
 ```
 
-## Thresholds
+Full-tree audit mode:
 
-| Variable | Default | Meaning |
-| --- | ---: | --- |
-| `MAX_LINES` | `1500` | Maximum line count before a file is oversized. |
-| `MAX_BYTES` | `51200` | Maximum byte count before a file is oversized. |
+```sh
+./scripts/check-file-size.sh --all
+```
 
-Set either env var on the command line to override the default.
+A full-tree audit may still report legacy oversized files until future split work lands.
 
-## Escape hatch
+### Thresholds
 
-Put `// djinn:allow-oversize` on any line of a file to allow that file. Use only when the file is intentionally large and should not block CI.
+Defaults are `MAX_LINES=1500` and `MAX_BYTES=51200`; exceeding either limit fails the guard. Override either value with environment variables:
 
-## What's skipped
+```sh
+MAX_LINES=1200 MAX_BYTES=45000 ./scripts/check-file-size.sh --all
+```
 
-Generated paths are ignored: any path matching `**/generated/**` and any file matching `*.gen.*`.
+### Escape hatch
 
-## CI wiring
+Add `// djinn:allow-oversize` anywhere in a file to allow an intentional exception. Use this only when a Rust source file genuinely needs to exceed the guideline and should not block CI.
 
-`.github/workflows/quality-gate.yml` runs `server-size-guard` when `needs.changes.outputs.server == 'true' && github.event_name != 'push'`.
+### Skipped paths
+
+Generated Rust files are skipped defensively: paths matching `**/generated/**` and files matching `*.gen.*`.
+
+### Tests
+
+```sh
+sh scripts/test-check-file-size.sh
+```
