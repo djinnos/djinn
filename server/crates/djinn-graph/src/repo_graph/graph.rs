@@ -558,6 +558,64 @@ impl RepoDependencyGraph {
         idx
     }
 
+    /// Register a synthetic [`RepoGraphNodeKind::Route`] node and return its
+    /// [`NodeIndex`]. Idempotent on the full route key, e.g.
+    /// `"GET /api/agents (axum)"`.
+    pub(crate) fn ensure_route_node(&mut self, route_key: &str) -> (NodeIndex, bool) {
+        let normalized = route_key.trim().to_string();
+        let key = RepoNodeKey::Route(normalized.clone());
+        if let Some(&idx) = self.node_lookup.get(&key) {
+            return (idx, false);
+        }
+        let node = RepoGraphNode {
+            id: key.clone(),
+            kind: RepoGraphNodeKind::Route,
+            display_name: normalized,
+            language: None,
+            file_path: None,
+            symbol: None,
+            symbol_kind: None,
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: Vec::new(),
+            signature_parts: None,
+            is_test: false,
+            complexity: None,
+            workspace: None,
+        };
+        let idx = self.graph.add_node(node);
+        self.node_lookup.insert(key, idx);
+        (idx, true)
+    }
+
+    /// Stamp a route extraction edge with explicit confidence/reason.
+    pub(crate) fn add_route_edge(
+        &mut self,
+        source: NodeIndex,
+        target: NodeIndex,
+        kind: RepoGraphEdgeKind,
+        confidence: f64,
+        reason: &str,
+    ) {
+        debug_assert!(matches!(
+            kind,
+            RepoGraphEdgeKind::HandlesRoute | RepoGraphEdgeKind::Fetches
+        ));
+        self.graph.add_edge(
+            source,
+            target,
+            RepoGraphEdge {
+                kind,
+                weight: edge_weight(kind),
+                evidence_count: 1,
+                confidence,
+                reason: Some(reason.to_string()),
+                step: None,
+            },
+        );
+    }
+
     /// Stamp a `Reads` / `Writes` edge from a caller symbol to a
     /// database-table node. Used by
     /// [`crate::db_access::detect_db_access`] to materialize SQL
@@ -835,6 +893,9 @@ pub(super) fn is_owned_by_changed_file(
         // Synthetic table nodes — same: they're rebuilt by the
         // db-access pass on the next warm.
         RepoGraphNodeKind::Table => false,
+        // Synthetic route nodes are rebuilt by route extraction on the
+        // next full warm.
+        RepoGraphNodeKind::Route => false,
     }
 }
 /// True when the node represents a SCIP symbol whose identifier is

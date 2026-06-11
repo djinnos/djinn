@@ -297,6 +297,28 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
                     "ensure_canonical_graph: db_access pass complete"
                 );
             }
+            if crate::route_extraction::route_detection_enabled() {
+                let report =
+                    crate::route_extraction::detect_routes(&mut graph, &project_root_for_blocking);
+                for (file, messages) in &report.file_failures {
+                    for message in messages {
+                        tracing::warn!(
+                            file = %file.display(),
+                            error = %message,
+                            "ensure_canonical_graph: route_extraction skipped file/error"
+                        );
+                    }
+                }
+                tracing::info!(
+                    route_nodes = report.route_nodes_added,
+                    handles_route_edges = report.handles_route_edges_added,
+                    fetches_edges = report.fetches_edges_added,
+                    unmatched_fetch_count = report.unmatched_fetch_count,
+                    unresolved_consumer_count = report.unresolved_consumer_count,
+                    skipped_files = report.skipped_files.len(),
+                    "ensure_canonical_graph: route_extraction pass complete"
+                );
+            }
             let build_ms = t_build.elapsed().as_millis() as u64;
             let node_count = graph.node_count();
             let edge_count = graph.edge_count();

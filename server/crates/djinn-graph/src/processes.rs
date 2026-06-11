@@ -319,6 +319,8 @@ fn build_process_id(entry_node: &crate::repo_graph::RepoGraphNode, step_count: u
         RepoNodeKey::Process(s) => format!("process:{s}"),
         // Table keys can't be entry points either (they're sinks).
         RepoNodeKey::Table(s) => format!("table:{s}"),
+        // Route keys are synthetic metadata, not entry points for tracing.
+        RepoNodeKey::Route(s) => format!("route:{s}"),
     };
     let mut hasher = Sha256::new();
     hasher.update(uid.as_bytes());

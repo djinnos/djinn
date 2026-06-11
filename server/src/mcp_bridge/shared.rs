@@ -284,7 +284,9 @@ pub(super) fn impact_bfs(
         | RepoGraphEdgeKind::DeclaredInFile
         | RepoGraphEdgeKind::MemberOf
         | RepoGraphEdgeKind::StepInProcess
-        | RepoGraphEdgeKind::EntryPointOf => false,
+        | RepoGraphEdgeKind::EntryPointOf
+        | RepoGraphEdgeKind::HandlesRoute
+        | RepoGraphEdgeKind::Fetches => false,
     };
     let confidence_threshold = min_confidence.unwrap_or(0.85);
 
