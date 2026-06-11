@@ -498,6 +498,7 @@ impl RepoDependencyGraphBuilder {
             community_lookup: BTreeMap::new(),
             processes: Vec::new(),
             process_lookup: BTreeMap::new(),
+            route_exclusion_config: Default::default(),
         };
 
         // PR F3: run modularity-based community detection unless the
