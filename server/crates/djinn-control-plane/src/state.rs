@@ -11,6 +11,7 @@ use djinn_provider::catalog::{CatalogService, HealthTracker};
 
 use crate::bridge::{
     CoordinatorOps, GitOps, LspOps, RepoGraphOps, RuntimeOps, SemanticQueryEmbedding, SlotPoolOps,
+    TaskrunJobRef,
 };
 
 /// Subset of application state consumed by the MCP layer.
@@ -238,6 +239,12 @@ impl McpState {
         self.runtime.teardown_taskrun_job(task_run_id).await
     }
 
+    /// List Djinn task-run Jobs visible to the runtime. The returned structs
+    /// are control-plane-owned and contain no Kubernetes API types.
+    pub async fn list_taskrun_jobs(&self) -> Result<Vec<TaskrunJobRef>, String> {
+        self.runtime.list_taskrun_jobs().await
+    }
+
     /// Best-effort: delete a force-closed task's branch on the local mirror and
     /// the GitHub remote (closing any open PR). Used by the abort cascade.
     pub async fn cleanup_task_branches(&self, task_id: &str) {
@@ -336,6 +343,9 @@ pub mod stubs {
         }
         async fn teardown_taskrun_job(&self, _: &str) -> Result<(), String> {
             Ok(())
+        }
+        async fn list_taskrun_jobs(&self) -> Result<Vec<TaskrunJobRef>, String> {
+            Ok(Vec::new())
         }
         async fn cleanup_task_branches(&self, _: &str) {}
     }

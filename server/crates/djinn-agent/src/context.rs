@@ -275,6 +275,14 @@ impl bridge::RuntimeOps for AgentRuntimeOps {
         // client, so this is an idempotent no-op stub.
         Ok(())
     }
+    async fn list_taskrun_jobs(
+        &self,
+    ) -> Result<Vec<djinn_control_plane::bridge::TaskrunJobRef>, String> {
+        // Agent-internal/test contexts have no kube client. Return a stable
+        // empty inventory so coordinator tests can exercise DB-side decisions
+        // without importing djinn-k8s.
+        Ok(Vec::new())
+    }
     async fn cleanup_task_branches(&self, _task_id: &str) {
         // Branch/PR cleanup needs the mirror manager, which the agent-internal
         // runtime doesn't own — only the server-side AppState impl does. The
