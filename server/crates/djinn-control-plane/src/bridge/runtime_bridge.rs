@@ -28,6 +28,17 @@ pub struct ProvisionedService {
     pub conn_string: String,
 }
 
+/// Control-plane-owned reference to a Djinn task-run Job.
+///
+/// This intentionally carries only primitive fields so callers in
+/// djinn-control-plane / djinn-agent can inventory runtime resources without
+/// importing djinn-k8s or Kubernetes API types.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskrunJobRef {
+    pub job_name: String,
+    pub task_run_id: String,
+}
+
 #[async_trait]
 pub trait RuntimeOps: Send + Sync {
     async fn apply_settings(
@@ -90,6 +101,9 @@ pub trait RuntimeOps: Send + Sync {
     /// kube client treat 404/not-found as success; runtimes without kube may
     /// no-op or return a clear unsupported error.
     async fn teardown_taskrun_job(&self, task_run_id: &str) -> Result<(), String>;
+    /// List Djinn task-run Jobs visible to the runtime. Non-Kubernetes/dev
+    /// runtimes return an empty inventory.
+    async fn list_taskrun_jobs(&self) -> Result<Vec<TaskrunJobRef>, String>;
     /// Delete a closed task's branch on the local mirror and the GitHub remote
     /// (which auto-closes any PR still open on that head). Best-effort: errors
     /// are logged, never surfaced. Used by `proposal_stop_build`'s abort cascade

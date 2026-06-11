@@ -51,7 +51,7 @@ use crate::bridge::{
     GitOps, GraphStatus, HotPathHit, HotspotEntry, ImpactResult, LspOps, LspWarning,
     MetricsAtResult, NeighborsResult, OrphanEntry, PathResult, PoolStatus, ProjectCtx, RankedNode,
     RepoGraphOps, RunningTaskInfo, RuntimeOps, SearchHit, SemanticQueryEmbedding, SlotPoolOps,
-    SymbolAtHit, SymbolDescription,
+    SymbolAtHit, SymbolDescription, TaskrunJobRef,
 };
 use crate::server::DjinnMcpServer;
 use crate::state::McpState;
@@ -117,7 +117,21 @@ impl LspOps for StubLsp {
 /// every fallible method errors loudly; the infallible ones (`reset_*`,
 /// `persist_*`) are simple no-ops because their signature precludes signalling
 /// failure.
-pub struct StubRuntime;
+///
+/// `list_taskrun_jobs` is a read-side inventory method, so the stub returns a
+/// deterministic, caller-supplied snapshot. This gives coordinator/backstop
+/// tests a layering-safe fake without importing `djinn-k8s`.
+#[derive(Clone, Default)]
+pub struct StubRuntime {
+    taskrun_jobs: Vec<TaskrunJobRef>,
+}
+
+impl StubRuntime {
+    pub fn with_taskrun_jobs(mut taskrun_jobs: Vec<TaskrunJobRef>) -> Self {
+        taskrun_jobs.sort_by(|a, b| a.job_name.cmp(&b.job_name));
+        Self { taskrun_jobs }
+    }
+}
 
 #[async_trait]
 impl RuntimeOps for StubRuntime {
@@ -163,6 +177,9 @@ impl RuntimeOps for StubRuntime {
     }
     async fn teardown_taskrun_job(&self, _task_run_id: &str) -> Result<(), String> {
         Ok(())
+    }
+    async fn list_taskrun_jobs(&self) -> Result<Vec<TaskrunJobRef>, String> {
+        Ok(self.taskrun_jobs.clone())
     }
     async fn cleanup_task_branches(&self, _task_id: &str) {}
 }
@@ -590,7 +607,7 @@ impl McpTestHarness {
             Some(Arc::new(StubNoteEmbedding) as Arc<dyn NoteEmbeddingProvider>),
             Some(Arc::new(StubNoteVectorStore) as Arc<dyn NoteVectorStore>),
             Arc::new(StubLsp),
-            Arc::new(StubRuntime),
+            Arc::new(StubRuntime::default()),
             Arc::new(StubGit),
             Arc::new(StubRepoGraph),
         );

@@ -10,6 +10,7 @@ use std::path::Path;
 use async_trait::async_trait;
 use djinn_control_plane::bridge::{
     GitOps, ProvisionServiceRequest, ProvisionedService, RuntimeOps, SemanticQueryEmbedding,
+    TaskrunJobRef,
 };
 use djinn_git::{GitActorHandle, GitError};
 
@@ -126,6 +127,22 @@ impl RuntimeOps for AppState {
             .teardown_taskrun_job(task_run_id)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    async fn list_taskrun_jobs(&self) -> Result<Vec<TaskrunJobRef>, String> {
+        let jobs = self
+            .graph_warmer()
+            .await
+            .list_taskrun_jobs()
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(jobs
+            .into_iter()
+            .map(|job| TaskrunJobRef {
+                job_name: job.job_name,
+                task_run_id: job.task_run_id,
+            })
+            .collect())
     }
 
     async fn cleanup_task_branches(&self, task_id: &str) {
