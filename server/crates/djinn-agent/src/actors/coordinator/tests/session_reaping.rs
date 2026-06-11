@@ -445,3 +445,247 @@ async fn stall_killed_prunes_sessions_absent_from_active() {
         "stall_killed entries for sessions absent from list_active() must be pruned"
     );
 }
+
+// ── No-slot-mapping & teardown-failure hardening for the zombie backstop ───
+
+/// Reaping must delete the task-run Job even when the slot pool has no live
+/// mapping for the task — the (likely leaked) slot was already reclaimed
+/// before the backstop ticked, so the only authoritative reference to the
+/// pod is the DB session row's `task_run_id`. Without this, a K8s pod that
+/// outlives the host's `task_to_slot` entry leaks indefinitely (its
+/// `activeDeadlineSeconds` is the only thing that ever stops it, and only
+/// after the full 3h budget).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reap_zombie_session_with_no_slot_mapping_still_tears_down_taskrun_job() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "zombie-no-slot").await;
+    sqlx::query("UPDATE tasks SET status = 'in_progress' WHERE id = $1")
+        .bind(&task.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    let run_id = "run-zombie-no-slot";
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status) VALUES ($1, $2, $3, 'manual', 'running')",
+    )
+    .bind(run_id)
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+        })
+        .await
+        .unwrap();
+    // Backdate past the 10-minute hard cap, tokens still 0/0.
+    sqlx::query(
+        "UPDATE sessions SET started_at = to_char(now() AT TIME ZONE 'utc' - interval '20 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
+    )
+    .bind(&session.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let runtime = RecordingRuntimeOps::new(false);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    // Critical: do NOT dispatch the task, so the slot pool has no
+    // `task_to_slot` mapping for `task.id`. `pool.has_session` returns
+    // false, `pool.session_for_task` returns Ok(None), and the pool
+    // cannot surface the task-run id on its own — the reap MUST get it
+    // from the DB session row.
+    actor.runtime_ops = Some(std::sync::Arc::new(runtime.clone()));
+
+    actor.reap_zombie_sessions().await;
+
+    assert_eq!(
+        runtime.calls(),
+        vec![run_id.to_string()],
+        "zombie reap must delete the task-run Job from DB session.task_run_id even when the slot pool has no mapping"
+    );
+    assert!(
+        !session_repo
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .any(|s| s.id == session.id),
+        "zombie session row must be finalized by the backstop"
+    );
+    let updated = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .get(&task.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        updated.status, "open",
+        "task must be released for redispatch after the no-slot zombie is reaped"
+    );
+}
+
+/// When the task-run Job teardown itself fails (e.g. transient kube API
+/// error, RBAC miss, 5xx), the DB-side recovery must still proceed:
+/// `reap_zombie_sessions` must NOT abort the sweep on a teardown error —
+/// session row finalization and task release are more important than the
+/// pod cleanup, and the periodic sweep will retry the teardown next tick.
+/// This is the explicit contract behind
+/// `teardown_zombie_taskrun_job`'s `tracing::warn!` + return.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reap_zombie_session_continues_recovery_when_teardown_fails() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "zombie-teardown-fail").await;
+    sqlx::query("UPDATE tasks SET status = 'in_progress' WHERE id = $1")
+        .bind(&task.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    let run_id = "run-zombie-teardown-fail";
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status) VALUES ($1, $2, $3, 'manual', 'running')",
+    )
+    .bind(run_id)
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+        })
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE sessions SET started_at = to_char(now() AT TIME ZONE 'utc' - interval '20 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
+    )
+    .bind(&session.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    // fail_teardown=true: the recording RuntimeOps returns an Err on every
+    // teardown_taskrun_job call. The reap must still finalize the session
+    // row and release the task.
+    let runtime = RecordingRuntimeOps::new(true);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.runtime_ops = Some(std::sync::Arc::new(runtime.clone()));
+
+    actor.reap_zombie_sessions().await;
+
+    assert_eq!(
+        runtime.calls(),
+        vec![run_id.to_string()],
+        "teardown must be attempted (logged as failure) even when it errors"
+    );
+    assert!(
+        !session_repo
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .any(|s| s.id == session.id),
+        "session row must be finalized even when teardown errors"
+    );
+    let updated = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .get(&task.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        updated.status, "open",
+        "task must be released for redispatch even when teardown errors"
+    );
+}
+
+/// A past-cap zombie whose session row carries `task_run_id = NULL` is
+/// still reaped (the row is finalized, the task is released), but
+/// teardown is NOT invoked — there is no Job to delete when no
+/// task-run was ever issued (e.g. a worker that crashed during the
+/// pre-dispatch handshake). The sweep must not error and must not panic
+/// on the absent task_run_id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reap_zombie_session_without_task_run_id_is_reaped_without_teardown() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "zombie-no-run-id").await;
+    sqlx::query("UPDATE tasks SET status = 'in_progress' WHERE id = $1")
+        .bind(&task.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+        })
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE sessions SET started_at = to_char(now() AT TIME ZONE 'utc' - interval '20 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
+    )
+    .bind(&session.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let runtime = RecordingRuntimeOps::new(false);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.runtime_ops = Some(std::sync::Arc::new(runtime.clone()));
+
+    actor.reap_zombie_sessions().await;
+
+    assert!(
+        runtime.calls().is_empty(),
+        "sessions with no task_run_id must not invoke teardown (no Job to delete)"
+    );
+    assert!(
+        !session_repo
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .any(|s| s.id == session.id),
+        "session row must still be finalized by the backstop"
+    );
+    let updated = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .get(&task.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        updated.status, "open",
+        "task must still be released for redispatch even when no task-run Job exists"
+    );
+}

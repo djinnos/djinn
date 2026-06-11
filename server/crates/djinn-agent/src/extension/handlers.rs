@@ -62,9 +62,10 @@ use memory_agent::{
     call_memory_list, call_memory_move, call_memory_orphans, call_memory_read, call_memory_search,
     call_memory_write,
 };
+pub(crate) use task_admin::call_task_kill_session;
 use task_admin::{
     call_task_archive_activity, call_task_blocked_list, call_task_delete_branch,
-    call_task_kill_session, call_task_reset_counters, call_task_transition,
+    call_task_reset_counters, call_task_transition,
 };
 use task_epic::{
     call_epic_blocked_list, call_epic_blockers_list, call_epic_close, call_epic_create,
