@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use anyhow::{Context, Result, anyhow};
 use std::collections::BTreeSet;
 use std::fs;

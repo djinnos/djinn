@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use async_stream::stream;
 use futures::StreamExt;
 use reqwest::header::HeaderMap;

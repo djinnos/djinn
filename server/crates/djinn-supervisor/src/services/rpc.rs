@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 //! Worker-side [`SupervisorServices`] impl that speaks bincode over a duplex
 //! byte stream.
 //!

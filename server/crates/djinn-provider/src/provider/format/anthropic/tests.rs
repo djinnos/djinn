@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use super::*;
 use crate::message::{Conversation, Message};
 use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig};

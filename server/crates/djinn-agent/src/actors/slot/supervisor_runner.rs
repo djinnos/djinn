@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 //! Default slot runner: routes dispatch through a
 //! [`djinn_runtime::SessionRuntime`] chosen at startup by
 //! [`crate::runtime_bridge::runtime_kind`].

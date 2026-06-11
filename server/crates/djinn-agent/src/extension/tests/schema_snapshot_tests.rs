@@ -229,10 +229,35 @@ fn code_graph_schema_embeds_workflow_guidance() {
         "context",
         "complexity",
         "refactor_candidates",
+        "workspaces",
+        "workspace_hint",
+        "available-workspace",
+        "node_count",
+        "commit_sha",
+        "warmed_at",
+        "status",
     ] {
         assert!(
             description.contains(operation),
             "code_graph guidance should mention {operation}"
+        );
+    }
+
+    let workspace_description = schema
+        .pointer("/inputSchema/properties/workspace/description")
+        .and_then(|value| value.as_str())
+        .expect("code_graph workspace property has a description");
+    for required in [
+        "operation=workspaces",
+        "Empty string is treated as omitted",
+        "hard-scope listing/bounded ops",
+        "seed/endpoint resolution",
+        "cross-workspace edges remain visible",
+        "workspace_hint",
+    ] {
+        assert!(
+            workspace_description.contains(required),
+            "workspace schema description should mention {required}: {workspace_description}"
         );
     }
 }

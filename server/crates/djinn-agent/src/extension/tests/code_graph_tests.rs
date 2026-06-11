@@ -610,6 +610,32 @@ async fn code_graph_dispatch_snapshot_reaches_graph_ops() {
 }
 
 #[tokio::test]
+async fn code_graph_dispatch_workspaces_passthrough_uses_graph_ops() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-workspaces-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let result = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "workspaces",
+            "project_path": worktree.path().to_string_lossy(),
+        }),
+        worktree.path(),
+    )
+    .await
+    .expect("workspaces should use the RepoGraphOps workspaces contract");
+
+    assert_eq!(
+        result
+            .get("workspaces")
+            .and_then(|value| value.as_array())
+            .map(Vec::len),
+        Some(0),
+        "default stub should return the trait passthrough shape: {result}"
+    );
+}
+
+#[tokio::test]
 async fn code_graph_dispatch_symbols_at_validates_inputs() {
     let worktree = crate::test_helpers::test_tempdir("djinn-cg-symat-");
     let state =
@@ -949,8 +975,13 @@ async fn code_graph_dispatch_capabilities_returns_introspection_payload() {
         "capabilities op must list itself in `operations`"
     );
 
-    // Artifact version stamp matches the v8 bump.
-    assert_eq!(obj["repo_graph_artifact_version"], 8);
+    // Artifact version stamp follows the canonical repo-graph artifact schema.
+    assert_eq!(obj["repo_graph_artifact_version"], 10);
+
+    assert!(
+        ops.iter().any(|o| o.as_str() == Some("workspaces")),
+        "workspaces op must be listed in capabilities"
+    );
 
     // Languages we ship a tree-sitter classifier for.
     let langs = obj["access_classifier_languages"]
@@ -962,4 +993,55 @@ async fn code_graph_dispatch_capabilities_returns_introspection_payload() {
             "missing language {required} in access_classifier_languages"
         );
     }
+}
+
+#[test]
+fn code_graph_workspace_traversal_keeps_seed_resolution_in_backend() {
+    let mut impact: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "impact",
+        "workspace": "server",
+        "key": "Handler",
+    }))
+    .expect("impact params parse");
+    impact.normalize();
+    assert!(
+        !should_pre_resolve_chat_key(&impact),
+        "workspace-scoped impact must let RepoGraphOps resolve the seed inside the workspace"
+    );
+
+    let mut path: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "path",
+        "workspace": "server",
+        "from": "Handler",
+        "to": "Database",
+    }))
+    .expect("path params parse");
+    path.normalize();
+    assert!(
+        !should_pre_resolve_chat_key(&path),
+        "workspace-scoped path must let RepoGraphOps resolve endpoints inside the workspace"
+    );
+
+    let mut unscoped: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "impact",
+        "workspace": "",
+        "key": "Handler",
+    }))
+    .expect("unscoped params parse");
+    unscoped.normalize();
+    assert!(
+        should_pre_resolve_chat_key(&unscoped),
+        "empty workspace normalizes away, preserving legacy chat pre-resolution"
+    );
+
+    let mut listing: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "ranked",
+        "workspace": "server",
+    }))
+    .expect("listing params parse");
+    listing.normalize();
+    assert!(
+        should_pre_resolve_chat_key(&listing),
+        "listing/bounded ops can still use normal dispatch; only traversal seeds are special"
+    );
 }
