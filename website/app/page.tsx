@@ -165,11 +165,11 @@ export default function Home() {
               <span className="dot bg-accent-coral/70" />
               <span className="dot bg-status-warn/70" />
               <span className="dot bg-status-pass/70" />
-              <span className="ml-3">djinn — board · 6 agents running</span>
+              <span className="ml-3">djinn — proposals · specs in review, building, and done</span>
             </div>
             <LightboxImage
-              src="/kanban.jpg"
-              alt="Djinn — parallel AI agents building approved work across multiple projects"
+              src="/proposals.jpg"
+              alt="Djinn — proposals moving from draft through review and sign-off to build"
               className="w-full"
             />
           </div>
@@ -233,8 +233,8 @@ export default function Home() {
             <div className="md:col-span-3 window">
               <div className="window-bar">fig. 01 — roadmap · epics generated from proposal #0001</div>
               <LightboxImage
-                src="/epics.jpg"
-                alt="Djinn Roadmap — epics and tasks generated from an approved proposal"
+                src="/roadmap.jpg"
+                alt="Djinn Roadmap — epics and tasks generated from an approved proposal, with dependencies and blockers"
                 className="w-full"
               />
             </div>
@@ -294,10 +294,10 @@ export default function Home() {
               </p>
             </div>
             <div className="md:col-span-3 order-1 md:order-2 window">
-              <div className="window-bar">fig. 02 — memory graph · decisions, patterns, pitfalls</div>
+              <div className="window-bar">fig. 02 — code graph · symbols, references, dependencies</div>
               <LightboxImage
-                src="/memory.jpg"
-                alt="Djinn Memory Graph — knowledge base visualization with connected decisions, patterns, and architecture notes"
+                src="/code-graph.jpg"
+                alt="Djinn Code Graph — per-project symbol graph powering impact analysis and code intelligence"
                 className="w-full"
               />
             </div>
