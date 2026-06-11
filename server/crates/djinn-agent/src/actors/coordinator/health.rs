@@ -71,6 +71,39 @@ pub(super) async fn sweep_stale_resources(
                 }
             }
         }
+
+        // Mirror-side task-ref prune. `fetch_mirror` excludes
+        // `refs/heads/task/*` from its `--prune` (those are djinn-owned
+        // durability refs the worker pods push — see the negative refspec in
+        // `MirrorManager::fetch_mirror`), so without this sweep the bare
+        // mirror's ref set grows one branch per task forever. Same deletion
+        // policy as the project-clone prune above: closed + Djinn-opened PR.
+        if let Some(mirror) = app_state.mirror.as_ref() {
+            let mirror_dir = mirror.mirror_path(&project.id);
+            if let Ok(git) = app_state.git_actor(&mirror_dir).await
+                && let Ok(out) = git
+                    .run_command(vec!["branch".into(), "--format=%(refname:short)".into()])
+                    .await
+            {
+                for line in out.stdout.lines() {
+                    let Some(short_id) = line.strip_prefix("task/") else {
+                        continue;
+                    };
+                    let should_delete = matches!(
+                        task_repo.get_by_short_id(short_id).await,
+                        Ok(Some(task)) if task.status == "closed" && task.pr_url.is_some()
+                    );
+                    if should_delete {
+                        tracing::info!(
+                            project_id=%project.id,
+                            branch=%line,
+                            "CoordinatorActor: deleting closed task branch from mirror"
+                        );
+                        let _ = mirror.delete_branch(&project.id, line).await;
+                    }
+                }
+            }
+        }
     }
 }
 

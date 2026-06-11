@@ -311,6 +311,18 @@ impl MirrorManager {
         // head on every fetch, with force-update so force-pushes and
         // branch resets also sync. Tags follow so release-detection
         // stays current.
+        //
+        // `^refs/heads/task/*` (negative refspec, git ≥2.29) carves the
+        // task branches OUT of the mirroring: djinn owns `task/<short_id>`
+        // refs LOCALLY — worker pods push them to the mirror for durability
+        // (post-stage push, periodic OOM-proof push, SIGTERM checkpoint),
+        // and redispatch / verification / ReviewResume all read them back.
+        // Without the exclusion, `--prune` + the catch-all refspec deleted
+        // every local-only task ref within one fetch tick (~60s) because it
+        // doesn't exist on GitHub — every durability push silently raced a
+        // shredder, verification's `git fetch task/<id>` exit-128'd, and
+        // tasks looped through full worker redos. Closed tasks' mirror refs
+        // are pruned by the coordinator's stale sweep instead.
         run_git_command(
             mirror.clone(),
             vec![
@@ -318,6 +330,7 @@ impl MirrorManager {
                 "--prune".into(),
                 "origin".into(),
                 "+refs/heads/*:refs/heads/*".into(),
+                "^refs/heads/task/*".into(),
                 "+refs/tags/*:refs/tags/*".into(),
             ],
         )
@@ -351,6 +364,33 @@ impl MirrorManager {
         git_gc(&mirror)
             .await
             .map_err(|e| git_err_to_mirror("git gc (mirror)", e))
+    }
+
+    /// Delete a local branch ref from the bare mirror (`git update-ref -d`).
+    ///
+    /// Task branches (`task/<short_id>`) are djinn-owned and excluded from
+    /// `fetch_mirror`'s `--prune` (see the negative refspec there), so the
+    /// coordinator's stale sweep calls this for CLOSED tasks to keep the
+    /// mirror's ref set from growing without bound. Deleting a ref that
+    /// doesn't exist is an error from git; callers treat that as already-done.
+    pub async fn delete_branch(&self, project_id: &str, branch: &str) -> Result<(), MirrorError> {
+        let mirror = self.mirror_path(project_id);
+        if !mirror.exists() {
+            return Err(MirrorError::Missing(project_id.to_string()));
+        }
+        let lock = self.lock_for(project_id).await;
+        let _held = lock.lock().await;
+        run_git_command(
+            mirror,
+            vec![
+                "update-ref".into(),
+                "-d".into(),
+                format!("refs/heads/{branch}"),
+            ],
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| git_err_to_mirror("git update-ref -d", e))
     }
 
     /// Hardlinked local clone of the mirror, returned as a [`Workspace`].
@@ -682,5 +722,129 @@ mod ahead_of_base_tests {
         let root = TempDir::new().unwrap();
         let mgr = MirrorManager::new(root.path().to_path_buf());
         assert!(!mgr.branch_ahead_of_base("absent", "task", "main").await);
+    }
+}
+
+#[cfg(test)]
+mod fetch_prune_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    async fn git(cwd: &Path, args: &[&str]) {
+        run_git_command(
+            cwd.to_path_buf(),
+            args.iter().map(|s| s.to_string()).collect(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+    }
+
+    /// `fetch_mirror`'s `--prune` must NOT delete djinn-owned local-only
+    /// `task/*` refs (the durability refs worker pods push), while still
+    /// pruning upstream-deleted ordinary branches and advancing `main`.
+    /// Regression: the catch-all `+refs/heads/*:refs/heads/*` + `--prune`
+    /// deleted every task ref within one fetch tick because it doesn't exist
+    /// on the upstream — every durability push silently raced the shredder.
+    #[tokio::test]
+    async fn fetch_prune_spares_task_refs_and_prunes_upstream_deletions() {
+        let root = TempDir::new().unwrap();
+
+        // "GitHub": an upstream bare repo with main + a feature branch.
+        let upstream = root.path().join("upstream.git");
+        git(
+            root.path(),
+            &["init", "--bare", "--quiet", upstream.to_str().unwrap()],
+        )
+        .await;
+        let work = TempDir::new().unwrap();
+        git(
+            root.path(),
+            &[
+                "clone",
+                "--quiet",
+                upstream.to_str().unwrap(),
+                work.path().to_str().unwrap(),
+            ],
+        )
+        .await;
+        let wp = work.path();
+        git(wp, &["config", "user.email", "t@t"]).await;
+        git(wp, &["config", "user.name", "t"]).await;
+        git(wp, &["checkout", "-q", "-b", "main"]).await;
+        git(wp, &["commit", "--allow-empty", "-qm", "base"]).await;
+        git(wp, &["push", "-q", "origin", "main"]).await;
+        git(wp, &["checkout", "-q", "-b", "feature"]).await;
+        git(wp, &["commit", "--allow-empty", "-qm", "feat"]).await;
+        git(wp, &["push", "-q", "origin", "feature"]).await;
+
+        // The mirror: cloned bare from upstream (has main + feature), plus a
+        // LOCAL-ONLY task ref a worker pod pushed for durability.
+        let mirror = root.path().join("p1.git");
+        git(
+            root.path(),
+            &[
+                "clone",
+                "--bare",
+                "--quiet",
+                upstream.to_str().unwrap(),
+                mirror.to_str().unwrap(),
+            ],
+        )
+        .await;
+        git(wp, &["checkout", "-q", "-b", "task/ab12"]).await;
+        git(wp, &["commit", "--allow-empty", "-qm", "worker work"]).await;
+        git(
+            wp,
+            &[
+                "push",
+                "-q",
+                mirror.to_str().unwrap(),
+                "task/ab12:refs/heads/task/ab12",
+            ],
+        )
+        .await;
+
+        // Upstream moves: main advances, feature is deleted.
+        git(wp, &["checkout", "-q", "main"]).await;
+        git(wp, &["commit", "--allow-empty", "-qm", "advance"]).await;
+        git(wp, &["push", "-q", "origin", "main"]).await;
+        git(wp, &["push", "-q", "origin", "--delete", "feature"]).await;
+
+        let mgr = MirrorManager::new(root.path().to_path_buf());
+        let changed = mgr
+            .fetch_mirror("p1", upstream.to_str().unwrap())
+            .await
+            .expect("fetch_mirror");
+        assert!(changed, "ref set moved (main advanced, feature pruned)");
+
+        let refs = run_git_command(
+            mirror.clone(),
+            vec!["for-each-ref".into(), "--format=%(refname)".into()],
+        )
+        .await
+        .expect("for-each-ref")
+        .stdout;
+        assert!(
+            refs.contains("refs/heads/task/ab12"),
+            "local-only task ref must survive the prune; refs:\n{refs}"
+        );
+        assert!(
+            !refs.contains("refs/heads/feature"),
+            "upstream-deleted branch must be pruned; refs:\n{refs}"
+        );
+
+        // And the mirror-side cleanup path: delete_branch removes the task
+        // ref once its task is closed.
+        mgr.delete_branch("p1", "task/ab12")
+            .await
+            .expect("delete_branch");
+        let refs = run_git_command(
+            mirror,
+            vec!["for-each-ref".into(), "--format=%(refname)".into()],
+        )
+        .await
+        .expect("for-each-ref")
+        .stdout;
+        assert!(!refs.contains("refs/heads/task/ab12"));
     }
 }
