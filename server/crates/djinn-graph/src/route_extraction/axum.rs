@@ -589,7 +589,71 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_handlers_get_low_confidence_placeholder_symbols() {
+        let source = r#"
+            use axum::{Router, routing::get};
+            fn router() -> Router<()> {
+                Router::new().route("/external", get(external_handlers::show))
+            }
+        "#;
+        let temp = tempfile::tempdir().expect("create temp fixture dir");
+        let root = temp.path();
+        std::fs::write(root.join("unresolved_fixture.rs"), source)
+            .expect("write temporary unresolved fixture");
+        let mut graph = fixture_graph(&[("unresolved_fixture.rs", source)]);
+
+        let report = detect_axum_routes(&mut graph, root);
+
+        assert_eq!(report.hits.len(), 1);
+        let hit = &report.hits[0];
+        assert_eq!(hit.path, "/external");
+        assert_eq!(hit.method, "get");
+        assert_eq!(hit.handler, "external_handlers::show");
+        assert_eq!(hit.reason, "axum-unresolved-handler");
+        assert_eq!(hit.confidence, 0.45);
+        let handler_node = hit.handler_node.expect("placeholder handler node");
+        assert_eq!(graph.node(handler_node).kind, RepoGraphNodeKind::Symbol);
+        assert_eq!(
+            graph.node(handler_node).display_name,
+            "external_handlers::show"
+        );
+    }
+
+    #[test]
     fn env_gate_defaults_on_and_accepts_false_values() {
+        let old = std::env::var(crate::route_extraction::ROUTE_DETECTION_FLAG).ok();
+
+        unsafe {
+            std::env::remove_var(crate::route_extraction::ROUTE_DETECTION_FLAG);
+        }
         assert!(crate::route_extraction::route_detection_enabled());
+
+        for value in ["0", "false", "no", "off"] {
+            unsafe {
+                std::env::set_var(crate::route_extraction::ROUTE_DETECTION_FLAG, value);
+            }
+            assert!(
+                !crate::route_extraction::route_detection_enabled(),
+                "{value:?} should disable route detection"
+            );
+        }
+
+        for value in ["1", "true", "yes", "on", "anything-else"] {
+            unsafe {
+                std::env::set_var(crate::route_extraction::ROUTE_DETECTION_FLAG, value);
+            }
+            assert!(
+                crate::route_extraction::route_detection_enabled(),
+                "{value:?} should keep route detection enabled"
+            );
+        }
+
+        unsafe {
+            if let Some(old) = old {
+                std::env::set_var(crate::route_extraction::ROUTE_DETECTION_FLAG, old);
+            } else {
+                std::env::remove_var(crate::route_extraction::ROUTE_DETECTION_FLAG);
+            }
+        }
     }
 }
