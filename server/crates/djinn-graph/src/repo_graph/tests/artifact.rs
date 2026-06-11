@@ -863,6 +863,28 @@ fn route_exclusion_config_default_round_trips_json() {
 }
 
 #[test]
+fn route_exclusion_config_persists_through_graph_artifact_sidecar() {
+    let mut graph = RepoDependencyGraph::build(&[fixture_index()]);
+    let config = RouteExclusionConfig {
+        health_path_globs: vec!["/status*".to_string()],
+        param_only_paths: false,
+        min_confidence_for_consumer_edge: 0.8,
+        excluded_frameworks: vec!["axum".to_string()],
+    };
+    graph.set_route_exclusion_config(config.clone());
+
+    let artifact = graph.to_artifact();
+    assert_eq!(artifact.route_exclusion_config, config);
+
+    let encoded = bincode::serialize(&artifact).expect("serialize artifact");
+    let decoded = deserialize_repo_graph_artifact_bincode(&encoded).expect("deserialize artifact");
+    let restored = RepoDependencyGraph::from_artifact(&decoded);
+
+    assert_eq!(decoded.route_exclusion_config, config);
+    assert_eq!(restored.route_exclusion_config(), &config);
+}
+
+#[test]
 fn current_bincode_artifact_without_route_exclusion_config_loads_default() {
     #[derive(Serialize)]
     struct V10RepoGraphArtifactWithoutRouteExclusionConfig {
