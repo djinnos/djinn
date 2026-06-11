@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 //! Djinn-native message and conversation types.
 //!
 //! These are the core data structures the reply loop, compaction, session

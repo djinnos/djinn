@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 //! Cognitive + cyclomatic complexity walker.
 //!
 //! Per-function metrics computed from a tree-sitter AST. Cognitive

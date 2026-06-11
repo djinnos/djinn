@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant as StdInstant;

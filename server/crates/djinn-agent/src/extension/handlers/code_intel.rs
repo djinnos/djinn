@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use super::*;
 use crate::extension::github_search;
 // v10: canonical test-path classification, shared with the graph

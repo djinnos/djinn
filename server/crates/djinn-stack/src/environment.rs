@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 //! `EnvironmentConfig` — per-project runtime configuration.
 //!
 //! Persisted as JSON in `projects.environment_config` (migration 10). Replaces
