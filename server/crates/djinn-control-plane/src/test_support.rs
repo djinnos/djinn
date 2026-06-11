@@ -164,6 +164,9 @@ impl RuntimeOps for StubRuntime {
     async fn teardown_taskrun_job(&self, _task_run_id: &str) -> Result<(), String> {
         Ok(())
     }
+    async fn list_taskrun_jobs(&self) -> Result<Vec<crate::bridge::TaskrunJobRef>, String> {
+        Ok(Vec::new())
+    }
     async fn cleanup_task_branches(&self, _task_id: &str) {}
 }
 
