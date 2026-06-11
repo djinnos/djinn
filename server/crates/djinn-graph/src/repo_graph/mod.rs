@@ -44,7 +44,7 @@ pub use self::edge::{
     EdgeConfidenceTier, RepoGraphEdge, RepoGraphEdgeKind, edge_confidence_floor,
     edge_confidence_tier, promote_fetches_confidence_with_import_evidence,
 };
-pub use self::graph::{RepoDependencyGraph, SymbolRange};
+pub use self::graph::{RepoDependencyGraph, RouteEdgeLanguageChain, SymbolRange};
 pub use self::node::{
     RepoGraphNode, RepoGraphNodeKind, RepoGraphSearchHit, RepoNodeKey, is_route_or_tool_node,
 };
