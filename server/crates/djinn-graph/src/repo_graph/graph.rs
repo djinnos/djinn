@@ -206,7 +206,7 @@ impl RepoDependencyGraph {
             // Route/Tool nodes are synthetic affordances. Keep them in the
             // PageRank projection so their edges still contribute to real
             // symbols, but do not expose them as ranked architecture hubs.
-            if node.is_route_or_tool() {
+            if super::ranking::is_route_or_tool_node(node) {
                 continue;
             }
             let page_rank = page_rank_scores[node_index.index()];
