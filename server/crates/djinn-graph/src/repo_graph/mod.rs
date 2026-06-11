@@ -37,13 +37,20 @@ mod tests;
 // `communities.rs`, etc. for the consumer side.
 pub use self::artifact::{
     RepoGraphArtifact, RepoGraphArtifactEdge, RepoGraphArtifactProcess,
-    RepoGraphArtifactSymbolRange, deserialize_repo_graph_artifact_bincode,
+    RepoGraphArtifactSymbolRange, RouteExclusionConfig, deserialize_repo_graph_artifact_bincode,
 };
 pub use self::constants::{REPO_GRAPH_ARTIFACT_VERSION, is_test_path};
-pub use self::edge::{RepoGraphEdge, RepoGraphEdgeKind, edge_confidence_floor};
+pub use self::edge::{
+    EdgeConfidenceTier, RepoGraphEdge, RepoGraphEdgeKind, edge_confidence_floor,
+    edge_confidence_tier, promote_fetches_confidence_with_import_evidence,
+};
 pub use self::graph::{RepoDependencyGraph, SymbolRange};
-pub use self::node::{RepoGraphNode, RepoGraphNodeKind, RepoGraphSearchHit, RepoNodeKey};
-pub use self::ranking::{RankedRepoGraphNode, RepoGraphRanking};
+pub use self::node::{
+    RepoGraphNode, RepoGraphNodeKind, RepoGraphSearchHit, RepoNodeKey, is_route_or_tool_node,
+};
+pub use self::ranking::{
+    RankedRepoGraphNode, RepoGraphRanking, is_singleton_route_without_consumers,
+};
 
 /// `RepoDependencyGraphBuilder` lives in [`self::builder`] (see
 /// `repo_graph/builder.rs`). The `impl` block in `mod.rs` (`build_with_source`
@@ -185,6 +192,7 @@ impl RepoDependencyGraph {
             symbol_ranges,
             communities: self.communities.clone(),
             processes: processes_out,
+            route_exclusion_config: RouteExclusionConfig::default(),
         }
     }
 
@@ -404,6 +412,7 @@ impl RepoDependencyGraph {
             communities: Vec::new(),
             // Processes are likewise recomputed by the post-build pass.
             processes: Vec::new(),
+            route_exclusion_config: artifact.route_exclusion_config,
         };
 
         // Step 2: Rebuild the base graph from the filtered artifact.

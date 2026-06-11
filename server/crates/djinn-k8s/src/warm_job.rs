@@ -137,11 +137,13 @@ exec {bin} warm-graph "{project_id}"
         env.push(env_var("DJINN_DATABASE_URL", url));
     }
     // Route the Rust toolchain caches (CARGO_HOME/CARGO_TARGET_DIR/SCCACHE_DIR)
-    // to the /cache PVC, identical to the task-run Pod, so the warmer primes the
-    // exact per-project dirs the task-runs reuse. Single-sourced in job.rs to
-    // avoid the task-run-updated-but-warm-missed drift that bit DJINN_*_URL.
+    // to the /cache PVC. Warm Pods intentionally write the shared per-project
+    // target base with incremental compilation disabled; task-run Pods use
+    // private run target dirs but keep the same shared CARGO_HOME/SCCACHE
+    // settings. Single-sourced in job.rs to avoid the
+    // task-run-updated-but-warm-missed drift that bit DJINN_*_URL.
     // Needs the cache volume mounted below.
-    env.extend(crate::job::cache_env_vars(project_id));
+    env.extend(crate::job::warm_cache_env_vars(project_id));
 
     let container = Container {
         name: "warmer".to_string(),
@@ -162,9 +164,9 @@ exec {bin} warm-graph "{project_id}"
                 read_only: Some(false),
                 ..VolumeMount::default()
             },
-            // Shared cross-task cache PVC, so the cache_env_vars paths above are
-            // backed by real persistent storage (RWX — concurrent task-run Pods
-            // already mount it).
+            // Shared cache PVC backing the warm-owned cargo target base plus the
+            // shared registry/sccache dirs. Task-run Pods mount the same PVC but
+            // use private cargo target dirs.
             VolumeMount {
                 name: crate::job::VOLUME_CACHE.to_string(),
                 mount_path: crate::job::CACHE_MOUNT_DIR.to_string(),
@@ -435,19 +437,22 @@ mod tests {
         );
         assert!(!envs.contains_key("DJINN_MYSQL_URL"));
 
-        // Rust cache routing must match the task-run Pod so the warmer primes
-        // the per-project dirs task-runs reuse (single-sourced via
-        // job::cache_env_vars).
+        // Warm cache routing must keep the shared per-project target base as the
+        // warm-owned seed, disable incremental state in that base, and preserve
+        // shared registry/sccache/sqlx settings while task-run Pods use private
+        // run target dirs.
         assert_eq!(envs.get("CARGO_HOME").copied(), Some("/cache/cargo"));
         assert_eq!(
             envs.get("CARGO_TARGET_DIR").copied(),
             Some("/cache/cargo-target/proj-xyz"),
         );
+        assert_eq!(envs.get("CARGO_INCREMENTAL").copied(), Some("0"));
         assert_eq!(
             envs.get("SCCACHE_DIR").copied(),
             Some("/cache/sccache/proj-xyz"),
         );
         assert_eq!(envs.get("SCCACHE_CACHE_SIZE").copied(), Some("20G"));
+        assert_eq!(envs.get("SQLX_OFFLINE").copied(), Some("true"));
 
         let mounts = container.volume_mounts.as_ref().expect("mounts");
         assert_eq!(mounts.len(), 4, "mirror + workspace + cache + env-config");

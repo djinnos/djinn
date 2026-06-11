@@ -22,7 +22,34 @@ use crate::complexity::ComplexityMetrics;
 use crate::scip_parser::{ScipSymbolKind, ScipVisibility};
 
 use super::edge::RepoGraphEdgeKind;
+use super::edge::{EdgeConfidenceTier, edge_confidence_tier};
 use super::node::{RepoGraphNode, RepoGraphNodeKind, RepoNodeKey};
+
+/// Durable sidecar controlling which inferred route/consumer edges should be
+/// suppressed or downgraded by graph operations.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RouteExclusionConfig {
+    pub health_path_globs: Vec<String>,
+    pub param_only_paths: bool,
+    pub min_confidence_for_consumer_edge: f64,
+    pub excluded_frameworks: Vec<String>,
+}
+
+impl Default for RouteExclusionConfig {
+    fn default() -> Self {
+        Self {
+            health_path_globs: [
+                "/health", "/healthz", "/ping", "/readyz", "/livez", "/metrics",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+            param_only_paths: true,
+            min_confidence_for_consumer_edge: 0.5,
+            excluded_frameworks: Vec::new(),
+        }
+    }
+}
 
 /// Minimal serializable artifact capturing the per-file and per-symbol graph
 /// relationships needed for incremental changed-file patch planning.
@@ -60,6 +87,22 @@ pub struct RepoGraphArtifact {
     /// without re-running the detector.
     #[serde(default)]
     pub processes: Vec<RepoGraphArtifactProcess>,
+    /// Config sidecar for inferred route/consumer-edge exclusions.
+    #[serde(default)]
+    pub route_exclusion_config: RouteExclusionConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepoGraphArtifactV10WithoutRouteExclusionConfig {
+    version: u32,
+    nodes: Vec<RepoGraphNode>,
+    edges: Vec<RepoGraphArtifactEdge>,
+    #[serde(default)]
+    symbol_ranges: BTreeMap<PathBuf, Vec<RepoGraphArtifactSymbolRange>>,
+    #[serde(default)]
+    communities: Vec<crate::communities::Community>,
+    #[serde(default)]
+    processes: Vec<RepoGraphArtifactProcess>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,6 +190,21 @@ impl From<RepoGraphArtifactV10WithoutWorkspace> for RepoGraphArtifact {
             symbol_ranges: old.symbol_ranges,
             communities: old.communities,
             processes: old.processes,
+            route_exclusion_config: RouteExclusionConfig::default(),
+        }
+    }
+}
+
+impl From<RepoGraphArtifactV10WithoutRouteExclusionConfig> for RepoGraphArtifact {
+    fn from(old: RepoGraphArtifactV10WithoutRouteExclusionConfig) -> Self {
+        Self {
+            version: old.version,
+            nodes: old.nodes,
+            edges: old.edges,
+            symbol_ranges: old.symbol_ranges,
+            communities: old.communities,
+            processes: old.processes,
+            route_exclusion_config: RouteExclusionConfig::default(),
         }
     }
 }
@@ -160,6 +218,7 @@ impl From<RepoGraphArtifactV10WithoutRouteMetadata> for RepoGraphArtifact {
             symbol_ranges: old.symbol_ranges,
             communities: old.communities,
             processes: old.processes,
+            route_exclusion_config: RouteExclusionConfig::default(),
         }
     }
 }
@@ -229,16 +288,23 @@ impl From<RepoGraphNodeV10WithoutWorkspace> for RepoGraphNode {
 pub fn deserialize_repo_graph_artifact_bincode(blob: &[u8]) -> Result<RepoGraphArtifact, String> {
     match bincode::deserialize::<RepoGraphArtifact>(blob) {
         Ok(artifact) => Ok(artifact),
-        Err(current_err) => match bincode::deserialize::<RepoGraphArtifactV10WithoutRouteMetadata>(blob) {
-            Ok(artifact) => Ok(RepoGraphArtifact::from(artifact)),
-            Err(route_compat_err) => bincode::deserialize::<RepoGraphArtifactV10WithoutWorkspace>(blob)
-                .map(RepoGraphArtifact::from)
-                .map_err(|workspace_compat_err| {
-                    format!(
-                        "deserialize graph: {current_err}; v10 pre-route-metadata fallback also failed: {route_compat_err}; v10 pre-workspace fallback also failed: {workspace_compat_err}"
-                    )
-                }),
-        },
+        Err(current_err) => {
+            match bincode::deserialize::<RepoGraphArtifactV10WithoutRouteExclusionConfig>(blob) {
+                Ok(artifact) => Ok(RepoGraphArtifact::from(artifact)),
+                Err(config_compat_err) => {
+                    match bincode::deserialize::<RepoGraphArtifactV10WithoutRouteMetadata>(blob) {
+                        Ok(artifact) => Ok(RepoGraphArtifact::from(artifact)),
+                        Err(route_compat_err) => bincode::deserialize::<RepoGraphArtifactV10WithoutWorkspace>(blob)
+                            .map(RepoGraphArtifact::from)
+                            .map_err(|workspace_compat_err| {
+                                format!(
+                                    "deserialize graph: {current_err}; v10 pre-route-exclusion-config fallback also failed: {config_compat_err}; v10 pre-route-metadata fallback also failed: {route_compat_err}; v10 pre-workspace fallback also failed: {workspace_compat_err}"
+                                )
+                            }),
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -261,6 +327,12 @@ pub struct RepoGraphArtifactEdge {
     /// edges. `None` for every other kind. New in artifact v4 (PR F2).
     #[serde(default)]
     pub step: Option<i32>,
+}
+
+impl RepoGraphArtifactEdge {
+    pub fn confidence_tier(&self) -> EdgeConfidenceTier {
+        edge_confidence_tier(self.kind, self.confidence, self.reason.as_deref())
+    }
 }
 
 /// A serializable enclosing range for a symbol definition, identified by the

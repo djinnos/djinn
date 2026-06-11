@@ -13,6 +13,7 @@ use super::messages::CoordinatorMessage;
 use super::types::*;
 use crate::actors::slot::SlotPoolHandle;
 use crate::roles::RoleRegistry;
+use djinn_control_plane::bridge::RuntimeOps;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::parse_json_array;
 use djinn_db::Database;
@@ -101,6 +102,9 @@ pub(super) struct CoordinatorActor {
     /// an `AgentContext` whose direct-push fallback can clone ephemeral
     /// workspaces. `None` in tests.
     pub(super) mirror: Option<Arc<djinn_workspace::MirrorManager>>,
+    /// Runtime bridge for coordinator-owned DB-truth finalization paths that
+    /// must delete a task-run Job even when no slot-pool mapping remains.
+    pub(super) runtime_ops: Option<Arc<dyn RuntimeOps>>,
     /// Host worker RPC connection registry — ground-truth liveness for the
     /// zombie reaper. `None` in tests (reaper falls back to DB/activity heuristics).
     pub(super) rpc_registry: Option<Arc<djinn_supervisor::ConnectionRegistry>>,
@@ -193,6 +197,7 @@ impl CoordinatorActor {
             graph_warmer,
             consolidation_runner,
             mirror,
+            runtime_ops,
             rpc_registry,
         } = deps;
         let events = events_tx.subscribe();
@@ -229,6 +234,7 @@ impl CoordinatorActor {
             last_graph_refresh: StdInstant::now(),
             graph_warmer,
             mirror,
+            runtime_ops,
             rpc_registry,
             prune_tick_counter: 0,
             throughput_events: HashMap::new(),
@@ -268,6 +274,8 @@ impl CoordinatorActor {
         // same sweep the 15-min tick uses so the dev UI / queries don't show
         // weeks-old stale rows after every restart.
         health::reap_stale_task_runs_for_startup(&self.db).await;
+        let startup_context = self.maintenance_context();
+        health::reap_orphaned_taskrun_jobs_for_startup(&self.db, &startup_context).await;
 
         loop {
             tokio::select! {
@@ -331,27 +339,7 @@ impl CoordinatorActor {
                     self.process_approved_tasks().await;
                     self.poll_pr_statuses().await;
                     if self.last_stale_sweep.elapsed() >= STALE_SWEEP_INTERVAL {
-                        let app_state = crate::context::AgentContext {
-                            db: self.db.clone(),
-                            event_bus: crate::events::event_bus_for(&self.events_tx),
-                            git_actors: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-                            verifying_tasks: self.verification_tracker.clone(),
-                            role_registry: self.role_registry.clone(),
-                            health_tracker: self.health.clone(),
-                            file_time: Arc::new(crate::file_time::FileTime::new()),
-                            lsp: self.lsp.clone(),
-                            catalog: self.catalog.clone(),
-                            coordinator: Arc::new(tokio::sync::Mutex::new(None)),
-                            active_tasks: crate::context::ActivityTracker::default(),
-                            task_ops_project_path_override: None,
-                            working_root: None,
-                            graph_warmer: None,
-                            repo_graph_ops: None,
-                            runtime_ops: None,
-                            mirror: self.mirror.clone(),
-                            rpc_registry: None,
-                            default_project_id: None,
-                        };
+                        let app_state = self.maintenance_context();
                         health::sweep_stale_resources(&self.db, &app_state).await;
                         self.last_stale_sweep = StdInstant::now();
                     }
@@ -409,6 +397,30 @@ impl CoordinatorActor {
             pr_errors: self.pr_errors.clone(),
             rate_limited_until: self.current_rate_limited_until(),
         });
+    }
+
+    fn maintenance_context(&self) -> crate::context::AgentContext {
+        crate::context::AgentContext {
+            db: self.db.clone(),
+            event_bus: crate::events::event_bus_for(&self.events_tx),
+            git_actors: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            verifying_tasks: self.verification_tracker.clone(),
+            role_registry: self.role_registry.clone(),
+            health_tracker: self.health.clone(),
+            file_time: Arc::new(crate::file_time::FileTime::new()),
+            lsp: self.lsp.clone(),
+            catalog: self.catalog.clone(),
+            coordinator: Arc::new(tokio::sync::Mutex::new(None)),
+            active_tasks: crate::context::ActivityTracker::default(),
+            task_ops_project_path_override: None,
+            working_root: None,
+            graph_warmer: None,
+            repo_graph_ops: None,
+            runtime_ops: self.runtime_ops.clone(),
+            mirror: self.mirror.clone(),
+            rpc_registry: self.rpc_registry.clone(),
+            default_project_id: None,
+        }
     }
 
     pub(super) fn current_rate_limited_until(&self) -> Option<StdInstant> {

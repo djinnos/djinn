@@ -98,6 +98,17 @@ async fn zombie_zero_token_session_is_reaped_on_db_truth() {
         .await
         .unwrap();
 
+    let run_id = "run-zombie-reap";
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status) VALUES ($1, $2, $3, 'manual', 'running')",
+    )
+    .bind(run_id)
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
     let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
     let session = session_repo
         .create(CreateSessionParams {
@@ -106,7 +117,7 @@ async fn zombie_zero_token_session_is_reaped_on_db_truth() {
             model: "openai/gpt-5.5",
             agent_type: "worker",
             metadata_json: None,
-            task_run_id: None,
+            task_run_id: Some(run_id),
         })
         .await
         .unwrap();
@@ -131,8 +142,16 @@ async fn zombie_zero_token_session_is_reaped_on_db_truth() {
         "precondition: zombie session should be listed as running"
     );
 
+    let runtime = RecordingRuntimeOps::new(true);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.runtime_ops = Some(Arc::new(runtime.clone()));
     actor.reap_zombie_sessions().await;
+
+    assert_eq!(
+        runtime.calls(),
+        vec![run_id.to_string()],
+        "zombie reaper must best-effort delete the task-run Job using DB session.task_run_id, even when teardown fails"
+    );
 
     assert!(
         !session_repo
@@ -258,10 +277,17 @@ async fn connected_worker_past_hard_cap_is_not_reaped() {
     // Wire a registry that reports a LIVE connection for this run.
     let registry = std::sync::Arc::new(djinn_supervisor::ConnectionRegistry::new());
     registry.register_connected_for_test(run_id).await;
+    let runtime = RecordingRuntimeOps::new(false);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.rpc_registry = Some(registry.clone());
+    actor.runtime_ops = Some(std::sync::Arc::new(runtime.clone()));
 
     actor.reap_zombie_sessions().await;
+
+    assert!(
+        runtime.calls().is_empty(),
+        "connected live sessions must not have their task-run Job deleted"
+    );
 
     assert!(
         session_repo
@@ -285,6 +311,11 @@ async fn connected_worker_past_hard_cap_is_not_reaped() {
     // Sanity: once the connection drops, the same session IS reaped.
     registry.deregister(run_id).await;
     actor.reap_zombie_sessions().await;
+    assert_eq!(
+        runtime.calls(),
+        vec![run_id.to_string()],
+        "once liveness gates pass, zombie reaping deletes the task-run Job"
+    );
     assert!(
         !session_repo
             .list_active()
@@ -294,6 +325,103 @@ async fn connected_worker_past_hard_cap_is_not_reaped() {
             .any(|s| s.id == session.id),
         "after the worker connection drops, the past-cap zombie must be reaped"
     );
+}
+
+/// Stall timeout goes through `pool.kill_session`, which owns task-run Job
+/// teardown for slot-mapped sessions. Teardown errors are non-fatal: the
+/// coordinator still marks this session as killed so the normal stall cleanup
+/// proceeds without retry-spamming the same DB row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stall_timeout_tears_down_taskrun_job_through_slot_pool_kill_path() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "stall-teardown").await;
+    let run_id = "run-stall-timeout";
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status) VALUES ($1, $2, $3, 'manual', 'running')",
+    )
+    .bind(run_id)
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+        })
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE sessions SET started_at = to_char(now() AT TIME ZONE 'utc' - interval '40 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
+    )
+    .bind(&session.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let runtime = RecordingRuntimeOps::new(true);
+    let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.runtime_ops = Some(std::sync::Arc::new(runtime.clone()));
+    let activity = app_state.register_activity(&task.id);
+    let old = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().saturating_sub(40 * 60))
+        .unwrap_or(0);
+    activity.store(old, std::sync::atomic::Ordering::Relaxed);
+    let cancel = CancellationToken::new();
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel.clone(),
+        SlotPoolConfig {
+            models: vec![ModelSlotConfig {
+                model_id: "openai/gpt-5.5".to_string(),
+                max_slots: 1,
+                roles: ["worker"].into_iter().map(ToOwned::to_owned).collect(),
+            }],
+            role_priorities: HashMap::new(),
+        },
+        std::sync::Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
+            let runner: crate::actors::slot::TestLifecycleRunner = std::sync::Arc::new(
+                |_task_id, _project_path, _model_id, _app_state, kill, _pause| {
+                    Box::pin(async move {
+                        kill.cancelled().await;
+                        Ok(())
+                    })
+                },
+            );
+            SlotHandle::spawn_with_test_runner(
+                slot_id, model_id, event_tx, app_state, cancel, runner,
+            )
+        }),
+    );
+    pool.dispatch(&task.id, "test-project", "openai/gpt-5.5")
+        .await
+        .expect("dispatch should create a slot mapping");
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.pool = pool;
+    actor.enforce_session_stall_timeout().await;
+
+    assert_eq!(
+        runtime.calls(),
+        vec![run_id.to_string()],
+        "stall timeout should invoke task-run Job teardown through pool.kill_session"
+    );
+    assert!(
+        actor.stall_killed.contains(&session.id),
+        "teardown failure must not prevent stall guard cleanup"
+    );
+    cancel.cancel();
 }
 
 /// `stall_killed` is keyed by session id and pruned against `list_active()`:
@@ -315,5 +443,216 @@ async fn stall_killed_prunes_sessions_absent_from_active() {
     assert!(
         actor.stall_killed.is_empty(),
         "stall_killed entries for sessions absent from list_active() must be pruned"
+    );
+}
+
+fn taskrun_job_ref(task_run_id: &str) -> djinn_control_plane::bridge::TaskrunJobRef {
+    djinn_control_plane::bridge::TaskrunJobRef {
+        job_name: format!("djinn-taskrun-{task_run_id}"),
+        task_run_id: task_run_id.to_string(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn taskrun_job_backstop_deletes_absent_and_finalized_rows_only() {
+    use djinn_core::models::SessionStatus;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "taskrun-job-backstop").await;
+
+    let finalized_run_id = "run-finalized-backstop";
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, ended_at)
+         VALUES ($1, $2, $3, 'manual', 'completed', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))",
+    )
+    .bind(finalized_run_id)
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let live_run_id = "run-live-backstop";
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status)
+         VALUES ($1, $2, $3, 'manual', 'running')",
+    )
+    .bind(live_run_id)
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let live_session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(live_run_id),
+        })
+        .await
+        .unwrap();
+
+    let completed_session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(finalized_run_id),
+        })
+        .await
+        .unwrap();
+    session_repo
+        .update(&completed_session.id, SessionStatus::Completed, 1, 1, 0, 0)
+        .await
+        .unwrap();
+
+    let interrupted_run_id = "run-interrupted-backstop";
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status)
+         VALUES ($1, $2, $3, 'manual', 'running')",
+    )
+    .bind(interrupted_run_id)
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let interrupted_session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(interrupted_run_id),
+        })
+        .await
+        .unwrap();
+    session_repo
+        .update(
+            &interrupted_session.id,
+            SessionStatus::Interrupted,
+            1,
+            1,
+            0,
+            0,
+        )
+        .await
+        .unwrap();
+
+    let runtime = RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![
+        taskrun_job_ref("run-absent-backstop"),
+        taskrun_job_ref(finalized_run_id),
+        taskrun_job_ref(interrupted_run_id),
+        taskrun_job_ref(live_run_id),
+    ]);
+    let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+
+    health::reap_orphaned_taskrun_jobs(&db, &app_state, "test").await;
+
+    assert_eq!(
+        runtime.calls(),
+        vec![
+            "run-absent-backstop".to_string(),
+            finalized_run_id.to_string(),
+            interrupted_run_id.to_string(),
+        ],
+        "backstop must delete absent/finalized/interrupted-session Jobs and preserve live running task-runs"
+    );
+    assert!(
+        session_repo
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .any(|session| session.id == live_session.id),
+        "live running session must be preserved"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_resource_sweep_runs_taskrun_job_backstop() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "periodic-backstop-wiring").await;
+    let periodic_run_id = "periodic-finalized";
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, ended_at)
+         VALUES ($1, $2, $3, 'manual', 'completed', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))",
+    )
+    .bind(periodic_run_id)
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let runtime =
+        RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![taskrun_job_ref(periodic_run_id)]);
+    let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+
+    health::sweep_stale_resources(&db, &app_state).await;
+
+    assert_eq!(
+        runtime.calls(),
+        vec![periodic_run_id.to_string()],
+        "periodic stale-resource sweep must run the K8s task-run Job backstop"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reconcile_runs_taskrun_job_backstop() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "startup-backstop-wiring").await;
+    let startup_run_id = "startup-finalized";
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, ended_at)
+         VALUES ($1, $2, $3, 'manual', 'completed', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))",
+    )
+    .bind(startup_run_id)
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let runtime =
+        RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![taskrun_job_ref(startup_run_id)]);
+    let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+
+    health::reap_orphaned_taskrun_jobs_for_startup(&db, &app_state).await;
+
+    assert_eq!(
+        runtime.calls(),
+        vec![startup_run_id.to_string()],
+        "startup reconcile must run the K8s task-run Job backstop before periodic intervals"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn taskrun_job_backstop_continues_after_delete_failure() {
+    let db = test_helpers::create_test_db();
+    let runtime = RecordingRuntimeOps::new(true).with_taskrun_jobs(vec![
+        taskrun_job_ref("missing-one"),
+        taskrun_job_ref("missing-two"),
+    ]);
+    let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+
+    health::reap_orphaned_taskrun_jobs(&db, &app_state, "test").await;
+
+    assert_eq!(
+        runtime.calls(),
+        vec!["missing-one".to_string(), "missing-two".to_string()],
+        "teardown failures are best-effort and must not stop the sweep"
     );
 }

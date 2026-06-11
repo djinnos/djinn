@@ -30,10 +30,6 @@ pub fn detect_typescript_fetches(
     routes_by_path: &BTreeMap<String, NodeIndex>,
     report: &mut RouteExtractionReport,
 ) {
-    if routes_by_path.is_empty() {
-        return;
-    }
-
     for (rel_path, _file_node) in file_nodes(graph, is_typescript_fetch_candidate) {
         let source = match std::fs::read_to_string(project_root.join(&rel_path)) {
             Ok(source) => source,
@@ -559,6 +555,7 @@ mod tests {
             ]),
             communities: Vec::new(),
             processes: Vec::new(),
+            route_exclusion_config: Default::default(),
         })
     }
 
@@ -725,5 +722,47 @@ mod tests {
                 "missing fetch edge to {expected}"
             );
         }
+    }
+
+    #[test]
+    fn unknown_fetches_increment_counter_even_without_known_routes() {
+        let temp = tempfile::tempdir().expect("create temp fixture dir");
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("ui/src/api")).unwrap();
+        std::fs::write(
+            root.join("ui/src/api/unknown.ts"),
+            "export function unknownFetch() {\n  return fetch('/api/unknown-only');\n}\n",
+        )
+        .unwrap();
+
+        let mut graph = fixture_graph();
+        let route_nodes_before = graph
+            .graph()
+            .node_weights()
+            .filter(|node| node.kind == RepoGraphNodeKind::Route)
+            .count();
+        let mut report = RouteExtractionReport::default();
+
+        detect_typescript_fetches(&mut graph, root, &BTreeMap::new(), &mut report);
+
+        assert_eq!(report.fetches_edges_added, 0);
+        assert_eq!(report.unmatched_fetch_count, 1);
+        assert_eq!(
+            graph
+                .graph()
+                .node_weights()
+                .filter(|node| node.kind == RepoGraphNodeKind::Route)
+                .count(),
+            route_nodes_before,
+            "TS-only unknown paths must not synthesize Route nodes"
+        );
+        assert_eq!(
+            graph
+                .graph()
+                .edge_references()
+                .filter(|edge| edge.weight().kind == RepoGraphEdgeKind::Fetches)
+                .count(),
+            0
+        );
     }
 }

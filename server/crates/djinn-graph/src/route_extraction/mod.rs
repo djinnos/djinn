@@ -23,6 +23,19 @@ use crate::repo_graph::{RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNodeKin
 /// Default = on.
 pub const ROUTE_DETECTION_FLAG: &str = "DJINN_ROUTE_DETECTION";
 
+/// Environment flag for the route-parity rollout gate. Default = on.
+pub const ROUTE_PARITY_FLAG: &str = "DJINN_ROUTE_PARITY";
+
+fn env_flag_enabled(value: Option<&str>) -> bool {
+    match value {
+        Some(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        None => true,
+    }
+}
+
 /// Summary emitted by [`detect_routes`] for rollout observability.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RouteExtractionReport {
@@ -39,13 +52,17 @@ pub struct RouteExtractionReport {
 
 /// Returns `true` when route extraction should run.
 pub fn route_detection_enabled() -> bool {
-    match std::env::var(ROUTE_DETECTION_FLAG) {
-        Ok(value) => !matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "no" | "off"
-        ),
-        Err(_) => true,
-    }
+    env_flag_enabled(std::env::var(ROUTE_DETECTION_FLAG).ok().as_deref())
+}
+
+/// Returns `true` when route parity behavior should be active.
+pub fn route_parity_enabled() -> bool {
+    route_parity_enabled_from_var(std::env::var(ROUTE_PARITY_FLAG).ok().as_deref())
+}
+
+/// Pure helper for tests/callers that already resolved the env var.
+pub fn route_parity_enabled_from_var(value: Option<&str>) -> bool {
+    env_flag_enabled(value)
 }
 
 #[cfg(test)]
@@ -317,6 +334,7 @@ mod tests {
             )]),
             communities: Vec::new(),
             processes: Vec::new(),
+            route_exclusion_config: Default::default(),
         })
     }
 
@@ -330,6 +348,25 @@ mod tests {
         unsafe { std::env::set_var(ROUTE_DETECTION_FLAG, "true") };
         assert!(route_detection_enabled());
         unsafe { std::env::remove_var(ROUTE_DETECTION_FLAG) };
+    }
+
+    #[test]
+    fn route_parity_defaults_enabled() {
+        assert!(route_parity_enabled_from_var(None));
+    }
+
+    #[test]
+    fn route_parity_accepts_on_values() {
+        for value in ["1", "true", "yes", "on", "anything"] {
+            assert!(route_parity_enabled_from_var(Some(value)));
+        }
+    }
+
+    #[test]
+    fn route_parity_accepts_off_values() {
+        for value in ["0", "false", "no", "off", " OFF "] {
+            assert!(!route_parity_enabled_from_var(Some(value)));
+        }
     }
 
     #[test]

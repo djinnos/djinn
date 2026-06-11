@@ -88,6 +88,26 @@ pub enum RepoGraphNodeKind {
     Tool,
 }
 
+impl RepoGraphNodeKind {
+    /// Returns true for synthetic route/tool affordance nodes.
+    ///
+    /// These nodes are useful anchors for route/tool-specific graph ops, but
+    /// they are not architecture hubs in their own right and should be filtered
+    /// out of centrality/god-object ranking surfaces.
+    pub fn is_route_or_tool(self) -> bool {
+        matches!(self, Self::Route | Self::Tool)
+    }
+}
+
+/// Reusable ranking/noise-filter predicate for synthetic route/tool nodes.
+///
+/// Checks both `kind` and `id` so future/confidence-tier migrations that load
+/// older artifacts with partially widened metadata still treat `Route`/`Tool`
+/// affordances consistently at the graph/ranking boundary.
+pub fn is_route_or_tool_node(node: &RepoGraphNode) -> bool {
+    node.kind.is_route_or_tool() || matches!(node.id, RepoNodeKey::Route(_) | RepoNodeKey::Tool(_))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoGraphNode {
     pub id: RepoNodeKey,
@@ -170,6 +190,10 @@ impl RepoGraphNode {
 
     pub fn kind(&self) -> RepoGraphNodeKind {
         self.kind
+    }
+
+    pub fn is_route_or_tool(&self) -> bool {
+        is_route_or_tool_node(self)
     }
 
     pub(crate) fn intrinsic_weight(&self) -> f64 {
