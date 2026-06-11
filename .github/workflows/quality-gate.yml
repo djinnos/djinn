@@ -221,6 +221,18 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  # Pure-shell PR-time guard for Rust source file size; independent from clippy.
+  server-size-guard:
+    name: Server Size Guard
+    needs: changes
+    if: needs.changes.outputs.server == 'true' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Rust file sizes
+        run: ./scripts/check-file-size.sh
+
   # ╔══════════════════════════════════════════════════════════════════╗
   # ║  Server Tests (merge queue only)                                 ║
   # ║                                                                  ║
@@ -446,6 +458,7 @@ jobs:
     if: always() && github.event_name != 'push'
     needs:
       - server-clippy
+      - server-size-guard
       - server-test
       - server-sqlx-cache
       - ui-frontend
@@ -454,6 +467,7 @@ jobs:
         run: |
           results=(
             "${{ needs.server-clippy.result }}"
+            "${{ needs.server-size-guard.result }}"
             "${{ needs.server-test.result }}"
             "${{ needs.server-sqlx-cache.result }}"
             "${{ needs.ui-frontend.result }}"
