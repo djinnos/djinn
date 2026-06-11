@@ -98,6 +98,7 @@ fn flow_fixture_graph() -> RepoDependencyGraph {
             terminal: 3,
             steps: vec![1, 2, 3],
         }],
+        route_exclusion_config: Default::default(),
     };
     RepoDependencyGraph::from_artifact(&artifact)
 }
