@@ -848,11 +848,8 @@ where
     }
 }
 
-async fn writer_loop<W>(
-    mut write_half: W,
-    mut rx: mpsc::Receiver<Frame>,
-    cancel: CancellationToken,
-) where
+async fn writer_loop<W>(mut write_half: W, mut rx: mpsc::Receiver<Frame>, cancel: CancellationToken)
+where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     // Unlike the reader, the writer does NOT exit eagerly on cancel.  On a

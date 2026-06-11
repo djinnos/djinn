@@ -28,7 +28,7 @@ pub(super) fn group_neighbors_by_file(
                 // file-grouped views can still render them without
                 // panicking.
                 RepoNodeKey::Process(_) => "<process>".to_string(),
-                // Synthetic table nodes — same bucketing strategy.
+                // Synthetic table/route/tool nodes — same bucketing strategy.
                 RepoNodeKey::Table(_) => "<table>".to_string(),
                 RepoNodeKey::Route(_) => "<route>".to_string(),
                 RepoNodeKey::Tool(_) => "<tool>".to_string(),
@@ -435,12 +435,15 @@ pub(super) fn classify_edge_category(
         // category — consumers asking "who imports/calls X" should
         // not see community membership in their answers.
         RepoGraphEdgeKind::MemberOf => EdgeCategory::References,
+        // Route extraction edges are dependency metadata; surface them as
+        // references until the control-plane bridge grows route-specific
+        // categories.
+        RepoGraphEdgeKind::HandlesRoute | RepoGraphEdgeKind::Fetches => EdgeCategory::References,
         // PR F2: `StepInProcess` is the synthetic process-membership
         // edge. Symbols receive these as incoming from a `Process`
         // node; expose under its own category so UI groupers can
         // separate process membership from real calls / references.
         RepoGraphEdgeKind::StepInProcess => EdgeCategory::Process,
-        RepoGraphEdgeKind::HandlesRoute | RepoGraphEdgeKind::Fetches => EdgeCategory::References,
     }
 }
 

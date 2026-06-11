@@ -649,7 +649,6 @@ impl RepoDependencyGraph {
     /// the handler's [`RepoNodeKey::Symbol`] back-reference without
     /// walking the graph. The handler-symbol edge itself is stamped
     /// separately by the route extractor (out of scope for cs4v).
-    #[allow(dead_code)] // cs4v lands the helper ahead of its first caller.
     pub(crate) fn ensure_route_node(
         &mut self,
         id: &str,
@@ -729,6 +728,33 @@ impl RepoDependencyGraph {
         let idx = self.graph.add_node(node);
         self.node_lookup.insert(key, idx);
         idx
+    }
+
+    /// Stamp a route extraction edge with explicit confidence/reason.
+    pub(crate) fn add_route_edge(
+        &mut self,
+        source: NodeIndex,
+        target: NodeIndex,
+        kind: RepoGraphEdgeKind,
+        confidence: f64,
+        reason: &str,
+    ) {
+        debug_assert!(matches!(
+            kind,
+            RepoGraphEdgeKind::HandlesRoute | RepoGraphEdgeKind::Fetches
+        ));
+        self.graph.add_edge(
+            source,
+            target,
+            RepoGraphEdge {
+                kind,
+                weight: edge_weight(kind),
+                evidence_count: 1,
+                confidence,
+                reason: Some(reason.to_string()),
+                step: None,
+            },
+        );
     }
 
     /// Stamp a `Reads` / `Writes` edge from a caller symbol to a

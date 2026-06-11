@@ -10,14 +10,14 @@ use std::sync::Arc;
 use tracing::Instrument;
 
 use crate::bridge::{
-    ApiSurfaceEntry, BoundaryRule, BoundaryViolation, Candidate, ChangedRange, ChurnEntry,
-    ComplexityResult, CoupledPairEntry, CouplingEntry, CouplingHubEntry, CycleGroup,
-    DeadSymbolEntry, DeprecatedHit, DetectedChangesResult, EdgeEntry, FileGroupEntry,
+    ApiImpactResult, ApiSurfaceEntry, BoundaryRule, BoundaryViolation, Candidate, ChangedRange,
+    ChurnEntry, ComplexityResult, CoupledPairEntry, CouplingEntry, CouplingHubEntry, CycleGroup,
+    DeadSymbolEntry, DeprecatedHit, DetectedChangesResult, EdgeEntry, FileGroupEntry, FlowResult,
     GraphNeighbor, GraphStatus, HotPathHit, HotspotEntry, ImpactEntry, ImpactResult,
     MetricsAtResult, NeighborsResult, OrphanEntry, PathResult, ProjectCtx, QuerySubgraphRequest,
-    QuerySubgraphResult, RankedNode, RefactorCandidate, ResolveOutcome, SearchHit, SnapshotLevel,
-    SnapshotPayload, SymbolAtHit, SymbolContext, SymbolDescription, TouchedSymbol,
-    WorkspacesResult,
+    QuerySubgraphResult, RankedNode, RefactorCandidate, ResolveOutcome, RouteMapResult, SearchHit,
+    ShapeCheckResult, SnapshotLevel, SnapshotPayload, SymbolAtHit, SymbolContext,
+    SymbolDescription, TouchedSymbol, WorkspacesResult,
 };
 use crate::server::DjinnMcpServer;
 use crate::tools::graph_exclusions::GraphExclusions;

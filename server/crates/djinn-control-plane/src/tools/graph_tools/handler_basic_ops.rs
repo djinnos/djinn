@@ -306,6 +306,99 @@ impl DjinnMcpServer {
         }))
     }
 
+    pub(super) async fn code_graph_route_map(
+        &self,
+        ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let limit = bounded_required_limit(params.limit, 50, "route_map")?;
+        let route_map = self
+            .state
+            .repo_graph()
+            .route_map(
+                ctx,
+                params.route_id.as_deref(),
+                params.method.as_deref(),
+                params.path_glob.as_deref(),
+                params.framework.as_deref(),
+                limit,
+            )
+            .await?;
+        Ok(CodeGraphResponse::RouteMap(RouteMapResponse {
+            route_map,
+            next_step: None,
+        }))
+    }
+
+    pub(super) async fn code_graph_shape_check(
+        &self,
+        ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let selector = require_route_selector(params)?;
+        let shape_check = self
+            .state
+            .repo_graph()
+            .shape_check(
+                ctx,
+                selector.route_id,
+                selector.method,
+                selector.path,
+                params.include_optional.unwrap_or(false),
+            )
+            .await?;
+        Ok(CodeGraphResponse::ShapeCheck(ShapeCheckResponse {
+            shape_check,
+            next_step: None,
+        }))
+    }
+
+    pub(super) async fn code_graph_api_impact(
+        &self,
+        ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let selector = require_route_selector(params)?;
+        let min_confidence = params.min_confidence.unwrap_or(0.5);
+        validate_min_confidence_value(min_confidence)?;
+        let limit = bounded_required_limit(params.limit, 50, "api_impact")?;
+        let api_impact = self
+            .state
+            .repo_graph()
+            .api_impact(
+                ctx,
+                selector.route_id,
+                selector.method,
+                selector.path,
+                min_confidence,
+                limit,
+            )
+            .await?;
+        Ok(CodeGraphResponse::ApiImpact(ApiImpactResponse {
+            api_impact,
+            next_step: None,
+        }))
+    }
+
+    pub(super) async fn code_graph_flow(
+        &self,
+        ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let query = require_query(params)?;
+        validate_flow_kind_filter(params.kind_filter.as_deref())?;
+        let limit = bounded_required_limit(params.limit, 20, "flow")?;
+        let flow = self
+            .state
+            .repo_graph()
+            .flow(ctx, query, params.kind_filter.as_deref(), limit)
+            .await?;
+        Ok(CodeGraphResponse::Flow(FlowResponse {
+            flow,
+            next_step: None,
+        }))
+    }
+
     pub(super) async fn code_graph_cycles(
         &self,
         ctx: &ProjectCtx,

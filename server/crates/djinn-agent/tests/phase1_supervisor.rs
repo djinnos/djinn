@@ -81,6 +81,7 @@ fn test_agent_context(db: Database) -> AgentContext {
         working_root: None,
         graph_warmer: None,
         repo_graph_ops: None,
+        runtime_ops: None,
         mirror: None,
         rpc_registry: None,
         default_project_id: None,
