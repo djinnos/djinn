@@ -2,7 +2,7 @@ use super::*;
 
 // ── Validation ──────────────────────────────────────────────────────────────────
 
-pub(super) fn validate_direction(direction: Option<&str>) -> Result<(), String> {
+pub(crate) fn validate_direction(direction: Option<&str>) -> Result<(), String> {
     if let Some(d) = direction {
         match d {
             "incoming" | "outgoing" => Ok(()),
@@ -15,7 +15,7 @@ pub(super) fn validate_direction(direction: Option<&str>) -> Result<(), String> 
     }
 }
 
-pub(super) fn validate_kind_filter(kind_filter: Option<&str>) -> Result<(), String> {
+pub(crate) fn validate_kind_filter(kind_filter: Option<&str>) -> Result<(), String> {
     if let Some(k) = kind_filter {
         match k {
             "file" | "symbol" => Ok(()),
@@ -61,7 +61,7 @@ pub(crate) fn resolve_search_mode(caller: Option<&str>) -> Result<SearchMode, St
 /// PR A3: validator for the `neighbors` op's edge-kind filter. Currently
 /// accepts `reads` / `writes`; future PRs may extend this with `calls` etc.
 /// once the `EdgeCategory` enum lands (PR C1).
-pub(super) fn validate_edge_kind_filter(kind_filter: Option<&str>) -> Result<(), String> {
+pub(crate) fn validate_edge_kind_filter(kind_filter: Option<&str>) -> Result<(), String> {
     if let Some(k) = kind_filter {
         match k {
             "reads" | "writes" => Ok(()),
@@ -74,7 +74,7 @@ pub(super) fn validate_edge_kind_filter(kind_filter: Option<&str>) -> Result<(),
     }
 }
 
-pub(super) fn require_key(params: &CodeGraphParams) -> Result<&str, String> {
+pub(crate) fn require_key(params: &CodeGraphParams) -> Result<&str, String> {
     params
         .key
         .as_deref()
@@ -82,7 +82,7 @@ pub(super) fn require_key(params: &CodeGraphParams) -> Result<&str, String> {
         .ok_or_else(|| format!("'key' is required for operation '{}'", params.operation))
 }
 
-pub(super) fn require_query(params: &CodeGraphParams) -> Result<&str, String> {
+pub(crate) fn require_query(params: &CodeGraphParams) -> Result<&str, String> {
     params
         .query
         .as_deref()
@@ -90,7 +90,7 @@ pub(super) fn require_query(params: &CodeGraphParams) -> Result<&str, String> {
         .ok_or_else(|| format!("'query' is required for operation '{}'", params.operation))
 }
 
-pub(super) fn require_from_to(params: &CodeGraphParams) -> Result<(&str, &str), String> {
+pub(crate) fn require_from_to(params: &CodeGraphParams) -> Result<(&str, &str), String> {
     let from = params
         .from
         .as_deref()
@@ -104,7 +104,7 @@ pub(super) fn require_from_to(params: &CodeGraphParams) -> Result<(&str, &str), 
     Ok((from, to))
 }
 
-pub(super) fn require_globs(params: &CodeGraphParams) -> Result<(&str, &str), String> {
+pub(crate) fn require_globs(params: &CodeGraphParams) -> Result<(&str, &str), String> {
     let from = params
         .from_glob
         .as_deref()
@@ -189,7 +189,7 @@ pub(crate) async fn resolve_workspace_scope(
     Ok(scope)
 }
 
-pub(super) fn bounded_optional_usize(
+pub(crate) fn bounded_optional_usize(
     value: Option<i64>,
     name: &str,
     min: usize,
@@ -205,7 +205,7 @@ pub(super) fn bounded_optional_usize(
     Ok(Some((raw as usize).clamp(min, max)))
 }
 
-pub(super) fn validate_visibility(visibility: Option<&str>) -> Result<(), String> {
+pub(crate) fn validate_visibility(visibility: Option<&str>) -> Result<(), String> {
     if let Some(v) = visibility {
         match v {
             "public" | "private" | "any" => Ok(()),
@@ -218,7 +218,7 @@ pub(super) fn validate_visibility(visibility: Option<&str>) -> Result<(), String
     }
 }
 
-pub(super) fn validate_sort_by(sort_by: Option<&str>) -> Result<(), String> {
+pub(crate) fn validate_sort_by(sort_by: Option<&str>) -> Result<(), String> {
     if let Some(s) = sort_by {
         match s {
             "pagerank" | "in_degree" | "out_degree" | "total_degree" => Ok(()),
@@ -231,7 +231,7 @@ pub(super) fn validate_sort_by(sort_by: Option<&str>) -> Result<(), String> {
     }
 }
 
-pub(super) fn validate_group_by(group_by: Option<&str>) -> Result<(), String> {
+pub(crate) fn validate_group_by(group_by: Option<&str>) -> Result<(), String> {
     if let Some(g) = group_by {
         match g {
             "file" => Ok(()),

@@ -36,9 +36,9 @@ mod risk_classification;
 mod tests;
 mod validation;
 
-use self::next_step_hints::*;
-use self::risk_classification::*;
-use self::validation::*;
+pub(crate) use self::next_step_hints::*;
+pub(crate) use self::risk_classification::*;
+pub(crate) use self::validation::*;
 
 pub use self::request_types::{CodeGraphParams, TestFilter};
 pub use self::response_types::*;

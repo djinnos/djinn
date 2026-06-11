@@ -2,19 +2,19 @@ use super::*;
 
 // ── Next-step hints ─────────────────────────────────────────────────────────────
 
-pub(super) const FALLBACK_NEXT_STEP: &str =
+pub(crate) const FALLBACK_NEXT_STEP: &str =
     "Use `code_graph status` to inspect the current graph state.";
 
 /// PR C3: emitted when an `impact` query lands on a HIGH or CRITICAL
 /// risk bucket. Steers the caller toward the cleanup ops they should
 /// run before the change ships.
-pub(super) const HIGH_IMPACT_NEXT_STEP: &str =
+pub(crate) const HIGH_IMPACT_NEXT_STEP: &str =
     "Consider running `dead_symbols` and `deprecated_callers` before the change.";
 
 /// Returns whether next-step hints should be appended. Toggled via the
 /// `DJINN_CODE_GRAPH_NEXT_STEP_HINTS` env var; default is `true` (only
 /// `0` / `false` / `off` / `no` suppress).
-pub(super) fn next_step_hints_enabled() -> bool {
+pub(crate) fn next_step_hints_enabled() -> bool {
     match std::env::var("DJINN_CODE_GRAPH_NEXT_STEP_HINTS") {
         Ok(v) => !matches!(
             v.trim().to_ascii_lowercase().as_str(),
@@ -30,7 +30,7 @@ pub(super) fn next_step_hints_enabled() -> bool {
 /// The 5 op-specific hints come from the PR A4 plan; everything else
 /// gets [`FALLBACK_NEXT_STEP`] so the contract "every response carries
 /// a non-empty `next_step`" holds.
-pub(super) fn attach_next_step_hint(op: &str, response: &mut CodeGraphResponse) -> String {
+pub(crate) fn attach_next_step_hint(op: &str, response: &mut CodeGraphResponse) -> String {
     let hint = compute_next_step_hint(op, response);
     set_next_step_hint(response, hint.clone());
     tracing::debug!(
@@ -41,7 +41,7 @@ pub(super) fn attach_next_step_hint(op: &str, response: &mut CodeGraphResponse) 
     hint
 }
 
-pub(super) fn compute_next_step_hint(op: &str, response: &CodeGraphResponse) -> String {
+pub(crate) fn compute_next_step_hint(op: &str, response: &CodeGraphResponse) -> String {
     match (op, response) {
         ("search", CodeGraphResponse::Search(s)) => match s.hits.first() {
             Some(hit) => format!(
@@ -119,12 +119,12 @@ pub(super) fn compute_next_step_hint(op: &str, response: &CodeGraphResponse) -> 
     }
 }
 
-pub(super) fn set_next_step_hint(response: &mut CodeGraphResponse, hint: String) {
+pub(crate) fn set_next_step_hint(response: &mut CodeGraphResponse, hint: String) {
     let slot = next_step_slot(response);
     *slot = Some(hint);
 }
 
-pub(super) fn next_step_slot(response: &mut CodeGraphResponse) -> &mut Option<String> {
+pub(crate) fn next_step_slot(response: &mut CodeGraphResponse) -> &mut Option<String> {
     match response {
         CodeGraphResponse::Neighbors(r) => &mut r.next_step,
         CodeGraphResponse::Ranked(r) => &mut r.next_step,
@@ -165,7 +165,7 @@ pub(super) fn next_step_slot(response: &mut CodeGraphResponse) -> &mut Option<St
 /// Pick the highest-priority touched symbol for the next-step impact
 /// hint. High-tier wins over Medium wins over Low; ties break on
 /// `name` for stability.
-pub(super) fn pick_next_step_target(
+pub(crate) fn pick_next_step_target(
     symbols: &[crate::bridge::DetectedTouchedSymbol],
 ) -> Option<String> {
     use crate::bridge::PagerankTier;

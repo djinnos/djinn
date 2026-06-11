@@ -11,7 +11,7 @@ use super::*;
 /// - `crates/djinn-control-plane/src/lib.rs` → `"crates/djinn-control-plane"`
 /// - `Cargo.toml` (single segment) → `"Cargo.toml"` (degenerate; the
 ///   single-file repo case still counts as one module)
-pub(super) fn module_bucket(file_path: &str) -> String {
+pub(crate) fn module_bucket(file_path: &str) -> String {
     let normalized = file_path.replace('\\', "/");
     let mut iter = normalized.split('/').filter(|s| !s.is_empty());
     let first = iter.next();
@@ -27,10 +27,10 @@ pub(super) fn module_bucket(file_path: &str) -> String {
 /// Computed once and shared between risk classification and the summary
 /// string so the two never disagree.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct ImpactMetrics {
-    pub(super) direct: usize,
-    pub(super) total: usize,
-    pub(super) modules: usize,
+pub(crate) struct ImpactMetrics {
+    pub(crate) direct: usize,
+    pub(crate) total: usize,
+    pub(crate) modules: usize,
 }
 
 /// Compute risk metrics from a detailed `ImpactEntry` slice. `direct`
@@ -39,7 +39,7 @@ pub(super) struct ImpactMetrics {
 /// bucket count over all entries that carry a `file_path`. Entries
 /// without a `file_path` (external/virtual symbols) don't contribute
 /// to the module count — the plan treats them as "no module signal".
-pub(super) fn metrics_from_detailed(entries: &[ImpactEntry]) -> ImpactMetrics {
+pub(crate) fn metrics_from_detailed(entries: &[ImpactEntry]) -> ImpactMetrics {
     use std::collections::HashSet;
     let direct = entries.iter().filter(|e| e.depth == 1).count();
     let total = entries.len();
@@ -66,7 +66,7 @@ pub(super) fn metrics_from_detailed(entries: &[ImpactEntry]) -> ImpactMetrics {
 /// case the approximation under-counts; the detailed path remains the
 /// authoritative source. `modules` is the unique two-segment bucket
 /// count across the listed files.
-pub(super) fn metrics_from_grouped(groups: &[FileGroupEntry]) -> ImpactMetrics {
+pub(crate) fn metrics_from_grouped(groups: &[FileGroupEntry]) -> ImpactMetrics {
     use std::collections::HashSet;
     let total: usize = groups.iter().map(|g| g.occurrence_count).sum();
     let direct: usize = groups
@@ -87,7 +87,7 @@ pub(super) fn metrics_from_grouped(groups: &[FileGroupEntry]) -> ImpactMetrics {
 
 /// Format the 1-line plan-mandated summary. Stable phrasing —
 /// reviewer prompts in PR E3 lift this verbatim.
-pub(super) fn impact_summary(metrics: ImpactMetrics) -> String {
+pub(crate) fn impact_summary(metrics: ImpactMetrics) -> String {
     if metrics.direct == 0 && metrics.total == 0 {
         return "no direct callers in current graph snapshot".to_string();
     }
