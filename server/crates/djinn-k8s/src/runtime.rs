@@ -1567,6 +1567,8 @@ mod tests {
                 _: djinn_core::models::SessionStatus,
                 _: i64,
                 _: i64,
+                _: i64,
+                _: i64,
             ) -> Result<(), String> {
                 unimplemented!()
             }

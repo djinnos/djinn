@@ -95,6 +95,8 @@ export interface SessionInfo {
   status: string;
   tokensIn: number;
   tokensOut: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
 }
 
 // ── Hook ─────────────────────────────────────────────────────────────────────
@@ -141,6 +143,8 @@ export function useSessionMessages(taskId: string | null, projectSlug: string | 
           status: s.status,
           tokensIn: s.tokens_in,
           tokensOut: s.tokens_out,
+          cacheReadTokens: s.cache_read_tokens ?? 0,
+          cacheWriteTokens: s.cache_write_tokens ?? 0,
         }))
       );
 

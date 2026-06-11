@@ -32,6 +32,44 @@ pub struct TokenUsage {
     /// reports them separately, e.g. OpenAI `reasoning_tokens`).
     #[serde(default)]
     pub reasoning_output: u32,
+    /// Total prompt-context tokens the model actually saw this turn, normalized
+    /// across provider formats so consumers (the context gauge, compaction
+    /// trigger, UI usage_pct) read one number with consistent semantics:
+    ///
+    /// - Anthropic format (Anthropic / MiniMax coding plan / GLM): the wire
+    ///   `input_tokens` EXCLUDES cached reads/writes, so the true context is
+    ///   `input + cache_read + cache_write`. Without this, a cache hit reports
+    ///   ~2k while the real context is 100k+ and proactive compaction never
+    ///   fires.
+    /// - OpenAI format (chat + responses): `prompt_tokens` / `input_tokens`
+    ///   already INCLUDE cached tokens, so context is just `input` (adding
+    ///   cache_read would double-count).
+    /// - Google format: `usageMetadata.promptTokenCount` already includes
+    ///   cached content, so context is just `input`.
+    ///
+    /// `#[serde(default)]` for wire/back-compat: rows serialized before this
+    /// field existed deserialize to 0, and [`TokenUsage::context_total`] falls
+    /// back to `input + cache_read + cache_write` in that case.
+    #[serde(default)]
+    pub context_total: u32,
+}
+
+impl TokenUsage {
+    /// True prompt-context token count for this turn (see [`Self::context_total`]).
+    ///
+    /// Returns the explicit normalized field when an adapter set it; otherwise
+    /// falls back to `input + cache_read + cache_write` for back-compat with
+    /// rows serialized before the field existed (Anthropic-format math, the
+    /// only case where the legacy `input`-only gauge undercounted).
+    pub fn context_total(&self) -> u32 {
+        if self.context_total > 0 {
+            self.context_total
+        } else {
+            self.input
+                .saturating_add(self.cache_read)
+                .saturating_add(self.cache_write)
+        }
+    }
 }
 
 // ─── Stream events ────────────────────────────────────────────────────────────

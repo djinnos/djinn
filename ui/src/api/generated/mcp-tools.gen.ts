@@ -328,11 +328,27 @@ export namespace CodeGraphInputSchema {
    */
   confidence?: string
   /**
+   * Optional coarse context substring for `query_subgraph`. Use this to
+   * narrow the natural-language subgraph query to a subsystem, API, type,
+   * or concern when the initial response is too broad; returned
+   * `narrowing_hints` may suggest values for this field.
+   */
+  context_filter?: string
+  /**
    * Edge direction filter for `neighbors`: `incoming`, `outgoing`, or omit for both.
    */
   direction?: string
   /**
-   * Optional edge-kind filter for `edges`.
+   * Optional explicit edge kinds for `query_subgraph` traversal. Omit to
+   * let the planner infer edge kinds from the question; provide values such
+   * as calls/imports/returns/reads/writes/implements/extends to narrow the
+   * bounded subgraph. `edge_kind` is accepted as a single-kind compatibility
+   * alias when this list is omitted.
+   */
+  edge_filters?: string[]
+  /**
+   * Optional edge-kind filter for `edges`; for `query_subgraph`, a
+   * single-kind compatibility alias used when `edge_filters` is omitted.
    */
   edge_kind?: string
   /**
@@ -345,7 +361,16 @@ export namespace CodeGraphInputSchema {
    */
   file?: string
   /**
-   * Optional file glob restricting `hotspots` to a subset of paths.
+   * Optional repository-relative path/file substring filter for
+   * `query_subgraph`. It narrows seed selection and traversal to matching
+   * file paths. `file_glob` is also accepted as a compatibility alias and
+   * is used when `file_filter` is omitted.
+   */
+  file_filter?: string
+  /**
+   * Optional file glob restricting `hotspots` to a subset of paths. For
+   * `query_subgraph`, a path-filter compatibility alias used when
+   * `file_filter` is omitted.
    */
   file_glob?: string
   /**
@@ -385,6 +410,8 @@ export namespace CodeGraphInputSchema {
    * Kind filter, op-specific:
    * - `ranked` / `search` / `cycles` / `orphans`: node kind — `file` or
    *   `symbol`.
+   * - `query_subgraph`: node-kind narrowing for seeds/traversal — `file`
+   *   or `symbol`.
    * - `neighbors`: edge kind — `reads` or `writes` (PR A3). Restricts
    *   the response to neighbors connected by `Reads` / `Writes` edges
    *   only, so callers can ask for "who writes to field X" without
@@ -400,12 +427,21 @@ export namespace CodeGraphInputSchema {
    */
   kind_hint?: string
   /**
+   * Semantic zoom level for `snapshot`: `symbol` keeps the existing
+   * file/symbol-node payload shape; `community` is accepted for forward
+   * compatibility with the collapsed community view.
+   */
+  level?: string
+  /**
    * Maximum results for `ranked`/`search`/`orphans`/`edges`/`neighbors`
    * (default 20) or max traversal depth for `impact` (default 3).
    */
   limit?: number
   /**
-   * Optional max depth for `path`.
+   * Optional max depth. For `path`, bounds shortest-path search depth. For
+   * `query_subgraph`, bounds traversal depth from selected seeds; omit to
+   * use the backend default (currently 2). Values are clamped into 0..=8, so 0 means seed
+   * nodes only and larger values are capped at 8.
    */
   max_depth?: number
   /**
@@ -416,6 +452,13 @@ export namespace CodeGraphInputSchema {
    * pairs with essentially zero real coupling information.
    */
   max_files_per_commit?: number
+  /**
+   * Maximum seed count for `query_subgraph`. Omit to use the backend
+   * default (currently 6). Positive values are clamped into 1..=32; zero/negative values
+   * are rejected. Returned seed debug metadata explains which seeds were
+   * selected and why.
+   */
+  max_seeds?: number
   /**
    * Minimum edge confidence in `[0, 1]` for the `impact` BFS frontier
    * (PR A2). Edges below this threshold are skipped — useful for
@@ -446,9 +489,9 @@ export namespace CodeGraphInputSchema {
   /**
    * The operation to perform.
    * One of: `neighbors`, `ranked`, `impact`, `implementations`,
-   * `search`, `cycles`, `orphans`, `path`, `edges`, `symbols_at`,
-   * `diff_touches`, `detect_changes`, `describe`, `context`, `status`,
-   * `snapshot`.
+   * `search`, `query_subgraph`, `cycles`, `orphans`, `path`, `edges`,
+   * `symbols_at`, `diff_touches`, `detect_changes`, `describe`,
+   * `context`, `status`, `snapshot`, `workspaces`, and the other graph analysis ops.
    */
   operation: string
   /**
@@ -459,7 +502,10 @@ export namespace CodeGraphInputSchema {
    */
   project: string
   /**
-   * Substring query for `search`.
+   * Query text, op-specific:
+   * - `search`: substring/name lookup text.
+   * - `query_subgraph`: required nonblank natural-language question used
+   *   to pick relevant seeds and infer useful traversal edge kinds.
    */
   query?: string
   /**
@@ -526,6 +572,14 @@ export namespace CodeGraphInputSchema {
    */
   to_sha?: string
   /**
+   * Approximate response token budget for `query_subgraph`. Omit to use
+   * the backend default (currently about 2000 tokens). Positive values below 1024 are clamped up to 1024,
+   * values above 32000 are clamped down to 32000, and zero/negative values
+   * are rejected. The result reports budget/truncation state so callers can
+   * retry with a narrower filter or a different budget.
+   */
+  token_budget?: number
+  /**
    * Visibility filter for `orphans`: `public`, `private`, or `any` (default).
    */
   visibility?: string
@@ -534,6 +588,12 @@ export namespace CodeGraphInputSchema {
    * to 365).
    */
   window_days?: number
+  /**
+   * Optional workspace slug. For `query_subgraph`, scopes seed search and
+   * traversal to a warmed workspace when provided; omit to query the
+   * project-level graph/default workspace selection.
+   */
+  workspace?: string
   [k: string]: any
   }
   /**
@@ -1395,15 +1455,16 @@ export namespace GetProjectDevcontainerStatusOutputSchema {
    * Derived status for the UI banner. One of
    * `pending | running | ready | failed`. `pending` means no warm has
    * ever run; `running` means the image is ready and a warm should be
-   * in flight (or imminent); `ready` means `graph_warmed_at` is set;
+   * in flight (or imminent); `ready` means derived graph freshness exists;
    * `failed` mirrors the image build's failed status (no warm possible).
    */
   graph_warm_status: string
   /**
-   * ISO-8601 UTC timestamp of the most recent successful canonical-graph
-   * warm for this project. `None` means the warmer has not completed a
-   * run yet (cold project or failing pipeline). The coordinator will not
-   * dispatch tasks until this is set.
+   * ISO-8601 UTC timestamp derived from per-workspace graph freshness
+   * or the merged repo graph cache. `None` means no freshness source has
+   * completed yet (cold project or failing pipeline). Dispatch no longer
+   * blocks on this value; it is badge metadata retained under a
+   * compatibility field name.
    */
   graph_warmed_at?: string
   /**
@@ -1427,6 +1488,19 @@ export namespace GetProjectDevcontainerStatusOutputSchema {
    * this as a distinct "Needs image" state rather than a build status.
    */
   needs_image: boolean
+  /**
+   * Per-workspace graph warm results from the most recent indexer run.
+   * Entries with `failed` or `timed_out` explain which workspace did not
+   * produce a SCIP artifact even when another workspace succeeded.
+   */
+  workspace_warm_statuses?: WorkspaceWarmStatusEntry[]
+  [k: string]: any
+  }
+  export interface WorkspaceWarmStatusEntry {
+  detail?: string
+  indexer: string
+  status: string
+  workspace_slug: string
   [k: string]: any
   }
 
@@ -4760,6 +4834,11 @@ export namespace SessionActiveOutputSchema {
   }
   export interface SessionToolSession {
   agent_type: string
+  /**
+   * Running totals of prompt-cache reads (hits) and writes (creation).
+   */
+  cache_read_tokens: number
+  cache_write_tokens: number
   ended_at?: string
   id: string
   model_id: string
@@ -4843,6 +4922,11 @@ export namespace SessionListOutputSchema {
   }
   export interface SessionToolSession {
   agent_type: string
+  /**
+   * Running totals of prompt-cache reads (hits) and writes (creation).
+   */
+  cache_read_tokens: number
+  cache_write_tokens: number
   ended_at?: string
   id: string
   model_id: string
@@ -4920,6 +5004,11 @@ export type SessionShowInput = SessionShowInputSchema.SessionShowInput;
 export namespace SessionShowOutputSchema {
   export interface SessionShowOutput {
   agent_type?: string
+  /**
+   * Running totals of prompt-cache reads (hits) and writes (creation).
+   */
+  cache_read_tokens?: number
+  cache_write_tokens?: number
   ended_at?: string
   error?: string
   id?: string
@@ -5534,6 +5623,11 @@ export namespace TaskTimelineOutputSchema {
   }
   export interface SessionToolSession {
   agent_type: string
+  /**
+   * Running totals of prompt-cache reads (hits) and writes (creation).
+   */
+  cache_read_tokens: number
+  cache_write_tokens: number
   ended_at?: string
   id: string
   model_id: string

@@ -9844,6 +9844,15 @@ expression: signatures
             "agent_type": {
               "type": "string"
             },
+            "cache_read_tokens": {
+              "description": "Running totals of prompt-cache reads (hits) and writes (creation).",
+              "format": "int64",
+              "type": "integer"
+            },
+            "cache_write_tokens": {
+              "format": "int64",
+              "type": "integer"
+            },
             "ended_at": {
               "nullable": true,
               "type": "string"
@@ -9890,7 +9899,9 @@ expression: signatures
             "started_at",
             "status",
             "tokens_in",
-            "tokens_out"
+            "tokens_out",
+            "cache_read_tokens",
+            "cache_write_tokens"
           ],
           "type": "object"
         }
@@ -10026,6 +10037,15 @@ expression: signatures
             "agent_type": {
               "type": "string"
             },
+            "cache_read_tokens": {
+              "description": "Running totals of prompt-cache reads (hits) and writes (creation).",
+              "format": "int64",
+              "type": "integer"
+            },
+            "cache_write_tokens": {
+              "format": "int64",
+              "type": "integer"
+            },
             "ended_at": {
               "nullable": true,
               "type": "string"
@@ -10072,7 +10092,9 @@ expression: signatures
             "started_at",
             "status",
             "tokens_in",
-            "tokens_out"
+            "tokens_out",
+            "cache_read_tokens",
+            "cache_write_tokens"
           ],
           "type": "object"
         }
@@ -10208,6 +10230,15 @@ expression: signatures
       "properties": {
         "agent_type": {
           "type": "string"
+        },
+        "cache_read_tokens": {
+          "description": "Running totals of prompt-cache reads (hits) and writes (creation).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "cache_write_tokens": {
+          "format": "int64",
+          "type": "integer"
         },
         "ended_at": {
           "nullable": true,
@@ -11329,6 +11360,15 @@ expression: signatures
             "agent_type": {
               "type": "string"
             },
+            "cache_read_tokens": {
+              "description": "Running totals of prompt-cache reads (hits) and writes (creation).",
+              "format": "int64",
+              "type": "integer"
+            },
+            "cache_write_tokens": {
+              "format": "int64",
+              "type": "integer"
+            },
             "ended_at": {
               "nullable": true,
               "type": "string"
@@ -11375,7 +11415,9 @@ expression: signatures
             "started_at",
             "status",
             "tokens_in",
-            "tokens_out"
+            "tokens_out",
+            "cache_read_tokens",
+            "cache_write_tokens"
           ],
           "type": "object"
         },

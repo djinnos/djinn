@@ -111,6 +111,8 @@ pub fn parse_google_line(line: &str) -> Vec<StreamEvent> {
                 input,
                 output,
                 cache_read,
+                // Gemini `promptTokenCount` already includes cached content.
+                context_total: input,
                 ..Default::default()
             }));
         }

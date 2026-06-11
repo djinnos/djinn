@@ -65,6 +65,8 @@ async fn run_with_provider(
     crate::output_parser::ParsedAgentOutput,
     i64,
     i64,
+    i64,
+    i64,
 ) {
     let worktree = test_path("djinn-reply-loop-");
     let worktree_path = worktree.as_path();
@@ -107,7 +109,7 @@ async fn text_only_completion_path_ends_without_nudge_when_no_tools_exist() {
     let (app_state, project_path, task_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
 
-    let (result, output, _, _) = run_with_provider(
+    let (result, output, _, _, _, _) = run_with_provider(
         &provider,
         &[],
         &mut conversation,
@@ -159,7 +161,7 @@ async fn tool_call_execution_adds_tool_result_and_continues_to_next_turn() {
     let (app_state, project_path, task_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
 
-    let (result, _output, _, _) = run_with_provider(
+    let (result, _output, _, _, _, _) = run_with_provider(
         &provider,
         &tools,
         &mut conversation,
@@ -206,7 +208,7 @@ async fn finalize_tool_detection_ends_loop_without_extra_provider_turn() {
     let (app_state, project_path, task_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
 
-    let (result, output, _, _) = run_with_provider(
+    let (result, output, _, _, _, _) = run_with_provider(
         &provider,
         &tools,
         &mut conversation,
@@ -258,7 +260,7 @@ async fn empty_response_retries_then_injects_nudge_into_second_turn_history() {
     let (app_state, project_path, task_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
 
-    let (result, output, _, _) = run_with_provider(
+    let (result, output, _, _, _, _) = run_with_provider(
         &provider,
         &tools,
         &mut conversation,
@@ -305,7 +307,7 @@ async fn max_nudge_abort_returns_clean_error_path() {
     let (app_state, project_path, task_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
 
-    let (result, _output, _, _) = run_with_provider(
+    let (result, _output, _, _, _, _) = run_with_provider(
         &provider,
         &tools,
         &mut conversation,
@@ -331,7 +333,7 @@ async fn provider_error_propagates_from_shared_failing_provider() {
     let (app_state, project_path, task_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
 
-    let (result, _output, _, _) = run_with_provider(
+    let (result, _output, _, _, _, _) = run_with_provider(
         &provider,
         &[],
         &mut conversation,
@@ -377,7 +379,7 @@ async fn metadata_drives_streaming_dispatch_for_safe_tools() {
     let (app_state, project_path, task_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
 
-    let (result, output, _, _) = run_with_provider(
+    let (result, output, _, _, _, _) = run_with_provider(
         &provider,
         &tools,
         &mut conversation,
@@ -429,7 +431,7 @@ async fn missing_metadata_defaults_to_unsafe_dispatch() {
     let (app_state, project_path, task_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
 
-    let (result, output, _, _) = run_with_provider(
+    let (result, output, _, _, _, _) = run_with_provider(
         &provider,
         &tools,
         &mut conversation,
@@ -491,7 +493,7 @@ async fn side_query_tools_share_normal_tool_result_turn_and_keep_order() {
     let (app_state, project_path, task_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
 
-    let (result, output, _, _) = run_with_provider(
+    let (result, output, _, _, _, _) = run_with_provider(
         &provider,
         &tools,
         &mut conversation,

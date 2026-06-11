@@ -410,9 +410,18 @@ impl SupervisorServices for WorkerSupervisorServices {
         status: SessionStatus,
         tokens_in: i64,
         tokens_out: i64,
+        cache_read: i64,
+        cache_write: i64,
     ) -> Result<(), String> {
         self.rpc
-            .update_session_status(session_id, status, tokens_in, tokens_out)
+            .update_session_status(
+                session_id,
+                status,
+                tokens_in,
+                tokens_out,
+                cache_read,
+                cache_write,
+            )
             .await
     }
 

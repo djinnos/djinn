@@ -39,6 +39,14 @@ pub struct SessionRecord {
     pub status: String,
     pub tokens_in: i64,
     pub tokens_out: i64,
+    /// Running total of prompt-cache reads (cache hits) and writes (cache
+    /// creation) across the session, persisted so cache hit-rate is queryable
+    /// from the DB even when OTel/Langfuse telemetry is not configured.
+    /// Added in migration 52.
+    #[serde(default)]
+    pub cache_read_tokens: i64,
+    #[serde(default)]
+    pub cache_write_tokens: i64,
     /// FK into `task_runs`; populated by the supervisor. The authoritative
     /// workspace path lives on the task_run row. Before migration 6 this
     /// struct also carried a `worktree_path: Option<String>` field mirroring

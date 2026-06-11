@@ -60,7 +60,8 @@ impl SessionRepository {
         let session = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                status AS "status!", tokens_in, tokens_out, task_run_id, title
+                status AS "status!", tokens_in, tokens_out,
+                cache_read_tokens, cache_write_tokens, task_run_id, title
              FROM sessions WHERE id = $1"#,
             id
         )
@@ -89,7 +90,8 @@ impl SessionRepository {
         let session = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                status AS "status!", tokens_in, tokens_out, task_run_id, title
+                status AS "status!", tokens_in, tokens_out,
+                cache_read_tokens, cache_write_tokens, task_run_id, title
              FROM sessions WHERE id = $1"#,
             id
         )
@@ -119,6 +121,8 @@ impl SessionRepository {
         status: SessionStatus,
         tokens_in: i64,
         tokens_out: i64,
+        cache_read: i64,
+        cache_write: i64,
     ) -> Result<SessionRecord> {
         self.db.ensure_initialized().await?;
 
@@ -128,11 +132,15 @@ impl SessionRepository {
              SET status = $1,
                  tokens_in = $2,
                  tokens_out = $3,
+                 cache_read_tokens = $4,
+                 cache_write_tokens = $5,
                  ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-             WHERE id = $4"#,
+             WHERE id = $6"#,
             status_str,
             tokens_in,
             tokens_out,
+            cache_read,
+            cache_write,
             id
         )
         .execute(self.db.pool())
@@ -149,7 +157,8 @@ impl SessionRepository {
         let running_sessions = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                status AS "status!", tokens_in, tokens_out, task_run_id, title
+                status AS "status!", tokens_in, tokens_out,
+                cache_read_tokens, cache_write_tokens, task_run_id, title
              FROM sessions WHERE status = 'running'"#
         )
         .fetch_all(self.db.pool())
@@ -183,7 +192,8 @@ impl SessionRepository {
         let orphans = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                status AS "status!", tokens_in, tokens_out, task_run_id, title
+                status AS "status!", tokens_in, tokens_out,
+                cache_read_tokens, cache_write_tokens, task_run_id, title
              FROM sessions WHERE task_id = $1 AND status = 'running'"#,
             task_id
         )
@@ -216,7 +226,8 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                status AS "status!", tokens_in, tokens_out, task_run_id, title
+                status AS "status!", tokens_in, tokens_out,
+                cache_read_tokens, cache_write_tokens, task_run_id, title
              FROM sessions WHERE id = $1"#,
             id
         )
@@ -233,7 +244,8 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                status AS "status!", tokens_in, tokens_out, task_run_id, title
+                status AS "status!", tokens_in, tokens_out,
+                cache_read_tokens, cache_write_tokens, task_run_id, title
              FROM sessions WHERE project_id = $1 AND id = $2"#,
             project_id,
             id
@@ -247,7 +259,8 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                status AS "status!", tokens_in, tokens_out, task_run_id, title
+                status AS "status!", tokens_in, tokens_out,
+                cache_read_tokens, cache_write_tokens, task_run_id, title
              FROM sessions WHERE task_id = $1 ORDER BY started_at DESC"#,
             task_id
         )
@@ -264,7 +277,8 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                status AS "status!", tokens_in, tokens_out, task_run_id, title
+                status AS "status!", tokens_in, tokens_out,
+                cache_read_tokens, cache_write_tokens, task_run_id, title
              FROM sessions
              WHERE project_id = $1 AND task_id = $2 ORDER BY started_at DESC"#,
             project_id,
@@ -279,7 +293,8 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                status AS "status!", tokens_in, tokens_out, task_run_id, title
+                status AS "status!", tokens_in, tokens_out,
+                cache_read_tokens, cache_write_tokens, task_run_id, title
              FROM sessions
              WHERE status = 'running' ORDER BY started_at DESC"#
         )
@@ -327,7 +342,8 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                status AS "status!", tokens_in, tokens_out, task_run_id, title
+                status AS "status!", tokens_in, tokens_out,
+                cache_read_tokens, cache_write_tokens, task_run_id, title
              FROM sessions
              WHERE project_id = $1 AND status = 'running' ORDER BY started_at DESC"#,
             project_id
@@ -347,6 +363,7 @@ impl SessionRepository {
             r#"SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,
                     s.started_at, s.ended_at,
                     s.status AS "status!", s.tokens_in, s.tokens_out,
+                    s.cache_read_tokens, s.cache_write_tokens,
                     s.task_run_id, s.title
              FROM sessions s
              INNER JOIN tasks t ON t.id = s.task_id
@@ -363,7 +380,8 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                status AS "status!", tokens_in, tokens_out, task_run_id, title
+                status AS "status!", tokens_in, tokens_out,
+                cache_read_tokens, cache_write_tokens, task_run_id, title
              FROM sessions
              WHERE task_id = $1 AND status = 'running' ORDER BY started_at DESC LIMIT 1"#,
             task_id
@@ -438,7 +456,8 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                status AS "status!", tokens_in, tokens_out, task_run_id, title
+                status AS "status!", tokens_in, tokens_out,
+                cache_read_tokens, cache_write_tokens, task_run_id, title
              FROM sessions
              WHERE task_id = $1 AND status = 'paused' ORDER BY started_at DESC LIMIT 1"#,
             task_id
@@ -515,7 +534,8 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                status AS "status!", tokens_in, tokens_out, task_run_id, title
+                status AS "status!", tokens_in, tokens_out,
+                cache_read_tokens, cache_write_tokens, task_run_id, title
              FROM sessions
              WHERE task_id = $1 AND status = 'paused' AND agent_type = $2
              ORDER BY started_at DESC LIMIT 1"#,
@@ -577,7 +597,8 @@ impl SessionRepository {
         let session = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                status AS "status!", tokens_in, tokens_out, task_run_id, title
+                status AS "status!", tokens_in, tokens_out,
+                cache_read_tokens, cache_write_tokens, task_run_id, title
              FROM sessions WHERE id = $1 AND agent_type = 'chat'"#,
             session_id
         )
@@ -635,7 +656,8 @@ impl SessionRepository {
         Ok(sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-                status AS "status!", tokens_in, tokens_out, task_run_id, title
+                status AS "status!", tokens_in, tokens_out,
+                cache_read_tokens, cache_write_tokens, task_run_id, title
              FROM sessions WHERE id = $1 AND agent_type = 'chat'"#,
             session_id
         )
@@ -656,6 +678,7 @@ impl SessionRepository {
             r#"SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,
                     s.started_at, s.ended_at,
                     s.status AS "status!", s.tokens_in, s.tokens_out,
+                    s.cache_read_tokens, s.cache_write_tokens,
                     s.task_run_id, s.title
              FROM sessions s
              LEFT JOIN (
@@ -687,6 +710,7 @@ impl SessionRepository {
             r#"SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,
                     s.started_at, s.ended_at,
                     s.status AS "status!", s.tokens_in, s.tokens_out,
+                    s.cache_read_tokens, s.cache_write_tokens,
                     s.task_run_id, s.title
              FROM sessions s
              LEFT JOIN (
@@ -958,10 +982,12 @@ mod tests {
         captured.lock().unwrap().clear();
 
         let updated = repo
-            .update(&created.id, SessionStatus::Completed, 10, 20)
+            .update(&created.id, SessionStatus::Completed, 10, 20, 5, 3)
             .await
             .unwrap();
         assert_eq!(updated.status, "completed");
+        assert_eq!(updated.cache_read_tokens, 5);
+        assert_eq!(updated.cache_write_tokens, 3);
         assert_eq!(updated.tokens_in, 10);
         assert_eq!(updated.tokens_out, 20);
         assert!(updated.ended_at.is_some());
@@ -1206,7 +1232,7 @@ mod tests {
             })
             .await
             .unwrap();
-        repo.update(&finished_planner.id, SessionStatus::Completed, 0, 0)
+        repo.update(&finished_planner.id, SessionStatus::Completed, 0, 0, 0, 0)
             .await
             .unwrap();
 

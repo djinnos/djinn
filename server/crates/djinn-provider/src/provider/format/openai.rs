@@ -315,12 +315,16 @@ pub fn parse_openai_line(
             .as_ref()
             .map(|d| d.reasoning())
             .unwrap_or(0);
+        let input = usage.prompt_tokens.unwrap_or(0);
         events.push(StreamEvent::Usage(TokenUsage {
-            input: usage.prompt_tokens.unwrap_or(0),
+            input,
             output: usage.completion_tokens.unwrap_or(0),
             cache_read,
             cache_write: 0,
             reasoning_output,
+            // OpenAI `prompt_tokens` already includes cached tokens, so it is
+            // the full context (adding cache_read would double-count).
+            context_total: input,
         }));
     }
 
@@ -451,6 +455,8 @@ pub fn parse_openai_response(body: &str) -> Vec<StreamEvent> {
             cache_read,
             cache_write: 0,
             reasoning_output,
+            // `prompt_tokens` already includes cached tokens (see streaming path).
+            context_total: input,
         }));
     }
 

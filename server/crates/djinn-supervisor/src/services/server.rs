@@ -1165,9 +1165,18 @@ async fn dispatch(
             status,
             tokens_in,
             tokens_out,
+            cache_read,
+            cache_write,
         } => {
             let result = services
-                .update_session_status(session_id, status, tokens_in, tokens_out)
+                .update_session_status(
+                    session_id,
+                    status,
+                    tokens_in,
+                    tokens_out,
+                    cache_read,
+                    cache_write,
+                )
                 .await;
             ServiceRpcResponse::UpdateSessionStatus(result)
         }
@@ -1348,6 +1357,8 @@ mod tests {
             _status: djinn_core::models::SessionStatus,
             _tokens_in: i64,
             _tokens_out: i64,
+            _cache_read: i64,
+            _cache_write: i64,
         ) -> Result<(), String> {
             unimplemented!("not exercised in server tests")
         }

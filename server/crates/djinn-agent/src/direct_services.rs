@@ -309,13 +309,22 @@ impl SupervisorServices for DirectServices {
         status: djinn_core::models::SessionStatus,
         tokens_in: i64,
         tokens_out: i64,
+        cache_read: i64,
+        cache_write: i64,
     ) -> Result<(), String> {
         let ctx = &self.callbacks.agent_context;
         let repo = SessionRepository::new(ctx.db.clone(), ctx.event_bus.clone());
-        repo.update(&session_id, status, tokens_in, tokens_out)
-            .await
-            .map(|_record| ())
-            .map_err(|e| e.to_string())
+        repo.update(
+            &session_id,
+            status,
+            tokens_in,
+            tokens_out,
+            cache_read,
+            cache_write,
+        )
+        .await
+        .map(|_record| ())
+        .map_err(|e| e.to_string())
     }
 
     async fn tool_github_search(
