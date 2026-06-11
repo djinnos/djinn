@@ -118,6 +118,10 @@ pub struct EdgeEntry {
     pub to: String,
     pub edge_kind: String,
     pub edge_weight: f64,
+    pub confidence: f64,
+    pub confidence_tier: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// A single `(file, start_line, end_line)` hunk from a parsed diff. The
@@ -443,6 +447,7 @@ pub struct QuerySubgraphEdge {
     pub to_uid: String,
     pub kind: String,
     pub confidence: f64,
+    pub confidence_tier: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
