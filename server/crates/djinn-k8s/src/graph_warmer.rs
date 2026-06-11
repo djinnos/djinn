@@ -426,6 +426,15 @@ impl GraphWarmerService for K8sGraphWarmer {
         Ok(())
     }
 
+    async fn teardown_taskrun_job(&self, task_run_id: &str) -> Result<(), WarmerError> {
+        let client = self.client.as_ref().ok_or_else(|| {
+            WarmerError::Backend("task-run Job teardown requires a live kube client".to_string())
+        })?;
+        crate::runtime::delete_taskrun_job_foreground(client, &self.config.namespace, task_run_id)
+            .await
+            .map_err(|e| WarmerError::Backend(format!("delete task-run Job: {e}")))
+    }
+
     async fn trigger(&self, project_id: &str) {
         {
             let guard = self.in_flight.lock().await;

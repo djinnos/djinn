@@ -90,6 +90,17 @@ pub trait GraphWarmerService: Send + Sync {
     async fn release_backing_service(&self, _instance_id: &str) -> Result<(), WarmerError> {
         Ok(())
     }
+
+    /// Foreground-delete the canonical task-run Job (`djinn-taskrun-{task_run_id}`).
+    ///
+    /// Default impl errors — only a backend that owns a kube client (the
+    /// `K8sGraphWarmer`) can delete the Job. The MCP/runtime bridge maps this
+    /// to a string error; lifecycle callers treat it as best-effort.
+    async fn teardown_taskrun_job(&self, _task_run_id: &str) -> Result<(), WarmerError> {
+        Err(WarmerError::Backend(
+            "task-run Job teardown requires the kubernetes runtime".to_string(),
+        ))
+    }
 }
 
 /// A request to provision an on-demand backing service. Primitive fields only —

@@ -231,6 +231,13 @@ impl McpState {
         self.runtime.release_backing_service(instance_id).await
     }
 
+    /// Best-effort/idempotent foreground deletion of the canonical task-run Job
+    /// (`djinn-taskrun-{task_run_id}`), routed through the runtime bridge so
+    /// control-plane/agent callers never depend on djinn-k8s directly.
+    pub async fn teardown_taskrun_job(&self, task_run_id: &str) -> Result<(), String> {
+        self.runtime.teardown_taskrun_job(task_run_id).await
+    }
+
     /// Best-effort: delete a force-closed task's branch on the local mirror and
     /// the GitHub remote (closing any open PR). Used by the abort cascade.
     pub async fn cleanup_task_branches(&self, task_id: &str) {
@@ -325,6 +332,9 @@ pub mod stubs {
             Err("stub: provision_backing_service".into())
         }
         async fn release_backing_service(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn teardown_taskrun_job(&self, _: &str) -> Result<(), String> {
             Ok(())
         }
         async fn cleanup_task_branches(&self, _: &str) {}

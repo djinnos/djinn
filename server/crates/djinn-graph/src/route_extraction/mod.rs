@@ -68,14 +68,24 @@ fn detect_axum_routes(
         }
         for route in scan_axum_routes(&source) {
             let key = format!("{} {} (axum)", route.method, route.path);
-            let (route_node, added) = graph.ensure_route_node(&key);
-            if added {
+            let handler = resolve_symbol_in_file(graph, &rel_path, &route.handler);
+            let handler_symbol = handler.and_then(|idx| graph.node(idx).symbol.clone());
+            let before_nodes = graph.node_count();
+            let route_node = graph.ensure_route_node(
+                &key,
+                &key,
+                Some("rust"),
+                None,
+                Some("axum"),
+                handler_symbol.as_deref(),
+            );
+            if graph.node_count() > before_nodes {
                 report.route_nodes_added += 1;
             }
             routes_by_path
                 .entry(route.path.clone())
                 .or_insert(route_node);
-            if let Some(handler) = resolve_symbol_in_file(graph, &rel_path, &route.handler) {
+            if let Some(handler) = handler {
                 graph.add_route_edge(
                     route_node,
                     handler,

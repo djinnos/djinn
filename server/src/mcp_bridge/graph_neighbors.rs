@@ -28,9 +28,10 @@ pub(super) fn group_neighbors_by_file(
                 // file-grouped views can still render them without
                 // panicking.
                 RepoNodeKey::Process(_) => "<process>".to_string(),
-                // Synthetic table/route nodes — same bucketing strategy.
+                // Synthetic table/route/tool nodes — same bucketing strategy.
                 RepoNodeKey::Table(_) => "<table>".to_string(),
                 RepoNodeKey::Route(_) => "<route>".to_string(),
+                RepoNodeKey::Tool(_) => "<tool>".to_string(),
             });
         let entry = by_file.entry(file_label.clone()).or_insert(FileGroupEntry {
             file: file_label,
@@ -85,8 +86,8 @@ pub(crate) fn format_node_key(key: &RepoNodeKey) -> String {
         RepoNodeKey::Process(id) => format!("process:{id}"),
         // Synthetic database-table nodes get a `table:<name>` uid.
         RepoNodeKey::Table(name) => format!("table:{name}"),
-        // Synthetic HTTP route nodes get a `route:<method path>` uid.
-        RepoNodeKey::Route(route) => format!("route:{route}"),
+        RepoNodeKey::Route(id) => format!("route:{id}"),
+        RepoNodeKey::Tool(id) => format!("tool:{id}"),
     }
 }
 
@@ -131,8 +132,8 @@ fn kind_label(node: &RepoGraphNode) -> String {
         RepoGraphNodeKind::Process => "process".to_string(),
         // Synthetic database-table nodes carry kind `"table"`.
         RepoGraphNodeKind::Table => "table".to_string(),
-        // Synthetic HTTP route nodes carry kind `"route"`.
         RepoGraphNodeKind::Route => "route".to_string(),
+        RepoGraphNodeKind::Tool => "tool".to_string(),
         RepoGraphNodeKind::Symbol => match &node.symbol_kind {
             Some(ScipSymbolKind::Type) => "class".to_string(),
             Some(ScipSymbolKind::Struct) => "struct".to_string(),
@@ -192,8 +193,9 @@ fn file_path_substring_match(node: &RepoGraphNode, query: &str) -> f64 {
             // PR F2: process nodes carry no file affinity — refuse to
             // contribute to file-path scoring.
             RepoNodeKey::Process(_) => None,
-            // Synthetic table/route nodes likewise carry no file affinity.
-            RepoNodeKey::Table(_) | RepoNodeKey::Route(_) => None,
+            // Synthetic table nodes likewise carry no file affinity.
+            RepoNodeKey::Table(_) => None,
+            RepoNodeKey::Route(_) | RepoNodeKey::Tool(_) => None,
         });
     match candidate_path {
         Some(path) if path.to_lowercase().contains(&q) => 1.0,
@@ -235,8 +237,9 @@ fn build_candidate(node: &RepoGraphNode, score: f64) -> Candidate {
             RepoNodeKey::Symbol(_) => String::new(),
             // PR F2: synthetic process nodes have no file_path.
             RepoNodeKey::Process(_) => String::new(),
-            // Synthetic table/route nodes have no file_path either.
-            RepoNodeKey::Table(_) | RepoNodeKey::Route(_) => String::new(),
+            // Synthetic table nodes have no file_path either.
+            RepoNodeKey::Table(_) => String::new(),
+            RepoNodeKey::Route(_) | RepoNodeKey::Tool(_) => String::new(),
         });
     Candidate {
         uid,
@@ -467,8 +470,9 @@ pub(super) fn build_related_symbol(node: &RepoGraphNode, confidence: f64) -> Rel
             RepoNodeKey::Symbol(_) => None,
             // PR F2: synthetic process nodes have no file affinity.
             RepoNodeKey::Process(_) => None,
-            // Synthetic table/route nodes likewise carry no file affinity.
-            RepoNodeKey::Table(_) | RepoNodeKey::Route(_) => None,
+            // Synthetic table nodes likewise carry no file affinity.
+            RepoNodeKey::Table(_) => None,
+            RepoNodeKey::Route(_) | RepoNodeKey::Tool(_) => None,
         });
     RelatedSymbol {
         uid: format_node_key(&node.id),

@@ -407,7 +407,14 @@ pub fn stable_node_uid(node: &RepoGraphNode) -> String {
         RepoNodeKey::Symbol(symbol) => format!("symbol:{symbol}"),
         RepoNodeKey::Process(id) => format!("process:{id}"),
         RepoNodeKey::Table(name) => format!("table:{name}"),
-        RepoNodeKey::Route(route) => format!("route:{route}"),
+        // PR s6ch / cs4v: route / tool nodes are synthetic side-channel
+        // metadata, but the stable uid keeps `stable_node_uid`
+        // exhaustive across the new key variants. Prefix mirrors
+        // `process:` / `table:` so the resulting string stays
+        // parseable by downstream consumers that split on the first
+        // colon.
+        RepoNodeKey::Route(id) => format!("route:{id}"),
+        RepoNodeKey::Tool(id) => format!("tool:{id}"),
     }
 }
 
@@ -760,6 +767,10 @@ mod tests {
             is_test: false,
             complexity: None,
             workspace: Some("root".to_string()),
+            // PR s6ch / cs4v: route metadata is not applicable to
+            // these placeholder symbol nodes — defaults to `None`.
+            route_framework: None,
+            route_handler_symbol: None,
         }
     }
 
@@ -920,5 +931,265 @@ mod tests {
             .collect();
         assert!(names.contains("read_target"));
         assert!(!names.contains("write_target"));
+    }
+
+    // -------------------------------------------------------------------
+    // wave-1 cross-layer regression coverage. The end-to-end behaviour
+    // we want to lock down: a broad natural-language question must
+    // return a bounded, non-empty subgraph and surface
+    // narrowing_hints + budget/truncation metadata instead of
+    // silently dropping the request or relying on the downstream
+    // 8MiB tool-result truncation backstop.
+    // -------------------------------------------------------------------
+
+    /// A realistic broad question against a fan-shaped fixture must
+    /// return bounded nodes + edges, keep the source budget, and emit
+    /// `narrowing_hints` whenever a workspace/file/edge filter would
+    /// help. This is the core agent-safety contract: no silent empty
+    /// results, no opaque blasts.
+    #[test]
+    fn broad_question_returns_bounded_subgraph_with_narrowing_hints() {
+        let graph = fixture_graph();
+        // Wording that does not match any edge-intent keyword falls
+        // back to the safe broad default — exercise that path because
+        // it is the one that produces the most widening pressure.
+        let result = graph.query_subgraph(
+            params("show me everything related to the seed subsystem"),
+            Some(&seed_provider(0, SeedSource::Hybrid)),
+        );
+        assert!(
+            !result.nodes.is_empty(),
+            "broad question must not return a silently-empty subgraph"
+        );
+        assert!(
+            result.budget.estimated_tokens <= result.budget.requested_tokens,
+            "source budget must be honoured: estimated={} requested={}",
+            result.budget.estimated_tokens,
+            result.budget.requested_tokens
+        );
+        // No filters were supplied, so the planner must surface
+        // workspace/file/edge narrowing hints to the caller.
+        assert!(
+            result
+                .narrowing_hints
+                .iter()
+                .any(|h| h.contains("workspace") || h.contains("context_filter")),
+            "broad query without workspace must suggest a workspace/context hint: {:?}",
+            result.narrowing_hints
+        );
+        assert!(
+            result
+                .narrowing_hints
+                .iter()
+                .any(|h| h.contains("file_filter")),
+            "broad query without file_filter must suggest a file_filter hint: {:?}",
+            result.narrowing_hints
+        );
+    }
+
+    /// Hub avoidance must be recorded in `traversal.hubs_blocked` so
+    /// agents can see *why* the bounded result omits neighbours
+    /// beyond a high-degree node. The fixture is engineered so the
+    /// `hub` node sits at the hub-degree threshold; with
+    /// `min_hub_degree=3` the threshold is at least 3, and any
+    /// non-seed expansion through the hub must be blocked while the
+    /// hub itself remains a returned node when directly reachable
+    /// from the seed.
+    #[test]
+    fn hub_avoidance_records_blocked_hubs_in_traversal_debug() {
+        let graph = fixture_graph();
+        let mut p = params("who calls seed");
+        p.edge_filter = vec![RepoGraphEdgeKind::SymbolReference];
+        let result = graph.query_subgraph(p, Some(&seed_provider(0, SeedSource::Hybrid)));
+
+        assert!(
+            result
+                .traversal
+                .hubs_blocked
+                .iter()
+                .any(|uid| uid.contains("hub")),
+            "traversal debug must list the blocked hub UID: {:?}",
+            result.traversal.hubs_blocked
+        );
+        assert!(
+            result.traversal.hub_degree_threshold >= 3,
+            "traversal must surface the resolved hub-degree threshold, got {}",
+            result.traversal.hub_degree_threshold
+        );
+        assert!(
+            result
+                .traversal
+                .hubs_blocked
+                .iter()
+                .all(|uid| uid.starts_with("symbol:") || uid.starts_with("file:")),
+            "blocked-hub UIDs must use the canonical stable UID prefix"
+        );
+    }
+
+    /// Stable UIDs emitted by `query_subgraph` must be accepted
+    /// verbatim by the existing follow-up ops. We verify the
+    /// invariants the bridge / extension layer depend on:
+    /// `file:` prefix for file nodes, `symbol:` prefix for symbol
+    /// nodes, and every edge's from_uid / to_uid must point at one
+    /// of the emitted node UIDs (otherwise the graph would dangle
+    /// when an agent feeds the UID to `neighbors`).
+    #[test]
+    fn returned_uids_have_stable_prefixes_for_followup_ops() {
+        let graph = fixture_graph();
+        let result =
+            graph.query_subgraph(params("seed"), Some(&seed_provider(0, SeedSource::Hybrid)));
+        // Every emitted node UID must be one of the canonical
+        // follow-up-op key shapes — agents pass these to
+        // `describe`, `context`, and `neighbors` without translation.
+        for node in &result.nodes {
+            assert!(
+                node.uid.starts_with("symbol:") || node.uid.starts_with("file:"),
+                "uid must use the canonical follow-up-op prefix, got {}",
+                node.uid
+            );
+        }
+        // Every edge's from_uid / to_uid must match one of the
+        // emitted node UIDs (or the traversal would dangle).
+        let node_uids: BTreeSet<&str> = result.nodes.iter().map(|n| n.uid.as_str()).collect();
+        for edge in &result.edges {
+            assert!(
+                node_uids.contains(edge.from_uid.as_str()),
+                "edge from_uid {} not present in returned nodes",
+                edge.from_uid
+            );
+            assert!(
+                node_uids.contains(edge.to_uid.as_str()),
+                "edge to_uid {} not present in returned nodes",
+                edge.to_uid
+            );
+        }
+    }
+
+    /// Edge intent inference must cover the breadth of agent phrasing
+    /// the spec calls out. The natural-language surface area in the
+    /// spec is broad; this test locks each phrase down against a
+    /// specific edge kind so a wording regression (e.g. removing
+    /// "imports" from the keyword list) breaks loudly.
+    ///
+    /// We assert `contains` rather than exact equality because
+    /// legitimate phrasings can fan out to several kinds at once
+    /// (e.g. "calls" is associated with both `SymbolReference` and
+    /// the role-specific `Reads` / `Writes`). The wave-1 contract is
+    /// "the inferred kinds include the intent the wording asked for",
+    /// not "the inferred kinds are exclusively the intent the
+    /// wording asked for" — agents reading the list can pick the
+    /// kind they wanted.
+    #[test]
+    fn edge_intent_inference_covers_calls_reads_writes_implements_imports() {
+        let calls = infer_edge_intent("who calls the login function");
+        assert!(
+            calls.contains(&RepoGraphEdgeKind::SymbolReference),
+            "calls phrasing must include SymbolReference, got {calls:?}"
+        );
+        let reads = infer_edge_intent("who reads the users table");
+        assert_eq!(
+            reads,
+            vec![RepoGraphEdgeKind::Reads],
+            "reads phrasing must collapse to Reads"
+        );
+        let writes = infer_edge_intent("who writes the audit log");
+        assert_eq!(
+            writes,
+            vec![RepoGraphEdgeKind::Writes],
+            "writes phrasing must collapse to Writes"
+        );
+        let impls = infer_edge_intent("implementations of the Auth trait");
+        assert_eq!(
+            impls,
+            vec![RepoGraphEdgeKind::Implements],
+            "implementations-of phrasing must collapse to Implements"
+        );
+        let imports = infer_edge_intent("imports from internal/auth");
+        assert!(
+            imports.contains(&RepoGraphEdgeKind::FileReference),
+            "imports phrasing must include FileReference, got {imports:?}"
+        );
+    }
+
+    /// Seed debug metadata must surface the source label and a
+    /// human-readable reason. The wave-1 contract is "agents can
+    /// understand *why* initial nodes were selected" — that means
+    /// at least `uid`, `display_name`, `score`, `source`, and a
+    /// `debug` vector. We additionally require the `source` to
+    /// round-trip through every variant of [`SeedSource`] because
+    /// a future migration to a single `Hybrid` value would lose
+    /// this debug signal silently.
+    #[test]
+    fn seed_debug_metadata_round_trips_all_seed_sources() {
+        let graph = fixture_graph();
+        for source in [
+            SeedSource::Hybrid,
+            SeedSource::Lexical,
+            SeedSource::Semantic,
+            SeedSource::Structural,
+        ] {
+            let result = graph.query_subgraph(params("seed"), Some(&seed_provider(0, source)));
+            assert_eq!(result.seeds.len(), 1, "expected one seed for {source:?}");
+            let seed = &result.seeds[0];
+            assert_eq!(seed.source, source);
+            assert!(seed.uid.starts_with("symbol:") || seed.uid.starts_with("file:"));
+            assert!(!seed.display_name.is_empty());
+            assert!(!seed.debug.is_empty());
+        }
+    }
+
+    /// When the caller explicitly supplies an `edge_filter`, planner
+    /// inference must not silently widen the set. This is the
+    /// "use the planner as a fallback only" contract — a power
+    /// user passing `edge_filters: ["implements"]` expects every
+    /// returned edge to be `Implements`, regardless of question
+    /// wording.
+    #[test]
+    fn explicit_edge_filter_overrides_natural_language_inference() {
+        let graph = fixture_graph();
+        let mut p = params("who writes the seed table");
+        p.edge_filter = vec![RepoGraphEdgeKind::Implements];
+        let result = graph.query_subgraph(p, Some(&seed_provider(0, SeedSource::Hybrid)));
+        assert_eq!(
+            result.inferred_edge_kinds,
+            vec![RepoGraphEdgeKind::Implements],
+            "explicit edge_filter must be reflected verbatim in inferred_edge_kinds"
+        );
+        for edge in &result.edges {
+            assert_eq!(
+                edge.kind,
+                RepoGraphEdgeKind::Implements,
+                "explicit edge_filter must not let inference widen the traversal"
+            );
+        }
+    }
+
+    /// When the seed fetch returns no seeds at all (e.g. hybrid
+    /// search miss, no `code_chunks` index, or a question the
+    /// planner can't match), the bounded subgraph must come back
+    /// empty with `narrowing_hints` populated — *not* a panic, an
+    /// error string, or a downstream 8MiB truncation. This is the
+    /// anti-regression for the "silently return empty results"
+    /// failure mode the spec calls out.
+    #[test]
+    fn empty_seed_set_returns_empty_subgraph_with_narrowing_hints() {
+        let graph = fixture_graph();
+        let result =
+            graph.query_subgraph(params("nothing matches this"), Some(&FixedSeeds(vec![])));
+        assert!(
+            result.nodes.is_empty(),
+            "empty seeds must produce an empty node list"
+        );
+        assert!(result.edges.is_empty());
+        assert!(
+            !result.narrowing_hints.is_empty(),
+            "empty result must come with narrowing hints, got: {:?}",
+            result.narrowing_hints
+        );
+        assert_eq!(result.seeds.len(), 0);
+        // budget.truncated should be false in this case because the
+        // planner had nothing to spend on; that distinguishes
+        // "nothing matched" from "matched but couldn't fit".
+        assert!(!result.budget.truncated);
     }
 }
