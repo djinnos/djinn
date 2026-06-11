@@ -212,7 +212,11 @@ jobs:
 
       - name: Verify workspace-hack (hakari)
         run: |
-          cargo install cargo-hakari --locked 2>/dev/null || true
+          # rust-cache restores Cargo's install metadata separately from the
+          # actual binary. If that cache is inconsistent, `cargo install`
+          # without --force can decide cargo-hakari is already installed while
+          # leaving `cargo hakari` unavailable on PATH.
+          cargo install cargo-hakari --locked --force
           cargo hakari verify || {
             echo "::error::workspace-hack is out of date. Run 'cargo hakari generate && cargo hakari manage-deps' locally."
             exit 1

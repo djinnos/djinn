@@ -419,6 +419,7 @@ pub(super) fn classify_edge_category(
         }
         RepoGraphEdgeKind::Reads => EdgeCategory::Reads,
         RepoGraphEdgeKind::Writes => EdgeCategory::Writes,
+        RepoGraphEdgeKind::Route => EdgeCategory::References,
         RepoGraphEdgeKind::Extends => EdgeCategory::Extends,
         RepoGraphEdgeKind::Implements => EdgeCategory::Implements,
         RepoGraphEdgeKind::TypeDefines => EdgeCategory::TypeDefines,
