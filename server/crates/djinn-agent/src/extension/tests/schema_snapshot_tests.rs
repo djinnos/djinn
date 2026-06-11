@@ -242,6 +242,24 @@ fn code_graph_schema_embeds_workflow_guidance() {
             "code_graph guidance should mention {operation}"
         );
     }
+
+    let workspace_description = schema
+        .pointer("/inputSchema/properties/workspace/description")
+        .and_then(|value| value.as_str())
+        .expect("code_graph workspace property has a description");
+    for required in [
+        "operation=workspaces",
+        "Empty string is treated as omitted",
+        "hard-scope listing/bounded ops",
+        "seed/endpoint resolution",
+        "cross-workspace edges remain visible",
+        "workspace_hint",
+    ] {
+        assert!(
+            workspace_description.contains(required),
+            "workspace schema description should mention {required}: {workspace_description}"
+        );
+    }
 }
 
 #[test]
