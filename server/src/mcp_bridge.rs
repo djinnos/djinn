@@ -3976,6 +3976,7 @@ pub(crate) mod graph_bridge_tests {
     // The bridge crate's `ResolveOutcome` (String) is different — we
     // never use it directly in these tests.
     use crate::mcp_bridge::graph_neighbors::{ResolveOutcome, resolve_node, resolve_node_or_err};
+    use djinn_control_plane::bridge::ComplexityMetrics as WireComplexityMetrics;
     use djinn_graph::repo_graph::{RepoDependencyGraph, RepoNodeKey};
     use djinn_graph::scip_parser::{
         ParsedScipIndex, ScipFile, ScipMetadata, ScipOccurrence, ScipRange, ScipRelationship,
