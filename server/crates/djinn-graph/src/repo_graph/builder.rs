@@ -274,6 +274,11 @@ impl RepoDependencyGraphBuilder {
             is_test,
             complexity: None,
             workspace: self.current_workspace.clone(),
+            // PR s6ch / cs4v: route metadata is not applicable to file
+            // nodes — the field set is shared across kinds so the
+            // struct needs the slot but it stays `None`.
+            route_framework: None,
+            route_handler_symbol: None,
         };
         let node_index = self.graph.add_node(node);
         self.node_lookup.insert(key, node_index);
@@ -315,6 +320,11 @@ impl RepoDependencyGraphBuilder {
                 .unwrap_or(false),
             complexity: None,
             workspace: self.current_workspace.clone(),
+            // PR s6ch / cs4v: route metadata is not applicable to
+            // symbol nodes — the field set is shared across kinds so
+            // the struct needs the slot but it stays `None`.
+            route_framework: None,
+            route_handler_symbol: None,
         };
         let node_index = self.graph.add_node(node);
         self.node_lookup.insert(key, node_index);
@@ -399,6 +409,12 @@ impl RepoDependencyGraphBuilder {
             is_test,
             complexity: None,
             workspace: self.current_workspace.clone(),
+            // PR s6ch / cs4v: route metadata is not applicable to
+            // placeholder symbol nodes — the field set is shared
+            // across kinds so the struct needs the slot but it stays
+            // `None`.
+            route_framework: None,
+            route_handler_symbol: None,
         };
         let key = node.id.clone();
         let node_index = self.graph.add_node(node);
