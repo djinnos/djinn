@@ -1,7 +1,8 @@
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
-use crate::message::{CacheBreakpoint, ContentBlock, Conversation};
+use crate::message::ContentBlock;
+use crate::message::{CacheBreakpoint, Conversation};
 use crate::provider::client::ApiClient;
 use crate::provider::{ProviderConfig, ToolChoice};
 
@@ -579,4 +580,9 @@ impl AnthropicProvider {
     }
 }
 
+mod request {
+    pub(super) use super::AnthropicProvider;
+}
+
+#[path = "streaming.rs"]
 mod streaming;
