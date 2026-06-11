@@ -32,5 +32,7 @@ pub use self::graph_data::{
     WorkspacesResult,
 };
 pub use self::lsp_bridge::{LspOps, LspWarning};
-pub use self::runtime_bridge::{ProvisionServiceRequest, ProvisionedService, RuntimeOps};
+pub use self::runtime_bridge::{
+    ProvisionServiceRequest, ProvisionedService, RuntimeOps, TaskrunJobRef,
+};
 pub use self::slot_pool_bridge::{ModelPoolStatus, PoolStatus, RunningTaskInfo, SlotPoolOps};

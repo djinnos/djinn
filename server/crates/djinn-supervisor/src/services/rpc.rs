@@ -343,9 +343,17 @@ impl RpcServices {
             return Err("rpc writer task dropped".into());
         }
 
+        let mut rx = rx;
         tokio::select! {
             biased;
             _ = self.cancel.cancelled() => {
+                // The reply may already be sitting in the oneshot — the
+                // reader delivers it and can fire `cancel` on the very next
+                // iteration when the socket EOFs (transport-death wind-down).
+                // A delivered reply beats the cancellation.
+                if let Ok(reply) = rx.try_recv() {
+                    return Ok(reply);
+                }
                 // Best-effort: pop our oneshot so the reader-loop drain
                 // doesn't try to deliver a reply that's already abandoned.
                 self.pending.lock().await.remove(&correlation_id);
@@ -353,7 +361,7 @@ impl RpcServices {
                     "rpc roundtrip cancelled before reply (correlation_id={correlation_id})"
                 ))
             }
-            reply = rx => {
+            reply = &mut rx => {
                 reply.map_err(|_| {
                     // Reader task dropped the oneshot without replying —
                     // usually because the socket closed before the reply
@@ -802,7 +810,18 @@ where
                         }
                     },
                     Err(e) => {
-                        debug!(error = %e, "rpc reader: stream closed");
+                        // Transport death is a terminal event for the worker:
+                        // there is no reconnect (a restarted host has a new
+                        // address), so without RPC the run can neither receive
+                        // instructions nor deliver results. Fire the cancel
+                        // token so the worker winds down through the same
+                        // graceful path as SIGTERM instead of idling forever
+                        // as an orphan pod that holds node capacity. (Seen
+                        // 2026-06-11: a server deploy interrupted 3 runs but
+                        // their pods kept running for 50+ min, wedging
+                        // scheduling on the single-node VPS.)
+                        warn!(error = %e, "rpc reader: stream closed; cancelling worker");
+                        cancel.cancel();
                         break Ok(());
                     }
                 }
@@ -832,7 +851,7 @@ where
 async fn writer_loop<W>(
     mut write_half: W,
     mut rx: mpsc::Receiver<Frame>,
-    _cancel: CancellationToken,
+    cancel: CancellationToken,
 ) where
     W: AsyncWrite + Unpin + Send + 'static,
 {
@@ -853,9 +872,7 @@ async fn writer_loop<W>(
     // `cancel.cancel()` so the reader can exit too.  The cancel-driven
     // teardown reaches the writer transitively, by the same drop chain.
     //
-    // `cancel` stays in the signature for shape compatibility (every
-    // constructor already threads one in) and to preserve the option of
-    // a future grace-period shutdown timer.
+    // `cancel` is only ever FIRED here (on transport death), never awaited.
     loop {
         let Some(frame) = rx.recv().await else {
             debug!("rpc writer: outbound channel closed");
@@ -863,7 +880,11 @@ async fn writer_loop<W>(
             return;
         };
         if let Err(e) = write_frame(&mut write_half, &frame).await {
-            error!(error = %e, "rpc writer: failed to write frame");
+            // Same rationale as the reader's stream-closed branch: a failed
+            // write means the host is gone and there is no reconnect, so the
+            // worker must wind down rather than orphan itself.
+            error!(error = %e, "rpc writer: failed to write frame; cancelling worker");
+            cancel.cancel();
             return;
         }
     }

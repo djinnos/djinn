@@ -5,12 +5,13 @@ use serde::{Deserialize, Serialize};
 
 use super::constants::{
     EDGE_CONFIDENCE_CONTAINS_DEFINITION, EDGE_CONFIDENCE_DECLARED_IN_FILE, EDGE_CONFIDENCE_DEFINES,
-    EDGE_CONFIDENCE_ENTRY_POINT_OF, EDGE_CONFIDENCE_EXTENDS, EDGE_CONFIDENCE_FILE_REFERENCE,
-    EDGE_CONFIDENCE_IMPLEMENTS, EDGE_CONFIDENCE_MEMBER_OF, EDGE_CONFIDENCE_READS,
-    EDGE_CONFIDENCE_STEP_IN_PROCESS, EDGE_CONFIDENCE_SYMBOL_REFERENCE,
-    EDGE_CONFIDENCE_TYPE_DEFINES, EDGE_CONFIDENCE_WRITES, EDGE_WEIGHT_DEFINES,
-    EDGE_WEIGHT_DEFINITION_TO_FILE, EDGE_WEIGHT_ENTRY_POINT_OF, EDGE_WEIGHT_EXTENDS,
-    EDGE_WEIGHT_FILE_REFERENCE, EDGE_WEIGHT_FILE_TO_DEFINITION, EDGE_WEIGHT_IMPLEMENTS,
+    EDGE_CONFIDENCE_ENTRY_POINT_OF, EDGE_CONFIDENCE_EXTENDS, EDGE_CONFIDENCE_FETCHES,
+    EDGE_CONFIDENCE_FILE_REFERENCE, EDGE_CONFIDENCE_HANDLES_ROUTE, EDGE_CONFIDENCE_IMPLEMENTS,
+    EDGE_CONFIDENCE_MEMBER_OF, EDGE_CONFIDENCE_READS, EDGE_CONFIDENCE_STEP_IN_PROCESS,
+    EDGE_CONFIDENCE_SYMBOL_REFERENCE, EDGE_CONFIDENCE_TYPE_DEFINES, EDGE_CONFIDENCE_WRITES,
+    EDGE_WEIGHT_DEFINES, EDGE_WEIGHT_DEFINITION_TO_FILE, EDGE_WEIGHT_ENTRY_POINT_OF,
+    EDGE_WEIGHT_EXTENDS, EDGE_WEIGHT_FETCHES, EDGE_WEIGHT_FILE_REFERENCE,
+    EDGE_WEIGHT_FILE_TO_DEFINITION, EDGE_WEIGHT_HANDLES_ROUTE, EDGE_WEIGHT_IMPLEMENTS,
     EDGE_WEIGHT_MEMBER_OF, EDGE_WEIGHT_STEP_IN_PROCESS, EDGE_WEIGHT_SYMBOL_REFERENCE,
     EDGE_WEIGHT_TYPE_DEFINES,
 };
@@ -84,11 +85,15 @@ pub enum RepoGraphEdgeKind {
     /// process membership is computed from SCIP-derived edges, so it's
     /// as deterministic as the source graph.
     StepInProcess,
-    /// Synthetic edge linking an HTTP [`RepoGraphNodeKind::Route`] to the
-    /// server-side handler symbol that services it.
+    /// PR s6ch / ykcg: synthetic edge from a first-class HTTP `Route`
+    /// node to the `Symbol` node that handles it. Stamped by route
+    /// extractors with per-edge confidence and a detector reason such as
+    /// `"axum-route-attr"`.
     HandlesRoute,
-    /// Synthetic edge linking a client-side caller symbol to a known
-    /// server-side [`RepoGraphNodeKind::Route`].
+    /// PR s6ch / ykcg: synthetic edge from a client/caller `Symbol` to
+    /// the HTTP `Route` it fetches. Consumer-side route matching is
+    /// inferential, so its confidence floor is lower than
+    /// [`RepoGraphEdgeKind::HandlesRoute`].
     Fetches,
 }
 
@@ -136,8 +141,8 @@ pub fn edge_confidence_floor(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::EntryPointOf => EDGE_CONFIDENCE_ENTRY_POINT_OF,
         RepoGraphEdgeKind::MemberOf => EDGE_CONFIDENCE_MEMBER_OF,
         RepoGraphEdgeKind::StepInProcess => EDGE_CONFIDENCE_STEP_IN_PROCESS,
-        RepoGraphEdgeKind::HandlesRoute => 0.90,
-        RepoGraphEdgeKind::Fetches => 0.70,
+        RepoGraphEdgeKind::HandlesRoute => EDGE_CONFIDENCE_HANDLES_ROUTE,
+        RepoGraphEdgeKind::Fetches => EDGE_CONFIDENCE_FETCHES,
     }
 }
 
@@ -167,8 +172,41 @@ pub(crate) fn edge_weight(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::EntryPointOf => EDGE_WEIGHT_ENTRY_POINT_OF,
         RepoGraphEdgeKind::MemberOf => EDGE_WEIGHT_MEMBER_OF,
         RepoGraphEdgeKind::StepInProcess => EDGE_WEIGHT_STEP_IN_PROCESS,
-        RepoGraphEdgeKind::HandlesRoute | RepoGraphEdgeKind::Fetches => {
-            EDGE_WEIGHT_SYMBOL_REFERENCE
-        }
+        RepoGraphEdgeKind::HandlesRoute => EDGE_WEIGHT_HANDLES_ROUTE,
+        RepoGraphEdgeKind::Fetches => EDGE_WEIGHT_FETCHES,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn route_edge_kinds_have_snake_case_serde_names() {
+        assert_eq!(
+            serde_json::to_string(&RepoGraphEdgeKind::HandlesRoute).expect("serialize kind"),
+            "\"handles_route\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RepoGraphEdgeKind::Fetches).expect("serialize kind"),
+            "\"fetches\""
+        );
+    }
+
+    #[test]
+    fn route_edge_confidence_and_weight_rows_are_pinned() {
+        let handles_confidence = edge_confidence_floor(RepoGraphEdgeKind::HandlesRoute);
+        let fetches_confidence = edge_confidence_floor(RepoGraphEdgeKind::Fetches);
+
+        assert!(handles_confidence > fetches_confidence);
+        assert!((handles_confidence - EDGE_CONFIDENCE_HANDLES_ROUTE).abs() < f64::EPSILON);
+        assert!((fetches_confidence - EDGE_CONFIDENCE_FETCHES).abs() < f64::EPSILON);
+        assert!(
+            (edge_weight(RepoGraphEdgeKind::HandlesRoute) - EDGE_WEIGHT_HANDLES_ROUTE).abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (edge_weight(RepoGraphEdgeKind::Fetches) - EDGE_WEIGHT_FETCHES).abs() < f64::EPSILON
+        );
     }
 }
