@@ -2,12 +2,13 @@ use super::*;
 
 // ── Next-step hints ─────────────────────────────────────────────────────────────
 
-const FALLBACK_NEXT_STEP: &str = "Use `code_graph status` to inspect the current graph state.";
+pub(super) const FALLBACK_NEXT_STEP: &str =
+    "Use `code_graph status` to inspect the current graph state.";
 
 /// PR C3: emitted when an `impact` query lands on a HIGH or CRITICAL
 /// risk bucket. Steers the caller toward the cleanup ops they should
 /// run before the change ships.
-const HIGH_IMPACT_NEXT_STEP: &str =
+pub(super) const HIGH_IMPACT_NEXT_STEP: &str =
     "Consider running `dead_symbols` and `deprecated_callers` before the change.";
 
 /// Returns whether next-step hints should be appended. Toggled via the
