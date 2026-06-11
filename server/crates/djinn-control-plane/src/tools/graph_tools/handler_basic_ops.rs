@@ -311,21 +311,21 @@ impl DjinnMcpServer {
         ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
-        let limit = params.limit.unwrap_or(20).max(0) as usize;
-        let result = self
+        let limit = bounded_required_limit(params.limit, 50, "route_map")?;
+        let route_map = self
             .state
             .repo_graph()
             .route_map(
                 ctx,
                 params.route_id.as_deref(),
                 params.method.as_deref(),
-                params.path_glob.as_deref().or(params.path.as_deref()),
+                params.path_glob.as_deref(),
                 params.framework.as_deref(),
                 limit,
             )
             .await?;
         Ok(CodeGraphResponse::RouteMap(RouteMapResponse {
-            route_map: result,
+            route_map,
             next_step: None,
         }))
     }
@@ -335,20 +335,20 @@ impl DjinnMcpServer {
         ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
-        let (route_id, method, path) = require_route_selector(params)?;
-        let result = self
+        let selector = require_route_selector(params)?;
+        let shape_check = self
             .state
             .repo_graph()
             .shape_check(
                 ctx,
-                route_id,
-                method,
-                path,
+                selector.route_id,
+                selector.method,
+                selector.path,
                 params.include_optional.unwrap_or(false),
             )
             .await?;
         Ok(CodeGraphResponse::ShapeCheck(ShapeCheckResponse {
-            shape_check: result,
+            shape_check,
             next_step: None,
         }))
     }
@@ -358,21 +358,24 @@ impl DjinnMcpServer {
         ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
-        let (route_id, method, path) = require_route_selector(params)?;
+        let selector = require_route_selector(params)?;
         let min_confidence = params.min_confidence.unwrap_or(0.5);
-        if !(0.0..=1.0).contains(&min_confidence) {
-            return Err(format!(
-                "invalid min_confidence {min_confidence}: must be in [0.0, 1.0]"
-            ));
-        }
-        let limit = params.limit.unwrap_or(50).max(0) as usize;
-        let result = self
+        validate_min_confidence_value(min_confidence)?;
+        let limit = bounded_required_limit(params.limit, 50, "api_impact")?;
+        let api_impact = self
             .state
             .repo_graph()
-            .api_impact(ctx, route_id, method, path, min_confidence, limit)
+            .api_impact(
+                ctx,
+                selector.route_id,
+                selector.method,
+                selector.path,
+                min_confidence,
+                limit,
+            )
             .await?;
         Ok(CodeGraphResponse::ApiImpact(ApiImpactResponse {
-            api_impact: result,
+            api_impact,
             next_step: None,
         }))
     }
@@ -384,14 +387,14 @@ impl DjinnMcpServer {
     ) -> Result<CodeGraphResponse, String> {
         let query = require_query(params)?;
         validate_flow_kind_filter(params.kind_filter.as_deref())?;
-        let limit = params.limit.unwrap_or(20).max(0) as usize;
-        let result = self
+        let limit = bounded_required_limit(params.limit, 20, "flow")?;
+        let flow = self
             .state
             .repo_graph()
             .flow(ctx, query, params.kind_filter.as_deref(), limit)
             .await?;
         Ok(CodeGraphResponse::Flow(FlowResponse {
-            flow: result,
+            flow,
             next_step: None,
         }))
     }

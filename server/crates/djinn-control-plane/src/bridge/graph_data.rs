@@ -475,115 +475,6 @@ pub struct QuerySubgraphTraversalDebug {
     pub skipped_edge_kinds: Vec<String>,
 }
 
-/// Lightweight route identity used by the route-aware `code_graph` ops.
-///
-/// The route extractor/model work lands in follow-up tasks; these fields are
-/// intentionally optional except for the stable id so empty/default bridge
-/// implementations can safely return no route without inventing data.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct RouteRef {
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub method: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub framework: Option<String>,
-}
-
-/// Lightweight symbol identity for route handlers, middleware, consumers, and
-/// flow matched steps. This mirrors the common `{key, display_name, file}`
-/// shapes already emitted by other graph DTOs without coupling callers to the
-/// larger `SymbolNode` context payload.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct SymbolRef {
-    pub key: String,
-    pub display_name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file: Option<String>,
-}
-
-/// One route plus the code symbols connected to it. Empty lists are the
-/// success shape when the current graph has no middleware/consumer data yet.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct RouteMapEntry {
-    pub route: RouteRef,
-    pub handler: SymbolRef,
-    pub middleware: Vec<SymbolRef>,
-    pub consumers: Vec<SymbolRef>,
-}
-
-/// Recovery summary returned by `route_map` when no matching route entries are
-/// available. Follow-up implementation tasks will fill these counts from route
-/// nodes; the stub returns zeros/empty maps.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-pub struct RouteSummary {
-    pub total_routes: usize,
-    pub framework_counts: BTreeMap<String, usize>,
-    pub handler_counts: BTreeMap<String, usize>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-pub struct RouteMapResult {
-    pub entries: Vec<RouteMapEntry>,
-    pub summary: RouteSummary,
-}
-
-/// Server response-shape summary for one route. `route` is `None` when the
-/// bridge has no route/process model data yet but the op is otherwise valid.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct RouteShape {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub route: Option<RouteRef>,
-    pub response_keys: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ShapeTypeMismatch {
-    pub key: String,
-    pub server_type: String,
-    pub consumer_type: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ShapeDrift {
-    pub consumer: SymbolRef,
-    pub missing_keys: Vec<String>,
-    pub extra_keys: Vec<String>,
-    pub type_mismatches: Vec<ShapeTypeMismatch>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ShapeCheckResult {
-    pub route_shape: RouteShape,
-    pub drifts: Vec<ShapeDrift>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ApiImpactEntry {
-    pub consumer: SymbolRef,
-    pub risk_tier: String,
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-pub struct ApiImpactResult {
-    pub entries: Vec<ApiImpactEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct FlowHit {
-    pub process: ProcessRef,
-    pub matched_step: SymbolRef,
-    pub matched_step_index: i32,
-    pub rrf_score: f64,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-pub struct FlowResult {
-    pub hits: Vec<FlowHit>,
-}
-
 /// Per-function complexity metrics surfaced on `describe` and
 /// `context` responses (iter 27). Wire-shape mirror of
 /// `djinn_graph::complexity::ComplexityMetrics`. Computed from the
@@ -1041,6 +932,115 @@ pub struct ProcessRef {
     pub id: String,
     pub label: String,
     pub role: String,
+}
+
+/// Lightweight symbol identity for route handlers, middleware, consumers, and
+/// flow matched steps. This mirrors the common `{key, display_name, file}`
+/// shapes already emitted by other graph DTOs without coupling callers to the
+/// larger `SymbolNode` context payload.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SymbolRef {
+    pub key: String,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+}
+
+/// Lightweight route identity used by the route-aware `code_graph` ops.
+///
+/// The route extractor/model work lands in follow-up tasks; these fields are
+/// intentionally optional except for the stable id so empty/default bridge
+/// implementations can safely return no route without inventing data.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RouteRef {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framework: Option<String>,
+}
+
+/// Recovery summary returned by `route_map` when no matching route entries are
+/// available. Follow-up implementation tasks will fill these counts from route
+/// nodes; the stub returns zeros/empty maps.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct RouteSummary {
+    pub total_routes: usize,
+    pub framework_counts: BTreeMap<String, usize>,
+    pub handler_counts: BTreeMap<String, usize>,
+}
+
+/// One route plus the code symbols connected to it. Empty lists are the
+/// success shape when the current graph has no middleware/consumer data yet.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RouteMapEntry {
+    pub route: RouteRef,
+    pub handler: SymbolRef,
+    pub middleware: Vec<SymbolRef>,
+    pub consumers: Vec<SymbolRef>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct RouteMapResult {
+    pub entries: Vec<RouteMapEntry>,
+    pub summary: RouteSummary,
+}
+
+/// Server response-shape summary for one route. `route` is `None` when the
+/// bridge has no route/process model data yet but the op is otherwise valid.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct RouteShape {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<RouteRef>,
+    pub response_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ShapeTypeMismatch {
+    pub key: String,
+    pub server_type: String,
+    pub consumer_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ShapeDrift {
+    pub consumer: SymbolRef,
+    pub missing_keys: Vec<String>,
+    pub extra_keys: Vec<String>,
+    pub type_mismatches: Vec<ShapeTypeMismatch>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ShapeCheckResult {
+    pub route_shape: RouteShape,
+    pub drifts: Vec<ShapeDrift>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ApiImpactEntry {
+    pub consumer: SymbolRef,
+    pub risk_tier: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ApiImpactResult {
+    pub entries: Vec<ApiImpactEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FlowHit {
+    pub process: ProcessRef,
+    pub matched_step: SymbolRef,
+    pub matched_step_index: i32,
+    pub rrf_score: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct FlowResult {
+    pub hits: Vec<FlowHit>,
 }
 
 /// PR C1: the queried symbol's identity + content + structural metadata

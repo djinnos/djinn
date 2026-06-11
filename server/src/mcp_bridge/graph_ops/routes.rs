@@ -1,8 +1,4 @@
-use djinn_control_plane::bridge::{
-    ApiImpactResult, ProjectCtx, RouteMapResult, RouteShape, ShapeCheckResult,
-};
-
-use super::RepoGraphBridge;
+use super::*;
 
 impl RepoGraphBridge {
     pub(super) async fn route_map(
@@ -31,13 +27,7 @@ impl RepoGraphBridge {
         // TODO(ykcg-shape-check): resolve the route/handler, extract response
         // keys, and compare consumer accesses. Empty graphs should continue to
         // return this default rather than a hard route-not-found error.
-        Ok(ShapeCheckResult {
-            route_shape: RouteShape {
-                route: None,
-                response_keys: Vec::new(),
-            },
-            drifts: Vec::new(),
-        })
+        Ok(ShapeCheckResult::default())
     }
 
     pub(super) async fn api_impact(

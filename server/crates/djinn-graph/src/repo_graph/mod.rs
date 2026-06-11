@@ -68,6 +68,7 @@ pub(crate) use self::constants::{
     PAGE_RANK_DAMPING_FACTOR, PAGE_RANK_ITERATIONS,
 };
 pub(crate) use self::edge::{edge_weight, edge_weight_for};
+pub(crate) use self::graph::is_default_hidden_synthetic_kind;
 #[allow(unused_imports)]
 pub(crate) use self::ranking::{
     apply_rrf_fused_rank, compute_entry_point_distance, compute_pagerank_sparse,

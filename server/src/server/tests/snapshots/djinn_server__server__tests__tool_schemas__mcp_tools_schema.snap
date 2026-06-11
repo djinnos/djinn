@@ -905,7 +905,7 @@ expression: signatures
         },
         "include_optional": {
           "default": null,
-          "description": "Include optional response keys while computing `shape_check` drift.\nDefault false.",
+          "description": "Include optional response fields when computing `shape_check` drift.\nDefaults to `false`.",
           "nullable": true,
           "type": "boolean"
         },
@@ -917,7 +917,7 @@ expression: signatures
         },
         "kind_filter": {
           "default": null,
-          "description": "Kind filter, op-specific:\n- `ranked` / `search` / `cycles` / `orphans`: node kind — `file` or\n  `symbol`.\n- `query_subgraph`: node-kind narrowing for seeds/traversal — `file`\n  or `symbol`.\n- `neighbors`: edge kind — `reads` or `writes` (PR A3). Restricts\n  the response to neighbors connected by `Reads` / `Writes` edges\n  only, so callers can ask for \"who writes to field X\" without\n  post-filtering.",
+          "description": "Kind filter, op-specific:\n- `ranked` / `search` / `cycles` / `orphans`: node kind — `file` or\n  `symbol`.\n- `query_subgraph`: node-kind narrowing for seeds/traversal — `file`\n  or `symbol`.\n- `neighbors`: edge kind — `reads` or `writes` (PR A3). Restricts\n  the response to neighbors connected by `Reads` / `Writes` edges\n  only, so callers can ask for \"who writes to field X\" without\n  post-filtering.\n- `flow`: flow-hit tier — `process` or `step`.",
           "nullable": true,
           "type": "string"
         },
@@ -935,7 +935,7 @@ expression: signatures
         },
         "limit": {
           "default": null,
-          "description": "Maximum results for `ranked`/`search`/`orphans`/`edges`/`neighbors`\n(default 20) or max traversal depth for `impact` (default 3).",
+          "description": "Maximum results for list operations. Defaults are op-specific:\n`ranked`/`search`/`neighbors`/`flow` default 20, `route_map`/\n`api_impact` default 50, `edges` default 100. For `impact`, this is\nmax traversal depth (default 3). Negative values are treated as zero by\nlegacy ops; new route/API/flow ops reject negative limits.",
           "format": "int64",
           "nullable": true,
           "type": "integer"
@@ -999,7 +999,7 @@ expression: signatures
         },
         "path": {
           "default": null,
-          "description": "Exact route path for `shape_check` / `api_impact` when `route_id` is\nnot supplied.",
+          "description": "Exact route path selector for `shape_check`/`api_impact` when\n`route_id` is omitted.",
           "nullable": true,
           "type": "string"
         },
@@ -1015,7 +1015,7 @@ expression: signatures
         },
         "query": {
           "default": null,
-          "description": "Query text, op-specific:\n- `search`: substring/name lookup text.\n- `query_subgraph`: required nonblank natural-language question used\n  to pick relevant seeds and infer useful traversal edge kinds.\n- `flow`: required nonblank natural-language question used to find\n  matching execution-flow/process steps.",
+          "description": "Query text, op-specific:\n- `search`: substring/name lookup text.\n- `query_subgraph`: required nonblank natural-language question used\n  to pick relevant seeds and infer useful traversal edge kinds.\n- `flow`: required nonblank natural-language query re-ranked over\n  process/step matches.",
           "nullable": true,
           "type": "string"
         },

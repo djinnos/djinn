@@ -457,6 +457,7 @@ mod tests {
             last_graph_refresh: StdInstant::now(),
             graph_warmer: None,
             mirror: None,
+            runtime_ops: None,
             rpc_registry: None,
             prune_tick_counter: 0,
             throughput_events: std::collections::HashMap::new(),

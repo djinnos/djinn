@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Mutex;
 
 use serde_json::json;
 use tokio::process::Command;
@@ -16,6 +17,94 @@ use djinn_db::NoteRepository;
 use djinn_db::TaskRepository;
 use djinn_db::{CreateSessionParams, SessionRepository};
 use djinn_provider::catalog::health::HealthTracker;
+
+#[derive(Clone)]
+struct RecordingRuntimeOps {
+    calls: Arc<Mutex<Vec<String>>>,
+    fail_teardown: bool,
+}
+
+impl RecordingRuntimeOps {
+    fn new(fail_teardown: bool) -> Self {
+        Self {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            fail_teardown,
+        }
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().expect("runtime calls mutex").clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl djinn_control_plane::bridge::RuntimeOps for RecordingRuntimeOps {
+    async fn apply_settings(&self, _: &djinn_core::models::DjinnSettings) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn embed_memory_query(
+        &self,
+        _: &str,
+    ) -> Result<Option<djinn_control_plane::bridge::SemanticQueryEmbedding>, String> {
+        Ok(None)
+    }
+
+    async fn reset_runtime_settings(&self) {}
+    async fn persist_model_health_state(&self) {}
+
+    async fn apply_environment_config(
+        &self,
+        _: &str,
+        _: &djinn_stack::environment::EnvironmentConfig,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn trigger_mirror_refresh(&self, _: &str) {}
+    async fn apply_user_model_change(&self) {}
+
+    async fn dispatch_verification_test(&self, _: &str, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn enqueue_image_build(&self, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn trigger_graph_warm(&self, _: &str) {}
+
+    async fn provision_backing_service(
+        &self,
+        _: djinn_control_plane::bridge::ProvisionServiceRequest,
+    ) -> Result<djinn_control_plane::bridge::ProvisionedService, String> {
+        Err("not used".to_string())
+    }
+
+    async fn release_backing_service(&self, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn teardown_taskrun_job(&self, task_run_id: &str) -> Result<(), String> {
+        self.calls
+            .lock()
+            .expect("runtime calls mutex")
+            .push(task_run_id.to_string());
+        if self.fail_teardown {
+            Err("synthetic teardown failure".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn list_taskrun_jobs(
+        &self,
+    ) -> Result<Vec<djinn_control_plane::bridge::TaskrunJobRef>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn cleanup_task_branches(&self, _: &str) {}
+}
 
 fn spawn_coordinator(
     db: &Database,
@@ -329,6 +418,7 @@ fn coordinator_actor_for_tests(
         last_graph_refresh: StdInstant::now(),
         graph_warmer: None,
         mirror: None,
+        runtime_ops: None,
         rpc_registry: None,
         prune_tick_counter: 0,
         throughput_events: HashMap::new(),

@@ -13,6 +13,7 @@ use super::messages::CoordinatorMessage;
 use super::types::*;
 use crate::actors::slot::SlotPoolHandle;
 use crate::roles::RoleRegistry;
+use djinn_control_plane::bridge::RuntimeOps;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::parse_json_array;
 use djinn_db::Database;
@@ -101,6 +102,9 @@ pub(super) struct CoordinatorActor {
     /// an `AgentContext` whose direct-push fallback can clone ephemeral
     /// workspaces. `None` in tests.
     pub(super) mirror: Option<Arc<djinn_workspace::MirrorManager>>,
+    /// Runtime bridge for coordinator-owned DB-truth finalization paths that
+    /// must delete a task-run Job even when no slot-pool mapping remains.
+    pub(super) runtime_ops: Option<Arc<dyn RuntimeOps>>,
     /// Host worker RPC connection registry — ground-truth liveness for the
     /// zombie reaper. `None` in tests (reaper falls back to DB/activity heuristics).
     pub(super) rpc_registry: Option<Arc<djinn_supervisor::ConnectionRegistry>>,
@@ -193,6 +197,7 @@ impl CoordinatorActor {
             graph_warmer,
             consolidation_runner,
             mirror,
+            runtime_ops,
             rpc_registry,
         } = deps;
         let events = events_tx.subscribe();
@@ -229,6 +234,7 @@ impl CoordinatorActor {
             last_graph_refresh: StdInstant::now(),
             graph_warmer,
             mirror,
+            runtime_ops,
             rpc_registry,
             prune_tick_counter: 0,
             throughput_events: HashMap::new(),
@@ -347,6 +353,7 @@ impl CoordinatorActor {
                             working_root: None,
                             graph_warmer: None,
                             repo_graph_ops: None,
+                            runtime_ops: None,
                             mirror: self.mirror.clone(),
                             rpc_registry: None,
                             default_project_id: None,

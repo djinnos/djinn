@@ -978,6 +978,7 @@ impl AppState {
             repo_graph_ops: Some(Arc::new(crate::mcp_bridge::RepoGraphBridge::new(
                 self.clone(),
             ))),
+            runtime_ops: Some(Arc::new(self.clone())),
             mirror: Some(self.inner.mirror.clone()),
             rpc_registry: Some(self.inner.rpc_registry.clone()),
             // Host-side AgentContext serves multiple projects (chat surface
@@ -1049,6 +1050,7 @@ impl AppState {
             )
             .with_graph_warmer(self.graph_warmer().await)
             .with_mirror(self.inner.mirror.clone())
+            .with_runtime_ops(Arc::new(self.clone()))
             .with_rpc_registry(self.inner.rpc_registry.clone()),
         );
 

@@ -202,13 +202,7 @@ pub trait RepoGraphOps: Send + Sync {
         _path: Option<&str>,
         _include_optional: bool,
     ) -> Result<ShapeCheckResult, String> {
-        Ok(ShapeCheckResult {
-            route_shape: RouteShape {
-                route: None,
-                response_keys: Vec::new(),
-            },
-            drifts: Vec::new(),
-        })
+        Ok(ShapeCheckResult::default())
     }
 
     /// Route API-impact surface stub. Follow-up work will combine impact and

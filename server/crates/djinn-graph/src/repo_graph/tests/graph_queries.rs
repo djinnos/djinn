@@ -165,6 +165,102 @@ fn search_by_name_respects_kind_filter() {
     }
 }
 
+#[test]
+fn search_by_name_none_zero_route_tool_nodes_keeps_fixture_order() {
+    let graph = RepoDependencyGraph::build(&[fixture_index()]);
+    assert!(graph.graph().node_weights().all(|node| {
+        node.kind != RepoGraphNodeKind::Route && node.kind != RepoGraphNodeKind::Tool
+    }));
+
+    let hits = graph.search_by_name("helper", None, 10);
+    let keys: Vec<_> = hits
+        .iter()
+        .map(|hit| graph.node(hit.node_index).key())
+        .collect();
+
+    assert_eq!(
+        keys,
+        vec![
+            RepoNodeKey::Symbol("scip-rust pkg src/helper.rs `helper`().".to_string()),
+            RepoNodeKey::File(PathBuf::from("src/helper.rs")),
+            RepoNodeKey::Symbol("scip-rust pkg src/types.rs `HelperTrait`#".to_string()),
+        ],
+        "adding Route/Tool model variants must not perturb the zero-new-kind fixture search contract"
+    );
+}
+
+#[test]
+fn default_search_and_query_subgraph_skip_route_tool_but_explicit_route_filter_finds_route() {
+    let mut graph = RepoDependencyGraph::build(&[fixture_index()]);
+    let handler_symbol = "scip-rust pkg src/helper.rs `helper`().";
+    let caller_symbol = "scip-rust pkg src/app.rs `main`().";
+    let handler = graph.symbol_node(handler_symbol).expect("handler symbol");
+    let caller = graph.symbol_node(caller_symbol).expect("caller symbol");
+    let route = graph.ensure_route_node(
+        "GET /api/helper (axum)",
+        "helper",
+        Some("rust"),
+        Some("root"),
+        Some("axum"),
+        Some(handler_symbol),
+    );
+    let tool = graph.ensure_tool_node("helper.run", "helper", Some("rust"), Some("root"));
+    graph.add_handles_route_edge(route, handler, "axum-route-attr", Some(0.95));
+    graph.add_fetches_edge(caller, route, "ts-fetch-literal", Some(0.75));
+
+    let default_hits = graph.search_by_name("helper", None, 10);
+    assert!(default_hits.iter().all(|hit| {
+        let kind = graph.node(hit.node_index).kind;
+        kind != RepoGraphNodeKind::Route && kind != RepoGraphNodeKind::Tool
+    }));
+
+    let route_hits = graph.search_by_name("helper", Some(RepoGraphNodeKind::Route), 10);
+    assert_eq!(route_hits.len(), 1);
+    assert_eq!(route_hits[0].node_index, route);
+
+    let default_subgraph = graph.query_subgraph(
+        crate::query_subgraph::QuerySubgraphParams {
+            query: "helper".to_string(),
+            workspace: None,
+            context_filter: None,
+            file_filter: None,
+            kind_filter: None,
+            edge_filter: Vec::new(),
+            token_budget: None,
+            max_depth: Some(2),
+            max_seeds: Some(4),
+            min_hub_degree: Some(100),
+        },
+        None,
+    );
+    assert!(default_subgraph.nodes.iter().all(|node| {
+        node.kind != RepoGraphNodeKind::Route && node.kind != RepoGraphNodeKind::Tool
+    }));
+
+    let route_subgraph = graph.query_subgraph(
+        crate::query_subgraph::QuerySubgraphParams {
+            query: "helper".to_string(),
+            workspace: None,
+            context_filter: None,
+            file_filter: None,
+            kind_filter: Some(RepoGraphNodeKind::Route),
+            edge_filter: vec![RepoGraphEdgeKind::HandlesRoute],
+            token_budget: None,
+            max_depth: Some(1),
+            max_seeds: Some(4),
+            min_hub_degree: Some(100),
+        },
+        None,
+    );
+    assert!(
+        route_subgraph
+            .nodes
+            .iter()
+            .any(|node| node.uid == "route:GET /api/helper (axum)")
+    );
+    assert_eq!(graph.node(tool).kind, RepoGraphNodeKind::Tool);
+}
+
 // F6: query-planner search path. The OFF path must be identical to the
 // baseline `search_by_name`; the ON path unions across sub-queries.
 #[test]

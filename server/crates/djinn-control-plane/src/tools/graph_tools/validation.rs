@@ -15,37 +15,6 @@ pub(crate) fn validate_direction(direction: Option<&str>) -> Result<(), String> 
     }
 }
 
-pub(crate) fn validate_flow_kind_filter(kind_filter: Option<&str>) -> Result<(), String> {
-    if let Some(k) = kind_filter {
-        match k {
-            "process" | "step" => Ok(()),
-            _ => Err(format!(
-                "invalid kind_filter '{k}' for flow: expected 'process' or 'step'"
-            )),
-        }
-    } else {
-        Ok(())
-    }
-}
-
-pub(crate) type RouteSelector<'a> = (Option<&'a str>, Option<&'a str>, Option<&'a str>);
-
-pub(crate) fn require_route_selector(
-    params: &CodeGraphParams,
-) -> Result<RouteSelector<'_>, String> {
-    let route_id = params.route_id.as_deref().filter(|s| !s.is_empty());
-    let method = params.method.as_deref().filter(|s| !s.is_empty());
-    let path = params.path.as_deref().filter(|s| !s.is_empty());
-    if route_id.is_some() || (method.is_some() && path.is_some()) {
-        Ok((route_id, method, path))
-    } else {
-        Err(format!(
-            "'route_id' or both 'method' and 'path' are required for operation '{}'",
-            params.operation
-        ))
-    }
-}
-
 pub(crate) fn validate_kind_filter(kind_filter: Option<&str>) -> Result<(), String> {
     if let Some(k) = kind_filter {
         match k {
@@ -103,6 +72,73 @@ pub(crate) fn validate_edge_kind_filter(kind_filter: Option<&str>) -> Result<(),
     } else {
         Ok(())
     }
+}
+
+pub(crate) fn validate_flow_kind_filter(kind_filter: Option<&str>) -> Result<(), String> {
+    if let Some(k) = kind_filter {
+        match k {
+            "process" | "step" => Ok(()),
+            _ => Err(format!(
+                "invalid kind_filter '{k}' for flow: expected 'process' or 'step'"
+            )),
+        }
+    } else {
+        Ok(())
+    }
+}
+
+/// Selectors that identify a single route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RouteSelector<'a> {
+    pub(crate) route_id: Option<&'a str>,
+    pub(crate) method: Option<&'a str>,
+    pub(crate) path: Option<&'a str>,
+}
+
+pub(crate) fn require_route_selector(
+    params: &CodeGraphParams,
+) -> Result<RouteSelector<'_>, String> {
+    let route_id = params.route_id.as_deref().filter(|s| !s.is_empty());
+    let method = params.method.as_deref().filter(|s| !s.is_empty());
+    let path = params.path.as_deref().filter(|s| !s.is_empty());
+    if route_id.is_some() || (method.is_some() && path.is_some()) {
+        Ok(RouteSelector {
+            route_id,
+            method,
+            path,
+        })
+    } else {
+        Err(format!(
+            "'route_id' or both 'method' and 'path' are required for operation '{}'",
+            params.operation
+        ))
+    }
+}
+
+pub(crate) fn validate_min_confidence_value(value: f64) -> Result<(), String> {
+    if (0.0..=1.0).contains(&value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid min_confidence {value}: must be in [0.0, 1.0]"
+        ))
+    }
+}
+
+pub(crate) fn bounded_required_limit(
+    value: Option<i64>,
+    default: usize,
+    op: &str,
+) -> Result<usize, String> {
+    let Some(raw) = value else {
+        return Ok(default);
+    };
+    if raw < 0 {
+        return Err(format!(
+            "invalid limit {raw} for operation '{op}': expected a non-negative integer"
+        ));
+    }
+    Ok(raw as usize)
 }
 
 pub(crate) fn require_key(params: &CodeGraphParams) -> Result<&str, String> {
