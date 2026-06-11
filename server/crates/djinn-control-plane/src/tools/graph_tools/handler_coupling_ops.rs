@@ -1,0 +1,235 @@
+use super::*;
+
+impl DjinnMcpServer {
+    /// Handler for `operation = "coupling"`.
+    pub(super) async fn code_graph_coupling(
+        &self,
+        ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let file = params
+            .file
+            .as_deref()
+            .filter(|f| !f.is_empty())
+            .ok_or_else(|| format!("'file' is required for operation '{}'", params.operation))?;
+        let limit = params.limit.unwrap_or(20).max(0) as usize;
+        let limit = limit.clamp(1, 200);
+        // Over-fetch 25× so the exclusion filter doesn't starve the
+        // returned set. Underlying SQL sort is invariant to LIMIT, so
+        // this is effectively free.
+        let fetch_limit = (limit.saturating_mul(25)).clamp(limit, 500);
+        let coupled = self
+            .state
+            .repo_graph()
+            .coupling(ctx, file, fetch_limit)
+            .await?;
+        let exclusions = self.load_graph_exclusions(&params.project_id).await;
+        let coupled: Vec<CouplingEntry> = coupled
+            .into_iter()
+            .filter(|c| !exclusions.excludes_path(&c.file_path))
+            .take(limit)
+            .collect();
+        Ok(CodeGraphResponse::Coupling(CouplingResponse {
+            file: file.to_string(),
+            coupled,
+            next_step: None,
+        }))
+    }
+
+    /// Handler for `operation = "coupling_hotspots"`.
+    pub(super) async fn code_graph_coupling_hotspots(
+        &self,
+        ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let limit = params.limit.unwrap_or(20).max(0) as usize;
+        let limit = limit.clamp(1, 200);
+        let max_files_per_commit =
+            params.max_files_per_commit.unwrap_or(15).clamp(1, 1000) as usize;
+        let fetch_limit = (limit.saturating_mul(25)).clamp(limit, 500);
+        let since_days_u32 = params
+            .since_days
+            .map(|d| u32::try_from(d.max(0)).unwrap_or(0));
+        let pairs = self
+            .state
+            .repo_graph()
+            .coupling_hotspots(ctx, fetch_limit, since_days_u32, max_files_per_commit)
+            .await?;
+        let exclusions = self.load_graph_exclusions(&params.project_id).await;
+        let pairs: Vec<CoupledPairEntry> = pairs
+            .into_iter()
+            .filter(|p| {
+                !exclusions.excludes_path(&p.file_a) && !exclusions.excludes_path(&p.file_b)
+            })
+            .take(limit)
+            .collect();
+        Ok(CodeGraphResponse::CouplingHotspots(
+            CouplingHotspotsResponse {
+                pairs,
+                next_step: None,
+            },
+        ))
+    }
+
+    /// Handler for `operation = "coupling_hubs"`.
+    pub(super) async fn code_graph_coupling_hubs(
+        &self,
+        ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let limit = params.limit.unwrap_or(20).max(0) as usize;
+        let limit = limit.clamp(1, 200);
+        let max_files_per_commit =
+            params.max_files_per_commit.unwrap_or(15).clamp(1, 1000) as usize;
+        let fetch_limit = (limit.saturating_mul(25)).clamp(limit, 500);
+        let since_days_u32 = params
+            .since_days
+            .map(|d| u32::try_from(d.max(0)).unwrap_or(0));
+        let hubs = self
+            .state
+            .repo_graph()
+            .coupling_hubs(ctx, fetch_limit, since_days_u32, max_files_per_commit)
+            .await?;
+        let exclusions = self.load_graph_exclusions(&params.project_id).await;
+        let hubs: Vec<CouplingHubEntry> = hubs
+            .into_iter()
+            .filter(|h| !exclusions.excludes_path(&h.file_path))
+            .take(limit)
+            .collect();
+        Ok(CodeGraphResponse::CouplingHubs(CouplingHubsResponse {
+            hubs,
+            next_step: None,
+        }))
+    }
+
+    /// Handler for `operation = "churn"`.
+    pub(super) async fn code_graph_churn(
+        &self,
+        ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let limit = params.limit.unwrap_or(20).max(0) as usize;
+        let limit = limit.clamp(1, 200);
+        let since_days_u32 = params
+            .since_days
+            .map(|d| u32::try_from(d.max(0)).unwrap_or(0));
+        let files = self
+            .state
+            .repo_graph()
+            .churn(ctx, limit, since_days_u32)
+            .await?;
+        Ok(CodeGraphResponse::Churn(ChurnResponse {
+            files,
+            next_step: None,
+        }))
+    }
+
+    /// Handler for `operation = "touches_hot_path"`.
+    pub(super) async fn code_graph_touches_hot_path(
+        &self,
+        ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        let seed_entries = params.seed_entries.as_deref().ok_or_else(|| {
+            format!(
+                "'seed_entries' is required for operation '{}'",
+                params.operation
+            )
+        })?;
+        let seed_sinks = params.seed_sinks.as_deref().ok_or_else(|| {
+            format!(
+                "'seed_sinks' is required for operation '{}'",
+                params.operation
+            )
+        })?;
+        let symbols = params
+            .symbols
+            .as_deref()
+            .ok_or_else(|| format!("'symbols' is required for operation '{}'", params.operation))?;
+        // pb94: `touches_hot_path` is a TRAVERSAL op — `workspace`
+        // scopes only seed/entry/sink resolution, the shortest-path
+        // walk itself must remain unconstrained.
+        let scope = resolve_workspace_scope(self.state.repo_graph(), ctx).await?;
+        let hits = self
+            .state
+            .repo_graph()
+            .touches_hot_path(
+                ctx,
+                scope.workspace.as_deref(),
+                seed_entries,
+                seed_sinks,
+                symbols,
+            )
+            .await?;
+        Ok(CodeGraphResponse::TouchesHotPath(TouchesHotPathResponse {
+            hits,
+            workspace_hint: scope.hint,
+            next_step: None,
+        }))
+    }
+
+    /// Handler for `operation = "snapshot"` (PR D2).
+    ///
+    /// Returns the full repo graph capped by PageRank tier so the
+    /// `/code-graph` UI can render it through Sigma + ForceAtlas2
+    /// without hitting the ~5k-node WebGL ceiling on large
+    /// repositories. The cap defaults to 2000 (matches the plan's
+    /// `Sigma.js performance ceiling at ~5k nodes` mitigation) and is
+    /// settable via the `limit` field.
+    ///
+    /// `graph_excluded_paths` filtering happens in the bridge so
+    /// `total_nodes` / `total_edges` reflect the post-exclusion graph
+    /// — the cap is then applied to the surviving population.
+    pub(super) async fn code_graph_snapshot(
+        &self,
+        ctx: &ProjectCtx,
+        params: &CodeGraphParams,
+    ) -> Result<CodeGraphResponse, String> {
+        // Default 2000 nodes — plan §"Risks & mitigations" calls out
+        // this as the Sigma WebGL ceiling. Clamp to [1, 10_000] to keep
+        // the wire payload bounded; callers that want a wider view can
+        // request up to 10k explicitly.
+        let node_cap = params
+            .limit
+            .map(|l| l.max(1) as usize)
+            .unwrap_or(2_000)
+            .clamp(1, 10_000);
+        let level = SnapshotLevel::parse(params.level.as_deref())?;
+        let exclusions = self.load_graph_exclusions(&params.project_id).await;
+        // pb94: route workspace resolution through the shared helper so
+        // valid / unknown / single-workspace / empty semantics stay in
+        // one place.
+        let scope = resolve_workspace_scope(self.state.repo_graph(), ctx).await?;
+        let mut snapshot = self
+            .state
+            .repo_graph()
+            .snapshot(
+                ctx,
+                scope.workspace.as_deref(),
+                level,
+                node_cap,
+                &exclusions,
+            )
+            .await?;
+        // v10: apply the `tests=` filter to the assembled snapshot. The
+        // UI defaults to `include` (it toggles test visibility
+        // client-side off `SnapshotNode.is_test`); agents can pass
+        // `exclude` / `only` to get a server-side-narrowed graph. Drop
+        // edges whose endpoints no longer survive so the wire shape
+        // stays internally consistent.
+        let filter = TestFilter::parse(params.tests.as_deref(), TestFilter::Include);
+        if filter != TestFilter::Include {
+            snapshot.nodes.retain(|n| filter.keeps(n.is_test));
+            let kept: std::collections::HashSet<&str> =
+                snapshot.nodes.iter().map(|n| n.id.as_str()).collect();
+            snapshot
+                .edges
+                .retain(|e| kept.contains(e.from.as_str()) && kept.contains(e.to.as_str()));
+        }
+        Ok(CodeGraphResponse::Snapshot(SnapshotResponse {
+            snapshot,
+            workspace_hint: scope.hint,
+            next_step: None,
+        }))
+    }
+}
