@@ -110,6 +110,9 @@ pub struct ProjectGraphExclusionsGetParams {
     pub project: String,
 }
 
+/// Partial-update payload. Either field may be `None` — the repository
+/// leaves the corresponding column untouched when the caller only wants
+/// to rewrite one of the two lists.
 #[derive(Deserialize, JsonSchema)]
 pub struct ProjectGraphExclusionsSetParams {
     pub project: String,
