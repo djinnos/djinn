@@ -71,6 +71,9 @@ mod tests {
         async fn release_backing_service(&self, _: &str) -> Result<(), String> {
             Ok(())
         }
+        async fn teardown_taskrun_job(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
         async fn cleanup_task_branches(&self, _: &str) {}
     }
 
@@ -115,6 +118,9 @@ mod tests {
             Err("stub".into())
         }
         async fn release_backing_service(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn teardown_taskrun_job(&self, _: &str) -> Result<(), String> {
             Ok(())
         }
         async fn cleanup_task_branches(&self, _: &str) {}
