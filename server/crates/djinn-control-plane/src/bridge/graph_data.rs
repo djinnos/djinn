@@ -934,6 +934,120 @@ pub struct ProcessRef {
     pub role: String,
 }
 
+/// Stable symbol/file reference used by route/API/flow graph ops.
+///
+/// Mirrors the identity fields exposed by `context`/`search` without requiring
+/// callers to deserialize a full `SymbolNode` when an operation only needs to
+/// point at a handler, middleware, consumer, or matched process step.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SymbolRef {
+    pub uid: String,
+    pub name: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+}
+
+/// HTTP route identity surfaced by route-aware graph ops.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct RouteRef {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub framework: Option<String>,
+}
+
+/// Summary envelope shared by route/API ops. Empty placeholder implementations
+/// return zero counts and `matched = false` rather than an error for graphs that
+/// have not yet been enriched with route/process nodes.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct RouteSummary {
+    pub matched: bool,
+    pub matched_count: usize,
+    pub total_routes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct RouteMapEntry {
+    pub route: RouteRef,
+    pub handler: SymbolRef,
+    pub middleware: Vec<SymbolRef>,
+    pub consumers: Vec<SymbolRef>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct RouteMapResult {
+    pub routes: Vec<RouteMapEntry>,
+    pub summary: RouteSummary,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ShapeField {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_name: Option<String>,
+    #[serde(default)]
+    pub optional: bool,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct RouteShape {
+    pub route: RouteRef,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handler: Option<SymbolRef>,
+    pub fields: Vec<ShapeField>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ShapeDrift {
+    pub field: String,
+    pub drift_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual: Option<String>,
+    pub confidence: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct ShapeCheckResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_shape: Option<RouteShape>,
+    pub drifts: Vec<ShapeDrift>,
+    pub summary: RouteSummary,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ApiImpactEntry {
+    pub consumer: SymbolRef,
+    pub risk_tier: String,
+    pub reason: String,
+    pub confidence: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct ApiImpactResult {
+    pub impacts: Vec<ApiImpactEntry>,
+    pub summary: RouteSummary,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FlowHit {
+    pub process: ProcessRef,
+    pub matched_step: SymbolRef,
+    pub matched_step_index: i32,
+    pub rrf_score: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct FlowResult {
+    pub hits: Vec<FlowHit>,
+}
+
 /// PR C1: the queried symbol's identity + content + structural metadata
 /// returned in [`SymbolContext::symbol`].
 #[derive(Debug, Clone, Serialize, JsonSchema)]

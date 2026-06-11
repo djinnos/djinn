@@ -15,19 +15,20 @@ pub use self::coordinator_bridge::{CoordinatorOps, CoordinatorStatus};
 pub use self::git_bridge::GitOps;
 pub use self::graph_bridge::RepoGraphOps;
 pub use self::graph_data::{
-    ApiSurfaceEntry, BoundaryRule, BoundaryViolation, CallerRef, Candidate, ChangeKind,
-    ChangedRange, ChurnEntry, ComplexityMetrics, ComplexityResult, CoupledPairEntry, CouplingEntry,
-    CouplingHubEntry, CycleGroup, CycleMember, DeadSymbolEntry, DeprecatedHit,
-    DetectedChangesResult, DetectedTouchedSymbol, DiffTouchesResult, EdgeCategory, EdgeEntry,
-    FileComplexityEntry, FileGroupEntry, FunctionComplexityEntry, GraphNeighbor, GraphStatus,
-    GraphWorkspaceEntry, HotPathHit, HotspotEntry, ImpactEntry, ImpactResult, MethodMeta,
-    MethodParam, MetricsAtResult, NeighborsResult, OrphanEntry, PagerankTier, PathHop, PathResult,
-    ProcessRef, ProjectCtx, QuerySubgraphBudget, QuerySubgraphEdge, QuerySubgraphNode,
-    QuerySubgraphRequest, QuerySubgraphResult, QuerySubgraphSeedDebug, QuerySubgraphTraversalDebug,
-    RankedNode, RefactorCandidate, RelatedSymbol, ResolveOutcome, SearchHit,
-    SemanticQueryEmbedding, SnapshotEdge, SnapshotLevel, SnapshotNode, SnapshotPayload,
-    SymbolAtHit, SymbolContext, SymbolDescription, SymbolNode, TouchedSymbol, WorkspaceScope,
-    WorkspacesResult,
+    ApiImpactEntry, ApiImpactResult, ApiSurfaceEntry, BoundaryRule, BoundaryViolation, CallerRef,
+    Candidate, ChangeKind, ChangedRange, ChurnEntry, ComplexityMetrics, ComplexityResult,
+    CoupledPairEntry, CouplingEntry, CouplingHubEntry, CycleGroup, CycleMember, DeadSymbolEntry,
+    DeprecatedHit, DetectedChangesResult, DetectedTouchedSymbol, DiffTouchesResult, EdgeCategory,
+    EdgeEntry, FileComplexityEntry, FileGroupEntry, FlowHit, FlowResult, FunctionComplexityEntry,
+    GraphNeighbor, GraphStatus, GraphWorkspaceEntry, HotPathHit, HotspotEntry, ImpactEntry,
+    ImpactResult, MethodMeta, MethodParam, MetricsAtResult, NeighborsResult, OrphanEntry,
+    PagerankTier, PathHop, PathResult, ProcessRef, ProjectCtx, QuerySubgraphBudget,
+    QuerySubgraphEdge, QuerySubgraphNode, QuerySubgraphRequest, QuerySubgraphResult,
+    QuerySubgraphSeedDebug, QuerySubgraphTraversalDebug, RankedNode, RefactorCandidate,
+    RelatedSymbol, ResolveOutcome, RouteMapEntry, RouteMapResult, RouteRef, RouteShape,
+    RouteSummary, SearchHit, SemanticQueryEmbedding, ShapeCheckResult, ShapeDrift, ShapeField,
+    SnapshotEdge, SnapshotLevel, SnapshotNode, SnapshotPayload, SymbolAtHit, SymbolContext,
+    SymbolDescription, SymbolNode, SymbolRef, TouchedSymbol, WorkspaceScope, WorkspacesResult,
 };
 pub use self::lsp_bridge::{LspOps, LspWarning};
 pub use self::runtime_bridge::{ProvisionServiceRequest, ProvisionedService, RuntimeOps};

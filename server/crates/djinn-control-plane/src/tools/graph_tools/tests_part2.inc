@@ -767,6 +767,12 @@
             confidence: None,
             window_days: None,
             file_glob: None,
+            route_id: None,
+            method: None,
+            path: None,
+            path_glob: None,
+            framework: None,
+            include_optional: None,
             rules: None,
             seed_entries: None,
             seed_sinks: None,
@@ -810,6 +816,35 @@
     fn require_query_rejects_missing() {
         let params = test_params("search");
         assert!(require_query(&params).is_err());
+    }
+
+    #[test]
+    fn route_selector_requires_route_id_or_method_path() {
+        let mut params = test_params("shape_check");
+        assert!(require_route_selector(&params).is_err());
+
+        params.route_id = Some("route-1".to_string());
+        let (route_id, method, path) = require_route_selector(&params).unwrap();
+        assert_eq!(route_id, Some("route-1"));
+        assert_eq!(method, None);
+        assert_eq!(path, None);
+
+        let mut params = test_params("api_impact");
+        params.method = Some("GET".to_string());
+        assert!(require_route_selector(&params).is_err());
+        params.path = Some("/users/:id".to_string());
+        let (route_id, method, path) = require_route_selector(&params).unwrap();
+        assert_eq!(route_id, None);
+        assert_eq!(method, Some("GET"));
+        assert_eq!(path, Some("/users/:id"));
+    }
+
+    #[test]
+    fn validates_flow_kind_filter() {
+        assert!(validate_flow_kind_filter(None).is_ok());
+        assert!(validate_flow_kind_filter(Some("process")).is_ok());
+        assert!(validate_flow_kind_filter(Some("step")).is_ok());
+        assert!(validate_flow_kind_filter(Some("symbol")).is_err());
     }
 
     #[test]
@@ -899,6 +934,45 @@
         assert_eq!(params.operation, "impact");
         assert_eq!(params.key.as_deref(), Some("scip-rust . . . MyStruct#"));
         assert_eq!(params.limit, Some(5));
+    }
+
+    #[test]
+    fn parses_route_api_and_flow_params_from_json() {
+        let route_map: CodeGraphParams = serde_json::from_value(serde_json::json!({
+            "operation": "route_map",
+            "project": "/workspace/repo",
+            "method": "GET",
+            "path_glob": "/api/**",
+            "framework": "axum",
+            "limit": 25
+        }))
+        .unwrap();
+        assert_eq!(route_map.method.as_deref(), Some("GET"));
+        assert_eq!(route_map.path_glob.as_deref(), Some("/api/**"));
+        assert_eq!(route_map.framework.as_deref(), Some("axum"));
+        assert_eq!(route_map.limit, Some(25));
+
+        let shape_check: CodeGraphParams = serde_json::from_value(serde_json::json!({
+            "operation": "shape_check",
+            "project": "/workspace/repo",
+            "route_id": "route-1",
+            "include_optional": true
+        }))
+        .unwrap();
+        assert_eq!(shape_check.route_id.as_deref(), Some("route-1"));
+        assert_eq!(shape_check.include_optional, Some(true));
+
+        let flow: CodeGraphParams = serde_json::from_value(serde_json::json!({
+            "operation": "flow",
+            "project": "/workspace/repo",
+            "query": "checkout payment",
+            "kind_filter": "step",
+            "limit": 10
+        }))
+        .unwrap();
+        assert_eq!(flow.query.as_deref(), Some("checkout payment"));
+        assert_eq!(flow.kind_filter.as_deref(), Some("step"));
+        assert_eq!(flow.limit, Some(10));
     }
 
     #[test]
