@@ -545,8 +545,6 @@ pub fn infer_edge_intent(query: &str) -> Vec<RepoGraphEdgeKind> {
             RepoGraphEdgeKind::Extends,
             RepoGraphEdgeKind::TypeDefines,
             RepoGraphEdgeKind::Defines,
-            RepoGraphEdgeKind::Route,
-            RepoGraphEdgeKind::Fetches,
         ];
     }
     kinds
