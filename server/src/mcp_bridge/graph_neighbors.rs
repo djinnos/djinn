@@ -419,7 +419,7 @@ pub(super) fn classify_edge_category(
         }
         RepoGraphEdgeKind::Reads => EdgeCategory::Reads,
         RepoGraphEdgeKind::Writes => EdgeCategory::Writes,
-        RepoGraphEdgeKind::Route | RepoGraphEdgeKind::Fetches => EdgeCategory::References,
+        RepoGraphEdgeKind::Route => EdgeCategory::References,
         RepoGraphEdgeKind::Extends => EdgeCategory::Extends,
         RepoGraphEdgeKind::Implements => EdgeCategory::Implements,
         RepoGraphEdgeKind::TypeDefines => EdgeCategory::TypeDefines,
@@ -440,6 +440,7 @@ pub(super) fn classify_edge_category(
         // node; expose under its own category so UI groupers can
         // separate process membership from real calls / references.
         RepoGraphEdgeKind::StepInProcess => EdgeCategory::Process,
+        RepoGraphEdgeKind::HandlesRoute | RepoGraphEdgeKind::Fetches => EdgeCategory::References,
     }
 }
 

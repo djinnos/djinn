@@ -277,11 +277,12 @@ pub(super) fn impact_bfs(
         | RepoGraphEdgeKind::SymbolReference
         | RepoGraphEdgeKind::FileReference
         | RepoGraphEdgeKind::Route
-        | RepoGraphEdgeKind::Fetches
         | RepoGraphEdgeKind::Implements
         | RepoGraphEdgeKind::Extends
         | RepoGraphEdgeKind::TypeDefines
-        | RepoGraphEdgeKind::Defines => true,
+        | RepoGraphEdgeKind::Defines
+        | RepoGraphEdgeKind::HandlesRoute
+        | RepoGraphEdgeKind::Fetches => true,
         RepoGraphEdgeKind::ContainsDefinition
         | RepoGraphEdgeKind::DeclaredInFile
         | RepoGraphEdgeKind::MemberOf

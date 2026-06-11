@@ -85,35 +85,34 @@ pub enum RepoGraphEdgeKind {
     /// process membership is computed from SCIP-derived edges, so it's
     /// as deterministic as the source graph.
     StepInProcess,
-    /// Inferred server-side route relationship (for example a handler or file
-    /// participating in a framework route). Ordinary string-shape matches are
-    /// suggestions and classify as [`EdgeConfidenceTier::Inferred`].
-    Route,
+    /// Synthetic edge linking an HTTP [`RepoGraphNodeKind::Route`] to the
+    /// server-side handler symbol that services it. This is extractor-derived
+    /// route evidence and classifies as extracted when stamped at 0.9+.
+    HandlesRoute,
     /// Inferred client/server fetch relationship. Plain URL-literal matches are
     /// suggestions; matches stamped with explicit import evidence are promoted
     /// by [`promote_fetches_confidence_with_import_evidence`] and classify as
     /// [`EdgeConfidenceTier::Extracted`].
     Fetches,
+    /// Inferred route relationship used by string/shape-based route matchers.
+    /// Ordinary route string-shape matches classify as [`EdgeConfidenceTier::Inferred`].
+    /// Appended after the v11 route-extraction variants to preserve existing
+    /// bincode discriminants for `HandlesRoute` and `Fetches`.
+    Route,
 }
 
 /// Model-level confidence tier for graph edges.
 ///
 /// This is deliberately computed from persisted `kind` / `confidence` /
 /// `reason` rather than stored on [`RepoGraphEdge`] or
-/// [`crate::repo_graph::RepoGraphArtifactEdge`], so existing v10 bincode
-/// artifacts remain readable.
+/// [`crate::repo_graph::RepoGraphArtifactEdge`], so existing bincode artifacts
+/// remain readable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeConfidenceTier {
     Extracted,
     Inferred,
     Ambiguous,
-}
-
-impl RepoGraphEdge {
-    pub fn confidence_tier(&self) -> EdgeConfidenceTier {
-        edge_confidence_tier(self.kind, self.confidence, self.reason.as_deref())
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -139,6 +138,12 @@ pub struct RepoGraphEdge {
     pub step: Option<i32>,
 }
 
+impl RepoGraphEdge {
+    pub fn confidence_tier(&self) -> EdgeConfidenceTier {
+        edge_confidence_tier(self.kind, self.confidence, self.reason.as_deref())
+    }
+}
+
 /// Initial confidence floor for an edge of the given kind.
 ///
 /// See the constants block at the top of this module for the table; the
@@ -153,8 +158,6 @@ pub fn edge_confidence_floor(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::SymbolReference => EDGE_CONFIDENCE_SYMBOL_REFERENCE,
         RepoGraphEdgeKind::Reads => EDGE_CONFIDENCE_READS,
         RepoGraphEdgeKind::Writes => EDGE_CONFIDENCE_WRITES,
-        RepoGraphEdgeKind::Route => EDGE_CONFIDENCE_ROUTE,
-        RepoGraphEdgeKind::Fetches => EDGE_CONFIDENCE_FETCHES,
         RepoGraphEdgeKind::Extends => EDGE_CONFIDENCE_EXTENDS,
         RepoGraphEdgeKind::Implements => EDGE_CONFIDENCE_IMPLEMENTS,
         RepoGraphEdgeKind::TypeDefines => EDGE_CONFIDENCE_TYPE_DEFINES,
@@ -162,6 +165,9 @@ pub fn edge_confidence_floor(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::EntryPointOf => EDGE_CONFIDENCE_ENTRY_POINT_OF,
         RepoGraphEdgeKind::MemberOf => EDGE_CONFIDENCE_MEMBER_OF,
         RepoGraphEdgeKind::StepInProcess => EDGE_CONFIDENCE_STEP_IN_PROCESS,
+        RepoGraphEdgeKind::HandlesRoute => 0.90,
+        RepoGraphEdgeKind::Fetches => EDGE_CONFIDENCE_FETCHES,
+        RepoGraphEdgeKind::Route => EDGE_CONFIDENCE_ROUTE,
     }
 }
 
@@ -194,6 +200,7 @@ pub fn edge_confidence_tier(
         | RepoGraphEdgeKind::EntryPointOf
         | RepoGraphEdgeKind::MemberOf
         | RepoGraphEdgeKind::StepInProcess
+        | RepoGraphEdgeKind::HandlesRoute
             if confidence >= 0.9 =>
         {
             EdgeConfidenceTier::Extracted
@@ -248,8 +255,6 @@ pub(crate) fn edge_weight(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::SymbolReference
         | RepoGraphEdgeKind::Reads
         | RepoGraphEdgeKind::Writes => EDGE_WEIGHT_SYMBOL_REFERENCE,
-        RepoGraphEdgeKind::Route => EDGE_WEIGHT_ROUTE,
-        RepoGraphEdgeKind::Fetches => EDGE_WEIGHT_FETCHES,
         RepoGraphEdgeKind::Extends => EDGE_WEIGHT_EXTENDS,
         RepoGraphEdgeKind::Implements => EDGE_WEIGHT_IMPLEMENTS,
         RepoGraphEdgeKind::TypeDefines => EDGE_WEIGHT_TYPE_DEFINES,
@@ -257,6 +262,8 @@ pub(crate) fn edge_weight(kind: RepoGraphEdgeKind) -> f64 {
         RepoGraphEdgeKind::EntryPointOf => EDGE_WEIGHT_ENTRY_POINT_OF,
         RepoGraphEdgeKind::MemberOf => EDGE_WEIGHT_MEMBER_OF,
         RepoGraphEdgeKind::StepInProcess => EDGE_WEIGHT_STEP_IN_PROCESS,
+        RepoGraphEdgeKind::HandlesRoute | RepoGraphEdgeKind::Route => EDGE_WEIGHT_ROUTE,
+        RepoGraphEdgeKind::Fetches => EDGE_WEIGHT_FETCHES,
     }
 }
 
@@ -268,6 +275,14 @@ mod tests {
     fn confidence_tier_classifies_extracted_inferred_and_ambiguous_edges() {
         assert_eq!(
             edge_confidence_tier(RepoGraphEdgeKind::ContainsDefinition, 0.95, None),
+            EdgeConfidenceTier::Extracted
+        );
+        assert_eq!(
+            edge_confidence_tier(
+                RepoGraphEdgeKind::HandlesRoute,
+                0.90,
+                Some("axum-router-new")
+            ),
             EdgeConfidenceTier::Extracted
         );
         assert_eq!(
