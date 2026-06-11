@@ -115,17 +115,35 @@ fn has_axum_router_reference(graph: &RepoDependencyGraph, file_idx: NodeIndex) -
                 return false;
             }
             let target = graph.node(edge.target());
-            let haystacks = [
-                target.symbol.as_deref().unwrap_or_default(),
-                target.display_name.as_str(),
-            ];
-            haystacks.iter().any(|value| {
-                value.contains("axum::Router")
-                    || value.contains("axum::routing")
-                    || value.ends_with("/axum/Router#")
-                    || value.ends_with("/axum/routing/")
-            })
+            let symbol = target.symbol.as_deref().unwrap_or_default();
+            let display_name = target.display_name.as_str();
+
+            // rust-analyzer SCIP symbols are not Rust paths; they usually look
+            // like package-qualified ids containing ` axum ` or `/axum/`, with
+            // the final item (`Router`, `get`, `post`, ...) carried separately
+            // as display_name. Keep accepting literal Rust paths for compact
+            // test fixtures and hand-built graphs.
+            is_axum_router_symbol(symbol, display_name)
+                || is_axum_routing_symbol(symbol, display_name)
         })
+}
+
+fn is_axum_router_symbol(symbol: &str, display_name: &str) -> bool {
+    (symbol.contains("axum::Router")
+        || symbol.ends_with("/axum/Router#")
+        || symbol.contains(" axum ")
+        || symbol.contains("/axum/")
+        || symbol.contains("`axum`"))
+        && display_name == "Router"
+}
+
+fn is_axum_routing_symbol(symbol: &str, display_name: &str) -> bool {
+    (symbol.contains("axum::routing")
+        || symbol.ends_with("/axum/routing/")
+        || symbol.contains(" axum ")
+        || symbol.contains("/axum/")
+        || symbol.contains("`axum`"))
+        && METHODS.contains(&display_name)
 }
 
 fn resolve_handler_symbol(
