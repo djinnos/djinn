@@ -259,6 +259,8 @@ pub struct GraphStatus {
     pub last_warm_at: Option<String>,
     pub pinned_commit: Option<String>,
     pub commits_since_pin: Option<u64>,
+    pub route_parity_enabled: bool,
+    pub route_exclusion_config: serde_json::Value,
 }
 
 /// One workspace visible to the repository graph, enriched with the latest

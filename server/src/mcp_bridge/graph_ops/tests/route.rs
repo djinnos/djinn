@@ -98,6 +98,7 @@ fn route_fixture_graph() -> RepoDependencyGraph {
         symbol_ranges: std::collections::BTreeMap::new(),
         communities: vec![],
         processes: vec![],
+        route_exclusion_config: Default::default(),
     };
     RepoDependencyGraph::from_artifact(&artifact)
 }
