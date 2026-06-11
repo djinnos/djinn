@@ -222,6 +222,7 @@ fn code_graph_schema_embeds_workflow_guidance() {
     assert!(description.contains("AFTER THIS"));
     for operation in [
         "capabilities",
+        "query_subgraph",
         "search",
         "describe",
         "neighbors",

@@ -264,6 +264,62 @@ async fn code_graph_dispatch_search_requires_query() {
 }
 
 #[tokio::test]
+async fn code_graph_dispatch_query_subgraph_reaches_graph_ops_with_filters() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-query-subgraph-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let result = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "query_subgraph",
+            "project_path": worktree.path().to_string_lossy(),
+            "workspace": "default",
+            "query": "How does auth routing reach middleware?",
+            "context_filter": " auth ",
+            "file_filter": "src/auth",
+            "kind_filter": "symbol",
+            "edge_filters": [" Calls ", "IMPORTS"],
+            "token_budget": 2048,
+            "max_depth": 2,
+            "max_seeds": 4,
+        }),
+        worktree.path(),
+    )
+    .await
+    .expect("query_subgraph should dispatch through graph ops");
+    assert_eq!(
+        result["query_subgraph"]["query"],
+        "How does auth routing reach middleware?"
+    );
+    assert!(
+        result["query_subgraph"]["budget"].is_object(),
+        "query_subgraph response should expose budget/truncation state: {result}"
+    );
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_query_subgraph_requires_nonblank_query() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-query-subgraph-no-query-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let err = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "query_subgraph",
+            "project_path": worktree.path().to_string_lossy(),
+            "query": "   ",
+        }),
+        worktree.path(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.contains("'query' is required for operation 'query_subgraph'"),
+        "query_subgraph without nonblank query should fail, got: {err}"
+    );
+}
+
+#[tokio::test]
 async fn code_graph_dispatch_cycles_reaches_graph_ops() {
     let worktree = crate::test_helpers::test_tempdir("djinn-cg-cycles-");
     let state =
@@ -964,6 +1020,10 @@ async fn code_graph_dispatch_capabilities_returns_introspection_payload() {
         obj.contains_key("default_filters"),
         "missing default_filters"
     );
+    assert!(
+        obj.contains_key("query_subgraph"),
+        "missing query_subgraph capability contract"
+    );
 
     // capabilities itself must list itself, otherwise clients can't
     // discover the op via probing.
@@ -982,6 +1042,48 @@ async fn code_graph_dispatch_capabilities_returns_introspection_payload() {
         ops.iter().any(|o| o.as_str() == Some("workspaces")),
         "workspaces op must be listed in capabilities"
     );
+
+    // Natural-language subgraph queries must be discoverable without
+    // consulting the external MCP schema snapshot. This locks the chat-facing
+    // parameter mirror to the final control-plane names and narrowing semantics.
+    let subgraph = obj["query_subgraph"]
+        .as_object()
+        .expect("query_subgraph capability must be object");
+    assert_eq!(subgraph["operation"], "query_subgraph");
+    assert_eq!(subgraph["required"], serde_json::json!(["query"]));
+    for field in [
+        "workspace",
+        "context_filter",
+        "file_filter",
+        "kind_filter",
+        "edge_filters",
+        "max_depth",
+        "max_seeds",
+        "token_budget",
+    ] {
+        assert!(
+            subgraph["optional_filters"].get(field).is_some(),
+            "query_subgraph capability missing optional filter {field}: {result}"
+        );
+    }
+    let response_fields = subgraph["response"]["fields"]
+        .as_array()
+        .expect("response fields must be array");
+    for field in [
+        "nodes",
+        "edges",
+        "seeds",
+        "budget",
+        "traversal",
+        "narrowing_hints",
+    ] {
+        assert!(
+            response_fields
+                .iter()
+                .any(|value| value.as_str() == Some(field)),
+            "query_subgraph response capability missing {field}: {result}"
+        );
+    }
 
     // Languages we ship a tree-sitter classifier for.
     let langs = obj["access_classifier_languages"]
