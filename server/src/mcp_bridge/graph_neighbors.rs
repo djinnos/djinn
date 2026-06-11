@@ -443,6 +443,7 @@ pub(super) fn classify_edge_category(
         // node; expose under its own category so UI groupers can
         // separate process membership from real calls / references.
         RepoGraphEdgeKind::StepInProcess => EdgeCategory::Process,
+        RepoGraphEdgeKind::HandlesRoute | RepoGraphEdgeKind::Fetches => EdgeCategory::References,
     }
 }
 

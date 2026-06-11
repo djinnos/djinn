@@ -84,11 +84,11 @@ pub enum RepoGraphEdgeKind {
     /// process membership is computed from SCIP-derived edges, so it's
     /// as deterministic as the source graph.
     StepInProcess,
-    /// Synthetic edge from `Route → Symbol`, emitted when framework routing
-    /// code maps an HTTP route to a handler symbol.
+    /// Synthetic edge linking an HTTP [`RepoGraphNodeKind::Route`] to the
+    /// server-side handler symbol that services it.
     HandlesRoute,
-    /// Synthetic edge from consumer `Symbol → Route`, emitted when a frontend
-    /// fetch call statically resolves to an extracted route.
+    /// Synthetic edge linking a client-side caller symbol to a known
+    /// server-side [`RepoGraphNodeKind::Route`].
     Fetches,
 }
 

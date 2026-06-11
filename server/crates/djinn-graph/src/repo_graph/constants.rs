@@ -72,8 +72,8 @@ pub(crate) const PAGE_RANK_ITERATIONS: usize = 25;
 ///   carry the under-populated flag; the bump forces a re-warm so the
 ///   `/code-graph` "hide tests" toggle and the `code_graph tests=`
 ///   filter see a complete classification.
-/// - v11: route extraction — adds synthetic `Route` nodes plus
-///   `HandlesRoute` and `Fetches` edge kinds.
+/// - v11: route extraction — adds `RepoGraphNodeKind::Route`,
+///   `RepoNodeKey::Route(String)`, and `HandlesRoute` / `Fetches` edge kinds.
 pub const REPO_GRAPH_ARTIFACT_VERSION: u32 = 11;
 
 /// Canonical "is this path a test file" classification — re-exported
