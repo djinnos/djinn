@@ -136,7 +136,6 @@ pub(super) async fn reap_orphaned_taskrun_jobs(
     };
 
     let task_run_repo = djinn_db::repositories::task_run::TaskRunRepository::new(db.clone());
-    let session_repo = djinn_db::SessionRepository::new(db.clone(), app_state.event_bus.clone());
 
     for job in jobs {
         let task_run_id = job.task_run_id.trim();
@@ -163,7 +162,7 @@ pub(super) async fn reap_orphaned_taskrun_jobs(
             }
         };
 
-        let sessions = match session_repo.list_for_task_run(task_run_id).await {
+        let sessions = match list_sessions_for_task_run(db, task_run_id).await {
             Ok(rows) => rows,
             Err(e) => {
                 tracing::warn!(
@@ -201,17 +200,49 @@ pub(super) async fn reap_orphaned_taskrun_jobs(
     }
 }
 
+async fn list_sessions_for_task_run(
+    db: &djinn_db::Database,
+    task_run_id: &str,
+) -> djinn_db::Result<Vec<djinn_core::models::SessionRecord>> {
+    db.ensure_initialized().await?;
+    Ok(sqlx::query_as::<_, djinn_core::models::SessionRecord>(
+        r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+            status, tokens_in, tokens_out,
+            cache_read_tokens, cache_write_tokens, task_run_id, title
+         FROM sessions WHERE task_run_id = $1 ORDER BY started_at DESC"#,
+    )
+    .bind(task_run_id)
+    .fetch_all(db.pool())
+    .await?)
+}
+
+/// Startup/rollout pass for the task-run Job backstop. Server boot first marks
+/// previously-running sessions interrupted via `interrupt_stale_sessions_on_startup`;
+/// the coordinator then runs this immediate reconcile before waiting for the
+/// normal stale-resource interval. The helper is idempotent and safe if startup
+/// ordering changes: if the session row is still running, the Job is preserved;
+/// if the row was interrupted/finalized or is absent, the Job is deleted.
+pub(super) async fn reap_orphaned_taskrun_jobs_for_startup(
+    db: &djinn_db::Database,
+    app_state: &crate::context::AgentContext,
+) {
+    tracing::info!("CoordinatorActor: running startup task-run Job backstop reconcile");
+    reap_orphaned_taskrun_jobs(db, app_state, "startup").await;
+}
+
 fn should_keep_taskrun_job(
     task_run: Option<&djinn_core::models::TaskRunRecord>,
     sessions: &[djinn_core::models::SessionRecord],
 ) -> bool {
+    let has_live_session = sessions
+        .iter()
+        .any(|session| session.status == "running" && session.ended_at.is_none());
+
     if let Some(task_run) = task_run {
-        return task_run.status == "running" && task_run.ended_at.is_none();
+        return task_run.status == "running" && task_run.ended_at.is_none() && has_live_session;
     }
 
-    sessions
-        .iter()
-        .any(|session| session.status == "running" && session.ended_at.is_none())
+    has_live_session
 }
 
 // ─── Note association pruning ────────────────────────────────────────────────

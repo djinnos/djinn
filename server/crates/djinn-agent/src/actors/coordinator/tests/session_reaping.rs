@@ -513,9 +513,44 @@ async fn taskrun_job_backstop_deletes_absent_and_finalized_rows_only() {
         .await
         .unwrap();
 
+    let interrupted_run_id = "run-interrupted-backstop";
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status)
+         VALUES ($1, $2, $3, 'manual', 'running')",
+    )
+    .bind(interrupted_run_id)
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let interrupted_session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(interrupted_run_id),
+        })
+        .await
+        .unwrap();
+    session_repo
+        .update(
+            &interrupted_session.id,
+            SessionStatus::Interrupted,
+            1,
+            1,
+            0,
+            0,
+        )
+        .await
+        .unwrap();
+
     let runtime = RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![
         taskrun_job_ref("run-absent-backstop"),
         taskrun_job_ref(finalized_run_id),
+        taskrun_job_ref(interrupted_run_id),
         taskrun_job_ref(live_run_id),
     ]);
     let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
@@ -528,8 +563,9 @@ async fn taskrun_job_backstop_deletes_absent_and_finalized_rows_only() {
         vec![
             "run-absent-backstop".to_string(),
             finalized_run_id.to_string(),
+            interrupted_run_id.to_string(),
         ],
-        "backstop must delete absent/finalized Jobs and preserve live running task-runs"
+        "backstop must delete absent/finalized/interrupted-session Jobs and preserve live running task-runs"
     );
     assert!(
         session_repo
@@ -539,6 +575,66 @@ async fn taskrun_job_backstop_deletes_absent_and_finalized_rows_only() {
             .iter()
             .any(|session| session.id == live_session.id),
         "live running session must be preserved"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_resource_sweep_runs_taskrun_job_backstop() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "periodic-backstop-wiring").await;
+    let periodic_run_id = "periodic-finalized";
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, ended_at)
+         VALUES ($1, $2, $3, 'manual', 'completed', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))",
+    )
+    .bind(periodic_run_id)
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let runtime =
+        RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![taskrun_job_ref(periodic_run_id)]);
+    let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+
+    health::sweep_stale_resources(&db, &app_state).await;
+
+    assert_eq!(
+        runtime.calls(),
+        vec![periodic_run_id.to_string()],
+        "periodic stale-resource sweep must run the K8s task-run Job backstop"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_reconcile_runs_taskrun_job_backstop() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "startup-backstop-wiring").await;
+    let startup_run_id = "startup-finalized";
+    sqlx::query(
+        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, ended_at)
+         VALUES ($1, $2, $3, 'manual', 'completed', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))",
+    )
+    .bind(startup_run_id)
+    .bind(&task.project_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    let runtime =
+        RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![taskrun_job_ref(startup_run_id)]);
+    let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+
+    health::reap_orphaned_taskrun_jobs_for_startup(&db, &app_state).await;
+
+    assert_eq!(
+        runtime.calls(),
+        vec![startup_run_id.to_string()],
+        "startup reconcile must run the K8s task-run Job backstop before periodic intervals"
     );
 }
 
