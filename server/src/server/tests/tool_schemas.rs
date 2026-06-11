@@ -291,6 +291,13 @@ async fn environment_config_tool_schemas_expose_workspace_metadata() {
         let schema = tool
             .get(schema_key)
             .unwrap_or_else(|| panic!("{tool_name} missing {schema_key}"));
+        let environment_config = &schema["$defs"]["EnvironmentConfig"];
+        assert_eq!(
+            environment_config["properties"]["workspaces"]["items"]["$ref"],
+            json!("#/$defs/Workspace"),
+            "{tool_name} {schema_key} EnvironmentConfig.workspaces no longer exposes Workspace"
+        );
+
         let workspace = &schema["$defs"]["Workspace"];
 
         assert_eq!(
