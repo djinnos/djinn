@@ -1122,6 +1122,7 @@ dependencies = [
  "djinn-supervisor",
  "djinn-workspace",
  "futures",
+ "rayon",
  "serde",
  "serde_json",
  "tempfile",
