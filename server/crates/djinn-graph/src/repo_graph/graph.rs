@@ -496,6 +496,78 @@ impl RepoDependencyGraph {
         );
     }
 
+    /// PR s6ch / ykcg: stamp a `HandlesRoute` edge from a synthetic
+    /// [`RepoGraphNodeKind::Route`] node to the handler
+    /// [`RepoGraphNodeKind::Symbol`] node. Route extraction is out of
+    /// scope for this model task; callers supply the detector `reason`
+    /// and may override confidence, which is clamped to `[0, 1]`.
+    #[allow(dead_code)] // Route detectors land in a follow-up task.
+    pub(crate) fn add_handles_route_edge(
+        &mut self,
+        route: NodeIndex,
+        handler: NodeIndex,
+        reason: &str,
+        confidence: Option<f64>,
+    ) {
+        self.add_route_metadata_edge(
+            route,
+            handler,
+            RepoGraphEdgeKind::HandlesRoute,
+            reason,
+            confidence,
+        );
+    }
+
+    /// PR s6ch / ykcg: stamp a `Fetches` edge from a caller/client
+    /// [`RepoGraphNodeKind::Symbol`] to the synthetic
+    /// [`RepoGraphNodeKind::Route`] it invokes. Consumer inference is a
+    /// side channel; callers supply an explanatory `reason` and may
+    /// override confidence, which is clamped to `[0, 1]`.
+    #[allow(dead_code)] // Client route inference lands in a follow-up task.
+    pub(crate) fn add_fetches_edge(
+        &mut self,
+        caller: NodeIndex,
+        route: NodeIndex,
+        reason: &str,
+        confidence: Option<f64>,
+    ) {
+        self.add_route_metadata_edge(
+            caller,
+            route,
+            RepoGraphEdgeKind::Fetches,
+            reason,
+            confidence,
+        );
+    }
+
+    fn add_route_metadata_edge(
+        &mut self,
+        source: NodeIndex,
+        target: NodeIndex,
+        kind: RepoGraphEdgeKind,
+        reason: &str,
+        confidence: Option<f64>,
+    ) {
+        debug_assert!(matches!(
+            kind,
+            RepoGraphEdgeKind::HandlesRoute | RepoGraphEdgeKind::Fetches
+        ));
+        self.graph.add_edge(
+            source,
+            target,
+            RepoGraphEdge {
+                kind,
+                weight: edge_weight(kind),
+                evidence_count: 1,
+                confidence: confidence
+                    .unwrap_or_else(|| edge_confidence_floor(kind))
+                    .clamp(0.0, 1.0),
+                reason: Some(reason.to_string()),
+                step: None,
+            },
+        );
+    }
+
     /// PR F2: register a new synthetic [`RepoGraphNodeKind::Process`]
     /// node and return its [`NodeIndex`]. Idempotent: returns the
     /// existing index when a process with `id` was already inserted.
@@ -985,4 +1057,81 @@ pub(super) fn derive_edge_confidence(
     }
 
     (confidence, reason)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn symbol_node(symbol: &str, display_name: &str) -> RepoGraphNode {
+        RepoGraphNode {
+            id: RepoNodeKey::Symbol(symbol.to_string()),
+            kind: RepoGraphNodeKind::Symbol,
+            display_name: display_name.to_string(),
+            language: Some("rust".to_string()),
+            file_path: Some(PathBuf::from("src/routes.rs")),
+            symbol: Some(symbol.to_string()),
+            symbol_kind: Some(ScipSymbolKind::Function),
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: Vec::new(),
+            signature_parts: None,
+            is_test: false,
+            complexity: None,
+            workspace: Some("root".to_string()),
+            route_framework: None,
+            route_handler_symbol: None,
+        }
+    }
+
+    #[test]
+    fn route_edge_helpers_stamp_reason_and_clamped_confidence() {
+        let mut graph = RepoDependencyGraph::build(&[]);
+        let route = graph.ensure_route_node(
+            "GET /api/agents (axum)",
+            "GET /api/agents",
+            Some("rust"),
+            Some("root"),
+            Some("axum"),
+            Some("scip-rust pkg handlers `list_agents`()."),
+        );
+        let handler = graph.graph_mut_unchecked().add_node(symbol_node(
+            "scip-rust pkg handlers `list_agents`().",
+            "list_agents",
+        ));
+        let caller = graph
+            .graph_mut_unchecked()
+            .add_node(symbol_node("scip-ts pkg ui `loadAgents`().", "loadAgents"));
+
+        graph.add_handles_route_edge(route, handler, "axum-router-new", Some(1.25));
+        graph.add_fetches_edge(caller, route, "ts-fetch-literal", None);
+
+        let handles = graph
+            .graph()
+            .edges_connecting(route, handler)
+            .find(|edge| edge.weight().kind == RepoGraphEdgeKind::HandlesRoute)
+            .expect("handles-route edge");
+        assert_eq!(handles.weight().reason.as_deref(), Some("axum-router-new"));
+        assert_eq!(handles.weight().confidence, 1.0);
+        assert_eq!(
+            handles.weight().weight,
+            edge_weight(RepoGraphEdgeKind::HandlesRoute)
+        );
+
+        let fetches = graph
+            .graph()
+            .edges_connecting(caller, route)
+            .find(|edge| edge.weight().kind == RepoGraphEdgeKind::Fetches)
+            .expect("fetches edge");
+        assert_eq!(fetches.weight().reason.as_deref(), Some("ts-fetch-literal"));
+        assert_eq!(
+            fetches.weight().confidence,
+            edge_confidence_floor(RepoGraphEdgeKind::Fetches)
+        );
+        assert_eq!(
+            fetches.weight().weight,
+            edge_weight(RepoGraphEdgeKind::Fetches)
+        );
+    }
 }
