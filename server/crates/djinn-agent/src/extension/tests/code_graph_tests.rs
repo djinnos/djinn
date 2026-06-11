@@ -319,6 +319,322 @@ async fn code_graph_dispatch_query_subgraph_requires_nonblank_query() {
     );
 }
 
+// -----------------------------------------------------------------------
+// wave-1 cross-layer regression coverage. The unit-level tests above
+// already assert dispatch reachability + missing/blank query rejection.
+// The tests below extend the public response surface with the
+// agent-safety properties the spec calls out: bounded payload shape,
+// seed debug metadata, narrowing hints, and stable-UID follow-up
+// compatibility.
+//
+// The agent-side path uses `agent_context_from_db`, which wires the
+// `StubRepoGraphOps` from `context.rs` — its default `query_subgraph`
+// returns a well-formed empty `QuerySubgraphResult`. This is the
+// right level for an end-to-end shape test: we are not re-testing
+// graph-layer behaviour (covered by the fixture tests in
+// `djinn-graph`), we are locking down what the agent extension
+// surfaces to MCP/chat clients when the real bridge is offline.
+// -----------------------------------------------------------------------
+
+/// Acceptance criterion #5 (agent side) — the public response shape
+/// always carries seed debug metadata scaffolding even when the
+/// bridge returns an empty result. Agents rely on
+/// `query_subgraph.seeds` being an array (possibly empty) so they
+/// can iterate without null checks; a regression that omits the
+/// field would break the contract.
+#[tokio::test]
+async fn code_graph_dispatch_query_subgraph_response_carries_seed_metadata_scaffold() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-query-subgraph-seeds-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let result = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "query_subgraph",
+            "project_path": worktree.path().to_string_lossy(),
+            "query": "what does the auth subsystem touch",
+        }),
+        worktree.path(),
+    )
+    .await
+    .expect("query_subgraph should dispatch through graph ops");
+    let payload = result
+        .get("query_subgraph")
+        .and_then(|v| v.as_object())
+        .expect("query_subgraph discriminator object present in agent response");
+    for field in [
+        "query",
+        "nodes",
+        "edges",
+        "seeds",
+        "inferred_edge_kinds",
+        "budget",
+        "traversal",
+        "narrowing_hints",
+    ] {
+        assert!(
+            payload.contains_key(field),
+            "query_subgraph response missing required public field {field}: {payload:?}"
+        );
+    }
+    // `seeds` must always be an array (possibly empty) so the agent
+    // can iterate. The empty stub path is what the agent sees when
+    // the bridge is unavailable, so this is the right place to lock
+    // the contract.
+    assert!(
+        payload["seeds"].is_array(),
+        "query_subgraph response `seeds` field must be an array, got {:?}",
+        payload["seeds"]
+    );
+    assert!(
+        payload["nodes"].is_array(),
+        "query_subgraph response `nodes` field must be an array"
+    );
+    assert!(
+        payload["edges"].is_array(),
+        "query_subgraph response `edges` field must be an array"
+    );
+    assert!(
+        payload["inferred_edge_kinds"].is_array(),
+        "query_subgraph response `inferred_edge_kinds` field must be an array"
+    );
+    assert!(
+        payload["narrowing_hints"].is_array(),
+        "query_subgraph response `narrowing_hints` field must be an array"
+    );
+    // `budget` and `traversal` are required debug objects — a
+    // regression that returns them as null or omits them would
+    // strip the agent of the source-level signal it needs to
+    // decide whether to retry with a narrower question.
+    assert!(
+        payload["budget"].is_object(),
+        "query_subgraph response `budget` must be an object, got {:?}",
+        payload["budget"]
+    );
+    assert!(
+        payload["traversal"].is_object(),
+        "query_subgraph response `traversal` must be an object, got {:?}",
+        payload["traversal"]
+    );
+}
+
+/// Acceptance criterion #1 (agent side) — the `budget` object
+/// always carries `truncated` / `omitted_nodes` / `omitted_edges`
+/// fields, even when the bridge returns the empty default. The
+/// flag trio is what agents read to decide "do I need to retry
+/// with a tighter filter" — missing fields would force a special
+/// case that drifts out of sync with the control-plane snapshot.
+#[tokio::test]
+async fn code_graph_dispatch_query_subgraph_budget_block_carries_truncation_state() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-query-subgraph-budget-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let result = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "query_subgraph",
+            "project_path": worktree.path().to_string_lossy(),
+            "query": "broad auth question",
+        }),
+        worktree.path(),
+    )
+    .await
+    .expect("query_subgraph dispatch succeeds");
+    let budget = result["query_subgraph"]["budget"]
+        .as_object()
+        .expect("query_subgraph response carries a `budget` object");
+    for field in [
+        "requested_tokens",
+        "estimated_tokens",
+        "truncated",
+        "omitted_nodes",
+        "omitted_edges",
+    ] {
+        assert!(
+            budget.contains_key(field),
+            "query_subgraph `budget` object missing field {field}: {budget:?}"
+        );
+    }
+    // `truncated` must be a boolean so the agent can branch on it
+    // without parsing strings. A regression that returned
+    // `truncated: 0` (integer) or omitted the field would break
+    // the standard `if response.budget.truncated` pattern agents
+    // use to decide whether to retry.
+    assert!(
+        budget["truncated"].is_boolean(),
+        "query_subgraph `budget.truncated` must be a boolean, got {:?}",
+        budget["truncated"]
+    );
+    assert!(
+        budget["requested_tokens"].is_number(),
+        "query_subgraph `budget.requested_tokens` must be a number"
+    );
+    assert!(
+        budget["omitted_nodes"].is_number(),
+        "query_subgraph `budget.omitted_nodes` must be a number"
+    );
+    assert!(
+        budget["omitted_edges"].is_number(),
+        "query_subgraph `budget.omitted_edges` must be a number"
+    );
+}
+
+/// Acceptance criterion #2 (agent side) — the `traversal` object
+/// always carries the hub-avoidance scaffolding (`max_depth`,
+/// `hub_degree_threshold`, `hubs_blocked`, `skipped_edge_kinds`).
+/// Even when the stub returns an empty traversal debug block, the
+/// shape must match the control-plane snapshot so schema
+/// generation in the agent extension doesn't drift.
+#[tokio::test]
+async fn code_graph_dispatch_query_subgraph_traversal_block_carries_hub_avoidance_scaffold() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-query-subgraph-traversal-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let result = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "query_subgraph",
+            "project_path": worktree.path().to_string_lossy(),
+            "query": "broad auth question",
+        }),
+        worktree.path(),
+    )
+    .await
+    .expect("query_subgraph dispatch succeeds");
+    let traversal = result["query_subgraph"]["traversal"]
+        .as_object()
+        .expect("query_subgraph response carries a `traversal` object");
+    for field in [
+        "max_depth",
+        "hub_degree_threshold",
+        "hubs_blocked",
+        "skipped_edge_kinds",
+    ] {
+        assert!(
+            traversal.contains_key(field),
+            "query_subgraph `traversal` object missing field {field}: {traversal:?}"
+        );
+    }
+    assert!(
+        traversal["hubs_blocked"].is_array(),
+        "query_subgraph `traversal.hubs_blocked` must be an array (possibly empty)"
+    );
+    assert!(
+        traversal["skipped_edge_kinds"].is_array(),
+        "query_subgraph `traversal.skipped_edge_kinds` must be an array (possibly empty)"
+    );
+}
+
+/// Acceptance criterion #4 (agent side) — the natural-language
+/// `query` echoes back to the agent verbatim, so the agent can
+/// use the response to confirm "yes, this is about auth routing"
+/// without re-reading the original prompt. We deliberately use
+/// leading/trailing whitespace + mixed case to verify the
+/// extension layer trims before forwarding (matches the
+/// `params.normalize()` contract).
+#[tokio::test]
+async fn code_graph_dispatch_query_subgraph_echoes_trimmed_natural_language_query() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-query-subgraph-echo-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let result = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "query_subgraph",
+            "project_path": worktree.path().to_string_lossy(),
+            // Leading whitespace + mixed case; the extension must
+            // trim/normalize before forwarding to the bridge.
+            "query": "  How does the AUTH middleware work?  ",
+        }),
+        worktree.path(),
+    )
+    .await
+    .expect("query_subgraph dispatch succeeds with trimmed natural-language query");
+    let echoed = result["query_subgraph"]["query"]
+        .as_str()
+        .expect("query_subgraph response echoes the natural-language question");
+    assert_eq!(
+        echoed, "How does the AUTH middleware work?",
+        "query_subgraph response must echo the trimmed natural-language question verbatim, got {echoed:?}"
+    );
+}
+
+/// Acceptance criterion #3 (agent side) — natural-language edge
+/// intent inference works through the agent dispatch. The agent
+/// extension does not strip the question wording before
+/// forwarding, so any future "smart pre-rewrite" pass that loses
+/// intent-bearing keywords (calls, reads, writes, implements,
+/// imports) would break this test loudly.
+#[tokio::test]
+async fn code_graph_dispatch_query_subgraph_preserves_intent_bearing_query_wording() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-query-subgraph-wording-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    // Loop over the five phrasings the spec calls out. Each is
+    // passed verbatim to the agent extension and the response
+    // must echo it back. We don't assert what the bridge inferred
+    // here (the stub returns an empty inferred_edge_kinds list);
+    // we only assert the wording round-trip is lossless, which
+    // is the agent-side half of the contract.
+    for wording in [
+        "who calls the login function",
+        "who reads the users table",
+        "who writes the audit log",
+        "implementations of the Auth trait",
+        "imports from internal/auth",
+    ] {
+        let result = code_graph_tool(
+            &state,
+            serde_json::json!({
+                "operation": "query_subgraph",
+                "project_path": worktree.path().to_string_lossy(),
+                "query": wording,
+            }),
+            worktree.path(),
+        )
+        .await
+        .unwrap_or_else(|err| {
+            panic!("query_subgraph with wording {wording:?} should dispatch, got: {err}")
+        });
+        let echoed = result["query_subgraph"]["query"]
+            .as_str()
+            .unwrap_or_else(|| {
+                panic!("query_subgraph response missing echoed query for {wording:?}")
+            });
+        assert_eq!(
+            echoed, wording,
+            "agent extension must round-trip intent-bearing wording {wording:?} verbatim"
+        );
+    }
+}
+
+/// Acceptance criterion #1 (companion, agent side) — invalid
+/// budget values must be rejected through the agent dispatch
+/// path, not silently forwarded to the bridge. The user-facing
+/// message must name the field so the model can self-correct.
+#[tokio::test]
+async fn code_graph_dispatch_query_subgraph_rejects_zero_token_budget_with_field_named_error() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-query-subgraph-zero-budget-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let err = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "query_subgraph",
+            "project_path": worktree.path().to_string_lossy(),
+            "query": "anything",
+            "token_budget": 0,
+        }),
+        worktree.path(),
+    )
+    .await
+    .expect_err("zero token_budget must be rejected through agent dispatch");
+    assert!(
+        err.contains("token_budget"),
+        "agent must surface the offending field name in the error, got: {err}"
+    );
+}
+
 #[tokio::test]
 async fn code_graph_dispatch_cycles_reaches_graph_ops() {
     let worktree = crate::test_helpers::test_tempdir("djinn-cg-cycles-");
