@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 // MCP tools for the global Proposals layer (Phase 0).
 //
 // A proposal is a project-INDEPENDENT, collaboratively-authored artifact

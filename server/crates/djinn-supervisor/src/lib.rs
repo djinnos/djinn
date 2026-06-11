@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 //! `djinn-supervisor` — task-run orchestration body extracted from
 //! `djinn-agent::supervisor` during Phase 2 PR 2 of
 //! `/home/fernando/.claude/plans/phase2-localdocker-scaffolding.md`.

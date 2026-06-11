@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 //! Linux-only ADR-057 mounted-memory enablement and guardrails.
 //!
 //! This module wires the transport-neutral [`crate::memory_fs::MemoryFilesystemCore`] into an

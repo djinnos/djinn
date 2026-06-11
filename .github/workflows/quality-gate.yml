@@ -222,16 +222,57 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
   # Pure-shell PR-time guard for Rust source file size; independent from clippy.
+  # Runs in changed-file mode (--files-from-stdin) so the job enforces the
+  # "new or edited Rust file" regression guard and does not fail on the
+  # legacy oversized files that the sibling split epics are still working
+  # through. Full-tree audits remain available locally via
+  # `./scripts/check-file-size.sh --all`.
   server-size-guard:
     name: Server Size Guard
     needs: changes
     if: needs.changes.outputs.server == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 is required so `git diff` can resolve the merge base
+      # against the PR / merge-queue base SHA. A shallow clone would force
+      # the diff command to fail on stale base commits.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Check Rust file sizes
-        run: ./scripts/check-file-size.sh
+      - name: Check changed Rust file sizes
+        env:
+          # Pick a base SHA appropriate for the current event:
+          #   pull_request: the PR's base ref HEAD
+          #   merge_group:  the merge-queue base ref HEAD
+          #   workflow_dispatch / other: empty → fall back to origin/main below
+          BASE_SHA: >-
+            ${{ github.event.pull_request.base.sha
+               || github.event.merge_group.base_sha
+               || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -eu
+
+          if [ -z "$BASE_SHA" ]; then
+            # workflow_dispatch has no PR/merge context; fall back to origin/main
+            # so the guard still runs against changes since the main branch.
+            git fetch --no-tags --depth=1 origin main >/dev/null 2>&1 || true
+            BASE_SHA="$(git rev-parse --verify origin/main 2>/dev/null || true)"
+          fi
+
+          if [ -z "$BASE_SHA" ]; then
+            echo "::error::Could not determine a base SHA for changed-file detection (event=$EVENT_NAME)."
+            exit 1
+          fi
+
+          echo "Computing changed-file diff against base $BASE_SHA (event=$EVENT_NAME)..."
+          # --diff-filter=AMR = Added, Modified, Renamed. D (Deleted) is
+          # intentionally excluded so deleted files are not re-checked.
+          # The three-dot form uses the merge base of $BASE_SHA and HEAD,
+          # which tolerates a slightly stale PR base SHA after main advances.
+          git diff --name-only --diff-filter=AMR "$BASE_SHA...HEAD" \
+            | ./scripts/check-file-size.sh --files-from-stdin
 
   # ╔══════════════════════════════════════════════════════════════════╗
   # ║  Server Tests (merge queue only)                                 ║

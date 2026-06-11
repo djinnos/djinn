@@ -1097,7 +1097,7 @@ expression: signatures
         },
         "workspace": {
           "default": null,
-          "description": "Optional workspace slug. For `query_subgraph`, scopes seed search and\ntraversal to a warmed workspace when provided; omit to query the\nproject-level graph/default workspace selection.",
+          "description": "Optional workspace slug. Empty string is normalized to omitted. Use\n`operation = \"workspaces\"` to enumerate valid slugs and metadata\n(`slug`, `name`, `node_count`, `commit_sha`, `warmed_at`, `status`).\nKnown workspaces hard-scope listing/bounded ops such as `ranked`,\n`orphans`, `snapshot`, and `api_surface`. Traversal ops such as\n`impact`, `path`, `touches_hot_path`, and `query_subgraph` use the\nworkspace only while resolving seeds/endpoints, then keep the traversal\ncross-workspace so blast radius stays visible. Unknown non-empty slugs\nreturn unscoped results with `workspace_hint` candidate slugs where the\nresponse type supports hints; single-workspace graphs treat the parameter\nas a no-op.",
           "nullable": true,
           "type": "string"
         }

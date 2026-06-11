@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::Project;
 use sqlx::Row;

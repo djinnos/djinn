@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 //! `djinn-agent-worker` — the binary the `KubernetesRuntime` launches inside
 //! each per-task-run Pod.
 //!

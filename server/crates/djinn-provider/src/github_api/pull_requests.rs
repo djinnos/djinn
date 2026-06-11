@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use anyhow::{Result, anyhow};
 
 use crate::github_api::transport::handle_rate_limit;

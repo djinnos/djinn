@@ -350,6 +350,12 @@ pub(super) struct LspParams {
 #[derive(Deserialize)]
 pub(super) struct CodeGraphParams {
     pub operation: String,
+    /// Project slug/UUID accepted by the public schema. The agent-side chat
+    /// dispatcher resolves the project before this struct is used, so this is
+    /// retained only to mirror the MCP request surface and tolerate callers
+    /// that include it.
+    #[serde(default)]
+    pub project: Option<String>,
     #[serde(default)]
     pub workspace: Option<String>,
     #[serde(default)]
@@ -438,6 +444,13 @@ pub(super) struct CodeGraphParams {
     /// violation. Empty / absent for every other op.
     #[serde(default)]
     pub rules: Option<Vec<BoundaryRule>>,
+    /// Optional module-path glob for `api_surface` (filter symbols by file).
+    #[serde(default)]
+    pub module_glob: Option<String>,
+    /// Churn look-back window in days for `hotspots`; MCP alias for
+    /// agent-side `since_days`.
+    #[serde(default)]
+    pub window_days: Option<u32>,
     /// v8 `symbols_at` op: 1-indexed end line for the range query.
     /// Both `start_line` and `end_line` are now first-class fields
     /// (the old `min_size` overload remains as a fallback).
@@ -491,6 +504,10 @@ pub(super) struct CodeGraphParams {
     /// `limit` fields for the metric / glob / cap.
     #[serde(default)]
     pub target: Option<String>,
+    /// v10: test-file filter. Honoured by the MCP surface for `snapshot`; kept
+    /// here so agent schema/params remain additive-compatible.
+    #[serde(default)]
+    pub tests: Option<String>,
 }
 
 impl CodeGraphParams {
@@ -513,6 +530,7 @@ impl CodeGraphParams {
         clear(&mut self.direction);
         clear(&mut self.kind_filter);
         clear(&mut self.query);
+        clear(&mut self.project);
         clear(&mut self.context_filter);
         clear(&mut self.file_filter);
         clear(&mut self.from);
@@ -528,10 +546,12 @@ impl CodeGraphParams {
         clear(&mut self.file_path);
         clear(&mut self.confidence);
         clear(&mut self.file_glob);
+        clear(&mut self.module_glob);
         clear(&mut self.from_sha);
         clear(&mut self.to_sha);
         clear(&mut self.level);
         clear(&mut self.target);
+        clear(&mut self.tests);
     }
 }
 

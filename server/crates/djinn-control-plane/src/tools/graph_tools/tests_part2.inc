@@ -26,6 +26,39 @@
         }
     }
 
+    /// Acceptance criterion: `operation = "workspaces"` is pure
+    /// introspection. It must dispatch through `RepoGraphOps::workspaces`
+    /// without requiring a key/query and without applying the requested
+    /// `workspace` as a scope first — callers use this operation to discover
+    /// the valid slugs, including when the slug they currently have is stale.
+    #[tokio::test]
+    async fn workspaces_operation_dispatches_without_workspace_scope() {
+        let ops = WorkspaceFixtureOps::new(Some(vec!["server".to_string(), "ui".to_string()]));
+        let (server, ops) = fixture_server(ops);
+        let ctx = fixture_ctx(Some("stale-slug"));
+        let mut params = test_params("workspaces");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.workspace = ctx.workspace.clone();
+
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("workspaces dispatch succeeds without key/query");
+
+        match response {
+            CodeGraphResponse::Workspaces(workspaces) => {
+                assert_eq!(workspaces.result.project_id, ctx.id);
+                assert!(workspaces.result.workspaces.is_empty());
+            }
+            other => panic!("expected workspaces response, got {other:?}"),
+        }
+        assert!(
+            ops.seen_workspaces().is_empty(),
+            "workspaces listing should not resolve/apply the caller's workspace filter first"
+        );
+    }
+
     /// Acceptance criterion: `resolve_workspace_scope` returns
     /// `(None, None)` when no workspace is requested. Bridge sees
     /// `None`.
