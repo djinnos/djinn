@@ -423,6 +423,9 @@ pub struct SessionRecordResponse {
     pub status: String,
     pub tokens_in: i64,
     pub tokens_out: i64,
+    /// Running totals of prompt-cache reads (hits) and writes (creation).
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
     /// Workspace path resolved from the session's attached `task_run`. `None`
     /// when no run is attached or the run has no recorded workspace.
     pub workspace_path: Option<String>,

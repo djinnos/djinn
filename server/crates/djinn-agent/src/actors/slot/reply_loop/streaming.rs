@@ -245,7 +245,17 @@ pub(super) async fn consume_provider_stream(
                         state.turn_cache_read = usage.cache_read;
                         state.turn_cache_write = usage.cache_write;
                         state.turn_reasoning_out = usage.reasoning_output;
-                        *ctx.current_context_tokens = usage.input;
+                        // Cache-aware context gauge: `usage.input` excludes
+                        // cached reads/writes for Anthropic-format providers, so
+                        // it massively undercounts the real prompt context on a
+                        // cache hit. `context_total()` normalizes this across
+                        // formats (Anthropic: input+cache_read+cache_write;
+                        // OpenAI/Google: input, already cache-inclusive) so the
+                        // gauge, compaction trigger, and UI usage_pct all see the
+                        // true context size. `tokens_in` keeps accumulating raw
+                        // `input` (its per-provider meaning is documented and the
+                        // persisted cache columns make it interpretable).
+                        *ctx.current_context_tokens = usage.context_total();
                         *ctx.total_tokens_in = ctx.total_tokens_in.saturating_add(usage.input);
                         *ctx.total_tokens_out = ctx.total_tokens_out.saturating_add(usage.output);
                         *ctx.total_cache_read =

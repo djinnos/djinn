@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                status AS \"status!\", tokens_in, tokens_out, task_run_id, title\n             FROM sessions WHERE task_id = $1 AND status = 'running'",
+  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                status AS \"status!\", tokens_in, tokens_out,\n                cache_read_tokens, cache_write_tokens, task_run_id, title\n             FROM sessions\n             WHERE project_id = $1 AND status = 'running' ORDER BY started_at DESC",
   "describe": {
     "columns": [
       {
@@ -55,11 +55,21 @@
       },
       {
         "ordinal": 10,
+        "name": "cache_read_tokens",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 11,
+        "name": "cache_write_tokens",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 12,
         "name": "task_run_id",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 11,
+        "ordinal": 13,
         "name": "title",
         "type_info": "Varchar"
       }
@@ -80,9 +90,11 @@
       false,
       false,
       false,
+      false,
+      false,
       true,
       true
     ]
   },
-  "hash": "70e7bcc1448ebd3ed61d33d917457cfd84fe91cbb5fc90c3e6c13ab7e8aa098c"
+  "hash": "d223f00ff4e484d1af6bd5e1afe7b426e6fd1ee8bca985c2287c0a3cba38390d"
 }

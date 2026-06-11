@@ -224,11 +224,18 @@ export function TaskSessionPage() {
         {sessions.length > 0 && (() => {
           const totalIn = sessions.reduce((sum, s) => sum + s.tokensIn, 0);
           const totalOut = sessions.reduce((sum, s) => sum + s.tokensOut, 0);
+          const totalCacheRead = sessions.reduce((sum, s) => sum + s.cacheReadTokens, 0);
+          const totalCacheWrite = sessions.reduce((sum, s) => sum + s.cacheWriteTokens, 0);
           return (
             <span className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
               <span>{formatTokens(totalIn)} in</span>
               <span>/</span>
               <span>{formatTokens(totalOut)} out</span>
+              {(totalCacheRead > 0 || totalCacheWrite > 0) && (
+                <span title="Prompt cache: reads (hits) / writes (creation)">
+                  ({formatTokens(totalCacheRead)} cache hit / {formatTokens(totalCacheWrite)} write)
+                </span>
+              )}
             </span>
           );
         })()}

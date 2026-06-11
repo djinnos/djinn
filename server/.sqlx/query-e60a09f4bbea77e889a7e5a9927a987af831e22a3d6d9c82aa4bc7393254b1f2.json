@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                status AS \"status!\", tokens_in, tokens_out, task_run_id, title\n             FROM sessions\n             WHERE project_id = $1 AND status = 'running' ORDER BY started_at DESC",
+  "query": "SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,\n                    s.started_at, s.ended_at,\n                    s.status AS \"status!\", s.tokens_in, s.tokens_out,\n                    s.cache_read_tokens, s.cache_write_tokens,\n                    s.task_run_id, s.title\n             FROM sessions s\n             LEFT JOIN (\n                SELECT session_id, MAX(created_at) AS last_at\n                FROM session_messages\n                GROUP BY session_id\n             ) m ON m.session_id = s.id\n             WHERE s.agent_type = 'chat' AND s.created_by_user_id = $1\n             ORDER BY COALESCE(m.last_at, s.started_at) DESC",
   "describe": {
     "columns": [
       {
@@ -55,11 +55,21 @@
       },
       {
         "ordinal": 10,
+        "name": "cache_read_tokens",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 11,
+        "name": "cache_write_tokens",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 12,
         "name": "task_run_id",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 11,
+        "ordinal": 13,
         "name": "title",
         "type_info": "Varchar"
       }
@@ -80,9 +90,11 @@
       false,
       false,
       false,
+      false,
+      false,
       true,
       true
     ]
   },
-  "hash": "1e5268ac16fa83ecb84640def1d4a9ef6372334da113404bd3e25a50707e6fe0"
+  "hash": "e60a09f4bbea77e889a7e5a9927a987af831e22a3d6d9c82aa4bc7393254b1f2"
 }

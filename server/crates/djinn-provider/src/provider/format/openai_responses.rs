@@ -419,6 +419,8 @@ fn parse_responses_line(line: &str, accumulated_items: &mut Vec<OutputItemInfo>)
                     cache_read,
                     cache_write: 0,
                     reasoning_output,
+                    // Responses API `input_tokens` already includes cached input.
+                    context_total: usage.input_tokens,
                 }));
             }
 

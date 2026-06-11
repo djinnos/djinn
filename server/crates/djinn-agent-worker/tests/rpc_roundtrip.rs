@@ -198,6 +198,8 @@ impl SupervisorServices for FakeServices {
         _status: djinn_core::models::SessionStatus,
         _tokens_in: i64,
         _tokens_out: i64,
+        _cache_read: i64,
+        _cache_write: i64,
     ) -> Result<(), String> {
         unimplemented!("not exercised on the auth-rejection path")
     }

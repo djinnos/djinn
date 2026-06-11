@@ -169,6 +169,8 @@ pub(super) async fn board_reconcile_impl(
                         SessionStatus::Interrupted,
                         session.tokens_in,
                         session.tokens_out,
+                        session.cache_read_tokens,
+                        session.cache_write_tokens,
                     )
                     .await
                     .is_ok()

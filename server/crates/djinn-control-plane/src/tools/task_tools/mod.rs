@@ -257,6 +257,8 @@ impl DjinnMcpServer {
                             status: s.status,
                             tokens_in: s.tokens_in,
                             tokens_out: s.tokens_out,
+                            cache_read_tokens: s.cache_read_tokens,
+                            cache_write_tokens: s.cache_write_tokens,
                             workspace_path,
                         })
                     }

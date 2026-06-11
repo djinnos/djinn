@@ -65,6 +65,8 @@ const mockSessions: SessionInfo[] = [
     status: "completed",
     tokensIn: 45200,
     tokensOut: 12800,
+    cacheReadTokens: 38000,
+    cacheWriteTokens: 7200,
   },
   {
     id: "sess-002",
@@ -75,6 +77,8 @@ const mockSessions: SessionInfo[] = [
     status: "completed",
     tokensIn: 18400,
     tokensOut: 5600,
+    cacheReadTokens: 14000,
+    cacheWriteTokens: 3100,
   },
   {
     id: "sess-003",
@@ -84,6 +88,8 @@ const mockSessions: SessionInfo[] = [
     status: "running",
     tokensIn: 32100,
     tokensOut: 8900,
+    cacheReadTokens: 27500,
+    cacheWriteTokens: 4800,
   },
 ];
 

@@ -172,6 +172,8 @@ pub trait SupervisorServices: Send + Sync + 'static {
         status: djinn_core::models::SessionStatus,
         tokens_in: i64,
         tokens_out: i64,
+        cache_read: i64,
+        cache_write: i64,
     ) -> Result<(), String>;
 
     /// Run the `github_search` chat-extension tool host-side and return its

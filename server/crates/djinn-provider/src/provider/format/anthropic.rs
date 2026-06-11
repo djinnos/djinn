@@ -747,6 +747,11 @@ pub(crate) fn parse_anthropic_event(
                     cache_read: *cache_read,
                     cache_write: *cache_write,
                     reasoning_output: 0,
+                    // Anthropic `input_tokens` excludes cached reads/writes; the
+                    // real context the model saw is the sum of all three.
+                    context_total: input_tokens
+                        .saturating_add(*cache_read)
+                        .saturating_add(*cache_write),
                 }));
             }
         }

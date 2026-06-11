@@ -240,6 +240,8 @@ async fn start_fake_server(
                                 status: "running".into(),
                                 tokens_in: 0,
                                 tokens_out: 0,
+                                cache_read_tokens: 0,
+                                cache_write_tokens: 0,
                                 task_run_id: None,
                                 title: None,
                             }))

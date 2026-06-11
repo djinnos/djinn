@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                status AS \"status!\", tokens_in, tokens_out, task_run_id, title\n             FROM sessions WHERE id = $1 AND agent_type = 'chat'",
+  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                status AS \"status!\", tokens_in, tokens_out,\n                cache_read_tokens, cache_write_tokens, task_run_id, title\n             FROM sessions\n             WHERE task_id = $1 AND status = 'paused' AND agent_type = $2\n             ORDER BY started_at DESC LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -55,17 +55,28 @@
       },
       {
         "ordinal": 10,
+        "name": "cache_read_tokens",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 11,
+        "name": "cache_write_tokens",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 12,
         "name": "task_run_id",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 11,
+        "ordinal": 13,
         "name": "title",
         "type_info": "Varchar"
       }
     ],
     "parameters": {
       "Left": [
+        "Text",
         "Text"
       ]
     },
@@ -80,9 +91,11 @@
       false,
       false,
       false,
+      false,
+      false,
       true,
       true
     ]
   },
-  "hash": "44820556dd6c94576d864053d891c147cdb9a0c12b4e4731c3ebc183892a3261"
+  "hash": "38339c9f8fab1fea5500965422524d61e28686680fd876a3bc6986688b304bf8"
 }

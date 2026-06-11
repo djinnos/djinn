@@ -433,7 +433,7 @@ pub(crate) async fn execute_stage(
             Some(provider) => provider,
             None => {
                 let _ = services
-                    .update_session_status(session_id.clone(), SessionStatus::Failed, 0, 0)
+                    .update_session_status(session_id.clone(), SessionStatus::Failed, 0, 0, 0, 0)
                     .await;
                 return Err(StageError::ModelResolution(
                     "no provider credential resolved for model".into(),
@@ -499,7 +499,7 @@ pub(crate) async fn execute_stage(
         &mut conversation,
         false,
     );
-    let (reply_result, final_output, tokens_in, tokens_out) =
+    let (reply_result, final_output, tokens_in, tokens_out, cache_read, cache_write) =
         djinn_core::auth_context::SESSION_USER_ID
             .scope(task.created_by_user_id.clone(), reply_loop_fut)
             .await;
@@ -511,7 +511,14 @@ pub(crate) async fn execute_stage(
         SessionStatus::Failed
     };
     if let Err(e) = services
-        .update_session_status(session_id.clone(), session_status, tokens_in, tokens_out)
+        .update_session_status(
+            session_id.clone(),
+            session_status,
+            tokens_in,
+            tokens_out,
+            cache_read,
+            cache_write,
+        )
         .await
     {
         tracing::warn!(

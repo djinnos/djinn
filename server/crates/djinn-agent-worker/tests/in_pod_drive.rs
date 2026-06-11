@@ -276,6 +276,8 @@ async fn handle_rpc(
                 status: "running".into(),
                 tokens_in: 0,
                 tokens_out: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
                 task_run_id: None,
                 title: None,
             }))
@@ -285,9 +287,18 @@ async fn handle_rpc(
             status,
             tokens_in,
             tokens_out,
+            cache_read,
+            cache_write,
         } => {
             audit.lock().await.update_session_status += 1;
-            let _ = (session_id, status, tokens_in, tokens_out);
+            let _ = (
+                session_id,
+                status,
+                tokens_in,
+                tokens_out,
+                cache_read,
+                cache_write,
+            );
             ServiceRpcResponse::UpdateSessionStatus(Ok(()))
         }
         ServiceRpcRequest::PublishSessionMessage {

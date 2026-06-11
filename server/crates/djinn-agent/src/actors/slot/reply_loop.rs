@@ -150,7 +150,7 @@ pub(crate) async fn run_reply_loop(
     ctx: ReplyLoopContext<'_>,
     conversation: &mut Conversation,
     is_resumed_session: bool,
-) -> (anyhow::Result<()>, ParsedAgentOutput, i64, i64) {
+) -> (anyhow::Result<()>, ParsedAgentOutput, i64, i64, i64, i64) {
     let ReplyLoopContext {
         provider,
         tools,
@@ -895,6 +895,8 @@ pub(crate) async fn run_reply_loop(
         output,
         total_tokens_in as i64,
         total_tokens_out as i64,
+        total_cache_read as i64,
+        total_cache_write as i64,
     )
 }
 
@@ -1136,7 +1138,7 @@ mod tests {
         conv.push(Message::system("You are a worker."));
         conv.push(Message::user("Do the task."));
 
-        let (result, _output, _tokens_in, _tokens_out) = run_reply_loop(
+        let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
             ReplyLoopContext {
                 provider: &provider,
                 tools: &[],
@@ -1227,7 +1229,7 @@ mod tests {
         conv.push(Message::system("You are a worker."));
         conv.push(Message::user("Do the task."));
 
-        let (result, _output, _tokens_in, _tokens_out) = run_reply_loop(
+        let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
             ReplyLoopContext {
                 provider: &provider,
                 tools: &[],
@@ -1368,7 +1370,7 @@ mod tests {
         conv.push(Message::system("You are a worker."));
         conv.push(Message::user("Do the task."));
 
-        let (result, _output, _tokens_in, _tokens_out) = run_reply_loop(
+        let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
             ReplyLoopContext {
                 provider: &provider,
                 tools: &[],
@@ -1593,7 +1595,7 @@ mod tests {
         conv.push(Message::system("You are a worker."));
         conv.push(Message::user("Do the task."));
 
-        let (result, output, _tokens_in, _tokens_out) = run_reply_loop(
+        let (result, output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
             ReplyLoopContext {
                 provider: &provider,
                 tools: &tools,
@@ -1654,7 +1656,7 @@ mod tests {
         conv.push(Message::system("You are a worker."));
         conv.push(Message::user("Do the task."));
 
-        let (result, _output, _tokens_in, _tokens_out) = run_reply_loop(
+        let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
             ReplyLoopContext {
                 provider: &provider,
                 tools: &tools,
@@ -1727,7 +1729,7 @@ mod tests {
         conv.push(Message::system("You are a worker."));
         conv.push(Message::user("Do the task."));
 
-        let (result, output, _tokens_in, _tokens_out) = run_reply_loop(
+        let (result, output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
             ReplyLoopContext {
                 provider: &provider,
                 tools: &tools,
@@ -1825,7 +1827,7 @@ mod tests {
         conv.push(Message::system("You are a worker."));
         conv.push(Message::user("Do the task."));
 
-        let (result, _output, _, _) = run_reply_loop(
+        let (result, _output, _, _, _, _) = run_reply_loop(
             ReplyLoopContext {
                 provider: &provider,
                 tools: &tools,
@@ -1919,7 +1921,7 @@ mod tests {
         conv.push(Message::system("You are a worker."));
         conv.push(Message::user("Do the task."));
 
-        let (result, _output, _tokens_in, _tokens_out) = run_reply_loop(
+        let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
             ReplyLoopContext {
                 provider: &provider,
                 tools: &tools,
@@ -2006,7 +2008,7 @@ mod tests {
         conv.push(Message::system("You are a worker."));
         conv.push(Message::user("Do the task."));
 
-        let (result, _output, _tokens_in, _tokens_out) = run_reply_loop(
+        let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
             ReplyLoopContext {
                 provider: &provider,
                 tools: &tools,

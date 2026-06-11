@@ -604,6 +604,8 @@ impl SupervisorServices for RpcServices {
         status: djinn_core::models::SessionStatus,
         tokens_in: i64,
         tokens_out: i64,
+        cache_read: i64,
+        cache_write: i64,
     ) -> Result<(), String> {
         match self
             .roundtrip(ServiceRpcRequest::UpdateSessionStatus {
@@ -611,6 +613,8 @@ impl SupervisorServices for RpcServices {
                 status,
                 tokens_in,
                 tokens_out,
+                cache_read,
+                cache_write,
             })
             .await
         {
@@ -1008,6 +1012,8 @@ impl SupervisorServices for UnimplementedRpcServices {
         _status: djinn_core::models::SessionStatus,
         _tokens_in: i64,
         _tokens_out: i64,
+        _cache_read: i64,
+        _cache_write: i64,
     ) -> Result<(), String> {
         unimplemented!(
             "UnimplementedRpcServices::update_session_status — construct RpcServices for real RPC"
@@ -1515,6 +1521,8 @@ mod tests {
                         status: "running".into(),
                         tokens_in: 0,
                         tokens_out: 0,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
                         task_run_id: params.task_run_id.clone(),
                         title: None,
                     };

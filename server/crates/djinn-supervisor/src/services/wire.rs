@@ -291,6 +291,8 @@ pub enum ServiceRpcRequest {
         status: SessionStatus,
         tokens_in: i64,
         tokens_out: i64,
+        cache_read: i64,
+        cache_write: i64,
     },
     /// [`crate::SupervisorServices::emit_djinn_event`].  Phase 7-followup
     /// gap-2 — bridges worker-side `event_bus.send(..)` calls to the host's
@@ -933,6 +935,8 @@ mod tests {
             status: "running".into(),
             tokens_in: 0,
             tokens_out: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
             task_run_id: Some("run-1".into()),
             title: None,
         };
@@ -1201,6 +1205,8 @@ mod tests {
                 status: SessionStatus::Completed,
                 tokens_in: 1234,
                 tokens_out: 567,
+                cache_read: 89,
+                cache_write: 12,
             }),
         };
         let bytes = bincode::serialize(&f).unwrap();
@@ -1211,11 +1217,15 @@ mod tests {
                 status,
                 tokens_in,
                 tokens_out,
+                cache_read,
+                cache_write,
             }) => {
                 assert_eq!(session_id, "s1");
                 assert_eq!(status, SessionStatus::Completed);
                 assert_eq!(tokens_in, 1234);
                 assert_eq!(tokens_out, 567);
+                assert_eq!(cache_read, 89);
+                assert_eq!(cache_write, 12);
             }
             other => panic!("unexpected: {other:?}"),
         }
