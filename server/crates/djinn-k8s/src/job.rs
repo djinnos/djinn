@@ -462,10 +462,10 @@ fn build_task_run_env(
 }
 
 /// Runtime env vars routing the shared Rust toolchain caches to the persistent
-/// `/cache` PVC. Warm/verification Pods use the per-project base target dir via
-/// `cache_env_vars`; task-run Pods use `task_run_cache_env_vars` so their
-/// writable target dir is private per task run while still sharing registry and
-/// sccache settings. The common cache routing stays single-sourced here on
+/// `/cache` PVC. Warm/verification Pods use the per-project base target dir;
+/// task-run Pods use `task_run_cache_env_vars` so their writable target dir is
+/// private per task run while still sharing registry and sccache settings.
+/// The common cache routing stays single-sourced here on
 /// purpose: the DB env once drifted because the task-run path was updated and
 /// the warm path was missed (see the comment in warm_job.rs) — keeping shared
 /// cache routing in one place makes that class of drift less likely.
@@ -484,10 +484,12 @@ fn build_task_run_env(
 ///   cache) — common crates download once. (Image default /usr/local/cargo is
 ///   an image layer that loses runtime-downloaded crates when the Pod dies.)
 /// - CARGO_TARGET_DIR: compiled artifacts are workspace-specific. The shared
-///   warm/verification base is namespaced per project; task-runs get a
-///   deterministic private dir under `/cache/cargo-target-runs/<task_run_id>` so
-///   they never write the shared base directly. (Default is <workspace>/target
-///   inside the ephemeral clone — also lost.)
+///   warm/verification base is namespaced per project; warm jobs write it with
+///   `CARGO_INCREMENTAL=0` so it does not accumulate incremental compiler state.
+///   Task-runs get a deterministic private dir under
+///   `/cache/cargo-target-runs/<task_run_id>` so they never write the shared base
+///   directly. (Default is <workspace>/target inside the ephemeral clone — also
+///   lost.)
 /// - SCCACHE_DIR: repos routinely pin `rustc-wrapper = "sccache"` in
 ///   .cargo/config.toml (e.g. the platform repo, which also sets
 ///   CARGO_INCREMENTAL=0 as sccache requires), so cargo invokes sccache
@@ -527,6 +529,16 @@ pub(crate) fn cache_env_vars(project_id: &str) -> Vec<EnvVar> {
         "CARGO_TARGET_DIR",
         &format!("{CACHE_MOUNT_DIR}/cargo-target/{project_id}"),
     ));
+    env
+}
+
+/// Cache env vars for warm Pods that intentionally populate the shared
+/// per-project cargo target base. Incremental compilation is disabled because
+/// the base is the durable single-writer cache seed, not a per-process scratch
+/// directory for incremental compiler state.
+pub(crate) fn warm_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
+    let mut env = cache_env_vars(project_id);
+    env.push(env_var("CARGO_INCREMENTAL", "0"));
     env
 }
 
