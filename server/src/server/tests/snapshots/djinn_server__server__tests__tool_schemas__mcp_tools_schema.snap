@@ -867,6 +867,12 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "framework": {
+          "default": null,
+          "description": "Optional route framework filter for `route_map` discovery.",
+          "nullable": true,
+          "type": "string"
+        },
         "from": {
           "default": null,
           "description": "Source node for `path`.",
@@ -894,6 +900,12 @@ expression: signatures
         "include_content": {
           "default": null,
           "description": "PR C1: when `true`, the `context` op populates\n`symbol_context.symbol.content` with the symbol's body text\nread from the project clone. Default `false` — bandwidth\nmatters; clients that already have the file open don't need\nthe body shipped over MCP.",
+          "nullable": true,
+          "type": "boolean"
+        },
+        "include_optional": {
+          "default": null,
+          "description": "Include optional response keys while computing `shape_check` drift.\nDefault false.",
           "nullable": true,
           "type": "boolean"
         },
@@ -949,6 +961,12 @@ expression: signatures
           "nullable": true,
           "type": "integer"
         },
+        "method": {
+          "default": null,
+          "description": "HTTP method for route-aware ops (`route_map`, `shape_check`,\n`api_impact`) when `route_id` is not supplied.",
+          "nullable": true,
+          "type": "string"
+        },
         "min_confidence": {
           "default": null,
           "description": "Minimum edge confidence in `[0, 1]` for the `impact` BFS frontier\n(PR A2). Edges below this threshold are skipped — useful for\nexcluding `local`-prefixed references and other low-confidence SCIP\nsignals from the blast radius. Omit to keep every edge regardless of\nconfidence (default behaviour).",
@@ -976,7 +994,19 @@ expression: signatures
           "type": "string"
         },
         "operation": {
-          "description": "The operation to perform.\nOne of: `neighbors`, `ranked`, `impact`, `implementations`,\n`search`, `query_subgraph`, `cycles`, `orphans`, `path`, `edges`,\n`symbols_at`, `diff_touches`, `detect_changes`, `describe`,\n`context`, `status`, `snapshot`, `workspaces`, and the other graph analysis ops.",
+          "description": "The operation to perform.\nOne of: `neighbors`, `ranked`, `impact`, `implementations`,\n`search`, `query_subgraph`, `route_map`, `shape_check`,\n`api_impact`, `flow`, `cycles`, `orphans`, `path`, `edges`,\n`symbols_at`, `diff_touches`, `detect_changes`, `describe`,\n`context`, `status`, `snapshot`, `workspaces`, and the other\ngraph analysis ops.",
+          "type": "string"
+        },
+        "path": {
+          "default": null,
+          "description": "Exact route path for `shape_check` / `api_impact` when `route_id` is\nnot supplied.",
+          "nullable": true,
+          "type": "string"
+        },
+        "path_glob": {
+          "default": null,
+          "description": "Route path glob for `route_map` discovery.",
+          "nullable": true,
           "type": "string"
         },
         "project": {
@@ -985,7 +1015,13 @@ expression: signatures
         },
         "query": {
           "default": null,
-          "description": "Query text, op-specific:\n- `search`: substring/name lookup text.\n- `query_subgraph`: required nonblank natural-language question used\n  to pick relevant seeds and infer useful traversal edge kinds.",
+          "description": "Query text, op-specific:\n- `search`: substring/name lookup text.\n- `query_subgraph`: required nonblank natural-language question used\n  to pick relevant seeds and infer useful traversal edge kinds.\n- `flow`: required nonblank natural-language question used to find\n  matching execution-flow/process steps.",
+          "nullable": true,
+          "type": "string"
+        },
+        "route_id": {
+          "default": null,
+          "description": "Stable route id for route-aware ops. For `shape_check` and\n`api_impact`, callers must provide either `route_id` or both\n`method` and `path`.",
           "nullable": true,
           "type": "string"
         },
