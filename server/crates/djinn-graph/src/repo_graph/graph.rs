@@ -20,6 +20,7 @@ use petgraph::visit::EdgeRef;
 use crate::complexity::ComplexityWalker;
 use crate::scip_parser::{ParsedScipIndex, ScipSymbolKind, ScipVisibility};
 
+use super::artifact::RouteExclusionConfig;
 use super::constants::EDGE_CONFIDENCE_LOCAL_PENALTY;
 use super::edge::{RepoGraphEdge, RepoGraphEdgeKind, edge_confidence_floor, edge_weight};
 use super::node::{RepoGraphNode, RepoGraphNodeKind, RepoGraphSearchHit, RepoNodeKey};
@@ -120,6 +121,10 @@ pub struct RepoDependencyGraph {
     /// `processes` is set (build-time or after `from_artifact`). Empty
     /// for nodes that don't participate in any traced process.
     pub(super) process_lookup: BTreeMap<usize, Vec<usize>>,
+    /// Durable inferred-route exclusion config. Persisted through the graph
+    /// artifact so cache-hit readers and extraction-aware graph operations use
+    /// the same policy as the warm build that produced the graph.
+    pub(super) route_exclusion_config: RouteExclusionConfig,
 }
 
 /// A single SCIP definition range pinned to a graph node.
@@ -134,6 +139,16 @@ pub struct SymbolRange {
 }
 
 impl RepoDependencyGraph {
+    /// Read the inferred-route exclusion config attached to this graph.
+    pub fn route_exclusion_config(&self) -> &RouteExclusionConfig {
+        &self.route_exclusion_config
+    }
+
+    /// Replace the inferred-route exclusion config sidecar.
+    pub fn set_route_exclusion_config(&mut self, config: RouteExclusionConfig) {
+        self.route_exclusion_config = config;
+    }
+
     pub fn build(indices: &[ParsedScipIndex]) -> Self {
         Self::build_with_source(indices, None)
     }
