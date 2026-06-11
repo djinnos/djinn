@@ -324,6 +324,56 @@ async fn environment_config_tool_schemas_expose_workspace_metadata() {
     }
 }
 
+#[test]
+fn checked_in_mcp_snapshot_exposes_environment_config_workspace_metadata() {
+    let snapshot =
+        include_str!("snapshots/djinn_server__server__tests__tool_schemas__mcp_tools_schema.snap");
+    let json_body = snapshot
+        .splitn(3, "---\n")
+        .nth(2)
+        .expect("insta snapshot body after metadata header");
+    let tools: Vec<Value> = serde_json::from_str(json_body).expect("MCP schema snapshot is JSON");
+
+    let schema_surfaces = [
+        ("project_environment_config_get", "output_schema"),
+        ("project_environment_config_reset", "output_schema"),
+        ("project_environment_config_set", "input_schema"),
+    ];
+
+    for (tool_name, schema_key) in schema_surfaces {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some(tool_name))
+            .unwrap_or_else(|| panic!("checked-in snapshot is missing {tool_name}"));
+        let schema = tool
+            .get(schema_key)
+            .unwrap_or_else(|| panic!("checked-in snapshot {tool_name} missing {schema_key}"));
+        let workspace = &schema["$defs"]["Workspace"];
+
+        assert_eq!(
+            workspace["properties"]["slug"],
+            json!({"default": null, "nullable": true, "type": "string"}),
+            "checked-in snapshot {tool_name} {schema_key} Workspace.slug schema drifted"
+        );
+        assert_eq!(
+            workspace["properties"]["name"],
+            json!({"default": null, "nullable": true, "type": "string"}),
+            "checked-in snapshot {tool_name} {schema_key} Workspace.name schema drifted"
+        );
+        assert_eq!(
+            workspace["properties"]["tags"],
+            json!({"default": [], "items": {"type": "string"}, "type": "array"}),
+            "checked-in snapshot {tool_name} {schema_key} Workspace.tags schema drifted"
+        );
+
+        let rendered = serde_json::to_string(schema).expect("schema serializes");
+        assert!(
+            !rendered.to_ascii_lowercase().contains("duplicate slug"),
+            "checked-in snapshot {tool_name} {schema_key} still advertises duplicate-slug rejection"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_tools_schema_snapshot() {
     let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
