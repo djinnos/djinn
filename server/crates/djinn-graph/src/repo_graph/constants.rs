@@ -72,9 +72,12 @@ pub(crate) const PAGE_RANK_ITERATIONS: usize = 25;
 ///   carry the under-populated flag; the bump forces a re-warm so the
 ///   `/code-graph` "hide tests" toggle and the `code_graph tests=`
 ///   filter see a complete classification.
-/// - v11: route extraction — adds `RepoGraphNodeKind::Route`,
-///   `RepoNodeKey::Route(String)`, and `HandlesRoute` / `Fetches` edge kinds.
-pub const REPO_GRAPH_ARTIFACT_VERSION: u32 = 11;
+///
+/// Route/Tool nodes plus `HandlesRoute` / `Fetches` route edges are
+/// intentionally additive under v10: the new enum variants are appended,
+/// new struct fields are `#[serde(default)]`, and existing v10 artifacts that
+/// do not contain the new surface keep round-tripping without a forced re-warm.
+pub const REPO_GRAPH_ARTIFACT_VERSION: u32 = 10;
 
 /// Canonical "is this path a test file" classification — re-exported
 /// from [`djinn_core::test_paths`] (the single source of truth) so the
@@ -113,7 +116,6 @@ pub(crate) const EDGE_CONFIDENCE_WRITES: f64 = 0.90;
 // SCIP edges so the confidence tier can distinguish inferred suggestions from
 // extracted graph facts without adding persisted fields to artifacts.
 pub(crate) const EDGE_CONFIDENCE_ROUTE: f64 = 0.75;
-pub(crate) const EDGE_CONFIDENCE_FETCHES: f64 = 0.75;
 // PR F1: floor for `EntryPointOf` edges. The detector itself records
 // per-hit confidence in [0.6, 0.95] depending on signal strength
 // (`fn main`, SCIP `Test` role → 0.95; file-path heuristics → 0.7;
@@ -134,13 +136,19 @@ pub(crate) const EDGE_CONFIDENCE_MEMBER_OF: f64 = 0.95;
 // every `StepInProcess` is as trustworthy as the strongest source edge
 // the trace consumed.
 pub(crate) const EDGE_CONFIDENCE_STEP_IN_PROCESS: f64 = 0.95;
+// PR s6ch / ykcg route model: `HandlesRoute` comes from deterministic
+// server-side route detector output (route node -> handler symbol), so it
+// sits in the high-confidence metadata tier. `Fetches` is client-side
+// consumer inference (caller symbol -> route node) and is deliberately lower
+// confidence than `HandlesRoute`.
+pub(crate) const EDGE_CONFIDENCE_HANDLES_ROUTE: f64 = 0.90;
+pub(crate) const EDGE_CONFIDENCE_FETCHES: f64 = 0.75;
 pub(crate) const EDGE_CONFIDENCE_LOCAL_PENALTY: f64 = 0.15;
 pub(crate) const EDGE_WEIGHT_DEFINITION_TO_FILE: f64 = 4.0;
 pub(crate) const EDGE_WEIGHT_FILE_TO_DEFINITION: f64 = 1.5;
 pub(crate) const EDGE_WEIGHT_FILE_REFERENCE: f64 = 2.5;
 pub(crate) const EDGE_WEIGHT_SYMBOL_REFERENCE: f64 = 3.5;
 pub(crate) const EDGE_WEIGHT_ROUTE: f64 = 2.0;
-pub(crate) const EDGE_WEIGHT_FETCHES: f64 = 2.0;
 pub(crate) const EDGE_WEIGHT_EXTENDS: f64 = 2.0;
 pub(crate) const EDGE_WEIGHT_IMPLEMENTS: f64 = 2.5;
 pub(crate) const EDGE_WEIGHT_TYPE_DEFINES: f64 = 1.75;
@@ -160,6 +168,11 @@ pub(crate) const EDGE_WEIGHT_MEMBER_OF: f64 = 1.0;
 // channel: they should not reshape the importance ranking of the
 // underlying call graph.
 pub(crate) const EDGE_WEIGHT_STEP_IN_PROCESS: f64 = 0.5;
+// PR s6ch / ykcg route model: route edges are metadata / side-channel links,
+// not primary callgraph evidence. Keep them low-to-moderate so route maps can
+// hang off the graph without dominating PageRank or shortest-path scoring.
+pub(crate) const EDGE_WEIGHT_HANDLES_ROUTE: f64 = 0.75;
+pub(crate) const EDGE_WEIGHT_FETCHES: f64 = 1.0;
 pub(crate) const SYMBOL_KIND_TYPE_MULTIPLIER: f64 = 1.15;
 pub(crate) const SYMBOL_KIND_METHOD_MULTIPLIER: f64 = 1.05;
 pub(crate) const SYMBOL_KIND_FUNCTION_MULTIPLIER: f64 = 1.0;

@@ -468,6 +468,34 @@ pub fn infer_edge_intent(query: &str) -> Vec<RepoGraphEdgeKind> {
     if contains_any(
         &q,
         &[
+            "fetch route",
+            "fetches route",
+            "fetches endpoint",
+            "calls route",
+            "calls endpoint",
+            "client route",
+            "api call",
+            "http fetch",
+        ],
+    ) {
+        add(RepoGraphEdgeKind::Fetches);
+    }
+    if contains_any(
+        &q,
+        &[
+            "handles route",
+            "handle route",
+            "route handler",
+            "handler for route",
+            "owns route",
+            "route ownership",
+        ],
+    ) {
+        add(RepoGraphEdgeKind::HandlesRoute);
+    }
+    if contains_any(
+        &q,
+        &[
             "write", "writes", "update", "updates", "insert", "inserts", "mutate", "mutates",
             "delete", "deletes",
         ],
@@ -501,9 +529,11 @@ pub fn infer_edge_intent(query: &str) -> Vec<RepoGraphEdgeKind> {
     }
 
     if kinds.is_empty() {
-        // Broad but safe default: no process/community synthetic expansion and
-        // no unbounded all-edge fanout. This covers code dependency, file, data
-        // access, and type relationship edges.
+        // Broad but safe default: no process/community/route synthetic
+        // expansion and no unbounded all-edge fanout. This covers code
+        // dependency, file, data access, and type relationship edges; route
+        // metadata (`HandlesRoute` / `Fetches`) appears only when explicitly
+        // requested by natural-language intent or `edge_filter`.
         kinds = vec![
             RepoGraphEdgeKind::SymbolReference,
             RepoGraphEdgeKind::Reads,
@@ -878,6 +908,17 @@ mod tests {
             infer_edge_intent("show related auth code")
                 .contains(&RepoGraphEdgeKind::SymbolReference)
         );
+        assert!(
+            infer_edge_intent("which client route does this http fetch call")
+                .contains(&RepoGraphEdgeKind::Fetches)
+        );
+        assert!(
+            infer_edge_intent("which route handler owns this route")
+                .contains(&RepoGraphEdgeKind::HandlesRoute)
+        );
+        let broad = infer_edge_intent("show related auth code");
+        assert!(!broad.contains(&RepoGraphEdgeKind::Fetches));
+        assert!(!broad.contains(&RepoGraphEdgeKind::HandlesRoute));
     }
 
     #[test]
