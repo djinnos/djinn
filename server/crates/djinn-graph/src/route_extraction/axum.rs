@@ -16,6 +16,13 @@ const METHODS: &[&str] = &[
 ];
 
 /// One parsed axum route registration.
+///
+/// Dedup discipline mirrors graphify's inferred-edge guardrails: identical
+/// labels are only eligible to merge when they come from the same `file`, Tool
+/// extraction must apply the same same-file rule plus an absolute
+/// cross-project/cross-repo merge ban, and low-entropy labels (health/ping/root
+/// style affordances) are never merged. This keeps inferred Route/Tool nodes
+/// from manufacturing phantom architecture across files or repositories.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AxumRouteHit {
     pub file: PathBuf,
@@ -70,7 +77,10 @@ pub fn detect_axum_routes(
             }
         };
 
-        for mut hit in parse_axum_routes_in_source(&source, &rel_path) {
+        for (hit_ordinal, mut hit) in parse_axum_routes_in_source(&source, &rel_path)
+            .into_iter()
+            .enumerate()
+        {
             let resolved_handler_node = resolve_handler_symbol(graph, &rel_path, &hit.handler);
             let reason = route_reason(&hit.path, resolved_handler_node.is_some());
             let confidence = if resolved_handler_node.is_some() {
@@ -86,8 +96,9 @@ pub fn detect_axum_routes(
                 graph.ensure_unresolved_route_handler_node(&rel_path, &hit.handler)
             });
             let label = format!("{} {} (axum)", hit.method.to_uppercase(), hit.path);
+            let route_id = route_node_id(&label, &rel_path, hit_ordinal, &hit.path);
             let route_node = graph.ensure_route_node(
-                &label,
+                &route_id,
                 &label,
                 Some("rust"),
                 workspace.as_deref(),
@@ -361,13 +372,39 @@ fn is_ident_boundary(s: &str, i: usize) -> bool {
 
 fn dedupe_hits(mut hits: Vec<AxumRouteHit>) -> Vec<AxumRouteHit> {
     hits.sort_by(|a, b| {
-        a.method
-            .cmp(&b.method)
+        a.file
+            .cmp(&b.file)
+            .then_with(|| a.method.cmp(&b.method))
             .then_with(|| a.path.cmp(&b.path))
             .then_with(|| a.handler.cmp(&b.handler))
     });
-    hits.dedup_by(|a, b| a.method == b.method && a.path == b.path && a.handler == b.handler);
+    hits.dedup_by(|a, b| {
+        a.file == b.file
+            && a.method == b.method
+            && a.path == b.path
+            && a.handler == b.handler
+            && !is_low_entropy_route_label(&a.path)
+            && !is_low_entropy_route_label(&b.path)
+    });
     hits
+}
+
+fn is_low_entropy_route_label(path: &str) -> bool {
+    let trimmed = path.trim().trim_matches('/');
+    trimmed.is_empty()
+        || matches!(
+            trimmed.to_ascii_lowercase().as_str(),
+            "health" | "ping" | "status"
+        )
+        || is_param_only_route(path)
+}
+
+fn route_node_id(label: &str, file: &Path, ordinal: usize, path: &str) -> String {
+    if is_low_entropy_route_label(path) {
+        format!("{label} [{}#{}]", file.display(), ordinal + 1)
+    } else {
+        format!("{label} [{}]", file.display())
+    }
 }
 
 #[cfg(test)]
@@ -622,6 +659,125 @@ mod tests {
         assert_eq!(reasons["/health"], "axum-health");
         assert_eq!(reasons["/ping"], "axum-health");
         assert_eq!(reasons["/{id}"], "axum-param-only");
+    }
+
+    #[test]
+    fn dedupe_is_same_file_only_and_keeps_low_entropy_labels() {
+        let source = r#"
+            use axum::{Router, routing::get};
+            fn router() -> Router<()> {
+                Router::new()
+                    .route("/api/agents", get(list_agents))
+                    .route("/api/agents", get(list_agents))
+                    .route("/health", get(health))
+                    .route("/health", get(health))
+            }
+        "#;
+
+        let hits = [
+            parse_axum_routes_in_source(source, Path::new("server/src/routes_a.rs")),
+            parse_axum_routes_in_source(source, Path::new("server/src/routes_b.rs")),
+        ]
+        .concat();
+
+        let agent_hits = hits
+            .iter()
+            .filter(|hit| hit.path == "/api/agents")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            agent_hits.len(),
+            2,
+            "identical route labels may dedupe within one source_file but must not merge across files",
+        );
+        assert_ne!(agent_hits[0].file, agent_hits[1].file);
+
+        let health_hits = hits
+            .iter()
+            .filter(|hit| hit.path == "/health")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            health_hits.len(),
+            4,
+            "low-entropy route labels are suggestions/noise and must not be merged even within one file",
+        );
+        assert_ne!(
+            route_node_id(
+                "GET /api/agents (axum)",
+                Path::new("server/src/routes_a.rs"),
+                0,
+                "/api/agents",
+            ),
+            route_node_id(
+                "GET /api/agents (axum)",
+                Path::new("server/src/routes_b.rs"),
+                0,
+                "/api/agents",
+            ),
+            "route node ids include source_file",
+        );
+        assert_ne!(
+            route_node_id(
+                "GET /health (axum)",
+                Path::new("server/src/routes_a.rs"),
+                0,
+                "/health",
+            ),
+            route_node_id(
+                "GET /health (axum)",
+                Path::new("server/src/routes_a.rs"),
+                1,
+                "/health",
+            ),
+            "low-entropy route node ids include occurrence ordinal to avoid merging",
+        );
+    }
+
+    #[test]
+    fn route_parity_live_graph_is_no_larger_than_shadow_when_enabled() {
+        assert!(crate::route_extraction::route_parity_enabled_from_var(
+            Some("1")
+        ));
+
+        let source = r#"
+            use axum::{Router, routing::get};
+            fn router() -> Router<()> {
+                Router::new()
+                    .route("/api/agents", get(list_agents))
+                    .route("/api/agents", get(list_agents))
+            }
+            async fn list_agents() {}
+        "#;
+        let shadow_hits = 2usize;
+        let temp = tempfile::tempdir().expect("create temp fixture dir");
+        let root = temp.path();
+        std::fs::write(root.join("routes.rs"), source).expect("write temporary route fixture");
+        let mut graph = fixture_graph(&[("routes.rs", source)]);
+
+        let report = detect_axum_routes(&mut graph, root);
+        let live_route_nodes = graph
+            .graph()
+            .node_weights()
+            .filter(|node| node.kind == RepoGraphNodeKind::Route)
+            .count();
+        let live_handles_edges = graph
+            .graph()
+            .edge_references()
+            .filter(|edge| edge.weight().kind == RepoGraphEdgeKind::HandlesRoute)
+            .count();
+
+        assert_eq!(
+            report.hits.len(),
+            1,
+            "live extractor applies same-file dedup"
+        );
+        assert!(
+            live_route_nodes <= shadow_hits,
+            "DJINN_ROUTE_PARITY live route graph must not exceed shadow route nodes",
+        );
+        assert!(
+            live_handles_edges <= shadow_hits,
+            "DJINN_ROUTE_PARITY live route graph must not exceed shadow route edges",
+        );
     }
 
     #[test]

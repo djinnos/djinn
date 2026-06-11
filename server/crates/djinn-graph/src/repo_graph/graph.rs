@@ -138,6 +138,16 @@ pub struct SymbolRange {
     pub node: NodeIndex,
 }
 
+/// Computed audit metadata for route-consumer edges. Kept out of persisted edge
+/// structs so old graph artifacts remain compatible while op-layer callers can
+/// still display the language chain that justified a `Fetches`/route link.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RouteEdgeLanguageChain {
+    pub source_language: Option<String>,
+    pub target_language: Option<String>,
+    pub is_cross_language: bool,
+}
+
 impl RepoDependencyGraph {
     /// Read the inferred-route exclusion config attached to this graph.
     pub fn route_exclusion_config(&self) -> &RouteExclusionConfig {
@@ -147,6 +157,41 @@ impl RepoDependencyGraph {
     /// Replace the inferred-route exclusion config sidecar.
     pub fn set_route_exclusion_config(&mut self, config: RouteExclusionConfig) {
         self.route_exclusion_config = config;
+    }
+
+    /// Compute compat-safe language-chain audit metadata for a route edge.
+    pub fn route_edge_language_chain(
+        &self,
+        source: NodeIndex,
+        target: NodeIndex,
+        kind: RepoGraphEdgeKind,
+    ) -> Option<RouteEdgeLanguageChain> {
+        if !matches!(
+            kind,
+            RepoGraphEdgeKind::HandlesRoute | RepoGraphEdgeKind::Fetches | RepoGraphEdgeKind::Route
+        ) {
+            return None;
+        }
+        let source_language = self.graph[source].language.clone();
+        let target_language = self.graph[target].language.clone();
+        let is_cross_language = source_language.is_some()
+            && target_language.is_some()
+            && source_language != target_language;
+        Some(RouteEdgeLanguageChain {
+            source_language,
+            target_language,
+            is_cross_language,
+        })
+    }
+
+    pub fn is_cross_language_route_edge(
+        &self,
+        source: NodeIndex,
+        target: NodeIndex,
+        kind: RepoGraphEdgeKind,
+    ) -> bool {
+        self.route_edge_language_chain(source, target, kind)
+            .is_some_and(|chain| chain.is_cross_language)
     }
 
     pub fn build(indices: &[ParsedScipIndex]) -> Self {
@@ -262,7 +307,7 @@ impl RepoDependencyGraph {
             // Route/Tool nodes are synthetic affordances. Keep them in the
             // PageRank projection so their edges still contribute to real
             // symbols, but do not expose them as ranked architecture hubs.
-            if node.is_route_or_tool() {
+            if super::ranking::is_route_or_tool_node(node) {
                 continue;
             }
             let page_rank = page_rank_scores[node_index.index()];
@@ -1287,6 +1332,7 @@ mod tests {
         let caller = graph
             .graph_mut_unchecked()
             .add_node(symbol_node("scip-ts pkg ui `loadAgents`().", "loadAgents"));
+        graph.graph_mut_unchecked()[caller].language = Some("typescript".to_string());
 
         graph.add_handles_route_edge(route, handler, "axum-router-new", Some(1.25));
         graph.add_fetches_edge(caller, route, "ts-fetch-literal", None);
@@ -1317,6 +1363,16 @@ mod tests {
             fetches.weight().weight,
             edge_weight(RepoGraphEdgeKind::Fetches)
         );
+        let language_chain = graph
+            .route_edge_language_chain(caller, route, RepoGraphEdgeKind::Fetches)
+            .expect("route edge language chain");
+        assert_eq!(
+            language_chain.source_language.as_deref(),
+            Some("typescript")
+        );
+        assert_eq!(language_chain.target_language.as_deref(), Some("rust"));
+        assert!(language_chain.is_cross_language);
+        assert!(graph.is_cross_language_route_edge(caller, route, RepoGraphEdgeKind::Fetches));
     }
 
     #[test]

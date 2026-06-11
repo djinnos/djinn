@@ -12,6 +12,16 @@ use petgraph::visit::EdgeRef;
 use super::edge::{RepoGraphEdge, RepoGraphEdgeKind};
 use super::node::{RepoGraphNode, RepoGraphNodeKind, RepoNodeKey};
 
+/// Reusable centrality/noise predicate for synthetic Route/Tool affordance nodes.
+///
+/// Route and Tool nodes are anchors for inferred edges, not architecture hubs in
+/// their own right.  Keep them in the graph so PageRank can flow through their
+/// edges, but filter them out before any `ranked`/god-object/high-coupling
+/// diagnostic projects node centrality to users.
+pub(crate) fn is_route_or_tool_node(node: &RepoGraphNode) -> bool {
+    node.is_route_or_tool()
+}
+
 /// Returns true when a `Route` node is backed by only one extraction evidence
 /// source and has no consumer/client edges.
 ///
