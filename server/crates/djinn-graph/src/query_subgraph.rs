@@ -598,6 +598,11 @@ fn node_allowed(node: &RepoGraphNode, params: &QuerySubgraphParams) -> bool {
     {
         return false;
     }
+    if params.kind_filter.is_none()
+        && crate::repo_graph::is_default_hidden_synthetic_kind(node.kind)
+    {
+        return false;
+    }
     if let Some(workspace) = params.workspace.as_deref()
         && let Some(node_workspace) = node.workspace.as_deref()
         && node_workspace != workspace
