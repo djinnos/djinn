@@ -272,6 +272,52 @@ async fn mcp_tools_list_schemas_do_not_use_nonstandard_uint_or_nullable_without_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn environment_config_tool_schemas_expose_workspace_metadata() {
+    let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+    let mcp = djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state());
+    let tools = mcp.all_tool_schemas();
+
+    let schema_surfaces = [
+        ("project_environment_config_get", "outputSchema"),
+        ("project_environment_config_reset", "outputSchema"),
+        ("project_environment_config_set", "inputSchema"),
+    ];
+
+    for (tool_name, schema_key) in schema_surfaces {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some(tool_name))
+            .unwrap_or_else(|| panic!("missing {tool_name} schema"));
+        let schema = tool
+            .get(schema_key)
+            .unwrap_or_else(|| panic!("{tool_name} missing {schema_key}"));
+        let workspace = &schema["$defs"]["Workspace"];
+
+        assert_eq!(
+            workspace["properties"]["slug"],
+            json!({"default": null, "nullable": true, "type": "string"}),
+            "{tool_name} {schema_key} Workspace.slug schema drifted"
+        );
+        assert_eq!(
+            workspace["properties"]["name"],
+            json!({"default": null, "nullable": true, "type": "string"}),
+            "{tool_name} {schema_key} Workspace.name schema drifted"
+        );
+        assert_eq!(
+            workspace["properties"]["tags"],
+            json!({"default": [], "items": {"type": "string"}, "type": "array"}),
+            "{tool_name} {schema_key} Workspace.tags schema drifted"
+        );
+
+        let rendered = serde_json::to_string(schema).expect("schema serializes");
+        assert!(
+            !rendered.to_ascii_lowercase().contains("duplicate slug"),
+            "{tool_name} {schema_key} still advertises duplicate-slug rejection"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_tools_schema_snapshot() {
     let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
     let mcp = djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state());
