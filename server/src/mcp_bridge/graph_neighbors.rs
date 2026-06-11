@@ -28,8 +28,10 @@ pub(super) fn group_neighbors_by_file(
                 // file-grouped views can still render them without
                 // panicking.
                 RepoNodeKey::Process(_) => "<process>".to_string(),
-                // Synthetic table nodes — same bucketing strategy.
+                // Synthetic table/route/tool nodes — same bucketing strategy.
                 RepoNodeKey::Table(_) => "<table>".to_string(),
+                RepoNodeKey::Route(_) => "<route>".to_string(),
+                RepoNodeKey::Tool(_) => "<tool>".to_string(),
             });
         let entry = by_file.entry(file_label.clone()).or_insert(FileGroupEntry {
             file: file_label,
@@ -84,6 +86,8 @@ pub(crate) fn format_node_key(key: &RepoNodeKey) -> String {
         RepoNodeKey::Process(id) => format!("process:{id}"),
         // Synthetic database-table nodes get a `table:<name>` uid.
         RepoNodeKey::Table(name) => format!("table:{name}"),
+        RepoNodeKey::Route(id) => format!("route:{id}"),
+        RepoNodeKey::Tool(id) => format!("tool:{id}"),
     }
 }
 
@@ -128,6 +132,8 @@ fn kind_label(node: &RepoGraphNode) -> String {
         RepoGraphNodeKind::Process => "process".to_string(),
         // Synthetic database-table nodes carry kind `"table"`.
         RepoGraphNodeKind::Table => "table".to_string(),
+        RepoGraphNodeKind::Route => "route".to_string(),
+        RepoGraphNodeKind::Tool => "tool".to_string(),
         RepoGraphNodeKind::Symbol => match &node.symbol_kind {
             Some(ScipSymbolKind::Type) => "class".to_string(),
             Some(ScipSymbolKind::Struct) => "struct".to_string(),
@@ -189,6 +195,7 @@ fn file_path_substring_match(node: &RepoGraphNode, query: &str) -> f64 {
             RepoNodeKey::Process(_) => None,
             // Synthetic table nodes likewise carry no file affinity.
             RepoNodeKey::Table(_) => None,
+            RepoNodeKey::Route(_) | RepoNodeKey::Tool(_) => None,
         });
     match candidate_path {
         Some(path) if path.to_lowercase().contains(&q) => 1.0,
@@ -232,6 +239,7 @@ fn build_candidate(node: &RepoGraphNode, score: f64) -> Candidate {
             RepoNodeKey::Process(_) => String::new(),
             // Synthetic table nodes have no file_path either.
             RepoNodeKey::Table(_) => String::new(),
+            RepoNodeKey::Route(_) | RepoNodeKey::Tool(_) => String::new(),
         });
     Candidate {
         uid,
@@ -426,6 +434,10 @@ pub(super) fn classify_edge_category(
         // category — consumers asking "who imports/calls X" should
         // not see community membership in their answers.
         RepoGraphEdgeKind::MemberOf => EdgeCategory::References,
+        // Route extraction edges are dependency metadata; surface them as
+        // references until the control-plane bridge grows route-specific
+        // categories.
+        RepoGraphEdgeKind::HandlesRoute | RepoGraphEdgeKind::Fetches => EdgeCategory::References,
         // PR F2: `StepInProcess` is the synthetic process-membership
         // edge. Symbols receive these as incoming from a `Process`
         // node; expose under its own category so UI groupers can
@@ -460,6 +472,7 @@ pub(super) fn build_related_symbol(node: &RepoGraphNode, confidence: f64) -> Rel
             RepoNodeKey::Process(_) => None,
             // Synthetic table nodes likewise carry no file affinity.
             RepoNodeKey::Table(_) => None,
+            RepoNodeKey::Route(_) | RepoNodeKey::Tool(_) => None,
         });
     RelatedSymbol {
         uid: format_node_key(&node.id),

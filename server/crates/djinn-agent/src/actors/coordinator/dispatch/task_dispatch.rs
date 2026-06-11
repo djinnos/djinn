@@ -466,6 +466,29 @@ impl CoordinatorActor {
                         // fails over; only the terminal-close counter is spared.
                         let throttle = provider_failure.is_some_and(|f| f.throttle);
 
+                        // Trigger B: the task keeps reappearing for the SAME
+                        // role with no typed provider failure to blame — its
+                        // runs complete but the task never converges (the
+                        // review-cycle bounce that never passes through `open`,
+                        // so trigger A's reopen_count never arms). Route it to
+                        // a Planner intervention instead of riding the ladder
+                        // to the terminal close at MAX_DISPATCH_FAILURES, which
+                        // would force-close a task whose durable work may be
+                        // fine. Falls through to the ordinary ladder when the
+                        // Planner was already routed for this loop (idempotency
+                        // marker) — the terminal close then remains the final
+                        // backstop.
+                        if should_route_cycling_intervention(
+                            role,
+                            next_streak,
+                            provider_failure.is_some(),
+                        ) && self
+                            .maybe_intervene_on_cycling_task(&task, role, next_streak)
+                            .await
+                        {
+                            continue;
+                        }
+
                         // After MAX consecutive same-role failures the task is
                         // structurally doomed (e.g. its run can never complete);
                         // fail it terminally instead of looping forever. Skipped

@@ -1,0 +1,572 @@
+//! Best-effort HTTP route extraction wired into the canonical graph warm path.
+//!
+//! Framework-specific extractors materialize synthetic `Route` nodes and typed
+//! route edges without changing the SCIP-derived symbol/file graph. The pass is
+//! intentionally conservative and non-fatal: per-file read/parse failures are
+//! reported in [`RouteExtractionReport`] and logged by the caller, while the
+//! canonical graph continues to build from the SCIP-derived graph.
+
+pub mod axum;
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use petgraph::graph::NodeIndex;
+
+pub use axum::{AxumRouteHit, detect_axum_routes};
+
+use crate::repo_graph::{RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNodeKind, RepoNodeKey};
+
+/// Environment flag that disables route extraction when set to `0` / `false`.
+/// Default = on.
+pub const ROUTE_DETECTION_FLAG: &str = "DJINN_ROUTE_DETECTION";
+
+/// Summary emitted by [`detect_routes`] for rollout observability.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RouteExtractionReport {
+    pub route_nodes_added: usize,
+    pub handles_route_edges_added: usize,
+    pub fetches_edges_added: usize,
+    pub unmatched_fetch_count: usize,
+    pub unresolved_consumer_count: usize,
+    pub skipped_files: Vec<PathBuf>,
+    /// Per-file extraction failure messages. Multiple entries for the same
+    /// file are allowed so callers can log each failure without losing order.
+    pub file_failures: Vec<(PathBuf, Vec<String>)>,
+}
+
+/// Returns `true` when route extraction should run.
+pub fn route_detection_enabled() -> bool {
+    match std::env::var(ROUTE_DETECTION_FLAG) {
+        Ok(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => true,
+    }
+}
+
+#[cfg(test)]
+pub(crate) static ROUTE_DETECTION_ENV_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
+/// Run server-side axum extraction first, then TypeScript fetch consumers so
+/// consumer edges can resolve against the already-materialized Route nodes.
+pub fn detect_routes(
+    graph: &mut RepoDependencyGraph,
+    project_root: &Path,
+) -> RouteExtractionReport {
+    let mut report = RouteExtractionReport::default();
+
+    preflight_readable_candidate_files(graph, project_root, &mut report);
+
+    let route_nodes_before = count_nodes(graph, RepoGraphNodeKind::Route);
+    let handles_edges_before = count_edges(graph, RepoGraphEdgeKind::HandlesRoute);
+    let axum_report = axum::detect_axum_routes(graph, project_root);
+    let route_nodes_after = count_nodes(graph, RepoGraphNodeKind::Route);
+    let handles_edges_after = count_edges(graph, RepoGraphEdgeKind::HandlesRoute);
+    report.route_nodes_added = route_nodes_after.saturating_sub(route_nodes_before);
+    report.handles_route_edges_added = handles_edges_after.saturating_sub(handles_edges_before);
+
+    let mut routes_by_path = BTreeMap::new();
+    for hit in axum_report.hits {
+        if let Some(route_node) = hit.route_node {
+            routes_by_path.entry(hit.path).or_insert(route_node);
+        }
+    }
+    if routes_by_path.is_empty() {
+        collect_existing_route_nodes(graph, &mut routes_by_path);
+    }
+
+    detect_typescript_fetches(graph, project_root, &routes_by_path, &mut report);
+    report
+}
+
+fn preflight_readable_candidate_files(
+    graph: &RepoDependencyGraph,
+    project_root: &Path,
+    report: &mut RouteExtractionReport,
+) {
+    for (rel_path, _file_node) in file_nodes(graph, |lang, path| {
+        is_rust_file(lang, path) || is_typescript_fetch_candidate(lang, path)
+    }) {
+        if let Err(error) = std::fs::read_to_string(project_root.join(&rel_path)) {
+            record_file_failure(report, rel_path, error.to_string());
+        }
+    }
+}
+
+fn detect_typescript_fetches(
+    graph: &mut RepoDependencyGraph,
+    project_root: &Path,
+    routes_by_path: &BTreeMap<String, NodeIndex>,
+    report: &mut RouteExtractionReport,
+) {
+    if routes_by_path.is_empty() {
+        return;
+    }
+
+    for (rel_path, _file_node) in file_nodes(graph, is_typescript_fetch_candidate) {
+        let source = match std::fs::read_to_string(project_root.join(&rel_path)) {
+            Ok(source) => source,
+            Err(error) => {
+                record_file_failure(report, rel_path, error.to_string());
+                continue;
+            }
+        };
+        if !source.contains("fetch(") {
+            continue;
+        }
+        for fetch in scan_fetches(&source) {
+            let Some(route_node) = resolve_fetch_route(&fetch.path, routes_by_path) else {
+                report.unmatched_fetch_count += 1;
+                continue;
+            };
+            let line = byte_to_line(&source, fetch.byte_offset);
+            if let Some(consumer) = enclosing_symbol(graph, &rel_path, line) {
+                graph.add_route_edge(
+                    consumer,
+                    route_node,
+                    RepoGraphEdgeKind::Fetches,
+                    fetch.confidence,
+                    fetch.reason,
+                );
+                report.fetches_edges_added += 1;
+            } else {
+                report.unresolved_consumer_count += 1;
+            }
+        }
+    }
+}
+
+fn resolve_fetch_route(
+    fetch_path: &str,
+    routes_by_path: &BTreeMap<String, NodeIndex>,
+) -> Option<NodeIndex> {
+    routes_by_path
+        .iter()
+        .find(|(route_path, _)| {
+            fetch_path == route_path.as_str()
+                || fetch_path.starts_with(route_path.as_str())
+                || route_path.starts_with(fetch_path)
+        })
+        .map(|(_, route_node)| *route_node)
+}
+
+fn collect_existing_route_nodes(
+    graph: &RepoDependencyGraph,
+    routes_by_path: &mut BTreeMap<String, NodeIndex>,
+) {
+    for idx in graph.graph().node_indices() {
+        let node = graph.node(idx);
+        if node.kind != RepoGraphNodeKind::Route {
+            continue;
+        }
+        if let Some(path) = route_path_from_display_name(&node.display_name) {
+            routes_by_path.entry(path).or_insert(idx);
+        }
+    }
+}
+
+fn route_path_from_display_name(display_name: &str) -> Option<String> {
+    let (_, rest) = display_name.split_once(' ')?;
+    let path = rest.rsplit_once(" (").map_or(rest, |(path, _)| path);
+    (!path.is_empty()).then(|| path.to_string())
+}
+
+fn count_nodes(graph: &RepoDependencyGraph, kind: RepoGraphNodeKind) -> usize {
+    graph
+        .graph()
+        .node_weights()
+        .filter(|node| node.kind == kind)
+        .count()
+}
+
+fn count_edges(graph: &RepoDependencyGraph, kind: RepoGraphEdgeKind) -> usize {
+    graph
+        .graph()
+        .edge_weights()
+        .filter(|edge| edge.kind == kind)
+        .count()
+}
+
+fn record_file_failure(report: &mut RouteExtractionReport, rel_path: PathBuf, message: String) {
+    if !report.skipped_files.contains(&rel_path) {
+        report.skipped_files.push(rel_path.clone());
+    }
+    if let Some((_, messages)) = report
+        .file_failures
+        .iter_mut()
+        .find(|(path, _)| path == &rel_path)
+    {
+        if !messages.contains(&message) {
+            messages.push(message);
+        }
+    } else {
+        report.file_failures.push((rel_path, vec![message]));
+    }
+}
+
+fn file_nodes<F>(graph: &RepoDependencyGraph, mut include: F) -> Vec<(PathBuf, NodeIndex)>
+where
+    F: FnMut(Option<&str>, &Path) -> bool,
+{
+    graph
+        .graph()
+        .node_indices()
+        .filter_map(|idx| {
+            let node = graph.node(idx);
+            if node.kind != RepoGraphNodeKind::File {
+                return None;
+            }
+            let path = node.file_path.clone().or_else(|| match &node.id {
+                RepoNodeKey::File(path) => Some(path.clone()),
+                _ => None,
+            })?;
+            if include(node.language.as_deref(), &path) {
+                Some((path, idx))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn is_rust_file(lang: Option<&str>, path: &Path) -> bool {
+    lang == Some("rust") || path.extension().is_some_and(|ext| ext == "rs")
+}
+
+fn is_typescript_fetch_candidate(lang: Option<&str>, path: &Path) -> bool {
+    let language_matches = matches!(lang, Some("typescript" | "javascript"));
+    let extension_matches = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| matches!(ext, "ts" | "js" | "tsx" | "jsx"));
+    if !language_matches && !extension_matches {
+        return false;
+    }
+    let path = path.to_string_lossy();
+    path.starts_with("ui/src/api/") || path.starts_with("ui/src/components/")
+}
+
+#[derive(Debug, Clone)]
+struct FetchHit {
+    path: String,
+    byte_offset: usize,
+    confidence: f64,
+    reason: &'static str,
+}
+
+fn scan_fetches(source: &str) -> Vec<FetchHit> {
+    let mut out = Vec::new();
+    let mut cursor = 0;
+    while let Some(pos) = source[cursor..].find("fetch(") {
+        let start = cursor + pos + "fetch(".len();
+        let arg_start = skip_ws(source, start);
+        if source.as_bytes().get(arg_start) == Some(&b'`') {
+            if let Some((template, _end)) = parse_until(source, arg_start + 1, '`')
+                && let Some(path) = first_path_literal(&template)
+            {
+                out.push(FetchHit {
+                    path,
+                    byte_offset: arg_start,
+                    confidence: 0.70,
+                    reason: "ts-fetch-template",
+                });
+            }
+        } else if let Some((literal, _end)) = parse_quoted(source, arg_start)
+            && literal.starts_with('/')
+        {
+            out.push(FetchHit {
+                path: literal,
+                byte_offset: arg_start,
+                confidence: 0.70,
+                reason: "ts-fetch-literal",
+            });
+        } else if let Some(window) = source.get(arg_start..source.len().min(arg_start + 256))
+            && let Some(path) = first_path_literal(window)
+        {
+            out.push(FetchHit {
+                path,
+                byte_offset: arg_start,
+                confidence: 0.70,
+                reason: "ts-fetch-template",
+            });
+        }
+        cursor = start;
+    }
+    out
+}
+
+fn enclosing_symbol(graph: &RepoDependencyGraph, rel_path: &Path, line: u32) -> Option<NodeIndex> {
+    graph
+        .symbols_enclosing(rel_path, line, line)
+        .into_iter()
+        .min_by_key(|node| {
+            graph
+                .range_for_node(*node, rel_path)
+                .map(|(start, end)| end.saturating_sub(start))
+                .unwrap_or(u32::MAX)
+        })
+}
+
+fn parse_quoted(source: &str, start: usize) -> Option<(String, usize)> {
+    let start = skip_ws(source, start);
+    let quote = *source.as_bytes().get(start)?;
+    if quote != b'\'' && quote != b'"' {
+        return None;
+    }
+    parse_until(source, start + 1, quote as char)
+}
+
+fn parse_until(source: &str, start: usize, term: char) -> Option<(String, usize)> {
+    let mut escaped = false;
+    for (off, ch) in source[start..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == term {
+            return Some((
+                source[start..start + off].to_string(),
+                start + off + ch.len_utf8(),
+            ));
+        }
+    }
+    None
+}
+
+fn first_path_literal(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'/' && bytes[i + 1].is_ascii_alphanumeric() {
+            let end = (i + 1..bytes.len())
+                .find(|&j| {
+                    matches!(
+                        bytes[j],
+                        b'`' | b'\'' | b'"' | b' ' | b'\n' | b'\r' | b'\t' | b'?' | b'#' | b'$'
+                    )
+                })
+                .unwrap_or(bytes.len());
+            return Some(s[i..end].to_string());
+        }
+        i += 1;
+    }
+    None
+}
+
+fn skip_ws(source: &str, mut i: usize) -> usize {
+    while source
+        .as_bytes()
+        .get(i)
+        .is_some_and(u8::is_ascii_whitespace)
+    {
+        i += 1;
+    }
+    i
+}
+
+fn byte_to_line(source: &str, byte_offset: usize) -> u32 {
+    1 + source[..source.len().min(byte_offset)]
+        .bytes()
+        .filter(|b| *b == b'\n')
+        .count() as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::repo_graph::{
+        RepoGraphArtifact, RepoGraphArtifactEdge, RepoGraphArtifactSymbolRange, RepoGraphNode,
+        edge_confidence_floor, edge_weight_for,
+    };
+    use crate::scip_parser::ScipSymbolKind;
+
+    fn fixture_node(
+        id: RepoNodeKey,
+        kind: RepoGraphNodeKind,
+        display_name: &str,
+        language: Option<&str>,
+        file_path: Option<&str>,
+        symbol: Option<&str>,
+        is_external: bool,
+    ) -> RepoGraphNode {
+        RepoGraphNode {
+            id,
+            kind,
+            display_name: display_name.to_string(),
+            language: language.map(str::to_string),
+            file_path: file_path.map(PathBuf::from),
+            symbol: symbol.map(str::to_string),
+            symbol_kind: (kind == RepoGraphNodeKind::Symbol).then_some(ScipSymbolKind::Function),
+            is_external,
+            visibility: None,
+            signature: None,
+            documentation: Vec::new(),
+            signature_parts: None,
+            is_test: false,
+            complexity: None,
+            workspace: None,
+            route_framework: None,
+            route_handler_symbol: None,
+        }
+    }
+
+    fn fixture_edge(
+        source: usize,
+        target: usize,
+        kind: RepoGraphEdgeKind,
+    ) -> RepoGraphArtifactEdge {
+        RepoGraphArtifactEdge {
+            source,
+            target,
+            kind,
+            weight: edge_weight_for(kind),
+            evidence_count: 1,
+            confidence: edge_confidence_floor(kind),
+            reason: None,
+            step: None,
+        }
+    }
+
+    fn fixture_graph() -> RepoDependencyGraph {
+        let nodes = vec![
+            fixture_node(
+                RepoNodeKey::File(PathBuf::from("server/src/routes.rs")),
+                RepoGraphNodeKind::File,
+                "server/src/routes.rs",
+                Some("rust"),
+                Some("server/src/routes.rs"),
+                None,
+                false,
+            ),
+            fixture_node(
+                RepoNodeKey::Symbol("axum::Router".to_string()),
+                RepoGraphNodeKind::Symbol,
+                "Router",
+                Some("rust"),
+                None,
+                Some("axum::Router"),
+                true,
+            ),
+            fixture_node(
+                RepoNodeKey::Symbol("test server/src/routes.rs/list_agents().".to_string()),
+                RepoGraphNodeKind::Symbol,
+                "list_agents",
+                Some("rust"),
+                Some("server/src/routes.rs"),
+                Some("test server/src/routes.rs/list_agents()."),
+                false,
+            ),
+            fixture_node(
+                RepoNodeKey::File(PathBuf::from("ui/src/api/agents.ts")),
+                RepoGraphNodeKind::File,
+                "ui/src/api/agents.ts",
+                Some("typescript"),
+                Some("ui/src/api/agents.ts"),
+                None,
+                false,
+            ),
+            fixture_node(
+                RepoNodeKey::Symbol("ts ui/src/api/agents.ts fetchAgents().".to_string()),
+                RepoGraphNodeKind::Symbol,
+                "fetchAgents",
+                Some("typescript"),
+                Some("ui/src/api/agents.ts"),
+                Some("ts ui/src/api/agents.ts fetchAgents()."),
+                false,
+            ),
+            fixture_node(
+                RepoNodeKey::File(PathBuf::from("server/src/missing.rs")),
+                RepoGraphNodeKind::File,
+                "server/src/missing.rs",
+                Some("rust"),
+                Some("server/src/missing.rs"),
+                None,
+                false,
+            ),
+        ];
+        RepoDependencyGraph::from_artifact(&RepoGraphArtifact {
+            version: crate::repo_graph::REPO_GRAPH_ARTIFACT_VERSION,
+            nodes,
+            edges: vec![fixture_edge(0, 1, RepoGraphEdgeKind::FileReference)],
+            symbol_ranges: BTreeMap::from([(
+                PathBuf::from("ui/src/api/agents.ts"),
+                vec![RepoGraphArtifactSymbolRange {
+                    start_line: 1,
+                    end_line: 3,
+                    node: 4,
+                }],
+            )]),
+            communities: Vec::new(),
+            processes: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn route_detection_env_defaults_on_and_can_be_disabled() {
+        let _guard = ROUTE_DETECTION_ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var(ROUTE_DETECTION_FLAG) };
+        assert!(route_detection_enabled());
+        unsafe { std::env::set_var(ROUTE_DETECTION_FLAG, "0") };
+        assert!(!route_detection_enabled());
+        unsafe { std::env::set_var(ROUTE_DETECTION_FLAG, "true") };
+        assert!(route_detection_enabled());
+        unsafe { std::env::remove_var(ROUTE_DETECTION_FLAG) };
+    }
+
+    #[test]
+    fn scans_typescript_fetch_shapes() {
+        let fetches =
+            scan_fetches("fetch(`${getServerBaseUrl()}/api/agents`, {})\nfetch('/api/missing')");
+        assert_eq!(
+            fetches.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            vec!["/api/agents", "/api/missing"]
+        );
+    }
+
+    #[test]
+    fn detect_routes_runs_axum_then_typescript_and_skips_broken_files() {
+        let temp = tempfile::tempdir().expect("create temp fixture dir");
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("server/src")).unwrap();
+        std::fs::create_dir_all(root.join("ui/src/api")).unwrap();
+        std::fs::write(
+            root.join("server/src/routes.rs"),
+            "use axum::{Router, routing::get};\nfn router() -> Router<()> { Router::new().route(\"/api/agents\", get(list_agents)) }\nasync fn list_agents() {}",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("ui/src/api/agents.ts"),
+            "export function fetchAgents() {\n  return fetch(`${getServerBaseUrl()}/api/agents`, {});\n}",
+        )
+        .unwrap();
+
+        let mut graph = fixture_graph();
+        let report = detect_routes(&mut graph, root);
+
+        assert_eq!(report.route_nodes_added, 1);
+        assert_eq!(report.handles_route_edges_added, 1);
+        assert_eq!(report.fetches_edges_added, 1);
+        assert_eq!(report.unmatched_fetch_count, 0);
+        assert_eq!(report.unresolved_consumer_count, 0);
+        assert_eq!(
+            report.skipped_files,
+            vec![PathBuf::from("server/src/missing.rs")]
+        );
+        assert_eq!(report.file_failures.len(), 1);
+        assert!(
+            graph
+                .graph()
+                .node_weights()
+                .any(|node| node.kind == RepoGraphNodeKind::Route)
+        );
+    }
+}

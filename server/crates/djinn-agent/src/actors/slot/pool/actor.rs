@@ -338,6 +338,8 @@ impl SlotPool {
                 // row exists. `Free` lifecycles settle their own row through the
                 // normal terminal path, so we only settle here on `Killed`.
                 if killed {
+                    self.teardown_taskrun_jobs_for_task(&task_id, "slot_event_killed")
+                        .await;
                     self.settle_session_row(&task_id).await;
                 }
 
@@ -376,6 +378,8 @@ impl SlotPool {
                 .ok_or_else(|| PoolError::TaskNotFound {
                     task_id: task_id.to_string(),
                 })?;
+        self.teardown_taskrun_jobs_for_task(task_id, "kill_session")
+            .await;
         self.slot(slot_id)?.kill().await?;
         Ok(())
     }
@@ -393,6 +397,8 @@ impl SlotPool {
         let Some(slot_id) = self.task_to_slot.get(task_id).copied() else {
             return Ok(());
         };
+        self.teardown_taskrun_jobs_for_task(task_id, "evict_session")
+            .await;
         // Best-effort terminate; ignore errors — the point of eviction is that
         // this slot is unresponsive and its normal teardown never completed.
         if let Ok(slot) = self.slot(slot_id) {
@@ -443,6 +449,52 @@ impl SlotPool {
                 error = %e,
                 "SlotPool: failed to settle session row on kill/evict (zombie backstop will retry)"
             );
+        }
+    }
+
+    /// Best-effort task-run Job teardown for interrupting slot-pool paths. The
+    /// slot pool stays behind the RuntimeOps bridge (no direct K8s dependency),
+    /// and teardown failures are deliberately non-fatal so DB settlement and
+    /// redispatch are never wedged by a Kubernetes/API hiccup.
+    async fn teardown_taskrun_jobs_for_task(&self, task_id: &str, reason: &str) {
+        let session_repo =
+            SessionRepository::new(self.app_state.db.clone(), self.app_state.event_bus.clone());
+        let sessions = match session_repo.list_for_task(task_id).await {
+            Ok(sessions) => sessions,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    reason = %reason,
+                    error = %e,
+                    "SlotPool: failed to look up task-run ids for Job teardown"
+                );
+                return;
+            }
+        };
+
+        let mut task_run_ids = HashSet::new();
+        for session in sessions {
+            if session.status != djinn_core::models::SessionStatus::Running.as_str() {
+                continue;
+            }
+            if let Some(task_run_id) = session.task_run_id.as_deref().map(str::trim)
+                && !task_run_id.is_empty()
+            {
+                task_run_ids.insert(task_run_id.to_string());
+            }
+        }
+
+        let mcp_state = self.app_state.to_mcp_state();
+        for task_run_id in task_run_ids {
+            if let Err(e) = mcp_state.teardown_taskrun_job(&task_run_id).await {
+                tracing::warn!(
+                    task_id = %task_id,
+                    task_run_id = %task_run_id,
+                    reason = %reason,
+                    error = %e,
+                    "SlotPool: task-run Job teardown failed (continuing slot kill/evict)"
+                );
+            }
         }
     }
 

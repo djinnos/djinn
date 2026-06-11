@@ -14,6 +14,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+/// Runtime-owned reference to a Kubernetes task-run Job.
+///
+/// Primitive fields only: this crate is shared by the agent/control-plane
+/// layers and must not expose Kubernetes API objects across that boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskrunJobRef {
+    pub job_name: String,
+    pub task_run_id: String,
+}
+
 /// Server-wide canonical-graph warmer.
 ///
 /// The service owns its own single-flight + cache-freshness logic.  Callers
@@ -89,6 +99,25 @@ pub trait GraphWarmerService: Send + Sync {
     /// label reaper are the backstops). No-op default.
     async fn release_backing_service(&self, _instance_id: &str) -> Result<(), WarmerError> {
         Ok(())
+    }
+
+    /// Foreground-delete the canonical task-run Job (`djinn-taskrun-{task_run_id}`).
+    ///
+    /// Default impl errors — only a backend that owns a kube client (the
+    /// `K8sGraphWarmer`) can delete the Job. The MCP/runtime bridge maps this
+    /// to a string error; lifecycle callers treat it as best-effort.
+    async fn teardown_taskrun_job(&self, _task_run_id: &str) -> Result<(), WarmerError> {
+        Err(WarmerError::Backend(
+            "task-run Job teardown requires the kubernetes runtime".to_string(),
+        ))
+    }
+
+    /// List Kubernetes task-run Jobs known to the runtime.
+    ///
+    /// Default impl returns an empty inventory for non-Kubernetes runtimes so
+    /// callers can run the same reconciliation code in dev/test contexts.
+    async fn list_taskrun_jobs(&self) -> Result<Vec<TaskrunJobRef>, WarmerError> {
+        Ok(Vec::new())
     }
 }
 

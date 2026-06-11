@@ -1,12 +1,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+use super::workspace::RootStrategy;
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ServerDef {
     pub(super) id: &'static str,
     /// The binary name (first element) and fixed args.
     pub(super) cmd: &'static [&'static str],
     pub(super) root_markers: &'static [&'static str],
+    /// How to pick the project root among marker-bearing ancestors.
+    pub(super) root_strategy: RootStrategy,
     /// How to install this server if it's not found on PATH.
     install: InstallMethod,
 }
@@ -27,26 +31,47 @@ pub(super) fn server_for_path(path: &Path) -> Option<ServerDef> {
             id: "rust-analyzer",
             cmd: &["rust-analyzer"],
             root_markers: &["Cargo.toml"],
+            root_strategy: RootStrategy::CargoWorkspace,
             install: InstallMethod::RustAnalyzer,
         }),
         Some("go") => Some(ServerDef {
             id: "gopls",
             cmd: &["gopls"],
             root_markers: &["go.mod"],
+            root_strategy: RootStrategy::Nearest,
             install: InstallMethod::GoInstall("golang.org/x/tools/gopls"),
         }),
         Some("ts") | Some("tsx") | Some("js") | Some("jsx") => Some(ServerDef {
             id: "typescript-language-server",
             cmd: &["typescript-language-server", "--stdio"],
             root_markers: &["package.json", "tsconfig.json"],
+            root_strategy: RootStrategy::Nearest,
             install: InstallMethod::Npm(&["typescript-language-server", "typescript"]),
         }),
         Some("py") => Some(ServerDef {
             id: "pyright",
             cmd: &["pyright-langserver", "--stdio"],
             root_markers: &["pyproject.toml", "setup.py"],
+            root_strategy: RootStrategy::Nearest,
             install: InstallMethod::Npm(&["pyright"]),
         }),
+        _ => None,
+    }
+}
+
+/// Server-specific LSP `initializationOptions`.
+///
+/// rust-analyzer: disable flycheck (`checkOnSave`). Our client sends
+/// `didChangeWatchedFiles` on every agent file touch, and each trigger makes
+/// rust-analyzer run `cargo check --workspace --all-targets` into the shared
+/// per-project CARGO_TARGET_DIR — a full workspace+tests compile that holds
+/// the cargo build-dir lock and starves every other task pod's cargo
+/// commands (observed wedging 3 of 4 pods on the VPS). The agent runs its
+/// own `cargo check` constantly, so flycheck is redundant; rust-analyzer's
+/// native diagnostics (type errors etc.) still publish without it.
+pub(super) fn initialization_options(server_id: &str) -> Option<serde_json::Value> {
+    match server_id {
+        "rust-analyzer" => Some(serde_json::json!({ "checkOnSave": false })),
         _ => None,
     }
 }
@@ -287,6 +312,13 @@ mod tests {
     fn server_for_unknown_extension() {
         assert!(server_for_path(Path::new("/foo/bar.txt")).is_none());
         assert!(server_for_path(Path::new("/foo/bar")).is_none());
+    }
+
+    #[test]
+    fn rust_analyzer_disables_flycheck() {
+        let opts = initialization_options("rust-analyzer").unwrap();
+        assert_eq!(opts["checkOnSave"], serde_json::json!(false));
+        assert!(initialization_options("gopls").is_none());
     }
 
     #[test]

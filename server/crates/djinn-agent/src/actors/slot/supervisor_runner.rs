@@ -158,12 +158,17 @@ pub(crate) async fn run_supervisor_dispatch(
     // pod kill (Job deadline) redispatching as a fresh ~55-min worker run.
     //
     // When the worker's commits are durable on the mirror task_branch (it
-    // exists and is ahead of base — the sibling eager-push makes this hold
-    // after the worker stage), upgrade to the reviewer-only `ReviewResume`
-    // flow so the redispatch reviews the existing diff instead of redoing the
-    // work. This is driven by what DURABLY happened (branch present), not by an
-    // outcome emitted after cancellation — so a cancelled reviewer run never
-    // tricks us into skipping real work (cf. the kw7s cancel-gate precedent).
+    // exists and carries commits beyond its merge-base with base — the sibling
+    // eager-push makes this hold after the worker stage), upgrade to the
+    // reviewer-only `ReviewResume` flow so the redispatch reviews the existing
+    // diff instead of redoing the work. Base having moved on (another task's
+    // PR merged mid-cycle) does NOT demote to a worker redo: requiring
+    // fast-forwardability here livelocked review-stage tasks on a busy board,
+    // because base moved during nearly every cycle (the t9wi/32bk wedge,
+    // 2026-06-11). This is driven by what DURABLY happened (branch present),
+    // not by an outcome emitted after cancellation — so a cancelled reviewer
+    // run never tricks us into skipping real work (cf. the kw7s cancel-gate
+    // precedent).
     //
     // The guard is conservative: a missing/empty task_branch (worker never
     // pushed, first cycle) keeps `ReviewResponse` and the full worker redo.

@@ -331,6 +331,69 @@ impl CoordinatorActor {
             return false;
         }
 
+        let reason = format!(
+            "Internal review loop exceeded {REOPEN_INTERVENTION_THRESHOLD} rounds without \
+             convergence (reopen_count={}). The worker keeps re-attempting but the same \
+             acceptance criteria remain unmet. Decide how to unstick this: DECOMPOSE into \
+             focused subtasks (carve out the specific unmet criterion), RESCOPE/clarify the \
+             acceptance criteria and re-dispatch, or CLOSE if the work is moot/duplicate/\
+             already-done.",
+            task.reopen_count
+        );
+        self.route_planner_intervention(task, "worker", &reason)
+            .await
+    }
+
+    /// Trigger B: route a task cycling on same-role redispatches to a Planner
+    /// intervention pass.
+    ///
+    /// Trigger A only sees loops that pass through `open` (a reviewer rejection
+    /// bumps `reopen_count`). A review-cycle livelock never reopens: the task
+    /// bounces `needs_task_review → in_progress → verifying →
+    /// needs_task_review`, each cycle a same-role reappearance counted on
+    /// `dispatch_failure_streak` while `reopen_count` stays 0 — so the only
+    /// bound was the terminal close at [`MAX_DISPATCH_FAILURES`], which
+    /// force-closes a task whose durable worker output may be perfectly fine
+    /// (the t9wi/32bk wedge, 2026-06-11). When the streak crosses
+    /// [`STREAK_INTERVENTION_THRESHOLD`] with no typed provider failure to
+    /// blame (gated by `should_route_cycling_intervention` at the call site),
+    /// hand the loop to the Planner for the same decompose / rescope / close
+    /// decision instead.
+    ///
+    /// Shares all of trigger A's machinery — second-strike terminal park,
+    /// reopen-count-keyed idempotency marker (stable across a review-cycle
+    /// loop, so one intervention per loop), backoff-state clearing — via
+    /// [`Self::route_planner_intervention`].
+    pub(in crate::actors::coordinator) async fn maybe_intervene_on_cycling_task(
+        &mut self,
+        task: &djinn_core::models::Task,
+        role: &'static str,
+        streak: u32,
+    ) -> bool {
+        let reason = format!(
+            "Task is cycling without converging: {streak} consecutive `{role}` redispatches \
+             completed without the task changing status (status `{}`, reopen_count={} — the \
+             loop never passes through `open`, so the reopen-based escalation never saw it). \
+             Each run finishes and the task lands right back where it was. Decide how to \
+             unstick this: DECOMPOSE into focused subtasks, RESCOPE/clarify the acceptance \
+             criteria and re-dispatch, or CLOSE if the durable work on the task branch is \
+             already sufficient or the task is moot/duplicate.",
+            task.status, task.reopen_count
+        );
+        self.route_planner_intervention(task, role, &reason).await
+    }
+
+    /// Shared intervention router behind triggers A and B: second-strike
+    /// terminal park, idempotency marker keyed by the task's CURRENT
+    /// `reopen_count`, backoff-state clearing, and the Planner escalation
+    /// dispatch. Returns `true` when the task was routed (or terminally
+    /// parked) — the caller skips its dispatch this pass.
+    async fn route_planner_intervention(
+        &mut self,
+        task: &djinn_core::models::Task,
+        role: &'static str,
+        reason: &str,
+    ) -> bool {
         // Second strike (terminal): the Planner has ALREADY intervened on this
         // task at least `MAX_PLANNER_INTERVENTIONS` time(s) and it has STILL
         // churned back up to the reopen threshold. The reshape/rescope did not
@@ -363,7 +426,7 @@ impl CoordinatorActor {
             // state, then terminally close (ForceClose) with the recoverable reason.
             self.dispatch_failure_streak.remove(&task.id);
             self.dispatch_cooldowns.remove(&task.id);
-            self.terminally_fail_task(task, "worker", &reason).await;
+            self.terminally_fail_task(task, role, &reason).await;
             return true;
         }
 
@@ -403,21 +466,11 @@ impl CoordinatorActor {
             return false;
         }
 
-        let reason = format!(
-            "Internal review loop exceeded {REOPEN_INTERVENTION_THRESHOLD} rounds without \
-             convergence (reopen_count={}). The worker keeps re-attempting but the same \
-             acceptance criteria remain unmet. Decide how to unstick this: DECOMPOSE into \
-             focused subtasks (carve out the specific unmet criterion), RESCOPE/clarify the \
-             acceptance criteria and re-dispatch, or CLOSE if the work is moot/duplicate/\
-             already-done.",
-            task.reopen_count
-        );
-
         tracing::warn!(
             task_id = %task.short_id,
+            role,
             reopen_count = task.reopen_count,
-            threshold = REOPEN_INTERVENTION_THRESHOLD,
-            "CoordinatorActor: stuck worker task — routing to Planner intervention"
+            "CoordinatorActor: stuck task — routing to Planner intervention"
         );
 
         // Clear the escalating-cooldown backoff state so the Planner-created
@@ -426,7 +479,7 @@ impl CoordinatorActor {
         self.dispatch_failure_streak.remove(&task.id);
         self.dispatch_cooldowns.remove(&task.id);
 
-        self.dispatch_planner_escalation(&task.id, &reason, &task.project_id)
+        self.dispatch_planner_escalation(&task.id, reason, &task.project_id)
             .await;
         true
     }

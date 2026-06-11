@@ -76,6 +76,45 @@ struct RepoGraphArtifactV10WithoutWorkspace {
 }
 
 #[derive(Debug, Deserialize)]
+struct RepoGraphArtifactV10WithoutRouteMetadata {
+    version: u32,
+    nodes: Vec<RepoGraphNodeV10WithoutRouteMetadata>,
+    edges: Vec<RepoGraphArtifactEdge>,
+    #[serde(default)]
+    symbol_ranges: BTreeMap<PathBuf, Vec<RepoGraphArtifactSymbolRange>>,
+    #[serde(default)]
+    communities: Vec<crate::communities::Community>,
+    #[serde(default)]
+    processes: Vec<RepoGraphArtifactProcess>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepoGraphNodeV10WithoutRouteMetadata {
+    id: RepoNodeKey,
+    kind: RepoGraphNodeKind,
+    display_name: String,
+    language: Option<String>,
+    file_path: Option<PathBuf>,
+    symbol: Option<String>,
+    symbol_kind: Option<ScipSymbolKind>,
+    is_external: bool,
+    #[serde(default)]
+    visibility: Option<ScipVisibility>,
+    #[serde(default)]
+    signature: Option<String>,
+    #[serde(default)]
+    documentation: Vec<String>,
+    #[serde(default)]
+    signature_parts: Option<crate::scip_parser::ScipSignatureParts>,
+    #[serde(default)]
+    is_test: bool,
+    #[serde(default)]
+    complexity: Option<ComplexityMetrics>,
+    #[serde(default)]
+    workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RepoGraphNodeV10WithoutWorkspace {
     id: RepoNodeKey,
     kind: RepoGraphNodeKind,
@@ -112,6 +151,49 @@ impl From<RepoGraphArtifactV10WithoutWorkspace> for RepoGraphArtifact {
     }
 }
 
+impl From<RepoGraphArtifactV10WithoutRouteMetadata> for RepoGraphArtifact {
+    fn from(old: RepoGraphArtifactV10WithoutRouteMetadata) -> Self {
+        Self {
+            version: old.version,
+            nodes: old.nodes.into_iter().map(RepoGraphNode::from).collect(),
+            edges: old.edges,
+            symbol_ranges: old.symbol_ranges,
+            communities: old.communities,
+            processes: old.processes,
+        }
+    }
+}
+
+impl From<RepoGraphNodeV10WithoutRouteMetadata> for RepoGraphNode {
+    fn from(old: RepoGraphNodeV10WithoutRouteMetadata) -> Self {
+        Self {
+            id: old.id,
+            kind: old.kind,
+            display_name: old.display_name,
+            language: old.language,
+            file_path: old.file_path,
+            symbol: old.symbol,
+            symbol_kind: old.symbol_kind,
+            is_external: old.is_external,
+            visibility: old.visibility,
+            signature: old.signature,
+            documentation: old.documentation,
+            signature_parts: old.signature_parts,
+            is_test: old.is_test,
+            complexity: old.complexity,
+            workspace: old.workspace,
+            // PR s6ch / cs4v: route metadata was appended after
+            // `workspace` inside artifact v10. Bincode is positional, so
+            // defaulted serde fields are not enough for already-persisted
+            // blobs that end at `workspace`; this compatibility shape
+            // preserves v10 loading when no Route/Tool metadata fields are
+            // present on disk.
+            route_framework: None,
+            route_handler_symbol: None,
+        }
+    }
+}
+
 impl From<RepoGraphNodeV10WithoutWorkspace> for RepoGraphNode {
     fn from(old: RepoGraphNodeV10WithoutWorkspace) -> Self {
         Self {
@@ -130,25 +212,33 @@ impl From<RepoGraphNodeV10WithoutWorkspace> for RepoGraphNode {
             is_test: old.is_test,
             complexity: old.complexity,
             workspace: None,
+            // PR s6ch / cs4v: route metadata is additive and not
+            // present in any v10 artifact. Older blobs hydrate as
+            // `None` so the v10 compat path stays open.
+            route_framework: None,
+            route_handler_symbol: None,
         }
     }
 }
 
-/// Deserialize a repo-graph bincode artifact, accepting both the current v10
-/// node layout (with `workspace`) and pre-workspace v10 blobs that do not carry
-/// the appended node field. The artifact version deliberately remains v10, so
+/// Deserialize a repo-graph bincode artifact, accepting the current v10 node
+/// layout, v10 blobs that include `workspace` but predate route metadata, and
+/// pre-workspace v10 blobs. The artifact version deliberately remains v10, so
 /// callers on the persisted cache path must use this compatibility seam instead
 /// of raw `bincode::deserialize`.
 pub fn deserialize_repo_graph_artifact_bincode(blob: &[u8]) -> Result<RepoGraphArtifact, String> {
     match bincode::deserialize::<RepoGraphArtifact>(blob) {
         Ok(artifact) => Ok(artifact),
-        Err(current_err) => bincode::deserialize::<RepoGraphArtifactV10WithoutWorkspace>(blob)
-            .map(RepoGraphArtifact::from)
-            .map_err(|compat_err| {
-                format!(
-                    "deserialize graph: {current_err}; v10 pre-workspace fallback also failed: {compat_err}"
-                )
-            }),
+        Err(current_err) => match bincode::deserialize::<RepoGraphArtifactV10WithoutRouteMetadata>(blob) {
+            Ok(artifact) => Ok(RepoGraphArtifact::from(artifact)),
+            Err(route_compat_err) => bincode::deserialize::<RepoGraphArtifactV10WithoutWorkspace>(blob)
+                .map(RepoGraphArtifact::from)
+                .map_err(|workspace_compat_err| {
+                    format!(
+                        "deserialize graph: {current_err}; v10 pre-route-metadata fallback also failed: {route_compat_err}; v10 pre-workspace fallback also failed: {workspace_compat_err}"
+                    )
+                }),
+        },
     }
 }
 

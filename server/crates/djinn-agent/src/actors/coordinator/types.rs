@@ -246,6 +246,49 @@ pub(super) const PROVIDER_RETRY_AFTER_MAX: Duration = Duration::from_secs(6 * 60
 /// patrols).
 pub(super) const MAX_DISPATCH_FAILURES: u32 = 10;
 
+/// Consecutive same-role failed dispatch attempts after which the task is
+/// routed to a Planner intervention (trigger B) instead of only riding the
+/// cooldown ladder toward [`MAX_DISPATCH_FAILURES`].
+///
+/// Trigger A (`reopen_count >= REOPEN_INTERVENTION_THRESHOLD`) only sees loops
+/// that pass through `open`: a reviewer rejection reopens the task and bumps
+/// the count. A review-cycle livelock never reopens — the task bounces
+/// `needs_task_review → in_progress → verifying → needs_task_review`, each
+/// cycle a same-role reappearance, `reopen_count` pinned at 0 — so the only
+/// bound was the terminal close at streak 10, which force-closes a task whose
+/// worker output may be perfectly fine (the t9wi/32bk wedge, 2026-06-11:
+/// streaks of 7-8 with 30-min cooldowns while the reviewer stage never ran).
+/// Trigger B hands that loop to the Planner for the same decompose / rescope /
+/// close decision the reopen path gets, well before the terminal close.
+///
+/// Rationale for `4`: the original attempt plus three same-role cycles — with
+/// the ladder that already spans well over an hour of wall clock, comparable
+/// depth to the reopen threshold of 3 — without firing on a one-off pod kill
+/// or a transient infra blip that the first cooldown rungs absorb.
+pub(super) const STREAK_INTERVENTION_THRESHOLD: u32 = 4;
+
+/// Trigger-B gate: should a same-role failure streak route this dispatch to a
+/// Planner intervention?
+///
+/// Only "the run keeps completing but the task never moves" loops qualify:
+///
+/// - `had_provider_failure` excludes reappearances explained by a typed
+///   provider fault (throttle, auth, server error) — those are provider
+///   problems, already bounded by the breaker/failover and the cooldown
+///   ladder, not task-shape problems a Planner can fix.
+/// - worker/reviewer roles only: a planner-role task must never escalate to
+///   another Planner (recursive intervention), and lead/architect loops have
+///   their own routing.
+pub(super) fn should_route_cycling_intervention(
+    role: &str,
+    next_streak: u32,
+    had_provider_failure: bool,
+) -> bool {
+    !had_provider_failure
+        && next_streak >= STREAK_INTERVENTION_THRESHOLD
+        && matches!(role, "worker" | "reviewer")
+}
+
 /// A task that becomes dispatch-ready again (with no active session) within
 /// this window of its last dispatch is treated as a failed attempt and backed
 /// off. Wide enough to catch SLOW failures — e.g. a worker that runs ~30s and
@@ -441,6 +484,53 @@ mod cooldown_tests {
         assert_eq!(
             apply_provider_retry_floor(ladder, Some(absurd_ms)),
             PROVIDER_RETRY_AFTER_MAX
+        );
+    }
+
+    #[test]
+    fn trigger_b_gate_arms_on_clean_same_role_streak_only() {
+        // The review-cycle livelock shape: reviewer-role reappearances with no
+        // provider failure, streak at the threshold → arm the Planner route.
+        assert!(
+            should_route_cycling_intervention("reviewer", STREAK_INTERVENTION_THRESHOLD, false),
+            "a clean reviewer streak at the threshold must arm trigger B \
+             (the t9wi/32bk review-cycle bounce)"
+        );
+        assert!(should_route_cycling_intervention(
+            "worker",
+            STREAK_INTERVENTION_THRESHOLD + 3,
+            false
+        ));
+
+        // Below the threshold: the ordinary ladder rungs absorb one-off pod
+        // kills / infra blips without burning a Planner session.
+        assert!(!should_route_cycling_intervention(
+            "reviewer",
+            STREAK_INTERVENTION_THRESHOLD - 1,
+            false
+        ));
+
+        // A typed provider failure explains the reappearance — that's a
+        // provider problem (breaker/failover territory), not a task-shape
+        // problem a Planner can fix.
+        assert!(!should_route_cycling_intervention(
+            "reviewer",
+            STREAK_INTERVENTION_THRESHOLD,
+            true
+        ));
+
+        // Planner-role tasks must never recursively escalate to a Planner.
+        assert!(!should_route_cycling_intervention(
+            "planner",
+            STREAK_INTERVENTION_THRESHOLD,
+            false
+        ));
+
+        // Trigger B must arm strictly before the terminal close so the
+        // Planner gets its pass before a force-close can fire.
+        assert!(
+            STREAK_INTERVENTION_THRESHOLD < MAX_DISPATCH_FAILURES,
+            "intervention must precede the terminal-close backstop"
         );
     }
 }

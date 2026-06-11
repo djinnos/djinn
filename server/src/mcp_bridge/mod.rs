@@ -10,6 +10,7 @@ use std::path::Path;
 use async_trait::async_trait;
 use djinn_control_plane::bridge::{
     GitOps, ProvisionServiceRequest, ProvisionedService, RuntimeOps, SemanticQueryEmbedding,
+    TaskrunJobRef,
 };
 use djinn_git::{GitActorHandle, GitError};
 
@@ -115,6 +116,33 @@ impl RuntimeOps for AppState {
             .release_backing_service(instance_id)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    async fn teardown_taskrun_job(&self, task_run_id: &str) -> Result<(), String> {
+        // The K8s graph warmer is the server component that owns the live kube
+        // client; the in-process warmer's default impl returns a clear
+        // unsupported error for dev/test runtimes without Kubernetes.
+        self.graph_warmer()
+            .await
+            .teardown_taskrun_job(task_run_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn list_taskrun_jobs(&self) -> Result<Vec<TaskrunJobRef>, String> {
+        let jobs = self
+            .graph_warmer()
+            .await
+            .list_taskrun_jobs()
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(jobs
+            .into_iter()
+            .map(|job| TaskrunJobRef {
+                job_name: job.job_name,
+                task_run_id: job.task_run_id,
+            })
+            .collect())
     }
 
     async fn cleanup_task_branches(&self, task_id: &str) {

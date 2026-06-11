@@ -209,6 +209,299 @@ fn build_stamps_workspace_from_parsed_index() {
 }
 
 #[test]
+fn route_and_tool_nodes_round_trip_with_metadata() {
+    let mut graph = RepoDependencyGraph::build(&[]);
+
+    let route = graph.ensure_route_node(
+        "GET /api/agents (axum)",
+        "GET /api/agents (axum)",
+        Some("rust"),
+        Some("api"),
+        Some("axum"),
+        Some("scip-rust pkg src/routes/agents.rs `list_agents`()."),
+    );
+    let tool = graph.ensure_tool_node("agents.list", "agents.list", Some("rust"), Some("api"));
+
+    let route_node = graph.node(route);
+    assert_eq!(
+        route_node.id,
+        RepoNodeKey::Route("GET /api/agents (axum)".to_string())
+    );
+    assert_eq!(route_node.kind, RepoGraphNodeKind::Route);
+    assert_eq!(route_node.display_name, "GET /api/agents (axum)");
+    assert_eq!(route_node.language.as_deref(), Some("rust"));
+    assert_eq!(route_node.workspace.as_deref(), Some("api"));
+    assert_eq!(route_node.route_framework.as_deref(), Some("axum"));
+    assert_eq!(
+        route_node.route_handler_symbol.as_deref(),
+        Some("scip-rust pkg src/routes/agents.rs `list_agents`().")
+    );
+
+    let tool_node = graph.node(tool);
+    assert_eq!(tool_node.id, RepoNodeKey::Tool("agents.list".to_string()));
+    assert_eq!(tool_node.kind, RepoGraphNodeKind::Tool);
+    assert_eq!(tool_node.display_name, "agents.list");
+    assert_eq!(tool_node.language.as_deref(), Some("rust"));
+    assert_eq!(tool_node.workspace.as_deref(), Some("api"));
+    assert_eq!(tool_node.route_framework, None);
+    assert_eq!(tool_node.route_handler_symbol, None);
+
+    let json = graph
+        .serialize_artifact()
+        .expect("serialize route/tool graph");
+    assert!(json.contains("\"kind\":\"route\""));
+    assert!(json.contains("\"kind\":\"tool\""));
+    assert!(json.contains("\"route_framework\":\"axum\""));
+    assert!(json.contains("\"route_handler_symbol\""));
+
+    let restored = RepoDependencyGraph::deserialize_artifact(&json).expect("deserialize");
+    let restored_route = restored
+        .node_lookup
+        .get(&RepoNodeKey::Route("GET /api/agents (axum)".to_string()))
+        .copied()
+        .expect("route lookup should survive artifact round trip");
+    let restored_tool = restored
+        .node_lookup
+        .get(&RepoNodeKey::Tool("agents.list".to_string()))
+        .copied()
+        .expect("tool lookup should survive artifact round trip");
+
+    assert_eq!(
+        restored.node(restored_route).route_framework.as_deref(),
+        Some("axum")
+    );
+    assert_eq!(
+        restored
+            .node(restored_route)
+            .route_handler_symbol
+            .as_deref(),
+        Some("scip-rust pkg src/routes/agents.rs `list_agents`().")
+    );
+    assert_eq!(restored.node(restored_tool).kind, RepoGraphNodeKind::Tool);
+}
+
+#[test]
+fn mixed_route_tool_artifact_bincode_round_trip_preserves_route_edges() {
+    let mut graph = RepoDependencyGraph::build(&[fixture_index()]);
+    let handler_symbol = "scip-rust pkg src/helper.rs `helper`().";
+    let caller_symbol = "scip-rust pkg src/app.rs `main`().";
+
+    let route = graph.ensure_route_node(
+        "GET /api/helper (axum)",
+        "GET /api/helper (axum)",
+        Some("rust"),
+        Some("api"),
+        Some("axum"),
+        Some(handler_symbol),
+    );
+    let _tool = graph.ensure_tool_node("helper.run", "helper.run", Some("rust"), Some("api"));
+    let handler = graph
+        .symbol_node(handler_symbol)
+        .expect("fixture helper symbol");
+    let caller = graph
+        .symbol_node(caller_symbol)
+        .expect("fixture main symbol");
+
+    graph.add_handles_route_edge(route, handler, "axum-route-attr", Some(0.87));
+    graph.add_fetches_edge(caller, route, "ts-fetch-literal", Some(0.42));
+
+    let artifact = graph.to_artifact();
+    assert_eq!(artifact.version, REPO_GRAPH_ARTIFACT_VERSION);
+    assert!(
+        artifact
+            .nodes
+            .iter()
+            .any(|node| node.kind == RepoGraphNodeKind::File)
+    );
+    assert!(
+        artifact
+            .nodes
+            .iter()
+            .any(|node| node.kind == RepoGraphNodeKind::Symbol)
+    );
+    assert!(
+        artifact
+            .nodes
+            .iter()
+            .any(|node| node.kind == RepoGraphNodeKind::Route)
+    );
+    assert!(
+        artifact
+            .nodes
+            .iter()
+            .any(|node| node.kind == RepoGraphNodeKind::Tool)
+    );
+    assert!(
+        artifact
+            .edges
+            .iter()
+            .any(|edge| edge.kind == RepoGraphEdgeKind::ContainsDefinition)
+    );
+    assert!(
+        artifact
+            .edges
+            .iter()
+            .any(|edge| edge.kind == RepoGraphEdgeKind::HandlesRoute)
+    );
+    assert!(
+        artifact
+            .edges
+            .iter()
+            .any(|edge| edge.kind == RepoGraphEdgeKind::Fetches)
+    );
+
+    let encoded = bincode::serialize(&artifact).expect("bincode serialize mixed graph");
+    let decoded = deserialize_repo_graph_artifact_bincode(&encoded)
+        .expect("deserialize mixed graph through artifact compatibility path");
+    let restored = RepoDependencyGraph::from_artifact(&decoded);
+
+    let restored_route = restored
+        .node_lookup
+        .get(&RepoNodeKey::Route("GET /api/helper (axum)".to_string()))
+        .copied()
+        .expect("route node survives bincode round trip");
+    let restored_tool = restored
+        .node_lookup
+        .get(&RepoNodeKey::Tool("helper.run".to_string()))
+        .copied()
+        .expect("tool node survives bincode round trip");
+    let restored_handler = restored
+        .symbol_node(handler_symbol)
+        .expect("handler symbol survives bincode round trip");
+    let restored_caller = restored
+        .symbol_node(caller_symbol)
+        .expect("caller symbol survives bincode round trip");
+
+    assert_eq!(restored.node(restored_route).kind, RepoGraphNodeKind::Route);
+    assert_eq!(restored.node(restored_tool).kind, RepoGraphNodeKind::Tool);
+
+    let handles_route = restored
+        .graph()
+        .edges_connecting(restored_route, restored_handler)
+        .find(|edge| edge.weight().kind == RepoGraphEdgeKind::HandlesRoute)
+        .expect("HandlesRoute edge survives bincode round trip")
+        .weight();
+    assert_eq!(handles_route.reason.as_deref(), Some("axum-route-attr"));
+    assert!((handles_route.confidence - 0.87).abs() < 1e-9);
+
+    let fetches = restored
+        .graph()
+        .edges_connecting(restored_caller, restored_route)
+        .find(|edge| edge.weight().kind == RepoGraphEdgeKind::Fetches)
+        .expect("Fetches edge survives bincode round trip")
+        .weight();
+    assert_eq!(fetches.reason.as_deref(), Some("ts-fetch-literal"));
+    assert!((fetches.confidence - 0.42).abs() < 1e-9);
+}
+
+#[test]
+fn json_route_tool_and_route_edge_names_deserialize_with_node_field_defaults() {
+    let json = format!(
+        r#"{{
+            "version": {version},
+            "nodes": [
+                {{
+                    "id": {{ "Route": "GET /api/helper (axum)" }},
+                    "kind": "route",
+                    "display_name": "GET /api/helper (axum)",
+                    "language": "rust",
+                    "file_path": null,
+                    "symbol": null,
+                    "symbol_kind": null,
+                    "is_external": false,
+                    "visibility": null,
+                    "signature": null,
+                    "documentation": [],
+                    "signature_parts": null,
+                    "is_test": false,
+                    "complexity": null,
+                    "workspace": "api"
+                }},
+                {{
+                    "id": {{ "Tool": "helper.run" }},
+                    "kind": "tool",
+                    "display_name": "helper.run",
+                    "language": "rust",
+                    "file_path": null,
+                    "symbol": null,
+                    "symbol_kind": null,
+                    "is_external": false,
+                    "visibility": null,
+                    "signature": null,
+                    "documentation": [],
+                    "signature_parts": null,
+                    "is_test": false,
+                    "complexity": null,
+                    "workspace": "api"
+                }},
+                {{
+                    "id": {{ "Symbol": "scip-rust pkg src/helper.rs `helper`()." }},
+                    "kind": "symbol",
+                    "display_name": "helper",
+                    "language": "rust",
+                    "file_path": "src/helper.rs",
+                    "symbol": "scip-rust pkg src/helper.rs `helper`().",
+                    "symbol_kind": "Function",
+                    "is_external": false,
+                    "visibility": null,
+                    "signature": null,
+                    "documentation": [],
+                    "signature_parts": null,
+                    "is_test": false,
+                    "complexity": null,
+                    "workspace": "api"
+                }}
+            ],
+            "edges": [
+                {{
+                    "source": 0,
+                    "target": 2,
+                    "kind": "handles_route",
+                    "weight": 2.0,
+                    "evidence_count": 1,
+                    "confidence": 0.91,
+                    "reason": "axum-route-attr"
+                }},
+                {{
+                    "source": 2,
+                    "target": 0,
+                    "kind": "fetches",
+                    "weight": 0.4,
+                    "evidence_count": 1,
+                    "confidence": 0.55,
+                    "reason": "ts-fetch-literal"
+                }}
+            ],
+            "symbol_ranges": {{}},
+            "communities": [],
+            "processes": []
+        }}"#,
+        version = REPO_GRAPH_ARTIFACT_VERSION
+    );
+
+    let artifact: RepoGraphArtifact = serde_json::from_str(&json).expect("deserialize route JSON");
+    assert_eq!(artifact.nodes[0].kind, RepoGraphNodeKind::Route);
+    assert_eq!(artifact.nodes[1].kind, RepoGraphNodeKind::Tool);
+    assert_eq!(artifact.nodes[0].route_framework, None);
+    assert_eq!(artifact.nodes[0].route_handler_symbol, None);
+    assert_eq!(artifact.nodes[1].route_framework, None);
+    assert_eq!(artifact.nodes[1].route_handler_symbol, None);
+    assert_eq!(artifact.edges[0].kind, RepoGraphEdgeKind::HandlesRoute);
+    assert_eq!(artifact.edges[0].reason.as_deref(), Some("axum-route-attr"));
+    assert!((artifact.edges[0].confidence - 0.91).abs() < 1e-9);
+    assert_eq!(artifact.edges[1].kind, RepoGraphEdgeKind::Fetches);
+    assert_eq!(
+        artifact.edges[1].reason.as_deref(),
+        Some("ts-fetch-literal")
+    );
+    assert!((artifact.edges[1].confidence - 0.55).abs() < 1e-9);
+
+    let restored = RepoDependencyGraph::from_artifact(&artifact);
+    assert_eq!(restored.node_count(), 3);
+    assert_eq!(restored.edge_count(), 2);
+}
+
+#[test]
 fn artifact_json_round_trip_preserves_graph() {
     let graph = RepoDependencyGraph::build(&[fixture_index()]);
     let json = graph.serialize_artifact().expect("serialize");
@@ -439,6 +732,115 @@ fn bincode_v10_artifact_without_workspace_deserializes_with_none() {
     let restored = RepoDependencyGraph::from_artifact(&decoded);
     let app_file = restored.file_node("src/app.rs").expect("app file");
     assert_eq!(restored.node(app_file).workspace, None);
+}
+
+#[test]
+fn bincode_v10_artifact_without_route_metadata_deserializes_with_none() {
+    #[derive(Serialize)]
+    struct V10RepoGraphNodeWithoutRouteMetadata {
+        id: RepoNodeKey,
+        kind: RepoGraphNodeKind,
+        display_name: String,
+        language: Option<String>,
+        file_path: Option<PathBuf>,
+        symbol: Option<String>,
+        symbol_kind: Option<ScipSymbolKind>,
+        is_external: bool,
+        visibility: Option<crate::scip_parser::ScipVisibility>,
+        signature: Option<String>,
+        documentation: Vec<String>,
+        signature_parts: Option<crate::scip_parser::ScipSignatureParts>,
+        is_test: bool,
+        complexity: Option<ComplexityMetrics>,
+        workspace: Option<String>,
+    }
+
+    #[derive(Serialize)]
+    struct V10RepoGraphArtifactWithoutRouteMetadata {
+        version: u32,
+        nodes: Vec<V10RepoGraphNodeWithoutRouteMetadata>,
+        edges: Vec<RepoGraphArtifactEdge>,
+        symbol_ranges: BTreeMap<PathBuf, Vec<RepoGraphArtifactSymbolRange>>,
+        communities: Vec<crate::communities::Community>,
+        processes: Vec<RepoGraphArtifactProcess>,
+    }
+
+    let graph = RepoDependencyGraph::build(&[fixture_index()]);
+    let artifact = graph.to_artifact();
+    assert!(
+        artifact
+            .nodes
+            .iter()
+            .all(|node| node.kind != RepoGraphNodeKind::Route
+                && node.kind != RepoGraphNodeKind::Tool)
+    );
+    assert!(artifact.edges.iter().all(|edge| !matches!(
+        edge.kind,
+        RepoGraphEdgeKind::HandlesRoute | RepoGraphEdgeKind::Fetches
+    )));
+
+    let old_nodes = artifact
+        .nodes
+        .iter()
+        .map(|node| V10RepoGraphNodeWithoutRouteMetadata {
+            id: node.id.clone(),
+            kind: node.kind,
+            display_name: node.display_name.clone(),
+            language: node.language.clone(),
+            file_path: node.file_path.clone(),
+            symbol: node.symbol.clone(),
+            symbol_kind: node.symbol_kind.clone(),
+            is_external: node.is_external,
+            visibility: node.visibility,
+            signature: node.signature.clone(),
+            documentation: node.documentation.clone(),
+            signature_parts: node.signature_parts.clone(),
+            is_test: node.is_test,
+            complexity: node.complexity,
+            workspace: node.workspace.clone(),
+        })
+        .collect();
+    let old_artifact = V10RepoGraphArtifactWithoutRouteMetadata {
+        version: REPO_GRAPH_ARTIFACT_VERSION,
+        nodes: old_nodes,
+        edges: artifact.edges.clone(),
+        symbol_ranges: artifact.symbol_ranges.clone(),
+        communities: artifact.communities.clone(),
+        processes: artifact.processes.clone(),
+    };
+
+    let encoded = bincode::serialize(&old_artifact)
+        .expect("serialize old v10 bincode without route metadata");
+    let decoded = deserialize_repo_graph_artifact_bincode(&encoded)
+        .expect("deserialize old v10 bincode without route metadata");
+
+    assert_eq!(decoded.version, REPO_GRAPH_ARTIFACT_VERSION);
+    assert!(
+        decoded
+            .nodes
+            .iter()
+            .all(|node| node.route_framework.is_none())
+    );
+    assert!(
+        decoded
+            .nodes
+            .iter()
+            .all(|node| node.route_handler_symbol.is_none())
+    );
+    assert!(decoded.nodes.iter().any(|node| {
+        node.kind == RepoGraphNodeKind::File && node.workspace.as_deref() == Some("root")
+    }));
+
+    let restored = RepoDependencyGraph::from_artifact(&decoded);
+    assert_eq!(restored.node_count(), graph.node_count());
+    assert_eq!(restored.edge_count(), graph.edge_count());
+    let app_file = restored.file_node("src/app.rs").expect("app file");
+    assert_eq!(restored.node(app_file).workspace.as_deref(), Some("root"));
+    assert!(
+        restored
+            .symbol_node("scip-rust pkg src/helper.rs `helper`().")
+            .is_some()
+    );
 }
 
 /// A `local`-prefixed symbol triggers `reason="local-prefix"` and a

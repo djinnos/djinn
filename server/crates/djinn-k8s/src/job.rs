@@ -29,6 +29,80 @@ pub const LABEL_COMPONENT: &str = "djinn.app/component";
 /// dispatched by the task-run runtime.
 pub const COMPONENT_TASK_RUN_WORKER: &str = "task-run-worker";
 
+/// Canonical task-run Job name prefix.
+pub const TASKRUN_JOB_NAME_PREFIX: &str = "djinn-taskrun-";
+
+/// Extract a task-run id from a canonical task-run Job name.
+///
+/// Returns the canonical UUID string, rejecting non-canonical prefixes and
+/// malformed UUID suffixes.
+pub fn task_run_id_from_job_name(job_name: &str) -> Option<String> {
+    let suffix = job_name.strip_prefix(TASKRUN_JOB_NAME_PREFIX)?;
+    Uuid::parse_str(suffix).ok().map(|uuid| uuid.to_string())
+}
+
+/// Extract a task-run Job inventory row from a Kubernetes Job.
+///
+/// Prefer the `djinn.app/task-run-id` label when it is present and valid, but
+/// fall back to the canonical `djinn-taskrun-{uuid}` name so older/malformed
+/// resources are still visible to the backstop reaper when the id can be
+/// parsed safely. Unparseable candidates are skipped with a diagnostic log.
+pub fn taskrun_job_ref_from_job(job: &Job) -> Option<djinn_runtime::TaskrunJobRef> {
+    let job_name = job.metadata.name.clone().unwrap_or_default();
+    if job_name.is_empty() {
+        tracing::warn!("task-run Job inventory: skipping Job without metadata.name");
+        return None;
+    }
+
+    let label_value = job
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get(LABEL_TASK_RUN_ID));
+    let task_run_id_from_label = label_value.and_then(|raw| match Uuid::parse_str(raw) {
+        Ok(uuid) => Some(uuid.to_string()),
+        Err(error) => {
+            tracing::warn!(
+                job_name = %job_name,
+                task_run_id = %raw,
+                error = %error,
+                "task-run Job inventory: invalid task-run label; trying canonical name"
+            );
+            None
+        }
+    });
+
+    let task_run_id_from_name = if job_name.starts_with(TASKRUN_JOB_NAME_PREFIX) {
+        match task_run_id_from_job_name(&job_name) {
+            Some(task_run_id) => Some(task_run_id),
+            None => {
+                tracing::warn!(
+                    job_name = %job_name,
+                    "task-run Job inventory: canonical task-run Job name has invalid UUID suffix"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let Some(task_run_id) = task_run_id_from_label.or(task_run_id_from_name) else {
+        if label_value.is_some() || job_name.starts_with(TASKRUN_JOB_NAME_PREFIX) {
+            tracing::warn!(
+                job_name = %job_name,
+                "task-run Job inventory: skipping unparseable task-run Job candidate"
+            );
+        }
+        return None;
+    };
+
+    Some(djinn_runtime::TaskrunJobRef {
+        job_name,
+        task_run_id,
+    })
+}
+
 /// Mount path where the spec Secret is exposed inside the worker container.
 pub const SPEC_MOUNT_DIR: &str = "/var/run/djinn";
 /// Full path to the bincode-encoded `TaskRunSpec` file inside the worker.
@@ -468,6 +542,62 @@ fn volume_mount(name: &str, mount_path: &str, read_only: Option<bool>) -> Volume
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn inventory_job(name: Option<&str>, label: Option<&str>) -> Job {
+        let mut labels = BTreeMap::new();
+        if let Some(label) = label {
+            labels.insert(LABEL_TASK_RUN_ID.to_string(), label.to_string());
+        }
+        Job {
+            metadata: ObjectMeta {
+                name: name.map(ToString::to_string),
+                labels: if labels.is_empty() {
+                    None
+                } else {
+                    Some(labels)
+                },
+                ..ObjectMeta::default()
+            },
+            ..Job::default()
+        }
+    }
+
+    #[test]
+    fn extracts_task_run_id_from_valid_label() {
+        let task_run_id = Uuid::now_v7();
+        let job = inventory_job(Some("unusual-job-name"), Some(&task_run_id.to_string()));
+
+        let got = taskrun_job_ref_from_job(&job).expect("label id should be extracted");
+
+        assert_eq!(got.job_name, "unusual-job-name");
+        assert_eq!(got.task_run_id, task_run_id.to_string());
+    }
+
+    #[test]
+    fn falls_back_to_canonical_name_when_label_missing_or_malformed() {
+        let task_run_id = Uuid::now_v7();
+        let job_name = format!("{TASKRUN_JOB_NAME_PREFIX}{task_run_id}");
+
+        let missing_label = taskrun_job_ref_from_job(&inventory_job(Some(&job_name), None))
+            .expect("canonical name should be extracted without label");
+        assert_eq!(missing_label.task_run_id, task_run_id.to_string());
+
+        let malformed_label =
+            taskrun_job_ref_from_job(&inventory_job(Some(&job_name), Some("not-a-uuid")))
+                .expect("canonical name should recover from malformed label");
+        assert_eq!(malformed_label.task_run_id, task_run_id.to_string());
+    }
+
+    #[test]
+    fn skips_unparseable_taskrun_job_candidates() {
+        assert!(
+            taskrun_job_ref_from_job(&inventory_job(Some("djinn-taskrun-not-a-uuid"), None))
+                .is_none()
+        );
+        assert!(taskrun_job_ref_from_job(&inventory_job(Some("other-job"), None)).is_none());
+        assert!(taskrun_job_ref_from_job(&inventory_job(None, Some("not-a-uuid"))).is_none());
+        assert!(task_run_id_from_job_name("not-djinn-taskrun-id").is_none());
+    }
 
     #[test]
     fn builds_task_run_job_manifest() {

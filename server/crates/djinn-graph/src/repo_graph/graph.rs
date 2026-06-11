@@ -496,6 +496,78 @@ impl RepoDependencyGraph {
         );
     }
 
+    /// PR s6ch / ykcg: stamp a `HandlesRoute` edge from a synthetic
+    /// [`RepoGraphNodeKind::Route`] node to the handler
+    /// [`RepoGraphNodeKind::Symbol`] node. Route extraction is out of
+    /// scope for this model task; callers supply the detector `reason`
+    /// and may override confidence, which is clamped to `[0, 1]`.
+    #[allow(dead_code)] // Route detectors land in a follow-up task.
+    pub(crate) fn add_handles_route_edge(
+        &mut self,
+        route: NodeIndex,
+        handler: NodeIndex,
+        reason: &str,
+        confidence: Option<f64>,
+    ) {
+        self.add_route_metadata_edge(
+            route,
+            handler,
+            RepoGraphEdgeKind::HandlesRoute,
+            reason,
+            confidence,
+        );
+    }
+
+    /// PR s6ch / ykcg: stamp a `Fetches` edge from a caller/client
+    /// [`RepoGraphNodeKind::Symbol`] to the synthetic
+    /// [`RepoGraphNodeKind::Route`] it invokes. Consumer inference is a
+    /// side channel; callers supply an explanatory `reason` and may
+    /// override confidence, which is clamped to `[0, 1]`.
+    #[allow(dead_code)] // Client route inference lands in a follow-up task.
+    pub(crate) fn add_fetches_edge(
+        &mut self,
+        caller: NodeIndex,
+        route: NodeIndex,
+        reason: &str,
+        confidence: Option<f64>,
+    ) {
+        self.add_route_metadata_edge(
+            caller,
+            route,
+            RepoGraphEdgeKind::Fetches,
+            reason,
+            confidence,
+        );
+    }
+
+    fn add_route_metadata_edge(
+        &mut self,
+        source: NodeIndex,
+        target: NodeIndex,
+        kind: RepoGraphEdgeKind,
+        reason: &str,
+        confidence: Option<f64>,
+    ) {
+        debug_assert!(matches!(
+            kind,
+            RepoGraphEdgeKind::HandlesRoute | RepoGraphEdgeKind::Fetches
+        ));
+        self.graph.add_edge(
+            source,
+            target,
+            RepoGraphEdge {
+                kind,
+                weight: edge_weight(kind),
+                evidence_count: 1,
+                confidence: confidence
+                    .unwrap_or_else(|| edge_confidence_floor(kind))
+                    .clamp(0.0, 1.0),
+                reason: Some(reason.to_string()),
+                step: None,
+            },
+        );
+    }
+
     /// PR F2: register a new synthetic [`RepoGraphNodeKind::Process`]
     /// node and return its [`NodeIndex`]. Idempotent: returns the
     /// existing index when a process with `id` was already inserted.
@@ -521,6 +593,11 @@ impl RepoDependencyGraph {
             is_test: false,
             complexity: None,
             workspace: None,
+            // PR s6ch / cs4v: route metadata is not applicable to
+            // process nodes — the field set is shared across kinds
+            // so the struct needs the slot but it stays `None`.
+            route_framework: None,
+            route_handler_symbol: None,
         };
         let idx = self.graph.add_node(node);
         self.node_lookup.insert(key, idx);
@@ -552,10 +629,132 @@ impl RepoDependencyGraph {
             is_test: false,
             complexity: None,
             workspace: None,
+            // PR s6ch / cs4v: route metadata is not applicable to
+            // table nodes — the field set is shared across kinds so
+            // the struct needs the slot but it stays `None`.
+            route_framework: None,
+            route_handler_symbol: None,
         };
         let idx = self.graph.add_node(node);
         self.node_lookup.insert(key, idx);
         idx
+    }
+
+    /// PR s6ch / cs4v: register a synthetic [`RepoGraphNodeKind::Route`]
+    /// node and return its [`NodeIndex`]. Idempotent on `id`. The
+    /// `id` is the stable route id shaped as `"<METHOD> <path>
+    /// (<framework>)"`, e.g. `"GET /api/agents (axum)"`. `framework`
+    /// and `handler_symbol` are stored on the node's `route_framework`
+    /// / `route_handler_symbol` metadata fields so callers can recover
+    /// the handler's [`RepoNodeKey::Symbol`] back-reference without
+    /// walking the graph. The handler-symbol edge itself is stamped
+    /// separately by the route extractor (out of scope for cs4v).
+    pub(crate) fn ensure_route_node(
+        &mut self,
+        id: &str,
+        display_name: &str,
+        language: Option<&str>,
+        workspace: Option<&str>,
+        framework: Option<&str>,
+        handler_symbol: Option<&str>,
+    ) -> NodeIndex {
+        let key = RepoNodeKey::Route(id.to_string());
+        if let Some(&idx) = self.node_lookup.get(&key) {
+            return idx;
+        }
+        let node = RepoGraphNode {
+            id: key.clone(),
+            kind: RepoGraphNodeKind::Route,
+            display_name: display_name.to_string(),
+            language: language.map(str::to_string),
+            file_path: None,
+            symbol: None,
+            symbol_kind: None,
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: Vec::new(),
+            signature_parts: None,
+            is_test: false,
+            complexity: None,
+            workspace: workspace.map(str::to_string),
+            route_framework: framework.map(str::to_string),
+            route_handler_symbol: handler_symbol.map(str::to_string),
+        };
+        let idx = self.graph.add_node(node);
+        self.node_lookup.insert(key, idx);
+        idx
+    }
+
+    /// PR s6ch / cs4v: register a synthetic [`RepoGraphNodeKind::Tool`]
+    /// node and return its [`NodeIndex`]. Idempotent on `id`. The
+    /// `id` is the stable tool id (e.g. `"agents.list"`). No
+    /// extractor lands in cs4v — the helper exists so the graph can
+    /// carry tool nodes when proposal ykcg #6 ships.
+    #[allow(dead_code)] // cs4v lands the helper ahead of its first caller.
+    pub(crate) fn ensure_tool_node(
+        &mut self,
+        id: &str,
+        display_name: &str,
+        language: Option<&str>,
+        workspace: Option<&str>,
+    ) -> NodeIndex {
+        let key = RepoNodeKey::Tool(id.to_string());
+        if let Some(&idx) = self.node_lookup.get(&key) {
+            return idx;
+        }
+        let node = RepoGraphNode {
+            id: key.clone(),
+            kind: RepoGraphNodeKind::Tool,
+            display_name: display_name.to_string(),
+            language: language.map(str::to_string),
+            file_path: None,
+            symbol: None,
+            symbol_kind: None,
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: Vec::new(),
+            signature_parts: None,
+            is_test: false,
+            complexity: None,
+            workspace: workspace.map(str::to_string),
+            // Tool nodes are forward-compatible surface only — no
+            // framework / handler back-reference fields exist on the
+            // shared struct for them.
+            route_framework: None,
+            route_handler_symbol: None,
+        };
+        let idx = self.graph.add_node(node);
+        self.node_lookup.insert(key, idx);
+        idx
+    }
+
+    /// Stamp a route extraction edge with explicit confidence/reason.
+    pub(crate) fn add_route_edge(
+        &mut self,
+        source: NodeIndex,
+        target: NodeIndex,
+        kind: RepoGraphEdgeKind,
+        confidence: f64,
+        reason: &str,
+    ) {
+        debug_assert!(matches!(
+            kind,
+            RepoGraphEdgeKind::HandlesRoute | RepoGraphEdgeKind::Fetches
+        ));
+        self.graph.add_edge(
+            source,
+            target,
+            RepoGraphEdge {
+                kind,
+                weight: edge_weight(kind),
+                evidence_count: 1,
+                confidence,
+                reason: Some(reason.to_string()),
+                step: None,
+            },
+        );
     }
 
     /// Stamp a `Reads` / `Writes` edge from a caller symbol to a
@@ -585,6 +784,42 @@ impl RepoDependencyGraph {
                 step: None,
             },
         );
+    }
+
+    /// Register a placeholder symbol for a route handler that appeared in
+    /// source but could not be matched to a SCIP definition.
+    pub(crate) fn ensure_unresolved_route_handler_node(
+        &mut self,
+        file_path: &Path,
+        handler: &str,
+    ) -> NodeIndex {
+        let symbol = format!("axum-unresolved-handler:{}:{handler}", file_path.display());
+        let key = RepoNodeKey::Symbol(symbol.clone());
+        if let Some(&idx) = self.node_lookup.get(&key) {
+            return idx;
+        }
+        let node = RepoGraphNode {
+            id: key.clone(),
+            kind: RepoGraphNodeKind::Symbol,
+            display_name: handler.to_string(),
+            language: Some("rust".to_string()),
+            file_path: Some(file_path.to_path_buf()),
+            symbol: Some(symbol),
+            symbol_kind: None,
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: Vec::new(),
+            signature_parts: None,
+            is_test: false,
+            complexity: None,
+            workspace: None,
+            route_framework: None,
+            route_handler_symbol: None,
+        };
+        let idx = self.graph.add_node(node);
+        self.node_lookup.insert(key, idx);
+        idx
     }
 
     /// Shortest dependency path between two nodes using A* over edge weights.
@@ -835,6 +1070,15 @@ pub(super) fn is_owned_by_changed_file(
         // Synthetic table nodes — same: they're rebuilt by the
         // db-access pass on the next warm.
         RepoGraphNodeKind::Table => false,
+        // PR s6ch / cs4v: synthetic route / tool nodes are never
+        // owned by a single source file — the route id is shaped
+        // `METHOD path (framework)` and the handler back-reference
+        // is denormalized, so a file-level changed-file strip
+        // shouldn't drop them. The next warm re-runs the route
+        // extractor from scratch, mirroring the `Process` /
+        // `Table` policy above.
+        RepoGraphNodeKind::Route => false,
+        RepoGraphNodeKind::Tool => false,
     }
 }
 /// True when the node represents a SCIP symbol whose identifier is
@@ -875,4 +1119,81 @@ pub(super) fn derive_edge_confidence(
     }
 
     (confidence, reason)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn symbol_node(symbol: &str, display_name: &str) -> RepoGraphNode {
+        RepoGraphNode {
+            id: RepoNodeKey::Symbol(symbol.to_string()),
+            kind: RepoGraphNodeKind::Symbol,
+            display_name: display_name.to_string(),
+            language: Some("rust".to_string()),
+            file_path: Some(PathBuf::from("src/routes.rs")),
+            symbol: Some(symbol.to_string()),
+            symbol_kind: Some(ScipSymbolKind::Function),
+            is_external: false,
+            visibility: None,
+            signature: None,
+            documentation: Vec::new(),
+            signature_parts: None,
+            is_test: false,
+            complexity: None,
+            workspace: Some("root".to_string()),
+            route_framework: None,
+            route_handler_symbol: None,
+        }
+    }
+
+    #[test]
+    fn route_edge_helpers_stamp_reason_and_clamped_confidence() {
+        let mut graph = RepoDependencyGraph::build(&[]);
+        let route = graph.ensure_route_node(
+            "GET /api/agents (axum)",
+            "GET /api/agents",
+            Some("rust"),
+            Some("root"),
+            Some("axum"),
+            Some("scip-rust pkg handlers `list_agents`()."),
+        );
+        let handler = graph.graph_mut_unchecked().add_node(symbol_node(
+            "scip-rust pkg handlers `list_agents`().",
+            "list_agents",
+        ));
+        let caller = graph
+            .graph_mut_unchecked()
+            .add_node(symbol_node("scip-ts pkg ui `loadAgents`().", "loadAgents"));
+
+        graph.add_handles_route_edge(route, handler, "axum-router-new", Some(1.25));
+        graph.add_fetches_edge(caller, route, "ts-fetch-literal", None);
+
+        let handles = graph
+            .graph()
+            .edges_connecting(route, handler)
+            .find(|edge| edge.weight().kind == RepoGraphEdgeKind::HandlesRoute)
+            .expect("handles-route edge");
+        assert_eq!(handles.weight().reason.as_deref(), Some("axum-router-new"));
+        assert_eq!(handles.weight().confidence, 1.0);
+        assert_eq!(
+            handles.weight().weight,
+            edge_weight(RepoGraphEdgeKind::HandlesRoute)
+        );
+
+        let fetches = graph
+            .graph()
+            .edges_connecting(caller, route)
+            .find(|edge| edge.weight().kind == RepoGraphEdgeKind::Fetches)
+            .expect("fetches edge");
+        assert_eq!(fetches.weight().reason.as_deref(), Some("ts-fetch-literal"));
+        assert_eq!(
+            fetches.weight().confidence,
+            edge_confidence_floor(RepoGraphEdgeKind::Fetches)
+        );
+        assert_eq!(
+            fetches.weight().weight,
+            edge_weight(RepoGraphEdgeKind::Fetches)
+        );
+    }
 }

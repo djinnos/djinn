@@ -29,7 +29,9 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use djinn_db::{Database, ProjectRepository, RepoGraphCacheRepository};
-use djinn_runtime::{BackingServiceConn, BackingServiceRequest, GraphWarmerService, WarmerError};
+use djinn_runtime::{
+    BackingServiceConn, BackingServiceRequest, GraphWarmerService, TaskrunJobRef, WarmerError,
+};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{Pod, Service};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
@@ -424,6 +426,24 @@ impl GraphWarmerService for K8sGraphWarmer {
             .delete(&service_name, &DeleteParams::default())
             .await;
         Ok(())
+    }
+
+    async fn teardown_taskrun_job(&self, task_run_id: &str) -> Result<(), WarmerError> {
+        let client = self.client.as_ref().ok_or_else(|| {
+            WarmerError::Backend("task-run Job teardown requires a live kube client".to_string())
+        })?;
+        crate::runtime::delete_taskrun_job_foreground(client, &self.config.namespace, task_run_id)
+            .await
+            .map_err(|e| WarmerError::Backend(format!("delete task-run Job: {e}")))
+    }
+
+    async fn list_taskrun_jobs(&self) -> Result<Vec<TaskrunJobRef>, WarmerError> {
+        let client = self.client.as_ref().ok_or_else(|| {
+            WarmerError::Backend("task-run Job inventory requires a live kube client".to_string())
+        })?;
+        crate::runtime::list_taskrun_jobs(client, &self.config.namespace)
+            .await
+            .map_err(|e| WarmerError::Backend(format!("list task-run Jobs: {e}")))
     }
 
     async fn trigger(&self, project_id: &str) {

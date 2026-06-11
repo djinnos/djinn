@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -12,7 +12,9 @@ use tokio::time::{Duration, sleep};
 
 use super::INIT_TIMEOUT;
 use super::diagnostics::{Diagnostic, DiagnosticsMap, new_diagnostics_map, publish};
-use super::server_config::{ServerDef, djinn_bin_dir, language_id_for_path, resolve_binary};
+use super::server_config::{
+    ServerDef, djinn_bin_dir, initialization_options, language_id_for_path, resolve_binary,
+};
 
 pub type PendingResponses =
     Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>>;
@@ -27,10 +29,21 @@ pub struct LspClient {
     pub pending: PendingResponses,
     pub seq: Arc<AtomicU64>,
     pub opened: OpenedFiles,
+    /// False while the server is still indexing and diagnostics are not yet
+    /// trustworthy. Driven by rust-analyzer's `experimental/serverStatus`
+    /// notification (`quiescent`); servers that never send it start as ready.
+    pub ready: Arc<AtomicBool>,
 }
 
-pub fn clone_client_refs(c: &LspClient) -> (ClientStdin, DiagnosticsMap, OpenedFiles) {
-    (c.stdin.clone(), c.diagnostics.clone(), c.opened.clone())
+pub fn clone_client_refs(
+    c: &LspClient,
+) -> (ClientStdin, DiagnosticsMap, OpenedFiles, Arc<AtomicBool>) {
+    (
+        c.stdin.clone(),
+        c.diagnostics.clone(),
+        c.opened.clone(),
+        c.ready.clone(),
+    )
 }
 
 pub fn clone_client_request_refs(c: &LspClient) -> (ClientStdin, PendingResponses, Arc<AtomicU64>) {
@@ -90,6 +103,13 @@ pub async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, 
 
     let pending: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
     let pending_reader = pending.clone();
+
+    // rust-analyzer reports indexing progress via `experimental/serverStatus`
+    // (we advertise the capability below); until it goes quiescent its
+    // diagnostics are not trustworthy. Servers without that notification
+    // start (and stay) ready.
+    let ready = Arc::new(AtomicBool::new(server.id != "rust-analyzer"));
+    let ready_reader = ready.clone();
 
     let reader_handle = tokio::spawn(async move {
         let mut reader = BufReader::new(stdout);
@@ -177,6 +197,18 @@ pub async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, 
                                 });
                             }
                             publish(&diagnostics_reader, uri, out).await;
+                        } else if method == Some("experimental/serverStatus") {
+                            let params = v.get("params");
+                            let quiescent = params
+                                .and_then(|p| p.get("quiescent"))
+                                .and_then(|q| q.as_bool())
+                                .unwrap_or(false);
+                            let health = params
+                                .and_then(|p| p.get("health"))
+                                .and_then(|h| h.as_str())
+                                .unwrap_or("unknown");
+                            tracing::info!(quiescent, health, "lsp: server status");
+                            ready_reader.store(quiescent, Ordering::SeqCst);
                         } else if let Some(m) = method {
                             tracing::debug!(method = m, "lsp: received server notification");
                         }
@@ -200,6 +232,7 @@ pub async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, 
         json!({
             "processId": null,
             "rootUri": format!("file://{}", root.display()),
+            "initializationOptions": initialization_options(server.id),
             "capabilities": {
                 "textDocument": {
                     "synchronization": {
@@ -211,6 +244,9 @@ pub async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, 
                     "publishDiagnostics": {
                         "versionSupport": true,
                     },
+                },
+                "experimental": {
+                    "serverStatusNotification": true,
                 },
             },
         }),
@@ -238,6 +274,7 @@ pub async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, 
         pending,
         seq,
         opened: Arc::new(Mutex::new(HashMap::new())),
+        ready,
     })
 }
 

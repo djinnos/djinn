@@ -155,6 +155,10 @@
             CodeGraphResponse::DetectedChanges(r) => r.next_step.as_deref(),
             CodeGraphResponse::Snapshot(r) => r.next_step.as_deref(),
             CodeGraphResponse::QuerySubgraph(r) => r.next_step.as_deref(),
+            CodeGraphResponse::RouteMap(r) => r.next_step.as_deref(),
+            CodeGraphResponse::ShapeCheck(r) => r.next_step.as_deref(),
+            CodeGraphResponse::ApiImpact(r) => r.next_step.as_deref(),
+            CodeGraphResponse::Flow(r) => r.next_step.as_deref(),
         }
     }
 

@@ -77,6 +77,12 @@ pub struct AgentContext {
     /// `djinn-agent` cannot depend on the server crate (per ADR-047), so the
     /// concrete `RepoGraphBridge` is wired in `server::AppState::agent_context()`.
     pub repo_graph_ops: Option<Arc<dyn RepoGraphOps>>,
+    /// Real `RuntimeOps` implementation injected at the server boundary
+    /// (typically `AppState`, via the server crate's bridge impl). Slot-pool
+    /// interrupt paths use this to route task-run Job teardown through the
+    /// control-plane seam without depending on Kubernetes directly. `None` in
+    /// off-server/test contexts falls back to the agent-internal no-op runtime.
+    pub runtime_ops: Option<Arc<dyn bridge::RuntimeOps>>,
     /// Shared bare-mirror manager. Used by the mirror-native merge path in
     /// `task_merge` to run squash-merges against an ephemeral hardlinked
     /// clone instead of a worktree under `.djinn/worktrees/.merge-*`.
@@ -268,6 +274,20 @@ impl bridge::RuntimeOps for AgentRuntimeOps {
     }
     async fn release_backing_service(&self, _instance_id: &str) -> Result<(), String> {
         Ok(())
+    }
+    async fn teardown_taskrun_job(&self, _task_run_id: &str) -> Result<(), String> {
+        // Task-run Job deletion is owned by the server-side AppState impl via
+        // the K8s graph warmer. Agent-internal/test contexts have no kube
+        // client, so this is an idempotent no-op stub.
+        Ok(())
+    }
+    async fn list_taskrun_jobs(
+        &self,
+    ) -> Result<Vec<djinn_control_plane::bridge::TaskrunJobRef>, String> {
+        // Agent-internal/test contexts have no kube client. Return a stable
+        // empty inventory so coordinator tests can exercise DB-side decisions
+        // without importing djinn-k8s.
+        Ok(Vec::new())
     }
     async fn cleanup_task_branches(&self, _task_id: &str) {
         // Branch/PR cleanup needs the mirror manager, which the agent-internal
@@ -565,6 +585,13 @@ impl AgentContext {
     /// djinn-control-plane, while agent adapters reuse their existing database/event-bus/project resolver
     /// dependencies instead of reconstructing MCP internals locally.
     pub fn to_mcp_state(&self) -> McpState {
+        let runtime_ops = self.runtime_ops.clone().unwrap_or_else(|| {
+            Arc::new(AgentRuntimeOps {
+                db: self.db.clone(),
+                event_bus: self.event_bus.clone(),
+                health_tracker: self.health_tracker.clone(),
+            }) as Arc<dyn bridge::RuntimeOps>
+        });
         McpState::new(
             self.db.clone(),
             self.event_bus.clone(),
@@ -575,11 +602,7 @@ impl AgentContext {
             None,
             None,
             Arc::new(self.lsp.clone()),
-            Arc::new(AgentRuntimeOps {
-                db: self.db.clone(),
-                event_bus: self.event_bus.clone(),
-                health_tracker: self.health_tracker.clone(),
-            }),
+            runtime_ops,
             Arc::new(AgentGitOps {
                 git_actors: self.git_actors.clone(),
             }),

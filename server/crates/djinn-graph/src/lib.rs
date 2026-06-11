@@ -32,6 +32,7 @@ pub mod processes;
 pub mod query_planner;
 pub mod query_subgraph;
 pub mod repo_graph;
+pub mod route_extraction;
 pub mod scip_indexer;
 pub mod scip_parser;
 

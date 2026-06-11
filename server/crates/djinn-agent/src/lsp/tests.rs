@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 
 use super::Diagnostic;
 use super::client::LspClient;
@@ -47,6 +47,7 @@ async fn spawn_fake_client(root: &str) -> (String, LspClient) {
         pending: Arc::new(Mutex::new(HashMap::new())),
         seq: Arc::new(AtomicU64::new(2)),
         opened: Arc::new(Mutex::new(HashMap::new())),
+        ready: Arc::new(AtomicBool::new(true)),
     };
     (key, client)
 }
