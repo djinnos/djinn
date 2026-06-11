@@ -12,14 +12,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use djinn_control_plane::bridge::{
     ApiSurfaceEntry, BoundaryRule, BoundaryViolation, CallerRef, ChangeKind, ChangedRange,
-    ComplexityMetrics as WireComplexityMetrics, CoordinatorOps, CycleGroup, CycleMember,
-    DeadSymbolEntry, DeprecatedHit, DetectedChangesResult, DetectedTouchedSymbol,
-    DiffTouchesResult, EdgeCategory, EdgeEntry, GitOps, GraphNeighbor, GraphStatus,
-    GraphWorkspaceEntry, HotPathHit, HotspotEntry, ImpactEntry, ImpactResult, MetricsAtResult,
-    NeighborsResult, OrphanEntry, PagerankTier, PathHop, PathResult, ProcessRef, ProjectCtx,
-    ProvisionServiceRequest, ProvisionedService, QuerySubgraphBudget as WireQuerySubgraphBudget,
-    QuerySubgraphEdge as WireQuerySubgraphEdge, QuerySubgraphNode as WireQuerySubgraphNode,
-    QuerySubgraphRequest, QuerySubgraphResult as WireQuerySubgraphResult,
+    CoordinatorOps, CycleGroup, CycleMember, DeadSymbolEntry, DeprecatedHit, DetectedChangesResult,
+    DetectedTouchedSymbol, DiffTouchesResult, EdgeCategory, EdgeEntry, GitOps, GraphNeighbor,
+    GraphStatus, GraphWorkspaceEntry, HotPathHit, HotspotEntry, ImpactEntry, ImpactResult,
+    MetricsAtResult, NeighborsResult, OrphanEntry, PagerankTier, PathHop, PathResult, ProcessRef,
+    ProjectCtx, ProvisionServiceRequest, ProvisionedService,
+    QuerySubgraphBudget as WireQuerySubgraphBudget, QuerySubgraphEdge as WireQuerySubgraphEdge,
+    QuerySubgraphNode as WireQuerySubgraphNode, QuerySubgraphRequest,
+    QuerySubgraphResult as WireQuerySubgraphResult,
     QuerySubgraphSeedDebug as WireQuerySubgraphSeedDebug,
     QuerySubgraphTraversalDebug as WireQuerySubgraphTraversalDebug, RankedNode, RefactorCandidate,
     RelatedSymbol, RepoGraphOps, ResolveOutcome, RuntimeOps, SearchHit, SemanticQueryEmbedding,
@@ -28,277 +28,12 @@ use djinn_control_plane::bridge::{
 };
 use djinn_git::{GitActorHandle, GitError};
 
-fn complexity_metrics_to_wire(
-    m: djinn_graph::complexity::ComplexityMetrics,
-) -> WireComplexityMetrics {
-    WireComplexityMetrics {
-        cyclomatic: m.cyclomatic,
-        cognitive: m.cognitive,
-        nloc: m.nloc,
-        max_nesting: m.max_nesting,
-        param_count: m.param_count,
-    }
-}
-
-/// Iter 28: sort `entries` in-place by the requested `sort_by` field
-/// descending, with a deterministic alpha tie-break. Extracted so the
-/// op's pure ranking logic is unit-testable without the canonical
-/// graph round-trip.
-fn sort_function_complexity_entries(
-    entries: &mut [djinn_control_plane::bridge::FunctionComplexityEntry],
-    sort_by: &str,
-) {
-    entries.sort_by(|a, b| {
-        let cmp = match sort_by {
-            "cyclomatic" => b.metrics.cyclomatic.cmp(&a.metrics.cyclomatic),
-            "nloc" => b.metrics.nloc.cmp(&a.metrics.nloc),
-            "max_nesting" => b.metrics.max_nesting.cmp(&a.metrics.max_nesting),
-            "param_count" => b.metrics.param_count.cmp(&a.metrics.param_count),
-            // "cognitive" (default)
-            _ => b.metrics.cognitive.cmp(&a.metrics.cognitive),
-        };
-        cmp.then_with(|| a.display_name.cmp(&b.display_name))
-            .then_with(|| a.key.cmp(&b.key))
-    });
-}
-
-/// Iter 28: roll a per-function entry list up into per-file aggregates,
-/// then sort by the file-level analog of `sort_by`. Pure on its inputs
-/// for unit-test isolation.
-fn aggregate_files_complexity(
-    entries: &[djinn_control_plane::bridge::FunctionComplexityEntry],
-    sort_by: &str,
-) -> Vec<djinn_control_plane::bridge::FileComplexityEntry> {
-    use djinn_control_plane::bridge::FileComplexityEntry;
-    use std::collections::BTreeMap;
-
-    struct FileAgg {
-        function_count: u32,
-        total_cognitive: u32,
-        total_cyclomatic: u32,
-        total_nloc: u32,
-        max_function_cognitive: u16,
-        max_function_name: String,
-    }
-    let mut by_file: BTreeMap<String, FileAgg> = BTreeMap::new();
-    for entry in entries {
-        let agg = by_file.entry(entry.file.clone()).or_insert(FileAgg {
-            function_count: 0,
-            total_cognitive: 0,
-            total_cyclomatic: 0,
-            total_nloc: 0,
-            max_function_cognitive: 0,
-            max_function_name: String::new(),
-        });
-        agg.function_count = agg.function_count.saturating_add(1);
-        agg.total_cognitive = agg
-            .total_cognitive
-            .saturating_add(u32::from(entry.metrics.cognitive));
-        agg.total_cyclomatic = agg
-            .total_cyclomatic
-            .saturating_add(u32::from(entry.metrics.cyclomatic));
-        agg.total_nloc = agg.total_nloc.saturating_add(u32::from(entry.metrics.nloc));
-        if entry.metrics.cognitive > agg.max_function_cognitive
-            || (entry.metrics.cognitive == agg.max_function_cognitive
-                && (agg.max_function_name.is_empty() || entry.display_name < agg.max_function_name))
-        {
-            agg.max_function_cognitive = entry.metrics.cognitive;
-            agg.max_function_name = entry.display_name.clone();
-        }
-    }
-
-    let mut files: Vec<FileComplexityEntry> = by_file
-        .into_iter()
-        .map(|(file, agg)| FileComplexityEntry {
-            file,
-            function_count: agg.function_count,
-            total_cognitive: agg.total_cognitive,
-            total_cyclomatic: agg.total_cyclomatic,
-            total_nloc: agg.total_nloc,
-            max_function_cognitive: agg.max_function_cognitive,
-            max_function_name: agg.max_function_name,
-        })
-        .collect();
-
-    files.sort_by(|a, b| {
-        let cmp = match sort_by {
-            "cyclomatic" => b.total_cyclomatic.cmp(&a.total_cyclomatic),
-            "nloc" => b.total_nloc.cmp(&a.total_nloc),
-            // `max_nesting` doesn't have a per-file aggregate — use
-            // the worst-function cognitive as the proxy. `param_count`
-            // collapses to "how many function-likes live here" since
-            // formal params don't sum meaningfully across functions.
-            "max_nesting" => b.max_function_cognitive.cmp(&a.max_function_cognitive),
-            "param_count" => b.function_count.cmp(&a.function_count),
-            // "cognitive" (default)
-            _ => b.total_cognitive.cmp(&a.total_cognitive),
-        };
-        cmp.then_with(|| a.file.cmp(&b.file))
-    });
-    files
-}
-/// Iter 29: pure helper for the `refactor_candidates` op. Takes a
-/// candidate set already filtered to function-like nodes with
-/// complexity payloads, plus a `(file → file-level commit count)`
-/// map. Computes per-axis means + population stddevs (divide by N to
-/// keep zero-stddev handling tight), produces z-scores, sorts by the
-/// mean composite descending, truncates to `limit`, and stamps a
-/// `tier` label per the post-cap rule (top 10% high / next 15% medium
-/// / rest low). Sets fewer than 10 entries collapse to all-high
-/// (degenerate small project).
-///
-/// Extracted so the ranking logic is unit-testable without spinning
-/// up an `AppState` / canonical graph.
-fn compute_refactor_candidates(
-    candidates: &[RefactorCandidateInput],
-    churn_map: &std::collections::HashMap<std::path::PathBuf, u32>,
-    limit: usize,
-) -> Vec<djinn_control_plane::bridge::RefactorCandidate> {
-    use djinn_control_plane::bridge::RefactorCandidate;
-
-    if candidates.is_empty() {
-        return Vec::new();
-    }
-
-    // Resolve churn for every candidate up front so the mean/stddev
-    // pass and the per-row z-score pass walk the same numbers.
-    let churn_for: Vec<u32> = candidates
-        .iter()
-        .map(|c| {
-            churn_map
-                .get(std::path::Path::new(&c.file))
-                .copied()
-                .unwrap_or(0)
-        })
-        .collect();
-
-    let n = candidates.len() as f64;
-    let mean_cog: f64 = candidates
-        .iter()
-        .map(|c| f64::from(c.cognitive))
-        .sum::<f64>()
-        / n;
-    let mean_churn: f64 = churn_for.iter().map(|c| f64::from(*c)).sum::<f64>() / n;
-    let mean_pr: f64 = candidates.iter().map(|c| c.page_rank).sum::<f64>() / n;
-
-    // Population stddev (divide by N) — a sample stddev would need
-    // N>=2 and special-case 1-element sets; population stays correct
-    // at every N and zero-variance sets cleanly degenerate to 0.
-    let var_cog: f64 = candidates
-        .iter()
-        .map(|c| (f64::from(c.cognitive) - mean_cog).powi(2))
-        .sum::<f64>()
-        / n;
-    let var_churn: f64 = churn_for
-        .iter()
-        .map(|c| (f64::from(*c) - mean_churn).powi(2))
-        .sum::<f64>()
-        / n;
-    let var_pr: f64 = candidates
-        .iter()
-        .map(|c| (c.page_rank - mean_pr).powi(2))
-        .sum::<f64>()
-        / n;
-    let std_cog = var_cog.sqrt();
-    let std_churn = var_churn.sqrt();
-    let std_pr = var_pr.sqrt();
-
-    let z =
-        |x: f64, mean: f64, std: f64| -> f64 { if std > 1e-9 { (x - mean) / std } else { 0.0 } };
-
-    let mut out: Vec<RefactorCandidate> = candidates
-        .iter()
-        .zip(churn_for.iter())
-        .map(|(c, churn)| {
-            let z_cog = z(f64::from(c.cognitive), mean_cog, std_cog);
-            let z_churn = z(f64::from(*churn), mean_churn, std_churn);
-            let z_pr = z(c.page_rank, mean_pr, std_pr);
-            let composite = (z_cog + z_churn + z_pr) / 3.0;
-            RefactorCandidate {
-                key: c.key.clone(),
-                display_name: c.display_name.clone(),
-                file: c.file.clone(),
-                start_line: c.start_line,
-                end_line: c.end_line,
-                composite_score: composite,
-                // Tier filled in below post-sort.
-                tier: String::new(),
-                cognitive: c.cognitive,
-                cyclomatic: c.cyclomatic,
-                churn_commits: *churn,
-                page_rank: c.page_rank,
-                z_cognitive: z_cog,
-                z_churn,
-                z_page_rank: z_pr,
-            }
-        })
-        .collect();
-
-    // Sort by composite desc, then a deterministic tiebreaker on
-    // display_name then key so equal-score sets ship in stable order.
-    out.sort_by(|a, b| {
-        b.composite_score
-            .partial_cmp(&a.composite_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.display_name.cmp(&b.display_name))
-            .then_with(|| a.key.cmp(&b.key))
-    });
-    out.truncate(limit);
-    assign_refactor_tiers(&mut out);
-    out
-}
-
-/// Per-candidate input row for [`compute_refactor_candidates`]. Plain
-/// data so the helper stays decoupled from `RepoDependencyGraph` /
-/// canonical-graph types and can be exercised by unit tests directly.
-#[derive(Debug, Clone)]
-struct RefactorCandidateInput {
-    key: String,
-    display_name: String,
-    file: String,
-    start_line: u32,
-    end_line: u32,
-    cognitive: u16,
-    cyclomatic: u16,
-    page_rank: f64,
-}
-
-/// Iter 29: stamp a `tier` label on each entry of an already-sorted
-/// `refactor_candidates` set. Top 10% = `"high"`, next 15% = `"medium"`,
-/// rest = `"low"`. Tier counts are rounded to nearest integer; for
-/// `limit=30` that's 3 high / 4 medium / 23 low. Sets with fewer than
-/// 10 candidates collapse to all-high (degenerate small project).
-fn assign_refactor_tiers(out: &mut [djinn_control_plane::bridge::RefactorCandidate]) {
-    if out.is_empty() {
-        return;
-    }
-    let n = out.len();
-    if n < 10 {
-        for entry in out.iter_mut() {
-            entry.tier = "high".to_string();
-        }
-        return;
-    }
-    let high_cnt = ((n as f64) * 0.10).round() as usize;
-    let medium_cnt = ((n as f64) * 0.15).round() as usize;
-    let high_cnt = high_cnt.min(n);
-    let medium_cnt = medium_cnt.min(n - high_cnt);
-    for (i, entry) in out.iter_mut().enumerate() {
-        entry.tier = if i < high_cnt {
-            "high".to_string()
-        } else if i < high_cnt + medium_cnt {
-            "medium".to_string()
-        } else {
-            "low".to_string()
-        };
-    }
-}
-
 use petgraph::visit::EdgeRef;
 
 mod bridges;
 pub(crate) mod graph_neighbors;
 pub(crate) mod hybrid_search;
+pub(crate) mod refactor;
 
 use self::bridges::{CoordinatorBridge, LspBridge, SlotPoolBridge};
 use self::graph_neighbors::{
@@ -1633,7 +1368,9 @@ impl RepoGraphOps for RepoGraphBridge {
             is_external: node.is_external,
             is_entry_point,
             is_test: node.is_test,
-            complexity: node.complexity.map(complexity_metrics_to_wire),
+            complexity: node
+                .complexity
+                .map(self::refactor::complexity_metrics_to_wire),
         }))
     }
 
@@ -1748,7 +1485,9 @@ impl RepoGraphOps for RepoGraphBridge {
             end_line,
             content,
             method_metadata,
-            complexity: node.complexity.map(complexity_metrics_to_wire),
+            complexity: node
+                .complexity
+                .map(self::refactor::complexity_metrics_to_wire),
         };
 
         // PR F2: populate process memberships from the per-graph
@@ -2598,19 +2337,19 @@ impl RepoGraphOps for RepoGraphBridge {
                 file: file_str,
                 start_line,
                 end_line,
-                metrics: complexity_metrics_to_wire(metrics),
+                metrics: self::refactor::complexity_metrics_to_wire(metrics),
             });
         }
 
         match target {
             "functions" => {
-                sort_function_complexity_entries(&mut functions, sort_by);
+                self::refactor::sort_function_complexity_entries(&mut functions, sort_by);
                 functions.truncate(limit);
                 Ok(ComplexityResult::Functions(functions))
             }
             // "files"
             _ => {
-                let mut files = aggregate_files_complexity(&functions, sort_by);
+                let mut files = self::refactor::aggregate_files_complexity(&functions, sort_by);
                 files.truncate(limit);
                 Ok(ComplexityResult::Files(files))
             }
@@ -2668,7 +2407,7 @@ impl RepoGraphOps for RepoGraphBridge {
         // the test/external flags (the spec calls out filtering tests
         // / externals when those flags are present; our nodes always
         // have them).
-        let mut candidate_inputs: Vec<RefactorCandidateInput> = Vec::new();
+        let mut candidate_inputs: Vec<self::refactor::RefactorCandidateInput> = Vec::new();
         for node_index in graph.graph().node_indices() {
             let node = graph.node(node_index);
             if node.is_external || node.is_test {
@@ -2703,7 +2442,7 @@ impl RepoGraphOps for RepoGraphBridge {
                 .range_for_node(node_index, file_path)
                 .unwrap_or((0, 0));
             let page_rank = pagerank_for.get(&node_index).copied().unwrap_or(0.0);
-            candidate_inputs.push(RefactorCandidateInput {
+            candidate_inputs.push(self::refactor::RefactorCandidateInput {
                 key,
                 display_name: node.display_name.clone(),
                 file: file_str,
@@ -2737,7 +2476,7 @@ impl RepoGraphOps for RepoGraphBridge {
             churn_map.insert(PathBuf::from(row.file_path), count);
         }
 
-        Ok(compute_refactor_candidates(
+        Ok(self::refactor::compute_refactor_candidates(
             &candidate_inputs,
             &churn_map,
             limit,
@@ -4237,6 +3976,7 @@ pub(crate) mod graph_bridge_tests {
     // The bridge crate's `ResolveOutcome` (String) is different — we
     // never use it directly in these tests.
     use crate::mcp_bridge::graph_neighbors::{ResolveOutcome, resolve_node, resolve_node_or_err};
+    use djinn_control_plane::bridge::ComplexityMetrics as WireComplexityMetrics;
     use djinn_graph::repo_graph::{RepoDependencyGraph, RepoNodeKey};
     use djinn_graph::scip_parser::{
         ParsedScipIndex, ScipFile, ScipMetadata, ScipOccurrence, ScipRange, ScipRelationship,
@@ -6568,7 +6308,7 @@ pub(crate) mod graph_bridge_tests {
                 complexity_metrics(10, 8, 50, 4, 3),
             ),
         ];
-        sort_function_complexity_entries(&mut entries, "cognitive");
+        super::refactor::sort_function_complexity_entries(&mut entries, "cognitive");
         assert_eq!(entries[0].display_name, "hard");
         assert_eq!(entries[0].metrics.cognitive, 10);
         assert_eq!(entries[1].display_name, "easy");
@@ -6593,7 +6333,7 @@ pub(crate) mod graph_bridge_tests {
                 complexity_metrics(5, 9, 50, 4, 3),
             ),
         ];
-        sort_function_complexity_entries(&mut entries, "cyclomatic");
+        super::refactor::sort_function_complexity_entries(&mut entries, "cyclomatic");
         assert_eq!(
             entries[0].display_name, "hard",
             "cyclomatic=9 should win over cyclomatic=2"
@@ -6628,7 +6368,7 @@ pub(crate) mod graph_bridge_tests {
                 complexity_metrics(2, 1, 8, 0, 0),
             ),
         ];
-        let files = aggregate_files_complexity(&entries, "cognitive");
+        let files = super::refactor::aggregate_files_complexity(&entries, "cognitive");
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].file, "src/big.rs");
         assert_eq!(files[0].function_count, 2);
@@ -6667,7 +6407,7 @@ pub(crate) mod graph_bridge_tests {
                 complexity_metrics(1, 1, 5, 0, 1),
             ),
         ];
-        let files = aggregate_files_complexity(&entries, "param_count");
+        let files = super::refactor::aggregate_files_complexity(&entries, "param_count");
         assert_eq!(
             files[0].file, "src/many.rs",
             "two functions should win by param_count proxy"
@@ -6708,8 +6448,8 @@ pub(crate) mod graph_bridge_tests {
         cognitive: u16,
         cyclomatic: u16,
         page_rank: f64,
-    ) -> super::RefactorCandidateInput {
-        super::RefactorCandidateInput {
+    ) -> super::refactor::RefactorCandidateInput {
+        super::refactor::RefactorCandidateInput {
             key: key.to_string(),
             display_name: display_name.to_string(),
             file: file.to_string(),
@@ -6738,7 +6478,7 @@ pub(crate) mod graph_bridge_tests {
         churn_map.insert(std::path::PathBuf::from("src/b.rs"), 20);
         churn_map.insert(std::path::PathBuf::from("src/c.rs"), 5);
 
-        let out = super::compute_refactor_candidates(&candidates, &churn_map, 30);
+        let out = super::refactor::compute_refactor_candidates(&candidates, &churn_map, 30);
         assert_eq!(out.len(), 3);
         assert_eq!(
             out[0].display_name, "b",
@@ -6767,7 +6507,7 @@ pub(crate) mod graph_bridge_tests {
         let mut churn_map: HashMap<std::path::PathBuf, u32> = HashMap::new();
         churn_map.insert(std::path::PathBuf::from("src/x.rs"), 7);
 
-        let out = super::compute_refactor_candidates(&candidates, &churn_map, 30);
+        let out = super::refactor::compute_refactor_candidates(&candidates, &churn_map, 30);
         assert_eq!(out.len(), 3);
         for entry in &out {
             assert_eq!(
@@ -6814,7 +6554,7 @@ pub(crate) mod graph_bridge_tests {
                 u32::try_from(i + 1).unwrap(),
             );
         }
-        let out = super::compute_refactor_candidates(&candidates, &churn_map, 20);
+        let out = super::refactor::compute_refactor_candidates(&candidates, &churn_map, 20);
         assert_eq!(out.len(), 20);
         let high_count = out.iter().filter(|c| c.tier == "high").count();
         let medium_count = out.iter().filter(|c| c.tier == "medium").count();
@@ -6844,7 +6584,7 @@ pub(crate) mod graph_bridge_tests {
         ];
         let churn_map: HashMap<std::path::PathBuf, u32> = HashMap::new();
 
-        let out = super::compute_refactor_candidates(&candidates, &churn_map, 30);
+        let out = super::refactor::compute_refactor_candidates(&candidates, &churn_map, 30);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].tier, "high");
         assert_eq!(out[1].tier, "high");
@@ -6865,7 +6605,7 @@ pub(crate) mod graph_bridge_tests {
         let mut churn_map: HashMap<std::path::PathBuf, u32> = HashMap::new();
         churn_map.insert(std::path::PathBuf::from("src/in_map.rs"), 50);
 
-        let out = super::compute_refactor_candidates(&candidates, &churn_map, 30);
+        let out = super::refactor::compute_refactor_candidates(&candidates, &churn_map, 30);
         assert_eq!(out.len(), 2);
         // The missing-file function inherits churn_commits=0.
         let missing = out.iter().find(|c| c.display_name == "b").unwrap();
@@ -6888,7 +6628,7 @@ pub(crate) mod graph_bridge_tests {
         // No candidates → empty Vec (success, not error). Caller must
         // tolerate empty results without a special-case branch.
         use std::collections::HashMap;
-        let out = super::compute_refactor_candidates(&[], &HashMap::new(), 30);
+        let out = super::refactor::compute_refactor_candidates(&[], &HashMap::new(), 30);
         assert!(out.is_empty());
     }
 
@@ -6916,7 +6656,7 @@ pub(crate) mod graph_bridge_tests {
                 u32::try_from(i + 1).unwrap(),
             );
         }
-        let out = super::compute_refactor_candidates(&candidates, &churn_map, 5);
+        let out = super::refactor::compute_refactor_candidates(&candidates, &churn_map, 5);
         assert_eq!(out.len(), 5);
         // Top entry is the highest-index candidate (largest signals).
         assert_eq!(out[0].display_name, "fn_49");
