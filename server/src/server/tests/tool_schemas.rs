@@ -376,6 +376,36 @@ fn checked_in_mcp_snapshot_exposes_environment_config_workspace_metadata() {
             format_args!("checked-in snapshot {tool_name} {snapshot_schema_key}"),
         );
     }
+
+    let mut workspace_schema_count = 0;
+    for tool in &tools {
+        let tool_name = tool
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("<unknown>");
+        for schema_key in ["input_schema", "output_schema"] {
+            let Some(workspace) = tool
+                .get(schema_key)
+                .and_then(|schema| schema.get("$defs"))
+                .and_then(|defs| defs.get("Workspace"))
+            else {
+                continue;
+            };
+
+            workspace_schema_count += 1;
+            let properties = &workspace["properties"];
+            for field in ["slug", "name", "tags"] {
+                assert!(
+                    properties.get(field).is_some(),
+                    "checked-in snapshot {tool_name} {schema_key} Workspace missing {field}"
+                );
+            }
+        }
+    }
+    assert!(
+        workspace_schema_count >= ENVIRONMENT_CONFIG_SCHEMA_SURFACES.len(),
+        "checked-in snapshot should include EnvironmentConfig Workspace schemas"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
