@@ -12,21 +12,19 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use djinn_control_plane::bridge::{
     ApiSurfaceEntry, BoundaryRule, BoundaryViolation, CallerRef, ChangeKind, ChangedRange,
-    ComplexityMetrics as WireComplexityMetrics, CoordinatorOps, CoordinatorStatus, CycleGroup,
-    CycleMember, DeadSymbolEntry, DeprecatedHit, DetectedChangesResult, DetectedTouchedSymbol,
+    ComplexityMetrics as WireComplexityMetrics, CoordinatorOps, CycleGroup, CycleMember,
+    DeadSymbolEntry, DeprecatedHit, DetectedChangesResult, DetectedTouchedSymbol,
     DiffTouchesResult, EdgeCategory, EdgeEntry, GitOps, GraphNeighbor, GraphStatus,
-    GraphWorkspaceEntry, HotPathHit, HotspotEntry, ImpactEntry, ImpactResult, LspOps, LspWarning,
-    MetricsAtResult, ModelPoolStatus, NeighborsResult, OrphanEntry, PagerankTier, PathHop,
-    PathResult, PoolStatus, ProcessRef, ProjectCtx, ProvisionServiceRequest, ProvisionedService,
-    QuerySubgraphBudget as WireQuerySubgraphBudget, QuerySubgraphEdge as WireQuerySubgraphEdge,
-    QuerySubgraphNode as WireQuerySubgraphNode, QuerySubgraphRequest,
-    QuerySubgraphResult as WireQuerySubgraphResult,
+    GraphWorkspaceEntry, HotPathHit, HotspotEntry, ImpactEntry, ImpactResult, MetricsAtResult,
+    NeighborsResult, OrphanEntry, PagerankTier, PathHop, PathResult, ProcessRef, ProjectCtx,
+    ProvisionServiceRequest, ProvisionedService, QuerySubgraphBudget as WireQuerySubgraphBudget,
+    QuerySubgraphEdge as WireQuerySubgraphEdge, QuerySubgraphNode as WireQuerySubgraphNode,
+    QuerySubgraphRequest, QuerySubgraphResult as WireQuerySubgraphResult,
     QuerySubgraphSeedDebug as WireQuerySubgraphSeedDebug,
     QuerySubgraphTraversalDebug as WireQuerySubgraphTraversalDebug, RankedNode, RefactorCandidate,
-    RelatedSymbol, RepoGraphOps, ResolveOutcome, RunningTaskInfo, RuntimeOps, SearchHit,
-    SemanticQueryEmbedding, SlotPoolOps, SnapshotEdge, SnapshotLevel, SnapshotNode,
-    SnapshotPayload, SymbolAtHit, SymbolContext, SymbolDescription, SymbolNode, TouchedSymbol,
-    WorkspacesResult,
+    RelatedSymbol, RepoGraphOps, ResolveOutcome, RuntimeOps, SearchHit, SemanticQueryEmbedding,
+    SlotPoolOps, SnapshotEdge, SnapshotLevel, SnapshotNode, SnapshotPayload, SymbolAtHit,
+    SymbolContext, SymbolDescription, SymbolNode, TouchedSymbol, WorkspacesResult,
 };
 use djinn_git::{GitActorHandle, GitError};
 
@@ -296,130 +294,18 @@ fn assign_refactor_tiers(out: &mut [djinn_control_plane::bridge::RefactorCandida
     }
 }
 
-use djinn_agent::actors::coordinator::CoordinatorHandle;
-use djinn_agent::actors::slot::SlotPoolHandle;
-use djinn_agent::lsp::LspManager;
 use petgraph::visit::EdgeRef;
 
+mod bridges;
 pub(crate) mod graph_neighbors;
 pub(crate) mod hybrid_search;
 
+use self::bridges::{CoordinatorBridge, LspBridge, SlotPoolBridge};
 use self::graph_neighbors::{
     build_method_metadata, build_related_symbol, classify_edge_category, format_node_key,
     group_impact_by_file, group_neighbors_by_file, kind_label_for_node, read_symbol_content,
     resolve_node_or_err, resolve_node_with_hint, resolve_node_with_hint_and_filter,
 };
-
-// ── Newtype wrappers ───────────────────────────────────────────────────────────
-
-struct CoordinatorBridge(pub CoordinatorHandle);
-struct SlotPoolBridge(pub SlotPoolHandle);
-struct LspBridge(pub LspManager);
-
-// ── CoordinatorBridge → CoordinatorOps ───────────────────────────────────────
-
-#[async_trait]
-impl CoordinatorOps for CoordinatorBridge {
-    fn get_status(&self) -> Result<CoordinatorStatus, String> {
-        let s = self.0.get_status().map_err(|e| e.to_string())?;
-        Ok(CoordinatorStatus {
-            tasks_dispatched: s.tasks_dispatched,
-            sessions_recovered: s.sessions_recovered,
-            epic_throughput: s.epic_throughput,
-            pr_errors: s.pr_errors,
-        })
-    }
-
-    async fn trigger_dispatch_for_project(&self, project_id: &str) -> Result<(), String> {
-        self.0
-            .trigger_dispatch_for_project(project_id)
-            .await
-            .map_err(|e| e.to_string())
-    }
-}
-
-// ── SlotPoolBridge → SlotPoolOps ──────────────────────────────────────────────
-
-#[async_trait]
-impl SlotPoolOps for SlotPoolBridge {
-    async fn get_status(&self) -> Result<PoolStatus, String> {
-        let s = self.0.get_status().await.map_err(|e| e.to_string())?;
-        Ok(PoolStatus {
-            active_slots: s.active_slots,
-            total_slots: s.total_slots,
-            per_model: s
-                .per_model
-                .into_iter()
-                .map(|(k, v)| {
-                    (
-                        k,
-                        ModelPoolStatus {
-                            active: v.active,
-                            free: v.free,
-                            total: v.total,
-                        },
-                    )
-                })
-                .collect(),
-            running_tasks: s
-                .running_tasks
-                .into_iter()
-                .map(|t| RunningTaskInfo {
-                    task_id: t.task_id,
-                    model_id: t.model_id,
-                    slot_id: t.slot_id,
-                    duration_seconds: t.duration_seconds,
-                    idle_seconds: t.idle_seconds,
-                    project_id: t.project_id,
-                })
-                .collect(),
-        })
-    }
-
-    async fn kill_session(&self, task_id: &str) -> Result<(), String> {
-        self.0
-            .kill_session(task_id)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn session_for_task(&self, task_id: &str) -> Result<Option<RunningTaskInfo>, String> {
-        let result = self
-            .0
-            .session_for_task(task_id)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(result.map(|t| RunningTaskInfo {
-            task_id: t.task_id,
-            model_id: t.model_id,
-            slot_id: t.slot_id,
-            duration_seconds: t.duration_seconds,
-            idle_seconds: t.idle_seconds,
-            project_id: t.project_id,
-        }))
-    }
-
-    async fn has_session(&self, task_id: &str) -> Result<bool, String> {
-        self.0.has_session(task_id).await.map_err(|e| e.to_string())
-    }
-}
-
-// ── LspBridge → LspOps ───────────────────────────────────────────────────────
-
-#[async_trait]
-impl LspOps for LspBridge {
-    async fn warnings(&self) -> Vec<LspWarning> {
-        self.0
-            .warnings()
-            .await
-            .into_iter()
-            .map(|w| LspWarning {
-                server: w.server,
-                message: w.message,
-            })
-            .collect()
-    }
-}
 
 // ── AppState → RuntimeOps + GitOps + mcp_state() ─────────────────────────────
 
