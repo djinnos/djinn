@@ -12,7 +12,9 @@ use tokio::time::{Duration, sleep};
 
 use super::INIT_TIMEOUT;
 use super::diagnostics::{Diagnostic, DiagnosticsMap, new_diagnostics_map, publish};
-use super::server_config::{ServerDef, djinn_bin_dir, language_id_for_path, resolve_binary};
+use super::server_config::{
+    ServerDef, djinn_bin_dir, initialization_options, language_id_for_path, resolve_binary,
+};
 
 pub type PendingResponses =
     Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<serde_json::Value>>>>;
@@ -230,6 +232,7 @@ pub async fn spawn_client(server: &ServerDef, root: &Path) -> Result<LspClient, 
         json!({
             "processId": null,
             "rootUri": format!("file://{}", root.display()),
+            "initializationOptions": initialization_options(server.id),
             "capabilities": {
                 "textDocument": {
                     "synchronization": {
