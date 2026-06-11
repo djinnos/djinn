@@ -277,7 +277,7 @@ pub(super) async fn call_task_reset_counters(
     )
 }
 
-pub(super) async fn call_task_kill_session(
+pub(crate) async fn call_task_kill_session(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
