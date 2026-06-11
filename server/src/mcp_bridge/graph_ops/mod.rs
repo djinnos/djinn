@@ -28,6 +28,8 @@ use crate::server::AppState;
 mod insights;
 mod query;
 mod snapshot;
+#[cfg(test)]
+mod tests;
 
 /// `RepoGraphOps` adapter wrapping the per-server `AppState`.  Holding the
 /// state lets graph queries route through `ensure_canonical_graph`, which
