@@ -20,6 +20,7 @@ set -eu
 
 MAX_LINES=${MAX_LINES:-1500}
 MAX_BYTES=${MAX_BYTES:-51200}
+ALLOW_MARKER='djinn:allow-oversize'
 
 SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd "$SCRIPT_DIR/.." && pwd)
@@ -65,9 +66,9 @@ find $find_roots \
         fi
 
         if [ "$lines" -gt "$MAX_LINES" ] || [ "$bytes" -gt "$MAX_BYTES" ]; then
-            if grep -q 'djinn:allow-oversize' "$file"; then
-                printf 'OK    %s  (allowed: djinn:allow-oversize; %s lines, %s bytes)\n' \
-                    "$file" "$lines" "$bytes"
+            if grep -q "$ALLOW_MARKER" "$file"; then
+                printf 'OK    %s  (allowed: %s; %s lines, %s bytes)\n' \
+                    "$file" "$ALLOW_MARKER" "$lines" "$bytes"
                 allowed=$((allowed + 1))
             else
                 printf 'FAIL  %s  (%s lines, %s bytes)\n' "$file" "$lines" "$bytes"
