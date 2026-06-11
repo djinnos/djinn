@@ -1,233 +1,21 @@
-/// Bridge trait implementations: connect djinn-control-plane's abstract traits to
-/// the server's concrete actor handles and managers.
-///
-/// Newtypes are required for CoordinatorHandle, SlotPoolHandle, and LspManager
-/// because both the trait (djinn-control-plane) and the implementor (djinn-agent) are
-/// external to the server — orphan rule.
-/// AppState is a server-local type so it implements RuntimeOps and GitOps directly.
-use std::path::Path;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use djinn_control_plane::bridge::{
-    CoordinatorOps, GitOps, ProvisionServiceRequest, ProvisionedService, RuntimeOps,
-    SemanticQueryEmbedding, SlotPoolOps, SnapshotEdge, SnapshotLevel, SnapshotNode,
-    SnapshotPayload,
+    CoordinatorOps, SlotPoolOps, SnapshotEdge, SnapshotLevel, SnapshotNode, SnapshotPayload,
 };
-use djinn_git::{GitActorHandle, GitError};
-
 use petgraph::visit::EdgeRef;
 
-mod bridges;
-pub(crate) mod graph_neighbors;
-mod graph_ops;
-pub(crate) mod hybrid_search;
-pub(crate) mod refactor;
-mod shared;
-
-use self::bridges::{CoordinatorBridge, LspBridge, SlotPoolBridge};
-use self::graph_neighbors::format_node_key;
-
-pub(crate) use self::graph_ops::RepoGraphBridge;
-
-// ── AppState → RuntimeOps + GitOps + mcp_state() ─────────────────────────────
-
+use super::bridges::{CoordinatorBridge, LspBridge, SlotPoolBridge};
+use super::graph_neighbors::format_node_key;
+use super::{RepoGraphBridge, shared};
 use crate::server::AppState;
-
-#[async_trait]
-impl RuntimeOps for AppState {
-    async fn apply_settings(
-        &self,
-        settings: &djinn_core::models::DjinnSettings,
-    ) -> Result<(), String> {
-        AppState::apply_settings(self, settings).await
-    }
-
-    async fn embed_memory_query(
-        &self,
-        query: &str,
-    ) -> Result<Option<SemanticQueryEmbedding>, String> {
-        match self.embedding_service().embed_query(query).await {
-            djinn_provider::embeddings::EmbeddingOutcome::Ready(vector) => {
-                Ok(Some(SemanticQueryEmbedding {
-                    values: vector.values,
-                }))
-            }
-            djinn_provider::embeddings::EmbeddingOutcome::Degraded(_) => Ok(None),
-        }
-    }
-
-    async fn reset_runtime_settings(&self) {
-        AppState::reset_runtime_settings(self).await;
-    }
-
-    async fn apply_user_model_change(&self) {
-        AppState::apply_user_model_change(self).await;
-    }
-
-    async fn dispatch_verification_test(
-        &self,
-        test_id: &str,
-        project_id: &str,
-    ) -> Result<(), String> {
-        // The K8s graph warmer owns the one-shot Job dispatcher + project-image
-        // resolution; the in-process warmer's default impl errors (no kube).
-        self.graph_warmer()
-            .await
-            .dispatch_verification_test(test_id, project_id)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn provision_backing_service(
-        &self,
-        req: ProvisionServiceRequest,
-    ) -> Result<ProvisionedService, String> {
-        let rt_req = djinn_runtime::BackingServiceRequest {
-            instance_id: req.instance_id,
-            task_run_id: req.task_run_id,
-            service_type: req.service_type,
-            image: req.image,
-            port: req.port,
-            env: req.env,
-            cpu_request: req.cpu_request,
-            memory_request: req.memory_request,
-            cpu_limit: req.cpu_limit,
-            memory_limit: req.memory_limit,
-            conn_template: req.conn_template,
-        };
-        let conn = self
-            .graph_warmer()
-            .await
-            .provision_backing_service(rt_req)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(ProvisionedService {
-            pod_name: conn.pod_name,
-            service_name: conn.service_name,
-            conn_string: conn.conn_string,
-        })
-    }
-
-    async fn release_backing_service(&self, instance_id: &str) -> Result<(), String> {
-        self.graph_warmer()
-            .await
-            .release_backing_service(instance_id)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn cleanup_task_branches(&self, task_id: &str) {
-        let mirror = self.mirror();
-        djinn_agent::task_merge::cleanup_task_branches_post_close(
-            task_id,
-            self.db(),
-            &self.event_bus(),
-            Some(mirror.as_ref()),
-        )
-        .await;
-    }
-
-    async fn persist_model_health_state(&self) {
-        AppState::persist_model_health_state(self).await;
-    }
-
-    async fn apply_environment_config(
-        &self,
-        project_id: &str,
-        config: &djinn_stack::environment::EnvironmentConfig,
-    ) -> Result<(), String> {
-        // Route through the image-controller in prod so the runtime
-        // ConfigMap gets upserted alongside the DB write. In dev mode
-        // without a kube client there's no CM to reconcile; just write
-        // the DB.
-        if let Some(controller) = self.image_controller().await {
-            controller
-                .apply_environment_config(project_id, config)
-                .await
-                .map_err(|e| e.to_string())
-        } else {
-            let repo = djinn_db::ProjectRepository::new(
-                self.db().clone(),
-                djinn_core::events::EventBus::noop(),
-            );
-            let json = serde_json::to_string(config)
-                .map_err(|e| format!("serialize environment_config: {e}"))?;
-            repo.set_environment_config(project_id, &json)
-                .await
-                .map_err(|e| format!("db write: {e}"))
-        }
-    }
-
-    async fn trigger_mirror_refresh(&self, project_id: &str) {
-        // Fire-and-forget: a fresh mirror clone + stack detection + image
-        // enqueue can take many seconds, and the caller (project_add) wants a
-        // snappy response. Errors are logged and swallowed — the periodic
-        // mirror-fetch tick retries anything that fails here.
-        let state = self.clone();
-        let project_id = project_id.to_string();
-        tokio::spawn(async move {
-            match crate::mirror_fetcher::fetch_project(&state, &project_id).await {
-                Ok(true) => {
-                    tracing::info!(project_id, "post-add mirror refresh complete")
-                }
-                Ok(false) => tracing::debug!(
-                    project_id,
-                    "post-add mirror refresh skipped: project not GitHub-linked yet"
-                ),
-                Err(err) => tracing::warn!(
-                    project_id,
-                    error = %err,
-                    "post-add mirror refresh failed; periodic tick will retry"
-                ),
-            }
-        });
-    }
-
-    async fn enqueue_image_build(&self, image_id: &str) -> Result<(), String> {
-        // No controller in dev mode (no kube client) — the badge stays
-        // `none` locally, which is correct: nothing builds images locally.
-        let Some(controller) = self.image_controller().await else {
-            return Ok(());
-        };
-        let image_repo = djinn_db::ImageRepository::new(self.db().clone());
-        let image = image_repo
-            .get(image_id)
-            .await
-            .map_err(|e| format!("get image {image_id}: {e}"))?
-            .ok_or_else(|| format!("image not found: {image_id}"))?;
-        controller
-            .enqueue_image(image_id.to_string(), &image_repo, image)
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn trigger_graph_warm(&self, project_id: &str) {
-        // Fire-and-forget: the warm Job dispatch + watch can take a while and
-        // the caller (image assignment) wants a snappy response. The warmer's
-        // own freshness gate + single-flight guard make this cheap if nothing
-        // changed or the image isn't ready yet.
-        let warmer = self.graph_warmer().await;
-        let project_id = project_id.to_string();
-        tokio::spawn(async move {
-            warmer.trigger(&project_id).await;
-        });
-    }
-}
-
-#[async_trait]
-impl GitOps for AppState {
-    async fn git_actor(&self, path: &Path) -> Result<GitActorHandle, GitError> {
-        AppState::git_actor(self, path).await
-    }
-}
 
 impl AppState {
     /// Helper for graph handlers in this module: compiles a
     /// [`GraphExclusions`] predicate for the given project id,
     /// falling back to the empty (Tier 1 only) filter on any DB /
     /// lookup failure.
-    async fn mcp_state_graph_exclusions(
+    pub(crate) async fn mcp_state_graph_exclusions(
         &self,
         project_id: &str,
     ) -> djinn_control_plane::tools::graph_exclusions::GraphExclusions {
@@ -284,7 +72,7 @@ impl AppState {
 /// the full bridge (which needs `AppState`, a Dolt connection, and a
 /// warmed K8s job).
 #[allow(clippy::too_many_arguments)]
-fn build_snapshot_payload(
+pub(crate) fn build_snapshot_payload(
     graph: &djinn_graph::repo_graph::RepoDependencyGraph,
     ranking: &djinn_graph::repo_graph::RepoGraphRanking,
     project_id: String,
@@ -715,108 +503,5 @@ fn build_community_snapshot_payload(
         node_cap,
         nodes: snapshot_nodes,
         edges: snapshot_edges,
-    }
-}
-
-#[cfg(test)]
-mod detect_changes_helper_tests {
-    use super::shared;
-    use djinn_control_plane::bridge::PagerankTier;
-
-    #[test]
-    fn bucket_pagerank_uses_q33_q67() {
-        let thresholds = (0.10, 0.20);
-        assert_eq!(
-            shared::bucket_pagerank(&thresholds, 0.05),
-            PagerankTier::Low
-        );
-        assert_eq!(
-            shared::bucket_pagerank(&thresholds, 0.10),
-            PagerankTier::Medium
-        );
-        assert_eq!(
-            shared::bucket_pagerank(&thresholds, 0.15),
-            PagerankTier::Medium
-        );
-        assert_eq!(
-            shared::bucket_pagerank(&thresholds, 0.20),
-            PagerankTier::High
-        );
-        assert_eq!(
-            shared::bucket_pagerank(&thresholds, 0.99),
-            PagerankTier::High
-        );
-    }
-
-    #[test]
-    fn tier_rank_orders_high_first() {
-        assert!(shared::tier_rank(PagerankTier::High) < shared::tier_rank(PagerankTier::Medium));
-        assert!(shared::tier_rank(PagerankTier::Medium) < shared::tier_rank(PagerankTier::Low));
-    }
-
-    #[test]
-    fn quartile_thresholds_handles_empty_ranking() {
-        let ranking = djinn_graph::repo_graph::RepoGraphRanking { nodes: vec![] };
-        assert_eq!(shared::quartile_thresholds(&ranking), (0.0, 0.0));
-    }
-}
-
-#[cfg(test)]
-mod helper_tests {
-    use super::shared;
-
-    #[test]
-    fn scip_crate_name_extracts_cargo_package() {
-        let sym = "scip-rust cargo my-crate 0.1.0 foo/Bar#";
-        assert_eq!(shared::scip_crate_name(sym), Some("my-crate"));
-    }
-
-    #[test]
-    fn scip_crate_name_extracts_go_module() {
-        let sym = "scip-go gomod github.com/acme/foo v1 pkg/Thing#";
-        assert_eq!(shared::scip_crate_name(sym), Some("github.com/acme/foo"));
-    }
-
-    #[test]
-    fn scip_crate_name_returns_none_for_short_input() {
-        assert_eq!(shared::scip_crate_name(""), None);
-        assert_eq!(shared::scip_crate_name("scip-rust"), None);
-        assert_eq!(shared::scip_crate_name("scip-rust cargo"), None);
-        assert_eq!(shared::scip_crate_name("scip-rust cargo pkg"), None);
-    }
-
-    #[test]
-    fn scip_crate_name_skips_locals_and_dot_placeholder() {
-        // Local symbols have no crate identity.
-        assert_eq!(shared::scip_crate_name("local 42"), None);
-        // Some SCIP scheme/manager slots use "." when missing — and
-        // the package slot does the same. In that case we have no
-        // identity to compare against.
-        let sym = "scip-rust cargo . 0.1.0 foo/Bar#";
-        assert_eq!(shared::scip_crate_name(sym), None);
-    }
-
-    #[test]
-    fn is_deprecated_text_matches_rust_attribute() {
-        assert!(shared::is_deprecated_text(
-            Some("#[deprecated] fn foo()"),
-            &[]
-        ));
-        assert!(shared::is_deprecated_text(
-            Some(r#"#[deprecated(since = "0.1", note = "use bar")] fn foo()"#),
-            &[]
-        ));
-    }
-
-    #[test]
-    fn is_deprecated_text_matches_jsdoc_marker_case_insensitive() {
-        let doc = vec!["/**".into(), " * @Deprecated use `bar` instead".into()];
-        assert!(shared::is_deprecated_text(None, &doc));
-    }
-
-    #[test]
-    fn is_deprecated_text_ignores_unrelated_text() {
-        let doc = vec!["A documented symbol.".into()];
-        assert!(!shared::is_deprecated_text(Some("fn foo()"), &doc));
     }
 }
