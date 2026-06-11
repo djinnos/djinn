@@ -1,6 +1,7 @@
 use super::*;
 
 impl CoordinatorActor {
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::actors::coordinator) async fn observe_auto_merge_state(
         &mut self,
         gh_client: &GitHubApiClient,
@@ -544,13 +545,6 @@ pub(crate) fn decide_auto_merge_tick(
         }
     }
 }
-
-/// Recognise the merge-queue 405 from a REST `PUT /pulls/{n}/merge` error.
-///
-/// GitHub returns `405 Method Not Allowed` with body
-/// `"Pull Request is in the merge queue."` when a queue-enabled repo
-/// receives a direct merge call for a PR the queue is already handling.
-/// We treat this as "GitHub is handling it" rather than a failure.
 
 /// Determine if a `DequeuedEvent.reason` indicates a real failure that
 /// should kick the task back into the worker loop.

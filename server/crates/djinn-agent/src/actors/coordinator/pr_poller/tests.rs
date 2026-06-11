@@ -59,7 +59,7 @@ fn auto_merge_completed_states_are_consumed() {
         let decision = decide_auto_merge_tick(&mut tracker, "task-1");
         assert_eq!(decision, AutoMergeTickDecision::Return(state));
         assert!(
-            tracker.get("task-1").is_none(),
+            !tracker.contains_key("task-1"),
             "completed state must be consumed so a later conflict re-arms"
         );
         // The very next tick (still mergeable==false) re-arms a fresh attempt.
