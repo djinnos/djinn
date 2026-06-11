@@ -6,6 +6,62 @@ use super::helpers::{canonicalize_json, mcp_jsonrpc};
 use crate::server::AppState;
 use crate::test_helpers;
 
+const ENVIRONMENT_CONFIG_SCHEMA_SURFACES: [(&str, &str, &str); 6] = [
+    ("image_create", "inputSchema", "input_schema"),
+    ("image_list", "outputSchema", "output_schema"),
+    ("image_update", "inputSchema", "input_schema"),
+    (
+        "project_environment_config_get",
+        "outputSchema",
+        "output_schema",
+    ),
+    (
+        "project_environment_config_reset",
+        "outputSchema",
+        "output_schema",
+    ),
+    (
+        "project_environment_config_set",
+        "inputSchema",
+        "input_schema",
+    ),
+];
+
+fn assert_environment_config_workspace_metadata_schema(
+    schema: &Value,
+    context: impl std::fmt::Display,
+) {
+    let environment_config = &schema["$defs"]["EnvironmentConfig"];
+    assert_eq!(
+        environment_config["properties"]["workspaces"]["items"]["$ref"],
+        json!("#/$defs/Workspace"),
+        "{context} EnvironmentConfig.workspaces no longer exposes Workspace"
+    );
+
+    let workspace = &schema["$defs"]["Workspace"];
+    assert_eq!(
+        workspace["properties"]["slug"],
+        json!({"default": null, "nullable": true, "type": "string"}),
+        "{context} Workspace.slug schema drifted"
+    );
+    assert_eq!(
+        workspace["properties"]["name"],
+        json!({"default": null, "nullable": true, "type": "string"}),
+        "{context} Workspace.name schema drifted"
+    );
+    assert_eq!(
+        workspace["properties"]["tags"],
+        json!({"default": [], "items": {"type": "string"}, "type": "array"}),
+        "{context} Workspace.tags schema drifted"
+    );
+
+    let rendered = serde_json::to_string(schema).expect("schema serializes");
+    assert!(
+        !rendered.to_ascii_lowercase().contains("duplicate slug"),
+        "{context} still advertises duplicate-slug rejection"
+    );
+}
+
 #[tokio::test]
 async fn all_tool_schemas_includes_cross_domain_tools() {
     let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
@@ -277,52 +333,17 @@ async fn environment_config_tool_schemas_expose_workspace_metadata() {
     let mcp = djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state());
     let tools = mcp.all_tool_schemas();
 
-    let schema_surfaces = [
-        ("image_create", "inputSchema"),
-        ("image_list", "outputSchema"),
-        ("image_update", "inputSchema"),
-        ("project_environment_config_get", "outputSchema"),
-        ("project_environment_config_reset", "outputSchema"),
-        ("project_environment_config_set", "inputSchema"),
-    ];
-
-    for (tool_name, schema_key) in schema_surfaces {
+    for (tool_name, live_schema_key, _) in ENVIRONMENT_CONFIG_SCHEMA_SURFACES {
         let tool = tools
             .iter()
             .find(|tool| tool.get("name").and_then(Value::as_str) == Some(tool_name))
             .unwrap_or_else(|| panic!("missing {tool_name} schema"));
         let schema = tool
-            .get(schema_key)
-            .unwrap_or_else(|| panic!("{tool_name} missing {schema_key}"));
-        let environment_config = &schema["$defs"]["EnvironmentConfig"];
-        assert_eq!(
-            environment_config["properties"]["workspaces"]["items"]["$ref"],
-            json!("#/$defs/Workspace"),
-            "{tool_name} {schema_key} EnvironmentConfig.workspaces no longer exposes Workspace"
-        );
-
-        let workspace = &schema["$defs"]["Workspace"];
-
-        assert_eq!(
-            workspace["properties"]["slug"],
-            json!({"default": null, "nullable": true, "type": "string"}),
-            "{tool_name} {schema_key} Workspace.slug schema drifted"
-        );
-        assert_eq!(
-            workspace["properties"]["name"],
-            json!({"default": null, "nullable": true, "type": "string"}),
-            "{tool_name} {schema_key} Workspace.name schema drifted"
-        );
-        assert_eq!(
-            workspace["properties"]["tags"],
-            json!({"default": [], "items": {"type": "string"}, "type": "array"}),
-            "{tool_name} {schema_key} Workspace.tags schema drifted"
-        );
-
-        let rendered = serde_json::to_string(schema).expect("schema serializes");
-        assert!(
-            !rendered.to_ascii_lowercase().contains("duplicate slug"),
-            "{tool_name} {schema_key} still advertises duplicate-slug rejection"
+            .get(live_schema_key)
+            .unwrap_or_else(|| panic!("{tool_name} missing {live_schema_key}"));
+        assert_environment_config_workspace_metadata_schema(
+            schema,
+            format_args!("{tool_name} {live_schema_key}"),
         );
     }
 }
@@ -337,52 +358,22 @@ fn checked_in_mcp_snapshot_exposes_environment_config_workspace_metadata() {
         .expect("insta snapshot body after metadata header");
     let tools: Vec<Value> = serde_json::from_str(json_body).expect("MCP schema snapshot is JSON");
 
-    let schema_surfaces = [
-        ("image_create", "input_schema"),
-        ("image_list", "output_schema"),
-        ("image_update", "input_schema"),
-        ("project_environment_config_get", "output_schema"),
-        ("project_environment_config_reset", "output_schema"),
-        ("project_environment_config_set", "input_schema"),
-    ];
+    assert!(
+        !json_body.to_ascii_lowercase().contains("duplicate slug"),
+        "checked-in MCP tool schema snapshot still advertises duplicate-slug rejection"
+    );
 
-    for (tool_name, schema_key) in schema_surfaces {
+    for (tool_name, _, snapshot_schema_key) in ENVIRONMENT_CONFIG_SCHEMA_SURFACES {
         let tool = tools
             .iter()
             .find(|tool| tool.get("name").and_then(Value::as_str) == Some(tool_name))
             .unwrap_or_else(|| panic!("checked-in snapshot is missing {tool_name}"));
-        let schema = tool
-            .get(schema_key)
-            .unwrap_or_else(|| panic!("checked-in snapshot {tool_name} missing {schema_key}"));
-        let environment_config = &schema["$defs"]["EnvironmentConfig"];
-        assert_eq!(
-            environment_config["properties"]["workspaces"]["items"]["$ref"],
-            json!("#/$defs/Workspace"),
-            "checked-in snapshot {tool_name} {schema_key} EnvironmentConfig.workspaces no longer exposes Workspace"
-        );
-
-        let workspace = &schema["$defs"]["Workspace"];
-
-        assert_eq!(
-            workspace["properties"]["slug"],
-            json!({"default": null, "nullable": true, "type": "string"}),
-            "checked-in snapshot {tool_name} {schema_key} Workspace.slug schema drifted"
-        );
-        assert_eq!(
-            workspace["properties"]["name"],
-            json!({"default": null, "nullable": true, "type": "string"}),
-            "checked-in snapshot {tool_name} {schema_key} Workspace.name schema drifted"
-        );
-        assert_eq!(
-            workspace["properties"]["tags"],
-            json!({"default": [], "items": {"type": "string"}, "type": "array"}),
-            "checked-in snapshot {tool_name} {schema_key} Workspace.tags schema drifted"
-        );
-
-        let rendered = serde_json::to_string(schema).expect("schema serializes");
-        assert!(
-            !rendered.to_ascii_lowercase().contains("duplicate slug"),
-            "checked-in snapshot {tool_name} {schema_key} still advertises duplicate-slug rejection"
+        let schema = tool.get(snapshot_schema_key).unwrap_or_else(|| {
+            panic!("checked-in snapshot {tool_name} missing {snapshot_schema_key}")
+        });
+        assert_environment_config_workspace_metadata_schema(
+            schema,
+            format_args!("checked-in snapshot {tool_name} {snapshot_schema_key}"),
         );
     }
 }
