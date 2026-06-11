@@ -675,6 +675,7 @@ fn snapshot_payload_rescues_cross_workspace_endpoint_under_cap() {
         symbol_ranges: std::collections::BTreeMap::new(),
         communities: vec![],
         processes: vec![],
+        route_exclusion_config: Default::default(),
     });
     let ranking = RepoGraphRanking {
         nodes: graph
@@ -815,6 +816,7 @@ fn community_snapshot_aggregates_cross_workspace_edges() {
             },
         ],
         processes: vec![],
+        route_exclusion_config: Default::default(),
     });
     let ranking = RepoGraphRanking {
         nodes: graph
@@ -914,6 +916,7 @@ fn snapshot_payload_preserves_quiet_workspace_when_cap_allows() {
         symbol_ranges: std::collections::BTreeMap::new(),
         communities: vec![],
         processes: vec![],
+        route_exclusion_config: Default::default(),
     });
     let ranking = RepoGraphRanking {
         nodes: graph
@@ -1043,6 +1046,7 @@ fn snapshot_payload_populates_community_id_pr_f3() {
         symbol_ranges: std::collections::BTreeMap::new(),
         communities: vec![],
         processes: vec![],
+        route_exclusion_config: Default::default(),
     };
     // `from_artifact` does NOT run community detection (it
     // restores the persisted sidecar — empty here). To exercise

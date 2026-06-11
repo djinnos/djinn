@@ -101,10 +101,10 @@ exec {bin} verify-test "{test_id}"
     if let Some(url) = config.database_url.as_deref() {
         env.push(env_var("DJINN_DATABASE_URL", url));
     }
-    // Route the Rust toolchain caches to the /cache PVC like task-runs/warm, so
-    // candidate verification commands (cargo build/test, sccache via repo
-    // .cargo/config.toml) reuse the warm per-project caches instead of
-    // recompiling cold. Single-sourced in job.rs; needs the cache volume below.
+    // Route the Rust toolchain caches to the /cache PVC. Verification uses the
+    // shared per-project target base like warm Pods; task-runs use private run
+    // target dirs but keep the same shared CARGO_HOME/SCCACHE settings.
+    // Single-sourced in job.rs; needs the cache volume below.
     env.extend(crate::job::cache_env_vars(project_id));
 
     let container = Container {
@@ -288,7 +288,7 @@ mod tests {
                 .iter()
                 .any(|m| m.name == crate::job::VOLUME_CACHE && m.read_only == Some(false))
         );
-        // Rust cache routing matches task-runs/warm (single-sourced).
+        // Verification keeps shared CARGO_HOME/SCCACHE routing while using the warm base target dir.
         let envs: BTreeMap<&str, &str> = c
             .env
             .as_ref()
