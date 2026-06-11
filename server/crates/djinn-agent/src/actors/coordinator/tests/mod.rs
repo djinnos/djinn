@@ -21,6 +21,7 @@ use djinn_provider::catalog::health::HealthTracker;
 #[derive(Clone)]
 struct RecordingRuntimeOps {
     calls: Arc<Mutex<Vec<String>>>,
+    taskrun_jobs: Arc<Mutex<Vec<djinn_control_plane::bridge::TaskrunJobRef>>>,
     fail_teardown: bool,
 }
 
@@ -28,8 +29,14 @@ impl RecordingRuntimeOps {
     fn new(fail_teardown: bool) -> Self {
         Self {
             calls: Arc::new(Mutex::new(Vec::new())),
+            taskrun_jobs: Arc::new(Mutex::new(Vec::new())),
             fail_teardown,
         }
+    }
+
+    fn with_taskrun_jobs(self, jobs: Vec<djinn_control_plane::bridge::TaskrunJobRef>) -> Self {
+        *self.taskrun_jobs.lock().expect("runtime jobs mutex") = jobs;
+        self
     }
 
     fn calls(&self) -> Vec<String> {
@@ -100,7 +107,11 @@ impl djinn_control_plane::bridge::RuntimeOps for RecordingRuntimeOps {
     async fn list_taskrun_jobs(
         &self,
     ) -> Result<Vec<djinn_control_plane::bridge::TaskrunJobRef>, String> {
-        Ok(Vec::new())
+        Ok(self
+            .taskrun_jobs
+            .lock()
+            .expect("runtime jobs mutex")
+            .clone())
     }
 
     async fn cleanup_task_branches(&self, _: &str) {}
