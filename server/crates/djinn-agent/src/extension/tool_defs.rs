@@ -379,7 +379,7 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
     RmcpTool::new(
         "code_graph".to_string(),
         "Query the SCIP-built repository dependency graph. Set `operation` to one of the enum \
-         values; most ops accept optional filters (kind_filter, group_by, limit, min_confidence). \
+         values; most ops accept optional filters (kind_filter, group_by, limit, min_confidence, workspace). \
          WHEN TO USE: capabilities = cheap discovery of supported ops/params/defaults before spending \
          graph budget; search = find candidate files/symbols by substring when you do not know a \
          key; describe = inspect one exact file/symbol key; neighbors = direct callers/callees/imports \
@@ -390,7 +390,7 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
          = public surface health; boundary_check/blast_radius/touches_hot_path = \
          change-impact analysis; hotspots/cochange/churn/coupling_hubs = git-coupling × PageRank \
          centrality; complexity/refactor_candidates = budget-conscious discovery of risky/refactorable \
-         code. AFTER THIS: after capabilities call the chosen op with only required fields; after search \
+         code. `workspaces` lists available workspace slugs plus node_count/commit_sha/warmed_at/status; optional `workspace` scopes listing/bounded ops (ranked/orphans/snapshot/api_surface), scopes only seed resolution for traversal ops (impact/path/touches_hot_path/blast_radius), normalizes empty string to omitted, and unknown non-empty slugs return unscoped results with `workspace_hint` candidates where supported. AFTER THIS: after capabilities call the chosen op with only required fields; after search \
          pass a returned key to describe, neighbors, context, or impact; after describe call neighbors \
          or context for relationships, or impact for dependents; after neighbors call describe on important \
          nodes or impact to expand beyond direct edges; after impact call blast_radius or boundary_check \
@@ -416,6 +416,10 @@ pub(crate) fn tool_code_graph() -> RmcpTool {
                 "project": {
                     "type": "string",
                     "description": "Project slug (owner/repo) or UUID. The handler resolves it to the server-managed clone path."
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": "Optional workspace slug. Empty string is treated as omitted. Use operation=workspaces to enumerate available slugs. Known workspaces hard-scope listing/bounded ops (ranked/orphans/snapshot/api_surface) and scope only seed/endpoint resolution for traversal ops (impact/path/touches_hot_path/blast_radius) so cross-workspace edges remain visible. Unknown non-empty slugs return unscoped results with workspace_hint candidates where supported."
                 },
                 "key": {
                     "type": "string",

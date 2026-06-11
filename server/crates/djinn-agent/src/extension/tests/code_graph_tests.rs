@@ -610,6 +610,32 @@ async fn code_graph_dispatch_snapshot_reaches_graph_ops() {
 }
 
 #[tokio::test]
+async fn code_graph_dispatch_workspaces_passthrough_uses_graph_ops() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-cg-workspaces-");
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let result = code_graph_tool(
+        &state,
+        serde_json::json!({
+            "operation": "workspaces",
+            "project_path": worktree.path().to_string_lossy(),
+        }),
+        worktree.path(),
+    )
+    .await
+    .expect("workspaces should use the RepoGraphOps workspaces contract");
+
+    assert_eq!(
+        result
+            .get("workspaces")
+            .and_then(|value| value.as_array())
+            .map(Vec::len),
+        Some(0),
+        "default stub should return the trait passthrough shape: {result}"
+    );
+}
+
+#[tokio::test]
 async fn code_graph_dispatch_symbols_at_validates_inputs() {
     let worktree = crate::test_helpers::test_tempdir("djinn-cg-symat-");
     let state =

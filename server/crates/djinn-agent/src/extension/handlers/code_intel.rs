@@ -328,13 +328,58 @@ fn code_graph_chat_dispatch_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+struct AgentWorkspaceScope {
+    workspace: Option<String>,
+    hint: Option<Vec<String>>,
+}
+
+async fn resolve_agent_workspace_scope(
+    graph_ops: &dyn RepoGraphOps,
+    ctx: &djinn_control_plane::bridge::ProjectCtx,
+) -> Result<AgentWorkspaceScope, String> {
+    match graph_ops
+        .workspace_hint(ctx, ctx.workspace.as_deref())
+        .await?
+    {
+        Some(candidates) => Ok(AgentWorkspaceScope {
+            workspace: None,
+            hint: Some(candidates),
+        }),
+        None => Ok(AgentWorkspaceScope {
+            workspace: ctx.workspace.clone(),
+            hint: None,
+        }),
+    }
+}
+
+fn attach_workspace_hint(value: &mut serde_json::Value, hint: Option<Vec<String>>) {
+    let Some(hint) = hint else {
+        return;
+    };
+    if let Some(object) = value.as_object_mut() {
+        object.insert("workspace_hint".to_string(), serde_json::json!(hint));
+    }
+}
+
+fn json_with_optional_workspace_hint<T: serde::Serialize>(
+    field: &str,
+    payload: T,
+    hint: Option<Vec<String>>,
+) -> Result<serde_json::Value, String> {
+    match hint {
+        Some(hint) => Ok(serde_json::json!({ field: payload, "workspace_hint": hint })),
+        None => serde_json::to_value(payload).map_err(|e| format!("serialize error: {e}")),
+    }
+}
+
 async fn call_code_graph_inner(
     state: &AgentContext,
     p: &mut CodeGraphParams,
     ctx: &djinn_control_plane::bridge::ProjectCtx,
     graph_ops: &dyn RepoGraphOps,
 ) -> Result<serde_json::Value, String> {
-    let mcp_state = state.to_mcp_state();
+    let _ = state;
+    let _ = (&p.edge_filters, p.token_budget, p.max_seeds, p.window_days);
     let result: serde_json::Value = match p.operation.as_str() {
         "neighbors" => {
             let key = p
@@ -355,16 +400,17 @@ async fn call_code_graph_inner(
         }
         "ranked" => {
             let limit = p.limit.unwrap_or(20);
+            let scope = resolve_agent_workspace_scope(graph_ops, ctx).await?;
             let ranked = graph_ops
                 .ranked(
                     ctx,
-                    ctx.workspace.as_deref(),
+                    scope.workspace.as_deref(),
                     p.kind_filter.as_deref(),
                     p.sort_by.as_deref(),
                     limit,
                 )
                 .await?;
-            serde_json::to_value(&ranked).map_err(|e| format!("serialize error: {e}"))?
+            json_with_optional_workspace_hint("nodes", ranked, scope.hint)?
         }
         "implementations" => {
             let key = p
@@ -397,17 +443,21 @@ async fn call_code_graph_inner(
             {
                 return Err(format!("invalid min_confidence {c}: must be in [0.0, 1.0]"));
             }
+            let scope = resolve_agent_workspace_scope(graph_ops, ctx).await?;
             let impact = graph_ops
                 .impact(
                     ctx,
-                    ctx.workspace.as_deref(),
+                    scope.workspace.as_deref(),
                     key,
                     depth,
                     p.group_by.as_deref(),
                     p.min_confidence,
                 )
                 .await?;
-            serde_json::to_value(&impact).map_err(|e| format!("serialize error: {e}"))?
+            let mut value =
+                serde_json::to_value(&impact).map_err(|e| format!("serialize error: {e}"))?;
+            attach_workspace_hint(&mut value, scope.hint);
+            value
         }
         "search" => {
             let query = p
@@ -441,6 +491,7 @@ async fn call_code_graph_inner(
                     ));
                 }
             };
+            let scope = resolve_agent_workspace_scope(graph_ops, ctx).await?;
             // v8: when hybrid returns nothing, wrap with a diagnostic
             // payload explaining WHY (semantic index unavailable, etc.)
             // instead of an opaque `[]`. Empty `name` results don't get
@@ -449,12 +500,14 @@ async fn call_code_graph_inner(
             // 'hits')` handles both the array shape and the wrapped
             // `{ hits: [...] }` shape, so this is non-breaking.
             if hits.is_empty() && mode == "hybrid" {
-                serde_json::json!({
+                let mut value = serde_json::json!({
                     "hits": [],
                     "diagnostic": hybrid_search_diagnostic(query),
-                })
+                });
+                attach_workspace_hint(&mut value, scope.hint);
+                value
             } else {
-                serde_json::to_value(&hits).map_err(|e| format!("serialize error: {e}"))?
+                json_with_optional_workspace_hint("hits", hits, scope.hint)?
             }
         }
         "cycles" => {
@@ -468,21 +521,23 @@ async fn call_code_graph_inner(
             // kind_filter=null explicitly via the underlying bridge
             // for the mixed view.
             let kind_filter = p.kind_filter.as_deref().or(Some("symbol"));
+            let scope = resolve_agent_workspace_scope(graph_ops, ctx).await?;
             let cycles = graph_ops.cycles(ctx, kind_filter, min_size).await?;
-            serde_json::to_value(&cycles).map_err(|e| format!("serialize error: {e}"))?
+            json_with_optional_workspace_hint("cycles", cycles, scope.hint)?
         }
         "orphans" => {
             let limit = p.limit.unwrap_or(50);
+            let scope = resolve_agent_workspace_scope(graph_ops, ctx).await?;
             let orphans = graph_ops
                 .orphans(
                     ctx,
-                    ctx.workspace.as_deref(),
+                    scope.workspace.as_deref(),
                     p.kind_filter.as_deref(),
                     p.visibility.as_deref(),
                     limit,
                 )
                 .await?;
-            serde_json::to_value(&orphans).map_err(|e| format!("serialize error: {e}"))?
+            json_with_optional_workspace_hint("orphans", orphans, scope.hint)?
         }
         "path" => {
             let from = p
@@ -494,10 +549,13 @@ async fn call_code_graph_inner(
                 p.to.as_deref()
                     .filter(|s| !s.is_empty())
                     .ok_or("'to' is required for 'path'")?;
+            let scope = resolve_agent_workspace_scope(graph_ops, ctx).await?;
             let path = graph_ops
-                .path(ctx, ctx.workspace.as_deref(), from, to, p.max_depth)
+                .path(ctx, scope.workspace.as_deref(), from, to, p.max_depth)
                 .await?;
-            serde_json::to_value(&path).map_err(|e| format!("serialize error: {e}"))?
+            let mut value = serde_json::json!({ "path": path });
+            attach_workspace_hint(&mut value, scope.hint);
+            value
         }
         "edges" => {
             let from_glob = p
@@ -511,10 +569,11 @@ async fn call_code_graph_inner(
                 .filter(|s| !s.is_empty())
                 .ok_or("'to_glob' is required for 'edges'")?;
             let limit = p.limit.unwrap_or(100);
+            let scope = resolve_agent_workspace_scope(graph_ops, ctx).await?;
             let edges = graph_ops
                 .edges(ctx, from_glob, to_glob, p.edge_kind.as_deref(), limit)
                 .await?;
-            serde_json::to_value(&edges).map_err(|e| format!("serialize error: {e}"))?
+            json_with_optional_workspace_hint("edges", edges, scope.hint)?
         }
         "describe" => {
             let key = p
@@ -559,45 +618,23 @@ async fn call_code_graph_inner(
             // higher values.
             let node_cap = p.node_cap.or(p.limit).unwrap_or(2000);
             let exclusions = djinn_control_plane::tools::graph_exclusions::GraphExclusions::empty();
+            let scope = resolve_agent_workspace_scope(graph_ops, ctx).await?;
             let result = graph_ops
                 .snapshot(
                     ctx,
-                    ctx.workspace.as_deref(),
+                    scope.workspace.as_deref(),
                     djinn_control_plane::bridge::SnapshotLevel::parse(p.level.as_deref())?,
                     node_cap,
                     &exclusions,
                 )
                 .await?;
-            serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
+            let mut value = serde_json::json!({ "snapshot": result });
+            attach_workspace_hint(&mut value, scope.hint);
+            value
         }
         "workspaces" => {
-            let repo = djinn_db::ProjectWorkspaceGraphRepository::new(mcp_state.db().clone());
-            let rows = repo
-                .list_for_project(&ctx.id)
-                .await
-                .map_err(|e| format!("read project_workspace_graph: {e}"))?;
-            let node_counts = graph_ops
-                .workspace_node_counts(ctx)
-                .await
-                .unwrap_or_default();
-            let workspaces: Vec<serde_json::Value> = rows
-                .into_iter()
-                .map(|row| {
-                    let node_count = node_counts
-                        .get(row.workspace_slug.as_str())
-                        .copied()
-                        .unwrap_or(0);
-                    serde_json::json!({
-                        "slug": row.workspace_slug.clone(),
-                        "name": row.workspace_slug,
-                        "node_count": node_count,
-                        "commit_sha": row.commit_sha,
-                        "warmed_at": row.warmed_at,
-                        "status": row.status,
-                    })
-                })
-                .collect();
-            serde_json::json!({ "workspaces": workspaces })
+            let result = graph_ops.workspaces(ctx).await?;
+            serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
         }
         "symbols_at" => {
             // v8: file/line → enclosing symbols.
@@ -673,16 +710,18 @@ async fn call_code_graph_inner(
             // used-outside-crate signal. Trait method already exists;
             // this is just dispatch wiring.
             let limit = p.limit.unwrap_or(50);
+            let scope = resolve_agent_workspace_scope(graph_ops, ctx).await?;
+            let module_glob = p.module_glob.as_deref().or(p.from_glob.as_deref());
             let result = graph_ops
                 .api_surface(
                     ctx,
-                    ctx.workspace.as_deref(),
-                    p.from_glob.as_deref(),
+                    scope.workspace.as_deref(),
+                    module_glob,
                     p.visibility.as_deref(),
                     limit,
                 )
                 .await?;
-            serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
+            json_with_optional_workspace_hint("symbols", result, scope.hint)?
         }
         "metrics_at" => {
             // v8: scalar graph snapshot — node/edge counts, cycles,
@@ -760,10 +799,11 @@ async fn call_code_graph_inner(
                      to_glob (sinks, comma-sep), and query (symbols, comma-sep)"
                     .to_string());
             }
+            let scope = resolve_agent_workspace_scope(graph_ops, ctx).await?;
             let result = graph_ops
-                .touches_hot_path(ctx, ctx.workspace.as_deref(), &entries, &sinks, &queried)
+                .touches_hot_path(ctx, scope.workspace.as_deref(), &entries, &sinks, &queried)
                 .await?;
-            serde_json::to_value(&result).map_err(|e| format!("serialize error: {e}"))?
+            json_with_optional_workspace_hint("hits", result, scope.hint)?
         }
         "coupling_hubs" => {
             // v8: top files by cumulative coupling across all
@@ -981,12 +1021,13 @@ async fn call_code_graph_inner(
                 .filter(|k| !k.is_empty())
                 .ok_or("'key' is required for 'blast_radius'")?;
             let depth = p.max_depth.unwrap_or(2);
+            let scope = resolve_agent_workspace_scope(graph_ops, ctx).await?;
 
             let (direct_result, transitive_result) = tokio::join!(
                 graph_ops.neighbors(ctx, key, Some("incoming"), Some("file"), None),
                 graph_ops.impact(
                     ctx,
-                    ctx.workspace.as_deref(),
+                    scope.workspace.as_deref(),
                     key,
                     depth,
                     Some("file"),
@@ -1023,7 +1064,7 @@ async fn call_code_graph_inner(
                 .filter(|g| g.file != target_key_norm && !direct_files.contains(&g.file))
                 .collect();
 
-            serde_json::json!({
+            let mut value = serde_json::json!({
                 "target": key,
                 "direct": categorize_blast_groups(direct_filtered),
                 "transitive": categorize_blast_groups(transitive_filtered),
@@ -1033,7 +1074,9 @@ async fn call_code_graph_inner(
                     "review `direct.runtime` for behavioural compatibility",
                     "treat `transitive.runtime` as a deeper-review hint, not a hard breakage list",
                 ],
-            })
+            });
+            attach_workspace_hint(&mut value, scope.hint);
+            value
         }
         other => {
             return Err(format!(

@@ -229,6 +229,8 @@ fn code_graph_schema_embeds_workflow_guidance() {
         "context",
         "complexity",
         "refactor_candidates",
+        "workspaces",
+        "workspace_hint",
     ] {
         assert!(
             description.contains(operation),
