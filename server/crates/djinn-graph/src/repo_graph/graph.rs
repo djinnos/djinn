@@ -232,6 +232,12 @@ impl RepoDependencyGraph {
         let mut scored_nodes = Vec::with_capacity(self.graph.node_count());
         for node_index in self.graph.node_indices() {
             let node = &self.graph[node_index];
+            // Route/Tool nodes are synthetic affordances. Keep them in the
+            // PageRank projection so their edges still contribute to real
+            // symbols, but do not expose them as ranked architecture hubs.
+            if node.is_route_or_tool() {
+                continue;
+            }
             let page_rank = page_rank_scores[node_index.index()];
             let structural_weight = self.structural_weight(node_index);
             let score = page_rank * structural_weight;
@@ -283,6 +289,10 @@ impl RepoDependencyGraph {
         let outbound_edge_weight = self.total_edge_weight(node_index, Outgoing);
         let degree_bonus = (inbound_edge_weight * 1.2) + (outbound_edge_weight * 0.8);
         node.intrinsic_weight() + degree_bonus
+    }
+
+    pub fn is_singleton_route_without_consumers(&self, node_index: NodeIndex) -> bool {
+        super::ranking::is_singleton_route_without_consumers(&self.graph, node_index)
     }
 
     fn total_edge_weight(&self, node_index: NodeIndex, direction: petgraph::Direction) -> f64 {
