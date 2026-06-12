@@ -1,12 +1,22 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{
+    mpsc::{self, error::TrySendError},
+    watch,
+};
 
 use super::actor::CoordinatorActor;
 use super::consolidation::DbConsolidationRunner;
 use super::messages::CoordinatorMessage;
 use super::types::*;
+
+const TRY_TRIGGER_DISPATCH_LOG_INTERVAL_SECS: u64 = 30;
+
+static LAST_FULL_TRY_TRIGGER_DISPATCH_LOG_SECS: AtomicU64 = AtomicU64::new(0);
+static LAST_CLOSED_TRY_TRIGGER_DISPATCH_LOG_SECS: AtomicU64 = AtomicU64::new(0);
 
 // ─── Handle ───────────────────────────────────────────────────────────────────
 
@@ -59,7 +69,26 @@ impl CoordinatorHandle {
     /// the pool must not `.await` on the coordinator channel while the
     /// coordinator may be `.await`-ing on the pool (e.g. `has_session`).
     pub fn try_trigger_dispatch(&self) {
-        let _ = self.sender.try_send(CoordinatorMessage::TriggerDispatch);
+        match self.sender.try_send(CoordinatorMessage::TriggerDispatch) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                if should_log_try_trigger_dispatch_failure(&LAST_FULL_TRY_TRIGGER_DISPATCH_LOG_SECS)
+                {
+                    tracing::warn!(
+                        "coordinator dispatch trigger skipped: coordinator channel is busy/backpressured"
+                    );
+                }
+            }
+            Err(TrySendError::Closed(_)) => {
+                if should_log_try_trigger_dispatch_failure(
+                    &LAST_CLOSED_TRY_TRIGGER_DISPATCH_LOG_SECS,
+                ) {
+                    tracing::error!(
+                        "coordinator dispatch trigger failed: coordinator channel is closed/dead"
+                    );
+                }
+            }
+        }
     }
 
     pub async fn trigger_dispatch_for_project(
@@ -154,4 +183,18 @@ impl CoordinatorHandle {
             .map_err(|_| CoordinatorError::ActorDead)?;
         rx.await.map_err(|_| CoordinatorError::NoResponse)
     }
+}
+
+fn should_log_try_trigger_dispatch_failure(last_log_secs: &AtomicU64) -> bool {
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    let last_secs = last_log_secs.load(Ordering::Relaxed);
+    if now_secs.saturating_sub(last_secs) < TRY_TRIGGER_DISPATCH_LOG_INTERVAL_SECS {
+        return false;
+    }
+
+    last_log_secs
+        .compare_exchange(last_secs, now_secs, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
 }
