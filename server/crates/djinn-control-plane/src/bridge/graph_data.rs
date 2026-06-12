@@ -1076,11 +1076,18 @@ pub struct RouteShape {
 }
 
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct ShapeTypeMismatch {
+    pub key: String,
+    pub server_type: String,
+    pub consumer_type: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct ShapeDrift {
     pub consumer: RelatedSymbol,
     pub missing_keys: Vec<String>,
     pub extra_keys: Vec<String>,
-    pub type_mismatches: Vec<String>,
+    pub type_mismatches: Vec<ShapeTypeMismatch>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
