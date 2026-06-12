@@ -88,6 +88,8 @@ pub fn detect_axum_routes(
             } else {
                 0.45
             };
+            let handler_source_file =
+                resolved_handler_node.and_then(|idx| graph.node(idx).file_path.clone());
             let handler_symbol =
                 resolved_handler_node.and_then(|idx| graph.node(idx).symbol.clone());
             let handler_node = resolved_handler_node.unwrap_or_else(|| {
@@ -100,6 +102,7 @@ pub fn detect_axum_routes(
                 &label,
                 Some("rust"),
                 workspace.as_deref(),
+                handler_source_file.as_deref(),
                 Some("axum"),
                 handler_symbol.as_deref(),
             );
@@ -541,14 +544,13 @@ mod tests {
             let candidate = trimmed
                 .strip_prefix("async fn ")
                 .or_else(|| trimmed.strip_prefix("fn "));
-            if let Some(rest) = candidate {
-                if let Some(name) = rest
+            if let Some(rest) = candidate
+                && let Some(name) = rest
                     .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
                     .next()
                     .filter(|name| !name.is_empty())
-                {
-                    names.insert(name.to_string());
-                }
+            {
+                names.insert(name.to_string());
             }
         }
         names

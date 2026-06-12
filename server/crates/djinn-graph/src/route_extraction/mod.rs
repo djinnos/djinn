@@ -809,6 +809,61 @@ mod tests {
     }
 
     #[test]
+    fn route_parity_enabled_live_counts_do_not_exceed_disabled_shadow_counts() {
+        let _guard = ROUTE_DETECTION_ENV_LOCK.lock().unwrap();
+        let old = std::env::var(ROUTE_PARITY_FLAG).ok();
+
+        let (disabled_nodes, disabled_edges) = route_parity_fixture_counts(Some("0"));
+        let (enabled_nodes, enabled_edges) = route_parity_fixture_counts(Some("1"));
+
+        unsafe {
+            if let Some(old) = old {
+                std::env::set_var(ROUTE_PARITY_FLAG, old);
+            } else {
+                std::env::remove_var(ROUTE_PARITY_FLAG);
+            }
+        }
+
+        assert!(
+            enabled_nodes <= disabled_nodes,
+            "route parity live node count ({enabled_nodes}) must not exceed shadow baseline ({disabled_nodes})"
+        );
+        assert!(
+            enabled_edges <= disabled_edges,
+            "route parity live edge count ({enabled_edges}) must not exceed shadow baseline ({disabled_edges})"
+        );
+    }
+
+    fn route_parity_fixture_counts(value: Option<&str>) -> (usize, usize) {
+        unsafe {
+            if let Some(value) = value {
+                std::env::set_var(ROUTE_PARITY_FLAG, value);
+            } else {
+                std::env::remove_var(ROUTE_PARITY_FLAG);
+            }
+        }
+
+        let temp = tempfile::tempdir().expect("create temp fixture dir");
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("server/src")).unwrap();
+        std::fs::create_dir_all(root.join("ui/src/api")).unwrap();
+        std::fs::write(
+            root.join("server/src/routes.rs"),
+            "use axum::{Router, routing::get};\nfn router() -> Router<()> { Router::new().route(\"/api/agents\", get(list_agents)) }\nasync fn list_agents() {}",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("ui/src/api/agents.ts"),
+            "export function fetchAgents() {\n  return fetch('/api/agents', {});\n}",
+        )
+        .unwrap();
+
+        let mut graph = fixture_graph();
+        let _report = detect_routes(&mut graph, root);
+        (graph.node_count(), graph.edge_count())
+    }
+
+    #[test]
     fn default_exclusion_config_suggests_health_and_param_only_fetches() {
         let temp = tempfile::tempdir().expect("create temp fixture dir");
         let root = temp.path();
@@ -903,6 +958,7 @@ mod tests {
             "GET /api/agents (nextjs)",
             Some("typescript"),
             Some("root"),
+            Some(Path::new("ui/src/routes.ts")),
             Some("nextjs"),
             None,
         );
