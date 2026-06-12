@@ -12,6 +12,7 @@
 //! derives are needed).
 
 use std::collections::HashMap;
+use std::fmt;
 
 use djinn_core::models::TaskRunTrigger;
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,45 @@ pub enum RoleKind {
     Architect,
     Lead,
 }
+
+/// Reply-loop guard family that terminated a degenerate session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopGuardKind {
+    IdenticalToolFailure,
+    PermissionDenial,
+    IdenticalOutput,
+    ConsecutiveFailures,
+}
+
+/// Typed error used inside the agent reply loop before it is mapped onto a
+/// terminal [`TaskRunOutcome`] / supervisor [`StageOutcome`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopGuardTrip {
+    pub kind: LoopGuardKind,
+    pub offending_signature: String,
+    pub threshold: u32,
+    pub observed: u32,
+    pub turn_span: (u32, u32),
+    pub session_id: String,
+}
+
+impl fmt::Display for LoopGuardTrip {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "loop guard tripped: kind={:?} signature={} observed={} threshold={} turn_span={:?} session_id={}",
+            self.kind,
+            self.offending_signature,
+            self.observed,
+            self.threshold,
+            self.turn_span,
+            self.session_id
+        )
+    }
+}
+
+impl std::error::Error for LoopGuardTrip {}
 
 impl RoleKind {
     pub fn as_str(self) -> &'static str {
@@ -318,6 +358,17 @@ pub enum TaskRunOutcome {
     /// non-self-describing, so reordering would break cross-version decoding
     /// during a rolling deploy — same rationale as `ProviderFailureClass::AuthInvalid`).
     WorkerSubmitted,
+    /// Reply-loop guard terminated a degenerate session before the task could
+    /// make progress. Added LAST to preserve bincode discriminants of all
+    /// existing worker→host terminal-report variants.
+    LoopGuardTripped {
+        kind: LoopGuardKind,
+        offending_signature: String,
+        threshold: u32,
+        observed: u32,
+        turn_span: (u32, u32),
+        session_id: String,
+    },
 }
 
 /// Return value of `TaskRunSupervisor::run`.
@@ -530,5 +581,97 @@ mod tests {
             ),
             other => panic!("unexpected outcome: {other:?}"),
         }
+    }
+
+    fn loop_guard_outcome(kind: LoopGuardKind) -> TaskRunOutcome {
+        TaskRunOutcome::LoopGuardTripped {
+            kind,
+            offending_signature: "tool_failure:shell:{\"command\":\"cargo test\"}:error: denied"
+                .to_string(),
+            threshold: 3,
+            observed: 3,
+            turn_span: (4, 6),
+            session_id: "session-1".to_string(),
+        }
+    }
+
+    #[test]
+    fn loop_guard_outcome_bincode_roundtrip_for_each_kind() {
+        for kind in [
+            LoopGuardKind::IdenticalToolFailure,
+            LoopGuardKind::PermissionDenial,
+            LoopGuardKind::IdenticalOutput,
+            LoopGuardKind::ConsecutiveFailures,
+        ] {
+            let report = TaskRunReport {
+                task_run_id: "run-loop-guard".to_string(),
+                outcome: loop_guard_outcome(kind),
+                stages_completed: vec![RoleKind::Worker],
+            };
+
+            let bytes = bincode::serialize(&report).expect("serialize");
+            let back: TaskRunReport = bincode::deserialize(&bytes).expect("deserialize");
+
+            match back.outcome {
+                TaskRunOutcome::LoopGuardTripped {
+                    kind: back_kind,
+                    offending_signature,
+                    threshold,
+                    observed,
+                    turn_span,
+                    session_id,
+                } => {
+                    assert_eq!(back_kind, kind);
+                    assert!(offending_signature.contains("tool_failure:shell"));
+                    assert_eq!(threshold, 3);
+                    assert_eq!(observed, 3);
+                    assert_eq!(turn_span, (4, 6));
+                    assert_eq!(session_id, "session-1");
+                }
+                other => panic!("unexpected outcome: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn task_run_outcome_bincode_discriminants_keep_existing_variants_stable() {
+        let old_variants = [
+            TaskRunOutcome::PrOpened {
+                url: "https://example.test/pr/1".to_string(),
+                sha: "abc123".to_string(),
+            },
+            TaskRunOutcome::Closed {
+                reason: "done".to_string(),
+            },
+            TaskRunOutcome::Escalated {
+                reason: "blocked".to_string(),
+            },
+            TaskRunOutcome::Failed {
+                stage: "worker".to_string(),
+                reason: "boom".to_string(),
+                provider_failure: None,
+            },
+            TaskRunOutcome::Interrupted,
+            TaskRunOutcome::WorkerSubmitted,
+        ];
+
+        for (expected_discriminant, outcome) in old_variants.into_iter().enumerate() {
+            let bytes = bincode::serialize(&outcome).expect("serialize old variant");
+            assert_eq!(
+                &bytes[..4],
+                &(expected_discriminant as u32).to_le_bytes(),
+                "existing variant discriminant shifted for {outcome:?}"
+            );
+            let decoded: TaskRunOutcome = bincode::deserialize(&bytes).expect("decode old frame");
+            assert_eq!(
+                std::mem::discriminant(&decoded),
+                std::mem::discriminant(&outcome)
+            );
+        }
+
+        let new_bytes =
+            bincode::serialize(&loop_guard_outcome(LoopGuardKind::IdenticalToolFailure))
+                .expect("serialize new variant");
+        assert_eq!(&new_bytes[..4], &6u32.to_le_bytes());
     }
 }

@@ -59,7 +59,8 @@ pub use services::wire::{
 // Re-export runtime spec types at the crate root so the thin
 // `djinn_agent::supervisor` shim preserves every existing import path.
 pub use djinn_runtime::spec::{
-    RoleKind, SupervisorFlow, TaskRunOutcome, TaskRunReport, TaskRunSpec, role_sequence,
+    LoopGuardKind, RoleKind, SupervisorFlow, TaskRunOutcome, TaskRunReport, TaskRunSpec,
+    role_sequence,
 };
 
 /// Root under the shared cache PVC for per-task-run Cargo target directories.
@@ -211,6 +212,14 @@ pub enum StageOutcome {
         #[serde(default)]
         provider_failure: Option<djinn_runtime::ProviderFailureClass>,
     },
+    LoopGuardTripped {
+        kind: LoopGuardKind,
+        offending_signature: String,
+        threshold: u32,
+        observed: u32,
+        turn_span: (u32, u32),
+        session_id: String,
+    },
 }
 
 impl StageOutcome {
@@ -221,6 +230,7 @@ impl StageOutcome {
             StageOutcome::PlannerClose { .. }
                 | StageOutcome::Escalate { .. }
                 | StageOutcome::Failed { .. }
+                | StageOutcome::LoopGuardTripped { .. }
                 | StageOutcome::ReviewerRejected { .. }
                 | StageOutcome::VerifierFailed { .. }
                 // Lead decisions that fire their own terminal board transition
@@ -1462,6 +1472,38 @@ impl TaskRunSupervisor {
                         });
                         break;
                     }
+                    StageOutcome::LoopGuardTripped {
+                        kind,
+                        offending_signature,
+                        threshold,
+                        observed,
+                        turn_span,
+                        session_id,
+                    } => {
+                        tracing::info!(
+                            target: "djinn_supervisor::loop_guard_tripped",
+                            kind = "loop_guard_tripped",
+                            guard_kind = ?kind,
+                            offending_signature = %offending_signature,
+                            threshold,
+                            observed,
+                            turn_span_start = turn_span.0,
+                            turn_span_end = turn_span.1,
+                            session_id = %session_id,
+                            task_id = %spec.task_id,
+                            task_run_id = %run_id,
+                            "loop_guard_tripped"
+                        );
+                        result = Some(TaskRunOutcome::LoopGuardTripped {
+                            kind,
+                            offending_signature,
+                            threshold,
+                            observed,
+                            turn_span,
+                            session_id,
+                        });
+                        break;
+                    }
                 }
             }
 
@@ -1596,6 +1638,7 @@ impl TaskRunSupervisor {
             TaskRunOutcome::WorkerSubmitted => TaskRunStatus::Completed,
             TaskRunOutcome::Escalated { .. } => TaskRunStatus::Completed,
             TaskRunOutcome::Failed { .. } => TaskRunStatus::Failed,
+            TaskRunOutcome::LoopGuardTripped { .. } => TaskRunStatus::Failed,
             TaskRunOutcome::Interrupted => TaskRunStatus::Interrupted,
         };
         // On the cancellation path the host-bound RPC channel may already
@@ -1733,6 +1776,10 @@ pub fn trigger_as_str(t: TaskRunTrigger) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use djinn_core::models::Task;
+    use djinn_workspace::Workspace;
+    use tokio_util::sync::CancellationToken;
 
     /// Compile-time assertion: `SupervisorServices` is object-safe.
     ///
@@ -1752,6 +1799,226 @@ mod tests {
 
     const PLANNING_ISSUE_TYPES: [&str; 4] =
         ["planning", "decomposition", "review", "epic_breakdown"];
+
+    fn run_git(cwd: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git command should run");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn make_source_repo(root: &std::path::Path) {
+        std::fs::create_dir_all(root).expect("create source repo dir");
+        run_git(root, &["init", "-b", "main"]);
+        run_git(root, &["config", "user.name", "Djinn Test"]);
+        run_git(root, &["config", "user.email", "djinn-test@example.com"]);
+        std::fs::write(root.join("README.md"), "# loop guard fixture\n")
+            .expect("write fixture file");
+        run_git(root, &["add", "README.md"]);
+        run_git(root, &["commit", "-m", "initial"]);
+    }
+
+    fn fixture_task(task_id: &str, project_id: &str) -> Task {
+        Task {
+            id: task_id.to_string(),
+            project_id: project_id.to_string(),
+            short_id: "lg-1".into(),
+            epic_id: None,
+            title: "loop guard fixture".into(),
+            description: "exercise loop guard settlement".into(),
+            design: String::new(),
+            issue_type: "task".into(),
+            status: "open".into(),
+            priority: 1,
+            owner: "test-owner".into(),
+            labels: "[]".into(),
+            acceptance_criteria: "[]".into(),
+            reopen_count: 0,
+            continuation_count: 0,
+            verification_failure_count: 0,
+            total_reopen_count: 0,
+            total_verification_failure_count: 0,
+            intervention_count: 0,
+            last_intervention_at: None,
+            created_at: "now".into(),
+            updated_at: "now".into(),
+            closed_at: None,
+            close_reason: None,
+            merge_commit_sha: None,
+            pr_url: None,
+            merge_conflict_metadata: None,
+            memory_refs: "[]".into(),
+            agent_type: None,
+            created_by_user_id: None,
+            unresolved_blocker_count: 0,
+        }
+    }
+
+    struct ScriptedLoopGuardServices {
+        cancel: CancellationToken,
+        task: Task,
+        outcome: StageOutcome,
+        updated_statuses: std::sync::Arc<std::sync::Mutex<Vec<TaskRunStatus>>>,
+    }
+
+    #[async_trait]
+    impl SupervisorServices for ScriptedLoopGuardServices {
+        fn cancel(&self) -> &CancellationToken {
+            &self.cancel
+        }
+
+        async fn load_task(&self, task_id: String) -> Result<Task, String> {
+            assert_eq!(task_id, self.task.id);
+            Ok(self.task.clone())
+        }
+
+        async fn execute_stage(
+            &self,
+            _task: &Task,
+            _workspace: &Workspace,
+            role_kind: RoleKind,
+            _task_run_id: &str,
+            _spec: &TaskRunSpec,
+        ) -> Result<StageOutcome, StageError> {
+            assert_eq!(role_kind, RoleKind::Worker);
+            Ok(self.outcome.clone())
+        }
+
+        async fn open_pr(&self, _spec: &TaskRunSpec, _task: &Task) -> TaskRunOutcome {
+            panic!("loop guard settlement must not open a PR")
+        }
+
+        async fn create_task_run(
+            &self,
+            _params: services::SerializableCreateTaskRunParams,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn update_task_run_status(
+            &self,
+            _run_id: String,
+            status: TaskRunStatus,
+        ) -> Result<(), String> {
+            self.updated_statuses
+                .lock()
+                .expect("updated statuses mutex poisoned")
+                .push(status);
+            Ok(())
+        }
+
+        async fn get_model_context_window(&self, _model_id: String) -> Result<i64, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn get_provider_base_url(
+            &self,
+            _catalog_provider_id: String,
+        ) -> Result<String, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn pick_any_default_model(&self) -> Result<Option<String>, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn create_session(
+            &self,
+            _params: services::SerializableCreateSessionParams,
+        ) -> Result<djinn_core::models::SessionRecord, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn publish_session_message(
+            &self,
+            _session_id: String,
+            _task_id: String,
+            _agent_type: String,
+            _message: serde_json::Value,
+        ) -> Result<(), String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn get_environment_config(
+            &self,
+            _project_id: String,
+        ) -> Result<djinn_stack::environment::EnvironmentConfig, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn invoke_llm(
+            &self,
+            _model_id: String,
+            _conversation: djinn_provider::message::Conversation,
+            _tools: Vec<serde_json::Value>,
+            _tool_choice: Option<djinn_provider::provider::ToolChoice>,
+        ) -> Result<djinn_provider::provider::LlmResponse, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn update_session_status(
+            &self,
+            _session_id: String,
+            _status: djinn_core::models::SessionStatus,
+            _tokens_in: i64,
+            _tokens_out: i64,
+            _cache_read: i64,
+            _cache_write: i64,
+        ) -> Result<(), String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn tool_github_search(
+            &self,
+            _project_id: Option<String>,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn tool_github_fetch_file(
+            &self,
+            _project_id: Option<String>,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn tool_ci_job_log(
+            &self,
+            _session_task_id: Option<String>,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn emit_djinn_event(
+            &self,
+            _event: services::SerializableDjinnEvent,
+        ) -> Result<(), String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn touch_activity(&self, _task_id: String) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn transition_task(
+            &self,
+            _task_id: String,
+            _action: String,
+            _reason: Option<String>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn cargo_target_run_dir_helper_matches_expected_cache_path() {
@@ -1807,6 +2074,17 @@ mod tests {
         assert!(StageOutcome::PlannerClose { reason: "x".into() }.is_terminal());
         assert!(StageOutcome::Escalate { reason: "x".into() }.is_terminal());
         assert!(
+            StageOutcome::LoopGuardTripped {
+                kind: LoopGuardKind::ConsecutiveFailures,
+                offending_signature: "x".into(),
+                threshold: 3,
+                observed: 3,
+                turn_span: (1, 3),
+                session_id: "session-x".into(),
+            }
+            .is_terminal()
+        );
+        assert!(
             StageOutcome::ReviewerRejected {
                 feedback: "x".into()
             }
@@ -1818,6 +2096,125 @@ mod tests {
         assert!(!StageOutcome::ReviewerApproved.is_terminal());
         assert!(!StageOutcome::VerifierPassed.is_terminal());
         assert!(!StageOutcome::ArchitectDone.is_terminal());
+    }
+
+    #[tokio::test]
+    async fn scripted_loop_guard_run_settles_with_distinct_telemetry() {
+        let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("temp test root");
+        let source_dir = root.path().join("source");
+        make_source_repo(&source_dir);
+
+        let project_id = "project-loop-guard";
+        let task_id = "task-loop-guard";
+        let task_run_id = "run-loop-guard";
+        let mirror = Arc::new(MirrorManager::new(root.path().join("mirrors")));
+        mirror
+            .ensure_mirror(project_id, &format!("file://{}", source_dir.display()))
+            .await
+            .expect("install fixture mirror");
+
+        let stage_outcome = StageOutcome::LoopGuardTripped {
+            kind: LoopGuardKind::PermissionDenial,
+            offending_signature: "tool_failure:shell:write:/root:permission_denied".into(),
+            threshold: 3,
+            observed: 4,
+            turn_span: (7, 11),
+            session_id: "session-loop-guard".into(),
+        };
+        let updated_statuses = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let services: Arc<dyn SupervisorServices> = Arc::new(ScriptedLoopGuardServices {
+            cancel: CancellationToken::new(),
+            task: fixture_task(task_id, project_id),
+            outcome: stage_outcome,
+            updated_statuses: std::sync::Arc::clone(&updated_statuses),
+        });
+        let supervisor = TaskRunSupervisor::new(mirror, services);
+        let spec = TaskRunSpec {
+            task_run_id: task_run_id.into(),
+            task_id: task_id.into(),
+            project_id: project_id.into(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".into(),
+            task_branch: "djinn/loop-guard".into(),
+            flow: SupervisorFlow::NewTask,
+            model_id_per_role: Default::default(),
+            read_source_project_ids: Vec::new(),
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+        };
+
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(logs.clone())
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+            .with_target(true)
+            .with_ansi(false)
+            .with_level(true)
+            .finish();
+        let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        match report.outcome {
+            TaskRunOutcome::LoopGuardTripped {
+                kind,
+                offending_signature,
+                threshold,
+                observed,
+                turn_span,
+                session_id,
+            } => {
+                assert_eq!(kind, LoopGuardKind::PermissionDenial);
+                assert_eq!(
+                    offending_signature,
+                    "tool_failure:shell:write:/root:permission_denied"
+                );
+                assert_eq!(threshold, 3);
+                assert_eq!(observed, 4);
+                assert_eq!(turn_span, (7, 11));
+                assert_eq!(session_id, "session-loop-guard");
+            }
+            other => panic!("expected LoopGuardTripped outcome, got {other:?}"),
+        }
+        assert_eq!(report.stages_completed, vec![RoleKind::Worker]);
+        assert_eq!(
+            updated_statuses
+                .lock()
+                .expect("updated statuses mutex poisoned")
+                .as_slice(),
+            &[TaskRunStatus::Failed],
+            "loop guard must settle through update_task_run_status/record_status path"
+        );
+
+        let captured = logs.take();
+        assert!(
+            captured.contains("djinn_supervisor::loop_guard_tripped"),
+            "expected distinct tracing target for loop guard event, got:\n{captured}"
+        );
+        assert!(
+            captured.contains("loop_guard_tripped")
+                && captured.contains("kind=\"loop_guard_tripped\"")
+                && captured.contains("guard_kind=PermissionDenial")
+                && captured.contains(
+                    "offending_signature=tool_failure:shell:write:/root:permission_denied"
+                )
+                && captured.contains("threshold=3")
+                && captured.contains("observed=4")
+                && captured.contains("turn_span_start=7")
+                && captured.contains("turn_span_end=11")
+                && captured.contains("session_id=session-loop-guard")
+                && captured.contains("task_id=task-loop-guard"),
+            "expected loop_guard_tripped info event with full payload, got:\n{captured}"
+        );
+        assert!(
+            !captured.contains("provider_failure") && !captured.contains("budget_park"),
+            "loop guard telemetry must be distinguishable from provider failures and budget parks, got:\n{captured}"
+        );
     }
 
     // ── Planner-escalate routing regression coverage (ykr7) ────────────────────
@@ -2741,5 +3138,109 @@ mod tests {
             captured.contains("INFO"),
             "expected log output to be emitted at INFO level, got:\n{captured}"
         );
+    }
+
+    fn loop_guard_stage_outcome(kind: LoopGuardKind) -> StageOutcome {
+        StageOutcome::LoopGuardTripped {
+            kind,
+            offending_signature: "tool_failure:shell:{\"command\":\"cargo test\"}:error: denied"
+                .to_string(),
+            threshold: 3,
+            observed: 3,
+            turn_span: (4, 6),
+            session_id: "session-1".to_string(),
+        }
+    }
+
+    #[test]
+    fn loop_guard_stage_outcome_bincode_roundtrip_for_each_kind() {
+        for kind in [
+            LoopGuardKind::IdenticalToolFailure,
+            LoopGuardKind::PermissionDenial,
+            LoopGuardKind::IdenticalOutput,
+            LoopGuardKind::ConsecutiveFailures,
+        ] {
+            let bytes = bincode::serialize(&loop_guard_stage_outcome(kind)).expect("serialize");
+            let back: StageOutcome = bincode::deserialize(&bytes).expect("deserialize");
+
+            match back {
+                StageOutcome::LoopGuardTripped {
+                    kind: back_kind,
+                    offending_signature,
+                    threshold,
+                    observed,
+                    turn_span,
+                    session_id,
+                } => {
+                    assert_eq!(back_kind, kind);
+                    assert!(offending_signature.contains("tool_failure:shell"));
+                    assert_eq!(threshold, 3);
+                    assert_eq!(observed, 3);
+                    assert_eq!(turn_span, (4, 6));
+                    assert_eq!(session_id, "session-1");
+                }
+                other => panic!("unexpected outcome: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn stage_outcome_bincode_discriminants_keep_existing_variants_stable() {
+        let old_variants = [
+            StageOutcome::WorkerDone,
+            StageOutcome::PlannerExecute,
+            StageOutcome::PlannerClose {
+                reason: "done".to_string(),
+            },
+            StageOutcome::ReviewerApproved,
+            StageOutcome::ReviewerRejected {
+                feedback: "needs work".to_string(),
+            },
+            StageOutcome::VerifierPassed,
+            StageOutcome::VerifierFailed {
+                reason: "tests failed".to_string(),
+            },
+            StageOutcome::ArchitectDone,
+            StageOutcome::Escalate {
+                reason: "blocked".to_string(),
+            },
+            StageOutcome::LeadApproved,
+            StageOutcome::LeadApproveConflict {
+                reason: "conflict".to_string(),
+            },
+            StageOutcome::LeadReopen {
+                reason: "retry".to_string(),
+            },
+            StageOutcome::LeadClose {
+                reason: "close".to_string(),
+            },
+            StageOutcome::LeadEscalate {
+                reason: "escalate".to_string(),
+            },
+            StageOutcome::Failed {
+                reason: "boom".to_string(),
+                provider_failure: None,
+            },
+        ];
+
+        for (expected_discriminant, outcome) in old_variants.into_iter().enumerate() {
+            let bytes = bincode::serialize(&outcome).expect("serialize old variant");
+            assert_eq!(
+                &bytes[..4],
+                &(expected_discriminant as u32).to_le_bytes(),
+                "existing variant discriminant shifted for {outcome:?}"
+            );
+            let decoded: StageOutcome = bincode::deserialize(&bytes).expect("decode old frame");
+            assert_eq!(
+                std::mem::discriminant(&decoded),
+                std::mem::discriminant(&outcome)
+            );
+        }
+
+        let new_bytes = bincode::serialize(&loop_guard_stage_outcome(
+            LoopGuardKind::IdenticalToolFailure,
+        ))
+        .expect("serialize new variant");
+        assert_eq!(&new_bytes[..4], &15u32.to_le_bytes());
     }
 }
