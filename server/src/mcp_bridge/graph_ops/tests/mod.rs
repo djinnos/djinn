@@ -701,6 +701,7 @@ async fn neighbors_returns_connected_nodes() {
             let other_node = graph.node(other_index);
             neighbors.push(GraphNeighbor {
                 key: format_node_key(&other_node.id),
+                uid: format_node_key(&other_node.id),
                 kind: format!("{:?}", other_node.kind).to_lowercase(),
                 display_name: other_node.display_name.clone(),
                 edge_kind: format!("{:?}", edge.weight().kind),
@@ -728,6 +729,7 @@ async fn ranked_returns_scored_nodes() {
             let graph_node = graph.node(node.node_index);
             RankedNode {
                 key: format_node_key(&node.key),
+                uid: format_node_key(&node.key),
                 kind: format!("{:?}", node.kind).to_lowercase(),
                 display_name: graph_node.display_name.clone(),
                 score: node.score,

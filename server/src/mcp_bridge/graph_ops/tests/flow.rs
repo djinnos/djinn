@@ -107,6 +107,7 @@ fn flow_fixture_graph() -> RepoDependencyGraph {
 fn search_hit(key: &str, name: &str, score: f64) -> SearchHit {
     SearchHit {
         key: key.to_string(),
+        uid: key.to_string(),
         kind: "function".to_string(),
         display_name: name.to_string(),
         score,

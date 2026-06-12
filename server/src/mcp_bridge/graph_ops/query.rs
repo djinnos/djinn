@@ -185,6 +185,7 @@ impl RepoGraphBridge {
                 neighbors.push((
                     other_node,
                     GraphNeighbor {
+                        uid: other_key.clone(),
                         key: other_key,
                         kind: format!("{:?}", other_node.kind).to_lowercase(),
                         display_name: other_node.display_name.clone(),
@@ -436,6 +437,7 @@ impl RepoGraphBridge {
                 let process_id = shared::pick_lowest_ordinal_process_id(&graph, node.node_index);
                 let community_id = graph.community_id(node.node_index).map(|s| s.to_string());
                 Some(RankedNode {
+                    uid: key.clone(),
                     key,
                     kind: format!("{:?}", node.kind).to_lowercase(),
                     display_name: graph_node.display_name.clone(),
@@ -626,6 +628,7 @@ impl RepoGraphBridge {
                 continue;
             }
             out.push(SearchHit {
+                uid: key.clone(),
                 key,
                 kind: format!("{:?}", node.kind).to_lowercase(),
                 display_name: node.display_name.clone(),
@@ -690,6 +693,7 @@ impl RepoGraphBridge {
                         let node = graph.node(*idx);
                         CycleMember {
                             key: format_node_key(&node.id),
+                            uid: format_node_key(&node.id),
                             display_name: node.display_name.clone(),
                             kind: format!("{:?}", node.kind).to_lowercase(),
                         }
@@ -788,6 +792,7 @@ impl RepoGraphBridge {
             }
             out.push(OrphanEntry {
                 key: format_node_key(&node.id),
+                uid: format_node_key(&node.id),
                 kind: format!("{:?}", node.kind).to_lowercase(),
                 display_name: node.display_name.clone(),
                 file: shared::repo_graph_node_file_path(node),
@@ -835,6 +840,7 @@ impl RepoGraphBridge {
             let dst_node = graph.node(dst);
             hops.push(PathHop {
                 key: format_node_key(&dst_node.id),
+                uid: format_node_key(&dst_node.id),
                 edge_kind,
             });
         }
@@ -1146,6 +1152,7 @@ impl RepoGraphBridge {
             .into_iter()
             .map(|p| ProcessRef {
                 id: p.id.clone(),
+                uid: p.id.clone(),
                 label: p.label.clone(),
                 role: "step".to_string(),
             })

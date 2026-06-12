@@ -136,6 +136,7 @@ fn chunk_hit_to_search_hit(hit: &CodeChunkSearchHit, match_kind: &str) -> Search
                 .to_string()
         });
     SearchHit {
+        uid: key.clone(),
         key,
         kind: hit.kind.clone(),
         display_name,
@@ -265,6 +266,7 @@ async fn run_structural_signal(
             let node = graph.node(hit.node_index);
             SearchHit {
                 key: super::graph_neighbors::format_node_key(&node.id),
+                uid: super::graph_neighbors::format_node_key(&node.id),
                 kind: format!("{:?}", node.kind).to_lowercase(),
                 display_name: node.display_name.clone(),
                 score: hit.score,
@@ -391,6 +393,7 @@ mod tests {
     fn struct_hit(key: &str, file: &str, score: f64) -> SearchHit {
         SearchHit {
             key: key.to_string(),
+            uid: key.to_string(),
             kind: "function".to_string(),
             display_name: key.split(['#', '/']).next_back().unwrap_or(key).to_string(),
             score,
@@ -522,6 +525,7 @@ mod tests {
         let key = cache_key("proj-1", "round-trip", None, 10);
         let hit = SearchHit {
             key: "rust::round_trip".to_string(),
+            uid: "rust::round_trip".to_string(),
             kind: "function".to_string(),
             display_name: "round_trip".to_string(),
             score: 0.42,
