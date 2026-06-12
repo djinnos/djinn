@@ -86,6 +86,11 @@ pub(super) struct StreamLoopContext<'a> {
     /// `activity_ts.store(..)` still fires on every event for
     /// worker-side diagnostics.
     pub last_rpc_touch: &'a Arc<AtomicU64>,
+    /// Last unix-second the cumulative token counters were flushed to the
+    /// session row via `services.flush_session_tokens`. Throttled to once
+    /// per `TOKEN_FLUSH_INTERVAL_SECS`; best-effort (see field above for
+    /// the host/worker routing of `services`).
+    pub last_token_flush: &'a Arc<AtomicU64>,
     /// Host-side / worker-side `SupervisorServices` handle. On the
     /// host this resolves to `DirectServices` and the touch is a
     /// local atomic write; on the worker it resolves to
@@ -110,6 +115,13 @@ pub(super) struct StreamLoopContext<'a> {
 /// never alone trip the stall poller; the next stream event ticks the
 /// clock and fires the RPC fresh.
 const TOUCH_ACTIVITY_RPC_INTERVAL_SECS: u64 = 30;
+
+/// Throttle interval for the mid-flight session-row token flush fired on
+/// `StreamEvent::Usage` frames (one per generation). Initialised to 0 in
+/// `run_reply_loop` so the first generation's usage lands in the DB
+/// immediately; after that one write per 30s is plenty for observability —
+/// the teardown `update_session_status` remains the authoritative total.
+const TOKEN_FLUSH_INTERVAL_SECS: u64 = 30;
 
 pub(super) async fn consume_provider_stream(
     mut ctx: StreamLoopContext<'_>,
@@ -281,6 +293,36 @@ pub(super) async fn consume_provider_stream(
                             usage.cache_write as i64,
                             usage.reasoning_output as i64,
                         ));
+
+                        // Persist the cumulative counters to the session row
+                        // so long-running sessions don't read `tokens_in = 0`
+                        // everywhere until teardown. Usage frames arrive once
+                        // per generation; the throttle keeps fast turn
+                        // cadences from turning into a DB write per turn.
+                        // Best-effort: the final `update_session_status` at
+                        // stage teardown is still the authoritative write.
+                        let last = ctx.last_token_flush.load(Ordering::Relaxed);
+                        if now.saturating_sub(last) >= TOKEN_FLUSH_INTERVAL_SECS {
+                            ctx.last_token_flush.store(now, Ordering::Relaxed);
+                            if let Err(e) = ctx
+                                .services
+                                .flush_session_tokens(
+                                    ctx.session_id.to_string(),
+                                    *ctx.total_tokens_in as i64,
+                                    *ctx.total_tokens_out as i64,
+                                    *ctx.total_cache_read as i64,
+                                    *ctx.total_cache_write as i64,
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    session_id = %ctx.session_id,
+                                    error = %e,
+                                    "reply_loop::streaming: flush_session_tokens failed; \
+                                     session row keeps stale token counters until next flush"
+                                );
+                            }
+                        }
                     }
                     StreamEvent::Done => break,
                 }

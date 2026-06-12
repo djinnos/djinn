@@ -27,7 +27,9 @@
 //! story reuses the same `Arc` plumbing on the host side to hand the
 //! supervisor to a `SessionRuntime`.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use djinn_core::models::{TaskRunStatus, TaskRunTrigger};
 use djinn_workspace::{
@@ -59,6 +61,36 @@ pub use services::wire::{
 pub use djinn_runtime::spec::{
     RoleKind, SupervisorFlow, TaskRunOutcome, TaskRunReport, TaskRunSpec, role_sequence,
 };
+
+/// Root under the shared cache PVC for per-task-run Cargo target directories.
+pub const CARGO_TARGET_RUNS_ROOT: &str = "/cache/cargo-target-runs";
+
+/// Canonical private Cargo target directory for a task-run Pod.
+pub fn cargo_target_run_dir(task_run_id: &str) -> PathBuf {
+    Path::new(CARGO_TARGET_RUNS_ROOT).join(task_run_id)
+}
+
+/// Validate a CARGO_TARGET_DIR value before deletion.
+///
+/// Cleanup must only ever remove the current task-run's private directory at
+/// `/cache/cargo-target-runs/<task_run_id>`. This intentionally rejects empty
+/// values, nested paths, sibling/root paths, and values for a different run.
+pub fn validate_cargo_target_run_dir(target_dir: &str, task_run_id: &str) -> Option<PathBuf> {
+    if target_dir.trim().is_empty() || task_run_id.trim().is_empty() {
+        return None;
+    }
+
+    let path = Path::new(target_dir);
+    if !path.is_absolute() || path.parent() != Some(Path::new(CARGO_TARGET_RUNS_ROOT)) {
+        return None;
+    }
+
+    if path.file_name().and_then(|name| name.to_str()) != Some(task_run_id) {
+        return None;
+    }
+
+    Some(path.to_path_buf())
+}
 
 // ── Error types ──────────────────────────────────────────────────────────────
 
@@ -1385,9 +1417,12 @@ impl TaskRunSupervisor {
                      proceeding with Interrupted report"
                 );
             } else {
+                cleanup_cargo_target_run_dir(&run_id).await;
                 return Err(SupervisorError::UpdateTaskRunStatus(e));
             }
         }
+
+        cleanup_cargo_target_run_dir(&run_id).await;
 
         info!(task_run_id = %run_id, ?outcome, "task-run finished");
         Ok(TaskRunReport {
@@ -1426,12 +1461,62 @@ impl TaskRunSupervisor {
                  host will fall back to Job-status polling"
             );
         }
+        cleanup_cargo_target_run_dir(&run_id).await;
+
         info!(task_run_id = %run_id, "task-run interrupted (early-cancel path)");
         Ok(TaskRunReport {
             task_run_id: run_id,
             outcome: TaskRunOutcome::Interrupted,
             stages_completed,
         })
+    }
+}
+
+async fn cleanup_cargo_target_run_dir(task_run_id: &str) {
+    let started = Instant::now();
+    let raw_target_dir = match std::env::var("CARGO_TARGET_DIR") {
+        Ok(value) => value,
+        Err(e) => {
+            debug!(
+                task_run_id = %task_run_id,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                error = %e,
+                "supervisor: skipping Cargo target run-dir cleanup; CARGO_TARGET_DIR is not set"
+            );
+            return;
+        }
+    };
+
+    let Some(target_dir) = validate_cargo_target_run_dir(&raw_target_dir, task_run_id) else {
+        tracing::warn!(
+            task_run_id = %task_run_id,
+            target_dir = %raw_target_dir,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "supervisor: refusing Cargo target run-dir cleanup for unsafe CARGO_TARGET_DIR"
+        );
+        return;
+    };
+
+    match tokio::fs::remove_dir_all(&target_dir).await {
+        Ok(()) => info!(
+            task_run_id = %task_run_id,
+            target_dir = %target_dir.display(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "supervisor: removed Cargo target run directory"
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => debug!(
+            task_run_id = %task_run_id,
+            target_dir = %target_dir.display(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "supervisor: Cargo target run directory already absent"
+        ),
+        Err(e) => tracing::warn!(
+            task_run_id = %task_run_id,
+            target_dir = %target_dir.display(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            error = %e,
+            "supervisor: failed to remove Cargo target run directory; continuing teardown"
+        ),
     }
 }
 
@@ -1454,6 +1539,48 @@ mod tests {
     /// stops compiling.
     #[allow(dead_code)]
     fn _obj_safe(_: &dyn SupervisorServices) {}
+
+    #[test]
+    fn cargo_target_run_dir_helper_matches_expected_cache_path() {
+        let task_run_id = "019eb956-ac3a-7492-b51c-bcd904f65a21";
+
+        assert_eq!(
+            cargo_target_run_dir(task_run_id),
+            PathBuf::from("/cache/cargo-target-runs/019eb956-ac3a-7492-b51c-bcd904f65a21")
+        );
+    }
+
+    #[test]
+    fn cargo_target_run_dir_validation_accepts_only_this_runs_private_dir() {
+        let task_run_id = "019eb956-ac3a-7492-b51c-bcd904f65a21";
+        let valid = "/cache/cargo-target-runs/019eb956-ac3a-7492-b51c-bcd904f65a21";
+
+        assert_eq!(
+            validate_cargo_target_run_dir(valid, task_run_id),
+            Some(PathBuf::from(valid))
+        );
+
+        for invalid in [
+            "",
+            "   ",
+            "relative/cargo-target-runs/019eb956-ac3a-7492-b51c-bcd904f65a21",
+            "/cache/cargo-target-runs",
+            "/cache/cargo-target-runs/",
+            "/cache/cargo-target-runs/019eb956-ac3a-7492-b51c-bcd904f65a21/nested",
+            "/cache/cargo-target/019eb956-ac3a-7492-b51c-bcd904f65a21",
+            "/cache/cargo-target-runs/019eb956-ac3a-7492-b51c-bcd904f65a22",
+            "/cache/cargo-target-runs/../019eb956-ac3a-7492-b51c-bcd904f65a21",
+            "/workspace/.tmp/019eb956-ac3a-7492-b51c-bcd904f65a21",
+        ] {
+            assert_eq!(
+                validate_cargo_target_run_dir(invalid, task_run_id),
+                None,
+                "accepted unsafe target dir: {invalid}"
+            );
+        }
+
+        assert_eq!(validate_cargo_target_run_dir(valid, ""), None);
+    }
 
     #[test]
     fn stage_outcome_terminal_classifier() {

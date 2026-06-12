@@ -327,6 +327,21 @@ impl SupervisorServices for DirectServices {
         .map_err(|e| e.to_string())
     }
 
+    async fn flush_session_tokens(
+        &self,
+        session_id: String,
+        tokens_in: i64,
+        tokens_out: i64,
+        cache_read: i64,
+        cache_write: i64,
+    ) -> Result<(), String> {
+        let ctx = &self.callbacks.agent_context;
+        let repo = SessionRepository::new(ctx.db.clone(), ctx.event_bus.clone());
+        repo.flush_tokens(&session_id, tokens_in, tokens_out, cache_read, cache_write)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn tool_github_search(
         &self,
         project_id: Option<String>,

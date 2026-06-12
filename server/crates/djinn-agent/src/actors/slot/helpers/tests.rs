@@ -567,6 +567,8 @@ fn make_symbol_context(name: &str, file_path: &str) -> SymbolContext {
                 file_path: Some("server/src/new_area.rs".to_string()),
                 confidence: 0.9,
                 confidence_tier: "extracted".to_string(),
+                confidence_reason: None,
+                excluded_reason: None,
                 route_language_chain: None,
             },
             RelatedSymbol {
@@ -576,6 +578,8 @@ fn make_symbol_context(name: &str, file_path: &str) -> SymbolContext {
                 file_path: Some("server/src/new_area.rs".to_string()),
                 confidence: 0.9,
                 confidence_tier: "extracted".to_string(),
+                confidence_reason: None,
+                excluded_reason: None,
                 route_language_chain: None,
             },
             RelatedSymbol {
@@ -585,6 +589,8 @@ fn make_symbol_context(name: &str, file_path: &str) -> SymbolContext {
                 file_path: Some("server/src/new_area.rs".to_string()),
                 confidence: 0.9,
                 confidence_tier: "extracted".to_string(),
+                confidence_reason: None,
+                excluded_reason: None,
                 route_language_chain: None,
             },
         ],
@@ -599,6 +605,8 @@ fn make_symbol_context(name: &str, file_path: &str) -> SymbolContext {
                 file_path: Some("server/src/new_area.rs".to_string()),
                 confidence: 0.9,
                 confidence_tier: "extracted".to_string(),
+                confidence_reason: None,
+                excluded_reason: None,
                 route_language_chain: None,
             },
             RelatedSymbol {
@@ -608,6 +616,8 @@ fn make_symbol_context(name: &str, file_path: &str) -> SymbolContext {
                 file_path: Some("server/src/new_area.rs".to_string()),
                 confidence: 0.9,
                 confidence_tier: "extracted".to_string(),
+                confidence_reason: None,
+                excluded_reason: None,
                 route_language_chain: None,
             },
         ],
@@ -625,6 +635,8 @@ fn make_symbol_context(name: &str, file_path: &str) -> SymbolContext {
                 file_path: None,
                 confidence: 0.9,
                 confidence_tier: "extracted".to_string(),
+                confidence_reason: None,
+                excluded_reason: None,
                 route_language_chain: None,
             })
             .collect(),
@@ -857,6 +869,8 @@ fn synth_impact(direct: usize, extra_total: usize, modules: usize) -> Vec<Impact
             key: format!("symbol:caller_{i}"),
             depth: 1,
             file_path: Some(format!("crate{bucket}/src/file_{i}.rs")),
+            confidence_tier: None,
+            exclusion_reason: None,
         });
     }
     for i in 0..extra_total {
@@ -865,6 +879,8 @@ fn synth_impact(direct: usize, extra_total: usize, modules: usize) -> Vec<Impact
             key: format!("symbol:transitive_{i}"),
             depth: 2,
             file_path: Some(format!("crate{bucket}/src/transitive_{i}.rs")),
+            confidence_tier: None,
+            exclusion_reason: None,
         });
     }
     entries

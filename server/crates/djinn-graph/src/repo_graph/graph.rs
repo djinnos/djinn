@@ -25,6 +25,62 @@ use super::constants::EDGE_CONFIDENCE_LOCAL_PENALTY;
 use super::edge::{RepoGraphEdge, RepoGraphEdgeKind, edge_confidence_floor, edge_weight};
 use super::node::{RepoGraphNode, RepoGraphNodeKind, RepoGraphSearchHit, RepoNodeKey};
 
+const SYNTHETIC_LABEL_ENTROPY_MERGE_THRESHOLD: f64 = 2.0;
+
+fn label_entropy(label: &str) -> f64 {
+    if label.is_empty() {
+        return 0.0;
+    }
+    let mut counts = BTreeMap::<char, usize>::new();
+    let mut total = 0usize;
+    for ch in label.chars() {
+        *counts.entry(ch).or_default() += 1;
+        total += 1;
+    }
+    counts
+        .values()
+        .map(|count| {
+            let p = (*count as f64) / (total as f64);
+            -p * p.log2()
+        })
+        .sum()
+}
+
+fn synthetic_source_scoped_key(
+    prefix: &str,
+    id: &str,
+    source_file: Option<&Path>,
+    workspace: Option<&str>,
+    low_entropy_discriminator: Option<&str>,
+    unique_discriminator: usize,
+) -> String {
+    let mut key = id.to_string();
+    if let Some(source_file) = source_file {
+        key.push_str(" @ ");
+        key.push_str(&source_file.display().to_string());
+    } else {
+        key.push_str(" @ <unresolved-source>");
+    }
+    if let Some(workspace) = workspace {
+        key.push_str(" [workspace=");
+        key.push_str(workspace);
+        key.push(']');
+    } else if prefix == "tool" {
+        key.push_str(" [workspace=<unresolved>]");
+    }
+
+    let can_merge_same_source = source_file.is_some()
+        && (prefix != "tool" || workspace.is_some())
+        && label_entropy(id) >= SYNTHETIC_LABEL_ENTROPY_MERGE_THRESHOLD;
+    if !can_merge_same_source {
+        key.push_str(" #");
+        key.push_str(low_entropy_discriminator.unwrap_or("unresolved"));
+        key.push(':');
+        key.push_str(&unique_discriminator.to_string());
+    }
+    key
+}
+
 /// Stable, reusable repository dependency graph built from normalized SCIP parse output.
 #[derive(Debug, Clone)]
 pub struct RepoDependencyGraph {
@@ -727,16 +783,26 @@ impl RepoDependencyGraph {
     /// the handler's [`RepoNodeKey::Symbol`] back-reference without
     /// walking the graph. The handler-symbol edge itself is stamped
     /// separately by the route extractor (out of scope for cs4v).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn ensure_route_node(
         &mut self,
         id: &str,
         display_name: &str,
         language: Option<&str>,
         workspace: Option<&str>,
+        source_file: Option<&Path>,
         framework: Option<&str>,
         handler_symbol: Option<&str>,
     ) -> NodeIndex {
-        let key = RepoNodeKey::Route(id.to_string());
+        let route_id = synthetic_source_scoped_key(
+            "route",
+            id,
+            source_file,
+            None,
+            handler_symbol,
+            self.graph.node_count(),
+        );
+        let key = RepoNodeKey::Route(route_id);
         if let Some(&idx) = self.node_lookup.get(&key) {
             return idx;
         }
@@ -745,7 +811,7 @@ impl RepoDependencyGraph {
             kind: RepoGraphNodeKind::Route,
             display_name: display_name.to_string(),
             language: language.map(str::to_string),
-            file_path: None,
+            file_path: source_file.map(Path::to_path_buf),
             symbol: None,
             symbol_kind: None,
             is_external: false,
@@ -777,8 +843,17 @@ impl RepoDependencyGraph {
         display_name: &str,
         language: Option<&str>,
         workspace: Option<&str>,
+        source_file: Option<&Path>,
     ) -> NodeIndex {
-        let key = RepoNodeKey::Tool(id.to_string());
+        let tool_id = synthetic_source_scoped_key(
+            "tool",
+            id,
+            source_file,
+            workspace,
+            None,
+            self.graph.node_count(),
+        );
+        let key = RepoNodeKey::Tool(tool_id);
         if let Some(&idx) = self.node_lookup.get(&key) {
             return idx;
         }
@@ -787,7 +862,7 @@ impl RepoDependencyGraph {
             kind: RepoGraphNodeKind::Tool,
             display_name: display_name.to_string(),
             language: language.map(str::to_string),
-            file_path: None,
+            file_path: source_file.map(Path::to_path_buf),
             symbol: None,
             symbol_kind: None,
             is_external: false,
@@ -1214,92 +1289,4 @@ pub(super) fn derive_edge_confidence(
     }
 
     (confidence, reason)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn symbol_node(symbol: &str, display_name: &str) -> RepoGraphNode {
-        RepoGraphNode {
-            id: RepoNodeKey::Symbol(symbol.to_string()),
-            kind: RepoGraphNodeKind::Symbol,
-            display_name: display_name.to_string(),
-            language: Some("rust".to_string()),
-            file_path: Some(PathBuf::from("src/routes.rs")),
-            symbol: Some(symbol.to_string()),
-            symbol_kind: Some(ScipSymbolKind::Function),
-            is_external: false,
-            visibility: None,
-            signature: None,
-            documentation: Vec::new(),
-            signature_parts: None,
-            is_test: false,
-            complexity: None,
-            workspace: Some("root".to_string()),
-            route_framework: None,
-            route_handler_symbol: None,
-        }
-    }
-
-    #[test]
-    fn route_edge_helpers_stamp_reason_and_clamped_confidence() {
-        let mut graph = RepoDependencyGraph::build(&[]);
-        let route = graph.ensure_route_node(
-            "GET /api/agents (axum)",
-            "GET /api/agents",
-            Some("rust"),
-            Some("root"),
-            Some("axum"),
-            Some("scip-rust pkg handlers `list_agents`()."),
-        );
-        let handler = graph.graph_mut_unchecked().add_node(symbol_node(
-            "scip-rust pkg handlers `list_agents`().",
-            "list_agents",
-        ));
-        let caller = graph
-            .graph_mut_unchecked()
-            .add_node(symbol_node("scip-ts pkg ui `loadAgents`().", "loadAgents"));
-        graph.graph_mut_unchecked()[caller].language = Some("typescript".to_string());
-
-        graph.add_handles_route_edge(route, handler, "axum-router-new", Some(1.25));
-        graph.add_fetches_edge(caller, route, "ts-fetch-literal", None);
-
-        let handles = graph
-            .graph()
-            .edges_connecting(route, handler)
-            .find(|edge| edge.weight().kind == RepoGraphEdgeKind::HandlesRoute)
-            .expect("handles-route edge");
-        assert_eq!(handles.weight().reason.as_deref(), Some("axum-router-new"));
-        assert_eq!(handles.weight().confidence, 1.0);
-        assert_eq!(
-            handles.weight().weight,
-            edge_weight(RepoGraphEdgeKind::HandlesRoute)
-        );
-
-        let fetches = graph
-            .graph()
-            .edges_connecting(caller, route)
-            .find(|edge| edge.weight().kind == RepoGraphEdgeKind::Fetches)
-            .expect("fetches edge");
-        assert_eq!(fetches.weight().reason.as_deref(), Some("ts-fetch-literal"));
-        assert_eq!(
-            fetches.weight().confidence,
-            edge_confidence_floor(RepoGraphEdgeKind::Fetches)
-        );
-        assert_eq!(
-            fetches.weight().weight,
-            edge_weight(RepoGraphEdgeKind::Fetches)
-        );
-        let language_chain = graph
-            .route_edge_language_chain(caller, route, RepoGraphEdgeKind::Fetches)
-            .expect("route edge language chain");
-        assert_eq!(
-            language_chain.source_language.as_deref(),
-            Some("typescript")
-        );
-        assert_eq!(language_chain.target_language.as_deref(), Some("rust"));
-        assert!(language_chain.is_cross_language);
-        assert!(graph.is_cross_language_route_edge(caller, route, RepoGraphEdgeKind::Fetches));
-    }
 }

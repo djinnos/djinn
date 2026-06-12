@@ -243,7 +243,7 @@ pub(super) fn is_deprecated_text(signature: Option<&str>, documentation: &[Strin
 
 /// PR s6ch / 92z7: machine-readable exclusion reasons stamped on
 /// `ImpactEntry.exclusion_reason` / `EdgeEntry.exclusion_reason` /
-/// `ApiImpactEntry.exclusion_reason`. Stable strings — the UI is
+/// `ApiImpactEntry.excluded_reason`. Stable strings — the UI is
 /// expected to switch on these values to render the entry as a
 /// suggestion instead of a hard dependency.
 pub(super) mod exclusion_reason {
@@ -265,9 +265,10 @@ pub(super) mod exclusion_reason {
 }
 /// PR s6ch / 92z7: match a path against the health-path glob list.
 /// A `path` is a "health" path when, after lowercasing and trimming
-/// the leading slash, it equals one of the configured globs (e.g.
-/// `/health`, `/healthz`, `/ping`, …). The match is exact-segment:
-/// `/healthcheck` does not match `/health`.
+/// trailing slashes, it matches one of the configured globs (e.g.
+/// `/health`, `/healthz`, `/ping`, or `/api/*`). Globs without `*`
+/// are exact-segment matches, so `/healthcheck` does not match
+/// `/health`.
 pub(super) fn path_matches_health_glob(path: &str, globs: &[String]) -> bool {
     if globs.is_empty() {
         return false;
@@ -280,8 +281,42 @@ pub(super) fn path_matches_health_glob(path: &str, globs: &[String]) -> bool {
     globs.iter().any(|glob| {
         let glob_lc = glob.trim().to_ascii_lowercase();
         let glob = glob_lc.trim_start_matches('/').trim_end_matches('/');
-        !glob.is_empty() && trimmed == glob
+        !glob.is_empty() && simple_glob_match(glob, trimmed)
     })
+}
+
+fn simple_glob_match(pattern: &str, value: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if !pattern.contains('*') {
+        return pattern == value;
+    }
+    let mut rest = value;
+    let mut parts = pattern.split('*').peekable();
+    let anchored_start = !pattern.starts_with('*');
+    let anchored_end = !pattern.ends_with('*');
+    let mut first = true;
+    while let Some(part) = parts.next() {
+        if part.is_empty() {
+            first = false;
+            continue;
+        }
+        if first && anchored_start {
+            if !rest.starts_with(part) {
+                return false;
+            }
+            rest = &rest[part.len()..];
+        } else if parts.peek().is_none() && anchored_end {
+            return rest.ends_with(part);
+        } else if let Some(pos) = rest.find(part) {
+            rest = &rest[pos + part.len()..];
+        } else {
+            return false;
+        }
+        first = false;
+    }
+    true
 }
 
 /// PR s6ch / 92z7: detect a route path that is made up entirely of

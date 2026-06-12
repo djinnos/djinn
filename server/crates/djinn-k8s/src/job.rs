@@ -18,6 +18,8 @@ use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use uuid::Uuid;
 
+use djinn_supervisor::cargo_target_run_dir;
+
 use crate::config::KubernetesConfig;
 
 /// Label key for the task-run id (Djinn's primary correlator).
@@ -488,8 +490,10 @@ fn build_task_run_env(
 ///   `CARGO_INCREMENTAL=0` so it does not accumulate incremental compiler state.
 ///   Task-runs get a deterministic private dir under
 ///   `/cache/cargo-target-runs/<task_run_id>` so they never write the shared base
-///   directly. (Default is <workspace>/target inside the ephemeral clone — also
-///   lost.)
+///   directly or contend on Cargo's shared build-dir lock. The worker may seed
+///   that private run dir from the warm base before cargo starts, then cargo is
+///   free to mutate only the run-local target. (Default is <workspace>/target
+///   inside the ephemeral clone — also lost.)
 /// - SCCACHE_DIR: repos routinely pin `rustc-wrapper = "sccache"` in
 ///   .cargo/config.toml (e.g. the platform repo, which also sets
 ///   CARGO_INCREMENTAL=0 as sccache requires), so cargo invokes sccache
@@ -542,13 +546,16 @@ pub(crate) fn warm_cache_env_vars(project_id: &str) -> Vec<EnvVar> {
     env
 }
 
-/// Cache env vars for task-run Pods. The target dir is private to the task run;
-/// shared cache settings remain identical to warm/verification Pods.
+/// Cache env vars for task-run Pods. The target dir is private to the canonical
+/// task run id, not the generated Kubernetes resource name, so task Pods avoid
+/// the shared Cargo build-dir lock while preserving the warm per-project base as
+/// a read-only seed source. Shared cache settings remain identical to
+/// warm/verification Pods.
 fn task_run_cache_env_vars(project_id: &str, task_run_id: &str) -> Vec<EnvVar> {
     let mut env = common_cache_env_vars(project_id);
     env.push(env_var(
         "CARGO_TARGET_DIR",
-        &format!("{CACHE_MOUNT_DIR}/cargo-target-runs/{task_run_id}"),
+        &cargo_target_run_dir(task_run_id).display().to_string(),
     ));
     env
 }
@@ -591,6 +598,22 @@ mod tests {
             },
             ..Job::default()
         }
+    }
+
+    fn task_run_job_envs(job: &Job) -> BTreeMap<&str, &str> {
+        let pod = job
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .expect("pod spec set");
+        let container = &pod.containers[0];
+        container
+            .env
+            .as_ref()
+            .expect("container.env set")
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().expect("env value")))
+            .collect()
     }
 
     #[test]
@@ -978,6 +1001,16 @@ mod tests {
             Some(expected_target_dir.as_str()),
             "task-run target dir must be private so task-runs never write the shared warm base"
         );
+        assert_ne!(
+            envs.get("CARGO_TARGET_DIR").copied(),
+            Some("/cache/cargo-target/proj-xyz"),
+            "task-run target dir must not regress to the shared per-project warm base"
+        );
+        assert_ne!(
+            envs.get("CARGO_TARGET_DIR").copied(),
+            Some("/cache/cargo-target-runs/djinn-taskrun-test"),
+            "task-run target dir must use the canonical task_run_id, not the generated Kubernetes job name"
+        );
         assert_eq!(
             envs.get("SCCACHE_DIR").copied(),
             Some("/cache/sccache/proj-xyz"),
@@ -989,6 +1022,65 @@ mod tests {
             Some("true"),
             "build-in-pod has no DB; sqlx macros must use the committed .sqlx cache"
         );
+    }
+
+    #[test]
+    fn same_project_task_runs_get_distinct_private_cargo_target_dirs() {
+        let cfg = KubernetesConfig::for_testing();
+        let first_task_run_id = Uuid::now_v7();
+        let second_task_run_id = Uuid::now_v7();
+        let project_id = "proj-xyz";
+
+        let first_job = build_task_run_job(
+            &cfg,
+            &first_task_run_id,
+            project_id,
+            "djinn-taskrun-first",
+            "registry.example:5000/djinn-project-p:abc123def456",
+        );
+        let second_job = build_task_run_job(
+            &cfg,
+            &second_task_run_id,
+            project_id,
+            "djinn-taskrun-second",
+            "registry.example:5000/djinn-project-p:abc123def456",
+        );
+
+        let first_envs = task_run_job_envs(&first_job);
+        let second_envs = task_run_job_envs(&second_job);
+        let first_target_dir = first_envs
+            .get("CARGO_TARGET_DIR")
+            .copied()
+            .expect("first job CARGO_TARGET_DIR set");
+        let second_target_dir = second_envs
+            .get("CARGO_TARGET_DIR")
+            .copied()
+            .expect("second job CARGO_TARGET_DIR set");
+
+        assert_ne!(
+            first_target_dir, second_target_dir,
+            "same-project task-runs must not contend on one cargo target dir"
+        );
+        assert_eq!(
+            first_target_dir,
+            format!("/cache/cargo-target-runs/{first_task_run_id}")
+        );
+        assert_eq!(
+            second_target_dir,
+            format!("/cache/cargo-target-runs/{second_task_run_id}")
+        );
+        assert!(first_target_dir.starts_with("/cache/cargo-target-runs/"));
+        assert!(second_target_dir.starts_with("/cache/cargo-target-runs/"));
+
+        for envs in [&first_envs, &second_envs] {
+            assert_eq!(envs.get("CARGO_HOME").copied(), Some("/cache/cargo"));
+            assert_eq!(
+                envs.get("SCCACHE_DIR").copied(),
+                Some("/cache/sccache/proj-xyz")
+            );
+            assert_eq!(envs.get("SCCACHE_CACHE_SIZE").copied(), Some("20G"));
+            assert_eq!(envs.get("SQLX_OFFLINE").copied(), Some("true"));
+        }
     }
 
     /// When the operator has configured nodeSelector + tolerations (typical

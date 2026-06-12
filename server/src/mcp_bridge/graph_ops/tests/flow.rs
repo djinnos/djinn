@@ -1,6 +1,7 @@
 use super::*;
 use crate::mcp_bridge::graph_ops::flow::test_helpers;
 use djinn_control_plane::bridge::SearchHit;
+use djinn_db::CodeChunkSearchHit;
 use djinn_graph::repo_graph::{
     REPO_GRAPH_ARTIFACT_VERSION, RepoGraphArtifact, RepoGraphArtifactEdge,
     RepoGraphArtifactProcess, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind,
@@ -114,6 +115,18 @@ fn search_hit(key: &str, name: &str, score: f64) -> SearchHit {
     }
 }
 
+fn lexical_chunk_hit(symbol_key: &str, score: f64) -> CodeChunkSearchHit {
+    CodeChunkSearchHit {
+        chunk_id: "chunk-charge-card".to_string(),
+        file_path: "src/payments.rs".to_string(),
+        symbol_key: Some(symbol_key.to_string()),
+        kind: "function".to_string(),
+        start_line: 10,
+        end_line: 24,
+        score,
+    }
+}
+
 #[test]
 fn flow_maps_hybrid_symbol_hit_to_process_membership() {
     let graph = flow_fixture_graph();
@@ -138,6 +151,37 @@ fn flow_maps_hybrid_symbol_hit_to_process_membership() {
     assert_eq!(hit.matched_step.uid, format!("symbol:{CHARGE_SYM}"));
     assert_eq!(hit.matched_step_index, 1);
     assert_eq!(hit.rrf_score, 0.42);
+}
+
+#[test]
+fn flow_surfaces_process_from_lexical_hit_fused_by_hybrid_pipeline() {
+    let graph = flow_fixture_graph();
+
+    // Fixture the DB/Qdrant-facing layer at the existing hybrid pipeline's
+    // signal boundary: the lexical DB search found the charge step, while
+    // semantic/Qdrant and structural search are empty. This proves `flow` can
+    // consume the same RRF-fused `SearchHit` shape produced by
+    // `hybrid_search::run` without duplicating BM25/semantic/RRF logic.
+    let hybrid_hits = crate::mcp_bridge::hybrid_search::fuse_signals(
+        vec![lexical_chunk_hit(CHARGE_SYM, 7.0)],
+        vec![],
+        vec![],
+        20,
+    );
+
+    assert_eq!(hybrid_hits.len(), 1);
+    assert_eq!(hybrid_hits[0].key, CHARGE_SYM);
+    assert_eq!(hybrid_hits[0].match_kind.as_deref(), Some("lexical"));
+
+    let result = test_helpers::flow_for_graph_from_hits(&graph, hybrid_hits, None, 20)
+        .expect("flow helper should consume hybrid output");
+
+    assert_eq!(result.hits.len(), 1);
+    let hit = &result.hits[0];
+    assert_eq!(hit.process.id, "checkout-flow");
+    assert_eq!(hit.matched_step.uid, format!("symbol:{CHARGE_SYM}"));
+    assert_eq!(hit.matched_step_index, 1);
+    assert!(hit.rrf_score > 0.0, "RRF score from hybrid pipeline");
 }
 
 #[test]

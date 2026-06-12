@@ -117,10 +117,11 @@ fn route_and_tool_weights_share_variable_tier_without_metadata_rank_boost() {
         "GET /api/helper (axum)",
         Some("rust"),
         Some("root"),
+        Some(Path::new("src/helper.rs")),
         Some("axum"),
         Some(handler_symbol),
     );
-    let tool = graph.ensure_tool_node("helper.run", "helper.run", Some("rust"), Some("root"));
+    let tool = graph.ensure_tool_node("helper.run", "helper.run", Some("rust"), Some("root"), None);
     let process = graph.ensure_process_node("process:helper", "process:helper");
     let table = graph.ensure_table_node("public.helpers");
 
@@ -160,6 +161,7 @@ fn singleton_route_without_consumers_is_detected_for_god_object_filters() {
         "GET /api/singleton (axum)",
         Some("rust"),
         Some("root"),
+        Some(Path::new("src/helper.rs")),
         Some("axum"),
         Some(handler_symbol),
     );
@@ -168,6 +170,7 @@ fn singleton_route_without_consumers_is_detected_for_god_object_filters() {
         "GET /api/consumed (axum)",
         Some("rust"),
         Some("root"),
+        Some(Path::new("src/helper.rs")),
         Some("axum"),
         Some(handler_symbol),
     );

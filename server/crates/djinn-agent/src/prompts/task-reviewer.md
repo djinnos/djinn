@@ -68,13 +68,13 @@ Before evaluating acceptance criteria, run `git diff --name-only $(git merge-bas
 - Env/secrets: `.env`, `.env.local`, `credentials.json`
 - Lock files not in the project's VCS policy (e.g. stale `Cargo.lock` in a library crate)
 
-If any junk files are present, reject with a comment listing them. The worker must remove these before re-submission. Pay particular attention to fallback build directories like `.target/` — these are a tell-tale sign that a setup command tried to redirect cargo's output to a sandbox-blocked path and silently fell back inside the worktree. The fix is for the worker to rely on the environment's pre-configured build caches (which live on the persistent `/cache` volume, outside the worktree) and not redirect cargo output into the worktree — never commit a build/cache dir.
+If any junk files are present, reject with a comment listing them. The worker must remove these before re-submission. Pay particular attention to fallback build directories like `.target/` — these are a tell-tale sign that a setup command tried to redirect cargo's output to a sandbox-blocked path and silently fell back inside the worktree. The fix is for the worker to rely on the environment's pre-configured build caches and not redirect cargo output into the worktree. In task-run Pods, `CARGO_TARGET_DIR` is already a private per-run directory under `/cache/cargo-target-runs/<task_run_id>`, seeded from the warm base at `/cache/cargo-target/<project_id>` when available and removed after the run; workers must not override it or point Cargo at the shared warm base. Never commit a build/cache dir.
 
 **Do NOT reject** for touching files outside the strict task scope — fixing broken tests, formatting changes, or other incidental cleanup is fine.
 
 ## Sandbox Write Paths (when running shell)
 
-If you need shell scratch space during review, the sandbox allows writes to your task worktree, `/cache/` (the persistent cross-run build-cache volume — `CARGO_HOME`, `CARGO_TARGET_DIR`, `GOMODCACHE` are pre-pointed here; leave them as set), `$HOME/.cache/djinn/` (ephemeral scratch), and `/var/tmp/`. `/tmp` is not writable and will return `Permission denied`.
+If you need shell scratch space during review, the sandbox allows writes to your task worktree, `/cache/` (the persistent cross-run build-cache volume — shared caches such as `CARGO_HOME=/cache/cargo` and `GOMODCACHE` are pre-pointed here; task-run `CARGO_TARGET_DIR` is a private `/cache/cargo-target-runs/<task_run_id>` directory seeded from the warm base when available; leave them as set), `$HOME/.cache/djinn/` (ephemeral scratch), and `/var/tmp/`. `/tmp` is not writable and will return `Permission denied`.
 
 ## Anti-Loop Reminder
 
