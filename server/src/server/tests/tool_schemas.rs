@@ -177,7 +177,15 @@ async fn code_graph_schema_advertises_uid_resolver_pagination_and_partial_semant
         .and_then(Value::as_str)
         .expect("code_graph description");
 
-    for resolver_keyword in ["uid", "name", "file_path", "kind", "ranked candidates"] {
+    for resolver_keyword in [
+        "uid",
+        "stable exact node input",
+        "fall back",
+        "name",
+        "file_path",
+        "kind",
+        "ranked candidates",
+    ] {
         assert!(
             description.contains(resolver_keyword),
             "code_graph schema description does not advertise resolver keyword {resolver_keyword}"
