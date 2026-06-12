@@ -44,9 +44,13 @@ pub use self::edge::{
     EdgeConfidenceTier, RepoGraphEdge, RepoGraphEdgeKind, edge_confidence_floor,
     edge_confidence_tier, promote_fetches_confidence_with_import_evidence,
 };
-pub use self::graph::{RepoDependencyGraph, SymbolRange};
-pub use self::node::{RepoGraphNode, RepoGraphNodeKind, RepoGraphSearchHit, RepoNodeKey};
-pub use self::ranking::{RankedRepoGraphNode, RepoGraphRanking};
+pub use self::graph::{RepoDependencyGraph, RouteEdgeLanguageChain, SymbolRange};
+pub use self::node::{
+    RepoGraphNode, RepoGraphNodeKind, RepoGraphSearchHit, RepoNodeKey, is_route_or_tool_node,
+};
+pub use self::ranking::{
+    RankedRepoGraphNode, RepoGraphRanking, is_singleton_route_without_consumers,
+};
 
 /// `RepoDependencyGraphBuilder` lives in [`self::builder`] (see
 /// `repo_graph/builder.rs`). The `impl` block in `mod.rs` (`build_with_source`
@@ -188,7 +192,7 @@ impl RepoDependencyGraph {
             symbol_ranges,
             communities: self.communities.clone(),
             processes: processes_out,
-            route_exclusion_config: RouteExclusionConfig::default(),
+            route_exclusion_config: self.route_exclusion_config.clone(),
         }
     }
 

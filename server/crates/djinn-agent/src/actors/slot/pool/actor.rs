@@ -814,4 +814,8 @@ impl SlotPool {
     pub(super) fn test_retire(&mut self, slot_id: usize) {
         self.retired_slots.insert(slot_id);
     }
+
+    pub(super) async fn test_handle_slot_event(&mut self, event: SlotEvent) {
+        self.handle_slot_event(event).await;
+    }
 }

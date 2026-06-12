@@ -85,7 +85,62 @@ pub struct SymbolRange {
     pub node: NodeIndex,
 }
 
+/// Computed audit metadata for route-consumer edges. Kept out of persisted edge
+/// structs so old graph artifacts remain compatible while op-layer callers can
+/// still display the language chain that justified a `Fetches`/route link.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RouteEdgeLanguageChain {
+    pub source_language: Option<String>,
+    pub target_language: Option<String>,
+    pub is_cross_language: bool,
+}
+
 impl RepoDependencyGraph {
+    /// Read the inferred-route exclusion config attached to this graph.
+    pub fn route_exclusion_config(&self) -> &RouteExclusionConfig {
+        &self.route_exclusion_config
+    }
+
+    /// Replace the inferred-route exclusion config sidecar.
+    pub fn set_route_exclusion_config(&mut self, config: RouteExclusionConfig) {
+        self.route_exclusion_config = config;
+    }
+
+    /// Compute compat-safe language-chain audit metadata for a route edge.
+    pub fn route_edge_language_chain(
+        &self,
+        source: NodeIndex,
+        target: NodeIndex,
+        kind: RepoGraphEdgeKind,
+    ) -> Option<RouteEdgeLanguageChain> {
+        if !matches!(
+            kind,
+            RepoGraphEdgeKind::HandlesRoute | RepoGraphEdgeKind::Fetches | RepoGraphEdgeKind::Route
+        ) {
+            return None;
+        }
+        let source_language = self.graph[source].language.clone();
+        let target_language = self.graph[target].language.clone();
+        let is_cross_language = source_language.is_some()
+            && target_language.is_some()
+            && source_language != target_language;
+        Some(RouteEdgeLanguageChain {
+            source_language,
+            target_language,
+            is_cross_language,
+        })
+    }
+
+    pub fn is_cross_language_route_edge(
+        &self,
+        source: NodeIndex,
+        target: NodeIndex,
+        kind: RepoGraphEdgeKind,
+    ) -> bool {
+        self.route_edge_language_chain(source, target, kind)
+            .is_some_and(|chain| chain.is_cross_language)
+    }
+
     pub fn build(indices: &[ParsedScipIndex]) -> Self {
         Self::build_with_source(indices, None)
     }
@@ -196,6 +251,12 @@ impl RepoDependencyGraph {
         let mut scored_nodes = Vec::with_capacity(self.graph.node_count());
         for node_index in self.graph.node_indices() {
             let node = &self.graph[node_index];
+            // Route/Tool nodes are synthetic affordances. Keep them in the
+            // PageRank projection so their edges still contribute to real
+            // symbols, but do not expose them as ranked architecture hubs.
+            if super::ranking::is_route_or_tool_node(node) {
+                continue;
+            }
             let page_rank = page_rank_scores[node_index.index()];
             let structural_weight = self.structural_weight(node_index);
             let score = page_rank * structural_weight;
@@ -247,6 +308,10 @@ impl RepoDependencyGraph {
         let outbound_edge_weight = self.total_edge_weight(node_index, Outgoing);
         let degree_bonus = (inbound_edge_weight * 1.2) + (outbound_edge_weight * 0.8);
         node.intrinsic_weight() + degree_bonus
+    }
+
+    pub fn is_singleton_route_without_consumers(&self, node_index: NodeIndex) -> bool {
+        super::ranking::is_singleton_route_without_consumers(&self.graph, node_index)
     }
 
     fn total_edge_weight(&self, node_index: NodeIndex, direction: petgraph::Direction) -> f64 {
@@ -480,27 +545,6 @@ impl RepoDependencyGraph {
     pub(crate) fn set_processes(&mut self, processes: Vec<crate::processes::Process>) {
         self.process_lookup = build_process_lookup(&processes);
         self.processes = processes;
-    }
-
-    /// PR s6ch / 92z7: read-only access to the in-memory route
-    /// exclusion config. Used by `impact` / `api_impact` /
-    /// `route_map` / `shape_check` / `edges` to apply the same
-    /// per-project policy without re-parsing the persisted artifact.
-    pub fn route_exclusion_config(&self) -> &RouteExclusionConfig {
-        &self.route_exclusion_config
-    }
-
-    /// PR s6ch / 92z7: install a [`RouteExclusionConfig`] on the
-    /// live graph. Crate-internal so the warmer / artifact hydration
-    /// paths can stamp the sidecar without exposing a generic
-    /// mutator surface to outside callers. Tests use this to
-    /// exercise the exclusion helpers without round-tripping
-    /// through a real artifact. Tests in
-    /// `crates/djinn-graph/src/repo_graph/tests/artifact.rs`
-    /// exercise this setter to verify the round-trip; the warmer
-    /// pipeline uses it the same way.
-    pub(crate) fn set_route_exclusion_config(&mut self, config: RouteExclusionConfig) {
-        self.route_exclusion_config = config;
     }
 
     /// PR F2: stamp a `StepInProcess` edge from a `Process` synthetic
@@ -1216,6 +1260,7 @@ mod tests {
         let caller = graph
             .graph_mut_unchecked()
             .add_node(symbol_node("scip-ts pkg ui `loadAgents`().", "loadAgents"));
+        graph.graph_mut_unchecked()[caller].language = Some("typescript".to_string());
 
         graph.add_handles_route_edge(route, handler, "axum-router-new", Some(1.25));
         graph.add_fetches_edge(caller, route, "ts-fetch-literal", None);
@@ -1246,5 +1291,15 @@ mod tests {
             fetches.weight().weight,
             edge_weight(RepoGraphEdgeKind::Fetches)
         );
+        let language_chain = graph
+            .route_edge_language_chain(caller, route, RepoGraphEdgeKind::Fetches)
+            .expect("route edge language chain");
+        assert_eq!(
+            language_chain.source_language.as_deref(),
+            Some("typescript")
+        );
+        assert_eq!(language_chain.target_language.as_deref(), Some("rust"));
+        assert!(language_chain.is_cross_language);
+        assert!(graph.is_cross_language_route_edge(caller, route, RepoGraphEdgeKind::Fetches));
     }
 }

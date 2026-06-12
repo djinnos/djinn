@@ -12,10 +12,15 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use petgraph::graph::NodeIndex;
+use petgraph::visit::EdgeRef;
 
 pub use axum::{AxumRouteHit, detect_axum_routes};
 
-use crate::repo_graph::{RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNodeKind, RepoNodeKey};
+use crate::repo_graph::{
+    RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind, RepoNodeKey,
+    RouteExclusionConfig, promote_fetches_confidence_with_import_evidence,
+};
+use crate::scip_parser::ScipSymbolKind;
 
 /// Environment flag that disables route extraction when set to `0` / `false`.
 /// Default = on.
@@ -46,6 +51,32 @@ pub struct RouteExtractionReport {
     /// Per-file extraction failure messages. Multiple entries for the same
     /// file are allowed so callers can log each failure without losing order.
     pub file_failures: Vec<(PathBuf, Vec<String>)>,
+    /// Inferred consumer matches that were intentionally left as suggestions
+    /// rather than hard `Fetches` edges. `reasons` contains stable,
+    /// machine-readable strings such as `health-path` and
+    /// `below-confidence-floor`.
+    pub consumer_edge_suggestions: Vec<RouteConsumerEdgeSuggestion>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouteConsumerEdgeSuggestion {
+    pub consumer_file: PathBuf,
+    pub fetch_path: String,
+    pub route_path: String,
+    pub framework: Option<String>,
+    pub confidence: f64,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RouteExtractionOptions<'a> {
+    pub exclusion_config: &'a RouteExclusionConfig,
+}
+
+impl<'a> RouteExtractionOptions<'a> {
+    pub fn new(exclusion_config: &'a RouteExclusionConfig) -> Self {
+        Self { exclusion_config }
+    }
 }
 
 /// Returns `true` when route extraction should run.
@@ -73,6 +104,15 @@ pub fn detect_routes(
     graph: &mut RepoDependencyGraph,
     project_root: &Path,
 ) -> RouteExtractionReport {
+    let config = graph.route_exclusion_config().clone();
+    detect_routes_with_options(graph, project_root, RouteExtractionOptions::new(&config))
+}
+
+pub fn detect_routes_with_options(
+    graph: &mut RepoDependencyGraph,
+    project_root: &Path,
+    options: RouteExtractionOptions<'_>,
+) -> RouteExtractionReport {
     let mut report = RouteExtractionReport::default();
 
     preflight_readable_candidate_files(graph, project_root, &mut report);
@@ -88,15 +128,40 @@ pub fn detect_routes(
     let mut routes_by_path = BTreeMap::new();
     for hit in axum_report.hits {
         if let Some(route_node) = hit.route_node {
-            routes_by_path.entry(hit.path).or_insert(route_node);
+            routes_by_path
+                .entry(hit.path.clone())
+                .or_insert_with(|| RouteCandidate::from_graph(graph, hit.path, route_node));
         }
     }
     if routes_by_path.is_empty() {
         collect_existing_route_nodes(graph, &mut routes_by_path);
     }
 
-    detect_typescript_fetches(graph, project_root, &routes_by_path, &mut report);
+    detect_typescript_fetches(
+        graph,
+        project_root,
+        &routes_by_path,
+        options.exclusion_config,
+        &mut report,
+    );
     report
+}
+
+#[derive(Debug, Clone)]
+struct RouteCandidate {
+    path: String,
+    node: NodeIndex,
+    framework: Option<String>,
+}
+
+impl RouteCandidate {
+    fn from_graph(graph: &RepoDependencyGraph, path: String, node: NodeIndex) -> Self {
+        Self {
+            path,
+            node,
+            framework: graph.node(node).route_framework.clone(),
+        }
+    }
 }
 
 fn preflight_readable_candidate_files(
@@ -116,14 +181,15 @@ fn preflight_readable_candidate_files(
 fn detect_typescript_fetches(
     graph: &mut RepoDependencyGraph,
     project_root: &Path,
-    routes_by_path: &BTreeMap<String, NodeIndex>,
+    routes_by_path: &BTreeMap<String, RouteCandidate>,
+    exclusion_config: &RouteExclusionConfig,
     report: &mut RouteExtractionReport,
 ) {
     if routes_by_path.is_empty() {
         return;
     }
 
-    for (rel_path, _file_node) in file_nodes(graph, is_typescript_fetch_candidate) {
+    for (rel_path, file_node) in file_nodes(graph, is_typescript_fetch_candidate) {
         let source = match std::fs::read_to_string(project_root.join(&rel_path)) {
             Ok(source) => source,
             Err(error) => {
@@ -135,18 +201,48 @@ fn detect_typescript_fetches(
             continue;
         }
         for fetch in scan_fetches(&source) {
-            let Some(route_node) = resolve_fetch_route(&fetch.path, routes_by_path) else {
+            let Some(route) = resolve_fetch_route(&fetch.path, routes_by_path) else {
                 report.unmatched_fetch_count += 1;
                 continue;
             };
+            let has_import_evidence = consumer_has_route_import_evidence(graph, file_node, route);
+            let (confidence, reason) = if has_import_evidence {
+                promote_fetches_confidence_with_import_evidence(
+                    fetch.confidence,
+                    Some(fetch.reason),
+                )
+            } else {
+                (fetch.confidence, fetch.reason.to_string())
+            };
+            let exclusion_reasons = consumer_edge_exclusion_reasons(
+                confidence,
+                has_import_evidence,
+                graph.node(file_node).language.as_deref(),
+                graph.node(route.node).language.as_deref(),
+                route,
+                exclusion_config,
+            );
+            if !exclusion_reasons.is_empty() {
+                report
+                    .consumer_edge_suggestions
+                    .push(RouteConsumerEdgeSuggestion {
+                        consumer_file: rel_path.clone(),
+                        fetch_path: fetch.path.clone(),
+                        route_path: route.path.clone(),
+                        framework: route.framework.clone(),
+                        confidence,
+                        reasons: exclusion_reasons,
+                    });
+                continue;
+            }
             let line = byte_to_line(&source, fetch.byte_offset);
             if let Some(consumer) = enclosing_symbol(graph, &rel_path, line) {
                 graph.add_route_edge(
                     consumer,
-                    route_node,
+                    route.node,
                     RepoGraphEdgeKind::Fetches,
-                    fetch.confidence,
-                    fetch.reason,
+                    confidence,
+                    &reason,
                 );
                 report.fetches_edges_added += 1;
             } else {
@@ -156,10 +252,10 @@ fn detect_typescript_fetches(
     }
 }
 
-fn resolve_fetch_route(
+fn resolve_fetch_route<'a>(
     fetch_path: &str,
-    routes_by_path: &BTreeMap<String, NodeIndex>,
-) -> Option<NodeIndex> {
+    routes_by_path: &'a BTreeMap<String, RouteCandidate>,
+) -> Option<&'a RouteCandidate> {
     routes_by_path
         .iter()
         .find(|(route_path, _)| {
@@ -167,12 +263,12 @@ fn resolve_fetch_route(
                 || fetch_path.starts_with(route_path.as_str())
                 || route_path.starts_with(fetch_path)
         })
-        .map(|(_, route_node)| *route_node)
+        .map(|(_, route)| route)
 }
 
 fn collect_existing_route_nodes(
     graph: &RepoDependencyGraph,
-    routes_by_path: &mut BTreeMap<String, NodeIndex>,
+    routes_by_path: &mut BTreeMap<String, RouteCandidate>,
 ) {
     for idx in graph.graph().node_indices() {
         let node = graph.node(idx);
@@ -180,9 +276,105 @@ fn collect_existing_route_nodes(
             continue;
         }
         if let Some(path) = route_path_from_display_name(&node.display_name) {
-            routes_by_path.entry(path).or_insert(idx);
+            routes_by_path
+                .entry(path.clone())
+                .or_insert_with(|| RouteCandidate::from_graph(graph, path, idx));
         }
     }
+}
+
+fn consumer_edge_exclusion_reasons(
+    confidence: f64,
+    has_import_evidence: bool,
+    consumer_language: Option<&str>,
+    route_language: Option<&str>,
+    route: &RouteCandidate,
+    config: &RouteExclusionConfig,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if health_path_matches(&route.path, &config.health_path_globs) {
+        reasons.push("health-path".to_string());
+    }
+    if config.param_only_paths && is_param_only_path(&route.path) {
+        reasons.push("param-only-path".to_string());
+    }
+    if confidence + f64::EPSILON < config.min_confidence_for_consumer_edge {
+        reasons.push("below-confidence-floor".to_string());
+    }
+    if !has_import_evidence
+        && consumer_language.is_some()
+        && route_language.is_some()
+        && consumer_language == route_language
+    {
+        reasons.push("same-language-inferred-collision".to_string());
+    }
+    if let Some(framework) = route.framework.as_deref()
+        && config
+            .excluded_frameworks
+            .iter()
+            .any(|excluded| excluded.eq_ignore_ascii_case(framework))
+    {
+        reasons.push("excluded-framework".to_string());
+    }
+    reasons
+}
+
+fn consumer_has_route_import_evidence(
+    graph: &RepoDependencyGraph,
+    consumer_file: NodeIndex,
+    route: &RouteCandidate,
+) -> bool {
+    let route_node = graph.node(route.node);
+    let route_handler_symbol = route_node.route_handler_symbol.as_deref();
+    graph
+        .graph()
+        .edges(consumer_file)
+        .filter(|edge| {
+            matches!(
+                edge.weight().kind,
+                RepoGraphEdgeKind::FileReference | RepoGraphEdgeKind::SymbolReference
+            )
+        })
+        .any(|edge| {
+            let target = graph.node(edge.target());
+            let references_handler = route_handler_symbol
+                .zip(target.symbol.as_deref())
+                .is_some_and(|(handler, target_symbol)| handler == target_symbol);
+            references_handler || is_server_route_context_node(target)
+        })
+}
+
+fn is_server_route_context_node(node: &RepoGraphNode) -> bool {
+    node.language.as_deref() == Some("rust")
+        && node.file_path.as_ref().is_some_and(|path| {
+            let path = path.to_string_lossy();
+            path.starts_with("server/") || path.contains("/server/")
+        })
+}
+
+fn health_path_matches(path: &str, globs: &[String]) -> bool {
+    let path = path.to_ascii_lowercase();
+    globs
+        .iter()
+        .any(|glob| glob_match(&path, &glob.to_ascii_lowercase()))
+}
+
+fn glob_match(value: &str, glob: &str) -> bool {
+    if glob == "*" {
+        return true;
+    }
+    let Some((prefix, suffix)) = glob.split_once('*') else {
+        return value == glob || value.ends_with(glob);
+    };
+    value.starts_with(prefix) && value.ends_with(suffix)
+}
+
+fn is_param_only_path(path: &str) -> bool {
+    let trimmed = path.trim_matches('/');
+    !trimmed.is_empty()
+        && trimmed.split('/').all(|segment| {
+            segment.starts_with(':') || (segment.starts_with('{') && segment.ends_with('}'))
+        })
 }
 
 fn route_path_from_display_name(display_name: &str) -> Option<String> {
@@ -319,12 +511,21 @@ fn enclosing_symbol(graph: &RepoDependencyGraph, rel_path: &Path, line: u32) -> 
     graph
         .symbols_enclosing(rel_path, line, line)
         .into_iter()
+        .filter(|node| is_enclosing_fetch_consumer_symbol(graph.node(*node)))
         .min_by_key(|node| {
             graph
                 .range_for_node(*node, rel_path)
                 .map(|(start, end)| end.saturating_sub(start))
                 .unwrap_or(u32::MAX)
         })
+}
+
+fn is_enclosing_fetch_consumer_symbol(node: &RepoGraphNode) -> bool {
+    node.kind == RepoGraphNodeKind::Symbol
+        && matches!(
+            node.symbol_kind,
+            Some(ScipSymbolKind::Function | ScipSymbolKind::Method | ScipSymbolKind::Constructor)
+        )
 }
 
 fn parse_quoted(source: &str, start: usize) -> Option<(String, usize)> {
@@ -401,8 +602,8 @@ mod tests {
 
     use super::*;
     use crate::repo_graph::{
-        RepoGraphArtifact, RepoGraphArtifactEdge, RepoGraphArtifactSymbolRange, RepoGraphNode,
-        edge_confidence_floor, edge_weight_for,
+        EdgeConfidenceTier, RepoGraphArtifact, RepoGraphArtifactEdge, RepoGraphArtifactSymbolRange,
+        RepoGraphEdge, RepoGraphNode, edge_confidence_floor, edge_weight_for,
     };
     use crate::scip_parser::ScipSymbolKind;
 
@@ -604,6 +805,165 @@ mod tests {
                 .graph()
                 .node_weights()
                 .any(|node| node.kind == RepoGraphNodeKind::Route)
+        );
+    }
+
+    #[test]
+    fn default_exclusion_config_suggests_health_and_param_only_fetches() {
+        let temp = tempfile::tempdir().expect("create temp fixture dir");
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("server/src")).unwrap();
+        std::fs::create_dir_all(root.join("ui/src/api")).unwrap();
+        std::fs::write(
+            root.join("server/src/routes.rs"),
+            "use axum::{Router, routing::get};\nfn router() -> Router<()> { Router::new().route(\"/health\", get(health)).route(\"/:id\", get(show)) }\nasync fn health() {}\nasync fn show() {}",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("ui/src/api/agents.ts"),
+            "export function fetchAgents() {\n  fetch('/health');\n  fetch('/:id');\n}",
+        )
+        .unwrap();
+
+        let mut graph = fixture_graph();
+        let report = detect_routes(&mut graph, root);
+
+        assert_eq!(report.fetches_edges_added, 0);
+        let reasons = report
+            .consumer_edge_suggestions
+            .iter()
+            .map(|suggestion| suggestion.reasons.as_slice())
+            .collect::<Vec<_>>();
+        assert!(reasons.iter().any(|r| *r == ["health-path"]));
+        assert!(reasons.iter().any(|r| *r == ["param-only-path"]));
+    }
+
+    #[test]
+    fn import_evidence_promotes_fetches_to_extracted_confidence() {
+        let temp = tempfile::tempdir().expect("create temp fixture dir");
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("server/src")).unwrap();
+        std::fs::create_dir_all(root.join("ui/src/api")).unwrap();
+        std::fs::write(
+            root.join("server/src/routes.rs"),
+            "use axum::{Router, routing::get};\nfn router() -> Router<()> { Router::new().route(\"/api/agents\", get(list_agents)) }\nasync fn list_agents() {}",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("ui/src/api/agents.ts"),
+            "export function fetchAgents() {\n  return fetch('/api/agents');\n}",
+        )
+        .unwrap();
+
+        let mut graph = fixture_graph();
+        graph.graph_mut_unchecked().add_edge(
+            NodeIndex::new(3),
+            NodeIndex::new(2),
+            RepoGraphEdge {
+                kind: RepoGraphEdgeKind::FileReference,
+                weight: edge_weight_for(RepoGraphEdgeKind::FileReference),
+                evidence_count: 1,
+                confidence: 0.95,
+                reason: Some("test-import".to_string()),
+                step: None,
+            },
+        );
+        let report = detect_routes(&mut graph, root);
+
+        assert_eq!(report.fetches_edges_added, 1);
+        let fetches = graph
+            .graph()
+            .edge_weights()
+            .find(|edge| edge.kind == RepoGraphEdgeKind::Fetches)
+            .expect("fetches edge");
+        assert!(fetches.confidence > 0.9);
+        assert_eq!(fetches.confidence_tier(), EdgeConfidenceTier::Extracted);
+        assert!(
+            fetches
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("import-evidence"))
+        );
+    }
+
+    #[test]
+    fn same_language_inferred_fetches_are_suggestions_without_import_evidence() {
+        let temp = tempfile::tempdir().expect("create temp fixture dir");
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("ui/src/api")).unwrap();
+        std::fs::write(
+            root.join("ui/src/api/agents.ts"),
+            "export function fetchAgents() {\n  return fetch('/api/agents');\n}",
+        )
+        .unwrap();
+
+        let mut graph = fixture_graph();
+        graph.ensure_route_node(
+            "GET /api/agents (nextjs)",
+            "GET /api/agents (nextjs)",
+            Some("typescript"),
+            Some("root"),
+            Some("nextjs"),
+            None,
+        );
+        let report = detect_routes(&mut graph, root);
+
+        assert_eq!(report.fetches_edges_added, 0);
+        assert!(report.consumer_edge_suggestions.iter().any(|suggestion| {
+            suggestion
+                .reasons
+                .iter()
+                .any(|reason| reason == "same-language-inferred-collision")
+        }));
+    }
+
+    #[test]
+    fn fetches_consumer_resolution_rejects_non_function_symbols() {
+        let mut graph = fixture_graph();
+        let consumer = graph.node(NodeIndex::new(4)).clone();
+        assert!(is_enclosing_fetch_consumer_symbol(&consumer));
+
+        graph.graph_mut_unchecked()[NodeIndex::new(4)].kind = RepoGraphNodeKind::Table;
+        assert!(!is_enclosing_fetch_consumer_symbol(
+            graph.node(NodeIndex::new(4))
+        ));
+
+        graph.graph_mut_unchecked()[NodeIndex::new(4)].kind = RepoGraphNodeKind::Symbol;
+        graph.graph_mut_unchecked()[NodeIndex::new(4)].symbol_kind = Some(ScipSymbolKind::Property);
+        assert!(!is_enclosing_fetch_consumer_symbol(
+            graph.node(NodeIndex::new(4))
+        ));
+    }
+
+    #[test]
+    fn exclusion_options_record_below_floor_and_framework_reasons() {
+        let fetch = FetchHit {
+            path: "/api/agents".to_string(),
+            byte_offset: 0,
+            confidence: 0.70,
+            reason: "ts-fetch-literal",
+        };
+        let route = RouteCandidate {
+            path: "/api/agents".to_string(),
+            node: NodeIndex::new(0),
+            framework: Some("axum".to_string()),
+        };
+        let config = RouteExclusionConfig {
+            min_confidence_for_consumer_edge: 0.75,
+            excluded_frameworks: vec!["Axum".to_string()],
+            ..RouteExclusionConfig::default()
+        };
+
+        assert_eq!(
+            consumer_edge_exclusion_reasons(
+                fetch.confidence,
+                false,
+                Some("typescript"),
+                Some("rust"),
+                &route,
+                &config,
+            ),
+            vec!["below-confidence-floor", "excluded-framework"]
         );
     }
 }
