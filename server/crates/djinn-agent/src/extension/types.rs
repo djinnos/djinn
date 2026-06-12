@@ -582,6 +582,14 @@ impl CodeGraphParams {
         clear(&mut self.tests);
     }
 
+    pub(super) fn resolved_offset(&self) -> usize {
+        self.offset.unwrap_or(0)
+    }
+
+    pub(super) fn resolved_page_limit(&self, default: usize) -> usize {
+        self.page_limit.unwrap_or(default).clamp(1, 1000)
+    }
+
     /// Normalize public resolver aliases to the legacy `key` + `kind_hint`
     /// fields consumed by the bridge. `uid` wins as an exact identity; `name`
     /// is used only when neither `uid` nor `key` was supplied. `kind` mirrors

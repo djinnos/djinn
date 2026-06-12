@@ -399,8 +399,8 @@ pub(crate) struct AgentPagination {
 impl AgentPagination {
     pub(crate) fn resolve(p: &CodeGraphParams, default_limit: usize) -> Self {
         Self {
-            offset: p.offset.unwrap_or(0),
-            limit: p.page_limit.unwrap_or(default_limit).clamp(1, 1000),
+            offset: p.resolved_offset(),
+            limit: p.resolved_page_limit(default_limit),
             summary_only: p.summary_only.unwrap_or(false),
             by_depth_counts: p.by_depth_counts.unwrap_or(false),
         }
@@ -441,7 +441,7 @@ pub(crate) fn agent_by_depth_counts(
         .collect()
 }
 
-async fn call_code_graph_inner(
+pub(crate) async fn call_code_graph_inner(
     state: &AgentContext,
     p: &mut CodeGraphParams,
     ctx: &djinn_control_plane::bridge::ProjectCtx,
@@ -1061,10 +1061,9 @@ async fn call_code_graph_inner(
                 })
             } else {
                 let pagination = AgentPagination::resolve(p, limit);
-                let fetch_limit = pagination
-                    .limit
-                    .saturating_mul(25)
-                    .clamp(pagination.limit, 500);
+                // Guard pageLimit=0/unset coercions so the bridge never sees a zero fetch cap.
+                let fetch_base = pagination.limit.max(1);
+                let fetch_limit = fetch_base.saturating_mul(25).clamp(fetch_base, 500);
                 let mut pairs = graph_ops
                     .coupling_hotspots(ctx, fetch_limit, None, 15)
                     .await?;
