@@ -1261,6 +1261,19 @@ mod tests {
         }
     }
 
+    fn create_input_with_ac<'a>(
+        title: &'a str,
+        body: &'a str,
+        ac: &'a str,
+    ) -> ProposalCreateInput<'a> {
+        ProposalCreateInput {
+            title,
+            body,
+            acceptance_criteria: Some(ac),
+            status: None,
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_defaults_and_short_id() {
         let (bus, captured) = capturing_bus();
@@ -1915,40 +1928,78 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_allows_spec_edit_while_building_and_marks_drift() {
+        // Amend-while-building: a material edit to a `building` proposal is
+        // allowed and only stamps drift — it does NOT touch the status. This
+        // is the positive replacement for the old "spec edit while building is
+        // rejected" regression; status-only updates remain allowed too.
         let db = test_db();
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
         let proj = insert_project(&db, "svc-editguard").await;
-        let p = repo.create(create_input("Guarded")).await.unwrap();
+        let p = repo
+            .create(create_input_with_ac(
+                "Guarded",
+                "",
+                r#"[{"criterion":"do X","met":false}]"#,
+            ))
+            .await
+            .unwrap();
         let epic = insert_epic(&db, &proj, "eg01").await;
         repo.link_epic(&p.id, &epic, &proj).await.unwrap();
         let building = repo.set_building(&p.id, "user-x").await.unwrap();
         assert_eq!(building.last_reconciled_revision_seq, Some(1));
         assert!(!building.pending_reconcile);
 
+        // Status-only update (no spec change) remains allowed: status stays
+        // `building`, no new revision, no new drift.
         let status_only = repo
-            .update(&p.id, update_input("Guarded", "", "[]", "building"))
+            .update(
+                &p.id,
+                update_input(
+                    "Guarded",
+                    "",
+                    r#"[{"criterion":"do X","met":false}]"#,
+                    "building",
+                ),
+            )
             .await
             .unwrap();
         assert_eq!(status_only.status, "building");
         assert_eq!(status_only.latest_revision_seq, 1);
         assert!(!status_only.pending_reconcile);
+        assert_eq!(repo.revisions(&p.id).await.unwrap().len(), 1);
 
+        // Material edit: title + body + AC all change. The build stays
+        // `building`, a new revision lands, `pending_reconcile` flips true,
+        // and `last_reconciled_revision_seq` does NOT advance (the build is
+        // still against rev 1).
         let updated = repo
             .update(
                 &p.id,
-                update_input("Guarded v2", "new body", "[]", "approved"),
+                update_input(
+                    "Guarded v2",
+                    "new body",
+                    r#"[{"criterion":"do X better","met":false}]"#,
+                    "approved",
+                ),
             )
             .await
             .unwrap();
         assert_eq!(updated.title, "Guarded v2");
+        assert_eq!(updated.body, "new body");
+        let ac: serde_json::Value = serde_json::from_str(&updated.acceptance_criteria).unwrap();
+        assert_eq!(
+            ac,
+            serde_json::json!([{"criterion": "do X better", "met": false}])
+        );
         assert_eq!(updated.status, "building");
         assert_eq!(updated.latest_revision_seq, 2);
         assert_eq!(updated.last_reconciled_revision_seq, Some(1));
         assert!(updated.pending_reconcile);
         assert_eq!(repo.revisions(&p.id).await.unwrap().len(), 2);
 
-        // A status-only update (no spec change) remains allowed and does not add
-        // new drift beyond the existing pending reconcile marker.
+        // A status-only path that closes out a build is still allowed and
+        // does not require the drift to be resolved first — the build owner
+        // owns the final say.
         let done = repo.set_done(&p.id).await.unwrap();
         assert_eq!(done.status, "done");
         assert!(done.pending_reconcile);
@@ -1956,6 +2007,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn add_signoff_while_building_does_not_reconcile_status() {
+        // `reconcile_approval` short-circuits on `building` so a sign-off
+        // (which would otherwise be enough to flip a draft → in_review and
+        // a fresh pair → approved) never demotes a build back to the review
+        // gate. The sign-off is still recorded, the status stays `building`.
         let db = test_db();
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
         let proj = insert_project(&db, "svc-build-signoff").await;
@@ -1967,6 +2022,13 @@ mod tests {
         let updated = repo.add_signoff(&p.id, "scoped", "user-y").await.unwrap();
         assert_eq!(updated.status, "building");
         assert_eq!(repo.signoffs(&p.id).await.unwrap().len(), 1);
+
+        // clear_signoff is the symmetric guard: it must also skip
+        // reconcile_approval on a building proposal, so withdrawing a sign-off
+        // can never yank the build back to in_review.
+        let cleared = repo.clear_signoff(&p.id, "scoped", "user-y").await.unwrap();
+        assert_eq!(cleared.status, "building");
+        assert!(repo.signoffs(&p.id).await.unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
