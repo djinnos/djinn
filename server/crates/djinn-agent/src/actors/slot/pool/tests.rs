@@ -157,6 +157,40 @@ async fn seed_running_session_with_task_run(
     task_id
 }
 
+async fn seed_running_session_with_task_run_in_project(
+    app_state: &crate::context::AgentContext,
+    project_id: &str,
+    task_run_id: &str,
+) -> String {
+    let epic = test_helpers::create_test_epic(&app_state.db, project_id).await;
+    let task = test_helpers::create_test_task(&app_state.db, project_id, &epic.id).await;
+    let task_id = task.id.clone();
+    djinn_db::TaskRunRepository::new(app_state.db.clone())
+        .create(djinn_db::CreateTaskRunParams {
+            id: task_run_id,
+            project_id,
+            task_id: &task_id,
+            trigger_type: "test",
+            status: None,
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .expect("task_run create should succeed");
+    djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone())
+        .create(djinn_db::CreateSessionParams {
+            project_id,
+            task_id: Some(&task_id),
+            model: "model-a",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(task_run_id),
+        })
+        .await
+        .expect("session create should succeed");
+    task_id
+}
+
 fn model(model_id: &str, max_slots: u32, roles: &[&str]) -> ModelSlotConfig {
     ModelSlotConfig {
         model_id: model_id.to_string(),
@@ -1035,5 +1069,346 @@ async fn mark_slot_free_is_idempotent_and_skips_retired() {
     assert!(
         !pool.test_free_slots("model-a").contains(&0),
         "mark_slot_free must refuse to resurrect a retired slot"
+    );
+}
+
+// ── Regression coverage for the "kill actually kills" teardown contract ──
+
+/// `interrupt_project` is the bulk-interrupt surface scoped to a single
+/// project (e.g. project delete / leadership handoff). It must hit the
+/// same teardown path as `interrupt_all` for every mapped task in that
+/// project — NOT just settle the session row, but also delete the
+/// `djinn-taskrun-{task_run_id}` Job so the K8s pod is terminated
+/// promptly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupt_project_tears_down_each_affected_taskrun_job() {
+    let (mut app_state, cancel, _temp) = test_app_state();
+    let runtime = RecordingRuntimeOps::new(false);
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+    let project = test_helpers::create_test_project(&app_state.db).await;
+    let other_project = test_helpers::create_test_project(&app_state.db).await;
+    let project_id = project.id.clone();
+    let other_project_id = other_project.id.clone();
+    let task_a =
+        seed_running_session_with_task_run_in_project(&app_state, &project_id, "run-proj-a").await;
+    let task_b =
+        seed_running_session_with_task_run_in_project(&app_state, &project_id, "run-proj-b").await;
+    let task_other =
+        seed_running_session_with_task_run_in_project(&app_state, &other_project_id, "run-other")
+            .await;
+
+    // Sanity: two affected tasks share one project, while the third task lives
+    // in a different project and must survive the scoped interrupt.
+    assert_ne!(project_id, other_project_id);
+
+    let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
+    let config = make_config(
+        vec![model("model-a", 3, &["worker"])],
+        &[("worker", vec!["model-a"])],
+    );
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel,
+        config,
+        test_slot_factory(Duration::from_secs(10), signal_tx),
+    );
+
+    pool.dispatch(&task_a, "/tmp/project", "model-a")
+        .await
+        .expect("dispatch A should succeed");
+    pool.dispatch(&task_b, "/tmp/project", "model-a")
+        .await
+        .expect("dispatch B should succeed");
+    pool.dispatch(&task_other, "/tmp/other-project", "model-a")
+        .await
+        .expect("dispatch other should succeed");
+
+    pool.interrupt_project(&project_id, "test project interrupt")
+        .await
+        .expect("interrupt_project should succeed");
+
+    let calls = runtime.calls();
+    assert!(
+        calls.iter().any(|call| call == "run-proj-a"),
+        "task a (project {project_id}) should be torn down"
+    );
+    assert!(
+        calls.iter().any(|call| call == "run-proj-b"),
+        "task b (project {project_id}) should be torn down"
+    );
+    assert!(
+        !calls.iter().any(|call| call == "run-other"),
+        "task other (project {other_project_id}) must NOT be torn down"
+    );
+    wait_until_no_sessions(&pool, &[task_a, task_b]).await;
+    assert!(
+        pool.has_session(&task_other)
+            .await
+            .expect("has_session should succeed"),
+        "unrelated project task should still be running"
+    );
+
+    pool.interrupt_all("test cleanup")
+        .await
+        .expect("cleanup interrupt_all should succeed");
+    wait_until_no_sessions(&pool, &[task_other]).await;
+}
+
+/// `evict_session` for a task whose session has no `task_run_id` (e.g. a
+/// purely synthetic paused session, or a session seeded without an
+/// attached K8s task-run) must NOT crash, NOT invoke teardown, and
+/// still reclaim the task mapping. This guards the
+/// `teardown_taskrun_jobs_for_task` filter that skips non-running rows
+/// and trims empty task-run ids.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evict_session_with_no_task_run_id_is_idempotent() {
+    use djinn_db::CreateSessionParams;
+
+    let (mut app_state, cancel, _temp) = test_app_state();
+    let runtime = RecordingRuntimeOps::new(false);
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+    let project = crate::test_helpers::create_test_project(&app_state.db).await;
+    let epic = crate::test_helpers::create_test_epic(&app_state.db, &project.id).await;
+    let task = crate::test_helpers::create_test_task(&app_state.db, &project.id, &epic.id).await;
+    let task_id = task.id.clone();
+
+    let session_repo =
+        djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    session_repo
+        .create(CreateSessionParams {
+            project_id: &project.id,
+            task_id: Some(&task_id),
+            model: "model-a",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+        })
+        .await
+        .expect("session create should succeed");
+
+    let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
+    let config = make_config(
+        vec![model("model-a", 1, &["worker"])],
+        &[("worker", vec!["model-a"])],
+    );
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel,
+        config,
+        test_slot_factory(Duration::from_secs(10), signal_tx),
+    );
+
+    pool.dispatch(&task_id, "/tmp/project", "model-a")
+        .await
+        .expect("dispatch should succeed");
+    pool.evict_session(&task_id)
+        .await
+        .expect("evict_session should succeed");
+
+    assert!(
+        runtime.calls().is_empty(),
+        "evict_session with no task_run_id must not invoke teardown"
+    );
+    assert!(
+        !pool
+            .has_session(&task_id)
+            .await
+            .expect("has_session should succeed"),
+        "evict_session should still reclaim the task mapping"
+    );
+}
+
+/// `kill_session` for an unknown task id returns `PoolError::TaskNotFound`
+/// and does NOT crash, leak, or call teardown. Idempotent error path —
+/// a redispatch loop that double-invokes `kill_session` for the same
+/// already-killed task id must not be able to wedge the slot pool on
+/// the second call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kill_session_with_no_slot_mapping_returns_task_not_found() {
+    let (mut app_state, cancel, _temp) = test_app_state();
+    let runtime = RecordingRuntimeOps::new(false);
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+    let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
+    let config = make_config(
+        vec![model("model-a", 1, &["worker"])],
+        &[("worker", vec!["model-a"])],
+    );
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel,
+        config,
+        test_slot_factory(Duration::from_secs(10), signal_tx),
+    );
+
+    pool.kill_session("ghost-task")
+        .await
+        .expect_err("kill_session on an unmapped task should return TaskNotFound");
+    assert!(
+        runtime.calls().is_empty(),
+        "kill_session on an unmapped task must not call teardown"
+    );
+}
+
+/// `interrupt_all` is idempotent at the teardown level: invoking it on
+/// an empty pool is a no-op (no calls, no panic). A double-invoke
+/// (the "shutdown tick after a forced kill" race the supervisor runner
+/// hits) does not double-tear-down — once a slot is no longer in
+/// `task_to_slot`, the inner `kill_session` returns `TaskNotFound` and
+/// the outer `interrupt_all` keeps going.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupt_all_is_idempotent_and_skips_already_removed_sessions() {
+    let (mut app_state, cancel, _temp) = test_app_state();
+    let runtime = RecordingRuntimeOps::new(false);
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+    let task_id =
+        seed_running_session_with_task_run(&app_state, "double interrupt", "run-double").await;
+    let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
+    let config = make_config(
+        vec![model("model-a", 1, &["worker"])],
+        &[("worker", vec!["model-a"])],
+    );
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel,
+        config,
+        test_slot_factory(Duration::from_secs(10), signal_tx),
+    );
+
+    pool.dispatch(&task_id, "/tmp/project", "model-a")
+        .await
+        .expect("dispatch should succeed");
+
+    // First interrupt: tears down `run-double` once, then drains via the
+    // slot `Killed` event handler.
+    pool.interrupt_all("first interrupt")
+        .await
+        .expect("first interrupt_all should succeed");
+    wait_until_no_sessions(&pool, std::slice::from_ref(&task_id)).await;
+
+    // Second interrupt on the now-empty pool is a no-op: zero calls,
+    // zero panics.
+    let calls_before = runtime.calls().len();
+    pool.interrupt_all("second interrupt (idempotent)")
+        .await
+        .expect("second interrupt_all should succeed");
+    let calls_after = runtime.calls().len();
+    assert_eq!(
+        calls_after, calls_before,
+        "interrupt_all on an already-drained pool must not invoke teardown again"
+    );
+}
+
+/// Layering guard: the slot-pool lifecycle code MUST NOT import
+/// `djinn_k8s` directly. The bridge abstraction is the whole point of
+/// the ld18 refactor — the slot pool reaches Kubernetes only through
+/// the `RuntimeOps::teardown_taskrun_job` trait method on
+/// `AgentContext.runtime_ops`. A regression that re-introduces a direct
+/// `use djinn_k8s` in the pool/actor (or any helper it pulls in) would
+/// make the agent crate impossible to compile/test without a live
+/// kube client and break the djinn-control-plane integration tests.
+#[test]
+fn slot_pool_lifecycle_does_not_import_djinn_k8s_directly() {
+    // Source-set under audit: the pool actor + everything reachable
+    // from `pool/actor.rs` (incl. `pool/types.rs`, `pool/mod.rs`,
+    // `pool/handle.rs`). The test file itself imports `RuntimeOps`
+    // from `djinn_control_plane::bridge` to plug in a recording fake
+    // — that is the *intended* boundary, not a `djinn_k8s` import.
+    let pool_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/actors/slot/pool");
+    let mut disallowed: Vec<(String, String)> = Vec::new();
+    let entries = std::fs::read_dir(&pool_dir).expect("read pool dir");
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        // The test file pulls in `djinn_control_plane::bridge` to wire
+        // up `RecordingRuntimeOps` — that bridge import is the intended
+        // boundary, and `tests.rs` is allowed (and required) to use
+        // it. The audit applies to non-test production code
+        // (`actor.rs`, `handle.rs`, `mod.rs`, `types.rs`).
+        if name == "tests.rs" {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        for (idx, line) in text.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            if trimmed.contains("use djinn_k8s")
+                || trimmed.contains("djinn_k8s::")
+                || trimmed.contains("djinn_k8s =")
+            {
+                disallowed.push((name.clone(), format!("line {}: {line}", idx + 1)));
+            }
+        }
+    }
+    assert!(
+        disallowed.is_empty(),
+        "slot-pool lifecycle code must not depend on djinn_k8s directly — reach K8s through the RuntimeOps bridge instead. Found: {disallowed:#?}"
+    );
+}
+
+/// The `SlotEvent::Killed` path is the backstop for kill routes that bypass
+/// `kill_session`/`evict_session`: when a slot lifecycle directly reports a
+/// killed task, the pool must still delete the task-run Job before settling the
+/// session row. Drive the actor method directly so this coverage is independent
+/// of the public `kill_session` path, which intentionally performs an earlier
+/// teardown and settlement to avoid duplicate Kubernetes deletes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slot_event_killed_tears_down_taskrun_job() {
+    let (mut app_state, cancel, _temp) = test_app_state();
+    let runtime = RecordingRuntimeOps::new(false);
+    app_state.runtime_ops = Some(Arc::new(runtime.clone()));
+    let task_id =
+        seed_running_session_with_task_run(&app_state, "killed event teardown", "run-killed").await;
+
+    let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
+    let config = make_config(
+        vec![model("model-a", 1, &["worker"])],
+        &[("worker", vec!["model-a"])],
+    );
+    let (_pool_tx, pool_rx) = mpsc::channel(8);
+    let mut pool = SlotPool::new_with_factory(
+        pool_rx,
+        app_state,
+        cancel,
+        config,
+        test_slot_factory(Duration::from_secs(10), signal_tx),
+    );
+
+    pool.test_dispatch(&task_id, "/tmp/project", "model-a")
+        .await
+        .expect("dispatch should succeed");
+    let slot_id = pool
+        .test_slot_of(&task_id)
+        .expect("task should hold a slot");
+
+    pool.test_handle_slot_event(super::super::SlotEvent::Killed {
+        slot_id,
+        model_id: "model-a".to_string(),
+        task_id: task_id.clone(),
+    })
+    .await;
+
+    assert!(
+        runtime.calls().iter().any(|call| call == "run-killed"),
+        "SlotEvent::Killed handler must tear down the task-run Job (saw calls: {:?})",
+        runtime.calls()
+    );
+    let count = runtime
+        .calls()
+        .iter()
+        .filter(|call| **call == "run-killed")
+        .count();
+    assert_eq!(
+        count, 1,
+        "SlotEvent::Killed must invoke teardown exactly once (saw {count} calls)"
     );
 }

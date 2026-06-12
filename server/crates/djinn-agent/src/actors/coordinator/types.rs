@@ -5,6 +5,7 @@ use std::time::{Duration, Instant as StdInstant};
 use super::consolidation::ConsolidationRunner;
 use crate::actors::slot::SlotPoolHandle;
 use crate::roles::RoleRegistry;
+use djinn_control_plane::bridge::RuntimeOps;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_db::Database;
 use djinn_provider::catalog::CatalogService;
@@ -71,6 +72,11 @@ pub struct CoordinatorDeps {
     /// can clone the ephemeral workspace from the mirror. `None` in test
     /// contexts — the direct-push path bails cleanly in that case.
     pub mirror: Option<Arc<MirrorManager>>,
+    /// Runtime bridge used for best-effort task-run Job teardown in coordinator
+    /// recovery paths that finalize DB rows directly (for example zombie reaping
+    /// when the slot-pool task→slot mapping has drifted away). `None` in tests
+    /// unless a fake is injected; production wires `AppState` through this seam.
+    pub runtime_ops: Option<Arc<dyn RuntimeOps>>,
     /// Host-side worker RPC connection registry. The zombie reaper consults it
     /// for ground-truth liveness so a long-running but actively-connected K8s
     /// worker is never false-reaped. `None` in off-server/test contexts, where
@@ -104,6 +110,7 @@ impl CoordinatorDeps {
             graph_warmer: None,
             consolidation_runner: None,
             mirror: None,
+            runtime_ops: None,
             rpc_registry: None,
         }
     }
@@ -121,6 +128,15 @@ impl CoordinatorDeps {
     /// returns a descriptive error instead of crashing.
     pub fn with_mirror(mut self, mirror: Arc<MirrorManager>) -> Self {
         self.mirror = Some(mirror);
+        self
+    }
+
+    /// Inject the production runtime bridge for coordinator-owned recovery
+    /// teardown. Slot-mapped paths still delete via `SlotPoolHandle`, but direct
+    /// DB-truth finalizers need this fallback because there may be no pool
+    /// mapping left to consult.
+    pub fn with_runtime_ops(mut self, runtime_ops: Arc<dyn RuntimeOps>) -> Self {
+        self.runtime_ops = Some(runtime_ops);
         self
     }
 
@@ -528,10 +544,12 @@ mod cooldown_tests {
 
         // Trigger B must arm strictly before the terminal close so the
         // Planner gets its pass before a force-close can fire.
-        assert!(
-            STREAK_INTERVENTION_THRESHOLD < MAX_DISPATCH_FAILURES,
-            "intervention must precede the terminal-close backstop"
-        );
+        const {
+            assert!(
+                STREAK_INTERVENTION_THRESHOLD < MAX_DISPATCH_FAILURES,
+                "intervention must precede the terminal-close backstop"
+            );
+        }
     }
 }
 

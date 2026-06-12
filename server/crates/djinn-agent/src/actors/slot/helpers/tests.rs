@@ -566,6 +566,10 @@ fn make_symbol_context(name: &str, file_path: &str) -> SymbolContext {
                 kind: "function".to_string(),
                 file_path: Some("server/src/new_area.rs".to_string()),
                 confidence: 0.9,
+                confidence_tier: "extracted".to_string(),
+                confidence_reason: None,
+                excluded_reason: None,
+                route_language_chain: None,
             },
             RelatedSymbol {
                 uid: "symbol:bar".to_string(),
@@ -573,6 +577,10 @@ fn make_symbol_context(name: &str, file_path: &str) -> SymbolContext {
                 kind: "function".to_string(),
                 file_path: Some("server/src/new_area.rs".to_string()),
                 confidence: 0.9,
+                confidence_tier: "extracted".to_string(),
+                confidence_reason: None,
+                excluded_reason: None,
+                route_language_chain: None,
             },
             RelatedSymbol {
                 uid: "symbol:baz".to_string(),
@@ -580,6 +588,10 @@ fn make_symbol_context(name: &str, file_path: &str) -> SymbolContext {
                 kind: "function".to_string(),
                 file_path: Some("server/src/new_area.rs".to_string()),
                 confidence: 0.9,
+                confidence_tier: "extracted".to_string(),
+                confidence_reason: None,
+                excluded_reason: None,
+                route_language_chain: None,
             },
         ],
     );
@@ -592,6 +604,10 @@ fn make_symbol_context(name: &str, file_path: &str) -> SymbolContext {
                 kind: "field".to_string(),
                 file_path: Some("server/src/new_area.rs".to_string()),
                 confidence: 0.9,
+                confidence_tier: "extracted".to_string(),
+                confidence_reason: None,
+                excluded_reason: None,
+                route_language_chain: None,
             },
             RelatedSymbol {
                 uid: "symbol:other_field".to_string(),
@@ -599,6 +615,10 @@ fn make_symbol_context(name: &str, file_path: &str) -> SymbolContext {
                 kind: "field".to_string(),
                 file_path: Some("server/src/new_area.rs".to_string()),
                 confidence: 0.9,
+                confidence_tier: "extracted".to_string(),
+                confidence_reason: None,
+                excluded_reason: None,
+                route_language_chain: None,
             },
         ],
     );
@@ -614,6 +634,10 @@ fn make_symbol_context(name: &str, file_path: &str) -> SymbolContext {
                 kind: "function".to_string(),
                 file_path: None,
                 confidence: 0.9,
+                confidence_tier: "extracted".to_string(),
+                confidence_reason: None,
+                excluded_reason: None,
+                route_language_chain: None,
             })
             .collect(),
     );

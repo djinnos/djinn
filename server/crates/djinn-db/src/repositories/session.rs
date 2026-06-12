@@ -269,6 +269,22 @@ impl SessionRepository {
         .await?)
     }
 
+    /// List all sessions linked to a task-run row. Used by runtime-resource
+    /// reconciliation: the task-run id is the label carried by K8s Jobs, while
+    /// session liveness is persisted here.
+    pub async fn list_for_task_run(&self, task_run_id: &str) -> Result<Vec<SessionRecord>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, SessionRecord>(
+            r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                status, tokens_in, tokens_out,
+                cache_read_tokens, cache_write_tokens, task_run_id, title
+             FROM sessions WHERE task_run_id = $1 ORDER BY started_at DESC"#,
+        )
+        .bind(task_run_id)
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
     pub async fn list_for_task_in_project(
         &self,
         project_id: &str,
@@ -438,6 +454,42 @@ impl SessionRepository {
         .await?;
 
         self.fetch_and_emit_update(id).await
+    }
+
+    /// Mid-flight token-counter flush for a still-running session.
+    ///
+    /// Long sessions otherwise show `tokens_in = 0` until they end, because
+    /// `update()` is only called at reply-loop teardown. This writes the token
+    /// columns ONLY — no `status`, no `ended_at` — and is guarded by
+    /// `status = 'running'` so a flush racing the zombie reaper / stall killer
+    /// can never resurrect or overwrite a terminal row. Best-effort: a missed
+    /// flush is corrected by the next one or by the final `update()`.
+    pub async fn flush_tokens(
+        &self,
+        id: &str,
+        tokens_in: i64,
+        tokens_out: i64,
+        cache_read: i64,
+        cache_write: i64,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+
+        sqlx::query!(
+            r#"UPDATE sessions
+             SET tokens_in = $1,
+                 tokens_out = $2,
+                 cache_read_tokens = $3,
+                 cache_write_tokens = $4
+             WHERE id = $5 AND status = 'running'"#,
+            tokens_in,
+            tokens_out,
+            cache_read,
+            cache_write,
+            id
+        )
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
     }
 
     /// Set a paused session back to Running (for resume cycles).

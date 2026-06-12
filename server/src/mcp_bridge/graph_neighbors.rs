@@ -419,6 +419,7 @@ pub(super) fn classify_edge_category(
         }
         RepoGraphEdgeKind::Reads => EdgeCategory::Reads,
         RepoGraphEdgeKind::Writes => EdgeCategory::Writes,
+        RepoGraphEdgeKind::Route => EdgeCategory::References,
         RepoGraphEdgeKind::Extends => EdgeCategory::Extends,
         RepoGraphEdgeKind::Implements => EdgeCategory::Implements,
         RepoGraphEdgeKind::TypeDefines => EdgeCategory::TypeDefines,
@@ -480,6 +481,10 @@ pub(super) fn build_related_symbol(node: &RepoGraphNode, confidence: f64) -> Rel
         kind: kind_label(node),
         file_path,
         confidence,
+        confidence_tier: "extracted".to_string(),
+        confidence_reason: None,
+        excluded_reason: None,
+        route_language_chain: None,
     }
 }
 

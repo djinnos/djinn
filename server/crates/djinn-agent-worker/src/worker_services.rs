@@ -425,6 +425,19 @@ impl SupervisorServices for WorkerSupervisorServices {
             .await
     }
 
+    async fn flush_session_tokens(
+        &self,
+        session_id: String,
+        tokens_in: i64,
+        tokens_out: i64,
+        cache_read: i64,
+        cache_write: i64,
+    ) -> Result<(), String> {
+        self.rpc
+            .flush_session_tokens(session_id, tokens_in, tokens_out, cache_read, cache_write)
+            .await
+    }
+
     async fn emit_djinn_event(&self, event: SerializableDjinnEvent) -> Result<(), String> {
         self.rpc.emit_djinn_event(event).await
     }

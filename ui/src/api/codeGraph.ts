@@ -29,6 +29,10 @@ export type CodeGraphOperation =
   | "status"
   | "ranked"
   | "search"
+  | "route_map"
+  | "shape_check"
+  | "api_impact"
+  | "flow"
   | "neighbors"
   | "impact"
   | "implementations"
@@ -54,19 +58,26 @@ export type CodeGraphOperation =
  */
 export interface CodeGraphArgs {
   changed_files?: string[];
-  changed_ranges?: Array<{ file: string; start_line: number; end_line?: number }>;
+  changed_ranges?: Array<{
+    file: string;
+    start_line: number;
+    end_line?: number;
+  }>;
   confidence?: string;
   direction?: string;
   edge_kind?: string;
   end_line?: number;
   file?: string;
   file_glob?: string;
+  framework?: string;
   from?: string;
   from_glob?: string;
   from_sha?: string;
   group_by?: string;
   /** PR C1 `context` op: fetch the symbol body verbatim. Defaults false. */
   include_content?: boolean;
+  /** Route/API ops: include optional response fields when checking shape drift. */
+  include_optional?: boolean;
   key?: string;
   kind_filter?: string;
   kind_hint?: string;
@@ -80,7 +91,14 @@ export interface CodeGraphArgs {
   module_glob?: string;
   /** PR C1 `context` op: short-name lookup target (alternative to `key`). */
   name?: string;
+  /** Exact HTTP route path for route/API ops. */
+  path?: string;
+  /** Route path glob filter for `route_map`. */
+  path_glob?: string;
   query?: string;
+  route_id?: string;
+  /** HTTP method selector for route-aware ops. */
+  method?: string;
   sort_by?: string;
   start_line?: number;
   symbols?: string[];
@@ -100,6 +118,23 @@ export interface CodeGraphWorkspace {
   language?: string;
   status?: string;
 }
+
+type RouteSelector =
+  | { route_id: string; method?: string; path?: string }
+  | { route_id?: string; method: string; path: string };
+
+export type RouteMapArgs = Pick<
+  CodeGraphArgs,
+  "route_id" | "method" | "path_glob" | "framework" | "limit"
+>;
+
+export type ShapeCheckArgs = RouteSelector &
+  Pick<CodeGraphArgs, "include_optional">;
+
+export type ApiImpactArgs = RouteSelector &
+  Pick<CodeGraphArgs, "min_confidence" | "limit">;
+
+export type FlowSearchArgs = Pick<CodeGraphArgs, "limit" | "kind_filter">;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -217,6 +252,37 @@ export function fetchImpact(
 ) {
   return callCodeGraph(project, "impact", { key, ...args });
 }
+
+export function fetchRouteMap(
+  project: string,
+  args: RouteMapArgs = {},
+) {
+  return callCodeGraph(project, "route_map", args);
+}
+
+export function fetchShapeCheck(
+  project: string,
+  args: ShapeCheckArgs,
+) {
+  return callCodeGraph(project, "shape_check", args);
+}
+
+export function fetchApiImpact(
+  project: string,
+  args: ApiImpactArgs,
+) {
+  return callCodeGraph(project, "api_impact", args);
+}
+
+export function searchFlow(
+  project: string,
+  query: string,
+  args: FlowSearchArgs = {},
+) {
+  return callCodeGraph(project, "flow", { query, ...args });
+}
+
+export const fetchFlow = searchFlow;
 
 export function fetchSymbolsAt(
   project: string,

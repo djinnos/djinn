@@ -132,6 +132,10 @@ pub(crate) async fn run_reply_loop(
     // fires immediately; subsequent touches throttle to once per
     // `TOUCH_ACTIVITY_RPC_INTERVAL_SECS` (in streaming.rs).
     let last_rpc_touch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    // Clock for the throttled mid-flight session-row token flush (see
+    // `TOKEN_FLUSH_INTERVAL_SECS` in streaming.rs). Initialised to 0 so the
+    // first generation's usage is persisted immediately.
+    let last_token_flush = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     // Session-scoped stash for full tool outputs that exceed truncation limits.
     // The agent can navigate stashed outputs via `output_view` and `output_grep`.
@@ -388,6 +392,7 @@ pub(crate) async fn run_reply_loop(
                 global_cancel,
                 activity_ts: &activity_ts,
                 last_rpc_touch: &last_rpc_touch,
+                last_token_flush: &last_token_flush,
                 services,
                 compaction_attempts,
                 current_context_tokens: &mut current_context_tokens,
