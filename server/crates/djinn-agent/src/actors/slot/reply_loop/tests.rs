@@ -1091,11 +1091,36 @@ async fn max_step_wind_down_ignored_falls_back_to_hard_error() {
     // Turns 1..=3 fill the cap; turn 4 (wind-down) is ALSO a tool call →
     // not terminal → next cap check hard-errors. The MockProvider's
     // text-only fallback is never reached because we error first.
+    //
+    // Vary the args per call so each call is a *distinct* tool-call
+    // signature: the new (fw2v) in-loop guard over repeated failing
+    // tool-call signatures would otherwise trip on the 4th identical call
+    // and preempt the max-turns hard error this test is asserting.
     let provider = MockProvider::new(vec![
-        MockResponse::tool_call("t1", "nonexistent_tool", 100),
-        MockResponse::tool_call("t2", "nonexistent_tool", 110),
-        MockResponse::tool_call("t3", "nonexistent_tool", 120),
-        MockResponse::tool_call("t4", "nonexistent_tool", 130),
+        MockResponse::tool_call_with_input(
+            "t1",
+            "nonexistent_tool",
+            serde_json::json!({"step": 1}),
+            100,
+        ),
+        MockResponse::tool_call_with_input(
+            "t2",
+            "nonexistent_tool",
+            serde_json::json!({"step": 2}),
+            110,
+        ),
+        MockResponse::tool_call_with_input(
+            "t3",
+            "nonexistent_tool",
+            serde_json::json!({"step": 3}),
+            120,
+        ),
+        MockResponse::tool_call_with_input(
+            "t4",
+            "nonexistent_tool",
+            serde_json::json!({"step": 4}),
+            130,
+        ),
     ]);
 
     let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
@@ -1226,11 +1251,19 @@ async fn identical_failing_tool_call_injects_correction_then_typed_terminates() 
         "corrective message should name and forbid the exact normalized signature, got: {user_text}"
     );
 
+    // The system prompt is intentionally skipped by the reply loop's
+    // initial-seed persistence pass, so persisted = conv.messages.len() - 1.
+    // The 4th attempt's tool-result message is also not persisted because
+    // the loop returns from the guard before appending it — but it is
+    // likewise absent from `conv.messages`, so the invariant still holds.
     let persisted = count_persisted_messages(&app_state, &session_id).await;
+    let expected_persisted = conv.messages.len() - 1;
     assert_eq!(
         persisted,
-        conv.messages.len() - 1,
-        "corrective message should be persisted with the transcript"
+        expected_persisted,
+        "corrective message should be persisted with the transcript; expected \
+         {expected_persisted} (conversation len {} minus 1 system prompt), got {persisted}",
+        conv.messages.len()
     );
     assert_eq!(
         provider.remaining(),
