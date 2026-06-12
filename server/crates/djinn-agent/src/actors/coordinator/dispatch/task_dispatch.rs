@@ -1,6 +1,7 @@
 use super::super::*;
 use super::DispatchOutcome;
 use crate::roles::DispatchContext;
+use djinn_db::{DispatchStateRepository, DispatchStateUpsert};
 
 /// Env flag allowing operators (and the in-process TestRuntime path) to
 /// bypass the devcontainer-image + graph-warm readiness gate. Default is
@@ -43,7 +44,114 @@ fn overlay_inflight_ledger(
     }
 }
 
+#[derive(Default)]
+struct DurableDispatchStateUpdate {
+    failure_streak: Option<u32>,
+    cooldown_until: Option<Option<String>>,
+    last_dispatched: Option<Option<(String, String)>>,
+    inflight: Option<Option<(Option<String>, String)>>,
+}
+
+fn format_dispatch_wall_clock(ts: ::time::OffsetDateTime) -> Option<String> {
+    ts.format(&::time::format_description::well_known::Rfc3339)
+        .ok()
+}
+
+fn dispatch_wall_clock_after(duration: Duration) -> Option<String> {
+    let secs = duration.as_secs().min(i64::MAX as u64) as i64;
+    let nanos = duration.subsec_nanos() as i64;
+    let deadline = ::time::OffsetDateTime::now_utc()
+        + ::time::Duration::seconds(secs)
+        + ::time::Duration::nanoseconds(nanos);
+    format_dispatch_wall_clock(deadline)
+}
+
+fn dispatch_wall_clock_now() -> Option<String> {
+    format_dispatch_wall_clock(::time::OffsetDateTime::now_utc())
+}
+
 impl CoordinatorActor {
+    async fn persist_durable_dispatch_state_update(
+        &self,
+        task_id: &str,
+        task_short_id: Option<&str>,
+        reason: &str,
+        update: DurableDispatchStateUpdate,
+    ) {
+        let repo = DispatchStateRepository::new(self.db.clone());
+        let existing = match repo.get(task_id).await {
+            Ok(existing) => existing,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = task_short_id.unwrap_or(task_id),
+                    task_uuid = %task_id,
+                    reason,
+                    error = %e,
+                    "CoordinatorActor: failed to load durable dispatch state before write-through"
+                );
+                return;
+            }
+        };
+
+        let failure_streak = update
+            .failure_streak
+            .map(i64::from)
+            .or_else(|| existing.as_ref().map(|r| r.failure_streak))
+            .unwrap_or(0);
+        let cooldown_until = update
+            .cooldown_until
+            .unwrap_or_else(|| existing.as_ref().and_then(|r| r.cooldown_until.clone()));
+        let escalation_count = existing
+            .as_ref()
+            .map(|r| r.escalation_count)
+            .unwrap_or_else(|| {
+                i64::from(self.escalation_counts.get(task_id).copied().unwrap_or(0))
+            });
+        let (last_dispatched_at, last_dispatched_role) = match update.last_dispatched {
+            Some(Some((at, role))) => (Some(at), Some(role)),
+            Some(None) => (None, None),
+            None => existing
+                .as_ref()
+                .map(|r| (r.last_dispatched_at.clone(), r.last_dispatched_role.clone()))
+                .unwrap_or((None, None)),
+        };
+        let (inflight_creator_user_id, inflight_model_id) = match update.inflight {
+            Some(Some((creator, model))) => (creator, Some(model)),
+            Some(None) => (None, None),
+            None => existing
+                .as_ref()
+                .map(|r| {
+                    (
+                        r.inflight_creator_user_id.clone(),
+                        r.inflight_model_id.clone(),
+                    )
+                })
+                .unwrap_or((None, None)),
+        };
+
+        if let Err(e) = repo
+            .upsert(DispatchStateUpsert {
+                task_id,
+                failure_streak,
+                cooldown_until: cooldown_until.as_deref(),
+                escalation_count,
+                last_dispatched_at: last_dispatched_at.as_deref(),
+                last_dispatched_role: last_dispatched_role.as_deref(),
+                inflight_creator_user_id: inflight_creator_user_id.as_deref(),
+                inflight_model_id: inflight_model_id.as_deref(),
+            })
+            .await
+        {
+            tracing::warn!(
+                task_id = task_short_id.unwrap_or(task_id),
+                task_uuid = %task_id,
+                reason,
+                error = %e,
+                "CoordinatorActor: failed to persist durable dispatch state mutation"
+            );
+        }
+    }
+
     pub(in crate::actors::coordinator) async fn try_dispatch_to_pool<F, Fut>(
         &self,
         label: &str,
@@ -245,10 +353,46 @@ impl CoordinatorActor {
         // backed off, instead of slipping past a short window and re-dispatching
         // every tick.
         let prune_now = StdInstant::now();
+        let expired_cooldown_task_ids: Vec<String> = self
+            .dispatch_cooldowns
+            .iter()
+            .filter_map(|(task_id, expiry)| (*expiry <= prune_now).then_some(task_id.clone()))
+            .collect();
         self.dispatch_cooldowns
             .retain(|_, expiry| *expiry > prune_now);
+        for task_id in expired_cooldown_task_ids {
+            self.persist_durable_dispatch_state_update(
+                &task_id,
+                None,
+                "cooldown_expired_prune",
+                DurableDispatchStateUpdate {
+                    cooldown_until: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+        let expired_last_dispatched_task_ids: Vec<String> = self
+            .last_dispatched
+            .iter()
+            .filter_map(|(task_id, marker)| {
+                (marker.instant.elapsed() >= FAILURE_DETECTION_WINDOW).then_some(task_id.clone())
+            })
+            .collect();
         self.last_dispatched
             .retain(|_, marker| marker.instant.elapsed() < FAILURE_DETECTION_WINDOW);
+        for task_id in expired_last_dispatched_task_ids {
+            self.persist_durable_dispatch_state_update(
+                &task_id,
+                None,
+                "last_dispatched_expired_prune",
+                DurableDispatchStateUpdate {
+                    last_dispatched: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
 
         // Bug #18 guard: skip any task that already has a running session.
         // Without this the coordinator tick re-dispatches the same task every
@@ -313,8 +457,26 @@ impl CoordinatorActor {
                     .into_iter()
                     .map(|t| t.task_id)
                     .collect();
+                let stale_inflight_task_ids: Vec<String> = self
+                    .inflight_dispatches
+                    .keys()
+                    .filter(|task_id| !live.contains(*task_id))
+                    .cloned()
+                    .collect();
                 self.inflight_dispatches
                     .retain(|task_id, _| live.contains(task_id));
+                for task_id in stale_inflight_task_ids {
+                    self.persist_durable_dispatch_state_update(
+                        &task_id,
+                        None,
+                        "inflight_ledger_reconcile_clear",
+                        DurableDispatchStateUpdate {
+                            inflight: Some(None),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                }
             }
             // On a pool query error, keep the ledger as-is rather than dropping
             // it — a stale-but-present ledger is conservative (may briefly defer
@@ -486,6 +648,20 @@ impl CoordinatorActor {
                             .maybe_intervene_on_cycling_task(&task, role, next_streak)
                             .await
                         {
+                            self.dispatch_failure_streak.remove(&task.id);
+                            self.dispatch_cooldowns.remove(&task.id);
+                            self.persist_durable_dispatch_state_update(
+                                &task.id,
+                                Some(&task.short_id),
+                                "cycling_planner_intervention_handoff_clear",
+                                DurableDispatchStateUpdate {
+                                    failure_streak: Some(0),
+                                    cooldown_until: Some(None),
+                                    last_dispatched: Some(None),
+                                    ..Default::default()
+                                },
+                            )
+                            .await;
                             continue;
                         }
 
@@ -504,6 +680,18 @@ impl CoordinatorActor {
                             .await;
                             self.dispatch_failure_streak.remove(&task.id);
                             self.dispatch_cooldowns.remove(&task.id);
+                            self.persist_durable_dispatch_state_update(
+                                &task.id,
+                                Some(&task.short_id),
+                                "same_role_terminal_close_clear",
+                                DurableDispatchStateUpdate {
+                                    failure_streak: Some(0),
+                                    cooldown_until: Some(None),
+                                    last_dispatched: Some(None),
+                                    ..Default::default()
+                                },
+                            )
+                            .await;
                             continue;
                         }
 
@@ -551,10 +739,35 @@ impl CoordinatorActor {
                         );
                         self.dispatch_cooldowns
                             .insert(task.id.clone(), StdInstant::now() + effective_cooldown);
+                        self.persist_durable_dispatch_state_update(
+                            &task.id,
+                            Some(&task.short_id),
+                            "same_role_failure_backoff",
+                            DurableDispatchStateUpdate {
+                                failure_streak: Some(stored_streak),
+                                cooldown_until: Some(dispatch_wall_clock_after(effective_cooldown)),
+                                last_dispatched: Some(None),
+                                ..Default::default()
+                            },
+                        )
+                        .await;
                         continue;
                     }
                     Some(ReappearingDispatch::RoleTransition) | None => {
                         self.dispatch_failure_streak.remove(&task.id);
+                        self.dispatch_cooldowns.remove(&task.id);
+                        self.persist_durable_dispatch_state_update(
+                            &task.id,
+                            Some(&task.short_id),
+                            "role_transition_dispatch_state_clear",
+                            DurableDispatchStateUpdate {
+                                failure_streak: Some(0),
+                                cooldown_until: Some(None),
+                                last_dispatched: Some(None),
+                                ..Default::default()
+                            },
+                        )
+                        .await;
                     }
                 }
             }
@@ -624,6 +837,18 @@ impl CoordinatorActor {
                     .await;
                     self.dispatch_failure_streak.remove(&task.id);
                     self.dispatch_cooldowns.remove(&task.id);
+                    self.persist_durable_dispatch_state_update(
+                        &task.id,
+                        Some(&task.short_id),
+                        "no_eligible_model_terminal_close_clear",
+                        DurableDispatchStateUpdate {
+                            failure_streak: Some(0),
+                            cooldown_until: Some(None),
+                            last_dispatched: Some(None),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
                 } else {
                     let cooldown = escalating_dispatch_cooldown(streak);
                     tracing::warn!(
@@ -635,6 +860,18 @@ impl CoordinatorActor {
                     );
                     self.dispatch_cooldowns
                         .insert(task.id.clone(), StdInstant::now() + cooldown);
+                    self.persist_durable_dispatch_state_update(
+                        &task.id,
+                        Some(&task.short_id),
+                        "no_eligible_model_backoff",
+                        DurableDispatchStateUpdate {
+                            failure_streak: Some(streak),
+                            cooldown_until: Some(dispatch_wall_clock_after(cooldown)),
+                            last_dispatched: Some(None),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
                 }
                 continue;
             }
@@ -750,6 +987,19 @@ impl CoordinatorActor {
                             role: role.to_owned(),
                         },
                     );
+                    self.persist_durable_dispatch_state_update(
+                        &task.id,
+                        Some(&task.short_id),
+                        "successful_dispatch_marker",
+                        DurableDispatchStateUpdate {
+                            cooldown_until: Some(None),
+                            last_dispatched: Some(
+                                dispatch_wall_clock_now().map(|ts| (ts, role.to_owned())),
+                            ),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
                     self.dispatched += 1;
                     // Bump the per-user running count for the model actually
                     // used (the first health-available one — the elastic pool
@@ -770,6 +1020,16 @@ impl CoordinatorActor {
                         // pass, so it drops out the moment the task completes.
                         self.inflight_dispatches
                             .insert(task.id.clone(), (Some(c.to_string()), used.clone()));
+                        self.persist_durable_dispatch_state_update(
+                            &task.id,
+                            Some(&task.short_id),
+                            "inflight_ledger_insert",
+                            DurableDispatchStateUpdate {
+                                inflight: Some(Some((Some(c.to_string()), used.clone()))),
+                                ..Default::default()
+                            },
+                        )
+                        .await;
                     }
                 }
                 DispatchOutcome::AtCapacity => {
