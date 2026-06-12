@@ -498,6 +498,123 @@ mod tests {
         })
     }
 
+    fn route_fixture_graph(include_axum: bool, include_ts: bool) -> RepoDependencyGraph {
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        let mut symbol_ranges = BTreeMap::new();
+
+        if include_axum {
+            let server_file = nodes.len();
+            nodes.push(fixture_node(
+                RepoNodeKey::File(PathBuf::from("server/src/routes.rs")),
+                RepoGraphNodeKind::File,
+                "server/src/routes.rs",
+                Some("rust"),
+                Some("server/src/routes.rs"),
+                None,
+                false,
+            ));
+            let router = nodes.len();
+            nodes.push(fixture_node(
+                RepoNodeKey::Symbol("axum::Router".to_string()),
+                RepoGraphNodeKind::Symbol,
+                "Router",
+                Some("rust"),
+                None,
+                Some("axum::Router"),
+                true,
+            ));
+            nodes.push(fixture_node(
+                RepoNodeKey::Symbol("test server/src/routes.rs/list_agents().".to_string()),
+                RepoGraphNodeKind::Symbol,
+                "list_agents",
+                Some("rust"),
+                Some("server/src/routes.rs"),
+                Some("test server/src/routes.rs/list_agents()."),
+                false,
+            ));
+            edges.push(fixture_edge(
+                server_file,
+                router,
+                RepoGraphEdgeKind::FileReference,
+            ));
+        }
+
+        if include_ts {
+            nodes.push(fixture_node(
+                RepoNodeKey::File(PathBuf::from("ui/src/api/agents.ts")),
+                RepoGraphNodeKind::File,
+                "ui/src/api/agents.ts",
+                Some("typescript"),
+                Some("ui/src/api/agents.ts"),
+                None,
+                false,
+            ));
+            let ts_symbol = nodes.len();
+            nodes.push(fixture_node(
+                RepoNodeKey::Symbol("ts ui/src/api/agents.ts fetchAgents().".to_string()),
+                RepoGraphNodeKind::Symbol,
+                "fetchAgents",
+                Some("typescript"),
+                Some("ui/src/api/agents.ts"),
+                Some("ts ui/src/api/agents.ts fetchAgents()."),
+                false,
+            ));
+            symbol_ranges.insert(
+                PathBuf::from("ui/src/api/agents.ts"),
+                vec![RepoGraphArtifactSymbolRange {
+                    start_line: 1,
+                    end_line: 3,
+                    node: ts_symbol,
+                }],
+            );
+        }
+
+        RepoDependencyGraph::from_artifact(&RepoGraphArtifact {
+            version: crate::repo_graph::REPO_GRAPH_ARTIFACT_VERSION,
+            nodes,
+            edges,
+            symbol_ranges,
+            communities: Vec::new(),
+            processes: Vec::new(),
+            route_exclusion_config: Default::default(),
+        })
+    }
+
+    fn write_route_fixture(root: &Path, axum_source: Option<&str>, ts_source: Option<&str>) {
+        if let Some(source) = axum_source {
+            std::fs::create_dir_all(root.join("server/src")).unwrap();
+            std::fs::write(root.join("server/src/routes.rs"), source).unwrap();
+        }
+        if let Some(source) = ts_source {
+            std::fs::create_dir_all(root.join("ui/src/api")).unwrap();
+            std::fs::write(root.join("ui/src/api/agents.ts"), source).unwrap();
+        }
+    }
+
+    fn route_extraction_counts(
+        graph: &RepoDependencyGraph,
+    ) -> (usize, Vec<RepoGraphEdge>, Vec<RepoGraphEdge>) {
+        let route_nodes = graph
+            .graph()
+            .node_weights()
+            .filter(|node| node.kind == RepoGraphNodeKind::Route)
+            .count();
+        let handles = graph
+            .graph()
+            .edge_weights()
+            .filter(|edge| edge.kind == RepoGraphEdgeKind::HandlesRoute)
+            .cloned()
+            .collect();
+        let fetches = graph
+            .graph()
+            .edge_weights()
+            .filter(|edge| edge.kind == RepoGraphEdgeKind::Fetches)
+            .cloned()
+            .collect();
+        (route_nodes, handles, fetches)
+    }
+
     #[test]
     fn route_detection_env_defaults_on_and_can_be_disabled() {
         let _guard = ROUTE_DETECTION_ENV_LOCK.lock().unwrap();
@@ -565,6 +682,117 @@ mod tests {
                 .node_weights()
                 .any(|node| node.kind == RepoGraphNodeKind::Route)
         );
+    }
+
+    #[test]
+    fn matched_axum_and_typescript_fixture_emits_single_route_and_edges() {
+        let temp = tempfile::tempdir().expect("create temp fixture dir");
+        let root = temp.path();
+        write_route_fixture(
+            root,
+            Some(
+                "use axum::{Router, routing::get};\nfn router() -> Router<()> { Router::new().route(\"/api/agents\", get(list_agents)) }\nasync fn list_agents() {}",
+            ),
+            Some("export function fetchAgents() {\n  return fetch('/api/agents');\n}"),
+        );
+
+        let mut graph = route_fixture_graph(true, true);
+        let report = detect_routes(&mut graph, root);
+        let (route_nodes, handles, fetches) = route_extraction_counts(&graph);
+
+        assert_eq!(report.route_nodes_added, 1);
+        assert_eq!(report.handles_route_edges_added, 1);
+        assert_eq!(report.fetches_edges_added, 1);
+        assert_eq!(report.unmatched_fetch_count, 0);
+        assert_eq!(route_nodes, 1);
+        assert_eq!(handles.len(), 1);
+        assert_eq!(fetches.len(), 1);
+        assert_eq!(handles[0].confidence, 0.90);
+        assert_eq!(handles[0].reason.as_deref(), Some("axum-router-new"));
+        assert_eq!(fetches[0].confidence, 0.70);
+        assert_eq!(fetches[0].reason.as_deref(), Some("ts-fetch-literal"));
+    }
+
+    #[test]
+    fn axum_only_fixture_emits_route_and_handler_without_fetches() {
+        let temp = tempfile::tempdir().expect("create temp fixture dir");
+        let root = temp.path();
+        write_route_fixture(
+            root,
+            Some(
+                "use axum::{Router, routing::get};\nfn router() -> Router<()> { Router::new().route(\"/api/agents\", get(list_agents)) }\nasync fn list_agents() {}",
+            ),
+            None,
+        );
+
+        let mut graph = route_fixture_graph(true, false);
+        let report = detect_routes(&mut graph, root);
+        let (route_nodes, handles, fetches) = route_extraction_counts(&graph);
+
+        assert_eq!(report.route_nodes_added, 1);
+        assert_eq!(report.handles_route_edges_added, 1);
+        assert_eq!(report.fetches_edges_added, 0);
+        assert_eq!(report.unmatched_fetch_count, 0);
+        assert_eq!(route_nodes, 1);
+        assert_eq!(handles.len(), 1);
+        assert!(fetches.is_empty());
+    }
+
+    #[test]
+    fn typescript_only_unknown_fixture_counts_unmatched_without_graph_pollution() {
+        let temp = tempfile::tempdir().expect("create temp fixture dir");
+        let root = temp.path();
+        write_route_fixture(
+            root,
+            None,
+            Some("export function fetchAgents() {\n  return fetch('/api/unknown');\n}"),
+        );
+
+        let mut graph = route_fixture_graph(false, true);
+        let report = detect_routes(&mut graph, root);
+        let (route_nodes, handles, fetches) = route_extraction_counts(&graph);
+
+        assert_eq!(report.route_nodes_added, 0);
+        assert_eq!(report.handles_route_edges_added, 0);
+        assert_eq!(report.fetches_edges_added, 0);
+        assert_eq!(report.unmatched_fetch_count, 1);
+        assert_eq!(route_nodes, 0);
+        assert!(handles.is_empty());
+        assert!(fetches.is_empty());
+    }
+
+    #[test]
+    fn empty_no_candidate_fixture_leaves_symbol_file_graph_unchanged() {
+        let temp = tempfile::tempdir().expect("create temp fixture dir");
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("server/src")).unwrap();
+        std::fs::create_dir_all(root.join("ui/src/api")).unwrap();
+        std::fs::write(root.join("server/src/routes.rs"), "fn helper() {}").unwrap();
+        std::fs::write(
+            root.join("ui/src/api/agents.ts"),
+            "export const value = 1;\n",
+        )
+        .unwrap();
+
+        let mut graph = route_fixture_graph(false, true);
+        graph.graph_mut_unchecked().add_node(fixture_node(
+            RepoNodeKey::File(PathBuf::from("server/src/routes.rs")),
+            RepoGraphNodeKind::File,
+            "server/src/routes.rs",
+            Some("rust"),
+            Some("server/src/routes.rs"),
+            None,
+            false,
+        ));
+        let before = graph.to_artifact();
+
+        let report = detect_routes(&mut graph, root);
+        let after = graph.to_artifact();
+
+        assert_eq!(report, RouteExtractionReport::default());
+        assert_eq!(after.nodes, before.nodes);
+        assert_eq!(after.edges, before.edges);
+        assert_eq!(after.symbol_ranges, before.symbol_ranges);
     }
 
     #[test]
