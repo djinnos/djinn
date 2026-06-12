@@ -1,3 +1,4 @@
+// djinn:allow-oversize — large code_graph boundary regression tests; split when refactored.
 use super::*;
 use async_trait::async_trait;
 use djinn_control_plane::bridge::{
