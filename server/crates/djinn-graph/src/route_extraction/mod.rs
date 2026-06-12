@@ -958,6 +958,7 @@ mod tests {
             "GET /api/agents (nextjs)",
             Some("typescript"),
             Some("root"),
+            Some(Path::new("ui/src/routes.ts")),
             Some("nextjs"),
             None,
         );
