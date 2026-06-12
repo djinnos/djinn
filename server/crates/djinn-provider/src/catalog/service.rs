@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use parking_lot::RwLock;
 use serde::Deserialize;
 
 use djinn_core::models::{Credential, Model, Pricing, Provider};
@@ -109,7 +110,7 @@ impl CatalogService {
         match serde_json::from_slice::<HashMap<String, RawProvider>>(EMBEDDED_SNAPSHOT) {
             Ok(raw) => {
                 let (providers, models_idx) = normalize(raw);
-                let mut data = self.inner.write().unwrap();
+                let mut data = self.inner.write();
                 data.providers = providers;
                 data.models_idx = models_idx;
                 // Do NOT set fetched_at — embedded data is stale by design.
@@ -126,7 +127,7 @@ impl CatalogService {
         match self.fetch_remote().await {
             Ok(raw) => {
                 let (providers, models_idx) = normalize(raw);
-                let mut data = self.inner.write().unwrap();
+                let mut data = self.inner.write();
                 data.providers = providers;
                 data.models_idx = models_idx;
                 data.fetched_at = Some(Instant::now());
@@ -162,13 +163,12 @@ impl CatalogService {
     // ── Read accessors ────────────────────────────────────────────────────────
 
     pub fn list_providers(&self) -> Vec<Provider> {
-        self.inner.read().unwrap().providers.clone()
+        self.inner.read().providers.clone()
     }
 
     pub fn list_models(&self, provider_id: &str) -> Vec<Model> {
         self.inner
             .read()
-            .unwrap()
             .models_idx
             .get(provider_id)
             .cloned()
@@ -195,7 +195,7 @@ impl CatalogService {
     /// Model lists are sourced from models.dev when a mapping exists (see
     /// [`MODEL_SOURCE_MAP`]).
     pub fn inject_builtin_providers(&self, entries: &[BuiltinProvider]) {
-        let mut data = self.inner.write().unwrap();
+        let mut data = self.inner.write();
         let existing_ids: HashSet<String> = data.providers.iter().map(|p| p.id.clone()).collect();
 
         for bp in entries {
@@ -305,7 +305,7 @@ impl CatalogService {
     /// Remove a custom provider and its models from the in-memory catalog.
     /// Persisting to DB is the caller's responsibility.
     pub fn remove_custom_provider(&self, provider_id: &str) {
-        let mut data = self.inner.write().unwrap();
+        let mut data = self.inner.write();
         data.providers.retain(|p| p.id != provider_id);
         data.models_idx.remove(provider_id);
     }
@@ -313,7 +313,7 @@ impl CatalogService {
     /// Add or replace a custom provider and its seed models in the in-memory catalog.
     /// Persisting to DB is the caller's responsibility.
     pub fn add_custom_provider(&self, provider: Provider, seed_models: Vec<Model>) {
-        let mut data = self.inner.write().unwrap();
+        let mut data = self.inner.write();
         data.providers.retain(|p| p.id != provider.id);
         data.models_idx.remove(&provider.id);
 

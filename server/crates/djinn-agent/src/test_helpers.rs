@@ -82,6 +82,7 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> AgentC
         graph_warmer: None,
         repo_graph_ops: None,
         runtime_ops: None,
+        cargo_target_runs_root: Some(test_path("cargo-target-runs-")),
         mirror: None,
         rpc_registry: None,
         default_project_id: None,

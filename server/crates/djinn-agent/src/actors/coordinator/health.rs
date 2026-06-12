@@ -1,5 +1,8 @@
 use super::*;
 
+use std::collections::HashSet;
+use std::path::Path;
+
 /// How long a `task_run` may stay in `running` without an `ended_at` before
 /// the periodic sweep flips it to `interrupted`. Must comfortably exceed the
 /// K8s Job `activeDeadlineSeconds` (10800s) + `terminationGracePeriodSeconds`
@@ -16,6 +19,8 @@ const STALE_TASK_RUN_THRESHOLD_SECS: i64 = 4 * 60 * 60;
 /// start (we know our previous self is gone).
 const STARTUP_TASK_RUN_THRESHOLD_SECS: i64 = 10;
 
+const CARGO_TARGET_RUNS_ROOT: &str = djinn_supervisor::CARGO_TARGET_RUNS_ROOT;
+
 // ─── Stale-resource sweep ────────────────────────────────────────────────────
 
 pub(super) async fn sweep_stale_resources(
@@ -24,6 +29,7 @@ pub(super) async fn sweep_stale_resources(
 ) {
     reap_stale_task_runs(db).await;
     reap_orphaned_taskrun_jobs(db, app_state, "periodic").await;
+    sweep_orphaned_cargo_target_run_dirs(db, app_state.cargo_target_runs_root.as_deref()).await;
 
     let project_repo = ProjectRepository::new(db.clone(), app_state.event_bus.clone());
     let task_repo = TaskRepository::new(db.clone(), app_state.event_bus.clone());
@@ -106,6 +112,194 @@ pub(super) async fn sweep_stale_resources(
             }
         }
     }
+}
+
+// ─── Cargo target run-dir GC ────────────────────────────────────────────────
+
+#[derive(Default)]
+pub(super) struct CargoTargetRunDirSweepStats {
+    pub(super) scanned: usize,
+    pub(super) deleted: usize,
+    pub(super) retained: usize,
+    pub(super) errors: usize,
+}
+
+async fn sweep_orphaned_cargo_target_run_dirs(db: &djinn_db::Database, root: Option<&Path>) {
+    sweep_orphaned_cargo_target_run_dirs_under(
+        db,
+        root.unwrap_or_else(|| Path::new(CARGO_TARGET_RUNS_ROOT)),
+    )
+    .await;
+}
+
+pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
+    db: &djinn_db::Database,
+    root: &Path,
+) -> CargoTargetRunDirSweepStats {
+    let protected = match protected_cargo_target_run_ids(db).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                root = %root.display(),
+                "CoordinatorActor: cargo target run-dir sweep failed to load protected task_run ids"
+            );
+            return CargoTargetRunDirSweepStats {
+                errors: 1,
+                ..Default::default()
+            };
+        }
+    };
+
+    let mut entries = match tokio::fs::read_dir(root).await {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(
+                root = %root.display(),
+                "CoordinatorActor: cargo target run-dir root does not exist; skipping sweep"
+            );
+            return CargoTargetRunDirSweepStats::default();
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                root = %root.display(),
+                "CoordinatorActor: cargo target run-dir sweep failed to enumerate root"
+            );
+            return CargoTargetRunDirSweepStats {
+                errors: 1,
+                ..Default::default()
+            };
+        }
+    };
+
+    let mut stats = CargoTargetRunDirSweepStats::default();
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(e) => {
+                stats.errors += 1;
+                tracing::warn!(
+                    error = %e,
+                    root = %root.display(),
+                    "CoordinatorActor: cargo target run-dir sweep failed to read directory entry; continuing"
+                );
+                continue;
+            }
+        };
+
+        let path = entry.path();
+        stats.scanned += 1;
+
+        let Some(task_run_id) = entry.file_name().to_str().map(ToOwned::to_owned) else {
+            stats.retained += 1;
+            tracing::debug!(
+                path = %path.display(),
+                "CoordinatorActor: cargo target run-dir sweep ignored non-UTF8 entry name"
+            );
+            continue;
+        };
+
+        if uuid::Uuid::parse_str(&task_run_id).is_err() {
+            stats.retained += 1;
+            tracing::debug!(
+                task_run_id = %task_run_id,
+                path = %path.display(),
+                "CoordinatorActor: cargo target run-dir sweep ignored malformed task_run_id entry"
+            );
+            continue;
+        }
+
+        let file_type = match entry.file_type().await {
+            Ok(file_type) => file_type,
+            Err(e) => {
+                stats.errors += 1;
+                tracing::warn!(
+                    error = %e,
+                    task_run_id = %task_run_id,
+                    path = %path.display(),
+                    "CoordinatorActor: cargo target run-dir sweep failed to inspect entry; continuing"
+                );
+                continue;
+            }
+        };
+
+        if !file_type.is_dir() {
+            stats.retained += 1;
+            tracing::debug!(
+                task_run_id = %task_run_id,
+                path = %path.display(),
+                "CoordinatorActor: cargo target run-dir sweep ignored non-directory entry"
+            );
+            continue;
+        }
+
+        if protected.contains(&task_run_id) {
+            stats.retained += 1;
+            tracing::debug!(
+                task_run_id = %task_run_id,
+                path = %path.display(),
+                "CoordinatorActor: cargo target run-dir sweep retained live task-run directory"
+            );
+            continue;
+        }
+
+        match tokio::fs::remove_dir_all(&path).await {
+            Ok(()) => {
+                stats.deleted += 1;
+                tracing::info!(
+                    task_run_id = %task_run_id,
+                    path = %path.display(),
+                    "CoordinatorActor: deleted orphaned cargo target run-dir"
+                );
+            }
+            Err(e) => {
+                stats.errors += 1;
+                tracing::warn!(
+                    error = %e,
+                    task_run_id = %task_run_id,
+                    path = %path.display(),
+                    "CoordinatorActor: failed to delete orphaned cargo target run-dir; continuing"
+                );
+            }
+        }
+    }
+
+    tracing::info!(
+        root = %root.display(),
+        scanned = stats.scanned,
+        deleted = stats.deleted,
+        retained = stats.retained,
+        errors = stats.errors,
+        "CoordinatorActor: cargo target run-dir sweep completed"
+    );
+
+    stats
+}
+
+async fn protected_cargo_target_run_ids(
+    db: &djinn_db::Database,
+) -> djinn_db::Result<HashSet<String>> {
+    db.ensure_initialized().await?;
+
+    let task_run_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM task_runs WHERE status = 'running' AND ended_at IS NULL",
+    )
+    .fetch_all(db.pool())
+    .await?;
+
+    let session_task_run_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT task_run_id FROM sessions
+         WHERE status = 'running' AND ended_at IS NULL AND task_run_id IS NOT NULL",
+    )
+    .fetch_all(db.pool())
+    .await?;
+
+    Ok(task_run_ids
+        .into_iter()
+        .chain(session_task_run_ids)
+        .collect())
 }
 
 fn session_status_classification(sessions: &[djinn_core::models::SessionRecord]) -> &'static str {

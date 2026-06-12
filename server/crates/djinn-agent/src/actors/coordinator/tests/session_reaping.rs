@@ -696,6 +696,104 @@ fn taskrun_job_ref(task_run_id: &str) -> djinn_control_plane::bridge::TaskrunJob
     }
 }
 
+fn new_task_run_uuid() -> String {
+    uuid::Uuid::now_v7().to_string()
+}
+
+fn temp_cargo_target_runs_root() -> tempfile::TempDir {
+    let parent = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".cache")
+        .join("djinn");
+    std::fs::create_dir_all(&parent).unwrap();
+    tempfile::Builder::new()
+        .prefix("cargo-target-runs-gc-")
+        .tempdir_in(parent)
+        .unwrap()
+}
+
+async fn seed_task_run(db: &Database, task: &djinn_core::models::Task, id: &str, status: &str) {
+    if status == "running" {
+        sqlx::query(
+            "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status)
+             VALUES ($1, $2, $3, 'manual', 'running')",
+        )
+        .bind(id)
+        .bind(&task.project_id)
+        .bind(&task.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    } else {
+        sqlx::query(
+            "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, ended_at)
+             VALUES ($1, $2, $3, 'manual', $4,
+                     to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))",
+        )
+        .bind(id)
+        .bind(&task.project_id)
+        .bind(&task.id)
+        .bind(status)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cargo_target_run_dir_sweep_retains_live_and_deletes_orphans() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "cargo-target-run-dir-gc").await;
+    let root = temp_cargo_target_runs_root();
+
+    let live_run_id = new_task_run_uuid();
+    seed_task_run(&db, &task, &live_run_id, "running").await;
+
+    let terminal_run_id = new_task_run_uuid();
+    seed_task_run(&db, &task, &terminal_run_id, "completed").await;
+
+    let live_session_guard_run_id = new_task_run_uuid();
+    seed_task_run(&db, &task, &live_session_guard_run_id, "completed").await;
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(&live_session_guard_run_id),
+        })
+        .await
+        .unwrap();
+
+    let unknown_run_id = new_task_run_uuid();
+    for run_id in [
+        live_run_id.as_str(),
+        terminal_run_id.as_str(),
+        live_session_guard_run_id.as_str(),
+        unknown_run_id.as_str(),
+    ] {
+        std::fs::create_dir(root.path().join(run_id)).unwrap();
+    }
+    std::fs::create_dir(root.path().join("not-a-task-run-id")).unwrap();
+    std::fs::write(root.path().join(new_task_run_uuid()), b"not a directory").unwrap();
+
+    let stats = health::sweep_orphaned_cargo_target_run_dirs_under(&db, root.path()).await;
+
+    assert!(root.path().join(&live_run_id).is_dir());
+    assert!(root.path().join(&live_session_guard_run_id).is_dir());
+    assert!(!root.path().join(&terminal_run_id).exists());
+    assert!(!root.path().join(&unknown_run_id).exists());
+    assert!(root.path().join("not-a-task-run-id").is_dir());
+    assert_eq!(stats.scanned, 6);
+    assert_eq!(stats.deleted, 2);
+    assert_eq!(stats.retained, 4);
+    assert_eq!(stats.errors, 0);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn taskrun_job_backstop_deletes_absent_and_finalized_rows_only() {
     use djinn_core::models::SessionStatus;
