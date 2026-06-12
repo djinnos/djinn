@@ -8,15 +8,17 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use petgraph::graph::NodeIndex;
-
 use super::{
     RouteCandidate, RouteConsumerEdgeSuggestion, RouteExtractionReport,
-    consumer_edge_exclusion_reasons, file_nodes, record_file_failure,
+    consumer_edge_exclusion_reasons, consumer_has_route_import_evidence, file_nodes,
+    record_file_failure,
 };
 use crate::repo_graph::{
-    RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNodeKind, RouteExclusionConfig,
+    RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind, RouteExclusionConfig,
+    promote_fetches_confidence_with_import_evidence,
 };
+use crate::scip_parser::ScipSymbolKind;
+use petgraph::graph::NodeIndex;
 
 /// One parsed TypeScript/JavaScript fetch call with a static path candidate.
 #[derive(Debug, Clone, PartialEq)]
@@ -36,7 +38,7 @@ pub(super) fn detect_typescript_fetches(
     exclusion_config: &RouteExclusionConfig,
     report: &mut RouteExtractionReport,
 ) {
-    for (rel_path, _file_node) in file_nodes(graph, is_typescript_fetch_candidate) {
+    for (rel_path, file_node) in file_nodes(graph, is_typescript_fetch_candidate) {
         let source = match std::fs::read_to_string(project_root.join(&rel_path)) {
             Ok(source) => source,
             Err(error) => {
@@ -52,8 +54,23 @@ pub(super) fn detect_typescript_fetches(
                 report.unmatched_fetch_count += 1;
                 continue;
             };
-            let exclusion_reasons =
-                consumer_edge_exclusion_reasons(&fetch, route, exclusion_config);
+            let has_import_evidence = consumer_has_route_import_evidence(graph, file_node, route);
+            let (confidence, reason) = if has_import_evidence {
+                promote_fetches_confidence_with_import_evidence(
+                    fetch.confidence,
+                    Some(fetch.reason),
+                )
+            } else {
+                (fetch.confidence, fetch.reason.to_string())
+            };
+            let exclusion_reasons = consumer_edge_exclusion_reasons(
+                confidence,
+                has_import_evidence,
+                graph.node(file_node).language.as_deref(),
+                graph.node(route.node).language.as_deref(),
+                route,
+                exclusion_config,
+            );
             if !exclusion_reasons.is_empty() {
                 report
                     .consumer_edge_suggestions
@@ -62,7 +79,7 @@ pub(super) fn detect_typescript_fetches(
                         fetch_path: fetch.path.clone(),
                         route_path: route.path.clone(),
                         framework: route.framework.clone(),
-                        confidence: fetch.confidence,
+                        confidence,
                         reasons: exclusion_reasons,
                     });
                 continue;
@@ -73,8 +90,8 @@ pub(super) fn detect_typescript_fetches(
                     consumer,
                     route.node,
                     RepoGraphEdgeKind::Fetches,
-                    fetch.confidence,
-                    fetch.reason,
+                    confidence,
+                    &reason,
                 );
                 report.fetches_edges_added += 1;
             } else {
@@ -250,12 +267,21 @@ fn enclosing_symbol(graph: &RepoDependencyGraph, rel_path: &Path, line: u32) -> 
     graph
         .symbols_enclosing(rel_path, line, line)
         .into_iter()
+        .filter(|node| is_enclosing_fetch_consumer_symbol(graph.node(*node)))
         .min_by_key(|node| {
             graph
                 .range_for_node(*node, rel_path)
                 .map(|(start, end)| end.saturating_sub(start))
                 .unwrap_or(u32::MAX)
         })
+}
+
+pub(super) fn is_enclosing_fetch_consumer_symbol(node: &RepoGraphNode) -> bool {
+    node.kind == RepoGraphNodeKind::Symbol
+        && matches!(
+            node.symbol_kind,
+            Some(ScipSymbolKind::Function | ScipSymbolKind::Method | ScipSymbolKind::Constructor)
+        )
 }
 
 fn parse_quoted(source: &str, start: usize) -> Option<(String, usize)> {

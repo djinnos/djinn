@@ -544,10 +544,12 @@ mod cooldown_tests {
 
         // Trigger B must arm strictly before the terminal close so the
         // Planner gets its pass before a force-close can fire.
-        assert!(
-            STREAK_INTERVENTION_THRESHOLD < MAX_DISPATCH_FAILURES,
-            "intervention must precede the terminal-close backstop"
-        );
+        const {
+            assert!(
+                STREAK_INTERVENTION_THRESHOLD < MAX_DISPATCH_FAILURES,
+                "intervention must precede the terminal-close backstop"
+            );
+        }
     }
 }
 

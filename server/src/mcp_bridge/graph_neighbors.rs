@@ -482,6 +482,7 @@ pub(super) fn build_related_symbol(node: &RepoGraphNode, confidence: f64) -> Rel
         file_path,
         confidence,
         confidence_tier: "extracted".to_string(),
+        route_language_chain: None,
     }
 }
 
