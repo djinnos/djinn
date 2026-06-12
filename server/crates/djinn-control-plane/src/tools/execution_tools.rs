@@ -204,3 +204,85 @@ impl DjinnMcpServer {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use rmcp::handler::server::wrapper::Parameters;
+
+    use super::*;
+    use crate::bridge::{PoolStatus, RunningTaskInfo, SlotPoolOps};
+    use crate::state::McpState;
+
+    #[derive(Default)]
+    struct RecordingSlotPool {
+        killed: Mutex<Vec<String>>,
+    }
+
+    impl RecordingSlotPool {
+        fn killed(&self) -> Vec<String> {
+            self.killed.lock().expect("recording pool mutex").clone()
+        }
+    }
+
+    #[async_trait]
+    impl SlotPoolOps for RecordingSlotPool {
+        async fn get_status(&self) -> Result<PoolStatus, String> {
+            Ok(PoolStatus {
+                active_slots: 0,
+                total_slots: 0,
+                per_model: Default::default(),
+                running_tasks: Vec::new(),
+            })
+        }
+
+        async fn kill_session(&self, task_id: &str) -> Result<(), String> {
+            self.killed
+                .lock()
+                .expect("recording pool mutex")
+                .push(task_id.to_string());
+            Ok(())
+        }
+
+        async fn session_for_task(&self, _: &str) -> Result<Option<RunningTaskInfo>, String> {
+            Ok(None)
+        }
+
+        async fn has_session(&self, _: &str) -> Result<bool, String> {
+            Ok(false)
+        }
+    }
+
+    #[tokio::test]
+    async fn execution_kill_task_routes_through_slot_pool_kill_session() {
+        let pool = Arc::new(RecordingSlotPool::default());
+        let state = McpState::new(
+            djinn_db::Database::open_in_memory().expect("open in-memory test database"),
+            djinn_core::events::EventBus::noop(),
+            djinn_provider::catalog::CatalogService::new(),
+            djinn_provider::catalog::HealthTracker::new(),
+            None,
+            Some(pool.clone()),
+            None,
+            None,
+            Arc::new(crate::state::stubs::StubLspOps),
+            Arc::new(crate::state::stubs::StubRuntimeOps),
+            Arc::new(crate::state::stubs::StubGitOps),
+            Arc::new(crate::state::stubs::StubRepoGraphOps),
+        );
+        let server = DjinnMcpServer::new(state);
+
+        let Json(response) = server
+            .execution_kill_task(Parameters(ExecutionKillTaskParams {
+                task_id: "task-to-kill".to_string(),
+                project: None,
+            }))
+            .await;
+
+        assert!(response.ok);
+        assert_eq!(response.task_id.as_deref(), Some("task-to-kill"));
+        assert_eq!(pool.killed(), vec!["task-to-kill".to_string()]);
+    }
+}

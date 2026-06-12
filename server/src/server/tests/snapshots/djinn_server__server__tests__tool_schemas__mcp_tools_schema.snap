@@ -869,7 +869,7 @@ expression: signatures
         },
         "framework": {
           "default": null,
-          "description": "Optional framework filter for `route_map` (for example `axum`,\n`express`, or `rails`).",
+          "description": "Optional route framework filter for `route_map` discovery.",
           "nullable": true,
           "type": "string"
         },
@@ -963,7 +963,7 @@ expression: signatures
         },
         "method": {
           "default": null,
-          "description": "HTTP method selector for route-aware ops. Optional for `route_map`;\nrequired with `path` when `shape_check`/`api_impact` omit `route_id`.",
+          "description": "HTTP method for route-aware ops (`route_map`, `shape_check`,\n`api_impact`) when `route_id` is not supplied.",
           "nullable": true,
           "type": "string"
         },
@@ -994,18 +994,18 @@ expression: signatures
           "type": "string"
         },
         "operation": {
-          "description": "The operation to perform.\nOne of: `neighbors`, `ranked`, `impact`, `implementations`,\n`search`, `query_subgraph`, `cycles`, `orphans`, `path`, `edges`,\n`symbols_at`, `diff_touches`, `detect_changes`, `describe`,\n`context`, `status`, `snapshot`, `workspaces`, and the other graph analysis ops.",
+          "description": "The operation to perform.\nOne of: `neighbors`, `ranked`, `impact`, `implementations`,\n`search`, `query_subgraph`, `route_map`, `shape_check`,\n`api_impact`, `flow`, `cycles`, `orphans`, `path`, `edges`,\n`symbols_at`, `diff_touches`, `detect_changes`, `describe`,\n`context`, `status`, `snapshot`, `workspaces`, and the other\ngraph analysis ops.",
           "type": "string"
         },
         "path": {
           "default": null,
-          "description": "Exact route path selector for `shape_check`/`api_impact` when\n`route_id` is omitted.",
+          "description": "Exact route path for `shape_check` / `api_impact` when `route_id` is\nnot supplied.",
           "nullable": true,
           "type": "string"
         },
         "path_glob": {
           "default": null,
-          "description": "Route path glob filter for `route_map`.",
+          "description": "Route path glob for `route_map` discovery.",
           "nullable": true,
           "type": "string"
         },
@@ -1021,7 +1021,7 @@ expression: signatures
         },
         "route_id": {
           "default": null,
-          "description": "Route identifier for `route_map` filters and as one selector form for\n`shape_check`/`api_impact`. For `shape_check`/`api_impact`, callers\nmust provide either `route_id` or both `method` and exact `path`.",
+          "description": "Stable route id for route-aware ops. For `shape_check` and\n`api_impact`, callers must provide either `route_id` or both\n`method` and `path`.",
           "nullable": true,
           "type": "string"
         },

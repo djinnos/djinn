@@ -21,7 +21,8 @@ use petgraph::visit::EdgeRef;
 use serde::{Deserialize, Serialize};
 
 use crate::repo_graph::{
-    RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind, RepoNodeKey,
+    EdgeConfidenceTier, RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind,
+    RepoNodeKey, RouteEdgeLanguageChain,
 };
 
 const DEFAULT_TOKEN_BUDGET: usize = 2_000;
@@ -183,7 +184,10 @@ pub struct QuerySubgraphEdge {
     pub to_uid: String,
     pub kind: RepoGraphEdgeKind,
     pub confidence: f64,
+    pub confidence_tier: EdgeConfidenceTier,
     pub reason: Option<String>,
+    pub route_language_chain: Option<RouteEdgeLanguageChain>,
+    pub is_cross_language_route_edge: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -454,6 +458,15 @@ pub fn infer_edge_intent(query: &str) -> Vec<RepoGraphEdgeKind> {
     if contains_any(&q, &["read", "reads", "select", "loads", "fetches"]) {
         add(RepoGraphEdgeKind::Reads);
     }
+    if contains_any(&q, &["route", "routes", "router", "endpoint", "endpoints"]) {
+        add(RepoGraphEdgeKind::Route);
+    }
+    if contains_any(
+        &q,
+        &["fetch", "fetches", "request", "requests", "url", "api call"],
+    ) {
+        add(RepoGraphEdgeKind::Fetches);
+    }
     if contains_any(
         &q,
         &[
@@ -595,6 +608,11 @@ fn normalize_seeds(
 fn node_allowed(node: &RepoGraphNode, params: &QuerySubgraphParams) -> bool {
     if let Some(kind) = params.kind_filter
         && node.kind != kind
+    {
+        return false;
+    }
+    if params.kind_filter.is_none()
+        && crate::repo_graph::is_default_hidden_synthetic_kind(node.kind)
     {
         return false;
     }
@@ -769,7 +787,10 @@ fn render_edge(
         to_uid: stable_node_uid(graph.node(target)),
         kind: edge.kind,
         confidence: edge.confidence,
+        confidence_tier: edge.confidence_tier(),
         reason: edge.reason.clone(),
+        route_language_chain: graph.route_edge_language_chain(source, target, edge.kind),
+        is_cross_language_route_edge: graph.is_cross_language_route_edge(source, target, edge.kind),
     }
 }
 
@@ -1149,6 +1170,16 @@ mod tests {
         assert!(
             imports.contains(&RepoGraphEdgeKind::FileReference),
             "imports phrasing must include FileReference, got {imports:?}"
+        );
+        assert_eq!(
+            infer_edge_intent("which route handles this endpoint"),
+            vec![RepoGraphEdgeKind::Route],
+            "route phrasing must collapse to Route"
+        );
+        let fetches = infer_edge_intent("which client fetches this url");
+        assert!(
+            fetches.contains(&RepoGraphEdgeKind::Fetches),
+            "fetches phrasing must include Fetches, got {fetches:?}"
         );
     }
 

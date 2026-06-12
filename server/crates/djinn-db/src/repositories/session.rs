@@ -269,6 +269,22 @@ impl SessionRepository {
         .await?)
     }
 
+    /// List all sessions linked to a task-run row. Used by runtime-resource
+    /// reconciliation: the task-run id is the label carried by K8s Jobs, while
+    /// session liveness is persisted here.
+    pub async fn list_for_task_run(&self, task_run_id: &str) -> Result<Vec<SessionRecord>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, SessionRecord>(
+            r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                status, tokens_in, tokens_out,
+                cache_read_tokens, cache_write_tokens, task_run_id, title
+             FROM sessions WHERE task_run_id = $1 ORDER BY started_at DESC"#,
+        )
+        .bind(task_run_id)
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
     pub async fn list_for_task_in_project(
         &self,
         project_id: &str,

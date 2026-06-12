@@ -690,6 +690,8 @@ mod tests {
             last_warm_at: Some("2026-04-28T00:00:00Z".into()),
             pinned_commit: Some("abc1234567890".into()),
             commits_since_pin: Some(0),
+            route_parity_enabled: true,
+            route_exclusion_config: serde_json::json!({}),
         }
     }
 
@@ -783,6 +785,8 @@ mod tests {
                 last_warm_at: None,
                 pinned_commit: None,
                 commits_since_pin: None,
+                route_parity_enabled: true,
+                route_exclusion_config: serde_json::json!({}),
             }),
             ..Default::default()
         });
