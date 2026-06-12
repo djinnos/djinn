@@ -88,13 +88,16 @@ use crate::actors::slot::lifecycle::setup::{
     SetupAndVerificationContext, SetupError, resolve_setup_and_verification_context,
 };
 use crate::actors::slot::lifecycle::teardown::{PostSessionParams, spawn_post_session_work};
+use crate::actors::slot::reply_loop::loop_guard::{
+    LoopGuardError, LoopGuardKind as ReplyLoopGuardKind,
+};
 use crate::actors::slot::reply_loop::{ReplyLoopContext, run_reply_loop};
 use crate::context::AgentContext;
 use crate::roles::{AgentRole, role_impl_for};
 use djinn_provider::message::{Conversation, Message};
 use djinn_provider::provider::LlmProvider;
 use djinn_provider::provider::error::ProviderError;
-use djinn_runtime::ProviderFailureClass;
+use djinn_runtime::{LoopGuardKind as RuntimeLoopGuardKind, LoopGuardTrip, ProviderFailureClass};
 
 use super::SupervisorCallbackContext;
 
@@ -147,6 +150,26 @@ fn classify_provider_failure(err: &anyhow::Error) -> Option<ProviderFailureClass
         ProviderError::ContextOverflow
         | ProviderError::EmptyCompletion
         | ProviderError::Transport => None,
+    }
+}
+
+fn stage_outcome_for_reply_loop_guard_error(error: &LoopGuardError) -> StageOutcome {
+    let kind = match error.condition.kind() {
+        ReplyLoopGuardKind::RepeatedToolFailure => RuntimeLoopGuardKind::IdenticalToolFailure,
+        ReplyLoopGuardKind::RepeatedPermissionOrSecurityDenial => {
+            RuntimeLoopGuardKind::PermissionDenial
+        }
+        ReplyLoopGuardKind::RepeatedAssistantOutput => RuntimeLoopGuardKind::IdenticalOutput,
+        ReplyLoopGuardKind::ConsecutiveToolFailures => RuntimeLoopGuardKind::ConsecutiveFailures,
+    };
+
+    StageOutcome::LoopGuardTripped {
+        kind,
+        offending_signature: error.condition.offending_signature_label(),
+        threshold: error.condition.threshold,
+        observed: error.condition.observed,
+        turn_span: error.turn_span,
+        session_id: error.session_id.clone(),
     }
 }
 
@@ -532,12 +555,27 @@ pub(crate) async fn execute_stage(
     let final_result_ok = reply_result.is_ok();
     let final_error = reply_result.as_ref().err().map(|e| e.to_string());
     let stage_outcome = match reply_result {
-        Err(e) => StageOutcome::Failed {
-            reason: format!("reply loop error: {e}"),
-            // Classify the typed provider error (if any) so the host breaker
-            // can fail over off a structurally-broken model/credential.
-            provider_failure: classify_provider_failure(&e),
-        },
+        Err(e) => {
+            if let Some(trip) = e.downcast_ref::<LoopGuardTrip>() {
+                StageOutcome::LoopGuardTripped {
+                    kind: trip.kind,
+                    offending_signature: trip.offending_signature.clone(),
+                    threshold: trip.threshold,
+                    observed: trip.observed,
+                    turn_span: trip.turn_span,
+                    session_id: trip.session_id.clone(),
+                }
+            } else if let Some(guard_error) = e.downcast_ref::<LoopGuardError>() {
+                stage_outcome_for_reply_loop_guard_error(guard_error)
+            } else {
+                StageOutcome::Failed {
+                    reason: format!("reply loop error: {e}"),
+                    // Classify the typed provider error (if any) so the host breaker
+                    // can fail over off a structurally-broken model/credential.
+                    provider_failure: classify_provider_failure(&e),
+                }
+            }
+        }
         Ok(()) => {
             let finalize_name = final_output.finalize_tool_name.as_deref().unwrap_or("");
             match role_kind {

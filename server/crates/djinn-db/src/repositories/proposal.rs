@@ -126,7 +126,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id, build_frozen, build_breakdown_task_id
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
              FROM proposals WHERE id = $1"#,
             id
         )
@@ -140,7 +140,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id, build_frozen, build_breakdown_task_id
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
              FROM proposals WHERE short_id = $1"#,
             short_id
         )
@@ -155,7 +155,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id, build_frozen, build_breakdown_task_id
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
              FROM proposals WHERE id = $1 OR short_id = $2"#,
             id_or_short,
             id_or_short
@@ -228,26 +228,15 @@ impl ProposalRepository {
             || input.body != current.body
             || acceptance_criteria != current_ac;
 
-        // A `building` proposal is being actively decomposed/built against the
-        // current spec — editing it would silently stale the sign-offs while
-        // `reconcile_approval` (which has no `building` arm) leaves the status
-        // stuck on `building`. Force the operator to stop the build first
-        // (proposal_stop_build → approved), then edit. Status-only updates
-        // (e.g. set_done) stay allowed.
-        if content_changed && current.status == "building" {
-            return Err(Error::InvalidData(
-                "cannot edit the spec of a proposal while it is building — \
-                 stop the build first (proposal_stop_build), then edit"
-                    .to_owned(),
-            ));
-        }
-
         // Stale/hard rule: editing the spec of an *approved* proposal reverts it
         // to in_review and clears its sign-offs (you changed an approved spec).
         // While in_review, edits leave sign-offs in place — they go stale
         // automatically because the head revision advances past them.
         let demote = content_changed && current.status == "approved";
-        let effective_status = if demote && input.status == "approved" {
+        let building_amend = content_changed && current.status == "building";
+        let effective_status = if building_amend {
+            "building"
+        } else if demote && input.status == "approved" {
             "in_review"
         } else {
             input.status
@@ -261,6 +250,7 @@ impl ProposalRepository {
         sqlx::query!(
             r#"UPDATE proposals SET title = $1, body = $2, acceptance_criteria = $3, status = $4,
                     superseded_by = $5, latest_revision_seq = $8,
+                    pending_reconcile = CASE WHEN $9 THEN true ELSE pending_reconcile END,
                     closed_at = CASE WHEN $6 IN ('done', 'rejected', 'archived', 'superseded')
                         THEN COALESCE(closed_at, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
                         ELSE NULL END,
@@ -273,7 +263,8 @@ impl ProposalRepository {
             input.superseded_by,
             effective_status,
             id,
-            next_seq
+            next_seq,
+            building_amend
         )
         .execute(self.db.pool())
         .await?;
@@ -300,7 +291,9 @@ impl ProposalRepository {
         // can already be present when a proposal *enters* in_review (e.g. signed
         // while in draft, or promoted via the status dropdown); add_signoff only
         // reconciles at sign-off time, so without this the gate would never fire.
-        self.reconcile_approval(id).await?;
+        if current.status != "building" {
+            self.reconcile_approval(id).await?;
+        }
         let proposal = self.get_required(id).await?;
         self.events
             .send(DjinnEventEnvelope::proposal_updated(&proposal));
@@ -488,7 +481,7 @@ impl ProposalRepository {
         // the `proposal_feedback_unresolved` partial index) for the list badge.
         let sql = format!(
             r#"SELECT id, short_id, title, body, acceptance_criteria::text AS acceptance_criteria,
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id, build_frozen, build_breakdown_task_id,
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id,
                     (SELECT COUNT(*) FROM proposal_feedback pf
                        WHERE pf.proposal_id = proposals.id AND pf.resolved_at IS NULL) AS unresolved_feedback_count
              FROM proposals WHERE {where_sql} ORDER BY {order_sql} LIMIT {limit_ph} OFFSET {offset_ph}"#
@@ -594,7 +587,9 @@ impl ProposalRepository {
         )
         .execute(self.db.pool())
         .await?;
-        self.reconcile_approval(proposal_id).await?;
+        if proposal.status != "building" {
+            self.reconcile_approval(proposal_id).await?;
+        }
         let updated = self.get_required(proposal_id).await?;
         self.events
             .send(DjinnEventEnvelope::proposal_updated(&updated));
@@ -618,7 +613,13 @@ impl ProposalRepository {
         )
         .execute(self.db.pool())
         .await?;
-        self.reconcile_approval(proposal_id).await?;
+        let proposal = self
+            .get(proposal_id)
+            .await?
+            .ok_or_else(|| Error::InvalidData(format!("proposal not found: {proposal_id}")))?;
+        if proposal.status != "building" {
+            self.reconcile_approval(proposal_id).await?;
+        }
         let updated = self.get_required(proposal_id).await?;
         self.events
             .send(DjinnEventEnvelope::proposal_updated(&updated));
@@ -650,6 +651,7 @@ impl ProposalRepository {
             "draft" if any => Some("in_review"),
             "in_review" if both => Some("approved"),
             "approved" if !both => Some("in_review"),
+            "building" => None,
             _ => None,
         };
         if let Some(status) = new_status {
@@ -795,6 +797,9 @@ impl ProposalRepository {
         self.db.ensure_initialized().await?;
         sqlx::query!(
             r#"UPDATE proposals SET status = 'building', build_owner_user_id = $1,
+                    last_reconciled_revision_seq = latest_revision_seq,
+                    pending_reconcile = false,
+                    reconciled_at = now(),
                     updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
              WHERE id = $2"#,
             owner_user_id,
@@ -1070,7 +1075,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id, build_frozen, build_breakdown_task_id
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
              FROM proposals p
              WHERE p.status = 'building'
                AND EXISTS (SELECT 1 FROM proposal_epics pe WHERE pe.proposal_id = p.id)
@@ -1252,6 +1257,19 @@ mod tests {
             title,
             body: "",
             acceptance_criteria: None,
+            status: None,
+        }
+    }
+
+    fn create_input_with_ac<'a>(
+        title: &'a str,
+        body: &'a str,
+        ac: &'a str,
+    ) -> ProposalCreateInput<'a> {
+        ProposalCreateInput {
+            title,
+            body,
+            acceptance_criteria: Some(ac),
             status: None,
         }
     }
@@ -1909,32 +1927,108 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn update_rejects_spec_edit_while_building_but_allows_status_only() {
+    async fn update_allows_spec_edit_while_building_and_marks_drift() {
+        // Amend-while-building: a material edit to a `building` proposal is
+        // allowed and only stamps drift — it does NOT touch the status. This
+        // is the positive replacement for the old "spec edit while building is
+        // rejected" regression; status-only updates remain allowed too.
         let db = test_db();
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
         let proj = insert_project(&db, "svc-editguard").await;
-        let p = repo.create(create_input("Guarded")).await.unwrap();
+        let p = repo
+            .create(create_input_with_ac(
+                "Guarded",
+                "",
+                r#"[{"criterion":"do X","met":false}]"#,
+            ))
+            .await
+            .unwrap();
         let epic = insert_epic(&db, &proj, "eg01").await;
+        repo.link_epic(&p.id, &epic, &proj).await.unwrap();
+        let building = repo.set_building(&p.id, "user-x").await.unwrap();
+        assert_eq!(building.last_reconciled_revision_seq, Some(1));
+        assert!(!building.pending_reconcile);
+
+        // Status-only update (no spec change) remains allowed: status stays
+        // `building`, no new revision, no new drift.
+        let status_only = repo
+            .update(
+                &p.id,
+                update_input(
+                    "Guarded",
+                    "",
+                    r#"[{"criterion":"do X","met":false}]"#,
+                    "building",
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status_only.status, "building");
+        assert_eq!(status_only.latest_revision_seq, 1);
+        assert!(!status_only.pending_reconcile);
+        assert_eq!(repo.revisions(&p.id).await.unwrap().len(), 1);
+
+        // Material edit: title + body + AC all change. The build stays
+        // `building`, a new revision lands, `pending_reconcile` flips true,
+        // and `last_reconciled_revision_seq` does NOT advance (the build is
+        // still against rev 1).
+        let updated = repo
+            .update(
+                &p.id,
+                update_input(
+                    "Guarded v2",
+                    "new body",
+                    r#"[{"criterion":"do X better","met":false}]"#,
+                    "approved",
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.title, "Guarded v2");
+        assert_eq!(updated.body, "new body");
+        let ac: serde_json::Value = serde_json::from_str(&updated.acceptance_criteria).unwrap();
+        assert_eq!(
+            ac,
+            serde_json::json!([{"criterion": "do X better", "met": false}])
+        );
+        assert_eq!(updated.status, "building");
+        assert_eq!(updated.latest_revision_seq, 2);
+        assert_eq!(updated.last_reconciled_revision_seq, Some(1));
+        assert!(updated.pending_reconcile);
+        assert_eq!(repo.revisions(&p.id).await.unwrap().len(), 2);
+
+        // A status-only path that closes out a build is still allowed and
+        // does not require the drift to be resolved first — the build owner
+        // owns the final say.
+        let done = repo.set_done(&p.id).await.unwrap();
+        assert_eq!(done.status, "done");
+        assert!(done.pending_reconcile);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn add_signoff_while_building_does_not_reconcile_status() {
+        // `reconcile_approval` short-circuits on `building` so a sign-off
+        // (which would otherwise be enough to flip a draft → in_review and
+        // a fresh pair → approved) never demotes a build back to the review
+        // gate. The sign-off is still recorded, the status stays `building`.
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proj = insert_project(&db, "svc-build-signoff").await;
+        let p = repo.create(create_input("Build signoff")).await.unwrap();
+        let epic = insert_epic(&db, &proj, "bs01").await;
         repo.link_epic(&p.id, &epic, &proj).await.unwrap();
         repo.set_building(&p.id, "user-x").await.unwrap();
 
-        // A material edit while building is rejected.
-        let err = repo
-            .update(
-                &p.id,
-                update_input("Guarded v2", "new body", "[]", "building"),
-            )
-            .await;
-        assert!(err.is_err(), "spec edit while building must be rejected");
+        let updated = repo.add_signoff(&p.id, "scoped", "user-y").await.unwrap();
+        assert_eq!(updated.status, "building");
+        assert_eq!(repo.signoffs(&p.id).await.unwrap().len(), 1);
 
-        // The spec is unchanged.
-        let still = repo.get(&p.id).await.unwrap().unwrap();
-        assert_eq!(still.title, "Guarded");
-        assert_eq!(still.status, "building");
-
-        // A status-only update (no spec change) is still allowed — e.g. set_done.
-        let done = repo.set_done(&p.id).await.unwrap();
-        assert_eq!(done.status, "done");
+        // clear_signoff is the symmetric guard: it must also skip
+        // reconcile_approval on a building proposal, so withdrawing a sign-off
+        // can never yank the build back to in_review.
+        let cleared = repo.clear_signoff(&p.id, "scoped", "user-y").await.unwrap();
+        assert_eq!(cleared.status, "building");
+        assert!(repo.signoffs(&p.id).await.unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

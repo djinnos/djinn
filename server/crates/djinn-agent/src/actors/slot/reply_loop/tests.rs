@@ -1,4 +1,5 @@
 use super::error_handling::supports_tool_choice_required;
+use super::loop_guard::{LoopGuardError, LoopGuardKind};
 use super::persistence::serialize_llm_input;
 use super::turn::{ReplyLoopContext, run_reply_loop};
 use crate::output_stash::extract_stash_content;
@@ -36,12 +37,21 @@ impl MockResponse {
     }
 
     fn tool_call(id: &str, name: &str, input_tokens: u32) -> Self {
+        Self::tool_call_with_input(id, name, serde_json::json!({}), input_tokens)
+    }
+
+    fn tool_call_with_input(
+        id: &str,
+        name: &str,
+        input: serde_json::Value,
+        input_tokens: u32,
+    ) -> Self {
         Self {
             text: None,
             tool_calls: vec![ContentBlock::ToolUse {
                 id: id.to_string(),
                 name: name.to_string(),
-                input: serde_json::json!({}),
+                input,
             }],
             input_tokens,
             output_tokens: 10,
@@ -1081,11 +1091,36 @@ async fn max_step_wind_down_ignored_falls_back_to_hard_error() {
     // Turns 1..=3 fill the cap; turn 4 (wind-down) is ALSO a tool call →
     // not terminal → next cap check hard-errors. The MockProvider's
     // text-only fallback is never reached because we error first.
+    //
+    // Vary the args per call so each call is a *distinct* tool-call
+    // signature: the new (fw2v) in-loop guard over repeated failing
+    // tool-call signatures would otherwise trip on the 4th identical call
+    // and preempt the max-turns hard error this test is asserting.
     let provider = MockProvider::new(vec![
-        MockResponse::tool_call("t1", "nonexistent_tool", 100),
-        MockResponse::tool_call("t2", "nonexistent_tool", 110),
-        MockResponse::tool_call("t3", "nonexistent_tool", 120),
-        MockResponse::tool_call("t4", "nonexistent_tool", 130),
+        MockResponse::tool_call_with_input(
+            "t1",
+            "nonexistent_tool",
+            serde_json::json!({"step": 1}),
+            100,
+        ),
+        MockResponse::tool_call_with_input(
+            "t2",
+            "nonexistent_tool",
+            serde_json::json!({"step": 2}),
+            110,
+        ),
+        MockResponse::tool_call_with_input(
+            "t3",
+            "nonexistent_tool",
+            serde_json::json!({"step": 3}),
+            120,
+        ),
+        MockResponse::tool_call_with_input(
+            "t4",
+            "nonexistent_tool",
+            serde_json::json!({"step": 4}),
+            130,
+        ),
     ]);
 
     let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
@@ -1148,5 +1183,118 @@ async fn max_step_wind_down_ignored_falls_back_to_hard_error() {
     assert_eq!(
         injected, 1,
         "wind-down injected exactly once, then hard-errors"
+    );
+}
+
+#[tokio::test]
+async fn identical_failing_tool_call_injects_correction_then_typed_terminates() {
+    let tools = vec![dummy_tool_schema("nonexistent_tool")];
+    let same_args = serde_json::json!({"b": 2, "a": 1});
+    let provider = MockProvider::new(vec![
+        MockResponse::tool_call_with_input("tc1", "nonexistent_tool", same_args.clone(), 100),
+        MockResponse::tool_call_with_input("tc2", "nonexistent_tool", same_args.clone(), 110),
+        MockResponse::tool_call_with_input("tc3", "nonexistent_tool", same_args.clone(), 120),
+        MockResponse::tool_call_with_input("tc4", "nonexistent_tool", same_args, 130),
+    ]);
+
+    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+    let test_services = test_helpers::test_services();
+    let worktree_path = std::path::PathBuf::from("/tmp");
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &tools,
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            app_state: &app_state,
+            services: &test_services,
+            mcp_registry: None,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    let err = result.expect_err("fourth identical failure should trip typed loop guard");
+    let guard_err = err
+        .downcast_ref::<LoopGuardError>()
+        .expect("reply-loop error should preserve typed loop guard condition");
+    assert_eq!(
+        guard_err.condition.kind(),
+        LoopGuardKind::RepeatedToolFailure
+    );
+    assert_eq!(guard_err.condition.observed, 4);
+    assert_eq!(guard_err.condition.threshold, 3);
+
+    let user_text = role_text(&conv, Role::User);
+    let correction_count = conv
+        .messages
+        .iter()
+        .filter(|m| {
+            m.role == Role::User
+                && m.content
+                    .iter()
+                    .filter_map(|b| b.as_text())
+                    .any(|t| t.contains("SYSTEM CORRECTION"))
+        })
+        .count();
+    assert_eq!(
+        correction_count, 1,
+        "exactly one corrective message should be injected before typed termination"
+    );
+    assert!(
+        user_text.contains("SYSTEM CORRECTION")
+            && user_text.contains("nonexistent_tool")
+            && user_text.contains(r#"{"a":1,"b":2}"#)
+            && user_text.contains("Do not call this exact tool"),
+        "corrective message should name and forbid the exact normalized signature, got: {user_text}"
+    );
+
+    // The system prompt is intentionally skipped by the reply loop's
+    // initial-seed persistence pass, so persisted = conv.messages.len() - 1.
+    // The 4th attempt's tool-result message is also not persisted because
+    // the loop returns from the guard before appending it — but it is
+    // likewise absent from `conv.messages`, so the invariant still holds.
+    let persisted = count_persisted_messages(&app_state, &session_id).await;
+    let expected_persisted = conv.messages.len() - 1;
+    assert_eq!(
+        persisted,
+        expected_persisted,
+        "corrective message should be persisted with the transcript; expected \
+         {expected_persisted} (conversation len {} minus 1 system prompt), got {persisted}",
+        conv.messages.len()
+    );
+    let persisted_conversation =
+        SessionMessageRepository::new(app_state.db.clone(), app_state.event_bus.clone())
+            .load_conversation(&session_id)
+            .await
+            .expect("load persisted conversation");
+    let persisted_user_text = role_text(&persisted_conversation, Role::User);
+    assert!(
+        persisted_user_text.contains("SYSTEM CORRECTION")
+            && persisted_user_text.contains("nonexistent_tool")
+            && persisted_user_text.contains(r#"{"a":1,"b":2}"#),
+        "persisted corrective message should name the exact signature, got: {persisted_user_text}"
+    );
+    assert_eq!(
+        provider.remaining(),
+        0,
+        "four scripted turns should be consumed"
     );
 }

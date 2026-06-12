@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- reconnect delay helpers are exported for focused unit tests. */
 /**
  * useEventSource hook - Manages EventSource connection with auto-reconnect
  *
@@ -16,7 +17,7 @@
  */
 
 import { useEffect, useRef } from "react";
-import { sseStore, type SSEEvent, type SSEEventType } from "../stores/sseStore";
+import { sseStore, type SSEEvent } from "../stores/sseStore";
 import { getServerBaseUrl } from "@/api/serverUrl";
 import { initSSEEventHandlers } from "../stores/sseEventHandlers";
 import { fetchKanbanSnapshot } from "@/api/server";
@@ -27,10 +28,41 @@ import { epicStore } from "@/stores/epicStore";
 import { resetMcpClient } from "@/api/mcpClient";
 import { useProviderGateStore } from "@/stores/providerGateStore";
 import { refreshDispatchPauseStatus } from "@/stores/dispatchPauseStore";
+import {
+  SERVER_SSE_EVENT_NAMES,
+  resolveServerSSEEventName,
+} from "@/stores/sseEventContract";
 
-const INITIAL_RECONNECT_DELAY = 1000;
-const MAX_RECONNECT_DELAY = 30000;
-const RECONNECT_MULTIPLIER = 2;
+export const INITIAL_RECONNECT_DELAY = 1000;
+export const MAX_RECONNECT_DELAY = 30000;
+export const RECONNECT_MULTIPLIER = 2;
+export const RECONNECT_JITTER_FACTOR = 0.2;
+export const MIN_RECONNECT_DELAY = 1;
+export const SILENCE_TIMEOUT_MS = 60_000;
+export const LIVENESS_WATCHDOG_INTERVAL_MS = 5_000;
+
+/**
+ * Returns the capped exponential reconnect delay with symmetric bounded jitter.
+ *
+ * Jitter is applied within +/- RECONNECT_JITTER_FACTOR of the capped base delay,
+ * then clamped so reconnects never happen below MIN_RECONNECT_DELAY or above
+ * MAX_RECONNECT_DELAY.
+ */
+export function getReconnectDelay(
+  reconnectAttempt: number,
+  random = Math.random,
+) {
+  const baseDelay = Math.min(
+    INITIAL_RECONNECT_DELAY * Math.pow(RECONNECT_MULTIPLIER, reconnectAttempt),
+    MAX_RECONNECT_DELAY,
+  );
+  const jitterMultiplier = 1 + (random() * 2 - 1) * RECONNECT_JITTER_FACTOR;
+  const jitteredDelay = baseDelay * jitterMultiplier;
+  return Math.min(
+    MAX_RECONNECT_DELAY,
+    Math.max(MIN_RECONNECT_DELAY, jitteredDelay),
+  );
+}
 
 export function useEventSource() {
   const projects = useProjects();
@@ -43,47 +75,9 @@ export function useEventSource() {
     .join(",");
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const livenessTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastReceivedAtRef = useRef<number>(Date.now());
   const cleanupHandlersRef = useRef<(() => void) | null>(null);
-  const normalizeEventType = (rawType: string): SSEEventType | null => {
-    const normalized = rawType.replace(".", "_");
-    if (normalized === "task_created") return "task_created";
-    if (normalized === "task_updated") return "task_updated";
-    if (normalized === "task_deleted") return "task_deleted";
-    if (normalized === "epic_created") return "epic_created";
-    if (normalized === "epic_updated") return "epic_updated";
-    if (normalized === "epic_deleted") return "epic_deleted";
-    if (normalized === "proposal_created") return "proposal_created";
-    if (normalized === "proposal_updated") return "proposal_updated";
-    if (normalized === "proposal_deleted") return "proposal_deleted";
-    if (normalized === "proposal_feedback_created") return "proposal_feedback_created";
-    if (normalized === "session_message") return "session_message";
-    if (normalized === "session_dispatched") return "session_dispatched";
-    if (normalized === "session_started") return "session_started";
-    if (
-      normalized === "session_completed" ||
-      normalized === "session_interrupted" ||
-      normalized === "session_failed" ||
-      normalized === "session_updated"
-    ) {
-      return "session_ended";
-    }
-    if (
-      normalized === "project_changed" ||
-      normalized === "project_created" ||
-      normalized === "project_updated" ||
-      normalized === "project_deleted" ||
-      normalized === "project_health_ok" ||
-      normalized === "project_health_error"
-    ) {
-      return "project_changed";
-    }
-    if (normalized === "sync_completed") return "sync_completed";
-    if (normalized === "verification_step") return "verification_step";
-    if (normalized === "lifecycle_step") return "lifecycle_step";
-    if (normalized === "dispatch_pause_changed") return "dispatch_pause_changed";
-    return null;
-  };
-
   useEffect(() => {
     let isActive = true;
 
@@ -117,7 +111,66 @@ export function useEventSource() {
     // Initialize SSE event handlers (wire stores to SSE events)
     cleanupHandlersRef.current = initSSEEventHandlers();
 
-    const connect = async () => {
+    const markServerEventReceived = () => {
+      lastReceivedAtRef.current = Date.now();
+    };
+
+    const clearLivenessWatchdog = () => {
+      if (livenessTimerRef.current) {
+        clearInterval(livenessTimerRef.current);
+        livenessTimerRef.current = null;
+      }
+    };
+
+    let connect: () => Promise<void>;
+
+    const scheduleReconnect = (source?: EventSource | null) => {
+      if (!isActive) return;
+
+      sseStore.getState().setConnected(false);
+      sseStore.getState().setConnectionStatus("reconnecting");
+
+      clearLivenessWatchdog();
+
+      const activeEventSource = source ?? eventSourceRef.current;
+      if (activeEventSource) {
+        activeEventSource.close();
+      }
+      if (!source || eventSourceRef.current === source) {
+        eventSourceRef.current = null;
+      }
+
+      if (reconnectTimerRef.current) {
+        return;
+      }
+
+      const { reconnectAttempt } = sseStore.getState();
+      const delay = getReconnectDelay(reconnectAttempt);
+      sseStore.getState().incrementReconnectAttempt();
+
+      reconnectTimerRef.current = setTimeout(async () => {
+        reconnectTimerRef.current = null;
+        if (!isActive) return;
+        // Reset MCP client so the next tool call reconnects cleanly.
+        try {
+          await resetMcpClient();
+        } catch {
+          // ignore — connect() below will surface any failure
+        }
+        void connect();
+      }, delay);
+    };
+
+    const startLivenessWatchdog = () => {
+      clearLivenessWatchdog();
+      livenessTimerRef.current = setInterval(() => {
+        if (!isActive || !eventSourceRef.current) return;
+        if (Date.now() - lastReceivedAtRef.current < SILENCE_TIMEOUT_MS) return;
+        scheduleReconnect(eventSourceRef.current);
+      }, LIVENESS_WATCHDOG_INTERVAL_MS);
+    };
+
+    connect = async () => {
       try {
         await hydrateSnapshot();
 
@@ -133,9 +186,12 @@ export function useEventSource() {
 
         const es = new EventSource(url);
         eventSourceRef.current = es;
+        markServerEventReceived();
+        startLivenessWatchdog();
 
         es.onopen = () => {
           if (!isActive) return;
+          markServerEventReceived();
           if (sseStore.getState().reconnectAttempt > 0) {
             void hydrateSnapshot();
             void hydratePauseStatus();
@@ -145,50 +201,6 @@ export function useEventSource() {
           sseStore.getState().setConnectionStatus("connected");
           sseStore.getState().setError(null);
         };
-
-        const eventTypes = [
-          "lagged",
-          "task_created",
-          "task_updated",
-          "task_deleted",
-          "epic_created",
-          "epic_updated",
-          "epic_deleted",
-          "proposal_created",
-          "proposal_updated",
-          "proposal_deleted",
-          "proposal_feedback_created",
-          "proposal.created",
-          "proposal.updated",
-          "proposal.deleted",
-          "proposal_feedback.created",
-          "project_changed",
-          "task.created",
-          "task.updated",
-          "task.deleted",
-          "epic.created",
-          "epic.updated",
-          "epic.deleted",
-          "project.created",
-          "project.updated",
-          "project.deleted",
-          "project.health_ok",
-          "project.health_error",
-          "session.message",
-          "session.dispatched",
-          "session.started",
-          "session.completed",
-          "session.interrupted",
-          "session.failed",
-          "session.updated",
-          "sync.completed",
-          "verification.step",
-          "verification_step",
-          "lifecycle.step",
-          "lifecycle_step",
-          "dispatch_pause.changed",
-          "dispatch_pause_changed",
-        ] as const;
 
         // Copilot's in-process OAuth still needs the browser-popup
         // fallback (its MCP handler opens the authorize URL on the
@@ -228,31 +240,33 @@ export function useEventSource() {
           }
         });
 
-        eventTypes.forEach((eventType) => {
+        SERVER_SSE_EVENT_NAMES.forEach((eventType) => {
           es.addEventListener(eventType, (event) => {
             if (!isActive) return;
+            markServerEventReceived();
             try {
-              if (eventType === "lagged") {
+              const decision = resolveServerSSEEventName(eventType);
+
+              if (decision.kind === "hydrate") {
                 void hydrateSnapshot();
                 void hydratePauseStatus();
                 return;
               }
 
+              if (decision.kind !== "dispatch") {
+                return;
+              }
+
               const data = JSON.parse(event.data);
-              
+
               // Track the event ID from the SSE message if present
               const eventId = (event as MessageEvent).lastEventId || undefined;
               if (eventId) {
                 sseStore.getState().setLastEventId(eventId);
               }
-              
-              const mappedType = normalizeEventType(eventType);
-              if (!mappedType) {
-                return;
-              }
 
               const sseEvent: SSEEvent = {
-                type: mappedType,
+                type: decision.eventType,
                 data,
                 timestamp: Date.now(),
                 id: eventId,
@@ -265,31 +279,7 @@ export function useEventSource() {
         });
 
         es.onerror = () => {
-          if (!isActive) return;
-
-          sseStore.getState().setConnected(false);
-          sseStore.getState().setConnectionStatus("reconnecting");
-
-          es.close();
-          eventSourceRef.current = null;
-
-          const { reconnectAttempt } = sseStore.getState();
-          const delay = Math.min(
-            INITIAL_RECONNECT_DELAY * Math.pow(RECONNECT_MULTIPLIER, reconnectAttempt),
-            MAX_RECONNECT_DELAY
-          );
-          sseStore.getState().incrementReconnectAttempt();
-
-          reconnectTimerRef.current = setTimeout(async () => {
-            if (!isActive) return;
-            // Reset MCP client so the next tool call reconnects cleanly.
-            try {
-              await resetMcpClient();
-            } catch {
-              // ignore — connect() below will surface any failure
-            }
-            connect();
-          }, delay);
+          scheduleReconnect(es);
         };
       } catch (err) {
         if (!isActive) return;
@@ -299,13 +289,15 @@ export function useEventSource() {
       }
     };
 
-    connect();
+    void connect();
 
     return () => {
       isActive = false;
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
       }
+      clearLivenessWatchdog();
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
         eventSourceRef.current = null;
