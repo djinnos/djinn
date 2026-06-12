@@ -83,6 +83,11 @@ pub struct AgentContext {
     /// control-plane seam without depending on Kubernetes directly. `None` in
     /// off-server/test contexts falls back to the agent-internal no-op runtime.
     pub runtime_ops: Option<Arc<dyn bridge::RuntimeOps>>,
+    /// Root under which coordinator stale-resource GC enumerates per-task-run
+    /// Cargo target directories. `None` uses the production PVC path
+    /// (`/cache/cargo-target-runs`); tests may inject a temp dir so sweeps never
+    /// touch the shared build cache used by the test process itself.
+    pub cargo_target_runs_root: Option<PathBuf>,
     /// Shared bare-mirror manager. Used by the mirror-native merge path in
     /// `task_merge` to run squash-merges against an ephemeral hardlinked
     /// clone instead of a worktree under `.djinn/worktrees/.merge-*`.
