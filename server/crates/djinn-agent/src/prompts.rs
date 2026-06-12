@@ -897,6 +897,68 @@ mod tests {
     }
 
     #[test]
+    fn planner_prompt_prunes_unverifiable_acceptance_criteria() {
+        let mut decomposition_task = make_task();
+        decomposition_task.issue_type = "planning".into();
+        let ctx = make_ctx();
+        let decomposition_prompt = render_prompt(AgentType::Planner, &decomposition_task, &ctx);
+
+        assert!(
+            decomposition_prompt.contains("unavailable external tools, external infrastructure"),
+            "decomposition planner should recognize unavailable external proof as invalid spec"
+        );
+        assert!(
+            decomposition_prompt
+                .contains("Lack of Djinn tool/environment access is NOT a reason to `escalate`"),
+            "decomposition planner should prune unverifiable AC instead of escalating for missing tools"
+        );
+        assert!(
+            decomposition_prompt
+                .contains("Rewrite or drop invalid task acceptance criteria with `task_update`"),
+            "decomposition planner should rewrite or drop invalid task AC"
+        );
+        assert!(
+            decomposition_prompt.contains("submit_grooming(decision=\"close\")"),
+            "decomposition planner should close planning when pruning leaves no implementable work"
+        );
+        assert!(
+            decomposition_prompt
+                .contains("objectively checkable by the executing role's actual tool surface"),
+            "task AC authoring should require criteria checkable by the executing role"
+        );
+
+        let mut intervention_task = make_task();
+        intervention_task.issue_type = "review".into();
+        let intervention_prompt = render_prompt(AgentType::Planner, &intervention_task, &ctx);
+
+        assert!(
+            intervention_prompt
+                .contains("requires tools/environment outside Djinn's available tool surface"),
+            "intervention planner should detect unverifiable AC loops"
+        );
+        assert!(
+            intervention_prompt
+                .contains("Prune or repair the criterion with `task_update` instead of escalating"),
+            "intervention planner should prune or repair unverifiable AC instead of escalating"
+        );
+
+        let mut proposal_task = make_task();
+        proposal_task.issue_type = "epic_breakdown".into();
+        let proposal_prompt = render_prompt(AgentType::Planner, &proposal_task, &ctx);
+
+        assert!(
+            proposal_prompt.contains(
+                "Only translate proposal AC into epic descriptions/AC when they are checkable"
+            ),
+            "proposal decomposition should only translate verifiable AC into epics"
+        );
+        assert!(
+            proposal_prompt.contains("Do not convert external-infra/operator-only proof requirements into acceptance criteria"),
+            "proposal decomposition should redirect external proof requirements out of AC"
+        );
+    }
+
+    #[test]
     fn worker_prompt_routes_memory_crud_through_mcp() {
         let task = make_task();
         let ctx = make_ctx();
