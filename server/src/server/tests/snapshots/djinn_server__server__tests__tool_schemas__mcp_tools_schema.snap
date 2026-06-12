@@ -3469,8 +3469,7 @@ expression: signatures
             "schema_version": {
               "default": 0,
               "description": "`0` (the default) is the \"needs reseed\" sentinel — the P5 boot hook\ntreats any config with `schema_version < 1` as an un-seeded row and\nrewrites it from `projects.stack`. `validate()` rejects 0 so that\nuser-submitted configs must declare a real version.",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "source": {
@@ -3958,8 +3957,7 @@ expression: signatures
             "schema_version": {
               "default": 0,
               "description": "`0` (the default) is the \"needs reseed\" sentinel — the P5 boot hook\ntreats any config with `schema_version < 1` as an un-seeded row and\nrewrites it from `projects.stack`. `validate()` rejects 0 so that\nuser-submitted configs must declare a real version.",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "source": {
@@ -4467,8 +4465,7 @@ expression: signatures
             "schema_version": {
               "default": 0,
               "description": "`0` (the default) is the \"needs reseed\" sentinel — the P5 boot hook\ntreats any config with `schema_version < 1` as an un-seeded row and\nrewrites it from `projects.stack`. `validate()` rejects 0 so that\nuser-submitted configs must declare a real version.",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "source": {
@@ -7410,8 +7407,7 @@ expression: signatures
             "schema_version": {
               "default": 0,
               "description": "`0` (the default) is the \"needs reseed\" sentinel — the P5 boot hook\ntreats any config with `schema_version < 1` as an un-seeded row and\nrewrites it from `projects.stack`. `validate()` rejects 0 so that\nuser-submitted configs must declare a real version.",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "source": {
@@ -7859,8 +7855,7 @@ expression: signatures
             "schema_version": {
               "default": 0,
               "description": "`0` (the default) is the \"needs reseed\" sentinel — the P5 boot hook\ntreats any config with `schema_version < 1` as an un-seeded row and\nrewrites it from `projects.stack`. `validate()` rejects 0 so that\nuser-submitted configs must declare a real version.",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "source": {
@@ -8285,8 +8280,7 @@ expression: signatures
             "schema_version": {
               "default": 0,
               "description": "`0` (the default) is the \"needs reseed\" sentinel — the P5 boot hook\ntreats any config with `schema_version < 1` as an un-seeded row and\nrewrites it from `projects.stack`. `validate()` rejects 0 so that\nuser-submitted configs must declare a real version.",
-              "format": "uint32",
-              "minimum": 0,
+              "format": "int64",
               "type": "integer"
             },
             "source": {

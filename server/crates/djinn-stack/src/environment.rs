@@ -101,6 +101,7 @@ pub struct EnvironmentConfig {
     /// rewrites it from `projects.stack`. `validate()` rejects 0 so that
     /// user-submitted configs must declare a real version.
     #[serde(default)]
+    #[schemars(with = "i64")]
     pub schema_version: u32,
     #[serde(default)]
     pub source: ConfigSource,
