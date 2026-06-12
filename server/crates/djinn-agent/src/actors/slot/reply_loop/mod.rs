@@ -15,6 +15,7 @@
 //! resolving identically.
 
 pub(crate) mod error_handling;
+pub(crate) mod loop_guard;
 mod persistence;
 mod streaming;
 mod tool_dispatch;
