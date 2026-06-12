@@ -46,6 +46,7 @@ In this pruning/repair arm:
 - Add task comments explaining which criteria were unverifiable, what tool/environment/operator proof they required, and why they were pruned or rewritten.
 - Update or append the roadmap rationale to document the invalid criteria, the repair decision, and any runbook/checklist artifact where external proof now belongs.
 - Reconcile epic and parent proposal state where applicable: update descriptions/acceptance criteria/roadmap references so they no longer present invalid external-proof criteria as unfinished worker work.
+- Do not create retry worker tasks, spike tasks, or follow-up tasks whose purpose is to obtain Docker/Postgres/Kubernetes/operator/Djinn-authenticated proof the current Djinn role cannot access; prune/rewrite those requirements or document them as operational runbook/checklist proof instead.
 - If no implementable work remains after pruning/repair, close or reconcile the affected tasks/epic/proposal as appropriate, then finish this planning task with `submit_grooming(decision="close")`.
 
 ### B4. Decide — Spike or Tasks?
