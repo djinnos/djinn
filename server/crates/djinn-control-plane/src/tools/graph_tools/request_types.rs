@@ -285,6 +285,45 @@ pub struct CodeGraphParams {
     /// test-handling.
     #[serde(default)]
     pub tests: Option<String>,
+    /// df6s: page offset for paginated traversal ops (`neighbors`,
+    /// `impact`, `coupling_hotspots`). Sliced **only** when
+    /// constructing the agent-facing response DTO — the underlying
+    /// `RepoDependencyGraph` traversal always runs to completion so
+    /// `total` reflects the unsliced result count and pagination can
+    /// never be misread as "the graph has no more nodes". Empty
+    /// string is normalized to `None` via `normalize()`. Negative
+    /// values are clamped to zero at the handler boundary.
+    #[serde(default)]
+    pub offset: Option<i64>,
+    /// df6s: counts-only mode for paginated traversal ops
+    /// (`neighbors`, `impact`, `coupling_hotspots`). When `Some(true)`,
+    /// the response omits the large node/pair lists and instead ships
+    /// `total` + the relevant counters (`by_depth_counts` for impact).
+    /// Designed for triage: a model can ask "how big is the blast
+    /// radius?" without paying the token cost of every impacted
+    /// symbol. The internal traversal still runs to completion so
+    /// group_by-file rollups report the full per-module count.
+    #[serde(default, alias = "summaryOnly")]
+    pub summary_only: Option<bool>,
+    /// df6s: per-depth counts for `impact`. When `Some(true)`, the
+    /// response ships a `by_depth_counts: { "1": 12, "2": 7 }` map
+    /// alongside the (sliced) impact list so triage can read the
+    /// depth distribution without walking every entry. Honoured by
+    /// `impact` only; other ops ignore it. `summary_only=true`
+    /// already implies this — passing both is fine.
+    #[serde(default, alias = "byDepthCounts")]
+    pub by_depth_counts: Option<bool>,
+    /// df6s: distinct result cap for paginated traversal ops. For
+    /// `neighbors` / `coupling_hotspots` this is the existing `limit`
+    /// (re-aliased for clarity), so the field is **only** consumed by
+    /// ops where `limit` means something else — currently `impact`,
+    /// where `limit` is the BFS depth. `impact` therefore reads
+    /// `page_limit` for its result cap and keeps `limit` as the
+    /// traversal depth. Defaults to 100 when omitted; clamps to
+    /// `[1, 1000]`. Sliced only at the response-DTO layer; the
+    /// internal traversal still runs to completion.
+    #[serde(default, alias = "pageLimit")]
+    pub page_limit: Option<i64>,
 }
 
 impl CodeGraphParams {
@@ -344,6 +383,62 @@ impl CodeGraphParams {
         clear(&mut self.path);
         clear(&mut self.path_glob);
         clear(&mut self.framework);
+    }
+
+    /// df6s: resolve a non-negative offset from `self.offset`. Negative
+    /// and missing values both clamp to `0` so handlers can pass the
+    /// result straight into `.skip()`.
+    pub fn resolved_offset(&self) -> usize {
+        self.offset.unwrap_or(0).max(0) as usize
+    }
+
+    /// df6s: resolve the result-cap for a paginated traversal op.
+    /// Precedence: `page_limit` → `default`. The legacy `limit`
+    /// field is **not** consulted here so the two semantics stay
+    /// separated. Handlers that want to honour both `limit` and
+    /// `page_limit` (e.g. `neighbors`, which uses `limit` for the
+    /// result cap) should pass `params.limit.unwrap_or(default) as
+    /// usize` as the `default` argument so a caller-supplied
+    /// `limit` survives alongside the new `page_limit`.
+    ///
+    /// Clamps into `[1, 1000]` so a runaway caller can't dump the
+    /// whole graph into a single page.
+    pub fn resolved_page_limit(&self, default: usize) -> usize {
+        let raw = self.page_limit.unwrap_or(default as i64).max(0) as usize;
+        raw.clamp(1, 1000)
+    }
+}
+
+/// df6s: the four pagination inputs a paginated traversal op resolves
+/// from `CodeGraphParams`. Held by value (not a reference) so handlers
+/// can pass it into the response DTO without further juggling.
+///
+/// `offset` is always populated (clamped to ≥ 0). `limit` is the
+/// cap applied to the agent-facing slice. `summary_only` is `true`
+/// when the response should ship counts only — the handler is
+/// expected to drop the large list fields in that case.
+/// `by_depth_counts` is `true` when the response should ship the
+/// per-depth count map (currently `impact` only).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PaginationParams {
+    pub offset: usize,
+    pub limit: usize,
+    pub summary_only: bool,
+    pub by_depth_counts: bool,
+}
+
+impl PaginationParams {
+    /// Resolve the four pagination inputs from `CodeGraphParams`,
+    /// using `default_limit` as the page-cap fallback. `summary_only`
+    /// is `true` only when the caller passed `Some(true)` — an omitted
+    /// flag means "give me the full page".
+    pub fn resolve(params: &CodeGraphParams, default_limit: usize) -> Self {
+        Self {
+            offset: params.resolved_offset(),
+            limit: params.resolved_page_limit(default_limit),
+            summary_only: params.summary_only.unwrap_or(false),
+            by_depth_counts: params.by_depth_counts.unwrap_or(false),
+        }
     }
 }
 
