@@ -979,6 +979,7 @@ impl AppState {
                 self.clone(),
             ))),
             runtime_ops: Some(Arc::new(self.clone())),
+            cargo_target_runs_root: None,
             mirror: Some(self.inner.mirror.clone()),
             rpc_registry: Some(self.inner.rpc_registry.clone()),
             // Host-side AgentContext serves multiple projects (chat surface

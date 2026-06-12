@@ -82,6 +82,7 @@ fn run_route_extraction_post_processor(
         unresolved_consumer_count = report.unresolved_consumer_count,
         suggested_consumer_edges = report.consumer_edge_suggestions.len(),
         skipped_files = report.skipped_files.len(),
+        file_failures = report.file_failures.len(),
         "ensure_canonical_graph: route_extraction pass complete"
     );
 
@@ -330,6 +331,12 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
                     "ensure_canonical_graph: db_access pass complete"
                 );
             }
+            // Route extraction intentionally runs after `build_with_source` has
+            // completed the SCIP graph plus its built-in entry-point, process,
+            // and complexity/default post-processors, and after DB-access has
+            // stamped any source-derived edges. Keep it before cache derivation
+            // and bincode serialization so Route/HandlesRoute/Fetches metadata
+            // is installed both in memory and in repo_graph_cache.
             let _ = run_route_extraction_post_processor(&mut graph, &project_root_for_blocking);
             let build_ms = t_build.elapsed().as_millis() as u64;
             let node_count = graph.node_count();
@@ -1049,12 +1056,57 @@ mod tests {
         });
         let mut graph = crate::repo_graph::RepoDependencyGraph::build(&[index]);
 
-        // SAFETY: test-only env mutation is serialized by ROUTE_DETECTION_ENV_LOCK.
-        unsafe { std::env::set_var("DJINN_ROUTE_DETECTION", "0") };
-        let report = run_route_extraction_post_processor(&mut graph, project_root);
-        unsafe { std::env::remove_var("DJINN_ROUTE_DETECTION") };
+        for disabled_value in ["0", "false", "no", "off", " OFF "] {
+            // SAFETY: test-only env mutation is serialized by ROUTE_DETECTION_ENV_LOCK.
+            unsafe { std::env::set_var("DJINN_ROUTE_DETECTION", disabled_value) };
+            let report = run_route_extraction_post_processor(&mut graph, project_root);
 
-        assert!(report.is_none());
+            assert!(
+                report.is_none(),
+                "DJINN_ROUTE_DETECTION={disabled_value:?} must skip the post-processor"
+            );
+            assert!(
+                graph
+                    .graph()
+                    .node_weights()
+                    .all(|node| { node.kind != crate::repo_graph::RepoGraphNodeKind::Route })
+            );
+        }
+        unsafe { std::env::remove_var("DJINN_ROUTE_DETECTION") };
+    }
+
+    #[test]
+    fn route_extraction_post_processor_counts_file_failures_without_poisoning_graph() {
+        let _guard = crate::route_extraction::ROUTE_DETECTION_ENV_LOCK
+            .lock()
+            .unwrap();
+        unsafe { std::env::remove_var("DJINN_ROUTE_DETECTION") };
+        let tmp = workspace_tempdir("route-extraction-failure-");
+        let project_root = tmp.path();
+
+        let mut index = build_test_parsed_index_fixture();
+        index.files.clear();
+        index.files.push(crate::scip_parser::ScipFile {
+            language: "rust".to_string(),
+            relative_path: PathBuf::from("server/src/missing.rs"),
+            definitions: vec![],
+            references: vec![],
+            occurrences: vec![],
+            symbols: vec![],
+        });
+        let mut graph = crate::repo_graph::RepoDependencyGraph::build(&[index]);
+
+        let report = run_route_extraction_post_processor(&mut graph, project_root)
+            .expect("default-on route extraction should run");
+
+        assert_eq!(report.route_nodes_added, 0);
+        assert_eq!(report.handles_route_edges_added, 0);
+        assert_eq!(report.fetches_edges_added, 0);
+        assert_eq!(
+            report.skipped_files,
+            vec![PathBuf::from("server/src/missing.rs")]
+        );
+        assert_eq!(report.file_failures.len(), 1);
         assert!(
             graph
                 .graph()

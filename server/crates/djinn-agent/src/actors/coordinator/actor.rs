@@ -640,6 +640,7 @@ impl CoordinatorActor {
             graph_warmer: None,
             repo_graph_ops: None,
             runtime_ops: self.runtime_ops.clone(),
+            cargo_target_runs_root: None,
             mirror: self.mirror.clone(),
             rpc_registry: self.rpc_registry.clone(),
             default_project_id: None,
