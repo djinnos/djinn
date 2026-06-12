@@ -4,7 +4,9 @@
 use djinn_core::events::EventBus;
 use djinn_db::{CONTRADICTION, NoteRepository, STALE_CITATION};
 use djinn_memory::ContradictionCandidate;
-use djinn_provider::{CompletionRequest, complete, provider::LlmProvider, resolve_memory_provider};
+use djinn_provider::{
+    CompletionRequest, complete, provider::LlmProvider, resolve_memory_provider_for_user,
+};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -98,7 +100,7 @@ pub(crate) async fn run_contradiction_analysis(
     db: djinn_db::Database,
     input: ContradictionAnalysisInput,
 ) {
-    let provider = match resolve_memory_provider(&db).await {
+    let provider = match resolve_memory_provider_for_user(&db, None).await {
         Ok(p) => p,
         Err(e) => {
             warn!(error = %e, "contradiction analysis: LLM unavailable, skipping");

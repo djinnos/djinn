@@ -6,7 +6,7 @@ use djinn_core::events::EventBus;
 use djinn_db::{Database, NoteRepository};
 use djinn_provider::{
     CompletionRequest, complete, prompts::MEMORY_L0_ABSTRACT, prompts::MEMORY_L1_OVERVIEW,
-    provider::LlmProvider, resolve_memory_provider,
+    provider::LlmProvider, resolve_memory_provider_for_user,
 };
 use tokio::sync::mpsc;
 use tracing::warn;
@@ -35,7 +35,7 @@ impl NoteSummaryService {
     pub async fn generate_for_note_ids(&self, note_ids: &[String]) {
         let repo = NoteRepository::new(self.db.clone(), EventBus::noop());
 
-        let provider = match resolve_memory_provider(&self.db).await {
+        let provider = match resolve_memory_provider_for_user(&self.db, None).await {
             Ok(provider) => Some(provider),
             Err(error) => {
                 warn!(error = %error, "note summary generation: provider unavailable, using fallback summaries");

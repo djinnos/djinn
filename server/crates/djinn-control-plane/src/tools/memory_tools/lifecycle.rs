@@ -10,7 +10,7 @@ pub(crate) fn schedule_summary_regeneration(server: &DjinnMcpServer, note_id: &s
     let note_id = note_id.to_string();
     tokio::spawn(async move {
         let service = NoteSummaryService::new(db.clone());
-        match djinn_provider::resolve_memory_provider(&db).await {
+        match djinn_provider::resolve_memory_provider_for_user(&db, None).await {
             Ok(_) => service.generate_for_note_ids(&[note_id]).await,
             Err(_) => service.apply_fallback_for_note_id(&note_id).await,
         }

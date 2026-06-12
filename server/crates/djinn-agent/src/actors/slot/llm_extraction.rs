@@ -19,7 +19,7 @@
 //! [`run_llm_extraction`] is driven by
 //! `session_extraction::run_post_session_extraction`, which runs server-side
 //! (fire-and-forget) when a task-run completes. The production path resolves
-//! the model via `resolve_memory_provider` — which falls back to the org's
+//! the model via caller-scoped memory provider resolution — which falls back to the org's
 //! configured model priority when no dedicated memory model is set, so it
 //! reuses the same model the task ran on with no extra credential plumbing.
 //! The file-level `#[allow(dead_code)]` is retained only to cover the
@@ -36,7 +36,7 @@ use djinn_db::{
     permalink_for,
 };
 use djinn_provider::provider::LlmProvider;
-use djinn_provider::{CompletionRequest, complete, resolve_memory_provider};
+use djinn_provider::{CompletionRequest, complete, resolve_memory_provider_for_user};
 use serde::Deserialize;
 
 use super::session_extraction::SessionTaxonomy;
@@ -613,7 +613,7 @@ async fn run_llm_extraction_inner(
         };
         match via_creator {
             Some(p) => p,
-            None => match resolve_memory_provider(&app_state.db).await {
+            None => match resolve_memory_provider_for_user(&app_state.db, None).await {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::warn!(
