@@ -338,6 +338,19 @@ pub enum ServiceRpcRequest {
         action: String,
         reason: Option<String>,
     },
+    /// [`crate::SupervisorServices::flush_session_tokens`]. Mid-flight
+    /// best-effort token-counter flush so long-running sessions don't show
+    /// `tokens_in = 0` until teardown. Appended at the enum tail — the
+    /// positional bincode codec encodes the variant index, so inserting
+    /// anywhere else would shift every later variant and break
+    /// mixed-version host/worker frames mid-deploy.
+    FlushSessionTokens {
+        session_id: String,
+        tokens_in: i64,
+        tokens_out: i64,
+        cache_read: i64,
+        cache_write: i64,
+    },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -402,6 +415,10 @@ pub enum ServiceRpcResponse {
     TransitionTask(Result<(), String>),
     /// Transport-level failure — not produced by normal operation.
     Err(String),
+    /// Mid-flight token-flush ack. Appended after `Err` to keep every
+    /// pre-existing variant index stable for the positional bincode codec
+    /// (see `ServiceRpcRequest::FlushSessionTokens`).
+    FlushSessionTokens(Result<(), String>),
 }
 
 #[cfg(test)]

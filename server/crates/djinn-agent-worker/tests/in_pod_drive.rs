@@ -301,6 +301,9 @@ async fn handle_rpc(
             );
             ServiceRpcResponse::UpdateSessionStatus(Ok(()))
         }
+        ServiceRpcRequest::FlushSessionTokens { .. } => {
+            ServiceRpcResponse::FlushSessionTokens(Ok(()))
+        }
         ServiceRpcRequest::PublishSessionMessage {
             session_id,
             task_id,
