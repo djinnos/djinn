@@ -17,6 +17,8 @@ pub struct SemanticQueryEmbedding {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct GraphNeighbor {
     pub key: String,
+    #[serde(default)]
+    pub uid: String,
     pub kind: String,
     pub display_name: String,
     pub edge_kind: String,
@@ -28,6 +30,8 @@ pub struct GraphNeighbor {
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct RankedNode {
     pub key: String,
+    #[serde(default)]
+    pub uid: String,
     pub kind: String,
     pub display_name: String,
     pub score: f64,
@@ -58,6 +62,8 @@ pub struct RankedNode {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SearchHit {
     pub key: String,
+    #[serde(default)]
+    pub uid: String,
     pub kind: String,
     pub display_name: String,
     pub score: f64,
@@ -73,6 +79,8 @@ pub struct SearchHit {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CycleMember {
     pub key: String,
+    #[serde(default)]
+    pub uid: String,
     pub display_name: String,
     pub kind: String,
 }
@@ -88,6 +96,8 @@ pub struct CycleGroup {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct OrphanEntry {
     pub key: String,
+    #[serde(default)]
+    pub uid: String,
     pub kind: String,
     pub display_name: String,
     pub file: Option<String>,
@@ -98,6 +108,8 @@ pub struct OrphanEntry {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct PathHop {
     pub key: String,
+    #[serde(default)]
+    pub uid: String,
     pub edge_kind: String,
 }
 
@@ -151,6 +163,8 @@ pub struct SymbolAtHit {
     /// Canonical node key — SCIP symbol string for symbol hits, file path
     /// (file: prefix) for file hits.
     pub key: String,
+    #[serde(default)]
+    pub uid: String,
     /// Either `"file"` or `"symbol"`.
     pub kind: String,
     pub display_name: String,
@@ -182,6 +196,8 @@ pub struct DiffTouchesResult {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct TouchedSymbol {
     pub key: String,
+    #[serde(default)]
+    pub uid: String,
     pub display_name: String,
     pub kind: String,
     pub symbol_kind: Option<String>,
@@ -296,6 +312,8 @@ pub struct WorkspacesResult {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SnapshotNode {
     pub id: String,
+    #[serde(default)]
+    pub uid: String,
     pub kind: String,
     pub label: String,
     /// Workspace slug that produced this node when available. Optional for
@@ -596,9 +614,9 @@ pub struct FileGroupEntry {
 /// edge passed every filter.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ImpactEntry {
+    pub key: String,
     #[serde(default)]
     pub uid: String,
-    pub key: String,
     pub depth: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_path: Option<String>,
@@ -713,6 +731,8 @@ pub struct FileComplexityEntry {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct RefactorCandidate {
     pub key: String,
+    #[serde(default)]
+    pub uid: String,
     pub display_name: String,
     pub file: String,
     pub start_line: u32,
@@ -991,6 +1011,8 @@ pub struct MethodParam {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ProcessRef {
     pub id: String,
+    #[serde(default)]
+    pub uid: String,
     pub label: String,
     pub role: String,
 }

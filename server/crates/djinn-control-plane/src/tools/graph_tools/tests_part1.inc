@@ -53,6 +53,7 @@
             if self.response.nodes.iter().any(|node| node.uid == key) {
                 Ok(NeighborsResult::Detailed(vec![GraphNeighbor {
                     key: key.to_string(),
+                    uid: key.to_string(),
                     kind: "symbol".to_string(),
                     display_name: "follow-up accepted stable UID".to_string(),
                     edge_kind: "symbol_reference".to_string(),

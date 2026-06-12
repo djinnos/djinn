@@ -244,6 +244,7 @@ pub(crate) fn build_snapshot_payload(
             let label = djinn_graph::scip_parser::prettify_scip_descriptor(&node.display_name);
             SnapshotNode {
                 id: format_node_key(&node.id),
+                uid: format_node_key(&node.id),
                 kind: format!("{:?}", node.kind).to_lowercase(),
                 label,
                 workspace: node.workspace.clone(),
@@ -455,6 +456,7 @@ fn build_community_snapshot_payload(
             };
             SnapshotNode {
                 id: agg.id.clone(),
+                uid: agg.id.clone(),
                 kind: "community".to_string(),
                 label: agg.label,
                 workspace,

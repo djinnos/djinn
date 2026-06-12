@@ -203,6 +203,7 @@ async fn codebase_header_builder_renders_status_hotspots_and_tree() {
         ) -> Result<Vec<RankedNode>, String> {
             Ok(vec![RankedNode {
                 key: "symbol:auth::verify_token".into(),
+                uid: "symbol:auth::verify_token".into(),
                 kind: "function".into(),
                 display_name: "auth::verify_token".into(),
                 score: 0.87,

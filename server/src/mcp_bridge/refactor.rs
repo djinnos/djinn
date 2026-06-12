@@ -188,6 +188,7 @@ pub(crate) fn compute_refactor_candidates(
             let composite = (z_cog + z_churn + z_pr) / 3.0;
             RefactorCandidate {
                 key: c.key.clone(),
+                uid: c.key.clone(),
                 display_name: c.display_name.clone(),
                 file: c.file.clone(),
                 start_line: c.start_line,

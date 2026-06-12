@@ -373,6 +373,7 @@ fn context_emits_processes_for_step_node_pr_f2() {
         .iter()
         .map(|p| ProcessRef {
             id: p.id.clone(),
+            uid: p.id.clone(),
             label: p.label.clone(),
             role: "step".to_string(),
         })

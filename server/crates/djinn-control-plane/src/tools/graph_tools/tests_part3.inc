@@ -3,6 +3,7 @@
             query: "auth".to_string(),
             hits: vec![SearchHit {
                 key: format!("scip-rust . . . {name}#"),
+                uid: format!("scip-rust . . . {name}#"),
                 kind: "function".to_string(),
                 display_name: name.to_string(),
                 score: 0.9,
@@ -749,6 +750,7 @@
         response.snapshot.truncated = true;
         response.snapshot.nodes.push(crate::bridge::SnapshotNode {
             id: "symbol:scip-rust . . . main()".to_string(),
+            uid: "symbol:scip-rust . . . main()".to_string(),
             kind: "symbol".to_string(),
             label: "main".to_string(),
             workspace: Some("server".to_string()),
@@ -856,6 +858,7 @@
     fn snapshot_node_omits_absent_workspace() {
         let node = crate::bridge::SnapshotNode {
             id: "file:src/lib.rs".to_string(),
+            uid: "file:src/lib.rs".to_string(),
             kind: "file".to_string(),
             label: "src/lib.rs".to_string(),
             workspace: None,
