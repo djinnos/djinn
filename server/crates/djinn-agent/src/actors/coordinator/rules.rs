@@ -1,7 +1,6 @@
 // Coordinator tick rules (ADR-034):
 //   (1) Spike/research task closure → create planning task for Planner.
 //   (2) Batch completion (all worker tasks closed under open epic) → new planning task.
-//   (3) Architect patrol: scheduled every 5 min, skipped when no open epics.
 //   (4) Epic throughput: tasks merged per hour per epic (rolling window, in-memory).
 //
 // All rules are deterministic — zero LLM calls.

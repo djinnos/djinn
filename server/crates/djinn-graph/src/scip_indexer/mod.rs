@@ -105,10 +105,17 @@ impl SupportedIndexer {
     /// a genuinely hung indexer can't pin the warm Job for ten minutes.
     pub(crate) fn timeout(self) -> std::time::Duration {
         let secs = match self {
-            // rust-analyzer drives a full cargo metadata + analysis pass;
+            // rust-analyzer drives a full cargo metadata + analysis pass.
+            // Measured on djinnos/djinn (≈10MB of Rust, warm /cache, 6-CPU
+            // warm pod): 527s — within 3% of the old 600s cap, so any CPU
+            // contention from co-scheduled task-run pods tipped it over and
+            // the server workspace silently dropped out of the graph.
+            // 1200s keeps real headroom while staying under the warm-Job
+            // activeDeadline with room for the TS targets.
+            Self::RustAnalyzer => 1200,
             // scip-typescript at a monorepo root indexes the whole tree
-            // (alt-front-end root = ~60s of input files). Both need headroom.
-            Self::RustAnalyzer | Self::TypeScript => 600,
+            // (alt-front-end root = ~60s of input files) — needs headroom.
+            Self::TypeScript => 600,
             _ => 120,
         };
         std::time::Duration::from_secs(secs)

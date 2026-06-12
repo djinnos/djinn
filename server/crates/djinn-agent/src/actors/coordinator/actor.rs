@@ -1079,12 +1079,12 @@ impl CoordinatorActor {
             // language) has nothing to index — warming it just churns empty
             // Jobs. Dispatch no longer depends on the warm (see
             // `is_ready_for_dispatch`), so skipping is purely a saving.
-            let cfg = crate::verification::environment::environment_config_for_project_id(
-                &self.db,
-                &project.id,
-            )
-            .await;
-            if !cfg.languages.has_any() {
+            // `project_has_indexable_code` resolves through the assigned
+            // catalog image — catalog projects keep an empty per-project
+            // languages block by design.
+            if !crate::verification::environment::project_has_indexable_code(&self.db, &project.id)
+                .await
+            {
                 skipped_no_code += 1;
                 tracing::debug!(
                     project_id = %project.id,
@@ -1215,7 +1215,7 @@ impl CoordinatorActor {
             // GLOBAL per-user model selection: the SAME `resolve_user_model_priority`
             // the worker dispatch path uses. This is still "only what the user
             // configured" (their global model choice), not random credentials.
-            // Without it, escalation/patrol roles (planner, lead) silently get
+            // Without it, escalation roles (planner, lead) silently get
             // NO model and the autonomous stuck-task Planner intervention no-ops
             // ("no model configured for planner role"), so stuck tasks loop on
             // the same rejected acceptance criterion forever instead of

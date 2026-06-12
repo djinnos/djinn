@@ -39,6 +39,22 @@ pub(crate) fn plan_indexer_commands(
     let project_root = project_root.as_ref();
     let output_root = output_root.as_ref();
 
+    // Discovered roots under test trees (e.g.
+    // `crates/*/tests/fixtures/<repo>` carrying its own Cargo.toml) are
+    // synthetic repos for tests, not indexable source: their manifests
+    // routinely reference members that only exist at test runtime, so the
+    // indexer fails on them every warm. Skip them UNLESS the project
+    // explicitly declares that root as a workspace — declaration is the
+    // escape hatch for repos that genuinely keep code there.
+    let declared_roots: std::collections::HashSet<PathBuf> = declared_workspaces
+        .map(|workspaces| {
+            workspaces
+                .iter()
+                .map(|workspace| PathBuf::from(&workspace.root))
+                .collect()
+        })
+        .unwrap_or_default();
+
     let plans: Vec<_> = available_indexers
         .iter()
         .flat_map(|availability| {
@@ -48,6 +64,21 @@ pub(crate) fn plan_indexer_commands(
 
             discover_workspaces(project_root, availability.indexer)
                 .into_iter()
+                .filter(|workspace| {
+                    if declared_roots.contains(&workspace.root) {
+                        return true;
+                    }
+                    let rel = workspace.root.to_string_lossy().replace('\\', "/");
+                    if djinn_core::test_paths::is_test_path(&rel) {
+                        tracing::info!(
+                            workspace_root = %workspace.root.display(),
+                            indexer = availability.indexer.binary_name(),
+                            "skipping discovered workspace under a test path (declare it in EnvironmentConfig workspaces to index it)"
+                        );
+                        return false;
+                    }
+                    true
+                })
                 .map(|workspace| {
                     let working_directory = project_root.join(&workspace.root);
                     let output_path = availability.indexer.default_output_path(
@@ -1373,6 +1404,53 @@ mod tests {
         assert!(
             divergence.found_but_undeclared.is_empty(),
             "server appears in two plans but the warning is slug-scoped, so it must not double-report"
+        );
+    }
+
+    /// Discovered roots under test trees (fixture repos with their own
+    /// `Cargo.toml`) are synthetic — their manifests routinely reference
+    /// members that only exist at test runtime, so indexing them fails
+    /// every warm. They must be skipped unless explicitly declared.
+    #[test]
+    fn plan_indexer_commands_skips_undeclared_test_path_workspaces() {
+        let tmp = tempdir_in_tmp();
+        let project_root = tmp.path().join("djinn");
+        fs::create_dir_all(project_root.join("server")).expect("create server dir");
+        fs::write(
+            project_root.join("server/Cargo.toml"),
+            "[workspace]\nmembers = []\n",
+        )
+        .expect("write rust workspace");
+        let fixture_root = project_root.join("server/tests/fixtures/polyglot");
+        fs::create_dir_all(&fixture_root).expect("create fixture dir");
+        fs::write(
+            fixture_root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .expect("write fixture workspace");
+        let output_root = project_root.join(".djinn/scip");
+
+        let available = vec![IndexerAvailability {
+            indexer: SupportedIndexer::RustAnalyzer,
+            binary: "rust-analyzer".to_string(),
+            path: Some(PathBuf::from("/tooling/rust-analyzer")),
+        }];
+
+        let plans = plan_indexer_commands(&project_root, &output_root, &available, None);
+        assert_eq!(
+            plans.iter().map(|p| &p.workspace_slug).collect::<Vec<_>>(),
+            vec!["server"],
+            "fixture workspace under tests/ must not be planned"
+        );
+
+        // Declaring the fixture root is the escape hatch — declared roots
+        // are planned even under test paths.
+        let declared = vec![declared_workspace(None, "server/tests/fixtures/polyglot")];
+        let plans = plan_indexer_commands(&project_root, &output_root, &available, Some(&declared));
+        assert_eq!(
+            plans.len(),
+            2,
+            "explicitly declared test-path workspace must be planned"
         );
     }
 

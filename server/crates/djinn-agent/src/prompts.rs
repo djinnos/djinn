@@ -93,10 +93,6 @@ pub struct TaskContext {
     /// Path-scoped knowledge notes relevant to this task's code areas.
     pub knowledge_context: Option<String>,
 
-    // ── Planner patrol context ───────────────────────────────────────────
-    /// Planner-patrol-only summary of code-graph diffs and undocumented hotspots.
-    pub planner_patrol_context: Option<String>,
-
     // ── Code graph context (PR E2) ───────────────────────────────────────
     /// Auto-injected `code_graph context` summary for worker / reviewer roles
     /// whose tasks touch known files in the canonical graph. `None` when the
@@ -248,15 +244,6 @@ pub(crate) fn render_prompt_for_role(
     out = out.replace(
         "{{reviewer_diff_context_section}}",
         &reviewer_diff_context_section,
-    );
-
-    let planner_patrol_context_section = match &ctx.planner_patrol_context {
-        Some(text) if !text.trim().is_empty() => format!("## Planner Patrol Context\n\n{text}\n"),
-        _ => String::new(),
-    };
-    out = out.replace(
-        "{{planner_patrol_context_section}}",
-        &planner_patrol_context_section,
     );
 
     let activity_section = match &ctx.activity {
@@ -556,7 +543,6 @@ mod tests {
             verification_failure: None,
             epic_context: None,
             knowledge_context: None,
-            planner_patrol_context: None,
             code_graph_context: None,
             reviewer_diff_context: None,
         }
@@ -931,105 +917,6 @@ mod tests {
             "worker prompt should retain registered analytical memory retrieval"
         );
     }
-
-    /// Per ADR-051 §1 the memory-health review moved from Architect to Planner
-    /// (patrol mode). This test now asserts the content lives on the Planner
-    /// prompt side.
-    #[test]
-    fn planner_patrol_prompt_contains_memory_health_review() {
-        let mut task = make_task();
-        task.issue_type = "review".into();
-        task.title = "Board patrol".into();
-        let ctx = make_ctx();
-        let prompt = render_prompt(AgentType::Planner, &task, &ctx);
-
-        assert!(
-            prompt.contains("Memory Health Review"),
-            "planner prompt should include memory health review section (patrol mode)"
-        );
-        assert!(
-            prompt.contains("memory_health()"),
-            "planner prompt should reference memory_health tool"
-        );
-        assert!(
-            prompt.contains("memory_broken_links()"),
-            "planner prompt should reference memory_broken_links tool"
-        );
-        assert!(
-            prompt.contains("memory_orphans()"),
-            "planner prompt should reference memory_orphans tool"
-        );
-        assert!(
-            prompt.contains("planning task"),
-            "planner prompt should direct memory-health follow-ups through planning tasks"
-        );
-        assert!(
-            prompt.contains("Knowledge Task Guard Rails"),
-            "planner prompt should explicitly mention patrol knowledge-task guard rails"
-        );
-        assert!(
-            prompt.contains("suppress the duplicate instead of creating another one"),
-            "planner prompt should tell patrol to suppress similar open knowledge tasks"
-        );
-        assert!(
-            prompt.contains("stop once the patrol budget is exhausted"),
-            "planner prompt should enforce the knowledge-task budget"
-        );
-        assert!(
-            prompt.contains("memory_build_context") && prompt.contains("memory_health"),
-            "planner prompt should keep registered analytical memory tools alongside CRUD MCP tools"
-        );
-        assert!(
-            prompt.contains("Memory notes live in Dolt"),
-            "planner prompt should state that note CRUD lives in Dolt via memory_* MCP tools"
-        );
-    }
-
-    /// Per ADR-051 §1 the contradiction review moved from Architect to Planner
-    /// (patrol mode). The architect prompt still asks for spike-note task
-    /// traceability, which this test also asserts below.
-    #[test]
-    fn planner_patrol_prompt_contains_contradiction_review() {
-        let mut task = make_task();
-        task.issue_type = "review".into();
-        task.title = "Board patrol".into();
-        let ctx = make_ctx();
-        let prompt = render_prompt(AgentType::Planner, &task, &ctx);
-
-        assert!(
-            prompt.contains("Contradiction and Low-Confidence Review"),
-            "planner prompt should include contradiction review section"
-        );
-        assert!(
-            prompt.contains("contradicts supersedes stale"),
-            "planner prompt should instruct searching for contradictions"
-        );
-        assert!(
-            prompt.contains("canonical"),
-            "planner prompt should mention canonicalization of conflicting notes"
-        );
-        assert!(
-            prompt.contains("planning task to deprecate the outdated note"),
-            "planner prompt should prescribe planning-task routing for contradiction resolution"
-        );
-    }
-
-    #[test]
-    fn planner_prompt_includes_patrol_context_section_when_present() {
-        let task = make_task();
-        let ctx = TaskContext {
-            planner_patrol_context: Some(
-                "### Memory Health Signals\n- Notes: 2 total, 1 low-confidence\n\n### Code Graph Diff Summary\n\nNew modules: `server/src/new_area.rs`\n\n### Knowledge Coverage Gaps\n- Stale scoped-note areas affected by changed code: `server/src/new_area.rs`".into(),
-            ),
-            ..make_ctx()
-        };
-        let prompt = render_prompt(AgentType::Planner, &task, &ctx);
-
-        assert!(prompt.contains("Planner Patrol Context"));
-        assert!(prompt.contains("Code Graph Diff Summary"));
-        assert!(prompt.contains("New modules:"));
-    }
-
     /// Architect spike notes must still carry task traceability (per ADR-051
     /// Contract 2 / §9 "Spike and Research Findings — Memory Writes").
     #[test]
@@ -1183,7 +1070,7 @@ mod tests {
             "architect prompt should contain memory_health"
         );
         // Per ADR-051 §1 `role_amend_prompt` moved from Architect to Planner
-        // (agent-effectiveness review is a patrol action, not a consultant
+        // (agent-effectiveness review is a Planner action, not a consultant
         // action). Architect keeps `role_metrics` (read) and `role_create`
         // (structural proposal) but cannot mutate existing learned_prompts.
         assert!(

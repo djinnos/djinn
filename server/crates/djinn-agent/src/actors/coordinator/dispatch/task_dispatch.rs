@@ -917,7 +917,7 @@ impl CoordinatorActor {
 
             // No model whose provider this task's owner has connected → the task
             // is structurally undispatchable (the canary). Don't loop it forever
-            // (which, for a patrol, blocks all future patrols). Back off with the
+            // (wedging the task open). Back off with the
             // escalating cooldown, and after MAX consecutive misses fail it
             // terminally with an actionable reason.
             if model_ids.is_empty() {
@@ -1328,7 +1328,7 @@ mod inflight_ledger_tests {
         assert_eq!(running.get(&key("user-b", "m")).copied(), Some(5));
     }
 
-    /// Creator-less (system/patrol) dispatches are ungated by the per-user cap,
+    /// Creator-less (legacy system) dispatches are ungated by the per-user cap,
     /// so they must not contribute to any count.
     #[test]
     fn ledger_overlay_ignores_creatorless_entries() {

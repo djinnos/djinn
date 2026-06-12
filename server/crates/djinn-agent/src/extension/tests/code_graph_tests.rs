@@ -26,6 +26,449 @@ async fn code_graph_tool(
     .await
 }
 
+#[derive(Clone)]
+struct TraversalDispatchStub {
+    neighbors: djinn_control_plane::bridge::NeighborsResult,
+    impact: djinn_control_plane::bridge::ImpactResult,
+}
+
+fn detailed_neighbors() -> djinn_control_plane::bridge::NeighborsResult {
+    djinn_control_plane::bridge::NeighborsResult::Detailed(vec![
+        neighbor("symbol:a"),
+        neighbor("symbol:b"),
+        neighbor("symbol:c"),
+        neighbor("symbol:d"),
+    ])
+}
+
+fn neighbor(key: &str) -> djinn_control_plane::bridge::GraphNeighbor {
+    djinn_control_plane::bridge::GraphNeighbor {
+        key: key.to_string(),
+        uid: key.to_string(),
+        kind: "symbol".to_string(),
+        display_name: key.trim_start_matches("symbol:").to_string(),
+        edge_kind: "Calls".to_string(),
+        edge_weight: 1.0,
+        direction: "outgoing".to_string(),
+    }
+}
+
+fn detailed_impact() -> djinn_control_plane::bridge::ImpactResult {
+    djinn_control_plane::bridge::ImpactResult::Detailed(vec![
+        impact_entry("symbol:a", 1),
+        impact_entry("symbol:b", 2),
+        impact_entry("symbol:c", 2),
+        impact_entry("symbol:d", 3),
+    ])
+}
+
+fn impact_entry(key: &str, depth: usize) -> djinn_control_plane::bridge::ImpactEntry {
+    djinn_control_plane::bridge::ImpactEntry {
+        key: key.to_string(),
+        uid: key.to_string(),
+        depth,
+        file_path: Some(format!("src/{}.rs", key.trim_start_matches("symbol:"))),
+        confidence_tier: None,
+        exclusion_reason: None,
+    }
+}
+
+async fn dispatch_traversal_stub(
+    mut params: CodeGraphParams,
+    stub: TraversalDispatchStub,
+) -> serde_json::Value {
+    params.normalize();
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let ctx = djinn_control_plane::bridge::ProjectCtx {
+        id: "project-1".to_string(),
+        clone_path: "/repo".to_string(),
+        workspace: None,
+        sub_path: None,
+    };
+    call_code_graph_inner(&state, &mut params, &ctx, &stub)
+        .await
+        .expect("code_graph traversal dispatch should serialize")
+}
+
+#[async_trait::async_trait]
+impl djinn_control_plane::bridge::RepoGraphOps for TraversalDispatchStub {
+    async fn neighbors(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<djinn_control_plane::bridge::NeighborsResult, String> {
+        Ok(self.neighbors.clone())
+    }
+
+    async fn impact(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _workspace: Option<&str>,
+        _: &str,
+        _: usize,
+        _: Option<&str>,
+        _: Option<f64>,
+    ) -> Result<djinn_control_plane::bridge::ImpactResult, String> {
+        Ok(self.impact.clone())
+    }
+
+    async fn ranked(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _workspace: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::RankedNode>, String> {
+        Err("not used".into())
+    }
+    async fn implementations(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+    ) -> Result<Vec<String>, String> {
+        Err("not used".into())
+    }
+    async fn search(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::SearchHit>, String> {
+        Err("not used".into())
+    }
+    async fn cycles(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::CycleGroup>, String> {
+        Err("not used".into())
+    }
+    async fn orphans(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _workspace: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::OrphanEntry>, String> {
+        Err("not used".into())
+    }
+    async fn path(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _workspace: Option<&str>,
+        _: &str,
+        _: &str,
+        _: Option<usize>,
+    ) -> Result<Option<djinn_control_plane::bridge::PathResult>, String> {
+        Err("not used".into())
+    }
+    async fn edges(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::EdgeEntry>, String> {
+        Err("not used".into())
+    }
+    async fn describe(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+    ) -> Result<Option<djinn_control_plane::bridge::SymbolDescription>, String> {
+        Err("not used".into())
+    }
+    async fn context(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: bool,
+    ) -> Result<Option<djinn_control_plane::bridge::SymbolContext>, String> {
+        Err("not used".into())
+    }
+    async fn status(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+    ) -> Result<djinn_control_plane::bridge::GraphStatus, String> {
+        Err("not used".into())
+    }
+    async fn snapshot(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _workspace: Option<&str>,
+        _: djinn_control_plane::bridge::SnapshotLevel,
+        _: usize,
+        _: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
+    ) -> Result<djinn_control_plane::bridge::SnapshotPayload, String> {
+        Err("not used".into())
+    }
+    async fn symbols_at(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: u32,
+        _: Option<u32>,
+    ) -> Result<Vec<djinn_control_plane::bridge::SymbolAtHit>, String> {
+        Err("not used".into())
+    }
+    async fn diff_touches(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &[djinn_control_plane::bridge::ChangedRange],
+    ) -> Result<djinn_control_plane::bridge::DiffTouchesResult, String> {
+        Err("not used".into())
+    }
+    async fn detect_changes(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: &[String],
+    ) -> Result<djinn_control_plane::bridge::DetectedChangesResult, String> {
+        Err("not used".into())
+    }
+    async fn api_surface(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _workspace: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::ApiSurfaceEntry>, String> {
+        Err("not used".into())
+    }
+    async fn boundary_check(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &[djinn_control_plane::bridge::BoundaryRule],
+    ) -> Result<Vec<djinn_control_plane::bridge::BoundaryViolation>, String> {
+        Err("not used".into())
+    }
+    async fn hotspots(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: u32,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::HotspotEntry>, String> {
+        Err("not used".into())
+    }
+    async fn complexity(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<djinn_control_plane::bridge::ComplexityResult, String> {
+        Err("not used".into())
+    }
+    async fn refactor_candidates(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: Option<u32>,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::RefactorCandidate>, String> {
+        Err("not used".into())
+    }
+    async fn metrics_at(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+    ) -> Result<djinn_control_plane::bridge::MetricsAtResult, String> {
+        Err("not used".into())
+    }
+    async fn dead_symbols(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::DeadSymbolEntry>, String> {
+        Err("not used".into())
+    }
+    async fn deprecated_callers(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::DeprecatedHit>, String> {
+        Err("not used".into())
+    }
+    async fn touches_hot_path(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _workspace: Option<&str>,
+        _: &[String],
+        _: &[String],
+        _: &[String],
+    ) -> Result<Vec<djinn_control_plane::bridge::HotPathHit>, String> {
+        Err("not used".into())
+    }
+    async fn coupling(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::CouplingEntry>, String> {
+        Err("not used".into())
+    }
+    async fn churn(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: usize,
+        _: Option<u32>,
+    ) -> Result<Vec<djinn_control_plane::bridge::ChurnEntry>, String> {
+        Err("not used".into())
+    }
+    async fn coupling_hotspots(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: usize,
+        _: Option<u32>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::CoupledPairEntry>, String> {
+        Err("not used".into())
+    }
+    async fn coupling_hubs(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: usize,
+        _: Option<u32>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::CouplingHubEntry>, String> {
+        Err("not used".into())
+    }
+    async fn resolve(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<djinn_control_plane::bridge::ResolveOutcome, String> {
+        Err("not used".into())
+    }
+}
+
+fn traversal_stub() -> TraversalDispatchStub {
+    TraversalDispatchStub {
+        neighbors: detailed_neighbors(),
+        impact: detailed_impact(),
+    }
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_neighbors_applies_offset_page_limit_metadata() {
+    let params: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "neighbors",
+        "key": "symbol:root",
+        "offset": 1,
+        "pageLimit": 2
+    }))
+    .expect("neighbors params parse");
+
+    let value = dispatch_traversal_stub(params, traversal_stub()).await;
+
+    assert_eq!(value["key"], "symbol:root");
+    assert_eq!(value["total"], 4);
+    assert_eq!(value["offset"], 1);
+    assert_eq!(value["limit"], 2);
+    assert_eq!(value["has_more"], true);
+    let neighbors = value["neighbors"].as_array().expect("neighbors array");
+    assert_eq!(neighbors.len(), 2);
+    assert_eq!(neighbors[0]["key"], "symbol:b");
+    assert_eq!(neighbors[1]["key"], "symbol:c");
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_neighbors_summary_only_omits_neighbors() {
+    let params: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "neighbors",
+        "key": "symbol:root",
+        "summaryOnly": true
+    }))
+    .expect("neighbors params parse");
+
+    let value = dispatch_traversal_stub(params, traversal_stub()).await;
+
+    assert_eq!(value["key"], "symbol:root");
+    assert_eq!(value["summary_only"], true);
+    assert_eq!(value["total"], 4);
+    assert!(
+        value.get("neighbors").is_none(),
+        "summaryOnly must omit neighbors from serialized dispatch response: {value}"
+    );
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_neighbors_full_page_has_more_false() {
+    let params: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "neighbors",
+        "key": "symbol:root",
+        "pageLimit": 4
+    }))
+    .expect("neighbors params parse");
+
+    let value = dispatch_traversal_stub(params, traversal_stub()).await;
+
+    let neighbors = value["neighbors"].as_array().expect("neighbors array");
+    assert_eq!(neighbors.len(), 4);
+    assert!(
+        value.get("has_more").is_none(),
+        "full pages should not emit has_more metadata: {value}"
+    );
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_impact_by_depth_counts_keeps_entries() {
+    let params: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "impact",
+        "key": "symbol:root",
+        "limit": 3,
+        "byDepthCounts": true,
+        "pageLimit": 3
+    }))
+    .expect("impact params parse");
+
+    let value = dispatch_traversal_stub(params, traversal_stub()).await;
+
+    let impact = value["impact"].as_array().expect("impact array");
+    assert_eq!(impact.len(), 3);
+    assert_eq!(value["by_depth_counts"]["1"], 1);
+    assert_eq!(value["by_depth_counts"]["2"], 2);
+    assert_eq!(value["by_depth_counts"]["3"], 1);
+    assert_eq!(value["has_more"], true);
+}
+
+#[tokio::test]
+async fn code_graph_dispatch_impact_summary_only_keeps_depth_counts_omits_impact() {
+    let params: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "impact",
+        "key": "symbol:root",
+        "summaryOnly": true,
+        "byDepthCounts": true,
+        "pageLimit": 2
+    }))
+    .expect("impact params parse");
+
+    let value = dispatch_traversal_stub(params, traversal_stub()).await;
+
+    assert_eq!(value["summary_only"], true);
+    assert_eq!(value["by_depth_counts"]["1"], 1);
+    assert_eq!(value["by_depth_counts"]["2"], 2);
+    assert_eq!(value["by_depth_counts"]["3"], 1);
+    assert!(
+        value.get("impact").is_none(),
+        "summaryOnly must omit impact from serialized dispatch response: {value}"
+    );
+}
+
 #[tokio::test]
 async fn code_graph_dispatch_neighbors_reaches_graph_ops() {
     let worktree = crate::test_helpers::test_tempdir("djinn-cg-neighbors-");

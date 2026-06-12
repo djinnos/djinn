@@ -61,5 +61,4 @@ Then update the epic to reference it: `epic_update(id, memory_refs=[..., "<roadm
 
 **MANDATORY**: Call `submit_grooming(summary="Wave N: created X tasks — <brief titles>")`.
 
-Do NOT set `next_patrol_minutes` in decomposition mode — that field is patrol-only.
 

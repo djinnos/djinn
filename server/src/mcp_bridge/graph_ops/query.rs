@@ -26,6 +26,12 @@ impl RepoGraphBridge {
 
         let mut freshness_by_slug = std::collections::BTreeMap::new();
         for row in freshness {
+            // The code-less sentinel is a freshness marker ("nothing to warm
+            // = considered warmed"), not a workspace — listing it would put a
+            // `__djinn_no_code__` entry in the UI workspace picker.
+            if row.workspace_slug == djinn_db::CODELESS_WORKSPACE_SLUG {
+                continue;
+            }
             let slug = shared::normalize_workspace_slug(Some(&row.workspace_slug))
                 .unwrap_or(row.workspace_slug.clone());
             counts.entry(slug.clone()).or_insert(0);

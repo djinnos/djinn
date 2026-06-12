@@ -142,6 +142,57 @@ pub async fn environment_config_for_path(db: &Database, worktree_path: &Path) ->
     }
 }
 
+/// Decide whether a project has indexable code for the canonical-graph
+/// warmer — the gate behind the "code-less repo" warm skip.
+///
+/// The naive check (`environment_config.languages.has_any()`) is
+/// catalog-image-blind: `project_set_image` deliberately does NOT copy the
+/// image's config into the project (migration 46), so a project on a shared
+/// catalog image keeps an all-null per-project `languages` block while having
+/// plenty of code. Gating warm on that block alone freezes such a project's
+/// graph forever and stamps the `__djinn_no_code__` sentinel every tick.
+///
+/// Effective signal, in order:
+/// 1. per-project `languages` configured, or
+/// 2. per-project `workspaces` declared (each carries a language), or
+/// 3. the assigned catalog image's config declares languages/workspaces.
+///
+/// Lookup *errors* on the catalog fallback resolve to `true` (attempt the
+/// warm) — wrongly skipping freezes the graph indefinitely, while wrongly
+/// warming costs one Job that the warmer's own freshness gate bounds.
+pub async fn project_has_indexable_code(db: &Database, project_id: &str) -> bool {
+    let cfg = environment_config_for_project_id(db, project_id).await;
+    if cfg.languages.has_any() || !cfg.workspaces.is_empty() {
+        return true;
+    }
+    match djinn_db::ImageRepository::new(db.clone())
+        .resolve_for_project(project_id)
+        .await
+    {
+        Ok(Some(image)) => match serde_json::from_str::<EnvironmentConfig>(&image.config) {
+            Ok(image_cfg) => image_cfg.languages.has_any() || !image_cfg.workspaces.is_empty(),
+            Err(e) => {
+                tracing::warn!(
+                    project_id = %project_id,
+                    image_id = %image.id,
+                    error = %e,
+                    "verification::environment: catalog image config unparseable; assuming project has code"
+                );
+                true
+            }
+        },
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!(
+                project_id = %project_id,
+                error = %e,
+                "verification::environment: failed to resolve catalog image; assuming project has code"
+            );
+            true
+        }
+    }
+}
+
 /// Fetch the verification rules for a project from the `project_verifications`
 /// table (migration 44 — verification moved out of `environment_config`).
 ///
@@ -286,6 +337,100 @@ mod tests {
             .set_rules(id, &serde_json::to_string(&rules).unwrap(), "user_edited")
             .await
             .unwrap();
+    }
+
+    async fn set_env_config(db: &Database, id: &str, config: serde_json::Value) {
+        ProjectRepository::new(db.clone(), EventBus::noop())
+            .set_environment_config(id, &config.to_string())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn has_indexable_code_false_for_empty_config_without_image() {
+        let db = test_db();
+        seed_project(&db, "p1", "p1").await;
+        assert!(!project_has_indexable_code(&db, "p1").await);
+    }
+
+    #[tokio::test]
+    async fn has_indexable_code_true_when_languages_configured() {
+        let db = test_db();
+        seed_project(&db, "p1", "p1").await;
+        set_env_config(
+            &db,
+            "p1",
+            serde_json::json!({
+                "schema_version": 1,
+                "languages": { "rust": { "default_toolchain": "stable" } },
+            }),
+        )
+        .await;
+        assert!(project_has_indexable_code(&db, "p1").await);
+    }
+
+    #[tokio::test]
+    async fn has_indexable_code_true_when_only_workspaces_declared() {
+        let db = test_db();
+        seed_project(&db, "p1", "p1").await;
+        set_env_config(
+            &db,
+            "p1",
+            serde_json::json!({
+                "schema_version": 1,
+                "workspaces": [{ "root": "server", "language": "rust" }],
+            }),
+        )
+        .await;
+        assert!(project_has_indexable_code(&db, "p1").await);
+    }
+
+    /// The catalog-image regression: `project_set_image` deliberately does
+    /// not copy the image's config into the project, so a catalog project's
+    /// own languages block stays empty. The gate must fall through to the
+    /// image config instead of declaring the project code-less.
+    #[tokio::test]
+    async fn has_indexable_code_resolves_through_catalog_image() {
+        let db = test_db();
+        seed_project(&db, "p1", "p1").await;
+        let image_repo = djinn_db::ImageRepository::new(db.clone());
+        let image_cfg = serde_json::json!({
+            "schema_version": 1,
+            "languages": {
+                "rust": { "default_toolchain": "stable" },
+                "node": { "default_version": "26" },
+            },
+        });
+        image_repo
+            .create("img1", "Rust + Node", None, &image_cfg.to_string())
+            .await
+            .unwrap();
+        image_repo
+            .set_project_image("p1", Some("img1"))
+            .await
+            .unwrap();
+        assert!(project_has_indexable_code(&db, "p1").await);
+    }
+
+    #[tokio::test]
+    async fn has_indexable_code_false_when_catalog_image_is_also_codeless() {
+        let db = test_db();
+        seed_project(&db, "p1", "p1").await;
+        let image_repo = djinn_db::ImageRepository::new(db.clone());
+        image_repo
+            .create(
+                "img1",
+                "Empty",
+                None,
+                &serde_json::json!({ "schema_version": 1 }).to_string(),
+            )
+            .await
+            .unwrap();
+        image_repo
+            .set_project_image("p1", Some("img1"))
+            .await
+            .unwrap();
+        assert!(!project_has_indexable_code(&db, "p1").await);
     }
 
     #[tokio::test]

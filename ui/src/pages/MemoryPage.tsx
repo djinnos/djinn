@@ -26,7 +26,6 @@ import type {
   MemoryListOutputSchema,
   MemorySearchOutputSchema,
   MemoryReadOutput,
-  MemoryHealthOutput,
 } from '@/api/generated/mcp-tools.gen';
 
 type NoteCompact = MemoryListOutputSchema.NoteCompact;
@@ -43,7 +42,7 @@ export function MemoryPage() {
   const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [health, setHealth] = useState<MemoryHealthOutput | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
 
   const noteCache = useRef(new Map<string, MemoryReadOutput>());
   const searchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -52,27 +51,24 @@ export function MemoryPage() {
     ? `${project.github_owner}/${project.github_repo}`
     : undefined;
 
-  // Fetch notes list + health on project change
+  // Fetch the compact notes list on project change
   const refresh = useCallback(() => {
     if (!projectSlug) return;
     setLoading(true);
+    setListError(null);
     setSelectedNote(null);
     setSelectedNoteId(null);
     setSearchQuery('');
     setSearchResults(null);
     noteCache.current.clear();
 
-    Promise.all([
-      callMcpTool('memory_list', { project: projectSlug, depth: 0 }),
-      callMcpTool('memory_health', { project: projectSlug }),
-    ])
-      .then(([listResult, healthResult]) => {
+    callMcpTool('memory_list', { project: projectSlug, depth: 0 })
+      .then((listResult) => {
         setNotes(listResult.notes ?? []);
-        setHealth(healthResult);
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         setNotes([]);
-        setHealth(null);
+        setListError(err instanceof Error ? err.message : 'Failed to load memory notes');
       })
       .finally(() => setLoading(false));
   }, [projectSlug]);
@@ -175,6 +171,19 @@ export function MemoryPage() {
         <div className="flex flex-1 items-center justify-center">
           <div className="h-5 w-5 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
         </div>
+      ) : listError ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 text-muted-foreground">
+          <HugeiconsIcon icon={Brain01Icon} size={32} className="opacity-40" />
+          <p className="text-sm">Failed to load memory notes</p>
+          <p className="max-w-md text-center text-xs text-muted-foreground/70">{listError}</p>
+          <button
+            type="button"
+            onClick={refresh}
+            className="rounded-md border border-border px-3 py-1.5 text-xs transition-colors hover:bg-white/[0.04]"
+          >
+            Retry
+          </button>
+        </div>
       ) : (
         <div className="flex min-h-0 flex-1">
           <MemoryExplorer
@@ -184,7 +193,6 @@ export function MemoryPage() {
             searchResults={searchResults}
             selectedNoteId={selectedNoteId}
             onSelectNote={handleSelectNote}
-            health={health}
           />
           <MemoryNoteDetail
             note={selectedNote}

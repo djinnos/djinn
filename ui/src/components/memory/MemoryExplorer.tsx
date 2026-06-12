@@ -21,7 +21,7 @@ import {
   noteTypeLabel,
   relativeTime,
 } from './memoryUtils';
-import type { MemoryListOutputSchema, MemorySearchOutputSchema, MemoryHealthOutput } from '@/api/generated/mcp-tools.gen';
+import type { MemoryListOutputSchema, MemorySearchOutputSchema } from '@/api/generated/mcp-tools.gen';
 
 type NoteCompact = MemoryListOutputSchema.NoteCompact;
 type SearchResult = MemorySearchOutputSchema.MemorySearchResultItem;
@@ -33,7 +33,6 @@ interface MemoryExplorerProps {
   searchResults: SearchResult[] | null;
   selectedNoteId: string | null;
   onSelectNote: (note: NoteCompact | SearchResult) => void;
-  health: MemoryHealthOutput | null;
 }
 
 export function MemoryExplorer({
@@ -43,7 +42,6 @@ export function MemoryExplorer({
   searchResults,
   selectedNoteId,
   onSelectNote,
-  health,
 }: MemoryExplorerProps) {
   const { global, scoped } = useMemo(() => partitionNotes(notes), [notes]);
   const globalGrouped = useMemo(() => sortedTypeEntries(groupByType(global)), [global]);
@@ -68,17 +66,7 @@ export function MemoryExplorer({
             className="pl-8"
           />
         </div>
-        {health && (
-          <p className="mt-2 text-[11px] text-muted-foreground">
-            {health.total_notes ?? 0} notes
-            {(health.broken_link_count ?? 0) > 0 && (
-              <span className="text-amber-400"> · {health.broken_link_count} broken links</span>
-            )}
-            {(health.orphan_note_count ?? 0) > 0 && (
-              <span> · {health.orphan_note_count} orphans</span>
-            )}
-          </p>
-        )}
+        <p className="mt-2 text-[11px] text-muted-foreground">{notes.length} notes</p>
       </div>
 
       {/* Content */}

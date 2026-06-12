@@ -10,7 +10,7 @@ use djinn_control_plane::bridge::{
 };
 use djinn_core::events::EventBus;
 use djinn_core::models::Project;
-use djinn_db::{Database, NoteRepository, ProjectRepository};
+use djinn_db::{Database, ProjectRepository};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -330,7 +330,7 @@ impl RepoGraphOps for FakeRepoGraphOps {
 async fn setup_project() -> (Database, AgentContext, Project, tempfile::TempDir) {
     let db = Database::open_in_memory().expect("db");
     db.ensure_initialized().await.expect("init db");
-    let tmp = crate::test_helpers::test_tempdir("planner-patrol-context-");
+    let tmp = crate::test_helpers::test_tempdir("slot-helpers-");
     let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
     let project = project_repo
         .create("test-project", "test", "test-project")
@@ -338,179 +338,6 @@ async fn setup_project() -> (Database, AgentContext, Project, tempfile::TempDir)
         .expect("create project");
     let ctx = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
     (db, ctx, project, tmp)
-}
-
-fn patrol_task(project_id: &str) -> Task {
-    Task {
-        id: uuid::Uuid::now_v7().to_string(),
-        project_id: project_id.to_string(),
-        short_id: "ptst".to_string(),
-        epic_id: None,
-        title: "Planner patrol: board health review".to_string(),
-        description: String::new(),
-        design: String::new(),
-        issue_type: "review".to_string(),
-        status: "open".to_string(),
-        priority: 1,
-        owner: "planner".to_string(),
-        labels: "[]".to_string(),
-        acceptance_criteria: "[]".to_string(),
-        reopen_count: 0,
-        continuation_count: 0,
-        verification_failure_count: 0,
-        total_reopen_count: 0,
-        total_verification_failure_count: 0,
-        intervention_count: 0,
-        last_intervention_at: None,
-        created_at: "2026-01-01T00:00:00Z".to_string(),
-        updated_at: "2026-01-01T00:00:00Z".to_string(),
-        closed_at: None,
-        close_reason: None,
-        merge_commit_sha: None,
-        pr_url: None,
-        merge_conflict_metadata: None,
-        memory_refs: "[]".to_string(),
-        agent_type: None,
-        created_by_user_id: None,
-        unresolved_blocker_count: 0,
-    }
-}
-
-#[tokio::test]
-async fn planner_patrol_context_reports_memory_and_coverage_gaps() {
-    let (db, mut ctx, project, _tmp) = setup_project().await;
-    let note_repo = NoteRepository::new(db.clone(), EventBus::noop());
-    note_repo
-        .create_with_scope(
-            &project.id,
-            "Server subsystem overview",
-            "documents server source",
-            "reference",
-            None,
-            "[]",
-            r#"["server/src/existing.rs"]"#,
-        )
-        .await
-        .expect("create scoped note");
-    let stale_note = note_repo
-        .create_with_scope(
-            &project.id,
-            "Stale changed-area note",
-            "needs review after canonical graph changes",
-            "reference",
-            None,
-            r#"["review_needed"]"#,
-            r#"["server/src/new_area.rs"]"#,
-        )
-        .await
-        .expect("create stale scoped note");
-    note_repo
-        .set_confidence(&stale_note.id, 0.2)
-        .await
-        .expect("lower stale note confidence");
-
-    ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps {
-        ranked: vec![
-            RankedNode {
-                key: "file:server/src/new_area.rs".to_string(),
-                kind: "file".to_string(),
-                display_name: "server/src/new_area.rs".to_string(),
-                score: 10.0,
-                page_rank: 0.91,
-                structural_weight: 1.0,
-                inbound_edge_weight: 1.0,
-                outbound_edge_weight: 1.0,
-                ..Default::default()
-            },
-            RankedNode {
-                key: "file:server/src/existing.rs".to_string(),
-                kind: "file".to_string(),
-                display_name: "server/src/existing.rs".to_string(),
-                score: 9.0,
-                page_rank: 0.75,
-                structural_weight: 1.0,
-                inbound_edge_weight: 1.0,
-                outbound_edge_weight: 1.0,
-                ..Default::default()
-            },
-        ],
-        contexts: HashMap::new(),
-        ..FakeRepoGraphOps::default()
-    }));
-
-    let project_path = djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
-        .to_string_lossy()
-        .into_owned();
-    let summary = build_planner_patrol_context(&patrol_task(&project.id), &ctx, &project_path)
-        .await
-        .expect("planner patrol context");
-
-    assert!(summary.contains("Memory Health Signals"));
-    assert!(summary.contains("1 low-confidence"));
-    assert!(summary.contains("Weakly documented hotspots: `server/src/new_area.rs`"));
-    assert!(summary.contains("`server/src/existing.rs` (score 0.750, coverage 1)"));
-    assert!(summary.contains("Stale changed-area note scoped to `server/src/new_area.rs`"));
-    assert!(summary.contains("Knowledge Task Guard Rails"));
-    assert!(
-        summary.contains("create at most 2 new hygiene/exploration follow-up tasks this patrol")
-    );
-    assert!(summary.contains("you may still create eligible follow-up work"));
-}
-
-#[tokio::test]
-async fn planner_patrol_context_suppresses_duplicate_knowledge_follow_ups_when_similar_tasks_are_open()
- {
-    let (db, mut ctx, project, _tmp) = setup_project().await;
-    let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
-
-    ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps::default()));
-
-    task_repo
-        .create_in_project(
-            &project.id,
-            None,
-            "Consolidate duplicate notes about planner patrol",
-            "memory hygiene cleanup for duplicate cluster",
-            "",
-            "planning",
-            1,
-            "planner",
-            Some("open"),
-            None,
-        )
-        .await
-        .expect("create hygiene task");
-
-    task_repo
-        .create_in_project(
-            &project.id,
-            None,
-            "Explore and document server/src/new_area.rs",
-            "undocumented subsystem knowledge gap",
-            "",
-            "spike",
-            1,
-            "architect",
-            Some("open"),
-            None,
-        )
-        .await
-        .expect("create exploration task");
-
-    let project_path = djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
-        .to_string_lossy()
-        .into_owned();
-    let summary = build_planner_patrol_context(&patrol_task(&project.id), &ctx, &project_path)
-        .await
-        .expect("planner patrol context");
-
-    assert!(summary.contains("Open hygiene knowledge tasks already on the board: `"));
-    assert!(summary.contains("Consolidate duplicate notes about planner patrol"));
-    assert!(summary.contains("Open exploration knowledge tasks already on the board: `"));
-    assert!(summary.contains("Explore and document server/src/new_area.rs"));
-    assert!(summary.contains(
-            "If a relevant hygiene or exploration task is already open for the same area/problem, suppress creating another one"
-        ));
 }
 
 // ── PR E2: auto-injected `code_graph context` ────────────────────────
