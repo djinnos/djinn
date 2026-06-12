@@ -122,6 +122,12 @@ pub struct EdgeEntry {
     pub confidence_tier: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// PR s6ch / 92z7: machine-readable explanation when the project
+    /// route-exclusion policy downgraded the edge to a suggestion
+    /// (`"below-confidence-floor"`, `"health-path"`, `"param-only-path"`).
+    /// `None` for edges the active policy treats as a hard dependency.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusion_reason: Option<String>,
 }
 
 /// A single `(file, start_line, end_line)` hunk from a parsed diff. The
@@ -575,12 +581,29 @@ pub struct FileGroupEntry {
 /// layer can bucket entries into modules for risk classification without
 /// re-resolving the graph node. `None` for nodes that lack a `file_path`
 /// (e.g. external/virtual symbols).
+///
+/// `confidence_tier` (PR s6ch / 92z7): the edge confidence tier of the
+/// last hop used to reach this node — `"extracted"`, `"inferred"`, or
+/// `"ambiguous"`. Surfacing it on the entry lets the UI label inferred
+/// consumer routes as suggestions without a follow-up call.
+///
+/// `exclusion_reason` (PR s6ch / 92z7): set when the impact BFS would
+/// have reached this node but the route-exclusion policy classified
+/// the link as a non-blast-radius suggestion
+/// (`"below-confidence-floor"`, `"health-path"`, `"param-only-path"`).
+/// The entry is still returned so the UI can display it as a soft
+/// dependency instead of a hard one. `None` for entries whose inbound
+/// edge passed every filter.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ImpactEntry {
     pub key: String,
     pub depth: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusion_reason: Option<String>,
 }
 
 /// Either symbol-level neighbors/impact or per-file rollup.
@@ -1108,6 +1131,10 @@ pub struct ApiImpactEntry {
     pub consumer: RelatedSymbol,
     pub risk_tier: String,
     pub reason: String,
+    /// PR s6ch / 92z7: machine-readable exclusion reason when the
+    /// active route policy classified the consumer's inbound edge
+    /// as a non-blast-radius suggestion. Drives the UI's "soft
+    /// dependency" treatment of inferred routes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub excluded_reason: Option<String>,
 }

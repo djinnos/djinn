@@ -7,6 +7,7 @@ use djinn_control_plane::bridge::{
 };
 use djinn_graph::repo_graph::{
     RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind, RepoNodeKey,
+    RouteExclusionConfig,
 };
 use petgraph::Direction;
 use petgraph::graph::NodeIndex;
@@ -240,6 +241,10 @@ fn handler_for_route(graph: &RepoDependencyGraph, route: NodeIndex) -> Option<No
         })
 }
 
+/// PR s6ch / 92z7: list the `Symbol` nodes that fetch into the given
+/// route. The route-exclusion helpers in [`route_consumer_excluded_reason`]
+/// and [`shared::first_exclusion_reason`] do the heavy lifting on
+/// the per-consumer side; this just enumerates the candidates.
 fn consumers_for_route(graph: &RepoDependencyGraph, route: NodeIndex) -> Vec<NodeIndex> {
     graph
         .graph()
@@ -250,6 +255,10 @@ fn consumers_for_route(graph: &RepoDependencyGraph, route: NodeIndex) -> Vec<Nod
         .collect()
 }
 
+/// PR s6ch / 92z7: compute the active route-exclusion reason for a
+/// default shape/API analyses. With `DJINN_ROUTE_PARITY` disabled,
+/// `route_consumer_excluded_reason` returns `None`, so this keeps the
+/// pre-filter shadow set intact for comparison.
 fn active_consumers_for_route(graph: &RepoDependencyGraph, route: NodeIndex) -> Vec<NodeIndex> {
     consumers_for_route(graph, route)
         .into_iter()
@@ -445,20 +454,42 @@ fn api_impact_on_graph(
         }
     }
 
+    // PR s6ch / 92z7: gate the policy argument on `route_parity_enabled()`
+    // so the transitive API-impact BFS agrees with the consumer-side
+    // helpers (`route_excluded_reason` / `route_consumer_excluded_reason`).
+    // With the flag off, passing `None` makes `impact_bfs_with_policy`
+    // behave like the legacy `impact_bfs` — no `exclusion_reason` is
+    // stamped, the pre-filter consumer set is returned as hard blast-
+    // radius links, and `excluded_impacts` stays empty. With the flag
+    // on, below-floor / health-path / param-only-path `Fetches` edges
+    // are downgraded to suggestions and surfaced via `excluded_impacts`.
+    let policy: Option<&RouteExclusionConfig> =
+        djinn_graph::route_extraction::route_parity_enabled()
+            .then(|| graph.route_exclusion_config());
     for start in seed.handler.into_iter().chain(std::iter::once(seed.route)) {
-        for (idx, impact) in shared::impact_bfs(graph, start, 3, Some(min_confidence)) {
+        for (idx, impact) in
+            shared::impact_bfs_with_policy(graph, start, 3, Some(min_confidence), policy)
+        {
             let node = graph.node(idx);
             if node.is_external || node.kind != RepoGraphNodeKind::Symbol {
                 continue;
             }
             let drift = drift_by_uid.get(&impact.key);
             let (risk_tier, reason) = risk_for(drift, impact.depth);
-            by_uid.entry(impact.key.clone()).or_insert(ApiImpactEntry {
+            // PR s6ch / 92z7: surface the policy reason on transitive
+            // entries too, so a node only reachable via a `Fetches`
+            // hop the policy excludes still gets flagged.
+            let entry = ApiImpactEntry {
                 consumer: symbol_ref(node, 1.0),
                 risk_tier,
                 reason,
-                excluded_reason: None,
-            });
+                excluded_reason: impact.exclusion_reason.clone(),
+            };
+            if entry.excluded_reason.is_some() {
+                excluded_by_uid.entry(impact.key.clone()).or_insert(entry);
+            } else {
+                by_uid.entry(impact.key.clone()).or_insert(entry);
+            }
         }
     }
 
@@ -684,6 +715,9 @@ fn route_ref(node: &RepoGraphNode) -> RouteRef {
 }
 
 fn route_excluded_reason(graph: &RepoDependencyGraph, route: NodeIndex) -> Option<String> {
+    if !djinn_graph::route_extraction::route_parity_enabled() {
+        return None;
+    }
     let node = graph.node(route);
     let config = graph.route_exclusion_config();
     let mut reasons = Vec::new();
@@ -698,14 +732,10 @@ fn route_excluded_reason(graph: &RepoDependencyGraph, route: NodeIndex) -> Optio
     let id = route_id_string(node);
     let (_, path) = split_route_id(&id);
     if let Some(path) = path.as_deref() {
-        if config
-            .health_path_globs
-            .iter()
-            .any(|glob| glob_match(&glob.to_ascii_lowercase(), &path.to_ascii_lowercase()))
-        {
+        if shared::path_matches_health_glob(path, &config.health_path_globs) {
             reasons.push("health-path".to_string());
         }
-        if config.param_only_paths && is_param_only_path(path) {
+        if config.param_only_paths && shared::path_is_param_only(path) {
             reasons.push("param-only-path".to_string());
         }
     }
@@ -717,6 +747,9 @@ fn route_consumer_excluded_reason(
     route: NodeIndex,
     consumer: NodeIndex,
 ) -> Option<String> {
+    if !djinn_graph::route_extraction::route_parity_enabled() {
+        return None;
+    }
     let mut reasons = Vec::new();
     if let Some(reason) = route_excluded_reason(graph, route) {
         reasons.push(reason);
@@ -730,30 +763,19 @@ fn route_consumer_excluded_reason(
                 && edge.target() == route
         })
     {
-        let edge = fetches_edge.weight();
-        if edge.confidence + f64::EPSILON
-            < graph
-                .route_exclusion_config()
-                .min_confidence_for_consumer_edge
-        {
-            reasons.push("below-confidence-floor".to_string());
+        let route_path = shared::route_node_path(graph.node(route));
+        if let Some(reason) = shared::first_exclusion_reason(
+            fetches_edge.weight(),
+            route_path.as_deref(),
+            graph.route_exclusion_config(),
+        ) {
+            let reason = reason.to_string();
+            if !reasons.iter().any(|existing| existing == &reason) {
+                reasons.push(reason);
+            }
         }
     }
     (!reasons.is_empty()).then(|| reasons.join(","))
-}
-
-fn is_param_only_path(path: &str) -> bool {
-    let mut saw_segment = false;
-    for segment in path.trim_matches('/').split('/').filter(|s| !s.is_empty()) {
-        saw_segment = true;
-        let is_param = segment.starts_with(':')
-            || (segment.starts_with('{') && segment.ends_with('}'))
-            || segment.starts_with('*');
-        if !is_param {
-            return false;
-        }
-    }
-    saw_segment
 }
 
 fn route_id_string(node: &RepoGraphNode) -> String {
@@ -903,5 +925,12 @@ pub(super) mod test_helpers {
 
     pub(crate) fn api_impact_for_graph(graph: &RepoDependencyGraph) -> ApiImpactResult {
         api_impact_on_graph(graph, Some("GET /api/agents (axum)"), None, None, 0.5, 20)
+    }
+
+    pub(crate) fn api_impact_for_graph_with_route_id(
+        graph: &RepoDependencyGraph,
+        route_id: &str,
+    ) -> ApiImpactResult {
+        api_impact_on_graph(graph, Some(route_id), None, None, 0.5, 20)
     }
 }

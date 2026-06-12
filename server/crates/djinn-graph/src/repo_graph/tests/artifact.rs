@@ -570,6 +570,47 @@ fn empty_artifact_round_trip() {
     let restored = RepoDependencyGraph::deserialize_artifact(&json).expect("deserialize empty");
     assert_eq!(restored.node_count(), 0);
     assert_eq!(restored.edge_count(), 0);
+    // PR s6ch / 92z7: freshly deserialized empty graphs inherit
+    // the baseline route-exclusion config so the bridge can read
+    // it without an extra round-trip.
+    assert_eq!(
+        restored.route_exclusion_config(),
+        &RouteExclusionConfig::default()
+    );
+}
+
+#[test]
+fn from_artifact_round_trips_route_exclusion_config() {
+    // PR s6ch / 92z7: the in-memory graph must carry the
+    // `route_exclusion_config` sidecar verbatim across the
+    // bincode / JSON round-trip so callers (impact / api_impact /
+    // route_map / shape_check / edges) see the same policy
+    // configuration the warmer persisted.
+    let mut config = RouteExclusionConfig::default();
+    config.health_path_globs = vec!["/_internal/health".to_string()];
+    config.param_only_paths = false;
+    config.min_confidence_for_consumer_edge = 0.75;
+    config.excluded_frameworks = vec!["actix".to_string()];
+
+    let artifact = RepoGraphArtifact {
+        version: REPO_GRAPH_ARTIFACT_VERSION,
+        nodes: vec![],
+        edges: vec![],
+        symbol_ranges: BTreeMap::new(),
+        communities: Vec::new(),
+        processes: vec![],
+        route_exclusion_config: config.clone(),
+    };
+    let graph = RepoDependencyGraph::from_artifact(&artifact);
+    assert_eq!(graph.route_exclusion_config(), &config);
+
+    // `set_route_exclusion_config` lets tests (and the warmer)
+    // override the policy without rebuilding the graph.
+    let mut override_cfg = RouteExclusionConfig::default();
+    override_cfg.min_confidence_for_consumer_edge = 0.10;
+    let mut graph = graph;
+    graph.set_route_exclusion_config(override_cfg.clone());
+    assert_eq!(graph.route_exclusion_config(), &override_cfg);
 }
 
 // ── PR A2: edge confidence + reason ───────────────────────────────────

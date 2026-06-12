@@ -869,6 +869,8 @@ fn synth_impact(direct: usize, extra_total: usize, modules: usize) -> Vec<Impact
             key: format!("symbol:caller_{i}"),
             depth: 1,
             file_path: Some(format!("crate{bucket}/src/file_{i}.rs")),
+            confidence_tier: None,
+            exclusion_reason: None,
         });
     }
     for i in 0..extra_total {
@@ -877,6 +879,8 @@ fn synth_impact(direct: usize, extra_total: usize, modules: usize) -> Vec<Impact
             key: format!("symbol:transitive_{i}"),
             depth: 2,
             file_path: Some(format!("crate{bucket}/src/transitive_{i}.rs")),
+            confidence_tier: None,
+            exclusion_reason: None,
         });
     }
     entries
