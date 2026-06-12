@@ -1,5 +1,6 @@
 ---
 source: src/server/tests/tool_schemas.rs
+assertion_line: 456
 expression: signatures
 ---
 [
@@ -791,6 +792,12 @@ expression: signatures
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "by_depth_counts": {
+          "default": null,
+          "description": "df6s: per-depth counts for `impact`. When `Some(true)`, the\nresponse ships a `by_depth_counts: { \"1\": 12, \"2\": 7 }` map\nalongside the (sliced) impact list so triage can read the\ndepth distribution without walking every entry. Honoured by\n`impact` only; other ops ignore it. `summary_only=true`\nalready implies this — passing both is fine.",
+          "nullable": true,
+          "type": "boolean"
+        },
         "changed_files": {
           "default": null,
           "description": "Repository-relative file paths for `detect_changes` when no\nSHA range is supplied (or as a coarser fallback). Every symbol\nin each listed file is treated as potentially touched.",
@@ -993,9 +1000,23 @@ expression: signatures
           "nullable": true,
           "type": "string"
         },
+        "offset": {
+          "default": null,
+          "description": "df6s: page offset for paginated traversal ops (`neighbors`,\n`impact`, `coupling_hotspots`). Sliced **only** when\nconstructing the agent-facing response DTO — the underlying\n`RepoDependencyGraph` traversal always runs to completion so\n`total` reflects the unsliced result count and pagination can\nnever be misread as \"the graph has no more nodes\". Empty\nstring is normalized to `None` via `normalize()`. Negative\nvalues are clamped to zero at the handler boundary.",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
+        },
         "operation": {
           "description": "The operation to perform.\nOne of: `neighbors`, `ranked`, `impact`, `implementations`,\n`search`, `query_subgraph`, `route_map`, `shape_check`,\n`api_impact`, `flow`, `cycles`, `orphans`, `path`, `edges`,\n`symbols_at`, `diff_touches`, `detect_changes`, `describe`,\n`context`, `status`, `snapshot`, `workspaces`, and the other\ngraph analysis ops.",
           "type": "string"
+        },
+        "page_limit": {
+          "default": null,
+          "description": "df6s: distinct result cap for paginated traversal ops. For\n`neighbors` / `coupling_hotspots` this is the existing `limit`\n(re-aliased for clarity), so the field is **only** consumed by\nops where `limit` means something else — currently `impact`,\nwhere `limit` is the BFS depth. `impact` therefore reads\n`page_limit` for its result cap and keeps `limit` as the\ntraversal depth. Defaults to 100 when omitted; clamps to\n`[1, 1000]`. Sliced only at the response-DTO layer; the\ninternal traversal still runs to completion.",
+          "format": "int64",
+          "nullable": true,
+          "type": "integer"
         },
         "path": {
           "default": null,
@@ -1071,6 +1092,12 @@ expression: signatures
           "format": "int64",
           "nullable": true,
           "type": "integer"
+        },
+        "summary_only": {
+          "default": null,
+          "description": "df6s: counts-only mode for paginated traversal ops\n(`neighbors`, `impact`, `coupling_hotspots`). When `Some(true)`,\nthe response omits the large node/pair lists and instead ships\n`total` + the relevant counters (`by_depth_counts` for impact).\nDesigned for triage: a model can ask \"how big is the blast\nradius?\" without paying the token cost of every impacted\nsymbol. The internal traversal still runs to completion so\ngroup_by-file rollups report the full per-module count.",
+          "nullable": true,
+          "type": "boolean"
         },
         "symbols": {
           "default": null,

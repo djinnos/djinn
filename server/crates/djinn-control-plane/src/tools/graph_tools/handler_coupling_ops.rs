@@ -37,16 +37,33 @@ impl DjinnMcpServer {
     }
 
     /// Handler for `operation = "coupling_hotspots"`.
+    ///
+    /// df6s: paginate the unsliced post-exclusion set at the
+    /// response DTO layer. The `coupling_hotspots` bridge call
+    /// returns the full ranked pair list (up to `fetch_limit`),
+    /// then we apply `offset` / `limit` / `summary_only` only when
+    /// building the response. `total` always reflects the
+    /// unsliced count so a caller paginating across offset
+    /// boundaries can never mistake an empty page for "no more
+    /// pairs in the graph".
     pub(super) async fn code_graph_coupling_hotspots(
         &self,
         ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
-        let limit = params.limit.unwrap_or(20).max(0) as usize;
-        let limit = limit.clamp(1, 200);
+        // Legacy `limit` is honoured as the page cap so pre-df6s
+        // callers keep working unchanged; the new `page_limit`
+        // field takes precedence when set. The default of 20
+        // matches the other list ops.
+        let default_cap = params.limit.unwrap_or(20).max(0) as usize;
+        let pagination = PaginationParams::resolve(params, default_cap);
         let max_files_per_commit =
             params.max_files_per_commit.unwrap_or(15).clamp(1, 1000) as usize;
-        let fetch_limit = (limit.saturating_mul(25)).clamp(limit, 500);
+        // Fetch the unsliced ranked set. The 25× over-fetch still
+        // matters — Tier 1/2 exclusions can drop 50% of pairs in
+        // practice, and we need the post-exclusion list to honour
+        // the requested page cap.
+        let fetch_limit = (pagination.limit.saturating_mul(25)).clamp(pagination.limit, 500);
         let since_days_u32 = params
             .since_days
             .map(|d| u32::try_from(d.max(0)).unwrap_or(0));
@@ -56,16 +73,41 @@ impl DjinnMcpServer {
             .coupling_hotspots(ctx, fetch_limit, since_days_u32, max_files_per_commit)
             .await?;
         let exclusions = self.load_graph_exclusions(&params.project_id).await;
-        let pairs: Vec<CoupledPairEntry> = pairs
+        let mut pairs: Vec<CoupledPairEntry> = pairs
             .into_iter()
             .filter(|p| {
                 !exclusions.excludes_path(&p.file_a) && !exclusions.excludes_path(&p.file_b)
             })
-            .take(limit)
             .collect();
+        // Compute the unsliced total before applying the page slice.
+        let total = pairs.len();
+        // Apply the (offset, limit) page at the response DTO layer.
+        let page = apply_page_slice(&mut pairs, pagination.offset, pagination.limit);
+        let has_more = page.has_more;
+        // `summary_only` strips the heavy list fields; `total`
+        // carries the count signal.
+        if pagination.summary_only {
+            pairs.clear();
+        }
+        let emit_pagination = pagination_applied(pagination, total, pagination.limit);
+        let (resp_offset, resp_limit, resp_total, resp_has_more) = if emit_pagination {
+            (
+                Some(pagination.offset),
+                Some(pagination.limit),
+                Some(total),
+                Some(has_more),
+            )
+        } else {
+            (None, None, None, None)
+        };
         Ok(CodeGraphResponse::CouplingHotspots(
             CouplingHotspotsResponse {
                 pairs,
+                total: resp_total,
+                offset: resp_offset,
+                limit: resp_limit,
+                has_more: resp_has_more,
+                summary_only: pagination.summary_only.then_some(true),
                 next_step: None,
             },
         ))
