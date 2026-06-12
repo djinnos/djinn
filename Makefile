@@ -9,7 +9,7 @@ SERVER_DIR := $(CURDIR)/server
 # Postgres (docker-compose.yml → `postgres-test` service at :5433) plus the
 # test harness targets that depend on it.
 
-.PHONY: help dev test-db-migrate test-db-postgres-template test-vault test-db-reset sqlx-prepare sqlx-check test test-all
+.PHONY: help dev test-db-migrate test-db-postgres-template test-vault test-db-reset sqlx-prepare sqlx-check test test-all validate-taskrun-backstop
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -92,3 +92,6 @@ test-all: ## Run every workspace crate's tests in one nextest invocation
 	@$(MAKE) --no-print-directory test-vault
 	@$(MAKE) --no-print-directory test-db-reset
 	cd $(SERVER_DIR) && cargo nextest run --workspace
+
+validate-taskrun-backstop: ## Run epic 8451 full Postgres-backed validation
+	./scripts/validate-taskrun-backstop.sh
