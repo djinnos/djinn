@@ -938,16 +938,28 @@ impl ProposalRepository {
 
     /// Mark a proposal `done` (terminal). Stamps `closed_at` if not already set.
     /// Used by the Planner's `proposal_complete` tool after reviewing the
-    /// finished build.
+    /// finished build. Completing is also a successful reconcile: stamp every
+    /// graduated epic at the proposal head and clear proposal-level drift before
+    /// moving to the terminal state.
     pub async fn set_done(&self, proposal_id: &str) -> Result<Proposal> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
+        let proposal = self.get_required(proposal_id).await?;
+        let revision_seq = proposal.latest_revision_seq;
+        let epics = self.graduated_epics(proposal_id).await?;
+        for (epic_id, _) in epics {
+            self.record_epic_reconciliation(proposal_id, &epic_id, revision_seq)
+                .await?;
+        }
+        sqlx::query(
             r#"UPDATE proposals SET status = 'done',
+                    last_reconciled_revision_seq = latest_revision_seq,
+                    pending_reconcile = false,
+                    reconciled_at = now(),
                     closed_at = COALESCE(closed_at, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')),
                     updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
              WHERE id = $1"#,
-            proposal_id
         )
+        .bind(proposal_id)
         .execute(self.db.pool())
         .await?;
         let proposal = self.get_required(proposal_id).await?;
@@ -2107,12 +2119,13 @@ mod tests {
         let latest_by_epic = repo.latest_epic_reconciliations(&p.id).await.unwrap();
         assert_eq!(latest_by_epic.get(&epic), Some(&2));
 
-        // A status-only path that closes out a build is still allowed and
-        // does not require the drift to be resolved first — the build owner
-        // owns the final say.
+        // A closeout is itself a successful reconcile: it stamps current
+        // per-epic metadata and clears proposal-level drift before moving to
+        // the terminal state.
         let done = repo.set_done(&p.id).await.unwrap();
         assert_eq!(done.status, "done");
-        assert!(done.pending_reconcile);
+        assert!(!done.pending_reconcile);
+        assert_eq!(done.last_reconciled_revision_seq, Some(2));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
