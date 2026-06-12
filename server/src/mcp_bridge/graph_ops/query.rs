@@ -922,7 +922,8 @@ impl RepoGraphBridge {
             // run the same helpers `impact_bfs_with_policy` uses.
             let exclusion_reason: Option<String> = {
                 use djinn_graph::repo_graph::{RepoGraphEdgeKind, RepoGraphNodeKind};
-                if edge_ref.weight().kind == RepoGraphEdgeKind::Fetches
+                if djinn_graph::route_extraction::route_parity_enabled()
+                    && edge_ref.weight().kind == RepoGraphEdgeKind::Fetches
                     && dst_node.kind == RepoGraphNodeKind::Route
                 {
                     let route_path = super::shared::route_node_path(dst_node);
