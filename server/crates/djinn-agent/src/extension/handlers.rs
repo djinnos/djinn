@@ -196,8 +196,8 @@ where
         }
         "proposal_show" => call_proposal_show(state, &call.arguments).await,
         "proposal_complete" => call_proposal_complete(state, &call.arguments).await,
-        "proposal_ac_amend" => call_proposal_ac_amend(state, &call.arguments).await,
         "proposal_ac_set" => call_proposal_ac_set(state, &call.arguments).await,
+        "proposal_ac_amend" => call_proposal_ac_amend(state, &call.arguments).await,
         "memory_read" => call_memory_read(state, &call.arguments, &project_ref).await,
         "memory_search" => {
             call_memory_search(state, &call.arguments, session_task_id, &project_ref).await

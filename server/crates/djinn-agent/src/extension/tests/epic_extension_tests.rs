@@ -111,7 +111,8 @@ async fn proposal_ac_amend_validates_and_uses_repository_primitive() {
     let missing_reason = Some(
         serde_json::json!({
             "id": proposal.short_id,
-            "amendments": [{"index": 0, "action": "rewrite", "criterion": "New text", "reason": "   "}],
+            "reason": "   ",
+            "amendments": [{"index": 0, "operation": "rewrite", "criterion": "New text"}],
         })
         .as_object()
         .expect("args object")
@@ -125,7 +126,8 @@ async fn proposal_ac_amend_validates_and_uses_repository_primitive() {
     let missing_criterion = Some(
         serde_json::json!({
             "id": proposal.id,
-            "amendments": [{"index": 0, "action": "rewrite", "reason": "make verifiable"}],
+            "reason": "make verifiable",
+            "amendments": [{"index": 0, "operation": "rewrite"}],
         })
         .as_object()
         .expect("args object")
@@ -139,10 +141,11 @@ async fn proposal_ac_amend_validates_and_uses_repository_primitive() {
     let amend_args = Some(
         serde_json::json!({
             "id": proposal.short_id,
+            "reason": "old text was unverifiable; duplicate of prior AC; external-only proof is not agent-verifiable",
             "amendments": [
-                {"index": 0, "action": "rewrite", "criterion": "New verifiable text", "reason": "old text was unverifiable"},
-                {"index": 1, "action": "drop", "reason": "duplicate of prior AC"},
-                {"index": 1, "action": "waive", "reason": "external-only proof is not agent-verifiable"}
+                {"index": 0, "operation": "rewrite", "criterion": "New verifiable text"},
+                {"index": 1, "operation": "drop"},
+                {"index": 1, "operation": "waive"}
             ],
         })
         .as_object()
@@ -153,10 +156,8 @@ async fn proposal_ac_amend_validates_and_uses_repository_primitive() {
         .await
         .expect("amend succeeds");
     assert_eq!(response["ok"], serde_json::json!(true));
-    assert_eq!(response["previous_revision"], serde_json::json!(1));
-    assert_eq!(response["revision"], serde_json::json!(2));
-    assert_eq!(response["total"], serde_json::json!(2));
-    assert_eq!(response["met"], serde_json::json!(0));
+    assert_eq!(response["latest_revision_seq"], serde_json::json!(2));
+    assert_eq!(response["acceptance_criteria_count"], serde_json::json!(2));
 
     let updated = proposal_repo
         .get(&proposal.id)

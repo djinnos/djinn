@@ -266,24 +266,25 @@ fn proposal_ac_amend_schema_documents_operations_and_reasons() {
     assert_eq!(schema["name"], "proposal_ac_amend");
     assert_eq!(
         schema["inputSchema"]["required"],
-        serde_json::json!(["id", "amendments"])
-    );
-    let item = &schema["inputSchema"]["properties"]["amendments"]["items"];
-    assert_eq!(
-        item["required"],
-        serde_json::json!(["index", "action", "reason"])
+        serde_json::json!(["id", "reason", "amendments"])
     );
     assert_eq!(
-        item["properties"]["action"]["enum"],
-        serde_json::json!(["rewrite", "drop", "waive"])
-    );
-    assert_eq!(
-        item["properties"]["reason"]["minLength"],
+        schema["inputSchema"]["properties"]["reason"]["minLength"],
         serde_json::json!(1)
     );
     assert_eq!(
+        schema["inputSchema"]["properties"]["amendments"]["minItems"],
+        serde_json::json!(1)
+    );
+    let item = &schema["inputSchema"]["properties"]["amendments"]["items"];
+    assert_eq!(item["required"], serde_json::json!(["operation", "index"]));
+    assert_eq!(
+        item["properties"]["operation"]["enum"],
+        serde_json::json!(["rewrite", "drop", "waive"])
+    );
+    assert_eq!(
         item["properties"]["criterion"]["description"],
-        "Required replacement criterion text when action is rewrite; omitted for drop/waive."
+        "New criterion text; required and non-empty when operation is rewrite."
     );
 }
 

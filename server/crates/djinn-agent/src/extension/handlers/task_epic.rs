@@ -526,31 +526,26 @@ pub(crate) async fn call_proposal_ac_set(
     }))
 }
 
-/// Amend proposal acceptance criteria as real spec edits (Planner Workflow E).
-/// Use this only to repair invalid/unverifiable criteria; status-only met flag
-/// reconciliation stays on `proposal_ac_set` and remains revision-lightweight.
+/// Apply real acceptance-criteria spec amendments (rewrite/drop/waive) with a
+/// required audit reason. Unlike `proposal_ac_set`, this delegates to the DB
+/// repository's revision-bumping amendment path rather than met-flag merge.
 pub(crate) async fn call_proposal_ac_amend(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: ProposalAcAmendParams = parse_args(arguments)?;
+    let reason = p.reason.as_deref().map(str::trim).unwrap_or_default();
+    if reason.is_empty() {
+        return Err("proposal_ac_amend requires a non-empty reason".to_string());
+    }
     if p.amendments.is_empty() {
         return Err("proposal_ac_amend requires at least one amendment".to_string());
     }
 
     let mut amendments = Vec::with_capacity(p.amendments.len());
-    let mut reasons = Vec::with_capacity(p.amendments.len());
     for (position, amendment) in p.amendments.iter().enumerate() {
-        let action = amendment.action.trim();
-        let reason = amendment.reason.trim();
-        if reason.is_empty() {
-            return Err(format!(
-                "proposal_ac_amend amendments[{position}] requires a non-empty reason"
-            ));
-        }
-        reasons.push(format!("{} index {}: {}", action, amendment.index, reason));
-
-        match action {
+        let operation = amendment.operation.trim();
+        match operation {
             "rewrite" => {
                 let criterion = amendment
                     .criterion
@@ -559,7 +554,7 @@ pub(crate) async fn call_proposal_ac_amend(
                     .filter(|text| !text.is_empty())
                     .ok_or_else(|| {
                         format!(
-                            "proposal_ac_amend amendments[{position}] action=rewrite requires non-empty `criterion` text"
+                            "proposal_ac_amend amendments[{position}] operation=rewrite requires non-empty `criterion`"
                         )
                     })?;
                 amendments.push(ProposalAcceptanceCriteriaAmendment::Rewrite {
@@ -567,37 +562,15 @@ pub(crate) async fn call_proposal_ac_amend(
                     criterion,
                 });
             }
-            "drop" => {
-                if amendment
-                    .criterion
-                    .as_deref()
-                    .is_some_and(|text| !text.trim().is_empty())
-                {
-                    return Err(format!(
-                        "proposal_ac_amend amendments[{position}] action=drop must not include `criterion`"
-                    ));
-                }
-                amendments.push(ProposalAcceptanceCriteriaAmendment::Drop {
-                    index: amendment.index,
-                });
-            }
-            "waive" => {
-                if amendment
-                    .criterion
-                    .as_deref()
-                    .is_some_and(|text| !text.trim().is_empty())
-                {
-                    return Err(format!(
-                        "proposal_ac_amend amendments[{position}] action=waive must not include `criterion`"
-                    ));
-                }
-                amendments.push(ProposalAcceptanceCriteriaAmendment::Waive {
-                    index: amendment.index,
-                });
-            }
+            "drop" => amendments.push(ProposalAcceptanceCriteriaAmendment::Drop {
+                index: amendment.index,
+            }),
+            "waive" => amendments.push(ProposalAcceptanceCriteriaAmendment::Waive {
+                index: amendment.index,
+            }),
             other => {
                 return Err(format!(
-                    "proposal_ac_amend amendments[{position}] has invalid action `{other}`; expected rewrite, drop, or waive"
+                    "proposal_ac_amend amendments[{position}] has invalid operation `{other}`; expected rewrite, drop, or waive"
                 ));
             }
         }
@@ -607,31 +580,19 @@ pub(crate) async fn call_proposal_ac_amend(
     let Some(proposal) = proposal_repo.resolve(&p.id).await.ok().flatten() else {
         return Err(format!("proposal not found: {}", p.id));
     };
-    let previous_revision = proposal.latest_revision_seq;
-    let reason = reasons.join("\n");
     let updated = proposal_repo
-        .amend_acceptance_criteria(&proposal.id, &amendments, &reason)
+        .amend_acceptance_criteria(&proposal.id, &amendments, reason)
         .await
         .map_err(|e| e.to_string())?;
     let parsed: Vec<serde_json::Value> =
         serde_json::from_str(&updated.acceptance_criteria).unwrap_or_default();
-    let met = parsed
-        .iter()
-        .filter(|c| {
-            c.get("met")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-        })
-        .count();
 
     Ok(serde_json::json!({
         "ok": true,
         "id": updated.id,
         "short_id": updated.short_id,
-        "revision": updated.latest_revision_seq,
-        "previous_revision": previous_revision,
-        "total": parsed.len(),
-        "met": met,
+        "latest_revision_seq": updated.latest_revision_seq,
+        "acceptance_criteria_count": parsed.len(),
     }))
 }
 

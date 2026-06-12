@@ -148,14 +148,15 @@ pub(super) struct ProposalAcSetParams {
 #[derive(Deserialize)]
 pub(super) struct ProposalAcAmendParams {
     pub id: String,
-    pub amendments: Vec<ProposalAcAmendmentParam>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    pub amendments: Vec<ProposalAcAmendmentParams>,
 }
 
 #[derive(Deserialize)]
-pub(super) struct ProposalAcAmendmentParam {
+pub(super) struct ProposalAcAmendmentParams {
+    pub operation: String,
     pub index: usize,
-    pub action: String,
-    pub reason: String,
     #[serde(default)]
     pub criterion: Option<String>,
 }

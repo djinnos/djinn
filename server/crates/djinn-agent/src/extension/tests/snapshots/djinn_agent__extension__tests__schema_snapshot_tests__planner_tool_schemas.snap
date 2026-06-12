@@ -935,11 +935,12 @@ expression: tool_schemas_planner()
   },
   {
     "name": "proposal_ac_amend",
-    "description": "Amend invalid or unverifiable proposal acceptance criteria during Planner Workflow E closeout. This is a real spec edit: it rewrites/drops/waives criteria, requires an explicit reason per amendment, bumps the proposal revision, and writes an audit trail. Use proposal_ac_set instead when only reconciling met flags.",
+    "description": "Amend a proposal's acceptance-criteria spec with audited revision semantics. Each amendment targets a zero-based criterion index and uses operation `rewrite`, `drop`, or `waive`: rewrite replaces criterion text and requires `criterion`; drop removes the criterion; waive marks it waived. Requires a non-empty top-level reason. This is a real spec edit: it bumps the proposal revision, retains sign-offs, and records feedback/audit. Use proposal_ac_set instead when only reconciling met flags.",
     "inputSchema": {
       "type": "object",
       "required": [
         "id",
+        "reason",
         "amendments"
       ],
       "properties": {
@@ -947,47 +948,47 @@ expression: tool_schemas_planner()
           "type": "string",
           "description": "Proposal UUID or short ID"
         },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required non-empty explanation for the acceptance-criteria amendment audit trail"
+        },
         "amendments": {
           "type": "array",
-          "description": "One or more ordered AC amendments. Indexes are zero-based against the current proposal_show acceptance_criteria list; drops affect later indexes, so order multi-drop operations carefully.",
+          "minItems": 1,
+          "description": "One or more spec amendments applied in order. Operations target zero-based acceptance-criteria indexes from proposal_show; drops affect later indexes, so order multi-drop operations carefully.",
           "items": {
             "type": "object",
             "required": [
-              "index",
-              "action",
-              "reason"
+              "operation",
+              "index"
             ],
             "properties": {
-              "index": {
-                "type": "integer",
-                "minimum": 0,
-                "description": "Zero-based acceptance-criteria index to amend."
-              },
-              "action": {
+              "operation": {
                 "type": "string",
                 "enum": [
                   "rewrite",
                   "drop",
                   "waive"
                 ],
-                "description": "rewrite replaces criterion text; drop removes the criterion; waive keeps it but marks it waived."
+                "description": "Amendment operation: rewrite replaces criterion text; drop removes the criterion; waive keeps it but marks it waived."
               },
-              "reason": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Required non-empty explanation for why this AC is invalid/unverifiable or no longer applicable."
+              "index": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Zero-based acceptance-criteria index to amend."
               },
               "criterion": {
                 "type": "string",
                 "minLength": 1,
-                "description": "Required replacement criterion text when action is rewrite; omitted for drop/waive."
+                "description": "New criterion text; required and non-empty when operation is rewrite."
               }
             },
             "allOf": [
               {
                 "if": {
                   "properties": {
-                    "action": {
+                    "operation": {
                       "const": "rewrite"
                     }
                   }
