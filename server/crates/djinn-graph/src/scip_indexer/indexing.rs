@@ -92,6 +92,7 @@ pub(crate) fn plan_indexer_commands(
                         args: availability.indexer.command_args(&output_path),
                         working_directory: working_directory.clone(),
                         workspace_root: working_directory,
+                        workspace_rel_root: workspace.root,
                         workspace_slug: workspace.slug,
                         output_path,
                     }
@@ -496,13 +497,14 @@ pub(crate) fn collect_scip_artifacts(
     let mut seen = std::collections::HashSet::new();
     let mut artifacts = Vec::new();
 
-    let expected_paths: Vec<(PathBuf, SupportedIndexer, String)> = commands
+    let expected_paths: Vec<(PathBuf, SupportedIndexer, String, PathBuf)> = commands
         .iter()
         .map(|command| {
             (
                 command.plan.output_path.clone(),
                 command.plan.indexer,
                 command.plan.workspace_slug.clone(),
+                command.plan.workspace_rel_root.clone(),
             )
         })
         .collect();
@@ -511,15 +513,19 @@ pub(crate) fn collect_scip_artifacts(
         if seen.insert(path.clone()) {
             let matched = expected_paths
                 .iter()
-                .find(|(expected, _, _)| expected == &path);
-            let indexer = matched.map(|(_, indexer, _)| *indexer);
+                .find(|(expected, _, _, _)| expected == &path);
+            let indexer = matched.map(|(_, indexer, _, _)| *indexer);
             let workspace_slug = matched
-                .map(|(_, _, workspace_slug)| workspace_slug.clone())
+                .map(|(_, _, workspace_slug, _)| workspace_slug.clone())
                 .unwrap_or_else(|| "root".to_string());
+            let workspace_root = matched
+                .map(|(_, _, _, rel_root)| rel_root.clone())
+                .unwrap_or_default();
             artifacts.push(ScipArtifact {
                 path,
                 indexer,
                 workspace_slug,
+                workspace_root,
             });
         }
     }
@@ -812,6 +818,7 @@ mod tests {
             ],
             working_directory: PathBuf::from("/tmp/project/server"),
             workspace_root: PathBuf::from("/tmp/project/server"),
+            workspace_rel_root: PathBuf::from("server"),
             workspace_slug: "server".to_string(),
             output_path: output_root.join("repo-rust-server.scip"),
         };
@@ -827,6 +834,7 @@ mod tests {
             ],
             working_directory: PathBuf::from("/tmp/project/desktop"),
             workspace_root: PathBuf::from("/tmp/project/desktop"),
+            workspace_rel_root: PathBuf::from("desktop"),
             workspace_slug: "desktop".to_string(),
             output_path: output_root.join("repo-typescript-desktop.scip"),
         };
@@ -865,6 +873,7 @@ mod tests {
             path: PathBuf::from("/out/repo-typescript-web.scip"),
             indexer: Some(SupportedIndexer::TypeScript),
             workspace_slug: "web".to_string(),
+            workspace_root: PathBuf::from("web"),
         }];
         let mut statuses = vec![
             WorkspaceWarmStatus {
@@ -915,6 +924,7 @@ mod tests {
             ],
             working_directory: PathBuf::from("/tmp/project"),
             workspace_root: PathBuf::from("/tmp/project"),
+            workspace_rel_root: PathBuf::new(),
             workspace_slug: "root".to_string(),
             output_path: output_root.join("example-go.scip"),
         };
@@ -1085,6 +1095,7 @@ mod tests {
             args: vec!["index".to_string()],
             working_directory: PathBuf::from(workspace),
             workspace_root: PathBuf::from(workspace),
+            workspace_rel_root: PathBuf::from(workspace),
             workspace_slug: workspace.replace('/', "-"),
             output_path: PathBuf::from(workspace).join("out.scip"),
         }
@@ -1206,6 +1217,7 @@ mod tests {
             args: vec!["index".to_string()],
             working_directory: PathBuf::from(slug),
             workspace_root: PathBuf::from(slug),
+            workspace_rel_root: PathBuf::from(slug),
             workspace_slug: slug.to_string(),
             output_path: PathBuf::from(slug).join("out.scip"),
         }
@@ -1382,6 +1394,7 @@ mod tests {
                 args: vec!["scip".to_string()],
                 working_directory: PathBuf::from("server"),
                 workspace_root: PathBuf::from("server"),
+                workspace_rel_root: PathBuf::from("server"),
                 workspace_slug: "server".to_string(),
                 output_path: PathBuf::from("server/rust.scip"),
             },
@@ -1391,6 +1404,7 @@ mod tests {
                 args: vec!["index".to_string()],
                 working_directory: PathBuf::from("server"),
                 workspace_root: PathBuf::from("server"),
+                workspace_rel_root: PathBuf::from("server"),
                 workspace_slug: "server".to_string(),
                 output_path: PathBuf::from("server/ts.scip"),
             },

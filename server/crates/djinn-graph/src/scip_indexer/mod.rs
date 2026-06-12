@@ -233,6 +233,11 @@ pub struct PlannedIndexerCommand {
     pub args: Vec<String>,
     pub working_directory: PathBuf,
     pub workspace_root: PathBuf,
+    /// Workspace root RELATIVE to the project root (empty for the repo
+    /// root itself). SCIP document paths come out relative to the
+    /// indexer's working directory, so this prefix is what re-roots them
+    /// to repo-relative at parse time — see `parse_scip_artifacts`.
+    pub workspace_rel_root: PathBuf,
     pub workspace_slug: String,
     pub output_path: PathBuf,
 }
@@ -277,6 +282,13 @@ pub struct ScipArtifact {
     pub path: PathBuf,
     pub indexer: Option<SupportedIndexer>,
     pub workspace_slug: String,
+    /// Workspace root RELATIVE to the project root (empty for the repo
+    /// root). Used by `parse_scip_artifacts` to re-root the index's
+    /// workspace-relative document paths to repo-relative — without it,
+    /// every consumer that joins node `file_path`s onto the project root
+    /// (complexity, route extraction, `symbols_at`, `diff_touches`,
+    /// file_glob filters) silently misses sub-workspace files.
+    pub workspace_root: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
