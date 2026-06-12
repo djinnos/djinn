@@ -249,6 +249,9 @@ async fn start_fake_server(
                         ServiceRpcRequest::UpdateSessionStatus { .. } => {
                             ServiceRpcResponse::UpdateSessionStatus(Ok(()))
                         }
+                        ServiceRpcRequest::FlushSessionTokens { .. } => {
+                            ServiceRpcResponse::FlushSessionTokens(Ok(()))
+                        }
                         ServiceRpcRequest::PublishSessionMessage { .. } => {
                             ServiceRpcResponse::PublishSessionMessage(Ok(()))
                         }

@@ -902,6 +902,18 @@ pub struct RelatedSymbol {
     /// Model-level confidence tier derived from the underlying graph edge.
     /// Stable snake_case string: `extracted`, `inferred`, or `ambiguous`.
     pub confidence_tier: String,
+    /// Human-readable confidence/exclusion explanation carried by route-aware
+    /// inferred edges (for example `ts-fetch-literal` or
+    /// `below-confidence-floor`). Present when the underlying graph edge has a
+    /// reason so callers can audit why a consumer link was included or
+    /// excluded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_reason: Option<String>,
+    /// Route-exclusion reason for audit-only route/consumer links. `None` means
+    /// the symbol participates in the default blast radius; `Some(...)` means it
+    /// was suppressed by the configured route exclusion policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded_reason: Option<String>,
     /// Compat-safe audit metadata for route consumer edges. Present for
     /// `Fetches`/route links so UI/API consumers can display the language chain
     /// (for example TypeScript → Rust) without changing persisted graph edges.
@@ -1030,6 +1042,12 @@ pub struct RouteSummary {
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct RouteMapEntry {
     pub route: RouteRef,
+    /// Populated when the configured route-exclusion policy suppresses this
+    /// route from route-aware default analyses (health/ping endpoints,
+    /// param-only paths, excluded frameworks, etc.). The entry remains visible
+    /// in `route_map` so callers can audit the exclusion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handler: Option<RelatedSymbol>,
     pub middleware: Vec<RelatedSymbol>,
@@ -1074,6 +1092,13 @@ pub struct ShapeDrift {
 
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct ShapeCheckResult {
+    /// Whether the selector matched a route that was eligible for default
+    /// shape-checking after applying route exclusions.
+    pub matched: bool,
+    /// Truthful one-line status for empty/excluded/unavailable extraction cases.
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded_reason: Option<String>,
     pub route_shape: RouteShape,
     pub drifts: Vec<ShapeDrift>,
 }
@@ -1083,11 +1108,19 @@ pub struct ApiImpactEntry {
     pub consumer: RelatedSymbol,
     pub risk_tier: String,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct ApiImpactResult {
     pub impacts: Vec<ApiImpactEntry>,
+    /// Audit-only entries excluded from the default blast radius by route
+    /// exclusion policy or below-floor `Fetches` confidence. Kept separate so
+    /// callers can inspect weak suggestions without treating them as impact.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_impacts: Vec<ApiImpactEntry>,
+    pub summary: String,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]

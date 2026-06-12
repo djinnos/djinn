@@ -176,6 +176,26 @@ pub trait SupervisorServices: Send + Sync + 'static {
         cache_write: i64,
     ) -> Result<(), String>;
 
+    /// Best-effort mid-flight flush of a running session's cumulative token
+    /// counters to the session row, so long sessions don't sit at
+    /// `tokens_in = 0` in the DB (and every list/show surface reading it)
+    /// until teardown. The repository guards with `status = 'running'` so a
+    /// flush can never clobber a terminal row.
+    ///
+    /// Default is a no-op `Ok(())` so test doubles stay untouched; the two
+    /// real impls (`DirectServices` host-side, `WorkerSupervisorServices`
+    /// over RPC) MUST override.
+    async fn flush_session_tokens(
+        &self,
+        _session_id: String,
+        _tokens_in: i64,
+        _tokens_out: i64,
+        _cache_read: i64,
+        _cache_write: i64,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Run the `github_search` chat-extension tool host-side and return its
     /// JSON result.
     ///
