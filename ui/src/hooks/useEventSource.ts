@@ -26,6 +26,7 @@ import { taskStore } from "@/stores/taskStore";
 import { epicStore } from "@/stores/epicStore";
 import { resetMcpClient } from "@/api/mcpClient";
 import { useProviderGateStore } from "@/stores/providerGateStore";
+import { refreshDispatchPauseStatus } from "@/stores/dispatchPauseStore";
 
 const INITIAL_RECONNECT_DELAY = 1000;
 const MAX_RECONNECT_DELAY = 30000;
@@ -79,6 +80,7 @@ export function useEventSource() {
     if (normalized === "sync_completed") return "sync_completed";
     if (normalized === "verification_step") return "verification_step";
     if (normalized === "lifecycle_step") return "lifecycle_step";
+    if (normalized === "dispatch_pause_changed") return "dispatch_pause_changed";
     return null;
   };
 
@@ -101,6 +103,14 @@ export function useEventSource() {
         epicStore.getState().setEpics(snapshot.epics);
       } catch (error) {
         console.error("Failed to hydrate Kanban snapshot:", error);
+      }
+    };
+
+    const hydratePauseStatus = async () => {
+      try {
+        await refreshDispatchPauseStatus();
+      } catch (error) {
+        console.error("Failed to hydrate dispatch pause status:", error);
       }
     };
 
@@ -128,6 +138,7 @@ export function useEventSource() {
           if (!isActive) return;
           if (sseStore.getState().reconnectAttempt > 0) {
             void hydrateSnapshot();
+            void hydratePauseStatus();
           }
           sseStore.getState().resetReconnectAttempt();
           sseStore.getState().setConnected(true);
@@ -175,6 +186,8 @@ export function useEventSource() {
           "verification_step",
           "lifecycle.step",
           "lifecycle_step",
+          "dispatch_pause.changed",
+          "dispatch_pause_changed",
         ] as const;
 
         // Copilot's in-process OAuth still needs the browser-popup
@@ -221,6 +234,7 @@ export function useEventSource() {
             try {
               if (eventType === "lagged") {
                 void hydrateSnapshot();
+                void hydratePauseStatus();
                 return;
               }
 

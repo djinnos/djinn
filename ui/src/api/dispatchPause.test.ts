@@ -73,9 +73,7 @@ describe("dispatch pause status API", () => {
     await fetchProjectDispatchPauseStatus("project-123");
     await fetchUserDispatchPauseStatus("user-123");
 
-    const toolNames = vi
-      .mocked(callMcpTool)
-      .mock.calls.map(([toolName]) => toolName);
+    const toolNames = vi.mocked(callMcpTool).mock.calls.map(([toolName]) => toolName);
     expect(toolNames).toEqual([
       "dispatch_pause_status",
       "dispatch_pause_status",

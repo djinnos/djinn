@@ -789,14 +789,6 @@ export type DispatchPauseStatusInput = DispatchPauseStatusInputSchema.DispatchPa
 export namespace DispatchPauseStatusOutputSchema {
   export type DispatchPauseScope = "global" | "project" | "user"
 
-  export interface DispatchPauseStatusOutput {
-  current?: DispatchPause | null
-  error?: string | null
-  ok: boolean
-  scope?: DispatchPauseScope | null
-  state?: DispatchPauseState | null
-  target_id?: string | null
-  }
   /**
    * Metadata recorded when dispatch is paused for a scope.
    */
@@ -817,6 +809,15 @@ export namespace DispatchPauseStatusOutputSchema {
   users?: {
   [k: string]: DispatchPause
   }
+  }
+  export interface DispatchPauseStatusOutput {
+  current?: DispatchPause | null
+  error?: string | null
+  ok: boolean
+  scope?: DispatchPauseScope | null
+  state?: DispatchPauseState | null
+  target_id?: string | null
+  [k: string]: any
   }
 
 }

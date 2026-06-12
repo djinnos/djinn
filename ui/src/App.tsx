@@ -27,6 +27,7 @@ import { useModelGateStore } from "@/stores/modelGateStore";
 import { ModelOnboarding } from "@/components/ModelOnboarding";
 import { useProjectGateStore } from "@/stores/projectGateStore";
 import { RepositoryOnboarding } from "@/components/RepositoryOnboarding";
+import { useDispatchPauseHydration } from "@/hooks/useDispatchPauseHydration";
 
 function MainLayout() {
   const isAdmin = useAuthUser()?.isAdmin ?? false;
@@ -100,6 +101,7 @@ function AuthenticatedApp() {
   const hasConnectedOnce = useRef(false);
 
   useProjectsBootstrap(status);
+  useDispatchPauseHydration(status);
   useEventSource();
 
   useEffect(() => {
