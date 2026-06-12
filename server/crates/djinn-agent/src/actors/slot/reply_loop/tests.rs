@@ -1243,6 +1243,21 @@ async fn identical_failing_tool_call_injects_correction_then_typed_terminates() 
     assert_eq!(guard_err.condition.threshold, 3);
 
     let user_text = role_text(&conv, Role::User);
+    let correction_count = conv
+        .messages
+        .iter()
+        .filter(|m| {
+            m.role == Role::User
+                && m.content
+                    .iter()
+                    .filter_map(|b| b.as_text())
+                    .any(|t| t.contains("SYSTEM CORRECTION"))
+        })
+        .count();
+    assert_eq!(
+        correction_count, 1,
+        "exactly one corrective message should be injected before typed termination"
+    );
     assert!(
         user_text.contains("SYSTEM CORRECTION")
             && user_text.contains("nonexistent_tool")
@@ -1264,6 +1279,18 @@ async fn identical_failing_tool_call_injects_correction_then_typed_terminates() 
         "corrective message should be persisted with the transcript; expected \
          {expected_persisted} (conversation len {} minus 1 system prompt), got {persisted}",
         conv.messages.len()
+    );
+    let persisted_conversation =
+        SessionMessageRepository::new(app_state.db.clone(), app_state.event_bus.clone())
+            .load_conversation(&session_id)
+            .await
+            .expect("load persisted conversation");
+    let persisted_user_text = role_text(&persisted_conversation, Role::User);
+    assert!(
+        persisted_user_text.contains("SYSTEM CORRECTION")
+            && persisted_user_text.contains("nonexistent_tool")
+            && persisted_user_text.contains(r#"{"a":1,"b":2}"#),
+        "persisted corrective message should name the exact signature, got: {persisted_user_text}"
     );
     assert_eq!(
         provider.remaining(),

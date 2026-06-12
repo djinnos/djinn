@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
@@ -307,7 +308,7 @@ pub(crate) async fn run_reply_loop(
         // signatures. A signature gets exactly one corrective turn at the
         // threshold; repeating it after that terminates through LoopGuardError.
         let mut loop_guard_state = LoopGuardState::default();
-        let mut corrected_tool_failure_signatures: Vec<ToolCallSignature> = Vec::new();
+        let mut corrected_tool_failure_signatures: HashSet<ToolCallSignature> = HashSet::new();
 
         // Track the last assistant text for output parsing.
         let mut last_assistant_text = String::new();
@@ -856,7 +857,7 @@ pub(crate) async fn run_reply_loop(
                             failure = %failure_text,
                             "ReplyLoop: repeated failing tool-call signature reached threshold; injecting corrective message"
                         );
-                        corrected_tool_failure_signatures.push(signature);
+                        corrected_tool_failure_signatures.insert(signature);
                         loop_guard_condition_to_inject.get_or_insert(condition);
                     }
                 } else {
