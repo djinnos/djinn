@@ -5,6 +5,7 @@ import { taskStore } from './taskStore';
 import { epicStore } from './epicStore';
 import { projectStore } from './projectStore';
 import { verificationStore } from './verificationStore';
+import { dispatchPauseStore } from './dispatchPauseStore';
 import { fetchProjects } from '@/api/server';
 import {
   flushDebouncedInvalidations,
@@ -74,6 +75,7 @@ describe('sseEventHandlers', () => {
     taskStore.getState().clearTasks();
     epicStore.getState().clearEpics();
     verificationStore.setState({ runs: new Map(), lifecycle: new Map() });
+    dispatchPauseStore.getState().clearAll();
     projectStore.setState({ selectedProjectId: null, projects: [] });
   });
 
@@ -412,6 +414,55 @@ describe('sseEventHandlers', () => {
     expect(queryClient.invalidateQueries).toHaveBeenCalledTimes(2);
     expect(queryClient.invalidateQueries).toHaveBeenNthCalledWith(1, { queryKey: ['providers'] });
     expect(queryClient.invalidateQueries).toHaveBeenNthCalledWith(2, { queryKey: ['settings'] });
+
+    cleanup();
+  });
+
+  it('routes dispatch_pause.changed pause and resume envelopes to dispatchPauseStore', () => {
+    const cleanup = initSSEEventHandlers();
+
+    sseStore.getState().emit({
+      type: 'dispatch_pause_changed',
+      data: {
+        entity_type: 'dispatch_pause',
+        action: 'changed',
+        payload: {
+          scope: 'project',
+          target_id: 'project-1',
+          current: {
+            paused_by: 'admin-1',
+            paused_at: '2026-01-01T00:00:00Z',
+            reason: 'maintenance',
+          },
+          previous: null,
+        },
+      },
+      timestamp: 6,
+    });
+
+    expect(dispatchPauseStore.getState().projects['project-1']?.reason).toBe('maintenance');
+
+    sseStore.getState().emit({
+      type: 'dispatch_pause_changed',
+      data: {
+        entity_type: 'dispatch_pause',
+        action: 'changed',
+        payload: {
+          scope: 'project',
+          target_id: 'project-1',
+          current: null,
+          previous: {
+            paused_by: 'admin-1',
+            paused_at: '2026-01-01T00:00:00Z',
+            reason: 'maintenance',
+          },
+          resumed_by: 'admin-2',
+        },
+      },
+      timestamp: 7,
+    });
+
+    expect(dispatchPauseStore.getState().projects['project-1']).toBeUndefined();
 
     cleanup();
   });
