@@ -1699,6 +1699,9 @@ mod tests {
         reason: Option<String>,
     }
 
+    const PLANNING_ISSUE_TYPES: [&str; 4] =
+        ["planning", "decomposition", "review", "epic_breakdown"];
+
     #[test]
     fn cargo_target_run_dir_helper_matches_expected_cache_path() {
         let task_run_id = "019eb956-ac3a-7492-b51c-bcd904f65a21";
@@ -1792,7 +1795,7 @@ mod tests {
     /// regressed.
     #[test]
     fn route_planner_escalate_planner_planning_not_cancelled_closes() {
-        for issue_type in ["planning", "decomposition", "review", "epic_breakdown"] {
+        for issue_type in PLANNING_ISSUE_TYPES {
             assert_eq!(
                 route_planner_escalate(RoleKind::Planner, issue_type, false),
                 PlannerEscalateRoute::CloseWithReason,
@@ -1807,7 +1810,7 @@ mod tests {
     /// arriving mid-stage doesn't park the task and strand the user.
     #[test]
     fn route_planner_escalate_planner_planning_cancelled_interrupts() {
-        for issue_type in ["planning", "decomposition", "review", "epic_breakdown"] {
+        for issue_type in PLANNING_ISSUE_TYPES {
             assert_eq!(
                 route_planner_escalate(RoleKind::Planner, issue_type, true),
                 PlannerEscalateRoute::Cancelled,
@@ -1933,7 +1936,7 @@ mod tests {
     /// accident (e.g. dropping `epic_breakdown`).
     #[tokio::test]
     async fn planner_escalate_routes_every_planning_issue_type_to_close() {
-        for issue_type in ["planning", "decomposition", "review", "epic_breakdown"] {
+        for issue_type in PLANNING_ISSUE_TYPES {
             let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TransitionCall>::new()));
             let calls_for_closure = std::sync::Arc::clone(&calls);
 
@@ -2047,7 +2050,7 @@ mod tests {
     /// matches!() list and the cancel check get out of sync.
     #[tokio::test]
     async fn planner_escalate_cancel_gate_skips_transition_for_every_planning_issue() {
-        for issue_type in ["planning", "decomposition", "review", "epic_breakdown"] {
+        for issue_type in PLANNING_ISSUE_TYPES {
             let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TransitionCall>::new()));
             let calls_for_closure = std::sync::Arc::clone(&calls);
 
