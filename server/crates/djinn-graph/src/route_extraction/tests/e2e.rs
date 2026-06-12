@@ -15,6 +15,11 @@ struct RouteCounts {
     fetches: Vec<RepoGraphEdge>,
 }
 
+fn assert_edge_metadata(edge: &RepoGraphEdge, confidence: f64, reason: &str) {
+    assert_eq!(edge.confidence, confidence);
+    assert_eq!(edge.reason.as_deref(), Some(reason));
+}
+
 fn write_fixture(root: &Path, axum_source: Option<&str>, ts_file: Option<(&str, &str)>) {
     if let Some(source) = axum_source {
         std::fs::create_dir_all(root.join("server/src")).expect("create server fixture dir");
@@ -89,7 +94,13 @@ fn axum_only_round_trips_to_route_and_handler_edge_without_fetches() {
     assert_eq!(report.fetches_edges_added, 0);
     assert_eq!(report.unmatched_fetch_count, 0);
     assert_eq!(counts.route_display_names, ["GET /api/fixture (axum)"]);
-    assert_eq!(counts.handles.len(), 1);
+    let [handles] = counts.handles.as_slice() else {
+        panic!(
+            "expected exactly one HandlesRoute edge, got {:?}",
+            counts.handles
+        );
+    };
+    assert_edge_metadata(handles, 0.90, "axum-router-new");
     assert_eq!(counts.fetches.len(), 0);
 }
 
@@ -138,8 +149,7 @@ fn full_e2e_round_trips_to_route_handler_and_fetch_edges() {
             counts.handles
         );
     };
-    assert_eq!(handles.confidence, 0.90);
-    assert_eq!(handles.reason.as_deref(), Some("axum-router-new"));
+    assert_edge_metadata(handles, 0.90, "axum-router-new");
 
     let [fetches] = counts.fetches.as_slice() else {
         panic!(
@@ -147,6 +157,5 @@ fn full_e2e_round_trips_to_route_handler_and_fetch_edges() {
             counts.fetches
         );
     };
-    assert_eq!(fetches.confidence, 0.70);
-    assert_eq!(fetches.reason.as_deref(), Some("ts-fetch-literal"));
+    assert_edge_metadata(fetches, 0.70, "ts-fetch-literal");
 }
