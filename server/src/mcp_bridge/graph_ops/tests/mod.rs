@@ -410,6 +410,62 @@ fn resolve_node_finds_symbol_by_name() {
     ));
 }
 
+/// PR ga1k regression: `RepoGraphBridge::implementations` must accept
+/// the canonical `symbol:<scip>`-prefixed key form that the MCP/chat
+/// pre-resolver produces (see
+/// `graph_ops::insights::resolve` returning
+/// `ResolveOutcome::Found(format_node_key(&node.id))`) AND the bare
+/// SCIP symbol, returning the same implementor list for both. The
+/// fixture graph's `main → HelperTrait` SCIP `Implementation`
+/// relationship is materialised as a `RepoGraphEdgeKind::Implements`
+/// edge by `RepoDependencyGraph::build`, so the resolver points both
+/// forms at the same trait node and the `implementations` op walks
+/// the same incoming `Implements` edge from `main`.
+#[test]
+fn implementations_accepts_canonical_symbol_prefixed_key() {
+    use crate::mcp_bridge::graph_ops::query::test_helpers::implementations_for_graph;
+    let graph = build_test_graph();
+    // The SCIP symbol for the trait — same string the fixture's
+    // `HelperTrait` definition carries.
+    let bare_scip = "scip-rust pkg src/types.rs `HelperTrait`#";
+    let prefixed = format!("symbol:{bare_scip}");
+
+    // Sanity: the resolver must resolve both forms to the same node.
+    // The pre-fix op was failing exactly here with
+    // `symbol 'symbol:…' not found in graph` because it bypassed the
+    // shared resolver and called `graph.symbol_node` directly with
+    // the bare SCIP symbol only.
+    let bare_idx = resolve_node_or_err(&graph, bare_scip).unwrap();
+    let prefixed_idx = resolve_node_or_err(&graph, &prefixed).unwrap();
+    assert_eq!(
+        bare_idx, prefixed_idx,
+        "bare and canonical-prefixed forms must resolve to the same node"
+    );
+
+    // End-to-end: both call shapes return the same implementor list.
+    let bare_impls = implementations_for_graph(&graph, bare_scip)
+        .expect("bare SCIP symbol should resolve and find its implementors");
+    let prefixed_impls = implementations_for_graph(&graph, &prefixed)
+        .expect("symbol:-prefixed key should resolve and find its implementors");
+    assert_eq!(
+        bare_impls, prefixed_impls,
+        "implementations must be invariant to the symbol: prefix"
+    );
+    // The fixture has exactly one implementor of `HelperTrait` —
+    // `main` — and no external implementors, so the list must be
+    // non-empty and contain the main symbol string.
+    assert!(
+        !bare_impls.is_empty(),
+        "expected at least one implementor of HelperTrait in the fixture"
+    );
+    assert!(
+        bare_impls
+            .iter()
+            .any(|s| s == "scip-rust pkg src/app.rs `main`()."),
+        "expected `main` to be listed as an implementor of HelperTrait: {bare_impls:?}"
+    );
+}
+
 #[test]
 fn resolve_node_returns_not_found_for_unknown() {
     let graph = build_test_graph();
