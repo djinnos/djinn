@@ -1,5 +1,15 @@
 # Task-run backstop E2E evidence
 
+## Wave 2 final consolidation status
+
+Wave 2 did **not** clear all residual proposal 4369 / epic 8451 criteria. The operator preflight helper from `7jbf` is present and documents the exact evidence bundle required from a real operator/admin shell, but the subsequent Wave 2 runs still executed in worker environments that lacked the required infrastructure and access. The residual status is:
+
+- **Nextest validation (`t2cs`): not satisfied; infrastructure blocker.** Exact command `cd server && cargo nextest run` was attempted at 2026-06-12T03:38:48Z. The run compiled tests and started nextest, but the worker lacked Docker/`postgres-test`, `psql`, and `pg_isready`; TCP `127.0.0.1:5433` refused connections. Result: `97/247 tests run: 92 passed, 5 failed, 2 skipped`, with all failures showing Postgres `Connection refused`. No teardown code defect was identified.
+- **`execution_kill_task` Kubernetes cleanup proof (`9eps`): not satisfied; operator access blocker.** Attempt window 2026-06-12T04:07:22Z through 2026-06-12T04:07:55Z for task `019eb9c5-d90f-78e0-95aa-edca757567c0`, active task_run_id `019eba02-e846-76f1-874e-35d1985a2a36`, namespace `djinn`. `kubectl` was absent, `KUBECONFIG` was unset, no operator MCP endpoint/token was configured, and the only worker token returned HTTP 401 from `/mcp`; therefore no before-kill Kubernetes listing, kill invocation, after-kill polling, or server/coordinator logs could be captured.
+- **Force-close/operator-close Kubernetes cleanup proof (`mqt8`): not satisfied; operator access blocker.** Attempt window 2026-06-12T04:33:26Z through 2026-06-12T04:33:28Z for task `019eb9c6-04bd-74c0-90e1-7e4b4ea6e23c`, active task_run_id `019eba1a-4dbe-7692-9269-82d234a888a8`, namespace `djinn`. `kubectl` was absent, `KUBECONFIG` was unset, the worker service account was forbidden from reading Pods/Jobs/canonical Jobs, no operator MCP endpoint/token was configured, and both projected tokens returned HTTP 401 from `/mcp`; therefore no force-close action, before/after polling, or server/coordinator logs could be captured.
+
+**Epic 8451 closure recommendation:** epic 8451 should **remain open**. The exact residual blockers are infrastructure/access blockers, not known task-run teardown code defects: provide Postgres on `127.0.0.1:5433` (or Docker to start `postgres-test`) for nextest, and rerun both cleanup checks from an operator/admin environment with `kubectl`, Pods/Jobs/log RBAC in namespace `djinn`, and authenticated Djinn MCP/control-plane credentials.
+
 ## Operator preflight evidence required before Wave 2 cleanup checks
 
 Wave 1 kill and force-close evidence attempts were blocked by the normal task-run worker environment: `kubectl` was not installed, `KUBECONFIG` was unset, the worker service account lacked RBAC to list/get Pods and Jobs or read server logs, and projected worker tokens were rejected by `/mcp` for operator/admin actions. Passing proof therefore requires an operator/admin environment rather than another normal task-run worker.
@@ -593,6 +603,17 @@ cargo nextest exit=100
 - **Kill invocation evidence:** documented below under [`execution_kill_task` invocation path](#execution_kill_task-invocation-path). `/mcp` initialization with the projected Djinn token returned `authentication required`, so `execution_kill_task` could not be invoked from the worker.
 - **Post-kill/log evidence:** documented below under [Post-kill polling and logs](#post-kill-polling-and-logs). No post-kill polling or server/coordinator logs were captured because resource reads, logs, and authenticated kill invocation were blocked.
 - **Reconciliation:** the attempt is valid blocker evidence, but the proposal criterion requiring actual before/after cleanup proof is **not satisfied**.
+
+### Kubernetes evidence outcome from `9eps` (Wave 2 `execution_kill_task`)
+
+- **Evidence task:** `9eps` / `019eb9c5-d90f-78e0-95aa-edca757567c0`
+- **Worker task_run_id:** `019eba02-e846-76f1-874e-35d1985a2a36`
+- **Attempt window:** 2026-06-12T04:07:22Z through 2026-06-12T04:07:55Z
+- **Namespace/context evidence:** intended namespace `djinn`; no current Kubernetes context could be read because `kubectl` is absent and `KUBECONFIG` is unset. The in-cluster namespace file reported `djinn`.
+- **Pre-kill evidence:** documented above under [Wave 2 operator preflight attempt from `9eps`](#wave-2-operator-preflight-attempt-from-9eps--failed-before-cleanup-action). Intended `kubectl get jobs,pods -n "$NS" -l "djinn.app/task-run-id=$TASK_RUN_ID" -o wide` and running-Pod polling commands failed with `kubectl: command not found`, so the target `djinn-taskrun-*` resource could not be proven present before kill.
+- **Kill invocation evidence:** no operator `DJINN_MCP_URL` or `DJINN_OPERATOR_BEARER_TOKEN` was configured, and MCP `initialize` with the worker-projected token returned HTTP 401 `authentication required`; therefore `execution_kill_task` was **not executed**.
+- **Post-kill/log evidence:** no post-kill Kubernetes polling or `deploy/djinn-server` server/coordinator log capture was possible because `kubectl` was absent and there was no authenticated operator/admin control-plane session.
+- **Reconciliation:** the Wave 2 `execution_kill_task` proposal criterion is **not satisfied**. This is access-blocker evidence only; no cleanup success is claimed.
 
 ### Kubernetes evidence outcome from `6eg3` (force-close/operator-close)
 
