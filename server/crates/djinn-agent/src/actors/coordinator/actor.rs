@@ -28,12 +28,14 @@ use djinn_provider::rate_limit::suppression_remaining;
 
 // ─── Actor (≤20 fields — AGENT-11) ───────────────────────────────────────────
 
-/// Coordinator runtime state has a deliberate durability boundary: dispatch
-/// decision state that changes how quickly or how often a task is re-dispatched
-/// is rehydrated from `dispatch_state` at startup; observation caches that are
-/// recomputed from GitHub, sessions, metrics windows, or background task state
-/// remain memory-only because losing them can at worst cause one redundant poll
-/// or a conservative retry after restart.
+/// Coordinator actor state.
+///
+/// Durability boundary: `last_dispatched`, `inflight_dispatches`,
+/// `dispatch_cooldowns`, `dispatch_failure_streak`, and `escalation_counts` are
+/// persisted in the `dispatch_state` table via `DispatchStateRepository` (epic
+/// n6xw, proposal 8ipw). The other caches below are deliberately
+/// restart-safe-to-lose — they only feed poller/metrics decisions and are cheap
+/// to rebuild on the next sweep.
 pub(super) struct CoordinatorActor {
     // Ryhl core
     pub(super) receiver: mpsc::Receiver<CoordinatorMessage>,
@@ -66,6 +68,7 @@ pub(super) struct CoordinatorActor {
     /// failed → it is placed in an escalating cooldown to prevent hot dispatch
     /// loops (missing credential, crash, or a provider returning empty/throttled
     /// turns). A role change is a successful stage transition, not a failure.
+    // Persisted in dispatch_state — see epic n6xw and proposal 8ipw
     pub(super) last_dispatched: HashMap<String, DispatchMarker>,
     /// Durable dispatch-state when persisted: in-flight dispatch ledger
     /// (task UUID → (creator, model actually used)).
@@ -77,14 +80,17 @@ pub(super) struct CoordinatorActor {
     /// overshoot the cap (e.g. 8 workers for a cap of 4). This ledger makes a
     /// dispatched-but-not-yet-running task count against the cap immediately;
     /// `max(db_count, ledger_count)` keeps the seed correct across restarts too.
+    // Persisted in dispatch_state — see epic n6xw and proposal 8ipw
     pub(super) inflight_dispatches: HashMap<String, (Option<String>, String)>,
     /// Durable dispatch-state: task UUID → cooldown EXPIRY instant. Persisted as
     /// a wall-clock timestamp and converted to a process-local `StdInstant` on
     /// startup; expired persisted cooldowns are intentionally not reloaded.
+    // Persisted in dispatch_state — see epic n6xw and proposal 8ipw
     pub(super) dispatch_cooldowns: HashMap<String, StdInstant>,
     /// Durable dispatch-state: task UUID → count of consecutive failed dispatches, driving the
     /// escalating `dispatch_cooldowns` backoff. Cleared once the task makes a
     /// successful stage transition to a different dispatch role.
+    // Persisted in dispatch_state — see epic n6xw and proposal 8ipw
     pub(super) dispatch_failure_streak: HashMap<String, u32>,
     /// Shared tracker for in-flight verification background tasks.
     pub(super) verification_tracker: VerificationTracker,
@@ -121,12 +127,12 @@ pub(super) struct CoordinatorActor {
     pub(super) rpc_registry: Option<Arc<djinn_supervisor::ConnectionRegistry>>,
     /// Tick counter for association pruning (runs once per ~120 ticks ≈ 1 hour)
     pub(super) prune_tick_counter: u32,
-    /// Restart-safe-to-lose: rolling-window throughput tracking is recomputed
-    /// from future merge events; losing it only resets the status metric window.
-    /// epic_id → Vec of merge event instants.
+    /// Rolling-window throughput tracking: epic_id → Vec of merge event instants.
+    // Restart-safe-to-lose: sliding window for throughput metrics, rebuilt on the next metrics tick.
     pub(super) throughput_events: HashMap<String, Vec<StdInstant>>,
     /// Durable dispatch-state: per-task Lead escalation count (request_lead call count per task UUID).
     /// When a task accumulates ≥ 2 escalations, the next request_lead routes to Architect.
+    // Persisted in dispatch_state — see epic n6xw and proposal 8ipw
     pub(super) escalation_counts: HashMap<String, u32>,
     /// Restart-safe-to-lose: PR status cache; losing it causes one redundant
     /// GitHub CI query, after which the cache is rebuilt.
@@ -134,6 +140,7 @@ pub(super) struct CoordinatorActor {
     ///
     /// Used by the PR poller to skip redundant CI check-run queries when the
     /// PR's head commit has not changed since the previous poll cycle.
+    // Restart-safe-to-lose: caches PR open/merged status and is refetched on the next poll cycle.
     pub(super) pr_status_cache: HashMap<String, String>,
     /// Restart-safe-to-lose: tracks when each task was first seen in `pr_draft`
     /// status. Losing it makes the PR poller wait the minimum age again rather
@@ -142,6 +149,7 @@ pub(super) struct CoordinatorActor {
     /// Used by the PR poller to enforce a minimum age before checking CI,
     /// preventing a race where GitHub hasn't registered workflow check-runs
     /// yet and the poller incorrectly concludes CI has passed.
+    // Restart-safe-to-lose: draft-first-seen timestamps only throttle ready-to-merge notifier behavior and rebuild naturally on the next poll.
     pub(super) pr_draft_first_seen: HashMap<String, StdInstant>,
     /// Restart-safe-to-lose: consecutive merge failure count per task. A restart
     /// resets the recheck threshold, which is safe because the next poll observes
@@ -149,6 +157,7 @@ pub(super) struct CoordinatorActor {
     /// After
     /// `MERGE_RETRY_RECHECK_THRESHOLD` failures, the poller invalidates
     /// the CI SHA cache so it re-checks whether CI actually passed.
+    // Restart-safe-to-lose: local merge retry backoff counter can reset to zero because the merge retrier reconciles.
     pub(super) merge_fail_count: HashMap<String, u32>,
     /// Restart-safe-to-lose: task_id → head SHA an auto-approve attempt was already made for
     /// (regardless of success). Suppresses retries on the same SHA — needed
@@ -156,6 +165,7 @@ pub(super) struct CoordinatorActor {
     /// when the approval already landed and the next tick hasn't observed
     /// it yet. Stale entries are harmless: a new push bumps the SHA and we
     /// retry once on the new commit.
+    // Restart-safe-to-lose: suppresses duplicate auto-approve attempts, and the auto-approve path is idempotent if reset.
     pub(super) auto_approve_attempted: HashMap<String, String>,
     /// Restart-safe-to-lose: task_id → head SHA at the time we handed the PR off to GitHub
     /// (either via auto-merge enablement or direct merge-queue enqueue).
@@ -181,6 +191,7 @@ pub(super) struct CoordinatorActor {
     /// disappears from `list_active()`.  Keyed by session id (not task id) so
     /// a redispatched successor session for the same task is never masked by a
     /// dead predecessor's entry — see `enforce_session_stall_timeout`.
+    // Restart-safe-to-lose: records already-issued stall kills; repeated kill attempts on the next sweep are harmless terminal-state no-ops.
     pub(super) stall_killed: HashSet<String>,
     /// Timestamp of the last completed idle-time consolidation sweep (ADR-048 §3A).
     pub(super) last_idle_consolidation: Option<StdInstant>,
