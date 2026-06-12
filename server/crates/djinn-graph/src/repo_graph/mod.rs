@@ -47,6 +47,7 @@ pub use self::edge::{
 pub use self::graph::{RepoDependencyGraph, RouteEdgeLanguageChain, SymbolRange};
 pub use self::node::{
     RepoGraphNode, RepoGraphNodeKind, RepoGraphSearchHit, RepoNodeKey, is_route_or_tool_node,
+    stable_node_uid,
 };
 pub use self::ranking::{
     RankedRepoGraphNode, RepoGraphRanking, is_singleton_route_without_consumers,

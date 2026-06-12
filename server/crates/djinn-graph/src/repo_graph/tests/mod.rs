@@ -14,6 +14,7 @@ mod artifact;
 mod build;
 mod graph_queries;
 mod ranking;
+mod stable_uid;
 mod symbols_complexity;
 mod synthetic_dedup;
 
