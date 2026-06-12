@@ -1056,7 +1056,42 @@ impl TaskRunSupervisor {
                         break;
                     }
                     StageOutcome::Escalate { reason } => {
-                        result = Some(TaskRunOutcome::Escalated { reason });
+                        if role_kind == RoleKind::Planner
+                            && matches!(
+                                task.issue_type.as_str(),
+                                "planning" | "decomposition" | "review" | "epic_breakdown"
+                            )
+                        {
+                            if self.services.cancel().is_cancelled() {
+                                tracing::debug!(
+                                    task_run_id = %run_id,
+                                    task_id = %spec.task_id,
+                                    issue_type = %task.issue_type,
+                                    "supervisor: run cancelled — skipping planner escalate close transition"
+                                );
+                                result = Some(TaskRunOutcome::Interrupted);
+                                break;
+                            }
+
+                            result = Some(TaskRunOutcome::Closed {
+                                reason: reason.clone(),
+                            });
+                            if let Err(e) = self
+                                .services
+                                .transition_task(spec.task_id.clone(), "close".into(), Some(reason))
+                                .await
+                            {
+                                tracing::warn!(
+                                    task_run_id = %run_id,
+                                    task_id = %spec.task_id,
+                                    issue_type = %task.issue_type,
+                                    error = %e,
+                                    "supervisor: planner escalate close transition skipped"
+                                );
+                            }
+                        } else {
+                            result = Some(TaskRunOutcome::Escalated { reason });
+                        }
                         break;
                     }
                     // ── Lead intervention decisions ──────────────────────────
