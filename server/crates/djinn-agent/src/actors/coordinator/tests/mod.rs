@@ -1008,5 +1008,6 @@ async fn planner_intervention_markers(
 
 mod dispatch_flow;
 mod intervention;
+mod pause_is_not_fault;
 mod session_reaping;
 mod status_and_stuck;
