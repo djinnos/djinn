@@ -23,6 +23,23 @@ type CanonicalGraphBuildOutput = (
     usize,
 );
 
+/// Ignore very small graph-size fluctuations: route/process extraction and
+/// indexer metadata can legitimately move a few nodes between commits.
+const GRAPH_CACHE_SHRINK_MIN_ABSOLUTE_DELTA: usize = 100;
+/// Require at least a 10% drop as well as the absolute floor before warning,
+/// so small repositories do not warn on normal day-to-day edits.
+const GRAPH_CACHE_SHRINK_MIN_PERCENT: f64 = 0.10;
+
+#[derive(Debug, Clone, PartialEq)]
+struct GraphCacheShrinkWarning {
+    old_node_count: usize,
+    new_node_count: usize,
+    delta: usize,
+    tolerance_min_absolute_delta: usize,
+    tolerance_min_percent: f64,
+    workspace_status_summary: String,
+}
+
 /// Pre-computed strongly-connected components, one set per `kind_filter`
 /// variant the `cycles` op exposes (`None` / `File` / `Symbol`).
 pub struct CachedSccs {
@@ -402,6 +419,64 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
         return Ok((handle, graph));
     }
 
+    let pre_write_latest = match cache_repo.latest_for_project(project_id).await {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::warn!(
+                project_id = %project_id,
+                commit_sha = %commit_sha,
+                error = %e,
+                "ensure_canonical_graph: failed to read previous graph cache row before upsert"
+            );
+            None
+        }
+    };
+
+    let shrink_warning = detect_graph_cache_shrink_warning(
+        pre_write_latest
+            .as_ref()
+            .map(|row| row.graph_blob.as_slice()),
+        node_count,
+        &workspace_statuses,
+    );
+    if let Some(warning) = &shrink_warning {
+        tracing::warn!(
+            project_id = %project_id,
+            commit_sha = %commit_sha,
+            old_node_count = warning.old_node_count,
+            new_node_count = warning.new_node_count,
+            delta = warning.delta,
+            tolerance_min_absolute_delta = warning.tolerance_min_absolute_delta,
+            tolerance_min_percent = warning.tolerance_min_percent,
+            workspace_status_summary = %warning.workspace_status_summary,
+            "ensure_canonical_graph: graph cache node count shrank beyond tolerance without failed/timed_out workspace status"
+        );
+        let detail = serde_json::json!({
+            "kind": "graph_cache_shrink_warning",
+            "project_id": project_id,
+            "commit_sha": commit_sha,
+            "old_node_count": warning.old_node_count,
+            "new_node_count": warning.new_node_count,
+            "delta": warning.delta,
+            "tolerance_min_absolute_delta": warning.tolerance_min_absolute_delta,
+            "tolerance_min_percent": warning.tolerance_min_percent,
+            "workspace_status_summary": warning.workspace_status_summary,
+        })
+        .to_string();
+        if let Err(e) = crate::scip_indexer::append_graph_cache_shrink_warning(
+            handle.path(),
+            &workspace_statuses,
+            detail,
+        ) {
+            tracing::warn!(
+                project_id = %project_id,
+                commit_sha = %commit_sha,
+                error = %e,
+                "ensure_canonical_graph: failed to persist graph cache shrink warning status"
+            );
+        }
+    }
+
     match cache_repo
         .upsert(RepoGraphCacheInsert {
             project_id,
@@ -442,6 +517,63 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     spawn_chunk_and_embed_best_effort(ctx, project_id, handle.path(), &graph);
     spawn_cluster_docs_best_effort(ctx, project_id, &graph);
     Ok((handle, graph))
+}
+
+fn detect_graph_cache_shrink_warning(
+    previous_blob: Option<&[u8]>,
+    new_node_count: usize,
+    workspace_statuses: &[crate::scip_indexer::WorkspaceWarmStatus],
+) -> Option<GraphCacheShrinkWarning> {
+    let previous_blob = previous_blob?;
+    if workspace_statuses
+        .iter()
+        .any(|status| matches!(status.status.as_str(), "failed" | "timed_out"))
+    {
+        return None;
+    }
+
+    let previous =
+        crate::repo_graph::deserialize_repo_graph_artifact_bincode(previous_blob).ok()?;
+    let old_node_count = previous.nodes.len();
+    if new_node_count >= old_node_count {
+        return None;
+    }
+    let delta = old_node_count - new_node_count;
+    let percent = if old_node_count == 0 {
+        0.0
+    } else {
+        delta as f64 / old_node_count as f64
+    };
+    if delta < GRAPH_CACHE_SHRINK_MIN_ABSOLUTE_DELTA || percent < GRAPH_CACHE_SHRINK_MIN_PERCENT {
+        return None;
+    }
+
+    Some(GraphCacheShrinkWarning {
+        old_node_count,
+        new_node_count,
+        delta,
+        tolerance_min_absolute_delta: GRAPH_CACHE_SHRINK_MIN_ABSOLUTE_DELTA,
+        tolerance_min_percent: GRAPH_CACHE_SHRINK_MIN_PERCENT,
+        workspace_status_summary: workspace_status_summary(workspace_statuses),
+    })
+}
+
+fn workspace_status_summary(statuses: &[crate::scip_indexer::WorkspaceWarmStatus]) -> String {
+    if statuses.is_empty() {
+        return "none".to_string();
+    }
+    statuses
+        .iter()
+        .map(|status| {
+            format!(
+                "{}:{}={}",
+                status.workspace_slug,
+                status.indexer.binary_name(),
+                status.status
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Fire the PR B3 chunk-and-embed pipeline on a detached `tokio::spawn`
@@ -1068,6 +1200,84 @@ mod tests {
         let graph = crate::repo_graph::RepoDependencyGraph::build(&[]);
 
         assert!(distinct_workspace_slugs(&graph).is_empty());
+    }
+
+    fn graph_artifact_blob_with_nodes(node_count: usize) -> Vec<u8> {
+        let graph = build_test_graph_fixture();
+        let mut artifact = graph.to_artifact();
+        let template = artifact.nodes.first().expect("fixture node").clone();
+        artifact.nodes.resize(node_count, template);
+        bincode::serialize(&artifact).expect("serialize graph artifact")
+    }
+
+    fn warm_status(status: &str) -> crate::scip_indexer::WorkspaceWarmStatus {
+        crate::scip_indexer::WorkspaceWarmStatus {
+            workspace_slug: "root".to_string(),
+            indexer: crate::scip_indexer::SupportedIndexer::RustAnalyzer,
+            status: status.to_string(),
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn shrink_decision_ignores_missing_previous_artifact() {
+        assert_eq!(detect_graph_cache_shrink_warning(None, 10, &[]), None);
+    }
+
+    #[test]
+    fn shrink_decision_ignores_unreadable_previous_artifact() {
+        assert_eq!(
+            detect_graph_cache_shrink_warning(Some(b"not-bincode"), 10, &[warm_status("ready")]),
+            None
+        );
+    }
+
+    #[test]
+    fn shrink_decision_ignores_shrinks_within_tolerance() {
+        let blob = graph_artifact_blob_with_nodes(1_000);
+
+        assert_eq!(
+            detect_graph_cache_shrink_warning(Some(&blob), 950, &[warm_status("ready")]),
+            None
+        );
+    }
+
+    #[test]
+    fn shrink_decision_ignores_explained_failed_or_timed_out_workspace() {
+        let blob = graph_artifact_blob_with_nodes(1_000);
+
+        assert_eq!(
+            detect_graph_cache_shrink_warning(Some(&blob), 700, &[warm_status("failed")]),
+            None
+        );
+        assert_eq!(
+            detect_graph_cache_shrink_warning(Some(&blob), 700, &[warm_status("timed_out")]),
+            None
+        );
+    }
+
+    #[test]
+    fn shrink_decision_warns_on_unexplained_shrink_beyond_tolerance() {
+        let blob = graph_artifact_blob_with_nodes(1_000);
+
+        let warning = detect_graph_cache_shrink_warning(Some(&blob), 700, &[warm_status("ready")])
+            .expect("warning decision");
+        assert_eq!(warning.old_node_count, 1_000);
+        assert_eq!(warning.new_node_count, 700);
+        assert_eq!(warning.delta, 300);
+        assert_eq!(
+            warning.tolerance_min_absolute_delta,
+            GRAPH_CACHE_SHRINK_MIN_ABSOLUTE_DELTA
+        );
+        assert_eq!(
+            warning.tolerance_min_percent,
+            GRAPH_CACHE_SHRINK_MIN_PERCENT
+        );
+        assert!(
+            warning
+                .workspace_status_summary
+                .contains("root:rust-analyzer=ready")
+        );
     }
 
     #[tokio::test]
