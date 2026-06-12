@@ -64,6 +64,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub mod cargo_target_seed;
 mod lifecycle;
 mod worker_services;
 
