@@ -192,6 +192,7 @@ impl DjinnMcpServer {
                 + Self::memory_tool_router()
                 + Self::provider_tool_router()
                 + Self::credential_tool_router()
+                + Self::dispatch_pause_tool_router()
                 + Self::execution_tool_router()
                 + Self::settings_tool_router()
                 + Self::user_settings_tool_router()
