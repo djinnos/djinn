@@ -55,6 +55,13 @@ struct DurableDispatchStateUpdate {
 }
 
 fn format_dispatch_wall_clock(ts: ::time::OffsetDateTime) -> Option<String> {
+    // Dispatch-state timestamps are round-tripped through Postgres and selected
+    // with millisecond precision. Emit the same precision up front so no-op
+    // write-throughs (for example, pause skips preserving cooldown_until) do not
+    // appear to mutate durable state by dropping sub-millisecond digits.
+    let ts = ts
+        .replace_nanosecond((ts.nanosecond() / 1_000_000) * 1_000_000)
+        .ok()?;
     ts.format(&::time::format_description::well_known::Rfc3339)
         .ok()
 }
