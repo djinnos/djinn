@@ -871,6 +871,18 @@ pub(super) mod test_helpers {
         route_map_on_graph(graph, None, None, None, None, None, 20)
     }
 
+    pub(crate) fn route_map_for_graph_with_filters(
+        graph: &RepoDependencyGraph,
+        route_id: Option<&str>,
+        method: Option<&str>,
+        path: Option<&str>,
+        path_glob: Option<&str>,
+        framework: Option<&str>,
+        limit: usize,
+    ) -> RouteMapResult {
+        route_map_on_graph(graph, route_id, method, path, path_glob, framework, limit)
+    }
+
     pub(crate) fn shape_check_for_graph(graph: &RepoDependencyGraph) -> ShapeCheckResult {
         shape_check_on_graph(graph, Some("GET /api/agents (axum)"), None, None, false)
     }
