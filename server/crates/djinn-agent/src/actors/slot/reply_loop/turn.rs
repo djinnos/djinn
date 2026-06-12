@@ -850,6 +850,19 @@ pub(crate) async fn run_reply_loop(
 
             let signatures_corrected_before_dispatch = corrected_tool_failure_signatures.clone();
             let mut loop_guard_condition_to_inject: Option<LoopGuardCondition> = None;
+            let tool_batch_has_success = tool_result_blocks.iter().any(|result_block| {
+                matches!(
+                    result_block,
+                    ContentBlock::ToolResult {
+                        is_error: false,
+                        ..
+                    }
+                )
+            });
+            if tool_batch_has_success {
+                tool_failure_guard_state.record_tool_success();
+                corrected_tool_failure_signatures.clear();
+            }
             for (result_index, result_block) in tool_result_blocks.iter().enumerate() {
                 let ContentBlock::ToolResult {
                     tool_use_id,
@@ -873,8 +886,15 @@ pub(crate) async fn run_reply_loop(
 
                 if *is_error {
                     let failure_text = tool_result_text(content);
-                    let condition = tool_failure_guard_state
-                        .record_tool_failure(signature.clone(), classify_tool_failure(content));
+                    let condition = if tool_batch_has_success {
+                        tool_failure_guard_state.record_tool_failure_after_progress(
+                            signature.clone(),
+                            classify_tool_failure(content),
+                        )
+                    } else {
+                        tool_failure_guard_state
+                            .record_tool_failure(signature.clone(), classify_tool_failure(content))
+                    };
                     if let Some(condition) = condition {
                         if matches!(&condition.reason, LoopGuardReason::RepeatedToolFailure { .. })
                             && !signatures_corrected_before_dispatch.contains(&signature)
@@ -902,9 +922,6 @@ pub(crate) async fn run_reply_loop(
                             return Err(loop_guard_error(condition, turns, session_id));
                         }
                     }
-                } else {
-                    tool_failure_guard_state.record_tool_success();
-                    corrected_tool_failure_signatures.clear();
                 }
             }
 

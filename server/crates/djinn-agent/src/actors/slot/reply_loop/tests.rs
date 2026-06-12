@@ -1496,3 +1496,72 @@ async fn successful_novel_tool_call_resets_failure_pressure() {
     assert_eq!(output.finalize_tool_name.as_deref(), Some("submit_work"));
     assert_eq!(provider.remaining(), 0);
 }
+
+#[tokio::test]
+async fn mixed_successful_tool_batch_resets_consecutive_failure_pressure() {
+    let tools = vec![
+        dummy_tool_schema("flaky_mcp"),
+        dummy_tool_schema("submit_work"),
+    ];
+    let registry = crate::mcp_client::McpToolRegistry::with_dispatch(
+        [("flaky_mcp".to_string(), "flaky-server".to_string())],
+        vec![serde_json::json!({"name": "flaky_mcp"})],
+        |_tool_name, arguments| {
+            if arguments
+                .as_ref()
+                .and_then(|args| args.get("ok"))
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                Ok(serde_json::json!({"ok": true}))
+            } else {
+                Err("ordinary tool failure".to_string())
+            }
+        },
+    );
+
+    let mut responses: Vec<MockResponse> = (0..5)
+        .map(|idx| {
+            MockResponse::tool_call_with_input(
+                &format!("fail{idx}"),
+                "flaky_mcp",
+                serde_json::json!({"ok": false, "attempt": idx}),
+                100 + idx,
+            )
+        })
+        .collect();
+    responses.push(MockResponse {
+        text: None,
+        tool_calls: vec![
+            ContentBlock::ToolUse {
+                id: "mixed-fail".to_string(),
+                name: "flaky_mcp".to_string(),
+                input: serde_json::json!({"ok": false, "attempt": "mixed"}),
+            },
+            ContentBlock::ToolUse {
+                id: "mixed-ok".to_string(),
+                name: "flaky_mcp".to_string(),
+                input: serde_json::json!({"ok": true}),
+            },
+        ],
+        input_tokens: 130,
+        output_tokens: 10,
+    });
+    responses.push(MockResponse::tool_call_with_input(
+        "done",
+        "submit_work",
+        serde_json::json!({"task_id": "t1", "summary": "done"}),
+        140,
+    ));
+    let provider = MockProvider::new(responses);
+
+    let (result, output, _conv, _app_state, _session_id) =
+        run_scripted_reply_loop(&provider, &tools, Some(&registry)).await;
+
+    assert!(
+        result.is_ok(),
+        "a mixed batch containing progress should reset the consecutive-failure streak: {result:?}"
+    );
+    assert_eq!(output.finalize_tool_name.as_deref(), Some("submit_work"));
+    assert_eq!(provider.remaining(), 0);
+}
