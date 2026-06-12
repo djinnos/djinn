@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use djinn_control_plane::bridge::{
     ApiImpactEntry, ApiImpactResult, RelatedSymbol, RouteLanguageChain, RouteMapEntry,
     RouteMapResult, RouteRef, RouteShape, RouteSummary, ShapeCheckResult, ShapeDrift, ShapeField,
+    ShapeTypeMismatch,
 };
 use djinn_graph::repo_graph::{
     RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind, RepoNodeKey,
@@ -460,7 +461,11 @@ fn drift_for_consumer(
         if let (Some(server), Some(client)) = (server, client)
             && !server.eq_ignore_ascii_case(client)
         {
-            type_mismatches.push(format!("{key}: server {server}, consumer {client}"));
+            type_mismatches.push(ShapeTypeMismatch {
+                key: key.clone(),
+                server_type: server.to_string(),
+                consumer_type: client.to_string(),
+            });
         }
     }
     if missing_keys.is_empty() && extra_keys.is_empty() && type_mismatches.is_empty() {
@@ -724,6 +729,15 @@ pub(super) mod test_helpers {
 
     pub(crate) fn shape_check_for_graph(graph: &RepoDependencyGraph) -> ShapeCheckResult {
         shape_check_on_graph(graph, Some("GET /api/agents (axum)"), None, None, false)
+    }
+
+    pub(crate) fn shape_check_for_graph_with_route(
+        graph: &RepoDependencyGraph,
+        route_id: Option<&str>,
+        method: Option<&str>,
+        path: Option<&str>,
+    ) -> ShapeCheckResult {
+        shape_check_on_graph(graph, route_id, method, path, false)
     }
 
     pub(crate) fn api_impact_for_graph(graph: &RepoDependencyGraph) -> ApiImpactResult {

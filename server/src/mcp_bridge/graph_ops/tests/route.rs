@@ -68,7 +68,7 @@ fn route_fixture_graph() -> RepoDependencyGraph {
         "typescript",
     );
     consumer.documentation =
-        vec!["fetches /api/agents; uses response: { id: string, missing: string }".to_string()];
+        vec!["fetches /api/agents; uses response: { id: number, missing: string }".to_string()];
 
     let middleware = symbol_node(
         "scip-rust pkg server/src/middleware.rs `auth`().",
@@ -241,10 +241,39 @@ fn route_map_no_match_returns_empty_routes_with_summary() {
 fn shape_check_detects_missing_and_extra_response_keys() {
     let graph = route_fixture_graph();
     let result = routes::test_helpers::shape_check_for_graph(&graph);
+    assert_eq!(
+        result.route_shape.route.path.as_deref(),
+        Some("/api/agents")
+    );
+    assert!(
+        result
+            .route_shape
+            .response_fields
+            .iter()
+            .any(|field| field.name == "id")
+    );
     assert_eq!(result.drifts.len(), 1);
     let drift = &result.drifts[0];
     assert!(drift.missing_keys.iter().any(|k| k == "missing"));
     assert!(drift.extra_keys.iter().any(|k| k == "name"));
+    assert!(
+        drift
+            .type_mismatches
+            .iter()
+            .any(|m| { m.key == "id" && m.server_type == "string" && m.consumer_type == "number" })
+    );
+
+    let by_method_path = routes::test_helpers::shape_check_for_graph_with_route(
+        &graph,
+        None,
+        Some("get"),
+        Some("/api/agents"),
+    );
+    assert_eq!(
+        by_method_path.route_shape.route.id,
+        result.route_shape.route.id
+    );
+    assert_eq!(by_method_path.drifts.len(), 1);
 }
 
 #[test]
