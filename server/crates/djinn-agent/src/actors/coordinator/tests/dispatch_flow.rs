@@ -109,7 +109,6 @@ async fn project_dispatch_pause_defers_only_matching_project() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let paused_task = open_task(&db, &tx, "paused project task").await;
-    let other_task = open_task(&db, &tx, "unpaused project task").await;
 
     pause_dispatch(
         &db,
@@ -124,20 +123,69 @@ async fn project_dispatch_pause_defers_only_matching_project() {
             .await
             .unwrap();
     assert!(pause_state.projects.contains_key(&paused_task.project_id));
-    assert!(!pause_state.projects.contains_key(&other_task.project_id));
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.dispatch_ready_tasks(None).await;
+
+    assert_eq!(actor.dispatched, 0, "paused project task must not dispatch");
+    assert!(!actor.last_dispatched.contains_key(&paused_task.id));
+    assert!(!actor.dispatch_failure_streak.contains_key(&paused_task.id));
+    assert!(!actor.dispatch_cooldowns.contains_key(&paused_task.id));
+    assert_task_status(&db, &tx, &paused_task, "open").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_dispatch_pause_does_not_block_unaffected_project() {
+    // Companion to `project_dispatch_pause_defers_only_matching_project`:
+    // a task in a project that is NOT paused must dispatch normally even
+    // while some other project is paused. Proves the project-pause scope is
+    // exact and does not bleed into dispatch for other projects. The pause
+    // is keyed by a project id that has no ready task, so the dispatch pass
+    // sees exactly one ready task — the unpaused one.
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+
+    let paused_project_id = uuid::Uuid::now_v7().to_string();
+    pause_dispatch(
+        &db,
+        &tx,
+        djinn_db::DispatchPauseTarget::project(paused_project_id.clone()),
+        "project maintenance",
+    )
+    .await;
+    assert!(
+        djinn_db::DispatchPauseRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+            .get_status()
+            .await
+            .unwrap()
+            .projects
+            .contains_key(&paused_project_id)
+    );
+
+    let other_task = open_task(&db, &tx, "unpaused project task").await;
+    assert!(other_task.project_id != paused_project_id);
 
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.dispatch_ready_tasks(None).await;
 
     assert_eq!(
         actor.dispatched, 1,
-        "unpaused project should still dispatch in the same pass"
+        "unpaused project task should dispatch even while another project is paused"
     );
-    assert!(!actor.last_dispatched.contains_key(&paused_task.id));
     assert!(actor.last_dispatched.contains_key(&other_task.id));
-    assert!(!actor.dispatch_failure_streak.contains_key(&paused_task.id));
-    assert!(!actor.dispatch_cooldowns.contains_key(&paused_task.id));
-    assert_task_status(&db, &tx, &paused_task, "open").await;
+    assert!(!actor.dispatch_failure_streak.contains_key(&other_task.id));
+    assert!(!actor.dispatch_cooldowns.contains_key(&other_task.id));
+    // The pause state must remain intact — pausing one project never
+    // accidentally clears or supersedes the persisted scope.
+    assert!(
+        djinn_db::DispatchPauseRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+            .get_status()
+            .await
+            .unwrap()
+            .projects
+            .contains_key(&paused_project_id)
+    );
+    assert_task_status(&db, &tx, &other_task, "open").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -145,9 +193,7 @@ async fn user_dispatch_pause_defers_only_matching_creator() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let paused_task = open_task(&db, &tx, "paused user task").await;
-    let other_task = open_task(&db, &tx, "unpaused user task").await;
     let paused_task = set_task_creator(&db, &tx, &paused_task, 10_001, "paused-user").await;
-    let other_task = set_task_creator(&db, &tx, &other_task, 10_002, "other-user").await;
 
     pause_dispatch(
         &db,
@@ -166,24 +212,70 @@ async fn user_dispatch_pause_defers_only_matching_creator() {
             .users
             .contains_key(paused_task.created_by_user_id.as_deref().unwrap())
     );
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.dispatch_ready_tasks(None).await;
+
+    assert_eq!(actor.dispatched, 0, "paused user task must not dispatch");
+    assert!(!actor.last_dispatched.contains_key(&paused_task.id));
+    assert!(!actor.dispatch_failure_streak.contains_key(&paused_task.id));
+    assert!(!actor.dispatch_cooldowns.contains_key(&paused_task.id));
+    assert_task_status(&db, &tx, &paused_task, "open").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn user_dispatch_pause_does_not_block_unaffected_creator() {
+    // Companion to `user_dispatch_pause_defers_only_matching_creator`:
+    // a task owned by a user that is NOT paused must dispatch normally even
+    // while some other user is paused. Proves the user-pause scope is
+    // exact and does not bleed into dispatch for other users. The pause is
+    // keyed by a synthetic user id with no ready task, so the dispatch pass
+    // sees exactly one ready task — the unpaused one.
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+
+    let paused_user_id = uuid::Uuid::now_v7().to_string();
+    pause_dispatch(
+        &db,
+        &tx,
+        djinn_db::DispatchPauseTarget::user(paused_user_id.clone()),
+        "user maintenance",
+    )
+    .await;
     assert!(
-        !pause_state
+        djinn_db::DispatchPauseRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+            .get_status()
+            .await
+            .unwrap()
             .users
-            .contains_key(other_task.created_by_user_id.as_deref().unwrap())
+            .contains_key(&paused_user_id)
     );
+
+    let other_task = open_task(&db, &tx, "unpaused user task").await;
+    let other_task = set_task_creator(&db, &tx, &other_task, 10_002, "other-user").await;
+    assert!(other_task.created_by_user_id.as_deref() != Some(paused_user_id.as_str()));
 
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.dispatch_ready_tasks(None).await;
 
     assert_eq!(
         actor.dispatched, 1,
-        "unpaused user's task should still dispatch in the same pass"
+        "unpaused user task should dispatch even while another user is paused"
     );
-    assert!(!actor.last_dispatched.contains_key(&paused_task.id));
     assert!(actor.last_dispatched.contains_key(&other_task.id));
-    assert!(!actor.dispatch_failure_streak.contains_key(&paused_task.id));
-    assert!(!actor.dispatch_cooldowns.contains_key(&paused_task.id));
-    assert_task_status(&db, &tx, &paused_task, "open").await;
+    assert!(!actor.dispatch_failure_streak.contains_key(&other_task.id));
+    assert!(!actor.dispatch_cooldowns.contains_key(&other_task.id));
+    // The pause state must remain intact — pausing one user never
+    // accidentally clears or supersedes the persisted scope.
+    assert!(
+        djinn_db::DispatchPauseRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+            .get_status()
+            .await
+            .unwrap()
+            .users
+            .contains_key(&paused_user_id)
+    );
+    assert_task_status(&db, &tx, &other_task, "open").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
