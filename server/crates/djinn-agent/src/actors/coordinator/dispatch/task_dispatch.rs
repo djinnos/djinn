@@ -1273,16 +1273,14 @@ mod inflight_ledger_tests {
 
     #[test]
     fn matching_dispatch_pause_honors_global_project_and_user_scopes() {
-        let mut state = DispatchPauseState::default();
-        state.global = Some(pause());
+        let mut state = state_with_global(pause());
         assert_eq!(
             matching_dispatch_pause(&state, &task("project-a", Some("user-a")))
                 .map(|(scope, target, _)| (scope, target)),
             Some(("global", None))
         );
 
-        state.global = None;
-        state.projects.insert("project-a".to_owned(), pause());
+        state = state_with_project("project-a", pause());
         assert_eq!(
             matching_dispatch_pause(&state, &task("project-a", Some("user-b")))
                 .map(|(scope, target, _)| (scope, target)),
@@ -1290,8 +1288,7 @@ mod inflight_ledger_tests {
         );
         assert!(matching_dispatch_pause(&state, &task("project-b", Some("user-b"))).is_none());
 
-        state.projects.clear();
-        state.users.insert("user-a".to_owned(), pause());
+        state = state_with_user("user-a", pause());
         assert_eq!(
             matching_dispatch_pause(&state, &task("project-b", Some("user-a")))
                 .map(|(scope, target, _)| (scope, target)),
@@ -1299,6 +1296,31 @@ mod inflight_ledger_tests {
         );
         assert!(matching_dispatch_pause(&state, &task("project-b", Some("user-b"))).is_none());
         assert!(matching_dispatch_pause(&state, &task("project-b", None)).is_none());
+    }
+
+    fn state_with_global(global: DispatchPause) -> DispatchPauseState {
+        DispatchPauseState {
+            global: Some(global),
+            ..Default::default()
+        }
+    }
+
+    fn state_with_project(project_id: &str, project: DispatchPause) -> DispatchPauseState {
+        let mut projects = std::collections::HashMap::new();
+        projects.insert(project_id.to_owned(), project);
+        DispatchPauseState {
+            projects,
+            ..Default::default()
+        }
+    }
+
+    fn state_with_user(user_id: &str, user: DispatchPause) -> DispatchPauseState {
+        let mut users = std::collections::HashMap::new();
+        users.insert(user_id.to_owned(), user);
+        DispatchPauseState {
+            users,
+            ..Default::default()
+        }
     }
 
     fn key(creator: &str, model: &str) -> (String, String) {
