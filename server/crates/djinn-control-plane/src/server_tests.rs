@@ -791,14 +791,12 @@ mod tests {
         // succeed silently). The `deny_unknown_fields` decoder catches
         // the attempt before the handler runs.
         for stray in ["paused", "reason", "paused_by"] {
-            let mut args = json!({});
-            if stray == "reason" {
-                args = json!({ "scope": "global", "reason": "should be rejected" });
-            } else if stray == "paused" {
-                args = json!({ "scope": "global", "paused": false });
-            } else {
-                args = json!({ "scope": "global", "paused_by": "attacker" });
-            }
+            let args = match stray {
+                "reason" => json!({ "scope": "global", "reason": "should be rejected" }),
+                "paused" => json!({ "scope": "global", "paused": false }),
+                "paused_by" => json!({ "scope": "global", "paused_by": "attacker" }),
+                _ => unreachable!("test stray field list is exhaustive"),
+            };
             let result = server.dispatch_tool("dispatch_pause_status", args).await;
             let err = result
                 .expect_err("dispatch_pause_status with stray `{stray}` field must fail decode");

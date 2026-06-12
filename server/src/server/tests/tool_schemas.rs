@@ -715,12 +715,12 @@ fn checked_in_mcp_snapshot_includes_dispatch_pause_tools_with_strict_schemas() {
             .unwrap_or_else(|| panic!("checked-in MCP snapshot is missing `{name}`"));
 
         let input_schema = tool
-            .get("inputSchema")
-            .unwrap_or_else(|| panic!("{name} snapshot entry missing inputSchema"));
+            .get("input_schema")
+            .unwrap_or_else(|| panic!("{name} snapshot entry missing input_schema"));
         assert_eq!(
             input_schema["additionalProperties"],
             json!(false),
-            "{name} inputSchema must declare additionalProperties=false \
+            "{name} input_schema must declare additionalProperties=false \
              (i.e. #[serde(deny_unknown_fields)] on the params struct)"
         );
     }
