@@ -88,6 +88,7 @@ impl RepoGraphBridge {
             let node = graph.node(file_idx);
             out.push(SymbolAtHit {
                 key: format_node_key(&node.id),
+                uid: format_node_key(&node.id),
                 kind: format!("{:?}", node.kind).to_lowercase(),
                 display_name: node.display_name.clone(),
                 file: node.file_path.as_ref().map(|p| p.display().to_string()),
@@ -110,6 +111,7 @@ impl RepoGraphBridge {
             );
             out.push(SymbolAtHit {
                 key: format_node_key(&node.id),
+                uid: format_node_key(&node.id),
                 kind: format!("{:?}", node.kind).to_lowercase(),
                 display_name: node.display_name.clone(),
                 file: node.file_path.as_ref().map(|p| p.display().to_string()),
@@ -180,6 +182,7 @@ impl RepoGraphBridge {
                     .count();
                 TouchedSymbol {
                     key: format_node_key(&node.id),
+                    uid: format_node_key(&node.id),
                     display_name: node.display_name.clone(),
                     kind: format!("{:?}", node.kind).to_lowercase(),
                     symbol_kind: node.symbol_kind.as_ref().map(|k| format!("{k:?}")),

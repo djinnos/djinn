@@ -102,6 +102,7 @@ fn flow_on_graph_from_hits(
             let flow_hit = FlowHit {
                 process: ProcessRef {
                     id: process.id.clone(),
+                    uid: process.id.clone(),
                     label: process.label.clone(),
                     role: "step".to_string(),
                 },
@@ -160,6 +161,7 @@ fn add_process_hit(
     let flow_hit = FlowHit {
         process: ProcessRef {
             id: process.id.clone(),
+            uid: process.id.clone(),
             label: process.label.clone(),
             role: "process".to_string(),
         },

@@ -698,6 +698,7 @@ mod tests {
     fn ranked_node(name: &str, score: f64) -> RankedNode {
         RankedNode {
             key: format!("symbol:{name}"),
+            uid: format!("symbol:{name}"),
             kind: "function".into(),
             display_name: name.into(),
             score,
