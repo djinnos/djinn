@@ -284,10 +284,11 @@ impl CoordinatorActor {
                is status-only: it does not edit the spec, bump the proposal revision, or clear \
                sign-offs.\n\
              - If a criterion is **invalid, unverifiable, misstated, or needs narrowing** during \
-               closeout, repair the spec with `proposal_ac_amend(id=\"{}\", amendments=[…])`. Every \
-               amendment needs a concrete `reason` (what is wrong and why), and the call is a real \
-               spec edit that bumps the proposal revision, retains sign-offs, and writes a \
-               board-visible audit trail. Use it for rewrite / drop / waive — never to hide valid \
+               closeout, repair the spec with `proposal_ac_amend(id=\"{}\", reason=\"…\", amendments=[…])`. The \
+               call needs a concrete `reason` (what is wrong and why) for its audit trail, and is \
+               a real spec edit that bumps the proposal revision, retains sign-offs, and writes a \
+               board-visible audit trail. Use it for rewrite / drop / waive (waive keeps the \
+               criterion visible with `waived: true`) — never to hide valid \
                but unmet work; if the work is real and unfinished, leave the criterion unmet (or \
                create a follow-on epic) instead of waiving it.\n\
              - If EVERY remaining criterion is now met (or has been validly amended/waived/dropped) \
@@ -306,7 +307,7 @@ impl CoordinatorActor {
             proposal.id,
         );
         let ac = serde_json::json!([
-            {"criterion": "Proposal spec read and the closed epics' delivery reconciled against each acceptance criterion (met flags updated via proposal_ac_set, with invalid/unverifiable/misstated/narrowed criteria repaired via proposal_ac_amend and a concrete reason per amendment)", "met": false},
+            {"criterion": "Proposal spec read and the closed epics' delivery reconciled against each acceptance criterion (met flags updated via proposal_ac_set, with invalid/unverifiable/misstated/narrowed criteria repaired via proposal_ac_amend and a concrete audit reason)", "met": false},
             {"criterion": "Outcome recorded: proposal_complete when all remaining criteria are met or validly amended/waived/dropped, OR additional epics created for real gaps, OR progress saved with work still in flight — never completed with valid-but-unmet criteria still standing", "met": false},
         ])
         .to_string();

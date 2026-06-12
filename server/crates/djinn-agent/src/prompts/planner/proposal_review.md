@@ -28,7 +28,7 @@ proposal_ac_set(id="<proposal-id>", acceptance_criteria=[{"met": true}, {"met": 
 
 ### E2b. Amend criteria that are invalid, unverifiable, or need narrowing
 
-Some acceptance criteria cannot honestly be checked off with `proposal_ac_set` because the spec itself is wrong. When that happens, use `proposal_ac_amend(id="<proposal-id>", amendments=[…])` to repair the spec — never to hide unfinished work. This is a **real spec edit**: it rewrites/drops/waives criteria, requires a concrete `reason` for every entry, bumps the proposal revision, retains prior sign-offs, and writes a board-visible proposal feedback/audit trail so humans can object.
+Some acceptance criteria cannot honestly be checked off with `proposal_ac_set` because the spec itself is wrong. When that happens, use `proposal_ac_amend(id="<proposal-id>", reason="<why the spec is being repaired>", amendments=[…])` to repair the spec — never to hide unfinished work. This is a **real spec edit**: it rewrites/drops/waives criteria, requires a concrete top-level `reason`, bumps the proposal revision, retains prior sign-offs, and writes a board-visible proposal feedback/audit trail so humans can object or contest the narrowing.
 
 Use the amendment tool **only** when one of these is true:
 
@@ -37,7 +37,7 @@ Use the amendment tool **only** when one of these is true:
 - **Misstated** — the wording is ambiguous, internally inconsistent with another criterion, or technically wrong in a way that would let a literal reader claim it is met when it is not. Rewrite it so the meaning is unambiguous.
 - **Needs narrowing during closeout** — the criterion is sound in spirit but over-broad (covers a much wider surface than was actually scoped), or duplicates a sibling criterion. Rewrite to a tighter, non-overlapping form, or drop the duplicate.
 
-Each amendment must include a concrete, non-empty `reason` that names the problem ("requires paid Stripe test-mode key — worker role has no payment-credentials tool", "duplicate of AC 2 after the audit epic narrowed scope", "asks for an SLA measurement no agent can produce from CI logs", etc.). Vague reasons like "n/a" or "doesn't apply" are rejected by the tool and should be rejected by you too.
+Each `proposal_ac_amend` call must include a concrete, non-empty top-level `reason` that names the problem ("requires paid Stripe test-mode key — worker role has no payment-credentials tool", "duplicate of AC 2 after the audit epic narrowed scope", "asks for an SLA measurement no agent can produce from CI logs", etc.). If you batch several amendments, the single reason must explain the whole batch; otherwise split the repairs into separate calls. Vague reasons like "n/a" or "doesn't apply" are rejected by the tool and should be rejected by you too.
 
 **Do not use `proposal_ac_amend` to hide unfinished work.** If a criterion is valid and the work is real but simply not done yet, the answer is not to waive or drop it — that would let a "complete" proposal ship with promises the merged work never kept. Instead:
 
@@ -52,7 +52,7 @@ Amendment is a spec repair, not a delivery shortcut. If you are tempted to waive
 
 - `rewrite` — replace the criterion text in place. Requires a non-empty `criterion` field. Use this when the spec is salvageable with better wording.
 - `drop` — remove the criterion entirely. Must NOT include `criterion`. Use this when the criterion is invalid and no rewrite would faithfully capture the original intent.
-- `waive` — keep the criterion visible but mark it as waived (it no longer blocks `proposal_complete`). Must NOT include `criterion`. Use this when the original intent is still meaningful and the proposal is intentionally not going to satisfy it (e.g. an out-of-scope operator-only check), so the audit trail and sign-off record both reflect that the proposal was shipped without meeting this AC.
+- `waive` — keep the criterion visible but mark it as waived by adding `waived: true` (it no longer blocks `proposal_complete`). Must NOT include `criterion`. Use this when the original intent is still meaningful and the proposal is intentionally not going to satisfy it (e.g. an out-of-scope operator-only check), so the audit trail and sign-off record both reflect that the proposal was shipped without meeting this AC.
 
 Indexes are evaluated against the **current** AC list; if you combine multiple drops in one call, later indexes shift down. Send drops in descending index order (highest first) to avoid surprises, and prefer a single batched call when several criteria need the same treatment.
 
