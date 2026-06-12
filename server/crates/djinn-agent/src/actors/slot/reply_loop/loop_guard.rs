@@ -267,7 +267,41 @@ impl LoopGuardState {
     ) -> Option<LoopGuardCondition> {
         self.consecutive_tool_failures = self.consecutive_tool_failures.saturating_add(1);
 
-        let repeated_condition = match class {
+        let repeated_condition = self.record_identical_tool_failure(signature.clone(), class);
+
+        let observed = self.consecutive_tool_failures;
+        repeated_condition.or_else(|| {
+            (observed >= self.config.consecutive_tool_failure_threshold).then_some(
+                LoopGuardCondition {
+                    reason: LoopGuardReason::ConsecutiveToolFailures {
+                        last_signature: signature,
+                    },
+                    observed,
+                    threshold: self.config.consecutive_tool_failure_threshold,
+                },
+            )
+        })
+    }
+
+    /// Record an identical-signature failure without extending the consecutive
+    /// failure streak. This is used for mixed tool-result batches: a successful
+    /// result in the same assistant turn is progress and resets the consecutive
+    /// pressure for that turn, but any failures in the batch should still start
+    /// fresh repeated-signature accounting after that progress.
+    pub(crate) fn record_tool_failure_after_progress(
+        &mut self,
+        signature: ToolCallSignature,
+        class: ToolFailureClass,
+    ) -> Option<LoopGuardCondition> {
+        self.record_identical_tool_failure(signature, class)
+    }
+
+    fn record_identical_tool_failure(
+        &mut self,
+        signature: ToolCallSignature,
+        class: ToolFailureClass,
+    ) -> Option<LoopGuardCondition> {
+        match class {
             ToolFailureClass::General => {
                 let observed = increment_count(&mut self.tool_failure_counts, signature.clone());
                 (observed >= self.config.identical_tool_failure_threshold).then(|| {
@@ -291,20 +325,7 @@ impl LoopGuardState {
                     threshold: self.config.permission_denial_threshold,
                 })
             }
-        };
-
-        let observed = self.consecutive_tool_failures;
-        repeated_condition.or_else(|| {
-            (observed >= self.config.consecutive_tool_failure_threshold).then_some(
-                LoopGuardCondition {
-                    reason: LoopGuardReason::ConsecutiveToolFailures {
-                        last_signature: signature,
-                    },
-                    observed,
-                    threshold: self.config.consecutive_tool_failure_threshold,
-                },
-            )
-        })
+        }
     }
 
     /// Record tool success/progress. A successful novel tool call is progress,

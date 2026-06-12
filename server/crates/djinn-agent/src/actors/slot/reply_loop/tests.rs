@@ -2,6 +2,7 @@ use super::error_handling::supports_tool_choice_required;
 use super::loop_guard::{LoopGuardError, LoopGuardKind};
 use super::persistence::serialize_llm_input;
 use super::turn::{ReplyLoopContext, run_reply_loop};
+use crate::output_parser::ParsedAgentOutput;
 use crate::output_stash::extract_stash_content;
 use crate::test_helpers;
 use djinn_core::message::Role;
@@ -671,6 +672,56 @@ fn dummy_tool_schema(name: &str) -> serde_json::Value {
     })
 }
 
+type ScriptedReplyLoopRun = (
+    anyhow::Result<()>,
+    ParsedAgentOutput,
+    Conversation,
+    crate::context::AgentContext,
+    String,
+);
+
+async fn run_scripted_reply_loop(
+    provider: &MockProvider,
+    tools: &[serde_json::Value],
+    mcp_registry: Option<&crate::mcp_client::McpToolRegistry>,
+) -> ScriptedReplyLoopRun {
+    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
+    let test_services = test_helpers::test_services();
+    let worktree_path = std::path::PathBuf::from("/tmp");
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
+        ReplyLoopContext {
+            provider,
+            tools,
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            app_state: &app_state,
+            services: &test_services,
+            mcp_registry,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    (result, output, conv, app_state, session_id)
+}
+
 /// Session ends immediately when the finalize tool is called.
 /// The payload is captured on the output.
 #[tokio::test]
@@ -1297,4 +1348,220 @@ async fn identical_failing_tool_call_injects_correction_then_typed_terminates() 
         0,
         "four scripted turns should be consumed"
     );
+}
+
+#[tokio::test]
+async fn permission_denial_tool_failure_trips_on_second_identical_attempt() {
+    let tools = vec![dummy_tool_schema("secure_fetch")];
+    let registry = crate::mcp_client::McpToolRegistry::with_dispatch(
+        [("secure_fetch".to_string(), "secure-server".to_string())],
+        vec![serde_json::json!({"name": "secure_fetch"})],
+        |_tool_name, _arguments| Err("permission denied: token is not allowed".to_string()),
+    );
+    let args = serde_json::json!({"path": "/secret"});
+    let provider = MockProvider::new(vec![
+        MockResponse::tool_call_with_input("deny1", "secure_fetch", args.clone(), 100),
+        MockResponse::tool_call_with_input("deny2", "secure_fetch", args, 110),
+    ]);
+
+    let (result, _output, _conv, _app_state, _session_id) =
+        run_scripted_reply_loop(&provider, &tools, Some(&registry)).await;
+
+    let err = result.expect_err("second identical permission denial should trip guard");
+    let guard_err = err
+        .downcast_ref::<LoopGuardError>()
+        .expect("permission denial should use typed loop guard error");
+    assert_eq!(
+        guard_err.condition.kind(),
+        LoopGuardKind::RepeatedPermissionOrSecurityDenial
+    );
+    assert_eq!(guard_err.condition.observed, 2);
+    assert_eq!(guard_err.condition.threshold, 2);
+    assert_eq!(provider.remaining(), 0);
+}
+
+#[tokio::test]
+async fn repeated_assistant_output_signature_trips_on_fourth_repeat() {
+    let tools = vec![dummy_tool_schema("missing_tool")];
+    let args = serde_json::json!({"same": true});
+    let response = |id: &str, input_tokens| MockResponse {
+        text: Some("I will retry the same thing.".to_string()),
+        tool_calls: vec![ContentBlock::ToolUse {
+            id: id.to_string(),
+            name: "missing_tool".to_string(),
+            input: args.clone(),
+        }],
+        input_tokens,
+        output_tokens: 10,
+    };
+    let provider = MockProvider::new(vec![
+        response("a1", 100),
+        response("a2", 110),
+        response("a3", 120),
+        response("a4", 130),
+    ]);
+
+    let (result, _output, _conv, _app_state, _session_id) =
+        run_scripted_reply_loop(&provider, &tools, None).await;
+
+    let err = result.expect_err("fourth identical assistant output should trip guard");
+    let guard_err = err
+        .downcast_ref::<LoopGuardError>()
+        .expect("assistant repeat should use typed loop guard error");
+    assert_eq!(
+        guard_err.condition.kind(),
+        LoopGuardKind::RepeatedAssistantOutput
+    );
+    assert_eq!(guard_err.condition.observed, 4);
+    assert_eq!(guard_err.condition.threshold, 4);
+    assert_eq!(provider.remaining(), 0);
+}
+
+#[tokio::test]
+async fn six_consecutive_tool_failures_across_different_signatures_trip_guard() {
+    let tools = vec![dummy_tool_schema("missing_tool")];
+    let provider = MockProvider::new(
+        (0..6)
+            .map(|idx| {
+                MockResponse::tool_call_with_input(
+                    &format!("fail{idx}"),
+                    "missing_tool",
+                    serde_json::json!({"attempt": idx}),
+                    100 + idx,
+                )
+            })
+            .collect(),
+    );
+
+    let (result, _output, _conv, _app_state, _session_id) =
+        run_scripted_reply_loop(&provider, &tools, None).await;
+
+    let err = result.expect_err("six consecutive failures should trip guard");
+    let guard_err = err
+        .downcast_ref::<LoopGuardError>()
+        .expect("consecutive failures should use typed loop guard error");
+    assert_eq!(
+        guard_err.condition.kind(),
+        LoopGuardKind::ConsecutiveToolFailures
+    );
+    assert_eq!(guard_err.condition.observed, 6);
+    assert_eq!(guard_err.condition.threshold, 6);
+    assert_eq!(provider.remaining(), 0);
+}
+
+#[tokio::test]
+async fn successful_novel_tool_call_resets_failure_pressure() {
+    let tools = vec![
+        dummy_tool_schema("flaky_mcp"),
+        dummy_tool_schema("submit_work"),
+    ];
+    let registry = crate::mcp_client::McpToolRegistry::with_dispatch(
+        [("flaky_mcp".to_string(), "flaky-server".to_string())],
+        vec![serde_json::json!({"name": "flaky_mcp"})],
+        |_tool_name, arguments| {
+            if arguments
+                .as_ref()
+                .and_then(|args| args.get("ok"))
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                Ok(serde_json::json!({"ok": true}))
+            } else {
+                Err("ordinary tool failure".to_string())
+            }
+        },
+    );
+    let fail_args = serde_json::json!({"ok": false});
+    let provider = MockProvider::new(vec![
+        MockResponse::tool_call_with_input("f1", "flaky_mcp", fail_args.clone(), 100),
+        MockResponse::tool_call_with_input("f2", "flaky_mcp", fail_args.clone(), 110),
+        MockResponse::tool_call_with_input("ok", "flaky_mcp", serde_json::json!({"ok": true}), 120),
+        MockResponse::tool_call_with_input("f3", "flaky_mcp", fail_args.clone(), 130),
+        MockResponse::tool_call_with_input("f4", "flaky_mcp", fail_args, 140),
+        MockResponse::tool_call_with_input(
+            "done",
+            "submit_work",
+            serde_json::json!({"task_id": "t1", "summary": "done"}),
+            150,
+        ),
+    ]);
+
+    let (result, output, _conv, _app_state, _session_id) =
+        run_scripted_reply_loop(&provider, &tools, Some(&registry)).await;
+
+    assert!(
+        result.is_ok(),
+        "post-progress repeated failures should not trip before finalize: {result:?}"
+    );
+    assert_eq!(output.finalize_tool_name.as_deref(), Some("submit_work"));
+    assert_eq!(provider.remaining(), 0);
+}
+
+#[tokio::test]
+async fn mixed_successful_tool_batch_resets_consecutive_failure_pressure() {
+    let tools = vec![
+        dummy_tool_schema("flaky_mcp"),
+        dummy_tool_schema("submit_work"),
+    ];
+    let registry = crate::mcp_client::McpToolRegistry::with_dispatch(
+        [("flaky_mcp".to_string(), "flaky-server".to_string())],
+        vec![serde_json::json!({"name": "flaky_mcp"})],
+        |_tool_name, arguments| {
+            if arguments
+                .as_ref()
+                .and_then(|args| args.get("ok"))
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                Ok(serde_json::json!({"ok": true}))
+            } else {
+                Err("ordinary tool failure".to_string())
+            }
+        },
+    );
+
+    let mut responses: Vec<MockResponse> = (0..5)
+        .map(|idx| {
+            MockResponse::tool_call_with_input(
+                &format!("fail{idx}"),
+                "flaky_mcp",
+                serde_json::json!({"ok": false, "attempt": idx}),
+                100 + idx,
+            )
+        })
+        .collect();
+    responses.push(MockResponse {
+        text: None,
+        tool_calls: vec![
+            ContentBlock::ToolUse {
+                id: "mixed-fail".to_string(),
+                name: "flaky_mcp".to_string(),
+                input: serde_json::json!({"ok": false, "attempt": "mixed"}),
+            },
+            ContentBlock::ToolUse {
+                id: "mixed-ok".to_string(),
+                name: "flaky_mcp".to_string(),
+                input: serde_json::json!({"ok": true}),
+            },
+        ],
+        input_tokens: 130,
+        output_tokens: 10,
+    });
+    responses.push(MockResponse::tool_call_with_input(
+        "done",
+        "submit_work",
+        serde_json::json!({"task_id": "t1", "summary": "done"}),
+        140,
+    ));
+    let provider = MockProvider::new(responses);
+
+    let (result, output, _conv, _app_state, _session_id) =
+        run_scripted_reply_loop(&provider, &tools, Some(&registry)).await;
+
+    assert!(
+        result.is_ok(),
+        "a mixed batch containing progress should reset the consecutive-failure streak: {result:?}"
+    );
+    assert_eq!(output.finalize_tool_name.as_deref(), Some("submit_work"));
+    assert_eq!(provider.remaining(), 0);
 }
