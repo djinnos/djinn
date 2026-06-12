@@ -374,10 +374,10 @@ impl CoordinatorActor {
 
     async fn rehydrate_durable_dispatch_state(&mut self) {
         let repo = DispatchStateRepository::new(self.db.clone());
-        match repo.cleanup_terminal().await {
-            Ok(pruned) if pruned > 0 => {
+        match repo.cleanup_terminal(&["closed", "done"]).await {
+            Ok(pruned) if !pruned.is_empty() => {
                 tracing::info!(
-                    pruned,
+                    pruned = pruned.len(),
                     "CoordinatorActor: pruned terminal durable dispatch-state rows"
                 )
             }
