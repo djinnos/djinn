@@ -1177,6 +1177,104 @@ impl CoordinatorActor {
 #[cfg(test)]
 mod inflight_ledger_tests {
     use super::*;
+    use djinn_core::models::{DispatchPause, DispatchPauseState, Task};
+
+    fn pause() -> DispatchPause {
+        DispatchPause {
+            paused_by: "admin".to_owned(),
+            paused_at: "2026-06-12T00:00:00Z".to_owned(),
+            reason: "maintenance".to_owned(),
+            expires_at: None,
+        }
+    }
+
+    fn task(project_id: &str, creator: Option<&str>) -> Task {
+        Task {
+            id: "task-uuid".to_owned(),
+            project_id: project_id.to_owned(),
+            short_id: "task".to_owned(),
+            epic_id: None,
+            title: "title".to_owned(),
+            description: String::new(),
+            design: String::new(),
+            issue_type: "task".to_owned(),
+            status: "open".to_owned(),
+            priority: 0,
+            owner: "owner".to_owned(),
+            labels: "[]".to_owned(),
+            acceptance_criteria: "[]".to_owned(),
+            reopen_count: 0,
+            continuation_count: 0,
+            verification_failure_count: 0,
+            total_reopen_count: 0,
+            total_verification_failure_count: 0,
+            intervention_count: 0,
+            last_intervention_at: None,
+            created_at: "2026-06-12T00:00:00Z".to_owned(),
+            updated_at: "2026-06-12T00:00:00Z".to_owned(),
+            closed_at: None,
+            close_reason: None,
+            merge_commit_sha: None,
+            pr_url: None,
+            merge_conflict_metadata: None,
+            memory_refs: "[]".to_owned(),
+            agent_type: None,
+            created_by_user_id: creator.map(str::to_owned),
+            unresolved_blocker_count: 0,
+        }
+    }
+
+    #[test]
+    fn matching_dispatch_pause_honors_global_project_and_user_scopes() {
+        let mut state = state_with_global(pause());
+        assert_eq!(
+            matching_task_dispatch_pause(&state, &task("project-a", Some("user-a")))
+                .map(|(scope, target, _)| (scope, target)),
+            Some(("global", None))
+        );
+
+        state = state_with_project("project-a", pause());
+        assert_eq!(
+            matching_task_dispatch_pause(&state, &task("project-a", Some("user-b")))
+                .map(|(scope, target, _)| (scope, target)),
+            Some(("project", Some("project-a".to_owned())))
+        );
+        assert!(matching_task_dispatch_pause(&state, &task("project-b", Some("user-b"))).is_none());
+
+        state = state_with_user("user-a", pause());
+        assert_eq!(
+            matching_task_dispatch_pause(&state, &task("project-b", Some("user-a")))
+                .map(|(scope, target, _)| (scope, target)),
+            Some(("user", Some("user-a".to_owned())))
+        );
+        assert!(matching_task_dispatch_pause(&state, &task("project-b", Some("user-b"))).is_none());
+        assert!(matching_task_dispatch_pause(&state, &task("project-b", None)).is_none());
+    }
+
+    fn state_with_global(global: DispatchPause) -> DispatchPauseState {
+        DispatchPauseState {
+            global: Some(global),
+            ..Default::default()
+        }
+    }
+
+    fn state_with_project(project_id: &str, project: DispatchPause) -> DispatchPauseState {
+        let mut projects = std::collections::HashMap::new();
+        projects.insert(project_id.to_owned(), project);
+        DispatchPauseState {
+            projects,
+            ..Default::default()
+        }
+    }
+
+    fn state_with_user(user_id: &str, user: DispatchPause) -> DispatchPauseState {
+        let mut users = std::collections::HashMap::new();
+        users.insert(user_id.to_owned(), user);
+        DispatchPauseState {
+            users,
+            ..Default::default()
+        }
+    }
 
     fn key(creator: &str, model: &str) -> (String, String) {
         (creator.to_string(), model.to_string())

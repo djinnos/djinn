@@ -958,7 +958,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn spawn_verification_defers_without_registering_when_global_pause_is_active() {
         let (_task_repo, task_id, app_state) = setup_verifying_task_with_count(0).await;
         let pause_repo =
