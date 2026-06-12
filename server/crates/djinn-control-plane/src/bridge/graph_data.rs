@@ -88,6 +88,8 @@ pub struct CycleGroup {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct OrphanEntry {
     pub key: String,
+    #[serde(default)]
+    pub uid: String,
     pub kind: String,
     pub display_name: String,
     pub file: Option<String>,
@@ -151,6 +153,8 @@ pub struct SymbolAtHit {
     /// Canonical node key — SCIP symbol string for symbol hits, file path
     /// (file: prefix) for file hits.
     pub key: String,
+    #[serde(default)]
+    pub uid: String,
     /// Either `"file"` or `"symbol"`.
     pub kind: String,
     pub display_name: String,
@@ -182,6 +186,8 @@ pub struct DiffTouchesResult {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct TouchedSymbol {
     pub key: String,
+    #[serde(default)]
+    pub uid: String,
     pub display_name: String,
     pub kind: String,
     pub symbol_kind: Option<String>,
