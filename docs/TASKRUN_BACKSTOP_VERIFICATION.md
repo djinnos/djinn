@@ -2,6 +2,8 @@
 
 This runbook verifies the operational safety criterion for the Kubernetes task-run backstop: after a worker task is killed or force-closed, no running `djinn-taskrun-*` Pod/Job for that `task_run_id` remains after roughly one minute.
 
+The manual steps in §1–§4 are still the source of truth for the procedure. The recommended way to capture a Wave 3 evidence bundle from an operator/admin environment is `scripts/taskrun-backstop-e2e-evidence.sh`, which wraps §0–§4 in a single Markdown bundle and pastes cleanly into `docs/TASKRUN_BACKSTOP_E2E_EVIDENCE.md`. See [Wave 3 operator evidence runner](#wave-3-operator-evidence-runner) for the runner usage and paste point.
+
 ## Preconditions
 
 - A real Kubernetes-backed Djinn deployment is running.
@@ -14,6 +16,57 @@ This runbook verifies the operational safety criterion for the Kubernetes task-r
 ```bash
 export NS=djinn
 ```
+
+## Wave 3 operator evidence runner
+
+The Wave 3 evidence runner, `scripts/taskrun-backstop-e2e-evidence.sh`, captures preflight, before-action Kubernetes resources, an action invocation placeholder, the 60-second post-action polling loop, and the filtered server log capture described in §0–§4, and emits a single auditable Markdown bundle. It supports two modes:
+
+- `MODE=kill` for the `execution_kill_task` verification path.
+- `MODE=force-close` for the operator/admin force-close or proposal-abort verification path.
+
+The runner reuses `scripts/taskrun-backstop-preflight.sh` and refuses to perform the post-action 60-second polling or claim cleanup success unless the preflight passes. It redacts the operator bearer token, records the task id, task run id, namespace/context, UTC timestamps, exact commands, and exit statuses needed for review, and fails closed (non-zero exit) when required inputs/access are missing. `DRY_RUN=1` produces the same bundle marked as a dry run, so operators can rehearse the paste workflow without invoking any action.
+
+Run the kill bundle (in an operator/admin shell with the preflight prerequisites):
+
+```bash
+export NS=djinn
+export TASK_ID="<long-running-task-id>"
+export TASK_RUN_ID="<active-task-run-id>"
+export DJINN_MCP_URL="https://<operator-accessible-djinn-host>/mcp"
+export DJINN_OPERATOR_BEARER_TOKEN="<operator/admin token>"
+
+# Dry-run first to confirm the bundle shape and field substitution:
+MODE=kill DRY_RUN=1 ./scripts/taskrun-backstop-e2e-evidence.sh | tee /tmp/taskrun-backstop-e2e-kill.dryrun.md
+
+# After invoking execution_kill_task from the same shell, record the
+# action and re-run for the real bundle:
+export ACTION_INVOKED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+export ACTION_RESULT="execution_kill_task returned ok"
+MODE=kill ./scripts/taskrun-backstop-e2e-evidence.sh | tee taskrun-backstop-e2e-kill.md
+```
+
+Run the force-close bundle (in an operator/admin shell with the preflight prerequisites):
+
+```bash
+export NS=djinn
+export TASK_ID="<long-running-task-id>"
+export TASK_RUN_ID="<active-task-run-id>"
+export DJINN_MCP_URL="https://<operator-accessible-djinn-host>/mcp"
+export DJINN_OPERATOR_BEARER_TOKEN="<operator/admin token>"
+
+# Dry-run:
+MODE=force-close DRY_RUN=1 ./scripts/taskrun-backstop-e2e-evidence.sh | tee /tmp/taskrun-backstop-e2e-force-close.dryrun.md
+
+# After invoking the operator/admin force-close or proposal abort from
+# the same shell, record the action and re-run for the real bundle:
+export ACTION_INVOKED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+export ACTION_RESULT="proposal abort 4711 closed task"
+MODE=force-close ./scripts/taskrun-backstop-e2e-evidence.sh | tee taskrun-backstop-e2e-force-close.md
+```
+
+After redacting secrets, paste the generated bundle into `docs/TASKRUN_BACKSTOP_E2E_EVIDENCE.md` under the Wave 3 kill or force-close evidence section. The bundle does not claim cleanup success unless all of the following are true: the embedded preflight shows `PRECHECK PASS`, the action was actually issued (or its transcript is recorded) and `ACTION_RESULT` is set, and the post-action 60-second polling subsection ends with `exit=0` and empty `running_pods`, `jobs`, and `canonical` lines for the final iteration.
+
+For the rest of this runbook, §0–§4 remain the source of truth for what the runner is doing and for any operator who needs to capture the evidence by hand.
 
 ## 0. Capture operator preflight evidence
 
