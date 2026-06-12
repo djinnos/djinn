@@ -541,14 +541,13 @@ mod tests {
             let candidate = trimmed
                 .strip_prefix("async fn ")
                 .or_else(|| trimmed.strip_prefix("fn "));
-            if let Some(rest) = candidate {
-                if let Some(name) = rest
+            if let Some(rest) = candidate
+                && let Some(name) = rest
                     .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
                     .next()
                     .filter(|name| !name.is_empty())
-                {
-                    names.insert(name.to_string());
-                }
+            {
+                names.insert(name.to_string());
             }
         }
         names

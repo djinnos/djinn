@@ -188,10 +188,10 @@ fn scan_named_call_paths(source: &str, name: &str, out: &mut Vec<FetchHit>) {
             continue;
         }
         let mut call_start = skip_ws(source, after_name);
-        if source.as_bytes().get(call_start) == Some(&b'<') {
-            if let Some(end) = find_matching_angle(source, call_start) {
-                call_start = skip_ws(source, end + 1);
-            }
+        if source.as_bytes().get(call_start) == Some(&b'<')
+            && let Some(end) = find_matching_angle(source, call_start)
+        {
+            call_start = skip_ws(source, end + 1);
         }
         if source.as_bytes().get(call_start) == Some(&b'(') {
             scan_call_argument_path(source, call_start + 1, out);
