@@ -283,6 +283,11 @@ fn proposal_ac_amend_schema_documents_operations_and_reasons() {
         serde_json::json!(["rewrite", "drop", "waive"])
     );
     assert_eq!(
+        item["properties"]["index"]["type"],
+        serde_json::json!("integer")
+    );
+    assert_eq!(item["properties"]["index"]["minimum"], serde_json::json!(0));
+    assert_eq!(
         item["properties"]["criterion"]["description"],
         "New criterion text; required and non-empty when operation is rewrite."
     );

@@ -123,6 +123,35 @@ async fn proposal_ac_amend_validates_and_uses_repository_primitive() {
         .expect_err("blank reason rejected");
     assert!(err.contains("non-empty reason"));
 
+    let omitted_reason = Some(
+        serde_json::json!({
+            "id": proposal.short_id,
+            "amendments": [{"index": 0, "operation": "rewrite", "criterion": "New text"}],
+        })
+        .as_object()
+        .expect("args object")
+        .clone(),
+    );
+    let err = call_proposal_ac_amend(&state, &omitted_reason)
+        .await
+        .expect_err("missing reason rejected");
+    assert!(err.contains("non-empty reason"));
+
+    let invalid_operation = Some(
+        serde_json::json!({
+            "id": proposal.short_id,
+            "reason": "make verifiable",
+            "amendments": [{"index": 0, "operation": "replace", "criterion": "New text"}],
+        })
+        .as_object()
+        .expect("args object")
+        .clone(),
+    );
+    let err = call_proposal_ac_amend(&state, &invalid_operation)
+        .await
+        .expect_err("invalid operation rejected");
+    assert!(err.contains("invalid operation `replace`"));
+
     let missing_criterion = Some(
         serde_json::json!({
             "id": proposal.id,
@@ -137,6 +166,44 @@ async fn proposal_ac_amend_validates_and_uses_repository_primitive() {
         .await
         .expect_err("rewrite text required");
     assert!(err.contains("requires non-empty `criterion`"));
+
+    let empty_criterion = Some(
+        serde_json::json!({
+            "id": proposal.id,
+            "reason": "make verifiable",
+            "amendments": [{"index": 0, "operation": "rewrite", "criterion": "   "}],
+        })
+        .as_object()
+        .expect("args object")
+        .clone(),
+    );
+    let err = call_proposal_ac_amend(&state, &empty_criterion)
+        .await
+        .expect_err("blank rewrite text rejected");
+    assert!(err.contains("requires non-empty `criterion`"));
+
+    let invalid_index = Some(
+        serde_json::json!({
+            "id": proposal.short_id,
+            "reason": "criterion is no longer relevant",
+            "amendments": [{"index": 99, "operation": "drop"}],
+        })
+        .as_object()
+        .expect("args object")
+        .clone(),
+    );
+    let err = call_proposal_ac_amend(&state, &invalid_index)
+        .await
+        .expect_err("out of range index rejected");
+    assert!(err.contains("acceptance-criteria index 99 out of range"));
+
+    let unchanged = proposal_repo
+        .get(&proposal.id)
+        .await
+        .expect("reload proposal after validation failures")
+        .expect("proposal exists");
+    assert_eq!(unchanged.latest_revision_seq, 1);
+    assert_eq!(unchanged.acceptance_criteria, proposal.acceptance_criteria);
 
     let amend_args = Some(
         serde_json::json!({
