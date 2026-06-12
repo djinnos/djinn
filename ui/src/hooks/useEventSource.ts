@@ -35,6 +35,8 @@ import {
 const INITIAL_RECONNECT_DELAY = 1000;
 const MAX_RECONNECT_DELAY = 30000;
 const RECONNECT_MULTIPLIER = 2;
+const SILENCE_TIMEOUT_MS = 60_000;
+const LIVENESS_WATCHDOG_INTERVAL_MS = 5_000;
 
 export function useEventSource() {
   const projects = useProjects();
@@ -47,6 +49,8 @@ export function useEventSource() {
     .join(",");
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const livenessTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastReceivedAtRef = useRef<number>(Date.now());
   const cleanupHandlersRef = useRef<(() => void) | null>(null);
   useEffect(() => {
     let isActive = true;
@@ -81,7 +85,69 @@ export function useEventSource() {
     // Initialize SSE event handlers (wire stores to SSE events)
     cleanupHandlersRef.current = initSSEEventHandlers();
 
-    const connect = async () => {
+    const markServerEventReceived = () => {
+      lastReceivedAtRef.current = Date.now();
+    };
+
+    const clearLivenessWatchdog = () => {
+      if (livenessTimerRef.current) {
+        clearInterval(livenessTimerRef.current);
+        livenessTimerRef.current = null;
+      }
+    };
+
+    let connect: () => Promise<void>;
+
+    const scheduleReconnect = (source?: EventSource | null) => {
+      if (!isActive) return;
+
+      sseStore.getState().setConnected(false);
+      sseStore.getState().setConnectionStatus("reconnecting");
+
+      clearLivenessWatchdog();
+
+      const activeEventSource = source ?? eventSourceRef.current;
+      if (activeEventSource) {
+        activeEventSource.close();
+      }
+      if (!source || eventSourceRef.current === source) {
+        eventSourceRef.current = null;
+      }
+
+      if (reconnectTimerRef.current) {
+        return;
+      }
+
+      const { reconnectAttempt } = sseStore.getState();
+      const delay = Math.min(
+        INITIAL_RECONNECT_DELAY * Math.pow(RECONNECT_MULTIPLIER, reconnectAttempt),
+        MAX_RECONNECT_DELAY,
+      );
+      sseStore.getState().incrementReconnectAttempt();
+
+      reconnectTimerRef.current = setTimeout(async () => {
+        reconnectTimerRef.current = null;
+        if (!isActive) return;
+        // Reset MCP client so the next tool call reconnects cleanly.
+        try {
+          await resetMcpClient();
+        } catch {
+          // ignore — connect() below will surface any failure
+        }
+        void connect();
+      }, delay);
+    };
+
+    const startLivenessWatchdog = () => {
+      clearLivenessWatchdog();
+      livenessTimerRef.current = setInterval(() => {
+        if (!isActive || !eventSourceRef.current) return;
+        if (Date.now() - lastReceivedAtRef.current < SILENCE_TIMEOUT_MS) return;
+        scheduleReconnect(eventSourceRef.current);
+      }, LIVENESS_WATCHDOG_INTERVAL_MS);
+    };
+
+    connect = async () => {
       try {
         await hydrateSnapshot();
 
@@ -97,9 +163,12 @@ export function useEventSource() {
 
         const es = new EventSource(url);
         eventSourceRef.current = es;
+        markServerEventReceived();
+        startLivenessWatchdog();
 
         es.onopen = () => {
           if (!isActive) return;
+          markServerEventReceived();
           if (sseStore.getState().reconnectAttempt > 0) {
             void hydrateSnapshot();
             void hydratePauseStatus();
@@ -151,6 +220,7 @@ export function useEventSource() {
         SERVER_SSE_EVENT_NAMES.forEach((eventType) => {
           es.addEventListener(eventType, (event) => {
             if (!isActive) return;
+            markServerEventReceived();
             try {
               const decision = resolveServerSSEEventName(eventType);
 
@@ -186,31 +256,7 @@ export function useEventSource() {
         });
 
         es.onerror = () => {
-          if (!isActive) return;
-
-          sseStore.getState().setConnected(false);
-          sseStore.getState().setConnectionStatus("reconnecting");
-
-          es.close();
-          eventSourceRef.current = null;
-
-          const { reconnectAttempt } = sseStore.getState();
-          const delay = Math.min(
-            INITIAL_RECONNECT_DELAY * Math.pow(RECONNECT_MULTIPLIER, reconnectAttempt),
-            MAX_RECONNECT_DELAY
-          );
-          sseStore.getState().incrementReconnectAttempt();
-
-          reconnectTimerRef.current = setTimeout(async () => {
-            if (!isActive) return;
-            // Reset MCP client so the next tool call reconnects cleanly.
-            try {
-              await resetMcpClient();
-            } catch {
-              // ignore — connect() below will surface any failure
-            }
-            connect();
-          }, delay);
+          scheduleReconnect(es);
         };
       } catch (err) {
         if (!isActive) return;
@@ -220,13 +266,15 @@ export function useEventSource() {
       }
     };
 
-    connect();
+    void connect();
 
     return () => {
       isActive = false;
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
       }
+      clearLivenessWatchdog();
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
         eventSourceRef.current = null;
