@@ -9,6 +9,9 @@ use crate::tools::agent_tools::{
 use crate::tools::credential_tools::{
     CredentialDeleteInput, CredentialListInput, CredentialSetInput,
 };
+use crate::tools::dispatch_pause_tools::{
+    DispatchPauseParams, DispatchPauseStatusParams, DispatchResumeParams,
+};
 use crate::tools::epic_tools::{
     EpicBlockersParams, EpicCloseParams, EpicCountParams, EpicCreateParams, EpicDeleteParams,
     EpicListParams, EpicReadSourceParams, EpicReopenParams, EpicShowParams, EpicTasksParams,
@@ -137,6 +140,23 @@ impl DjinnMcpServer {
             "credential_delete" => map_json(
                 name,
                 self.credential_delete(Parameters(decode_args::<CredentialDeleteInput>(
+                    name, args,
+                )?))
+                .await,
+            ),
+            "dispatch_pause" => map_json(
+                name,
+                self.dispatch_pause(Parameters(decode_args::<DispatchPauseParams>(name, args)?))
+                    .await,
+            ),
+            "dispatch_resume" => map_json(
+                name,
+                self.dispatch_resume(Parameters(decode_args::<DispatchResumeParams>(name, args)?))
+                    .await,
+            ),
+            "dispatch_pause_status" => map_json(
+                name,
+                self.dispatch_pause_status(Parameters(decode_args::<DispatchPauseStatusParams>(
                     name, args,
                 )?))
                 .await,

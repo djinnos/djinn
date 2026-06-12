@@ -192,6 +192,7 @@ impl DjinnMcpServer {
                 + Self::memory_tool_router()
                 + Self::provider_tool_router()
                 + Self::credential_tool_router()
+                + Self::dispatch_pause_tool_router()
                 + Self::execution_tool_router()
                 + Self::settings_tool_router()
                 + Self::user_settings_tool_router()
@@ -259,6 +260,42 @@ impl DjinnMcpServer {
 
 fn annotate_server_tool_schema_safety(value: &mut serde_json::Value) {
     if let Some(obj) = value.as_object_mut() {
+        let annotations = obj
+            .get("annotations")
+            .and_then(serde_json::Value::as_object)
+            .cloned();
+        if let Some(annotations) = annotations {
+            if let Some(read_only) = annotations
+                .get("readOnlyHint")
+                .and_then(serde_json::Value::as_bool)
+            {
+                obj.insert("readOnly".to_string(), serde_json::Value::Bool(read_only));
+            }
+            if let Some(destructive) = annotations
+                .get("destructiveHint")
+                .and_then(serde_json::Value::as_bool)
+            {
+                obj.insert(
+                    "destructive".to_string(),
+                    serde_json::Value::Bool(destructive),
+                );
+            }
+            if let Some(idempotent) = annotations
+                .get("idempotentHint")
+                .and_then(serde_json::Value::as_bool)
+            {
+                obj.insert(
+                    "idempotent".to_string(),
+                    serde_json::Value::Bool(idempotent),
+                );
+            }
+            if let Some(open_world) = annotations
+                .get("openWorldHint")
+                .and_then(serde_json::Value::as_bool)
+            {
+                obj.insert("openWorld".to_string(), serde_json::Value::Bool(open_world));
+            }
+        }
         // This first-party server-wide schema path is produced directly by the
         // rmcp router, not by the agent role schema serializer that owns typed
         // safety classifications. Publish conservative fail-closed defaults so

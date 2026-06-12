@@ -1342,6 +1342,433 @@ expression: signatures
     }
   },
   {
+    "name": "dispatch_pause",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$defs": {
+        "DispatchPauseScope": {
+          "description": "Dispatch pause scope supported by the persistence layer.",
+          "enum": [
+            "global",
+            "project",
+            "user"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "description": "Non-empty administrative reason recorded with the pause.",
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/DispatchPauseScope",
+          "description": "Pause scope: `global`, `project`, or `user`."
+        },
+        "target_id": {
+          "default": null,
+          "description": "Required for `project` and `user`; must be omitted for `global`.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "reason"
+      ],
+      "title": "DispatchPauseParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "DispatchPause": {
+          "additionalProperties": false,
+          "description": "Metadata recorded when dispatch is paused for a scope.",
+          "properties": {
+            "expires_at": {
+              "nullable": true,
+              "type": "string"
+            },
+            "paused_at": {
+              "type": "string"
+            },
+            "paused_by": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "paused_by",
+            "paused_at",
+            "reason"
+          ],
+          "type": "object"
+        },
+        "DispatchPauseScope": {
+          "description": "Dispatch pause scope supported by the persistence layer.",
+          "enum": [
+            "global",
+            "project",
+            "user"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "changed": {
+          "type": "boolean"
+        },
+        "current": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DispatchPause"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ]
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "previous": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DispatchPause"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/DispatchPauseScope"
+        },
+        "target_id": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok",
+        "changed",
+        "scope"
+      ],
+      "title": "DispatchPauseMutationResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "dispatch_pause_status",
+    "read_only": true,
+    "destructive": false,
+    "idempotent": true,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$defs": {
+        "DispatchPauseScope": {
+          "description": "Dispatch pause scope supported by the persistence layer.",
+          "enum": [
+            "global",
+            "project",
+            "user"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DispatchPauseScope"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ],
+          "default": null,
+          "description": "Optional scope filter. Omit to return all pause scopes."
+        },
+        "target_id": {
+          "default": null,
+          "description": "Required when filtering `project` or `user`; invalid for `global`.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "DispatchPauseStatusParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "DispatchPause": {
+          "additionalProperties": false,
+          "description": "Metadata recorded when dispatch is paused for a scope.",
+          "properties": {
+            "expires_at": {
+              "nullable": true,
+              "type": "string"
+            },
+            "paused_at": {
+              "type": "string"
+            },
+            "paused_by": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "paused_by",
+            "paused_at",
+            "reason"
+          ],
+          "type": "object"
+        },
+        "DispatchPauseScope": {
+          "description": "Dispatch pause scope supported by the persistence layer.",
+          "enum": [
+            "global",
+            "project",
+            "user"
+          ],
+          "type": "string"
+        },
+        "DispatchPauseState": {
+          "additionalProperties": false,
+          "description": "Snapshot of dispatch pause state across all scopes.",
+          "properties": {
+            "global": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DispatchPause"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ]
+            },
+            "projects": {
+              "additionalProperties": {
+                "$ref": "#/$defs/DispatchPause"
+              },
+              "default": {},
+              "type": "object"
+            },
+            "users": {
+              "additionalProperties": {
+                "$ref": "#/$defs/DispatchPause"
+              },
+              "default": {},
+              "type": "object"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "current": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DispatchPause"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ]
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DispatchPauseScope"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ]
+        },
+        "state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DispatchPauseState"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ]
+        },
+        "target_id": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "title": "DispatchPauseStatusResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "dispatch_resume",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$defs": {
+        "DispatchPauseScope": {
+          "description": "Dispatch pause scope supported by the persistence layer.",
+          "enum": [
+            "global",
+            "project",
+            "user"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "$ref": "#/$defs/DispatchPauseScope",
+          "description": "Resume scope: `global`, `project`, or `user`."
+        },
+        "target_id": {
+          "default": null,
+          "description": "Required for `project` and `user`; must be omitted for `global`.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope"
+      ],
+      "title": "DispatchResumeParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "DispatchPause": {
+          "additionalProperties": false,
+          "description": "Metadata recorded when dispatch is paused for a scope.",
+          "properties": {
+            "expires_at": {
+              "nullable": true,
+              "type": "string"
+            },
+            "paused_at": {
+              "type": "string"
+            },
+            "paused_by": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "paused_by",
+            "paused_at",
+            "reason"
+          ],
+          "type": "object"
+        },
+        "DispatchPauseScope": {
+          "description": "Dispatch pause scope supported by the persistence layer.",
+          "enum": [
+            "global",
+            "project",
+            "user"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "changed": {
+          "type": "boolean"
+        },
+        "current": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DispatchPause"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ]
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "previous": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DispatchPause"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/DispatchPauseScope"
+        },
+        "target_id": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok",
+        "changed",
+        "scope"
+      ],
+      "title": "DispatchPauseMutationResponse",
+      "type": "object"
+    }
+  },
+  {
     "name": "epic_add_read_source",
     "read_only": false,
     "destructive": true,

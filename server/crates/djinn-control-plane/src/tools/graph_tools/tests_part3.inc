@@ -59,6 +59,8 @@
             .map(|i| {
                 let bucket = i % modules.max(1);
                 ImpactEntry {
+                    // uid: test-only synthetic symbol key mirrors key.
+                    uid: format!("symbol:scip-rust pkg src/m{bucket}/f{i}.rs `caller{i}`()."),
                     key: format!("symbol:scip-rust pkg src/m{bucket}/f{i}.rs `caller{i}`()."),
                     depth: 1,
                     file_path: Some(format!("src/m{bucket}/f{i}.rs")),
@@ -463,6 +465,8 @@
         // into `total` only. Modules dedupe by two-segment bucket.
         let entries = vec![
             ImpactEntry {
+                // uid: test-only synthetic symbol key mirrors key.
+                uid: "symbol:a".into(),
                 key: "symbol:a".into(),
                 depth: 1,
                 file_path: Some("src/auth/A.rs".into()),
@@ -470,6 +474,8 @@
                 exclusion_reason: None,
             },
             ImpactEntry {
+                // uid: test-only synthetic symbol key mirrors key.
+                uid: "symbol:b".into(),
                 key: "symbol:b".into(),
                 depth: 1,
                 file_path: Some("src/auth/B.rs".into()),
@@ -477,6 +483,8 @@
                 exclusion_reason: None,
             },
             ImpactEntry {
+                // uid: test-only synthetic symbol key mirrors key.
+                uid: "symbol:c".into(),
                 key: "symbol:c".into(),
                 depth: 2,
                 file_path: Some("src/billing/C.rs".into()),
@@ -496,6 +504,8 @@
         // module count but still hit `direct`/`total`.
         let entries = vec![
             ImpactEntry {
+                // uid: test-only synthetic symbol key mirrors key.
+                uid: "symbol:a".into(),
                 key: "symbol:a".into(),
                 depth: 1,
                 file_path: Some("src/auth/A.rs".into()),
@@ -503,6 +513,8 @@
                 exclusion_reason: None,
             },
             ImpactEntry {
+                // uid: test-only synthetic symbol key mirrors key.
+                uid: "symbol:ext".into(),
                 key: "symbol:ext".into(),
                 depth: 1,
                 file_path: None,
