@@ -2,7 +2,9 @@
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use djinn_core::events::EventBus;
+    use djinn_core::events::{DjinnEventEnvelope, EventBus};
+    use djinn_core::models::DispatchPause;
+    use djinn_db::repositories::dispatch_pause::{DispatchPauseRepository, DispatchPauseTarget};
     use djinn_db::{Database, NoteRepository, ProjectRepository};
     use rmcp::{Json, ServerHandler, handler::server::wrapper::Parameters};
     use serde_json::json;
@@ -665,6 +667,278 @@ mod tests {
             "dispatch.rs match arms and #[tool]-registered tools have drifted.\n\
              Orphan arms (in dispatch.rs, NOT a registered tool — remove or fix the name): {orphan:#?}\n\
              Unrouted tools (registered via #[tool], NO dispatch arm — add one in dispatch.rs): {unrouted:#?}"
+        );
+    }
+
+    // ── Dispatch-pause contract: strict-argument decoding + read-only status ─
+    //
+    // The dispatch-pause epic ships three MCP tools whose parameter structs
+    // (DispatchPauseParams, DispatchResumeParams, DispatchPauseStatusParams)
+    // are decorated with `#[serde(deny_unknown_fields)]`. That decoration is
+    // the structural reason stray / mutation-looking fields fail the
+    // dispatcher's `decode_args` step before the handler ever runs — which
+    // is the only safe place to reject them (silent acceptance would let a
+    // typo or a stale client fudge a "paused: false" field onto a write
+    // and have it ignored, or sneak a mutation field onto the read-only
+    // status endpoint).
+    //
+    // The `dispatch_tool` entry point in `dispatch.rs` centralizes decode
+    // for every MCP tool and surfaces the failure as a `Result::Err` whose
+    // message starts with `"invalid arguments for tool '{name}': "`. The
+    // tests below exercise that path so a future change to the parameter
+    // structs (or the decode surface) cannot silently weaken the contract.
+
+    /// Build a one-shot `DjinnMcpServer` whose `EventBus` records every
+    /// envelope it receives. The handler itself never reads the bus — it
+    /// only sends — so this is the canonical way to prove a read-only call
+    /// did not emit an event the handler shouldn't have.
+    fn server_with_recording_event_bus(
+        db: &Database,
+    ) -> (
+        DjinnMcpServer,
+        Arc<std::sync::Mutex<Vec<DjinnEventEnvelope>>>,
+    ) {
+        let recorded: Arc<std::sync::Mutex<Vec<DjinnEventEnvelope>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded_for_bus = Arc::clone(&recorded);
+        let bus = EventBus::new(move |envelope| {
+            recorded_for_bus
+                .lock()
+                .expect("recording event bus mutex poisoned")
+                .push(envelope);
+        });
+        let state = crate::state::stubs::test_mcp_state_with_event_bus(db.clone(), bus);
+        let server = DjinnMcpServer::new(state);
+        (server, recorded)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_pause_tool_rejects_unknown_fields_via_decode() {
+        let db = Database::open_in_memory().unwrap();
+        let (server, _events) = server_with_recording_event_bus(&db);
+
+        // `paused: false` is the canonical "stray mutation-looking field"
+        // the proposal warns about: a stale or buggy client could ship it
+        // on a pause and expect the tool to refuse instead of silently
+        // ignoring it. With `#[serde(deny_unknown_fields)]` on
+        // DispatchPauseParams, the decoder surfaces an invalid-arguments
+        // error *before* the admin gate or repository run, so the
+        // mutation never gets a chance to be partially applied.
+        let result = server
+            .dispatch_tool(
+                "dispatch_pause",
+                json!({
+                    "scope": "global",
+                    "reason": "x",
+                    "paused": false,
+                }),
+            )
+            .await;
+        let err = result.expect_err("dispatch_pause with stray `paused` field must fail decode");
+        assert!(
+            err.contains("invalid arguments for tool 'dispatch_pause'"),
+            "decode error must use the standard `invalid arguments for tool '...'` \
+             shape so clients can branch on it, got: {err}"
+        );
+        assert!(
+            err.contains("unknown field"),
+            "decode error must mention the unknown field name, got: {err}"
+        );
+        assert!(
+            err.contains("paused"),
+            "decode error must name the offending field `paused`, got: {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_resume_tool_rejects_unknown_fields_via_decode() {
+        let db = Database::open_in_memory().unwrap();
+        let (server, _events) = server_with_recording_event_bus(&db);
+
+        // `paused: true` mirrors the pause-side test: a stale client should
+        // not be able to sneak a mutation-looking field onto a resume. The
+        // contract is symmetric — both `dispatch_pause` and
+        // `dispatch_resume` carry `#[serde(deny_unknown_fields)]`.
+        let result = server
+            .dispatch_tool(
+                "dispatch_resume",
+                json!({
+                    "scope": "global",
+                    "paused": true,
+                }),
+            )
+            .await;
+        let err = result.expect_err("dispatch_resume with stray `paused` field must fail decode");
+        assert!(
+            err.contains("invalid arguments for tool 'dispatch_resume'"),
+            "decode error must use the standard `invalid arguments for tool '...'` shape, got: {err}"
+        );
+        assert!(
+            err.contains("unknown field") && err.contains("paused"),
+            "decode error must mention the unknown `paused` field, got: {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_pause_status_tool_rejects_unknown_fields_via_decode() {
+        let db = Database::open_in_memory().unwrap();
+        let (server, _events) = server_with_recording_event_bus(&db);
+
+        // Status is the read-only side; mutation-looking fields on it are
+        // the most dangerous kind of silent contract drift (a buggy
+        // client could attempt a write that the host UI marked
+        // "read-only" because the schema says so, and have the call
+        // succeed silently). The `deny_unknown_fields` decoder catches
+        // the attempt before the handler runs.
+        for stray in ["paused", "reason", "paused_by"] {
+            let mut args = json!({});
+            if stray == "reason" {
+                args = json!({ "scope": "global", "reason": "should be rejected" });
+            } else if stray == "paused" {
+                args = json!({ "scope": "global", "paused": false });
+            } else {
+                args = json!({ "scope": "global", "paused_by": "attacker" });
+            }
+            let result = server.dispatch_tool("dispatch_pause_status", args).await;
+            let err = result
+                .expect_err("dispatch_pause_status with stray `{stray}` field must fail decode");
+            assert!(
+                err.contains("invalid arguments for tool 'dispatch_pause_status'"),
+                "decode error must use the standard shape, got: {err}"
+            );
+            assert!(
+                err.contains("unknown field") && err.contains(stray),
+                "decode error must mention the offending `{stray}` field, got: {err}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_pause_status_does_not_mutate_state_or_emit_events() {
+        // The flagship read-only regression for the dispatch-pause epic.
+        // Three guarantees pinned in one test so a future refactor of the
+        // status handler cannot violate any of them silently:
+        //
+        // 1. Setting a real global pause (via the repository directly —
+        //    bypasses the admin gate so the test is hermetic) populates
+        //    persisted state.
+        // 2. Calling `dispatch_pause_status` with valid args returns the
+        //    expected `ok: true, scope: global, current.paused_by = "admin"`
+        //    payload without altering the stored `DispatchPause` value.
+        // 3. The recording event bus records ZERO `dispatch_pause` events
+        //    for the status call — only the direct repository pause that
+        //    seeded the test fixture is allowed to appear in the log.
+        //
+        // If a future change wires a `EventBus::send` into the status
+        // handler (e.g. as a "last_polled" telemetry side-effect), the
+        // event-count assertion below will catch it before it ships to
+        // production and starts polluting SSE streams.
+        let db = Database::open_in_memory().unwrap();
+        let (server, events) = server_with_recording_event_bus(&db);
+
+        // Seed a global pause directly via the repository so the test
+        // doesn't depend on the admin gate. The repository itself emits
+        // a `dispatch_pause.changed` event; that single event is the
+        // baseline the status-call event-count delta is measured against.
+        let seed_repo = DispatchPauseRepository::new(db.clone(), EventBus::noop());
+        seed_repo
+            .pause(
+                DispatchPauseTarget::global(),
+                DispatchPause {
+                    paused_by: "admin".to_string(),
+                    paused_at: "2026-06-12T00:00:00.000Z".to_string(),
+                    reason: "seeded by test".to_string(),
+                    expires_at: None,
+                },
+            )
+            .await
+            .expect("seed pause should succeed");
+
+        // The seed pause runs through `EventBus::noop()` (constructed
+        // above), so the recording bus should see zero events from the
+        // seed step. Snapshot the baseline count now.
+        let baseline_event_count = events.lock().unwrap().len();
+
+        // Snapshot the stored pause so we can assert the status call
+        // did not touch it. The state struct is `Clone + PartialEq`, so
+        // we can compare directly after the status call.
+        let stored_before = seed_repo
+            .get_status()
+            .await
+            .expect("read stored pause state before status call");
+
+        // Exercise the status tool with valid args. We deliberately pass
+        // a scope filter (`global`) so the call takes the single-scope
+        // branch (returns `current`) rather than the all-scopes branch
+        // (returns `state`) — both branches must be non-mutating, and
+        // testing the more-specific branch first gives the most direct
+        // contract check.
+        let result = server
+            .dispatch_tool("dispatch_pause_status", json!({ "scope": "global" }))
+            .await
+            .expect("dispatch_pause_status with valid args must succeed");
+        assert_eq!(result["ok"], true, "status call must return ok=true");
+        assert_eq!(
+            result["scope"], "global",
+            "status call must echo the scope filter it was given"
+        );
+        assert_eq!(
+            result["current"]["paused_by"], "admin",
+            "status call must surface the seeded pause's paused_by"
+        );
+        assert_eq!(
+            result["current"]["reason"], "seeded by test",
+            "status call must surface the seeded pause's reason"
+        );
+
+        // Re-read the stored pause and assert it is byte-identical to the
+        // snapshot taken before the status call. If the handler ever
+        // evolves a side effect (e.g. a `paused_at: now()` touch on
+        // status read), the `paused_at` field would shift and this
+        // assertion would fail.
+        let stored_after = seed_repo
+            .get_status()
+            .await
+            .expect("read stored pause state after status call");
+        assert_eq!(
+            stored_before, stored_after,
+            "dispatch_pause_status must not mutate persisted pause state"
+        );
+
+        // No new events from the status call. The seed pause emitted
+        // through `EventBus::noop()`, so the only acceptable delta is
+        // zero. A future change that adds a status-side `EventBus::send`
+        // (e.g. telemetry) would push the count above the baseline.
+        let post_status_event_count = events.lock().unwrap().len();
+        let recorded_entity_types: Vec<String> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.entity_type().to_owned())
+            .collect();
+        assert_eq!(
+            post_status_event_count,
+            baseline_event_count,
+            "dispatch_pause_status must not emit any events; \
+             recorded {} new event(s) (entity_types: {recorded_entity_types:?})",
+            post_status_event_count - baseline_event_count,
+        );
+
+        // Belt-and-braces: also assert the recorded event list contains
+        // no `dispatch_pause.changed` envelope tagged as a status read.
+        // The seed step's `EventBus::noop()` is the structural reason the
+        // list is empty in this revision; this assertion is the
+        // forward-compatible shape of the contract — a future test that
+        // seeds through the recording bus would still pass it.
+        let recorded_events = events.lock().unwrap();
+        let dispatch_pause_events: Vec<_> = recorded_events
+            .iter()
+            .filter(|e| e.entity_type() == "dispatch_pause" && e.action() == "changed")
+            .collect();
+        assert!(
+            dispatch_pause_events.is_empty(),
+            "dispatch_pause_status must not emit dispatch_pause.changed events; \
+             recorded: {dispatch_pause_events:#?}"
         );
     }
 }
