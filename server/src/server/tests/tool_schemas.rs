@@ -163,6 +163,52 @@ async fn code_graph_schema_advertises_route_shape_impact_flow_ops() {
     }
 }
 
+#[tokio::test]
+async fn code_graph_schema_advertises_uid_resolver_pagination_and_partial_semantics() {
+    let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+    let mcp = djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state());
+    let tools = mcp.all_tool_schemas();
+    let code_graph = tools
+        .iter()
+        .find(|tool| tool.get("name").and_then(Value::as_str) == Some("code_graph"))
+        .expect("code_graph schema");
+    let description = code_graph
+        .get("description")
+        .and_then(Value::as_str)
+        .expect("code_graph description");
+
+    for resolver_keyword in ["uid", "name", "file_path", "kind", "ranked candidates"] {
+        assert!(
+            description.contains(resolver_keyword),
+            "code_graph schema description does not advertise resolver keyword {resolver_keyword}"
+        );
+    }
+
+    for triage_control in [
+        "limit",
+        "offset",
+        "pageLimit",
+        "summaryOnly",
+        "byDepthCounts",
+    ] {
+        assert!(
+            description.contains(triage_control),
+            "code_graph schema description does not advertise traversal triage control {triage_control}"
+        );
+    }
+
+    for warning_fragment in [
+        "Partial pages and capped summaries are triage views",
+        "absence from a page or summary is NOT evidence",
+        "absent from the full graph",
+    ] {
+        assert!(
+            description.contains(warning_fragment),
+            "code_graph schema description does not advertise partial-result warning fragment {warning_fragment}"
+        );
+    }
+}
+
 /// The curated chat surface (`filter_chat_allowed_mcp_schemas`) is what the
 /// chat completions handler hands to the provider. Every `object`-typed
 /// (sub)schema in it must carry a `properties` field — OpenAI/Codex's strict
