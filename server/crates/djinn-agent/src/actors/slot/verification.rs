@@ -956,10 +956,27 @@ mod tests {
     #[tokio::test]
     async fn spawn_verification_defers_without_registering_when_global_pause_is_active() {
         let (_task_repo, task_id, app_state) = setup_verifying_task_with_count(0).await;
-        DispatchPauseRepository::new(app_state.db.clone(), app_state.event_bus.clone())
-            .pause(DispatchPauseTarget::global(), dispatch_pause())
-            .await
-            .expect("pause dispatch globally");
+        let pause_repo =
+            DispatchPauseRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+        let mut last_err = None;
+        for _ in 0..10 {
+            match pause_repo
+                .pause(DispatchPauseTarget::global(), dispatch_pause())
+                .await
+            {
+                Ok(_) => {
+                    last_err = None;
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+        if let Some(e) = last_err {
+            panic!("pause dispatch globally: {e}");
+        }
 
         spawn_verification(
             task_id.clone(),
