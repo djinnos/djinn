@@ -1287,6 +1287,21 @@ mod inflight_ledger_tests {
         (creator.to_string(), model.to_string())
     }
 
+    #[test]
+    fn dispatch_wall_clock_timestamps_are_millisecond_precision() {
+        let ts = ::time::OffsetDateTime::parse(
+            "2026-06-12T14:48:37.048295203Z",
+            &::time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+
+        assert_eq!(
+            format_dispatch_wall_clock(ts).as_deref(),
+            Some("2026-06-12T14:48:37.048Z"),
+            "persisted dispatch-state timestamps must match Postgres millisecond precision"
+        );
+    }
+
     /// The overshoot fix: a dispatch whose `running` session row hasn't landed
     /// yet still counts against the per-user cap. The DB seed shows 0 running,
     /// but four in-flight dispatches must raise the count to 4 so the next pass
