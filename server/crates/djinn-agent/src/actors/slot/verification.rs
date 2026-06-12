@@ -5,7 +5,10 @@ use crate::verification::service::verify_commit;
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::TransitionAction;
 use djinn_db::TaskRepository;
+use djinn_db::retry::DEFAULT_MAX_TX_RETRIES;
+use djinn_db::retry::retry_on_serialization_failure;
 use djinn_db::{VerificationResultRepository, VerificationStepInsert};
+use std::sync::Arc;
 
 use super::*;
 
@@ -68,7 +71,12 @@ where
                     "Verification pipeline crashed; releasing task"
                 );
                 let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-                let _ = repo
+                // `transition` internally wraps its body with
+                // `retry_on_serialization_failure`/`DEFAULT_MAX_TX_RETRIES` so we
+                // do not re-wrap here. On non-retryable failure we must surface
+                // the loss loudly — the task is otherwise stuck in `verifying`
+                // and the pipeline already failed.
+                if let Err(transition_err) = repo
                     .transition(
                         &task_id,
                         TransitionAction::ReleaseVerification,
@@ -77,7 +85,14 @@ where
                         Some(&format!("verification pipeline error: {e}")),
                         None,
                     )
-                    .await;
+                    .await
+                {
+                    tracing::error!(
+                        task_id = %task_id,
+                        error = %transition_err,
+                        "Failed to release task after verification pipeline error; task may stay in `verifying`"
+                    );
+                }
             }
             Err(_elapsed) => {
                 tracing::error!(
@@ -86,7 +101,8 @@ where
                     "Verification pipeline timed out; releasing task"
                 );
                 let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-                let _ = repo
+                // See note above: `transition` already retries internally.
+                if let Err(transition_err) = repo
                     .transition(
                         &task_id,
                         TransitionAction::ReleaseVerification,
@@ -98,16 +114,34 @@ where
                         )),
                         None,
                     )
-                    .await;
+                    .await
+                {
+                    tracing::error!(
+                        task_id = %task_id,
+                        error = %transition_err,
+                        "Failed to release task after verification pipeline timeout; task may stay in `verifying`"
+                    );
+                }
             }
         }
 
         if let Ok(task) = load_task(&task_id, &app_state).await
             && let Some(coordinator) = app_state.coordinator().await
         {
-            let _ = coordinator
+            // Redispatch is state-bearing: if the coordinator ack fails (actor
+            // dead, channel closed) the project sits idle until something else
+            // nudges it. Log loudly so an outage is visible.
+            if let Err(coord_err) = coordinator
                 .trigger_dispatch_for_project(&task.project_id)
-                .await;
+                .await
+            {
+                tracing::error!(
+                    task_id = %task_id,
+                    project_id = %task.project_id,
+                    error = %coord_err,
+                    "Failed to trigger project redispatch after verification completion; project may stay idle"
+                );
+            }
         }
     })
 }
@@ -137,6 +171,10 @@ pub(crate) fn spawn_verification(task_id: String, project_path: String, app_stat
         .await
     };
 
+    // Detach the verification `JoinHandle` — the pipeline owns its own
+    // lifetime via `VerificationRegistrationGuard` and we have no further work
+    // to do here. This is intentional fire-and-forget of a tokio task handle,
+    // not a state-bearing drop.
     std::mem::drop(spawn_verification_with_timeout(
         task_id,
         app_state,
@@ -251,7 +289,10 @@ async fn run_verification_pipeline(
 
     // All passed — transition to needs_task_review.
     tracing::info!(task_id = %task_id, "Verification: all commands passed");
-    let _ = task_repo
+    // `transition` already retries internally on 40001/40P01. A non-retryable
+    // failure here would leave the task stuck in `verifying` even though the
+    // pipeline succeeded — surface it loudly.
+    if let Err(e) = task_repo
         .transition(
             task_id,
             TransitionAction::VerificationPass,
@@ -260,7 +301,14 @@ async fn run_verification_pipeline(
             None,
             None,
         )
-        .await;
+        .await
+    {
+        tracing::error!(
+            task_id = %task_id,
+            error = %e,
+            "Failed to transition task to `needs_task_review` after verification pass; task may stay in `verifying`"
+        );
+    }
     Ok(())
 }
 
@@ -277,15 +325,34 @@ async fn handle_verification_failure(
     _app_state: &AgentContext,
 ) {
     let payload = serde_json::json!({ "body": feedback }).to_string();
-    let _ = task_repo
-        .log_activity(
-            Some(task_id),
-            "agent-supervisor",
-            "verification",
-            "comment",
-            &payload,
-        )
-        .await;
+    // `log_activity` does not internally retry serialization failures. The
+    // operation is idempotent at the row level (each retry just inserts a
+    // fresh activity row), so wrap the call in the existing
+    // serialization/deadlock retry helper. A persistent failure means the
+    // worker won't see the verification feedback on rework — warn loudly.
+    let log_result = retry_on_serialization_failure(DEFAULT_MAX_TX_RETRIES, || {
+        let payload = payload.clone();
+        let task_id_owned = task_id.to_owned();
+        async move {
+            task_repo
+                .log_activity(
+                    Some(&task_id_owned),
+                    "agent-supervisor",
+                    "verification",
+                    "comment",
+                    &payload,
+                )
+                .await
+        }
+    })
+    .await;
+    if let Err(e) = log_result {
+        tracing::warn!(
+            task_id = %task_id,
+            error = %e,
+            "Failed to log verification failure activity; worker rework will not see the feedback"
+        );
+    }
 
     // Check if this failure will hit the escalation threshold BEFORE
     // transitioning, so we can go directly to lead without an intermediate
@@ -313,7 +380,9 @@ async fn handle_verification_failure(
             feedback
         );
         // Single transition: verifying → needs_pm_intervention.
-        let _ = task_repo
+        // `transition` already retries internally on 40001/40P01; a persistent
+        // failure here would leave the task in `verifying` — surface it.
+        if let Err(e) = task_repo
             .transition(
                 task_id,
                 TransitionAction::Escalate,
@@ -322,10 +391,18 @@ async fn handle_verification_failure(
                 Some(&reason),
                 None,
             )
-            .await;
+            .await
+        {
+            tracing::error!(
+                task_id = %task_id,
+                error = %e,
+                "Failed to escalate task to `needs_lead_intervention` after consecutive verification failures; task may stay in `verifying`"
+            );
+        }
     } else {
         // Normal path: transition to open for re-dispatch to worker.
-        let _ = task_repo
+        // See note above: `transition` already retries internally.
+        if let Err(e) = task_repo
             .transition(
                 task_id,
                 TransitionAction::VerificationFail,
@@ -334,7 +411,14 @@ async fn handle_verification_failure(
                 Some(feedback),
                 None,
             )
-            .await;
+            .await
+        {
+            tracing::error!(
+                task_id = %task_id,
+                error = %e,
+                "Failed to transition task to `open` after verification failure; task may stay in `verifying` and the worker will not be re-dispatched"
+            );
+        }
     }
 }
 
@@ -364,6 +448,10 @@ async fn emit_verification_steps(
     let mut step_index: i32 = 1;
 
     for (idx, r) in result.setup_results.iter().enumerate() {
+        // Fire-and-forget event bus emission: state-bearing results are
+        // persisted below via `replace_for_task`; this notification is a
+        // best-effort progress signal to UI subscribers and is intentionally
+        // non-blocking.
         app_state
             .event_bus
             .send(DjinnEventEnvelope::verification_step(
@@ -395,6 +483,7 @@ async fn emit_verification_steps(
         step_index += 1;
     }
     for (idx, r) in result.verification_results.iter().enumerate() {
+        // Fire-and-forget event bus emission — see comment above.
         app_state
             .event_bus
             .send(DjinnEventEnvelope::verification_step(
@@ -428,9 +517,28 @@ async fn emit_verification_steps(
 
     // Persist to DB so the frontend can load results on page open.
     if let Some(tid) = task_id {
-        let repo = VerificationResultRepository::new(app_state.db.clone());
-        if let Err(e) = repo.replace_for_task(tid, &db_rows).await {
-            tracing::warn!(task_id = %tid, error = %e, "Failed to persist verification results");
+        let repo = Arc::new(VerificationResultRepository::new(app_state.db.clone()));
+        // `replace_for_task` does not internally retry on 40001/40P01. The
+        // operation is safe to re-run (delete-then-insert on a fresh
+        // transaction) so wrap it in the existing serialization/deadlock
+        // retry helper before logging on persistent failure.
+        // `VerificationStepInsert` is not `Clone`, so share ownership of the
+        // row set via `Arc` for the retry closure. `repo` is also `Arc`-ed
+        // because the `FnMut` closure is invoked multiple times.
+        let db_rows = Arc::new(db_rows);
+        let persist_result = retry_on_serialization_failure(DEFAULT_MAX_TX_RETRIES, || {
+            let db_rows = Arc::clone(&db_rows);
+            let tid = tid.to_owned();
+            let repo = Arc::clone(&repo);
+            async move { repo.replace_for_task(&tid, &db_rows).await }
+        })
+        .await;
+        if let Err(e) = persist_result {
+            tracing::warn!(
+                task_id = %tid,
+                error = %e,
+                "Failed to persist verification results after retry; frontend will fall back to live re-fetch"
+            );
         }
     }
 }
@@ -798,6 +906,9 @@ mod tests {
         assert!(app_state.has_verification(&task_id));
 
         background.abort();
+        // JoinError is expected when we just aborted the task — the only
+        // outcome we care about is the registration guard running. Drop the
+        // join error intentionally.
         let _ = background.await;
 
         assert!(!app_state.has_verification(&task_id));

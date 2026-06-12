@@ -24,7 +24,7 @@ async fn settings_set_get_reset_round_trip() {
         json!({"dispatch_limit": 7}),
     )
     .await;
-    assert_eq!(set["ok"], true);
+    assert_eq!(set["ok"], true, "settings_set response: {set}");
 
     let get = mcp_call_tool(&app, &session_id, "settings_get", json!({})).await;
     assert_eq!(get["exists"], true);

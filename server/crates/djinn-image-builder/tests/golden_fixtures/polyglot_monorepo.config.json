@@ -7,9 +7,31 @@
     "python": { "default_version": "3.12" }
   },
   "workspaces": [
-    { "root": "server",        "language": "rust", "toolchain": "stable" },
-    { "root": "tools/codegen", "language": "rust", "toolchain": "1.85.0" },
-    { "root": "ui",            "language": "node", "version": "20", "package_manager": "pnpm" }
+    {
+      "slug": "server",
+      "name": null,
+      "tags": [],
+      "root": "server",
+      "language": "rust",
+      "toolchain": "stable"
+    },
+    {
+      "slug": "tools-codegen-fd7092df",
+      "name": null,
+      "tags": [],
+      "root": "tools/codegen",
+      "language": "rust",
+      "toolchain": "1.85.0"
+    },
+    {
+      "slug": "ui",
+      "name": null,
+      "tags": [],
+      "root": "ui",
+      "language": "node",
+      "version": "20",
+      "package_manager": "pnpm"
+    }
   ],
   "system_packages": ["postgresql-client"],
   "env": { "RUST_LOG": "info" },
