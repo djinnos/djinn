@@ -28,6 +28,12 @@ pub struct Proposal {
     pub closed_at: Option<String>,
     /// Head revision number; sign-offs anchored to an earlier seq are stale.
     pub latest_revision_seq: i32,
+    /// Last proposal revision that the in-flight build has reconciled against.
+    /// `None` means no build reconciliation has been stamped for this proposal.
+    pub last_reconciled_revision_seq: Option<i32>,
+    /// True when the latest proposal revision is newer than the revision the
+    /// in-flight build has reconciled against.
+    pub pending_reconcile: bool,
     /// Participant accountable for the build once graduated (also the epic
     /// creator, so commits attribute correctly).
     pub build_owner_user_id: Option<String>,
