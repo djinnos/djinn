@@ -297,13 +297,23 @@ async fn project_pause_keeps_review_status_task_dispatchable_for_resume() {
 /// an administrative pause is not infra drift and must not feed the same
 /// reap path. Without this guard, pausing dispatch would silently drop every
 /// in-flight worker session and waste their work.
+///
+/// The fixture MUST model a real active coordinator session — i.e. the slot
+/// pool holds a `task_to_slot` mapping for the task, in addition to the DB
+/// `running` session row. `detect_and_recover_stuck_filtered` (the orphan
+/// reconciler) gates on `pool.has_session(&task.id)`; with only a DB row and
+/// no slot mapping it would treat the task as orphaned and transition it
+/// back to `open` via `interrupt_running_for_task`, which would invalidate
+/// this test. Seeding a real slot-pool session makes the test reflect the
+/// proposal's "active session" contract: a worker that holds both the
+/// in-memory slot AND the DB `running` row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn global_pause_does_not_reap_or_kill_active_worker_sessions() {
     use djinn_db::SessionRepository;
 
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
-    let (task, _project_path) =
+    let (task, project_path) =
         create_simple_task(&db, &tx, "task", "active session during pause").await;
 
     // Put the task in the dispatchable execution state and create a real
@@ -319,7 +329,7 @@ async fn global_pause_does_not_reap_or_kill_active_worker_sessions() {
         .create(CreateSessionParams {
             project_id: &task.project_id,
             task_id: Some(&task.id),
-            model: "openai/gpt-5.5",
+            model: "test/mock",
             agent_type: "worker",
             metadata_json: None,
             task_run_id: None,
@@ -327,7 +337,7 @@ async fn global_pause_does_not_reap_or_kill_active_worker_sessions() {
         .await
         .unwrap();
 
-    // Pre-condition: the session is active.
+    // Pre-condition: the DB session row is active.
     assert!(
         session_repo
             .list_active()
@@ -335,7 +345,61 @@ async fn global_pause_does_not_reap_or_kill_active_worker_sessions() {
             .unwrap()
             .iter()
             .any(|s| s.id == session.id),
-        "test fixture: session must be active before pause enforcement"
+        "test fixture: DB session row must be active before pause enforcement"
+    );
+
+    // Build a slot pool whose slots stay busy for the lifetime of the test
+    // (the test runner parks on the kill signal, so the slot never returns
+    // `Ok` and the pool keeps the `task_to_slot` mapping). This is the
+    // "active" half of the fixture — without it the orphan reconciler below
+    // would treat the in_progress task as leaked and finalize the session.
+    let runtime = RecordingRuntimeOps::new(true);
+    let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.runtime_ops = Some(std::sync::Arc::new(runtime.clone()));
+    let cancel = CancellationToken::new();
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel.clone(),
+        SlotPoolConfig {
+            models: vec![ModelSlotConfig {
+                model_id: DEFAULT_MODEL_ID.to_owned(),
+                max_slots: 1,
+                roles: ["worker", "reviewer"]
+                    .into_iter()
+                    .map(ToOwned::to_owned)
+                    .collect(),
+            }],
+            role_priorities: HashMap::new(),
+        },
+        std::sync::Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
+            let runner: crate::actors::slot::TestLifecycleRunner = std::sync::Arc::new(
+                |_task_id, _project_path, _model_id, _app_state, kill, _pause| {
+                    Box::pin(async move {
+                        // Block until the slot's kill signal fires — the slot
+                        // stays busy and the pool's `task_to_slot` mapping
+                        // survives. This is the "active session" state the
+                        // proposal requires the coordinator to leave alone.
+                        kill.cancelled().await;
+                        Ok(())
+                    })
+                },
+            );
+            SlotHandle::spawn_with_test_runner(
+                slot_id,
+                model_id,
+                event_tx,
+                app_state,
+                cancel,
+                runner,
+            )
+        }),
+    );
+    pool.dispatch(&task.id, &project_path, DEFAULT_MODEL_ID)
+        .await
+        .expect("dispatch should claim a slot for the active worker fixture");
+    assert!(
+        pool.has_session(&task.id).await.expect("has_session"),
+        "test fixture: slot pool must report an active session for the task"
     );
 
     // Set a global pause and run every active-session lifecycle method the
@@ -349,8 +413,8 @@ async fn global_pause_does_not_reap_or_kill_active_worker_sessions() {
     )
     .await;
 
-    let runtime = RecordingRuntimeOps::new(true);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.pool = pool;
     actor.runtime_ops = Some(std::sync::Arc::new(runtime.clone()));
 
     // All four lifecycle methods run under the same actor reference; assert
@@ -367,16 +431,23 @@ async fn global_pause_does_not_reap_or_kill_active_worker_sessions() {
         "pause must not trigger task-run Job teardown for an active session"
     );
 
-    // The session row is still `running` and listed by `list_active()`.
+    // The DB session row is still `running` and listed by `list_active()`.
     let active = session_repo.list_active().await.unwrap();
     assert!(
         active.iter().any(|s| s.id == session.id),
-        "pause enforcement must not remove or finalize the active session"
+        "pause enforcement must not remove or finalize the active DB session"
+    );
+
+    // The slot pool still holds the task→slot mapping; nothing in the
+    // lifecycle methods evicted or replaced it.
+    assert!(
+        actor.pool.has_session(&task.id).await.expect("has_session"),
+        "pause enforcement must not evict the slot pool's task→slot mapping"
     );
 
     // The task was not released for redispatch — it stays in_progress, just
-    // like it would without the pause, because `detect_and_recover_stuck`
-    // is keyed on `has_session` and the slot pool still holds it.
+    // like it would without the pause, because `detect_and_recover_stuck` is
+    // keyed on `has_session` and the slot pool still holds it.
     let updated = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
         .get(&task.id)
         .await
@@ -386,6 +457,8 @@ async fn global_pause_does_not_reap_or_kill_active_worker_sessions() {
         updated.status, "in_progress",
         "pause must not release the task from its execution state"
     );
+
+    cancel.cancel();
 }
 
 // ── AC #4: chat and PR poller paths remain unaffected by dispatch pause ──────
