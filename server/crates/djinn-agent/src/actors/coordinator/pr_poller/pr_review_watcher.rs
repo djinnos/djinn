@@ -579,6 +579,7 @@ impl CoordinatorActor {
                     &owner,
                     &repo,
                     pull_number,
+                    &pr.node_id,
                     has_approved,
                     &current_sha,
                 )
@@ -618,6 +619,7 @@ impl CoordinatorActor {
                     self.pr_status_cache.remove(&task.id);
                     self.merge_fail_count.remove(&task.id);
                     self.delegated_to_github.remove(&task.id);
+                    self.handled_dequeues.remove(&task.id);
                 }
                 Err(e) => {
                     // Merge-queue 405: the repo's branch protection routes
