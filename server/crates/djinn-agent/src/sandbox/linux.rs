@@ -21,7 +21,9 @@ use super::{Sandbox, djinn_cache_dir, git_dir, git_metadata_dir};
 /// task worktree, its git metadata directory, `/var/tmp`, a dedicated djinn
 /// agent scratch dir (`$XDG_CACHE_HOME/djinn` or `$HOME/.cache/djinn`), the
 /// shared cross-task cache PVC (`/cache`, where toolchain caches like
-/// `GOMODCACHE`/`GOCACHE`/sccache live), and the usual `/dev/{null,zero,urandom}`
+/// `GOMODCACHE`/`GOCACHE`/sccache live, task-run Cargo targets use private
+/// `/cache/cargo-target-runs/<task_run_id>` dirs, and warm jobs maintain
+/// `/cache/cargo-target/<project_id>` bases), and the usual `/dev/{null,zero,urandom}`
 /// nodes. `/tmp` is intentionally not
 /// writable: on typical Linux it's tmpfs, and allowing writes there caused a
 /// 3.8 GB cargo-artifact leak into RAM-backed storage.
@@ -157,14 +159,18 @@ fn apply_policy(
 
     // Shared cross-task cache PVC (`/cache`). The K8s task-run Pod env
     // (djinn-k8s/src/job.rs) routes the toolchain caches here at runtime —
-    // CARGO_HOME=/cache/cargo, CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>,
+    // CARGO_HOME=/cache/cargo,
+    // CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id> for private
+    // per-run Cargo target dirs seeded from warm bases when available,
     // SCCACHE_DIR=/cache/sccache/<project> — and the image bakes the Go cache
-    // (GOMODCACHE/GOCACHE) onto /cache too — so build/test commands need write
-    // access to populate them (`go mod download` → /cache/go/mod, cargo
-    // registry → /cache/cargo, cargo target artifacts → /cache/cargo-target-runs,
-    // sccache → /cache/sccache, etc.). Only present
-    // in the K8s task-run
-    // Pod (the PVC mount); a no-op elsewhere since the open fails. Guarded:
+    // (GOMODCACHE/GOCACHE) onto /cache too. Warm jobs maintain shared base
+    // targets under /cache/cargo-target/<project_id>. The broad /cache rule is
+    // compatible with both path families and lets build/test commands populate
+    // their assigned cache locations (`go mod download` → /cache/go/mod, cargo
+    // registry → /cache/cargo, private cargo target artifacts →
+    // /cache/cargo-target-runs, warm base maintenance → /cache/cargo-target,
+    // sccache → /cache/sccache, etc.). Only present in the K8s task-run Pod
+    // (the PVC mount); a no-op elsewhere since the open fails. Guarded:
     // if the dir is absent we silently skip, same as the scratch dir above.
     if let Ok(fd) = PathFd::new("/cache") {
         ruleset = ruleset.add_rule(PathBeneath::new(fd, full_access))?;
