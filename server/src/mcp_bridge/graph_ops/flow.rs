@@ -215,6 +215,8 @@ fn related_symbol(node: &RepoGraphNode, confidence: f64) -> RelatedSymbol {
         file_path: shared::repo_graph_node_file_path(node),
         confidence,
         confidence_tier: "extracted".to_string(),
+        confidence_reason: None,
+        excluded_reason: None,
         route_language_chain: None,
     }
 }
