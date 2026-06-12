@@ -714,7 +714,8 @@ async fn get_pr_merge_queue_state_returns_dequeue_event_when_kicked() {
                                 {
                                     "__typename": "RemovedFromMergeQueueEvent",
                                     "reason": "CHECKS_FAILED",
-                                    "createdAt": "2026-05-21T22:30:00Z"
+                                    "createdAt": "2026-05-21T22:30:00Z",
+                                    "beforeCommit": { "oid": "abc123def456" }
                                 }
                             ]
                         }
@@ -736,6 +737,7 @@ async fn get_pr_merge_queue_state_returns_dequeue_event_when_kicked() {
     let dequeue = state.last_dequeue.expect("dequeue event present");
     assert_eq!(dequeue.reason.as_deref(), Some("CHECKS_FAILED"));
     assert_eq!(dequeue.created_at.as_deref(), Some("2026-05-21T22:30:00Z"));
+    assert_eq!(dequeue.before_commit_sha.as_deref(), Some("abc123def456"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

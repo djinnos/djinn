@@ -11,6 +11,7 @@ impl CoordinatorActor {
         owner: &str,
         repo: &str,
         pull_number: u64,
+        pr_node_id: &str,
         has_approved: bool,
         current_sha: &str,
     ) {
@@ -29,6 +30,71 @@ impl CoordinatorActor {
                 return;
             }
         };
+
+        // ── Sticky failure-dequeue check ──────────────────────────────────
+        // A failure-flavored dequeue whose head SHA still matches the PR's
+        // current head means the queue rejected exactly this code and no
+        // rework has landed since. This must be handled REGARDLESS of the
+        // PR's current queue/auto-merge state: GitHub's merge-when-ready can
+        // re-add the PR to the queue seconds after the eviction (and a
+        // coordinator restart loses `delegated_to_github`, making the merge
+        // path blindly re-enqueue) — so a check that only fires when a tick
+        // happens to observe the PR *out* of the queue misses the eviction
+        // entirely and the same broken head churns the queue forever
+        // (observed on PRs #491/#492, 2026-06-12). `handled_dequeues`
+        // consumes each event once so the reopen doesn't re-fire while
+        // rework for it is still pending on the same SHA.
+        if dequeue_requires_rework(
+            state.last_dequeue.as_ref(),
+            current_sha,
+            self.handled_dequeues.get(task_id).map(|s| s.as_str()),
+        ) {
+            // Pull the PR back out of the queue / disarm merge-when-ready
+            // first so GitHub stops churning merge groups on the rejected
+            // head while the reopened task is being reworked. Best-effort:
+            // a fresh push from the rework invalidates the entry anyway.
+            if state.merge_queue_entry.is_some()
+                && let Err(e) = gh_client.dequeue_pull_request(pr_node_id).await
+            {
+                tracing::warn!(
+                    task_id = %task_short_id,
+                    pr = pull_number,
+                    error = %e,
+                    "PR poller: failed to dequeue rejected PR before reopen (continuing)"
+                );
+            }
+            if state.auto_merge_request.is_some()
+                && let Err(e) = gh_client.disable_auto_merge(pr_node_id).await
+            {
+                tracing::warn!(
+                    task_id = %task_short_id,
+                    pr = pull_number,
+                    error = %e,
+                    "PR poller: failed to disarm auto-merge on rejected PR before reopen (continuing)"
+                );
+            }
+            if let Some(created_at) = state
+                .last_dequeue
+                .as_ref()
+                .and_then(|d| d.created_at.clone())
+            {
+                self.handled_dequeues
+                    .insert(task_id.to_string(), created_at);
+            }
+            self.handle_queue_failure(
+                gh_client,
+                owner,
+                repo,
+                task_id,
+                task_short_id,
+                pull_number,
+                pr_url,
+                state.last_dequeue.as_ref(),
+                "merge_queue_dequeued",
+            )
+            .await;
+            return;
+        }
 
         // ── In-queue states: just wait ────────────────────────────────────
         if let Some(entry) = &state.merge_queue_entry {
@@ -123,30 +189,12 @@ impl CoordinatorActor {
             return;
         }
 
-        // Auto-merge is no longer enabled and the PR isn't queued. Most
-        // commonly this means GitHub disabled auto-merge after a failed
-        // merge attempt. If we have a failure-flavored dequeue event,
-        // surface it. Otherwise fall through silently — next tick will
-        // re-enable auto-merge via the undraft path on a fresh push, or
-        // a human will intervene.
-        if let Some(dequeue) = &state.last_dequeue
-            && dequeue_reason_is_failure(dequeue.reason.as_deref())
-        {
-            self.handle_queue_failure(
-                gh_client,
-                owner,
-                repo,
-                task_id,
-                task_short_id,
-                pull_number,
-                pr_url,
-                Some(dequeue),
-                "merge_queue_dequeued",
-            )
-            .await;
-            return;
-        }
-
+        // Auto-merge is no longer enabled and the PR isn't queued, and the
+        // sticky dequeue check above found no unconsumed failure eviction
+        // for the current head (a failure for a PREVIOUS head means rework
+        // already landed and just needs re-delegation). Fall through
+        // silently — next tick re-enables auto-merge via the undraft path
+        // on a fresh push, or a human intervenes.
         tracing::debug!(
             task_id = %task_short_id,
             pr = pull_number,
@@ -573,6 +621,42 @@ pub(in crate::actors::coordinator) fn dequeue_reason_is_failure(reason: Option<&
             r.to_ascii_uppercase().as_str(),
             "MERGED" | "BRANCH_INVALIDATED" | "QUEUE_CLEARED" | "DEQUEUED"
         ),
+    }
+}
+
+/// Decide whether a merge-queue dequeue event demands reopening the task.
+///
+/// True only when all three hold:
+///   * the reason is failure-flavored (see [`dequeue_reason_is_failure`]);
+///   * the evicted head (`before_commit_sha`) still matches the PR's current
+///     head — i.e. no rework has landed since the rejection. A missing
+///     `before_commit_sha` counts as a match so a GraphQL field gap degrades
+///     to the conservative pre-existing behavior (reopen) rather than
+///     silently never reopening;
+///   * the event hasn't been consumed already (`handled_created_at` is the
+///     `created_at` of the last dequeue this task was reopened for).
+pub(in crate::actors::coordinator) fn dequeue_requires_rework(
+    dequeue: Option<&djinn_provider::github_api::DequeueEvent>,
+    current_sha: &str,
+    handled_created_at: Option<&str>,
+) -> bool {
+    let Some(dequeue) = dequeue else {
+        return false;
+    };
+    if !dequeue_reason_is_failure(dequeue.reason.as_deref()) {
+        return false;
+    }
+    if dequeue
+        .before_commit_sha
+        .as_deref()
+        .is_some_and(|sha| sha != current_sha)
+    {
+        return false;
+    }
+    match (dequeue.created_at.as_deref(), handled_created_at) {
+        (Some(event), Some(handled)) => event != handled,
+        // No created_at on the event: cannot dedup, err on reopening.
+        _ => true,
     }
 }
 

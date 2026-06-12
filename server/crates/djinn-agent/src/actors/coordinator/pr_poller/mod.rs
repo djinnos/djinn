@@ -85,6 +85,6 @@ pub(crate) use pr_review_handlers::parse_pr_url;
 #[cfg(test)]
 use ci_helpers::is_advisory_check_name;
 #[cfg(test)]
-use pr_commands::dequeue_reason_is_failure;
+use pr_commands::{dequeue_reason_is_failure, dequeue_requires_rework};
 #[cfg(test)]
 use pr_review_handlers::{is_racing_unmerged_status, pick_conflict_blocker_sibling};

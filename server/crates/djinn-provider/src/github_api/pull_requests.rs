@@ -590,6 +590,7 @@ impl GitHubApiClient {
                                     reason
                                     createdAt
                                     actor { login }
+                                    beforeCommit { oid }
                                 }
                             }
                         }
@@ -700,6 +701,7 @@ impl GitHubApiClient {
                 reason: node["reason"].as_str().map(|s| s.to_string()),
                 merge_group_ref: None,
                 created_at: node["createdAt"].as_str().map(|s| s.to_string()),
+                before_commit_sha: node["beforeCommit"]["oid"].as_str().map(|s| s.to_string()),
             });
 
         Ok(PrMergeQueueState {

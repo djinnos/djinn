@@ -308,4 +308,8 @@ pub struct DequeueEvent {
     /// Used to look up the failing check runs.
     pub merge_group_ref: Option<String>,
     pub created_at: Option<String>,
+    /// PR head commit SHA at the moment of removal (`beforeCommit.oid`).
+    /// Comparing this against the PR's current head tells whether rework
+    /// has landed since the queue rejected it.
+    pub before_commit_sha: Option<String>,
 }
