@@ -13,7 +13,8 @@
 -- Index choices: idx_dispatch_state_cooldown_until lets the integration epic's
 -- periodic cleanup/due scan find cooldown rows efficiently; idx_dispatch_state_
 -- escalation_count supports operator/audit queries for repeatedly escalated
--- tasks without a full-table scan.
+-- tasks without a full-table scan. The task_id primary key already provides the
+-- natural-key lookup path used by load/upsert/clear operations.
 
 CREATE TABLE IF NOT EXISTS dispatch_state (
     task_id                VARCHAR(36) NOT NULL PRIMARY KEY,

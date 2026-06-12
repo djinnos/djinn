@@ -449,6 +449,86 @@ fn coordinator_actor_for_tests(
     }
 }
 
+fn dispatch_state_record(
+    task_id: &str,
+    cooldown_until: Option<String>,
+    counters: (i64, i64),
+) -> djinn_db::DispatchStateRecord {
+    djinn_db::DispatchStateRecord {
+        task_id: task_id.to_owned(),
+        failure_streak: counters.0,
+        cooldown_until,
+        escalation_count: counters.1,
+        last_dispatched_at: None,
+        last_dispatched_role: None,
+        inflight_creator_user_id: None,
+        inflight_model_id: None,
+        updated_at: "2026-06-12T00:00:00.000Z".to_owned(),
+    }
+}
+
+fn rfc3339(dt: ::time::OffsetDateTime) -> String {
+    dt.format(&::time::format_description::well_known::Rfc3339)
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rehydration_loads_active_cooldown_and_durable_counters() {
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _) = broadcast::channel(16);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let wall_now = ::time::OffsetDateTime::parse(
+        "2026-06-12T00:00:00Z",
+        &::time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    let instant_now = StdInstant::now();
+    let active_deadline = wall_now + ::time::Duration::seconds(90);
+
+    let mut record = dispatch_state_record("task-active", Some(rfc3339(active_deadline)), (3, 2));
+    record.last_dispatched_at = Some(rfc3339(wall_now - ::time::Duration::seconds(30)));
+    record.last_dispatched_role = Some("reviewer".to_owned());
+    record.inflight_creator_user_id = Some("user-1".to_owned());
+    record.inflight_model_id = Some("provider/model".to_owned());
+
+    let summary = actor.apply_rehydrated_dispatch_state(vec![record], wall_now, instant_now);
+
+    assert_eq!(summary.records, 1);
+    assert_eq!(summary.cooldowns, 1);
+    assert_eq!(summary.expired_cooldowns, 0);
+    assert_eq!(actor.dispatch_failure_streak["task-active"], 3);
+    assert_eq!(actor.escalation_counts["task-active"], 2);
+    assert_eq!(actor.last_dispatched["task-active"].role, "reviewer");
+    assert_eq!(
+        actor.inflight_dispatches["task-active"],
+        (Some("user-1".to_owned()), "provider/model".to_owned())
+    );
+    let remaining = actor.dispatch_cooldowns["task-active"].duration_since(instant_now);
+    assert!(remaining >= std::time::Duration::from_secs(89));
+    assert!(remaining <= std::time::Duration::from_secs(91));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rehydration_skips_expired_cooldown_but_keeps_other_state() {
+    let db = Database::open_in_memory().unwrap();
+    let (tx, _) = broadcast::channel(16);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let wall_now = ::time::OffsetDateTime::parse(
+        "2026-06-12T00:00:00Z",
+        &::time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    let expired_deadline = wall_now - ::time::Duration::seconds(1);
+
+    let record = dispatch_state_record("task-expired", Some(rfc3339(expired_deadline)), (5, 0));
+    let summary = actor.apply_rehydrated_dispatch_state(vec![record], wall_now, StdInstant::now());
+
+    assert_eq!(summary.cooldowns, 0);
+    assert_eq!(summary.expired_cooldowns, 1);
+    assert!(!actor.dispatch_cooldowns.contains_key("task-expired"));
+    assert_eq!(actor.dispatch_failure_streak["task-expired"], 5);
+}
+
 async fn create_simple_task(
     db: &Database,
     tx: &broadcast::Sender<DjinnEventEnvelope>,

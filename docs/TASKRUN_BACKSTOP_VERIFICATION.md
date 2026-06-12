@@ -5,13 +5,39 @@ This runbook verifies the operational safety criterion for the Kubernetes task-r
 ## Preconditions
 
 - A real Kubernetes-backed Djinn deployment is running.
+- Run this from an operator/admin shell, not from a normal task-run worker. Wave 1 evidence showed workers can be missing `kubectl`/`KUBECONFIG`, can lack RBAC to read Pods/Jobs/logs, and can have projected tokens that `/mcp` rejects for operator actions.
 - `kubectl` points at the cluster/namespace that runs Djinn. Set `NS=djinn` below if your namespace differs.
+- Your Kubernetes identity can list/get Pods and Jobs in the Djinn namespace and can read `deploy/djinn-server` logs.
 - You can call the Djinn control-plane tools (for example through MCP) including `execution_kill_task`. For proposal abort verification, you can call the force-close/abort path that closes the task.
 - The target task should be long-running enough that its worker Pod is still active before the kill/force-close is issued.
 
 ```bash
 export NS=djinn
 ```
+
+## 0. Capture operator preflight evidence
+
+Before creating the long-running evidence task, prove that the operator shell has the required Kubernetes and Djinn control-plane access. This preflight does **not** kill or force-close anything and must not be cited as cleanup success by itself.
+
+```bash
+export NS=djinn
+export DJINN_MCP_URL="https://<operator-accessible-djinn-host>/mcp"
+export DJINN_OPERATOR_BEARER_TOKEN="<operator/admin token>"
+./scripts/taskrun-backstop-preflight.sh | tee taskrun-backstop-preflight.md
+```
+
+Paste the complete Markdown output into `docs/TASKRUN_BACKSTOP_E2E_EVIDENCE.md` under the operator preflight section before running the kill and force-close checks. Redact secrets before pasting: bearer tokens, kubeconfig client keys/certificates, cookies, database URLs, and full health payloads containing credentials. The helper redacts the MCP bearer token in the displayed command, but operators remain responsible for reviewing the captured output.
+
+The preflight must show:
+
+- `kubectl version --client=true` exits 0;
+- current context and namespace are the intended Djinn cluster/namespace;
+- `kubectl auth can-i` allows list/get for Pods and Jobs in `$NS`;
+- `kubectl get pods` and `kubectl get jobs` smoke tests succeed;
+- `kubectl logs -n "$NS" deploy/djinn-server ...` succeeds;
+- the MCP `initialize` request to `$DJINN_MCP_URL` succeeds with the same operator/admin credential that will be used for `execution_kill_task` and force-close/operator-close.
+
+If any preflight item fails, stop and fix the operator environment before continuing. Do not grant broad runtime permissions to task-run workers as a workaround unless a separate, narrowly scoped, reviewed deployment change already exists for that purpose.
 
 ## 1. Start and identify a long-running task run
 

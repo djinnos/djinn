@@ -251,6 +251,9 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
                 tracing::info!(
                     task_run_id = %task_run_id,
                     path = %path.display(),
+                    cleanup_outcome = "removed",
+                    deleted_count = 1_u64,
+                    error_count = 0_u64,
                     "CoordinatorActor: deleted orphaned cargo target run-dir"
                 );
             }
@@ -260,6 +263,9 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
                     error = %e,
                     task_run_id = %task_run_id,
                     path = %path.display(),
+                    cleanup_outcome = "failed",
+                    deleted_count = 0_u64,
+                    error_count = 1_u64,
                     "CoordinatorActor: failed to delete orphaned cargo target run-dir; continuing"
                 );
             }
@@ -272,6 +278,7 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
         deleted = stats.deleted,
         retained = stats.retained,
         errors = stats.errors,
+        cleanup_outcome = if stats.errors == 0 { "completed" } else { "completed_with_errors" },
         "CoordinatorActor: cargo target run-dir sweep completed"
     );
 
