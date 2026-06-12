@@ -1,54 +1,86 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { callMcpTool } from "@/api/mcpClient";
 import {
   fetchDispatchPauseStatus,
   fetchGlobalDispatchPauseStatus,
   fetchProjectDispatchPauseStatus,
   fetchUserDispatchPauseStatus,
-} from './dispatchPause';
-import { callMcpTool } from '@/api/mcpClient';
+} from "@/api/dispatchPause";
 
-vi.mock('@/api/mcpClient', () => ({
-  callMcpTool: vi.fn().mockResolvedValue({ ok: true }),
+vi.mock("@/api/mcpClient", () => ({
+  callMcpTool: vi.fn(),
 }));
 
-describe('dispatchPause API wrapper', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
+beforeEach(() => {
+  vi.mocked(callMcpTool).mockReset();
+  vi.mocked(callMcpTool).mockResolvedValue({
+    ok: true,
+    state: { projects: {}, users: {} },
   });
+});
 
-  it('calls only the read-only dispatch_pause_status tool with exact empty args', async () => {
+describe("dispatch pause status API", () => {
+  it("fetches all dispatch pause status with exact empty arguments", async () => {
     await fetchDispatchPauseStatus();
 
-    expect(callMcpTool).toHaveBeenCalledTimes(1);
-    expect(callMcpTool).toHaveBeenCalledWith('dispatch_pause_status', {});
-    expect(vi.mocked(callMcpTool).mock.calls.map(([name]) => name)).not.toContain('dispatch_pause');
-    expect(vi.mocked(callMcpTool).mock.calls.map(([name]) => name)).not.toContain('dispatch_resume');
+    expect(vi.mocked(callMcpTool)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(callMcpTool)).toHaveBeenCalledWith("dispatch_pause_status", {});
   });
 
-  it('passes only status scope and target_id fields for scoped reads', async () => {
-    await fetchProjectDispatchPauseStatus('project-1');
-    await fetchUserDispatchPauseStatus('user-1');
-    await fetchGlobalDispatchPauseStatus();
+  it("does not forward unknown mutation-like fields to status reads", async () => {
     await fetchDispatchPauseStatus({
-      scope: 'project',
-      target_id: 'project-2',
-      reason: 'must not forward',
-      paused_by: 'must not forward',
+      paused: true,
+      reason: "maintenance",
       resume: true,
     } as never);
 
-    expect(callMcpTool).toHaveBeenNthCalledWith(1, 'dispatch_pause_status', {
-      scope: 'project',
-      target_id: 'project-1',
+    expect(vi.mocked(callMcpTool)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(callMcpTool)).toHaveBeenCalledWith("dispatch_pause_status", {});
+    expect(vi.mocked(callMcpTool)).not.toHaveBeenCalledWith(
+      expect.stringMatching(/^dispatch_(pause|resume)$/),
+      expect.anything(),
+    );
+  });
+
+  it("fetches global status with exact empty arguments", async () => {
+    await fetchGlobalDispatchPauseStatus();
+
+    expect(vi.mocked(callMcpTool)).toHaveBeenCalledWith("dispatch_pause_status", {});
+  });
+
+  it("fetches project status with exact scope and target", async () => {
+    await fetchProjectDispatchPauseStatus("project-123");
+
+    expect(vi.mocked(callMcpTool)).toHaveBeenCalledWith("dispatch_pause_status", {
+      scope: "project",
+      target_id: "project-123",
     });
-    expect(callMcpTool).toHaveBeenNthCalledWith(2, 'dispatch_pause_status', {
-      scope: 'user',
-      target_id: 'user-1',
+  });
+
+  it("fetches user status with exact scope and target", async () => {
+    await fetchUserDispatchPauseStatus("user-123");
+
+    expect(vi.mocked(callMcpTool)).toHaveBeenCalledWith("dispatch_pause_status", {
+      scope: "user",
+      target_id: "user-123",
     });
-    expect(callMcpTool).toHaveBeenNthCalledWith(3, 'dispatch_pause_status', { scope: 'global' });
-    expect(callMcpTool).toHaveBeenNthCalledWith(4, 'dispatch_pause_status', {
-      scope: 'project',
-      target_id: 'project-2',
-    });
+  });
+
+  it("never calls dispatch_pause or dispatch_resume from status helpers", async () => {
+    await fetchDispatchPauseStatus();
+    await fetchGlobalDispatchPauseStatus();
+    await fetchProjectDispatchPauseStatus("project-123");
+    await fetchUserDispatchPauseStatus("user-123");
+
+    const toolNames = vi.mocked(callMcpTool).mock.calls.map(([toolName]) => toolName);
+    expect(toolNames).toEqual([
+      "dispatch_pause_status",
+      "dispatch_pause_status",
+      "dispatch_pause_status",
+      "dispatch_pause_status",
+    ]);
+    expect(toolNames).not.toContain("dispatch_pause");
+    expect(toolNames).not.toContain("dispatch_resume");
   });
 });

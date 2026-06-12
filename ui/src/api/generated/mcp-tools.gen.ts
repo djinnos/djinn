@@ -789,12 +789,18 @@ export type DispatchPauseStatusInput = DispatchPauseStatusInputSchema.DispatchPa
 export namespace DispatchPauseStatusOutputSchema {
   export type DispatchPauseScope = "global" | "project" | "user"
 
+  /**
+   * Metadata recorded when dispatch is paused for a scope.
+   */
   export interface DispatchPause {
   expires_at?: string | null
   paused_at: string
   paused_by: string
   reason: string
   }
+  /**
+   * Snapshot of dispatch pause state across all scopes.
+   */
   export interface DispatchPauseState {
   global?: DispatchPause | null
   projects?: {

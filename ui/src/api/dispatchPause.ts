@@ -7,18 +7,29 @@ export type DispatchPauseScope = NonNullable<DispatchPauseStatusInput["scope"]>;
 export type DispatchPauseMetadata = NonNullable<DispatchPauseStatusOutput["current"]>;
 export type DispatchPauseState = NonNullable<DispatchPauseStatusOutput["state"]>;
 
+// Back-compat aliases for callers added by the API-wrapper task.
+export type DispatchPauseStatusArgs = DispatchPauseStatusInput;
+export type DispatchPauseStatusResponse = DispatchPauseStatusOutput;
+export type DispatchPauseStatusEntry = DispatchPauseMetadata;
+
 function sanitizeStatusArgs(args?: Partial<DispatchPauseStatusInput>): DispatchPauseStatusInput {
   const sanitized: DispatchPauseStatusInput = {};
-  if (args?.scope) {
+
+  if (args?.scope != null) {
     sanitized.scope = args.scope;
   }
   if (typeof args?.target_id === "string" && args.target_id.trim() !== "") {
     sanitized.target_id = args.target_id;
   }
+
   return sanitized;
 }
 
-/** Read-only dispatch pause status wrapper. Never calls pause/resume mutators. */
+/**
+ * Fetch dispatch pause status. This wrapper is intentionally read-only: it only
+ * invokes `dispatch_pause_status` and strips unknown/mutation-like fields from
+ * caller-provided objects before sending MCP arguments.
+ */
 export async function fetchDispatchPauseStatus(
   args?: Partial<DispatchPauseStatusInput>,
 ): Promise<DispatchPauseStatusOutput> {
@@ -26,7 +37,7 @@ export async function fetchDispatchPauseStatus(
 }
 
 export function fetchGlobalDispatchPauseStatus(): Promise<DispatchPauseStatusOutput> {
-  return fetchDispatchPauseStatus({ scope: "global" });
+  return fetchDispatchPauseStatus();
 }
 
 export function fetchProjectDispatchPauseStatus(targetId: string): Promise<DispatchPauseStatusOutput> {
