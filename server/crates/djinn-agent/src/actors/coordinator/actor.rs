@@ -250,7 +250,8 @@ mod rehydration_tests {
 }
 
 // Field count: receiver, events, cancel, tick, db, events_tx, pool,
-//              catalog, health, paused, dispatched, recovered = 12 ✓ (≤20)
+//              catalog, health, role registry, lsp, status, dispatch state,
+//              verification, merge/proposal helpers, runtime hooks = ≤20
 
 #[derive(Default)]
 pub(super) struct RehydratedDispatchStateSummary {
