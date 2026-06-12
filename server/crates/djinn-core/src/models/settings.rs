@@ -32,6 +32,12 @@ impl DispatchPauseScope {
     }
 }
 
+impl std::fmt::Display for DispatchPauseScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl std::str::FromStr for DispatchPauseScope {
     type Err = String;
 
@@ -324,6 +330,42 @@ mod tests {
 
         let older = DjinnSettings::from_db_value(r#"{"dispatch_limit":10}"#);
         assert!(older.dispatch_pause.is_none());
+    }
+
+    #[test]
+    fn dispatch_pause_state_serializes_scoped_metadata() {
+        let pause = DispatchPause {
+            paused_by: "admin".to_owned(),
+            paused_at: "2026-06-12T00:00:00.000Z".to_owned(),
+            reason: "maintenance".to_owned(),
+            expires_at: None,
+        };
+        let mut state = DispatchPauseState {
+            global: Some(pause.clone()),
+            projects: HashMap::new(),
+            users: HashMap::new(),
+        };
+        state.projects.insert("project-1".to_owned(), pause.clone());
+        state.users.insert("user-1".to_owned(), pause.clone());
+
+        let serialized = serde_json::to_value(&state).unwrap();
+        assert_eq!(serialized["global"]["paused_by"], "admin");
+        assert_eq!(serialized["projects"]["project-1"]["reason"], "maintenance");
+        assert_eq!(serialized["users"]["user-1"]["paused_at"], pause.paused_at);
+
+        let parsed: DispatchPauseState = serde_json::from_value(serialized).unwrap();
+        assert_eq!(parsed, state);
+    }
+
+    #[test]
+    fn dispatch_pause_scope_round_trips_as_typed_scope() {
+        assert_eq!(DispatchPauseScope::Global.as_str(), "global");
+        assert_eq!(DispatchPauseScope::Project.to_string(), "project");
+        assert_eq!(
+            "user".parse::<DispatchPauseScope>().unwrap(),
+            DispatchPauseScope::User
+        );
+        assert!("bogus".parse::<DispatchPauseScope>().is_err());
     }
 
     #[test]
