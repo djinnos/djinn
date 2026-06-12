@@ -10663,6 +10663,14 @@ expression: signatures
             "project_path": {
               "type": "string"
             },
+            "reconciled_at_revision_seq": {
+              "format": "int32",
+              "nullable": true,
+              "type": "integer"
+            },
+            "needs_reconcile": {
+              "type": "boolean"
+            },
             "status": {
               "type": "string"
             }
@@ -10673,7 +10681,9 @@ expression: signatures
             "epic_title",
             "epic_emoji",
             "project_path",
-            "status"
+            "status",
+            "reconciled_at_revision_seq",
+            "needs_reconcile"
           ],
           "type": "object"
         },

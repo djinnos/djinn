@@ -352,11 +352,19 @@ impl DjinnMcpServer {
             Err(e) => return Json(err_show(e.to_string())),
         };
         let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
-        let epics =
-            match graduated_epic_models(&repo, &epic_repo, &project_repo, &proposal.id).await {
-                Ok(e) => e,
-                Err(e) => return Json(err_show(e)),
-            };
+        let epics = match graduated_epic_models(
+            &repo,
+            &epic_repo,
+            &project_repo,
+            &proposal.id,
+            proposal.latest_revision_seq,
+            proposal.pending_reconcile,
+        )
+        .await
+        {
+            Ok(e) => e,
+            Err(e) => return Json(err_show(e)),
+        };
         Json(ProposalShowResponse {
             proposal: Some(ProposalModel::from(&proposal)),
             targets: Some(targets),
@@ -1154,9 +1162,15 @@ async fn graduated_epic_models(
     epic_repo: &EpicRepository,
     project_repo: &ProjectRepository,
     proposal_id: &str,
+    latest_revision_seq: i32,
+    pending_reconcile: bool,
 ) -> Result<Vec<ProposalEpicModel>, String> {
     let links = repo
         .graduated_epics(proposal_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let reconciliations = repo
+        .latest_epic_reconciliations(proposal_id)
         .await
         .map_err(|e| e.to_string())?;
     let mut out = Vec::with_capacity(links.len());
@@ -1164,6 +1178,11 @@ async fn graduated_epic_models(
         let Some(epic) = epic_repo.get(&epic_id).await.ok().flatten() else {
             continue;
         };
+        let reconciled_at_revision_seq = reconciliations.get(&epic_id).copied();
+        let needs_reconcile = pending_reconcile
+            && reconciled_at_revision_seq
+                .map(|seq| seq < latest_revision_seq)
+                .unwrap_or(false);
         let project_path = match project_repo.get(&project_id).await {
             Ok(Some(p)) => format!("{}/{}", p.github_owner, p.github_repo),
             _ => project_id.clone(),
@@ -1175,6 +1194,8 @@ async fn graduated_epic_models(
             epic_emoji: epic.emoji,
             project_path,
             status: epic.status,
+            reconciled_at_revision_seq,
+            needs_reconcile,
         });
     }
     Ok(out)
