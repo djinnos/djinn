@@ -15,6 +15,7 @@ mod build;
 mod graph_queries;
 mod ranking;
 mod symbols_complexity;
+mod synthetic_dedup;
 
 use std::path::{Path, PathBuf};
 
