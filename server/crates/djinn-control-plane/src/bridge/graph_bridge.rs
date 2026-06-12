@@ -176,9 +176,10 @@ pub trait RepoGraphOps: Send + Sync {
         })
     }
 
-    /// Map HTTP route declarations to handlers, middleware, and observed
-    /// consumers. Default is a successful empty result so older graph artifacts
-    /// without route nodes remain queryable.
+    /// Route graph surface stub. Follow-up route extraction tasks will resolve
+    /// route nodes and walk HandlesRoute/Fetches/EntryPointOf edges; until then
+    /// an empty route set with a zero summary is the production-safe success
+    /// shape for graphs without route/process data.
     async fn route_map(
         &self,
         _ctx: &ProjectCtx,
@@ -192,8 +193,9 @@ pub trait RepoGraphOps: Send + Sync {
         Ok(RouteMapResult::default())
     }
 
-    /// Compare a route handler's response shape with observed consumers.
-    /// The route is identified by `route_id` or by exact `(method, path)`.
+    /// Route response-shape drift surface stub. Implementation tasks will
+    /// populate route shape keys and consumer drift; empty graphs return an
+    /// empty shape/drift result rather than a not-found error.
     async fn shape_check(
         &self,
         _ctx: &ProjectCtx,
@@ -205,8 +207,9 @@ pub trait RepoGraphOps: Send + Sync {
         Ok(ShapeCheckResult::default())
     }
 
-    /// Rank consumers impacted by a route/API shape change. The route is
-    /// identified by `route_id` or by exact `(method, path)`.
+    /// Route API-impact surface stub. Follow-up work will combine impact and
+    /// shape-check scoring; until route data exists, return no impacted
+    /// consumers.
     async fn api_impact(
         &self,
         _ctx: &ProjectCtx,
@@ -219,9 +222,9 @@ pub trait RepoGraphOps: Send + Sync {
         Ok(ApiImpactResult::default())
     }
 
-    /// Search process/step flow descriptions using the existing search
-    /// pipeline, returning matched process steps. Default is empty for graphs
-    /// with no process nodes.
+    /// Execution-flow search surface stub. The implementation task will reuse
+    /// hybrid_search + process memberships; graphs without process data return
+    /// an empty hit list.
     async fn flow(
         &self,
         _ctx: &ProjectCtx,

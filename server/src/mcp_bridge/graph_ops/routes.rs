@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use djinn_control_plane::bridge::{
-    ApiImpactEntry, ApiImpactResult, RelatedSymbol, RouteMapEntry, RouteMapResult, RouteRef,
-    RouteShape, RouteSummary, ShapeCheckResult, ShapeDrift, ShapeField,
+    ApiImpactEntry, ApiImpactResult, RelatedSymbol, RouteLanguageChain, RouteMapEntry,
+    RouteMapResult, RouteRef, RouteShape, RouteSummary, ShapeCheckResult, ShapeDrift, ShapeField,
 };
 use djinn_graph::repo_graph::{
     RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind, RepoNodeKey,
@@ -123,7 +123,7 @@ fn route_map_entry(graph: &RepoDependencyGraph, seed: &RouteSeed) -> RouteMapEnt
     let mut consumers = seed
         .consumers
         .iter()
-        .map(|idx| symbol_ref(graph.node(*idx), 1.0))
+        .map(|idx| route_consumer_ref(graph, seed.route, *idx))
         .collect::<Vec<_>>();
     sort_symbol_refs(&mut consumers);
     let mut middleware = middleware_for_route(graph, seed.route)
@@ -617,6 +617,7 @@ fn symbol_ref(node: &RepoGraphNode, confidence: f64) -> RelatedSymbol {
         file_path: shared::repo_graph_node_file_path(node),
         confidence,
         confidence_tier: "extracted".to_string(),
+        route_language_chain: None,
     }
 }
 
@@ -638,6 +639,13 @@ fn route_consumer_ref(
         return symbol_ref(consumer_node, 1.0);
     };
     let edge = fetches_edge.weight();
+    let route_language_chain = graph
+        .route_edge_language_chain(consumer, route, edge.kind)
+        .map(|chain| RouteLanguageChain {
+            source_language: chain.source_language,
+            target_language: chain.target_language,
+            is_cross_language: chain.is_cross_language,
+        });
     RelatedSymbol {
         uid: format_node_key(&consumer_node.id),
         name: consumer_node.display_name.clone(),
@@ -645,6 +653,7 @@ fn route_consumer_ref(
         file_path: shared::repo_graph_node_file_path(consumer_node),
         confidence: edge.confidence,
         confidence_tier: format!("{:?}", edge.confidence_tier()).to_ascii_lowercase(),
+        route_language_chain,
     }
 }
 
@@ -699,6 +708,18 @@ pub(super) mod test_helpers {
 
     pub(crate) fn route_map_for_graph(graph: &RepoDependencyGraph) -> RouteMapResult {
         route_map_on_graph(graph, None, None, None, None, None, 20)
+    }
+
+    pub(crate) fn route_map_for_graph_with_filters(
+        graph: &RepoDependencyGraph,
+        route_id: Option<&str>,
+        method: Option<&str>,
+        path: Option<&str>,
+        path_glob: Option<&str>,
+        framework: Option<&str>,
+        limit: usize,
+    ) -> RouteMapResult {
+        route_map_on_graph(graph, route_id, method, path, path_glob, framework, limit)
     }
 
     pub(crate) fn shape_check_for_graph(graph: &RepoDependencyGraph) -> ShapeCheckResult {

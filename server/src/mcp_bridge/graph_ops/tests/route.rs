@@ -103,6 +103,49 @@ fn route_fixture_graph() -> RepoDependencyGraph {
     RepoDependencyGraph::from_artifact(&artifact)
 }
 
+fn multi_route_fixture_graph() -> RepoDependencyGraph {
+    let mut artifact = route_fixture_graph().to_artifact();
+    artifact.nodes.push(RepoGraphNode {
+        id: RepoNodeKey::Route("POST /api/tasks (actix-web)".to_string()),
+        kind: RepoGraphNodeKind::Route,
+        display_name: "POST /api/tasks (actix-web)".to_string(),
+        language: Some("rust".to_string()),
+        file_path: None,
+        symbol: None,
+        symbol_kind: None,
+        is_external: false,
+        visibility: None,
+        signature: Some("route POST /api/tasks".to_string()),
+        documentation: vec![],
+        signature_parts: None,
+        is_test: false,
+        complexity: None,
+        workspace: Some("root".to_string()),
+        route_framework: Some("actix-web".to_string()),
+        route_handler_symbol: None,
+    });
+    artifact.nodes.push(RepoGraphNode {
+        id: RepoNodeKey::Route("GET /health (axum)".to_string()),
+        kind: RepoGraphNodeKind::Route,
+        display_name: "GET /health (axum)".to_string(),
+        language: Some("rust".to_string()),
+        file_path: None,
+        symbol: None,
+        symbol_kind: None,
+        is_external: false,
+        visibility: None,
+        signature: Some("route GET /health".to_string()),
+        documentation: vec![],
+        signature_parts: None,
+        is_test: false,
+        complexity: None,
+        workspace: Some("root".to_string()),
+        route_framework: Some("axum".to_string()),
+        route_handler_symbol: None,
+    });
+    RepoDependencyGraph::from_artifact(&artifact)
+}
+
 #[test]
 fn route_map_returns_handler_consumers_middleware_and_summary() {
     let graph = route_fixture_graph();
@@ -116,9 +159,82 @@ fn route_map_returns_handler_consumers_middleware_and_summary() {
         Some("list_agents")
     );
     assert_eq!(entry.consumers[0].name, "loadAgents");
+    let chain = entry.consumers[0]
+        .route_language_chain
+        .as_ref()
+        .expect("route-map consumer includes route language chain");
+    assert_eq!(chain.source_language.as_deref(), Some("typescript"));
+    assert_eq!(chain.target_language.as_deref(), Some("rust"));
+    assert!(chain.is_cross_language);
     assert_eq!(entry.middleware[0].name, "auth");
     assert_eq!(result.summary.total_routes, 1);
     assert_eq!(result.summary.framework_counts.get("axum"), Some(&1));
+}
+
+#[test]
+fn route_map_resolves_seed_filters_and_applies_limit_deterministically() {
+    let graph = multi_route_fixture_graph();
+
+    let by_id = routes::test_helpers::route_map_for_graph_with_filters(
+        &graph,
+        Some("GET /api/agents (axum)"),
+        None,
+        None,
+        None,
+        None,
+        20,
+    );
+    assert_eq!(by_id.routes.len(), 1);
+    assert_eq!(by_id.routes[0].route.path.as_deref(), Some("/api/agents"));
+
+    let by_method_path_glob = routes::test_helpers::route_map_for_graph_with_filters(
+        &graph,
+        None,
+        Some("get"),
+        None,
+        Some("/api/*"),
+        None,
+        20,
+    );
+    assert_eq!(by_method_path_glob.routes.len(), 1);
+    assert_eq!(
+        by_method_path_glob.routes[0].route.id,
+        "GET /api/agents (axum)"
+    );
+
+    let by_framework_limited = routes::test_helpers::route_map_for_graph_with_filters(
+        &graph,
+        None,
+        None,
+        None,
+        None,
+        Some("axum"),
+        1,
+    );
+    assert_eq!(by_framework_limited.routes.len(), 1);
+    assert_eq!(
+        by_framework_limited.routes[0].route.id, "GET /api/agents (axum)",
+        "limit ordering follows stable route node keys"
+    );
+}
+
+#[test]
+fn route_map_no_match_returns_empty_routes_with_summary() {
+    let graph = route_fixture_graph();
+    let result = routes::test_helpers::route_map_for_graph_with_filters(
+        &graph,
+        None,
+        Some("POST"),
+        None,
+        Some("/api/missing*"),
+        Some("axum"),
+        20,
+    );
+
+    assert!(result.routes.is_empty());
+    assert_eq!(result.summary.total_routes, 1);
+    assert_eq!(result.summary.framework_counts.get("axum"), Some(&1));
+    assert_eq!(result.summary.handler_counts.get("list_agents"), Some(&1));
 }
 
 #[test]
@@ -149,6 +265,12 @@ fn shape_check_consumer_uses_fetches_confidence_tier() {
     assert_eq!(consumer.name, "loadAgents");
     assert_eq!(consumer.confidence, 0.2);
     assert_eq!(consumer.confidence_tier, "ambiguous");
+    assert!(
+        consumer
+            .route_language_chain
+            .as_ref()
+            .is_some_and(|chain| chain.is_cross_language)
+    );
 }
 
 #[test]
