@@ -94,7 +94,7 @@ use crate::roles::{AgentRole, role_impl_for};
 use djinn_provider::message::{Conversation, Message};
 use djinn_provider::provider::LlmProvider;
 use djinn_provider::provider::error::ProviderError;
-use djinn_runtime::ProviderFailureClass;
+use djinn_runtime::{LoopGuardTrip, ProviderFailureClass};
 
 use super::SupervisorCallbackContext;
 
@@ -532,12 +532,25 @@ pub(crate) async fn execute_stage(
     let final_result_ok = reply_result.is_ok();
     let final_error = reply_result.as_ref().err().map(|e| e.to_string());
     let stage_outcome = match reply_result {
-        Err(e) => StageOutcome::Failed {
-            reason: format!("reply loop error: {e}"),
-            // Classify the typed provider error (if any) so the host breaker
-            // can fail over off a structurally-broken model/credential.
-            provider_failure: classify_provider_failure(&e),
-        },
+        Err(e) => {
+            if let Some(trip) = e.downcast_ref::<LoopGuardTrip>() {
+                StageOutcome::LoopGuardTripped {
+                    kind: trip.kind,
+                    offending_signature: trip.offending_signature.clone(),
+                    threshold: trip.threshold,
+                    observed: trip.observed,
+                    turn_span: trip.turn_span,
+                    session_id: trip.session_id.clone(),
+                }
+            } else {
+                StageOutcome::Failed {
+                    reason: format!("reply loop error: {e}"),
+                    // Classify the typed provider error (if any) so the host breaker
+                    // can fail over off a structurally-broken model/credential.
+                    provider_failure: classify_provider_failure(&e),
+                }
+            }
+        }
         Ok(()) => {
             let finalize_name = final_output.finalize_tool_name.as_deref().unwrap_or("");
             match role_kind {

@@ -8,6 +8,7 @@ use djinn_db::SessionMessageRepository;
 use djinn_provider::message::{ContentBlock, Conversation, Message, MessageMeta, Role};
 use djinn_provider::provider::LlmProvider;
 use djinn_provider::provider::telemetry;
+use djinn_runtime::{LoopGuardKind, LoopGuardTrip};
 
 use super::super::{runtime_env_diagnostics, runtime_fs_diagnostics};
 use super::error_handling::{
@@ -21,6 +22,7 @@ use super::streaming::{StreamLoopContext, StreamTurnState, consume_provider_stre
 use super::tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_runtime_metadata};
 
 const MAX_TURNS: u32 = 1000;
+const LOOP_GUARD_THRESHOLD: u32 = 3;
 
 /// Resolve the effective step cap for this reply loop.
 ///
@@ -33,6 +35,162 @@ const MAX_TURNS: u32 = 1000;
 /// no room to do any real work before winding down.
 fn effective_max_turns(override_value: Option<u32>) -> u32 {
     override_value.map(|v| v.max(2)).unwrap_or(MAX_TURNS)
+}
+
+#[derive(Default)]
+struct ReplyLoopGuardState {
+    identical_tool_failure: Option<(String, u32, u32)>,
+    identical_output: Option<(String, u32, u32)>,
+    consecutive_failures: Option<(String, u32, u32)>,
+}
+
+fn shorten_signature(value: String) -> String {
+    const MAX_SIGNATURE_CHARS: usize = 512;
+    let value = value.replace('\n', "\\n").trim().to_string();
+    value.chars().take(MAX_SIGNATURE_CHARS).collect()
+}
+
+fn content_text(blocks: &[ContentBlock]) -> String {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn permission_denial_text(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("permission denied")
+        || lower.contains("access denied")
+        || lower.contains("operation not permitted")
+        || lower.contains("not authorized")
+        || lower.contains("unauthorized")
+        || lower.contains("forbidden")
+}
+
+fn count_repetition(
+    slot: &mut Option<(String, u32, u32)>,
+    signature: String,
+    turn: u32,
+) -> (u32, u32) {
+    match slot {
+        Some((existing, count, start)) if *existing == signature => {
+            *count += 1;
+            (*count, *start)
+        }
+        _ => {
+            *slot = Some((signature, 1, turn));
+            (1, turn)
+        }
+    }
+}
+
+fn loop_guard_trip(
+    kind: LoopGuardKind,
+    offending_signature: String,
+    observed: u32,
+    start_turn: u32,
+    turn: u32,
+    session_id: &str,
+) -> LoopGuardTrip {
+    LoopGuardTrip {
+        kind,
+        offending_signature: shorten_signature(offending_signature),
+        threshold: LOOP_GUARD_THRESHOLD,
+        observed,
+        turn_span: (start_turn, turn),
+        session_id: session_id.to_string(),
+    }
+}
+
+fn observe_loop_guard(
+    state: &mut ReplyLoopGuardState,
+    turn_tool_calls: &[ContentBlock],
+    tool_result_blocks: &[ContentBlock],
+    turn_text: &str,
+    turn: u32,
+    session_id: &str,
+) -> Option<LoopGuardTrip> {
+    if !turn_text.trim().is_empty() {
+        let signature = shorten_signature(format!("assistant_output:{}", turn_text.trim()));
+        let (observed, start_turn) =
+            count_repetition(&mut state.identical_output, signature.clone(), turn);
+        if observed >= LOOP_GUARD_THRESHOLD {
+            return Some(loop_guard_trip(
+                LoopGuardKind::IdenticalOutput,
+                signature,
+                observed,
+                start_turn,
+                turn,
+                session_id,
+            ));
+        }
+    }
+
+    let mut saw_error = false;
+    for (tool_call, result) in turn_tool_calls.iter().zip(tool_result_blocks.iter()) {
+        let (name, input) = match tool_call {
+            ContentBlock::ToolUse { name, input, .. } => (name, input),
+            _ => continue,
+        };
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = result
+        else {
+            continue;
+        };
+        if !is_error {
+            continue;
+        }
+        saw_error = true;
+        let text = content_text(content);
+        let signature = shorten_signature(format!("tool_failure:{name}:{}:{text}", input));
+        let (observed, start_turn) =
+            count_repetition(&mut state.identical_tool_failure, signature.clone(), turn);
+        if permission_denial_text(&text) && observed >= LOOP_GUARD_THRESHOLD {
+            return Some(loop_guard_trip(
+                LoopGuardKind::PermissionDenial,
+                signature,
+                observed,
+                start_turn,
+                turn,
+                session_id,
+            ));
+        }
+        if observed >= LOOP_GUARD_THRESHOLD {
+            return Some(loop_guard_trip(
+                LoopGuardKind::IdenticalToolFailure,
+                signature,
+                observed,
+                start_turn,
+                turn,
+                session_id,
+            ));
+        }
+    }
+
+    if saw_error {
+        let signature = "consecutive_tool_failures".to_string();
+        let (observed, start_turn) =
+            count_repetition(&mut state.consecutive_failures, signature.clone(), turn);
+        if observed >= LOOP_GUARD_THRESHOLD {
+            return Some(loop_guard_trip(
+                LoopGuardKind::ConsecutiveFailures,
+                signature,
+                observed,
+                start_turn,
+                turn,
+                session_id,
+            ));
+        }
+    } else {
+        state.consecutive_failures = None;
+    }
+
+    None
 }
 
 fn push_fragment(fragments: &mut Vec<String>, value: String) {
@@ -240,6 +398,7 @@ pub(crate) async fn run_reply_loop(
         let mut assistant_fragments: Vec<String> = Vec::new();
         let mut compaction_attempts: u32 = 0;
         let mut empty_turn_retries: u32 = 0;
+        let mut loop_guard_state = ReplyLoopGuardState::default();
         // Consecutive text-only turns without a finalize or tool call (for nudge loop).
         let mut consecutive_nudge_count: u32 = 0;
 
@@ -739,6 +898,34 @@ pub(crate) async fn run_reply_loop(
                 &dispatch_ctx,
             )
             .await;
+
+            // Step-cap wind-down has precedence over loop-guard termination. In
+            // particular, a small configured cap can coincide with the third
+            // identical tool failure (the default loop-guard threshold). Let the
+            // next iteration inject/complete the one-shot wind-down rather than
+            // preempting it with a loop-guard error.
+            if turns < max_turns
+                && let Some(trip) = observe_loop_guard(
+                    &mut loop_guard_state,
+                    &turn_tool_calls,
+                    &tool_result_blocks,
+                    &turn_text,
+                    turns,
+                    session_id,
+                )
+            {
+                tracing::warn!(
+                    task_id = %task_id,
+                    session_id = %session_id,
+                    kind = ?trip.kind,
+                    offending_signature = %trip.offending_signature,
+                    threshold = trip.threshold,
+                    observed = trip.observed,
+                    turn_span = ?trip.turn_span,
+                    "ReplyLoop: loop guard tripped"
+                );
+                return Err(anyhow::Error::new(trip));
+            }
 
             // Touch activity after tool execution — tool calls are legitimate
             // work and can take a while (e.g. cargo build).
