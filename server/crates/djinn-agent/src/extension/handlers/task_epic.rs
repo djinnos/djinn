@@ -534,9 +534,9 @@ pub(crate) async fn call_proposal_ac_amend(
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let p: ProposalAcAmendParams = parse_args(arguments)?;
-    let reason = p.reason.trim();
+    let reason = p.reason.as_deref().map(str::trim).unwrap_or_default();
     if reason.is_empty() {
-        return Err("proposal_ac_amend requires a non-empty `reason`".to_string());
+        return Err("proposal_ac_amend requires a non-empty reason".to_string());
     }
     if p.amendments.is_empty() {
         return Err("proposal_ac_amend requires at least one amendment".to_string());
