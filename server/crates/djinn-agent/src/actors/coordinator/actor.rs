@@ -1030,6 +1030,31 @@ impl CoordinatorActor {
             return;
         };
 
+        let pause_state = match crate::dispatch_pause::load_dispatch_pause_state(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        )
+        .await
+        {
+            Ok(state) => state,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "CoordinatorActor: graph refresh tick — failed to load dispatch-pause state; deferring warm triggers"
+                );
+                return;
+            }
+        };
+        if let Some(pause) = crate::dispatch_pause::active_global_dispatch_pause(&pause_state) {
+            tracing::info!(
+                paused_by = %pause.paused_by,
+                paused_at = %pause.paused_at,
+                reason = %pause.reason,
+                "CoordinatorActor: graph refresh tick deferred by global administrative dispatch pause"
+            );
+            return;
+        }
+
         let project_repo = ProjectRepository::new(
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
