@@ -1756,15 +1756,27 @@ mod tests {
                 .contains("reason: criterion 2 cannot be verified by agents")
         );
         assert!(audit.body.contains("revision: 1 -> 2"));
-        assert!(audit.body.contains(r#""operation":"rewrite""#));
-        assert!(audit.body.contains(r#""operation":"drop""#));
-        assert!(audit.body.contains(r#""operation":"waive""#));
-        assert!(
-            audit
-                .body
-                .contains(r#""old_criterion":{"criterion":"drop me","met":false}"#)
+        let amendments_json = audit
+            .body
+            .strip_prefix(&format!(
+                "Acceptance criteria amended\nreason: {}\nrevision: 1 -> 2\namendments: ",
+                "criterion 2 cannot be verified by agents"
+            ))
+            .unwrap();
+        let audit_entries: serde_json::Value = serde_json::from_str(amendments_json).unwrap();
+        let audit_entries = audit_entries.as_array().unwrap();
+        assert_eq!(audit_entries.len(), 3);
+        assert_eq!(audit_entries[0]["operation"], serde_json::json!("rewrite"));
+        assert_eq!(audit_entries[1]["operation"], serde_json::json!("drop"));
+        assert_eq!(audit_entries[2]["operation"], serde_json::json!("waive"));
+        assert_eq!(
+            audit_entries[1]["old_criterion"],
+            serde_json::json!({"criterion": "drop me", "met": false})
         );
-        assert!(audit.body.contains(r#""new_criterion":{"dropped":true}"#));
+        assert_eq!(
+            audit_entries[1]["new_criterion"],
+            serde_json::json!({"dropped": true})
+        );
 
         let events = captured.lock().unwrap();
         assert_eq!(events.len(), 2);
