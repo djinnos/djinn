@@ -410,6 +410,7 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
                     source_base = %source_base.display(),
                     destination_run_dir = %destination_run_dir.display(),
                     clone_duration_ms = result.elapsed.as_millis(),
+                    seed_duration_ms = result.elapsed.as_millis(),
                     linked_file_count = result.linked_file_count,
                     copied_file_count = result.copied_file_count,
                     skipped_file_count = result.skipped_file_count,
@@ -425,6 +426,7 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
                     source_base = %source_base.display(),
                     destination_run_dir = %destination_run_dir.display(),
                     clone_duration_ms = result.elapsed.as_millis(),
+                    seed_duration_ms = result.elapsed.as_millis(),
                     linked_file_count = result.linked_file_count,
                     copied_file_count = result.copied_file_count,
                     skipped_file_count = result.skipped_file_count,
@@ -441,6 +443,7 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
                 source_base = %source_base.display(),
                 destination_run_dir = %destination_run_dir.display(),
                 clone_duration_ms = 0_u128,
+                seed_duration_ms = 0_u128,
                 linked_file_count = 0_u64,
                 copied_file_count = 0_u64,
                 skipped_file_count = 0_u64,
@@ -455,6 +458,7 @@ async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
                 source_base = %source_base.display(),
                 destination_run_dir = %destination_run_dir.display(),
                 clone_duration_ms = 0_u128,
+                seed_duration_ms = 0_u128,
                 linked_file_count = 0_u64,
                 copied_file_count = 0_u64,
                 skipped_file_count = 0_u64,
@@ -486,16 +490,22 @@ impl CargoTargetRunDirGuard {
 impl Drop for CargoTargetRunDirGuard {
     fn drop(&mut self) {
         match teardown_run_dir(&self.run_dir) {
-            Ok(()) => info!(
+            Ok(result) => info!(
                 task_run_id = %self.task_run_id,
                 project_id = %self.project_id,
                 destination_run_dir = %self.run_dir.display(),
-                "cargo target teardown: removed private run target dir"
+                cleanup_outcome = result.outcome(),
+                removed_count = result.removed_count(),
+                error_count = 0_u64,
+                "cargo target teardown: private run target dir cleanup completed"
             ),
             Err(err) => warn!(
                 task_run_id = %self.task_run_id,
                 project_id = %self.project_id,
                 destination_run_dir = %self.run_dir.display(),
+                cleanup_outcome = "failed",
+                removed_count = 0_u64,
+                error_count = 1_u64,
                 error = %err,
                 "cargo target teardown: failed to remove private run target dir"
             ),

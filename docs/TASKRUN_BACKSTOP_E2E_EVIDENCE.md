@@ -1,5 +1,33 @@
 # Task-run backstop E2E evidence
 
+## Operator preflight evidence required before Wave 2 cleanup checks
+
+Wave 1 kill and force-close evidence attempts were blocked by the normal task-run worker environment: `kubectl` was not installed, `KUBECONFIG` was unset, the worker service account lacked RBAC to list/get Pods and Jobs or read server logs, and projected worker tokens were rejected by `/mcp` for operator/admin actions. Passing proof therefore requires an operator/admin environment rather than another normal task-run worker.
+
+Before running the real `execution_kill_task` or force-close cleanup checks, run the helper from the repository root in the operator/admin shell:
+
+```bash
+export NS=djinn
+export DJINN_MCP_URL="https://<operator-accessible-djinn-host>/mcp"
+export DJINN_OPERATOR_BEARER_TOKEN="<operator/admin token>"
+./scripts/taskrun-backstop-preflight.sh | tee taskrun-backstop-preflight.md
+```
+
+Paste the full generated Markdown bundle below this paragraph, before the kill/force-close evidence subsections. The bundle must include the exact command output for:
+
+- `kubectl version --client=true`;
+- `kubectl config current-context` and the current-context namespace;
+- `kubectl get namespace "$NS" -o name`;
+- RBAC checks proving list/get access for Pods and Jobs in `$NS`;
+- `kubectl get pods -n "$NS" -o name --request-timeout=10s`;
+- `kubectl get jobs -n "$NS" -o name --request-timeout=10s`;
+- `kubectl logs -n "$NS" deploy/djinn-server --since=10m --tail=20` (or the configured `DJINN_SERVER_DEPLOY` target);
+- an authenticated MCP `initialize` response from the same operator/admin credential that will be used for kill and force-close actions.
+
+Redact secrets before committing or pasting the bundle: bearer tokens, kubeconfig client keys/certificates, cookies, database URLs, and full health payloads containing credentials. Keep non-secret context, namespace, RBAC, HTTP status/error text, and Kubernetes resource names intact so reviewers can distinguish an environment blocker from a cleanup defect.
+
+> Paste Wave 2 operator preflight output here. A preflight pass only proves the evidence environment is ready; it does **not** claim task-run cleanup success.
+
 ## Final proposal 4369 residual-criteria reconciliation — 2026-06-12
 
 This evidence pack reconciles the remaining proposal 4369 / epic 8451 criteria against the completed evidence tasks:
