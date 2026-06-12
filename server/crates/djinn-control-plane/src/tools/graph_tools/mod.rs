@@ -35,11 +35,19 @@ mod risk_classification;
 #[cfg(test)]
 mod tests;
 mod validation;
+// df6s: shared pagination slicing/counting helpers, plus the
+// `PaginationParams` summary struct used by the agent-boundary
+// pagination work on `neighbors` / `impact` / `coupling_hotspots`.
+mod df6s_pagination;
 
 pub(crate) use self::next_step_hints::*;
 pub(crate) use self::risk_classification::*;
 pub(crate) use self::validation::*;
 
+pub(crate) use self::df6s_pagination::{
+    apply_page_slice, build_by_depth_counts, pagination_applied,
+};
+pub(crate) use self::request_types::PaginationParams;
 pub use self::request_types::{CodeGraphParams, TestFilter};
 pub use self::response_types::*;
 pub(crate) use self::validation::{SearchMode, resolve_search_mode};

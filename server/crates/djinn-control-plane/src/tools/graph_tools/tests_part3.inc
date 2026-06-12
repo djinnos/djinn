@@ -48,6 +48,15 @@
             risk: Some(ImpactRisk::Low),
             summary: Some("no direct callers in current graph snapshot".to_string()),
             workspace_hint: None,
+            // df6s: pagination fields default to `None` for
+            // non-paginated responses, matching the pre-pagination
+            // wire shape.
+            total: None,
+            offset: None,
+            limit: None,
+            has_more: None,
+            summary_only: None,
+            by_depth_counts: None,
             next_step: None,
         })
     }
@@ -80,6 +89,15 @@
             risk: Some(risk),
             summary: Some(summary),
             workspace_hint: None,
+            // df6s: the new pagination fields default to `None` for
+            // non-paginated responses, matching the pre-pagination
+            // wire shape.
+            total: None,
+            offset: None,
+            limit: None,
+            has_more: None,
+            summary_only: None,
+            by_depth_counts: None,
             next_step: None,
         })
     }

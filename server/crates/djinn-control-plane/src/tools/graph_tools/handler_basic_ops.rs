@@ -26,34 +26,83 @@ impl DjinnMcpServer {
                 params.kind_filter.as_deref(),
             )
             .await?;
-        // Bound the wire size — the underlying neighbors() call returns every
-        // edge incident on the node (1k+ for high-centrality files), which
-        // makes the MCP response unusably large. Sort by weight desc and cap
-        // at `limit` (default 20, matching other list operations).
-        let limit = params.limit.unwrap_or(20).max(0) as usize;
+        // df6s: the underlying `neighbors()` returns every edge incident
+        // on the node (1k+ for high-centrality files). We retain + sort
+        // the **unsliced** post-exclusion set first so the agent-facing
+        // pagination can never be misread as graph absence. Slicing
+        // happens only when building the response DTO, mirroring the
+        // epic's "pagination at the boundary" rule.
+        //
+        // Default cap is 20 — matches the other list ops. The pagination
+        // helper clamps to `[1, 1000]` so a runaway caller can't dump the
+        // whole graph into a single page. Legacy `limit` is honoured as
+        // the page cap (so pre-df6s callers keep working unchanged);
+        // the new `page_limit` field takes precedence when set.
+        let default_cap = params.limit.unwrap_or(20).max(0) as usize;
+        let pagination = PaginationParams::resolve(params, default_cap);
         let exclusions = self.load_graph_exclusions(&params.project_id).await;
-        let (neighbors, file_groups) = match result {
-            NeighborsResult::Detailed(mut v) => {
+        let (mut neighbors, mut file_groups) = match result {
+            NeighborsResult::Detailed(v) => {
+                let mut v = v;
                 v.retain(|n| !exclusions.excludes(&n.key, None, &n.display_name));
                 v.sort_by(|a, b| {
                     b.edge_weight
                         .partial_cmp(&a.edge_weight)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
-                v.truncate(limit);
                 (Some(v), None)
             }
-            NeighborsResult::Grouped(mut v) => {
+            NeighborsResult::Grouped(v) => {
+                let mut v = v;
                 v.retain(|g| !exclusions.excludes(&g.file, Some(&g.file), &g.file));
                 v.sort_by_key(|g| std::cmp::Reverse(g.occurrence_count));
-                v.truncate(limit);
                 (None, Some(v))
             }
+        };
+        // Compute the unsliced total **before** applying the page slice
+        // so a caller paginating across an offset can never see `total`
+        // shrink on the second page.
+        let total = neighbors
+            .as_ref()
+            .map(|v| v.len())
+            .or_else(|| file_groups.as_ref().map(|v| v.len()))
+            .unwrap_or(0);
+        // Build the (offset, limit) page over the unsliced lists.
+        let mut has_more = false;
+        if let Some(v) = neighbors.as_mut() {
+            let page = apply_page_slice(v, pagination.offset, pagination.limit);
+            has_more = page.has_more;
+        }
+        if let Some(v) = file_groups.as_mut() {
+            let page = apply_page_slice(v, pagination.offset, pagination.limit);
+            has_more = has_more || page.has_more;
+        }
+        // `summary_only` strips the heavy list fields; `total` carries
+        // the count signal. Skip serializing the lists entirely.
+        if pagination.summary_only {
+            neighbors = None;
+            file_groups = None;
+        }
+        let emit_pagination = pagination_applied(pagination, total, pagination.limit);
+        let (resp_offset, resp_limit, resp_total, resp_has_more) = if emit_pagination {
+            (
+                Some(pagination.offset),
+                Some(pagination.limit),
+                Some(total),
+                Some(has_more),
+            )
+        } else {
+            (None, None, None, None)
         };
         Ok(CodeGraphResponse::Neighbors(NeighborsResponse {
             key: key.to_string(),
             neighbors,
             file_groups,
+            total: resp_total,
+            offset: resp_offset,
+            limit: resp_limit,
+            has_more: resp_has_more,
+            summary_only: pagination.summary_only.then_some(true),
             next_step: None,
         }))
     }
@@ -126,7 +175,14 @@ impl DjinnMcpServer {
     ) -> Result<CodeGraphResponse, String> {
         let key = require_key(params)?;
         validate_group_by(params.group_by.as_deref())?;
+        // df6s: `limit` keeps its pre-df6s semantic — it's the BFS
+        // traversal **depth** (default 3). Result-cap pagination is
+        // served by `page_limit` instead so a caller that wants a
+        // smaller page doesn't accidentally shrink the blast-radius
+        // search. `page_limit` defaults to 100, matching the
+        // `neighbors`/`coupling_hotspots` family at the wire layer.
         let depth = params.limit.unwrap_or(3) as usize;
+        let pagination = PaginationParams::resolve(params, 100);
         // PR A2: validate `min_confidence` lives in `[0, 1]` before letting
         // it loose on the BFS frontier; out-of-range values would silently
         // collapse the impact set to zero or do nothing.
@@ -155,8 +211,9 @@ impl DjinnMcpServer {
             )
             .await?;
         let exclusions = self.load_graph_exclusions(&params.project_id).await;
-        let (impact, file_groups, metrics) = match result {
-            ImpactResult::Detailed(mut v) => {
+        let (mut impact, mut file_groups, metrics) = match result {
+            ImpactResult::Detailed(v) => {
+                let mut v = v;
                 // ImpactEntry has no display_name; match key only (Tier
                 // 1 still catches module artifacts; Tier 2 globs bound
                 // against the SCIP key, matching the old client-side
@@ -165,7 +222,8 @@ impl DjinnMcpServer {
                 let metrics = metrics_from_detailed(&v);
                 (Some(v), None, metrics)
             }
-            ImpactResult::Grouped(mut v) => {
+            ImpactResult::Grouped(v) => {
+                let mut v = v;
                 v.retain(|g| !exclusions.excludes(&g.file, Some(&g.file), &g.file));
                 let metrics = metrics_from_grouped(&v);
                 (None, Some(v), metrics)
@@ -175,8 +233,61 @@ impl DjinnMcpServer {
         // both the structured bucket (`risk`) and a human-readable
         // 1-line summary so chat UIs / reviewer prompts / dashboards
         // can each pick the form they want.
+        //
+        // df6s: `risk` + `summary` continue to be derived from the
+        // **unsliced** post-exclusion set, so a capped page still
+        // reports the same blast-radius bucket as the full response.
+        // The classification metrics read `total`/`modules` from the
+        // unsliced counts, never from the page.
         let risk = ImpactRisk::classify(metrics.direct, metrics.total, metrics.modules);
         let summary = impact_summary(metrics);
+        // Compute the unsliced total before applying the page slice.
+        // `impact` and `file_groups` are mutually exclusive at this
+        // point (the bridge returns one or the other), so we just sum
+        // whichever is `Some`.
+        let total = impact
+            .as_ref()
+            .map(|v| v.len())
+            .or_else(|| file_groups.as_ref().map(|v| v.len()))
+            .unwrap_or(0);
+        // Apply the page slice at the response DTO layer so the
+        // internal BFS never has to know about pagination.
+        let mut has_more = false;
+        if let Some(v) = impact.as_mut() {
+            let page = apply_page_slice(v, pagination.offset, pagination.limit);
+            has_more = has_more || page.has_more;
+        }
+        if let Some(v) = file_groups.as_mut() {
+            let page = apply_page_slice(v, pagination.offset, pagination.limit);
+            has_more = has_more || page.has_more;
+        }
+        // df6s: per-depth counts are computed from the **unsliced**
+        // detailed set so they reflect the full impact distribution
+        // (a `page_limit=10` page still reports e.g. `{1: 12, 2: 7}`
+        // when there are 19 total impacted entries).
+        let by_depth_counts = if pagination.summary_only || pagination.by_depth_counts {
+            impact.as_ref().map(|v| build_by_depth_counts(v))
+        } else {
+            None
+        };
+        // `summary_only` strips the heavy list fields. Risk + summary
+        // (and the per-depth breakdown when applicable) carry the
+        // count signal.
+        if pagination.summary_only {
+            impact = None;
+            file_groups = None;
+        }
+        let emit_pagination = pagination_applied(pagination, total, pagination.limit);
+        let (resp_offset, resp_limit, resp_total, resp_has_more) = if emit_pagination {
+            (
+                Some(pagination.offset),
+                Some(pagination.limit),
+                Some(total),
+                Some(has_more),
+            )
+        } else {
+            (None, None, None, None)
+        };
         Ok(CodeGraphResponse::Impact(ImpactResponse {
             key: key.to_string(),
             impact,
@@ -184,6 +295,12 @@ impl DjinnMcpServer {
             risk: Some(risk),
             summary: Some(summary),
             workspace_hint: scope.hint,
+            total: resp_total,
+            offset: resp_offset,
+            limit: resp_limit,
+            has_more: resp_has_more,
+            summary_only: pagination.summary_only.then_some(true),
+            by_depth_counts,
             next_step: None,
         }))
     }
