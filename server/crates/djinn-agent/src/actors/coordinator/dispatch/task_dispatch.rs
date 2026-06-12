@@ -1,7 +1,8 @@
 use super::super::*;
 use super::DispatchOutcome;
 use crate::roles::DispatchContext;
-use djinn_db::{DispatchStateRepository, DispatchStateUpsert};
+use djinn_core::models::{DispatchPause, DispatchPauseState, Task};
+use djinn_db::{DispatchPauseRepository, DispatchStateRepository, DispatchStateUpsert};
 
 /// Env flag allowing operators (and the in-process TestRuntime path) to
 /// bypass the devcontainer-image + graph-warm readiness gate. Default is
@@ -17,6 +18,54 @@ fn readiness_gate_enabled() -> bool {
         ),
         Err(_) => true,
     }
+}
+
+fn parse_dispatch_pause_wall_clock_ts(raw: &str) -> Option<::time::OffsetDateTime> {
+    use ::time::format_description::well_known::{Iso8601, Rfc3339};
+
+    ::time::OffsetDateTime::parse(raw, &Iso8601::DEFAULT)
+        .or_else(|_| ::time::OffsetDateTime::parse(raw, &Rfc3339))
+        .ok()
+}
+
+fn dispatch_pause_is_active(pause: &DispatchPause) -> bool {
+    let Some(expires_at) = pause.expires_at.as_deref() else {
+        return true;
+    };
+
+    parse_dispatch_pause_wall_clock_ts(expires_at)
+        .map(|deadline| deadline > ::time::OffsetDateTime::now_utc())
+        // A malformed persisted expiry should not accidentally bypass an
+        // administrative pause. Treat it as active until an admin resumes it.
+        .unwrap_or(true)
+}
+
+fn matching_dispatch_pause<'a>(
+    pause_state: &'a DispatchPauseState,
+    task: &Task,
+) -> Option<(&'static str, Option<String>, &'a DispatchPause)> {
+    if let Some(pause) = pause_state
+        .global
+        .as_ref()
+        .filter(|pause| dispatch_pause_is_active(pause))
+    {
+        return Some(("global", None, pause));
+    }
+
+    if let Some(pause) = pause_state
+        .projects
+        .get(&task.project_id)
+        .filter(|pause| dispatch_pause_is_active(pause))
+    {
+        return Some(("project", Some(task.project_id.clone()), pause));
+    }
+
+    let creator = task.created_by_user_id.as_deref()?;
+    pause_state
+        .users
+        .get(creator)
+        .filter(|pause| dispatch_pause_is_active(pause))
+        .map(|pause| ("user", Some(creator.to_owned()), pause))
 }
 
 /// Overlay the in-flight dispatch ledger onto the DB-seeded per-user running
@@ -404,6 +453,34 @@ impl CoordinatorActor {
                 .then_with(|| a.created_at.cmp(&b.created_at))
         });
 
+        // Load the durable administrative dispatch-pause snapshot once for this
+        // pass. A matching pause is an admission-control deferral, not a task,
+        // model, provider, or infrastructure failure: paused tasks below are
+        // skipped before any claim/spawn path and before task-specific
+        // last-dispatched/failure-streak/cooldown accounting.
+        let pause_state = match DispatchPauseRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        )
+        .get_status()
+        .await
+        {
+            Ok(state) => state,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "CoordinatorActor: failed to load dispatch-pause state; deferring dispatch pass"
+                );
+                return;
+            }
+        };
+
+        let paused_ready_task_ids: HashSet<String> = ready
+            .iter()
+            .filter(|task| matching_dispatch_pause(&pause_state, task).is_some())
+            .map(|task| task.id.clone())
+            .collect();
+
         // ADR-048 §3A: cancel any in-flight idle consolidation sweep when
         // tasks are ready for dispatch.
         if !ready.is_empty() {
@@ -422,10 +499,14 @@ impl CoordinatorActor {
         let expired_cooldown_task_ids: Vec<String> = self
             .dispatch_cooldowns
             .iter()
-            .filter_map(|(task_id, expiry)| (*expiry <= prune_now).then_some(task_id.clone()))
+            .filter_map(|(task_id, expiry)| {
+                (*expiry <= prune_now && !paused_ready_task_ids.contains(task_id))
+                    .then_some(task_id.clone())
+            })
             .collect();
-        self.dispatch_cooldowns
-            .retain(|_, expiry| *expiry > prune_now);
+        self.dispatch_cooldowns.retain(|task_id, expiry| {
+            *expiry > prune_now || paused_ready_task_ids.contains(task_id)
+        });
         for task_id in expired_cooldown_task_ids {
             self.persist_durable_dispatch_state_update(
                 &task_id,
@@ -442,11 +523,15 @@ impl CoordinatorActor {
             .last_dispatched
             .iter()
             .filter_map(|(task_id, marker)| {
-                (marker.instant.elapsed() >= FAILURE_DETECTION_WINDOW).then_some(task_id.clone())
+                (marker.instant.elapsed() >= FAILURE_DETECTION_WINDOW
+                    && !paused_ready_task_ids.contains(task_id))
+                .then_some(task_id.clone())
             })
             .collect();
-        self.last_dispatched
-            .retain(|_, marker| marker.instant.elapsed() < FAILURE_DETECTION_WINDOW);
+        self.last_dispatched.retain(|task_id, marker| {
+            marker.instant.elapsed() < FAILURE_DETECTION_WINDOW
+                || paused_ready_task_ids.contains(task_id)
+        });
         for task_id in expired_last_dispatched_task_ids {
             self.persist_durable_dispatch_state_update(
                 &task_id,
@@ -566,6 +651,24 @@ impl CoordinatorActor {
             if let Some(project_id) = project_filter
                 && task.project_id != project_id
             {
+                continue;
+            }
+            if let Some((pause_scope, pause_target_id, pause)) =
+                matching_dispatch_pause(&pause_state, &task)
+            {
+                tracing::info!(
+                    task_id = %task.short_id,
+                    task_uuid = %task.id,
+                    project_id = %task.project_id,
+                    status = %task.status,
+                    created_by_user_id = ?task.created_by_user_id,
+                    pause_scope,
+                    pause_target_id,
+                    paused_by = %pause.paused_by,
+                    paused_at = %pause.paused_at,
+                    reason = %pause.reason,
+                    "CoordinatorActor: dispatch deferred by administrative pause"
+                );
                 continue;
             }
             // Defensive guard: NEVER dispatch an agent for a task in a host-owned
@@ -1122,6 +1225,81 @@ impl CoordinatorActor {
 #[cfg(test)]
 mod inflight_ledger_tests {
     use super::*;
+
+    fn pause() -> DispatchPause {
+        DispatchPause {
+            paused_by: "admin".to_owned(),
+            paused_at: "2026-06-12T00:00:00Z".to_owned(),
+            reason: "maintenance".to_owned(),
+            expires_at: None,
+        }
+    }
+
+    fn task(project_id: &str, creator: Option<&str>) -> Task {
+        Task {
+            id: "task-uuid".to_owned(),
+            project_id: project_id.to_owned(),
+            short_id: "task".to_owned(),
+            epic_id: None,
+            title: "title".to_owned(),
+            description: String::new(),
+            design: String::new(),
+            issue_type: "task".to_owned(),
+            status: "open".to_owned(),
+            priority: 0,
+            owner: "owner".to_owned(),
+            labels: "[]".to_owned(),
+            acceptance_criteria: "[]".to_owned(),
+            reopen_count: 0,
+            continuation_count: 0,
+            verification_failure_count: 0,
+            total_reopen_count: 0,
+            total_verification_failure_count: 0,
+            intervention_count: 0,
+            last_intervention_at: None,
+            created_at: "2026-06-12T00:00:00Z".to_owned(),
+            updated_at: "2026-06-12T00:00:00Z".to_owned(),
+            closed_at: None,
+            close_reason: None,
+            merge_commit_sha: None,
+            pr_url: None,
+            merge_conflict_metadata: None,
+            memory_refs: "[]".to_owned(),
+            agent_type: None,
+            created_by_user_id: creator.map(str::to_owned),
+            unresolved_blocker_count: 0,
+        }
+    }
+
+    #[test]
+    fn matching_dispatch_pause_honors_global_project_and_user_scopes() {
+        let mut state = DispatchPauseState::default();
+        state.global = Some(pause());
+        assert_eq!(
+            matching_dispatch_pause(&state, &task("project-a", Some("user-a")))
+                .map(|(scope, target, _)| (scope, target)),
+            Some(("global", None))
+        );
+
+        state.global = None;
+        state.projects.insert("project-a".to_owned(), pause());
+        assert_eq!(
+            matching_dispatch_pause(&state, &task("project-a", Some("user-b")))
+                .map(|(scope, target, _)| (scope, target)),
+            Some(("project", Some("project-a".to_owned())))
+        );
+        assert!(matching_dispatch_pause(&state, &task("project-b", Some("user-b"))).is_none());
+
+        state.projects.clear();
+        state.users.insert("user-a".to_owned(), pause());
+        assert_eq!(
+            matching_dispatch_pause(&state, &task("project-b", Some("user-a")))
+                .map(|(scope, target, _)| (scope, target)),
+            Some(("user", Some("user-a".to_owned())))
+        );
+        assert!(matching_dispatch_pause(&state, &task("project-b", Some("user-b"))).is_none());
+        assert!(matching_dispatch_pause(&state, &task("project-b", None)).is_none());
+    }
 
     fn key(creator: &str, model: &str) -> (String, String) {
         (creator.to_string(), model.to_string())
