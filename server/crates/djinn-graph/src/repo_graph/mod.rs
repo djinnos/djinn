@@ -192,7 +192,7 @@ impl RepoDependencyGraph {
             symbol_ranges,
             communities: self.communities.clone(),
             processes: processes_out,
-            route_exclusion_config: RouteExclusionConfig::default(),
+            route_exclusion_config: self.route_exclusion_config.clone(),
         }
     }
 
@@ -293,6 +293,7 @@ impl RepoDependencyGraph {
             community_lookup: BTreeMap::new(),
             processes,
             process_lookup,
+            route_exclusion_config: artifact.route_exclusion_config.clone(),
         };
         // PR F3: rehydrate the community sidecar verbatim — node
         // positions in the artifact match `NodeIndex` 0..n thanks to the

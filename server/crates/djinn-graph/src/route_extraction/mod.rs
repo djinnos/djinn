@@ -15,9 +15,11 @@ use std::path::{Path, PathBuf};
 use petgraph::graph::NodeIndex;
 
 pub use axum::{AxumRouteHit, detect_axum_routes};
-pub use typescript_fetch::{FetchHit, detect_typescript_fetches};
+pub use typescript_fetch::FetchHit;
 
-use crate::repo_graph::{RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNodeKind, RepoNodeKey};
+use crate::repo_graph::{
+    RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNodeKind, RepoNodeKey, RouteExclusionConfig,
+};
 
 /// Environment flag that disables route extraction when set to `0` / `false`.
 /// Default = on.
@@ -48,6 +50,32 @@ pub struct RouteExtractionReport {
     /// Per-file extraction failure messages. Multiple entries for the same
     /// file are allowed so callers can log each failure without losing order.
     pub file_failures: Vec<(PathBuf, Vec<String>)>,
+    /// Inferred consumer matches that were intentionally left as suggestions
+    /// rather than hard `Fetches` edges. `reasons` contains stable,
+    /// machine-readable strings such as `health-path` and
+    /// `below-confidence-floor`.
+    pub consumer_edge_suggestions: Vec<RouteConsumerEdgeSuggestion>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouteConsumerEdgeSuggestion {
+    pub consumer_file: PathBuf,
+    pub fetch_path: String,
+    pub route_path: String,
+    pub framework: Option<String>,
+    pub confidence: f64,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RouteExtractionOptions<'a> {
+    pub exclusion_config: &'a RouteExclusionConfig,
+}
+
+impl<'a> RouteExtractionOptions<'a> {
+    pub fn new(exclusion_config: &'a RouteExclusionConfig) -> Self {
+        Self { exclusion_config }
+    }
 }
 
 /// Returns `true` when route extraction should run.
@@ -75,6 +103,15 @@ pub fn detect_routes(
     graph: &mut RepoDependencyGraph,
     project_root: &Path,
 ) -> RouteExtractionReport {
+    let config = graph.route_exclusion_config().clone();
+    detect_routes_with_options(graph, project_root, RouteExtractionOptions::new(&config))
+}
+
+pub fn detect_routes_with_options(
+    graph: &mut RepoDependencyGraph,
+    project_root: &Path,
+    options: RouteExtractionOptions<'_>,
+) -> RouteExtractionReport {
     let mut report = RouteExtractionReport::default();
 
     preflight_readable_candidate_files(graph, project_root, &mut report);
@@ -90,15 +127,40 @@ pub fn detect_routes(
     let mut routes_by_path = BTreeMap::new();
     for hit in axum_report.hits {
         if let Some(route_node) = hit.route_node {
-            routes_by_path.entry(hit.path).or_insert(route_node);
+            routes_by_path
+                .entry(hit.path.clone())
+                .or_insert_with(|| RouteCandidate::from_graph(graph, hit.path, route_node));
         }
     }
     if routes_by_path.is_empty() {
         collect_existing_route_nodes(graph, &mut routes_by_path);
     }
 
-    typescript_fetch::detect_typescript_fetches(graph, project_root, &routes_by_path, &mut report);
+    typescript_fetch::detect_typescript_fetches(
+        graph,
+        project_root,
+        &routes_by_path,
+        options.exclusion_config,
+        &mut report,
+    );
     report
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct RouteCandidate {
+    path: String,
+    node: NodeIndex,
+    framework: Option<String>,
+}
+
+impl RouteCandidate {
+    fn from_graph(graph: &RepoDependencyGraph, path: String, node: NodeIndex) -> Self {
+        Self {
+            path,
+            node,
+            framework: graph.node(node).route_framework.clone(),
+        }
+    }
 }
 
 fn preflight_readable_candidate_files(
@@ -117,7 +179,7 @@ fn preflight_readable_candidate_files(
 
 fn collect_existing_route_nodes(
     graph: &RepoDependencyGraph,
-    routes_by_path: &mut BTreeMap<String, NodeIndex>,
+    routes_by_path: &mut BTreeMap<String, RouteCandidate>,
 ) {
     for idx in graph.graph().node_indices() {
         let node = graph.node(idx);
@@ -125,9 +187,62 @@ fn collect_existing_route_nodes(
             continue;
         }
         if let Some(path) = route_path_from_display_name(&node.display_name) {
-            routes_by_path.entry(path).or_insert(idx);
+            routes_by_path
+                .entry(path.clone())
+                .or_insert_with(|| RouteCandidate::from_graph(graph, path, idx));
         }
     }
+}
+
+fn consumer_edge_exclusion_reasons(
+    fetch: &FetchHit,
+    route: &RouteCandidate,
+    config: &RouteExclusionConfig,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if health_path_matches(&route.path, &config.health_path_globs) {
+        reasons.push("health-path".to_string());
+    }
+    if config.param_only_paths && is_param_only_path(&route.path) {
+        reasons.push("param-only-path".to_string());
+    }
+    if fetch.confidence + f64::EPSILON < config.min_confidence_for_consumer_edge {
+        reasons.push("below-confidence-floor".to_string());
+    }
+    if let Some(framework) = route.framework.as_deref()
+        && config
+            .excluded_frameworks
+            .iter()
+            .any(|excluded| excluded.eq_ignore_ascii_case(framework))
+    {
+        reasons.push("excluded-framework".to_string());
+    }
+    reasons
+}
+
+fn health_path_matches(path: &str, globs: &[String]) -> bool {
+    let path = path.to_ascii_lowercase();
+    globs
+        .iter()
+        .any(|glob| glob_match(&path, &glob.to_ascii_lowercase()))
+}
+
+fn glob_match(value: &str, glob: &str) -> bool {
+    if glob == "*" {
+        return true;
+    }
+    let Some((prefix, suffix)) = glob.split_once('*') else {
+        return value == glob || value.ends_with(glob);
+    };
+    value.starts_with(prefix) && value.ends_with(suffix)
+}
+
+fn is_param_only_path(path: &str) -> bool {
+    let trimmed = path.trim_matches('/');
+    !trimmed.is_empty()
+        && trimmed.split('/').all(|segment| {
+            segment.starts_with(':') || (segment.starts_with('{') && segment.ends_with('}'))
+        })
 }
 
 fn route_path_from_display_name(display_name: &str) -> Option<String> {
@@ -404,6 +519,61 @@ mod tests {
                 .graph()
                 .node_weights()
                 .any(|node| node.kind == RepoGraphNodeKind::Route)
+        );
+    }
+
+    #[test]
+    fn default_exclusion_config_suggests_health_and_param_only_fetches() {
+        let temp = tempfile::tempdir().expect("create temp fixture dir");
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("server/src")).unwrap();
+        std::fs::create_dir_all(root.join("ui/src/api")).unwrap();
+        std::fs::write(
+            root.join("server/src/routes.rs"),
+            "use axum::{Router, routing::get};\nfn router() -> Router<()> { Router::new().route(\"/health\", get(health)).route(\"/:id\", get(show)) }\nasync fn health() {}\nasync fn show() {}",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("ui/src/api/agents.ts"),
+            "export function fetchAgents() {\n  fetch('/health');\n  fetch('/:id');\n}",
+        )
+        .unwrap();
+
+        let mut graph = fixture_graph();
+        let report = detect_routes(&mut graph, root);
+
+        assert_eq!(report.fetches_edges_added, 0);
+        let reasons = report
+            .consumer_edge_suggestions
+            .iter()
+            .map(|suggestion| suggestion.reasons.as_slice())
+            .collect::<Vec<_>>();
+        assert!(reasons.iter().any(|r| *r == ["health-path"]));
+        assert!(reasons.iter().any(|r| *r == ["param-only-path"]));
+    }
+
+    #[test]
+    fn exclusion_options_record_below_floor_and_framework_reasons() {
+        let fetch = FetchHit {
+            path: "/api/agents".to_string(),
+            byte_offset: 0,
+            confidence: 0.70,
+            reason: "ts-fetch-literal",
+        };
+        let route = RouteCandidate {
+            path: "/api/agents".to_string(),
+            node: NodeIndex::new(0),
+            framework: Some("axum".to_string()),
+        };
+        let config = RouteExclusionConfig {
+            min_confidence_for_consumer_edge: 0.75,
+            excluded_frameworks: vec!["Axum".to_string()],
+            ..RouteExclusionConfig::default()
+        };
+
+        assert_eq!(
+            consumer_edge_exclusion_reasons(&fetch, &route, &config),
+            vec!["below-confidence-floor", "excluded-framework"]
         );
     }
 }

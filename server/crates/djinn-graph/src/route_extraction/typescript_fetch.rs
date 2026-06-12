@@ -10,8 +10,13 @@ use std::path::Path;
 
 use petgraph::graph::NodeIndex;
 
-use super::{RouteExtractionReport, file_nodes, record_file_failure};
-use crate::repo_graph::{RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNodeKind};
+use super::{
+    RouteCandidate, RouteConsumerEdgeSuggestion, RouteExtractionReport,
+    consumer_edge_exclusion_reasons, file_nodes, record_file_failure,
+};
+use crate::repo_graph::{
+    RepoDependencyGraph, RepoGraphEdgeKind, RepoGraphNodeKind, RouteExclusionConfig,
+};
 
 /// One parsed TypeScript/JavaScript fetch call with a static path candidate.
 #[derive(Debug, Clone, PartialEq)]
@@ -24,10 +29,11 @@ pub struct FetchHit {
 
 /// Detect UI fetch consumers and add `Symbol -> Route` `Fetches` edges for
 /// paths that match an already-materialized route node.
-pub fn detect_typescript_fetches(
+pub(super) fn detect_typescript_fetches(
     graph: &mut RepoDependencyGraph,
     project_root: &Path,
-    routes_by_path: &BTreeMap<String, NodeIndex>,
+    routes_by_path: &BTreeMap<String, RouteCandidate>,
+    exclusion_config: &RouteExclusionConfig,
     report: &mut RouteExtractionReport,
 ) {
     for (rel_path, _file_node) in file_nodes(graph, is_typescript_fetch_candidate) {
@@ -38,19 +44,34 @@ pub fn detect_typescript_fetches(
                 continue;
             }
         };
-        if !source.contains("fetch(") {
+        if !source.contains("fetch(") && !source.contains("request") {
             continue;
         }
         for fetch in scan_fetches(&source) {
-            let Some(route_node) = resolve_fetch_route(&fetch.path, routes_by_path) else {
+            let Some(route) = resolve_fetch_route(&fetch.path, routes_by_path) else {
                 report.unmatched_fetch_count += 1;
                 continue;
             };
+            let exclusion_reasons =
+                consumer_edge_exclusion_reasons(&fetch, route, exclusion_config);
+            if !exclusion_reasons.is_empty() {
+                report
+                    .consumer_edge_suggestions
+                    .push(RouteConsumerEdgeSuggestion {
+                        consumer_file: rel_path.clone(),
+                        fetch_path: fetch.path.clone(),
+                        route_path: route.path.clone(),
+                        framework: route.framework.clone(),
+                        confidence: fetch.confidence,
+                        reasons: exclusion_reasons,
+                    });
+                continue;
+            }
             let line = byte_to_line(&source, fetch.byte_offset);
             if let Some(consumer) = enclosing_symbol(graph, &rel_path, line) {
                 graph.add_route_edge(
                     consumer,
-                    route_node,
+                    route.node,
                     RepoGraphEdgeKind::Fetches,
                     fetch.confidence,
                     fetch.reason,
@@ -76,15 +97,15 @@ pub(crate) fn is_typescript_fetch_candidate(lang: Option<&str>, path: &Path) -> 
     path.starts_with("ui/src/api/") || path.starts_with("ui/src/components/")
 }
 
-fn resolve_fetch_route(
+fn resolve_fetch_route<'a>(
     fetch_path: &str,
-    routes_by_path: &BTreeMap<String, NodeIndex>,
-) -> Option<NodeIndex> {
+    routes_by_path: &'a BTreeMap<String, RouteCandidate>,
+) -> Option<&'a RouteCandidate> {
     routes_by_path
         .iter()
         .filter(|(route_path, _)| paths_match(fetch_path, route_path))
         .max_by_key(|(route_path, _)| match_quality(fetch_path, route_path))
-        .map(|(_, route_node)| *route_node)
+        .map(|(_, route)| route)
 }
 
 fn match_quality(fetch_path: &str, route_path: &str) -> (u8, usize) {
@@ -559,7 +580,7 @@ mod tests {
         })
     }
 
-    fn route_map(graph: &RepoDependencyGraph) -> BTreeMap<String, NodeIndex> {
+    fn route_map(graph: &RepoDependencyGraph) -> BTreeMap<String, RouteCandidate> {
         graph
             .graph()
             .node_indices()
@@ -570,7 +591,14 @@ mod tests {
                 }
                 let (_, rest) = node.display_name.split_once(' ')?;
                 let path = rest.rsplit_once(" (").map_or(rest, |(path, _)| path);
-                Some((path.to_string(), idx))
+                Some((
+                    path.to_string(),
+                    RouteCandidate {
+                        path: path.to_string(),
+                        node: idx,
+                        framework: node.route_framework.clone(),
+                    },
+                ))
             })
             .collect()
     }
@@ -668,7 +696,13 @@ mod tests {
             .count();
         let mut report = RouteExtractionReport::default();
 
-        detect_typescript_fetches(&mut graph, root, &routes_by_path, &mut report);
+        detect_typescript_fetches(
+            &mut graph,
+            root,
+            &routes_by_path,
+            &RouteExclusionConfig::default(),
+            &mut report,
+        );
 
         assert_eq!(report.fetches_edges_added, 14);
         assert_eq!(report.unmatched_fetch_count, 1);
@@ -743,7 +777,13 @@ mod tests {
             .count();
         let mut report = RouteExtractionReport::default();
 
-        detect_typescript_fetches(&mut graph, root, &BTreeMap::new(), &mut report);
+        detect_typescript_fetches(
+            &mut graph,
+            root,
+            &BTreeMap::new(),
+            &RouteExclusionConfig::default(),
+            &mut report,
+        );
 
         assert_eq!(report.fetches_edges_added, 0);
         assert_eq!(report.unmatched_fetch_count, 1);

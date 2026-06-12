@@ -1141,6 +1141,164 @@ mod tests {
         assert_object_safe::<dyn SessionRuntime>();
     }
 
+    // ── ld18 "kill actually kills" teardown coverage ─────────────────────
+    //
+    // The slot-pool / coordinator lifecycle code calls
+    // `KubernetesRuntime::teardown_taskrun_job` (or the free function
+    // `delete_taskrun_job_foreground`) to actually delete the canonical
+    // `djinn-taskrun-{task_run_id}` Job when a session is killed. These
+    // tests pin the two layers of idempotency that make the contract
+    // safe:
+    //
+    // 1. The job name is the canonical prefix + task_run_id (no shadow
+    //    names that a later redispatch would not match).
+    // 2. A 404 from the kube apiserver is treated as success — a
+    //    double-call (race between slot kill and the zombie backstop,
+    //    or the slot event handler firing after `kill_session` already
+    //    deleted the Job) must NOT bubble an error.
+
+    #[test]
+    fn taskrun_job_name_is_canonical_prefix_plus_task_run_id() {
+        assert_eq!(taskrun_job_name("abc-123"), "djinn-taskrun-abc-123");
+        // The exact UUID format used by the host coordinator
+        // (Uuid::now_v7().to_string()).
+        let uuid = Uuid::now_v7();
+        assert_eq!(
+            taskrun_job_name(&uuid.to_string()),
+            format!("djinn-taskrun-{uuid}")
+        );
+        // A second invocation with the same id produces the same name
+        // — the teardown/delete side of the bridge depends on this
+        // for idempotency.
+        assert_eq!(taskrun_job_name("x"), taskrun_job_name("x"));
+    }
+
+    /// Drive `delete_taskrun_job_foreground` with a mocked kube
+    /// client that returns a 404 Status (the apiserver's response
+    /// shape for a missing object). The 404 must be treated as
+    /// success — this is the layered idempotency guarantee that makes
+    /// every server-side interrupt path safe to call twice (e.g.
+    /// `pool.kill_session` deletes the Job, then the
+    /// `SlotEvent::Killed` handler in `handle_slot_event` runs and
+    /// tries to delete the same Job; the second call sees a 404 and
+    /// must return Ok(()) instead of bubbling an error).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_taskrun_job_foreground_treats_404_as_success() {
+        use http::Response;
+        use kube::client::Body;
+        use tower_test::mock::{Handle, Mock};
+
+        type Req = http::Request<Body>;
+        type Resp = http::Response<Body>;
+
+        let (mock_service, mut handle): (Mock<Req, Resp>, Handle<Req, Resp>) =
+            tower_test::mock::pair();
+        let client = kube::Client::new(mock_service, "djinn");
+
+        // Spawn the server side: respond to the first request with a
+        // 404 Status (the apiserver's standard "not found" body
+        // shape), then close so the test can complete without
+        // blocking on a second request the client never sends.
+        let server = tokio::spawn(async move {
+            // The client issues exactly one delete; respond with
+            // 404 and then drop the handle to signal "no more
+            // responses".
+            let (req, send) = handle
+                .next_request()
+                .await
+                .expect("apiserver should receive the Job delete request");
+            // Sanity: the URL path includes the canonical job name.
+            // The slot pool builds the same name from the
+            // task_run_id via `taskrun_job_name`.
+            assert!(
+                req.uri().path().contains("djinn-taskrun-019e-missing"),
+                "delete request should target the canonical job name; got {}",
+                req.uri().path()
+            );
+            assert_eq!(req.method(), http::Method::DELETE, "must be a DELETE");
+            let status_body = serde_json::json!({
+                "kind": "Status",
+                "apiVersion": "v1",
+                "metadata": {},
+                "status": "Failure",
+                "message": "jobs.batch \"djinn-taskrun-019e-missing\" not found",
+                "reason": "NotFound",
+                "code": 404,
+            })
+            .to_string();
+            let response = Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(Body::from(status_body.into_bytes()))
+                .expect("build 404 response");
+            send.send_response(response);
+        });
+
+        // 404 must be Ok(()) per the `delete_job_foreground` contract.
+        let result = delete_taskrun_job_foreground(&client, "djinn", "019e-missing").await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .expect("mock apiserver should complete within 2s")
+            .expect("mock apiserver task should not panic");
+        assert!(
+            result.is_ok(),
+            "delete_taskrun_job_foreground must treat 404 as success, got: {result:?}"
+        );
+    }
+
+    /// A non-404 apiserver error (e.g. 500, 403) must still bubble
+    /// through. The contract is "404 is success", NOT "all errors are
+    /// success" — a real permission failure or apiserver outage must
+    /// surface to the caller (the slot pool / coordinator then logs
+    /// and continues, but the failure is observable for ops
+    /// dashboards).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_taskrun_job_foreground_propagates_non_404_errors() {
+        use http::Response;
+        use kube::client::Body;
+        use tower_test::mock::{Handle, Mock};
+
+        type Req = http::Request<Body>;
+        type Resp = http::Response<Body>;
+
+        let (mock_service, mut handle): (Mock<Req, Resp>, Handle<Req, Resp>) =
+            tower_test::mock::pair();
+        let client = kube::Client::new(mock_service, "djinn");
+
+        let server = tokio::spawn(async move {
+            let (_req, send) = handle
+                .next_request()
+                .await
+                .expect("apiserver should receive the Job delete request");
+            let status_body = serde_json::json!({
+                "kind": "Status",
+                "apiVersion": "v1",
+                "metadata": {},
+                "status": "Failure",
+                "message": "forbidden: User cannot delete jobs.batch",
+                "reason": "Forbidden",
+                "code": 403,
+            })
+            .to_string();
+            let response = Response::builder()
+                .status(403)
+                .header("content-type", "application/json")
+                .body(Body::from(status_body.into_bytes()))
+                .expect("build 403 response");
+            send.send_response(response);
+        });
+
+        let result = delete_taskrun_job_foreground(&client, "djinn", "019e-forbidden").await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .expect("mock apiserver should complete within 2s")
+            .expect("mock apiserver task should not panic");
+        assert!(
+            result.is_err(),
+            "delete_taskrun_job_foreground must propagate non-404 apiserver errors (got: {result:?})"
+        );
+    }
+
     /// The teardown poll must cover a full dev session: too short and the
     /// supervisor reaps in-flight worker pods (bug #18 regression). It must
     /// exceed the Job's `activeDeadlineSeconds` (default 10800s) plus the
