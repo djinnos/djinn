@@ -727,6 +727,14 @@ impl CoordinatorActor {
                 self.dispatch_planner_escalation(&source_task_id, &reason, &project_id)
                     .await;
             }
+            CoordinatorMessage::RouteLoopGuardPlannerIntervention {
+                source_task_id,
+                role,
+                reason,
+            } => {
+                self.route_loop_guard_planner_intervention(&source_task_id, role, &reason)
+                    .await;
+            }
             CoordinatorMessage::IncrementEscalationCount { task_id, reply } => {
                 match self.increment_durable_escalation_count(&task_id).await {
                     Ok(count) => {
