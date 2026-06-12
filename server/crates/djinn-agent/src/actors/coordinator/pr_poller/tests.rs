@@ -492,80 +492,88 @@ fn dequeue_reasons_classified_correctly() {
 
 // ── Sticky failure-dequeue decision ────────────────────────────────────────
 
-fn dequeue_event(reason: &str, sha: Option<&str>, created_at: Option<&str>) -> DequeueEvent {
+fn dequeue_event(reason: &str, created_at: Option<&str>) -> DequeueEvent {
     DequeueEvent {
         reason: Some(reason.to_string()),
         merge_group_ref: None,
         created_at: created_at.map(|s| s.to_string()),
-        before_commit_sha: sha.map(|s| s.to_string()),
+        // NOTE: beforeCommit on the real event is the merge-group head, not
+        // the PR head — the decision must not depend on it.
+        before_commit_sha: Some("merge-group-head".to_string()),
     }
 }
 
 #[test]
-fn dequeue_requires_rework_on_unhandled_failure_for_current_head() {
-    // The blind-requeue loop case: queue rejected the exact head that is
-    // still on the PR and nothing consumed the event yet — must reopen even
-    // if the PR is already sitting back in the queue.
-    let dq = dequeue_event(
-        "failed_checks",
-        Some("abc123"),
-        Some("2026-06-12T14:30:33Z"),
-    );
-    assert!(dequeue_requires_rework(Some(&dq), "abc123", None));
+fn dequeue_requires_rework_on_unhandled_failure_with_no_commit_after() {
+    // The blind-requeue loop case (PRs #491/#492): queue rejected a head
+    // whose last commit predates the eviction and nothing consumed the
+    // event yet — must reopen even if the PR is already sitting back in
+    // the queue.
+    let dq = dequeue_event("failed_checks", Some("2026-06-12T14:30:33Z"));
+    assert!(dequeue_requires_rework(
+        Some(&dq),
+        Some("2026-06-12T14:12:31Z"),
+        None
+    ));
     // A different handled timestamp is an older, already-consumed event —
     // this one is new and still actionable.
     assert!(dequeue_requires_rework(
         Some(&dq),
-        "abc123",
+        Some("2026-06-12T14:12:31Z"),
         Some("2026-06-12T13:56:01Z")
     ));
 }
 
 #[test]
 fn dequeue_requires_rework_skips_when_rework_already_landed() {
-    // Eviction was for a previous head; a new commit superseded it.
-    let dq = dequeue_event(
-        "failed_checks",
-        Some("abc123"),
-        Some("2026-06-12T14:30:33Z"),
-    );
-    assert!(!dequeue_requires_rework(Some(&dq), "def456", None));
+    // A commit landed after the eviction — the rejection is stale and the
+    // reworked head deserves a fresh queue run, not another reopen.
+    let dq = dequeue_event("failed_checks", Some("2026-06-12T14:05:59Z"));
+    assert!(!dequeue_requires_rework(
+        Some(&dq),
+        Some("2026-06-12T14:18:19Z"),
+        None
+    ));
 }
 
 #[test]
 fn dequeue_requires_rework_consumes_each_event_once() {
     // Same created_at as the handled marker → already reopened for this
     // event; don't re-fire while the rework is still in flight.
-    let dq = dequeue_event(
-        "failed_checks",
-        Some("abc123"),
-        Some("2026-06-12T14:30:33Z"),
-    );
+    let dq = dequeue_event("failed_checks", Some("2026-06-12T14:30:33Z"));
     assert!(!dequeue_requires_rework(
         Some(&dq),
-        "abc123",
+        Some("2026-06-12T14:12:31Z"),
         Some("2026-06-12T14:30:33Z")
     ));
 }
 
 #[test]
 fn dequeue_requires_rework_ignores_non_failure_and_absent_events() {
-    let merged = dequeue_event("merged", Some("abc123"), Some("2026-06-12T14:50:36Z"));
-    assert!(!dequeue_requires_rework(Some(&merged), "abc123", None));
-    assert!(!dequeue_requires_rework(None, "abc123", None));
+    let merged = dequeue_event("merged", Some("2026-06-12T14:50:36Z"));
+    assert!(!dequeue_requires_rework(
+        Some(&merged),
+        Some("2026-06-12T14:12:31Z"),
+        None
+    ));
+    assert!(!dequeue_requires_rework(
+        None,
+        Some("2026-06-12T14:12:31Z"),
+        None
+    ));
 }
 
 #[test]
 fn dequeue_requires_rework_degrades_conservatively_on_missing_fields() {
-    // No before_commit_sha (GraphQL field gap) → assume it applies to the
-    // current head, matching the pre-existing reopen behavior.
-    let no_sha = dequeue_event("failed_checks", None, Some("2026-06-12T14:30:33Z"));
-    assert!(dequeue_requires_rework(Some(&no_sha), "abc123", None));
-    // No created_at → cannot dedup; err on reopening.
-    let no_ts = dequeue_event("failed_checks", Some("abc123"), None);
+    // No head timestamp (GraphQL field gap) → cannot prove rework landed;
+    // keep the pre-existing reopen behavior.
+    let dq = dequeue_event("failed_checks", Some("2026-06-12T14:30:33Z"));
+    assert!(dequeue_requires_rework(Some(&dq), None, None));
+    // No created_at → cannot compare or dedup; err on reopening.
+    let no_ts = dequeue_event("failed_checks", None);
     assert!(dequeue_requires_rework(
         Some(&no_ts),
-        "abc123",
+        Some("2026-06-12T14:12:31Z"),
         Some("2026-06-12T14:30:33Z")
     ));
 }
