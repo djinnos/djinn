@@ -143,7 +143,13 @@ impl DjinnMcpServer {
     }
 
     #[tool(
-        description = "Read-only: return dispatch pause status globally, for one project, for one user, or all scopes."
+        description = "Read-only: return dispatch pause status globally, for one project, for one user, or all scopes.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     pub async fn dispatch_pause_status(
         &self,
