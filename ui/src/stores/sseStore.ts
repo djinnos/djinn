@@ -26,6 +26,7 @@ export type SSEEventType =
   | "sync_completed"
   | "verification_step"
   | "lifecycle_step"
+  | "dispatch_pause_changed"
   | "credential_created"
   | "credential_updated"
   | "credential_deleted"

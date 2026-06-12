@@ -8,6 +8,17 @@ export { useChatStore, type ChatState, type ChatSession, type ChatMessage } from
 // SSE Store
 export { sseStore, type SSEState, type SSEEvent, type SSEEventType } from "./sseStore";
 
+// Dispatch Pause Store
+export {
+  dispatchPauseStore,
+  useDispatchPauseStore,
+  refreshDispatchPauseStatus,
+  applyDispatchPauseSsePayload,
+  type DispatchPauseState,
+  type DispatchPauseEntry,
+  type DispatchPauseSsePayload,
+} from "./dispatchPauseStore";
+
 // Task Store
 export { taskStore, type TaskState } from "./taskStore";
 export {
