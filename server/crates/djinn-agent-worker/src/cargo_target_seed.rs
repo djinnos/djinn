@@ -207,6 +207,19 @@ pub fn seed_cargo_target_dir_with_options(
     Ok(metrics.result(start.elapsed(), None))
 }
 
+/// Remove a private per-task-run Cargo target dir on worker teardown.
+///
+/// Teardown is intentionally best-effort for the normal already-cleaned-up
+/// case: a missing run dir is considered success so terminal-report paths can
+/// call this helper unconditionally.
+pub fn teardown_run_dir(run_dir: impl AsRef<Path>) -> io::Result<()> {
+    match fs::remove_dir_all(run_dir.as_ref()) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
 /// Classify a Cargo target relative path.
 ///
 /// The helper is intentionally pure for unit coverage and later callers. It is
@@ -399,6 +412,9 @@ fn has_component(path: &Path, needle: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+
     #[test]
     fn classifies_heavy_artifacts_for_hardlink() {
         assert_eq!(
@@ -476,5 +492,95 @@ mod tests {
             Some(CargoTargetSeedFallback::BaseNotDirectory)
         );
         assert!(run.is_dir());
+    }
+
+    #[test]
+    fn seeds_target_tree_with_required_clone_semantics() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().join("warm-base");
+        let run = tmp.path().join("run-target");
+
+        let heavy = Path::new("debug/deps/libfoo.rlib");
+        let fingerprint = Path::new("debug/.fingerprint/foo-abc/invoked.timestamp");
+        let dep_info = Path::new("debug/deps/foo.d");
+        let incremental = Path::new("debug/incremental/foo-abc/s-cache.bin");
+
+        write_base_file(&base, heavy, b"large immutable artifact");
+        write_base_file(&base, fingerprint, b"fingerprint metadata");
+        write_base_file(&base, dep_info, b"dep-info metadata");
+        write_base_file(&base, incremental, b"incremental state");
+
+        let result =
+            seed_cargo_target_dir_with_options(&base, &run, &CargoTargetSeedOptions::new(4))
+                .expect("seed target dir");
+
+        assert_eq!(result.fallback_reason, None);
+        assert_eq!(result.linked_file_count, 1);
+        assert_eq!(result.copied_file_count, 2);
+        assert!(
+            result.skipped_file_count >= 1,
+            "incremental directory should be counted as skipped"
+        );
+
+        assert_eq!(
+            fs::read(run.join(heavy)).expect("read linked artifact"),
+            b"large immutable artifact"
+        );
+        assert_eq!(
+            fs::read(run.join(fingerprint)).expect("read copied fingerprint"),
+            b"fingerprint metadata"
+        );
+        assert_eq!(
+            fs::read(run.join(dep_info)).expect("read copied dep-info"),
+            b"dep-info metadata"
+        );
+        assert!(
+            !run.join(incremental).exists(),
+            "incremental state must not be seeded into the private run dir"
+        );
+        assert!(
+            !run.join("debug/incremental").exists(),
+            "incremental directories must be skipped before descent"
+        );
+
+        #[cfg(unix)]
+        {
+            assert_same_inode(&base.join(heavy), &run.join(heavy));
+            assert_different_inode(&base.join(fingerprint), &run.join(fingerprint));
+            assert_different_inode(&base.join(dep_info), &run.join(dep_info));
+        }
+    }
+
+    #[test]
+    fn teardown_run_dir_removes_private_dir_and_ignores_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let run = tmp.path().join("run-target");
+        fs::create_dir_all(run.join("debug/deps")).expect("create run tree");
+        fs::write(run.join("debug/deps/libfoo.rlib"), b"artifact").expect("write run file");
+
+        teardown_run_dir(&run).expect("remove run dir");
+        assert!(!run.exists());
+
+        teardown_run_dir(&run).expect("missing run dir should be non-fatal");
+    }
+
+    fn write_base_file(base: &Path, relative: &Path, contents: &[u8]) {
+        let path = base.join(relative);
+        fs::create_dir_all(path.parent().expect("relative path parent")).expect("create parent");
+        fs::write(path, contents).expect("write base file");
+    }
+
+    #[cfg(unix)]
+    fn assert_same_inode(left: &Path, right: &Path) {
+        let left = fs::metadata(left).expect("left metadata");
+        let right = fs::metadata(right).expect("right metadata");
+        assert_eq!((left.dev(), left.ino()), (right.dev(), right.ino()));
+    }
+
+    #[cfg(unix)]
+    fn assert_different_inode(left: &Path, right: &Path) {
+        let left = fs::metadata(left).expect("left metadata");
+        let right = fs::metadata(right).expect("right metadata");
+        assert_ne!((left.dev(), left.ino()), (right.dev(), right.ino()));
     }
 }
