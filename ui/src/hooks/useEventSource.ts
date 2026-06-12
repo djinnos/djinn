@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- reconnect delay helpers are exported for focused unit tests. */
 /**
  * useEventSource hook - Manages EventSource connection with auto-reconnect
  *
@@ -32,11 +33,36 @@ import {
   resolveServerSSEEventName,
 } from "@/stores/sseEventContract";
 
-const INITIAL_RECONNECT_DELAY = 1000;
-const MAX_RECONNECT_DELAY = 30000;
-const RECONNECT_MULTIPLIER = 2;
+export const INITIAL_RECONNECT_DELAY = 1000;
+export const MAX_RECONNECT_DELAY = 30000;
+export const RECONNECT_MULTIPLIER = 2;
+export const RECONNECT_JITTER_FACTOR = 0.2;
+export const MIN_RECONNECT_DELAY = 1;
 const SILENCE_TIMEOUT_MS = 60_000;
 const LIVENESS_WATCHDOG_INTERVAL_MS = 5_000;
+
+/**
+ * Returns the capped exponential reconnect delay with symmetric bounded jitter.
+ *
+ * Jitter is applied within +/- RECONNECT_JITTER_FACTOR of the capped base delay,
+ * then clamped so reconnects never happen below MIN_RECONNECT_DELAY or above
+ * MAX_RECONNECT_DELAY.
+ */
+export function getReconnectDelay(
+  reconnectAttempt: number,
+  random = Math.random,
+) {
+  const baseDelay = Math.min(
+    INITIAL_RECONNECT_DELAY * Math.pow(RECONNECT_MULTIPLIER, reconnectAttempt),
+    MAX_RECONNECT_DELAY,
+  );
+  const jitterMultiplier = 1 + (random() * 2 - 1) * RECONNECT_JITTER_FACTOR;
+  const jitteredDelay = baseDelay * jitterMultiplier;
+  return Math.min(
+    MAX_RECONNECT_DELAY,
+    Math.max(MIN_RECONNECT_DELAY, jitteredDelay),
+  );
+}
 
 export function useEventSource() {
   const projects = useProjects();
@@ -119,10 +145,7 @@ export function useEventSource() {
       }
 
       const { reconnectAttempt } = sseStore.getState();
-      const delay = Math.min(
-        INITIAL_RECONNECT_DELAY * Math.pow(RECONNECT_MULTIPLIER, reconnectAttempt),
-        MAX_RECONNECT_DELAY,
-      );
+      const delay = getReconnectDelay(reconnectAttempt);
       sseStore.getState().incrementReconnectAttempt();
 
       reconnectTimerRef.current = setTimeout(async () => {
