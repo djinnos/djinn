@@ -18,6 +18,8 @@ use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use uuid::Uuid;
 
+use djinn_supervisor::cargo_target_run_dir;
+
 use crate::config::KubernetesConfig;
 
 /// Label key for the task-run id (Djinn's primary correlator).
@@ -553,7 +555,7 @@ fn task_run_cache_env_vars(project_id: &str, task_run_id: &str) -> Vec<EnvVar> {
     let mut env = common_cache_env_vars(project_id);
     env.push(env_var(
         "CARGO_TARGET_DIR",
-        &format!("{CACHE_MOUNT_DIR}/cargo-target-runs/{task_run_id}"),
+        &cargo_target_run_dir(task_run_id).display().to_string(),
     ));
     env
 }

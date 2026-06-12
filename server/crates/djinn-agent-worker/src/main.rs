@@ -71,6 +71,7 @@ mod worker_services;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use cargo_target_seed::{run_target_dir, seed_cargo_target_dir, teardown_run_dir, warm_base_dir};
 use clap::{Parser, Subcommand};
 use djinn_agent::context::AgentContext;
 use djinn_agent::file_time::FileTime;
@@ -115,6 +116,8 @@ const CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(20);
 /// read-only on the working tree (it reads refs/objects only — no add, no
 /// commit), so it never contends with the live agent or cargo.
 const PERIODIC_PUSH_INTERVAL: Duration = Duration::from_secs(180);
+
+const CARGO_TARGET_DIR_ENV: &str = "CARGO_TARGET_DIR";
 
 use worker_services::WorkerSupervisorServices;
 
@@ -346,6 +349,170 @@ async fn configure_private_dep_access(spec: &TaskRunSpec) {
     }
 }
 
+fn set_cargo_target_dir_for_children(destination: &Path) {
+    // SAFETY: this worker mutates the process environment only during
+    // task-run startup, before installing its own signal/deadline/push
+    // background tasks or starting supervisor-driven command execution.
+    unsafe { std::env::set_var(CARGO_TARGET_DIR_ENV, destination) };
+}
+
+async fn prepare_cargo_target_dir(spec: &TaskRunSpec) -> PathBuf {
+    let source_base = warm_base_dir(&spec.project_id);
+    let fallback_run_dir = run_target_dir(&spec.task_run_id);
+    let (destination_run_dir, env_was_present) = match std::env::var_os(CARGO_TARGET_DIR_ENV) {
+        Some(raw) if !raw.is_empty() => {
+            let configured = PathBuf::from(raw);
+            if configured == source_base {
+                warn!(
+                    task_run_id = %spec.task_run_id,
+                    project_id = %spec.project_id,
+                    configured_target_dir = %configured.display(),
+                    fallback_target_dir = %fallback_run_dir.display(),
+                    "cargo target seed: ignoring shared warm base CARGO_TARGET_DIR for task run"
+                );
+                set_cargo_target_dir_for_children(&fallback_run_dir);
+                (fallback_run_dir.clone(), false)
+            } else {
+                (configured, true)
+            }
+        }
+        _ => {
+            set_cargo_target_dir_for_children(&fallback_run_dir);
+            (fallback_run_dir.clone(), false)
+        }
+    };
+
+    info!(
+        task_run_id = %spec.task_run_id,
+        project_id = %spec.project_id,
+        source_base = %source_base.display(),
+        destination_run_dir = %destination_run_dir.display(),
+        env_was_present,
+        "cargo target seed: preparing private run target dir"
+    );
+
+    let seed_source_base = source_base.clone();
+    let seed_destination_run_dir = destination_run_dir.clone();
+    match tokio::task::spawn_blocking(move || {
+        seed_cargo_target_dir(seed_source_base, seed_destination_run_dir)
+    })
+    .await
+    {
+        Ok(Ok(result)) => {
+            let fallback_reason = result
+                .fallback_reason
+                .as_ref()
+                .map(std::string::ToString::to_string);
+            if result.cold_started() {
+                warn!(
+                    task_run_id = %spec.task_run_id,
+                    project_id = %spec.project_id,
+                    source_base = %source_base.display(),
+                    destination_run_dir = %destination_run_dir.display(),
+                    clone_duration_ms = result.elapsed.as_millis(),
+                    seed_duration_ms = result.elapsed.as_millis(),
+                    linked_file_count = result.linked_file_count,
+                    copied_file_count = result.copied_file_count,
+                    skipped_file_count = result.skipped_file_count,
+                    linked_bytes = result.linked_bytes,
+                    copied_bytes = result.copied_bytes,
+                    fallback_reason = fallback_reason.as_deref().unwrap_or("unknown"),
+                    "cargo target seed: falling back to cold private target dir"
+                );
+            } else {
+                info!(
+                    task_run_id = %spec.task_run_id,
+                    project_id = %spec.project_id,
+                    source_base = %source_base.display(),
+                    destination_run_dir = %destination_run_dir.display(),
+                    clone_duration_ms = result.elapsed.as_millis(),
+                    seed_duration_ms = result.elapsed.as_millis(),
+                    linked_file_count = result.linked_file_count,
+                    copied_file_count = result.copied_file_count,
+                    skipped_file_count = result.skipped_file_count,
+                    linked_bytes = result.linked_bytes,
+                    copied_bytes = result.copied_bytes,
+                    "cargo target seed: seeded private run target dir"
+                );
+            }
+        }
+        Ok(Err(err)) => {
+            warn!(
+                task_run_id = %spec.task_run_id,
+                project_id = %spec.project_id,
+                source_base = %source_base.display(),
+                destination_run_dir = %destination_run_dir.display(),
+                clone_duration_ms = 0_u128,
+                seed_duration_ms = 0_u128,
+                linked_file_count = 0_u64,
+                copied_file_count = 0_u64,
+                skipped_file_count = 0_u64,
+                fallback_reason = %format!("seed helper failed: {err}"),
+                "cargo target seed: proceeding with cold private target dir after setup error"
+            );
+        }
+        Err(err) => {
+            warn!(
+                task_run_id = %spec.task_run_id,
+                project_id = %spec.project_id,
+                source_base = %source_base.display(),
+                destination_run_dir = %destination_run_dir.display(),
+                clone_duration_ms = 0_u128,
+                seed_duration_ms = 0_u128,
+                linked_file_count = 0_u64,
+                copied_file_count = 0_u64,
+                skipped_file_count = 0_u64,
+                fallback_reason = %format!("seed task join failed: {err}"),
+                "cargo target seed: proceeding with cold private target dir after setup task failure"
+            );
+        }
+    }
+
+    destination_run_dir
+}
+
+struct CargoTargetRunDirGuard {
+    task_run_id: String,
+    project_id: String,
+    run_dir: PathBuf,
+}
+
+impl CargoTargetRunDirGuard {
+    fn new(task_run_id: String, project_id: String, run_dir: PathBuf) -> Self {
+        Self {
+            task_run_id,
+            project_id,
+            run_dir,
+        }
+    }
+}
+
+impl Drop for CargoTargetRunDirGuard {
+    fn drop(&mut self) {
+        match teardown_run_dir(&self.run_dir) {
+            Ok(result) => info!(
+                task_run_id = %self.task_run_id,
+                project_id = %self.project_id,
+                destination_run_dir = %self.run_dir.display(),
+                cleanup_outcome = result.outcome(),
+                removed_count = result.removed_count(),
+                error_count = 0_u64,
+                "cargo target teardown: private run target dir cleanup completed"
+            ),
+            Err(err) => warn!(
+                task_run_id = %self.task_run_id,
+                project_id = %self.project_id,
+                destination_run_dir = %self.run_dir.display(),
+                cleanup_outcome = "failed",
+                removed_count = 0_u64,
+                error_count = 1_u64,
+                error = %err,
+                "cargo target teardown: failed to remove private run target dir"
+            ),
+        }
+    }
+}
+
 async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     info!(
         server = %args.server_addr,
@@ -364,6 +531,13 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     let spec: TaskRunSpec =
         bincode::deserialize(&spec_bytes).context("bincode deserialize TaskRunSpec")?;
     info!(task_id = %spec.task_id, flow = ?spec.flow, "received spec");
+
+    let cargo_target_run_dir = prepare_cargo_target_dir(&spec).await;
+    let _cargo_target_guard = CargoTargetRunDirGuard::new(
+        spec.task_run_id.clone(),
+        spec.project_id.clone(),
+        cargo_target_run_dir,
+    );
 
     // Configure git + Go so the agent's build/test commands can fetch the
     // org's PRIVATE transitive deps using the per-project installation token.
@@ -1077,6 +1251,7 @@ fn build_worker_agent_context(
         graph_warmer: None,
         repo_graph_ops: None,
         runtime_ops: None,
+        cargo_target_runs_root: None,
         mirror: None,
         rpc_registry: None,
         // The K8s worker only ever serves one project per Pod, so default

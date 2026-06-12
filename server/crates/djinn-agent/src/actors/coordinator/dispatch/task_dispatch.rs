@@ -747,7 +747,7 @@ impl CoordinatorActor {
                         task.id.clone(),
                         DispatchMarker {
                             instant: StdInstant::now(),
-                            role,
+                            role: role.to_owned(),
                         },
                     );
                     self.dispatched += 1;

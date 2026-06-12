@@ -101,6 +101,7 @@ pub struct EnvironmentConfig {
     /// rewrites it from `projects.stack`. `validate()` rejects 0 so that
     /// user-submitted configs must declare a real version.
     #[serde(default)]
+    #[schemars(with = "i64")]
     pub schema_version: u32,
     #[serde(default)]
     pub source: ConfigSource,
@@ -1353,6 +1354,32 @@ mod tests {
         let round_tripped: EnvironmentConfig = serde_json::from_str(&serialized).unwrap();
         assert_eq!(round_tripped, cfg);
         round_tripped.validate().unwrap();
+    }
+
+    #[test]
+    fn public_schema_exposes_workspace_metadata() {
+        let schema = schemars::schema_for!(EnvironmentConfig);
+        let value = serde_json::to_value(&schema).unwrap();
+        let workspace = &value["$defs"]["Workspace"];
+
+        assert_eq!(
+            workspace["properties"]["slug"]["type"],
+            json!(["string", "null"])
+        );
+        assert_eq!(workspace["properties"]["slug"]["default"], json!(null));
+
+        assert_eq!(
+            workspace["properties"]["name"]["type"],
+            json!(["string", "null"])
+        );
+        assert_eq!(workspace["properties"]["name"]["default"], json!(null));
+
+        assert_eq!(workspace["properties"]["tags"]["type"], json!("array"));
+        assert_eq!(workspace["properties"]["tags"]["default"], json!([]));
+        assert_eq!(
+            workspace["properties"]["tags"]["items"]["type"],
+            json!("string")
+        );
     }
 
     #[test]

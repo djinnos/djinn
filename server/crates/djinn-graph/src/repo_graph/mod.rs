@@ -37,7 +37,8 @@ mod tests;
 // `communities.rs`, etc. for the consumer side.
 pub use self::artifact::{
     RepoGraphArtifact, RepoGraphArtifactEdge, RepoGraphArtifactProcess,
-    RepoGraphArtifactSymbolRange, RouteExclusionConfig, deserialize_repo_graph_artifact_bincode,
+    RepoGraphArtifactSymbolRange, RouteExclusionConfig, RouteRef,
+    deserialize_repo_graph_artifact_bincode,
 };
 pub use self::constants::{REPO_GRAPH_ARTIFACT_VERSION, is_test_path};
 pub use self::edge::{

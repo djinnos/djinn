@@ -33,6 +33,28 @@ pub struct CargoTargetSeedOptions {
     pub parallelism: usize,
 }
 
+/// Outcome returned by worker teardown so logs can report observable cleanup
+/// success/failure/count information for the private run dir.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct CargoTargetTeardownResult {
+    /// `true` when a run directory existed and was removed.
+    pub removed: bool,
+}
+
+impl CargoTargetTeardownResult {
+    pub fn removed_count(self) -> u64 {
+        u64::from(self.removed)
+    }
+
+    pub fn outcome(self) -> &'static str {
+        if self.removed {
+            "removed"
+        } else {
+            "already_absent"
+        }
+    }
+}
+
 impl CargoTargetSeedOptions {
     /// Build options from environment, falling back to the production default.
     pub fn from_env() -> Self {
@@ -212,10 +234,12 @@ pub fn seed_cargo_target_dir_with_options(
 /// Teardown is intentionally best-effort for the normal already-cleaned-up
 /// case: a missing run dir is considered success so terminal-report paths can
 /// call this helper unconditionally.
-pub fn teardown_run_dir(run_dir: impl AsRef<Path>) -> io::Result<()> {
+pub fn teardown_run_dir(run_dir: impl AsRef<Path>) -> io::Result<CargoTargetTeardownResult> {
     match fs::remove_dir_all(run_dir.as_ref()) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(()) => Ok(CargoTargetTeardownResult { removed: true }),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            Ok(CargoTargetTeardownResult { removed: false })
+        }
         Err(err) => Err(err),
     }
 }
@@ -558,10 +582,14 @@ mod tests {
         fs::create_dir_all(run.join("debug/deps")).expect("create run tree");
         fs::write(run.join("debug/deps/libfoo.rlib"), b"artifact").expect("write run file");
 
-        teardown_run_dir(&run).expect("remove run dir");
+        let removed = teardown_run_dir(&run).expect("remove run dir");
+        assert_eq!(removed.outcome(), "removed");
+        assert_eq!(removed.removed_count(), 1);
         assert!(!run.exists());
 
-        teardown_run_dir(&run).expect("missing run dir should be non-fatal");
+        let missing = teardown_run_dir(&run).expect("missing run dir should be non-fatal");
+        assert_eq!(missing.outcome(), "already_absent");
+        assert_eq!(missing.removed_count(), 0);
     }
 
     fn write_base_file(base: &Path, relative: &Path, contents: &[u8]) {
