@@ -38,7 +38,6 @@ import {
   saveAutomationModelSelection,
 } from "@/api/automationConfig";
 import { showToast } from "@/lib/toast";
-import { cn } from "@/lib/utils";
 import { ProviderSection } from "@/components/userConfig/ProviderSection";
 import { automationKeys } from "@/components/userConfig/automationKeys";
 import { formatProvider } from "@/components/userConfig/providerDisplay";
