@@ -69,8 +69,8 @@ mod state;
 mod tests;
 
 use ci_helpers::{
-    advisory_checks_section, blocking_failed_checks, build_ci_failure_sections, is_merge_queue_405,
-    parse_actions_run_id,
+    advisory_checks_section, blocking_failed_checks, build_ci_failure_sections, is_already_queued,
+    is_merge_queue_405, parse_actions_run_id,
 };
 use conversation_resolution::{
     is_conversation_resolution_block, should_auto_resolve_conversations,
@@ -85,6 +85,6 @@ pub(crate) use pr_review_handlers::parse_pr_url;
 #[cfg(test)]
 use ci_helpers::is_advisory_check_name;
 #[cfg(test)]
-use pr_commands::dequeue_reason_is_failure;
+use pr_commands::{dequeue_reason_is_failure, dequeue_requires_rework};
 #[cfg(test)]
 use pr_review_handlers::{is_racing_unmerged_status, pick_conflict_blocker_sibling};

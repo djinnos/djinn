@@ -219,6 +219,60 @@ fn build_with_source_attaches_complexity_to_function_nodes() {
     assert_eq!(nested_metrics.max_nesting, 4);
 }
 
+/// scip-typescript regression: it emits `SymbolInformation.kind = 0`
+/// (UnspecifiedKind) for every symbol, so kind-based function detection
+/// rejects ALL TypeScript symbols and complexity silently never attaches.
+/// The fallback must recognize the SCIP method descriptor suffix `")."`.
+#[test]
+fn build_with_source_attaches_complexity_despite_unknown_symbol_kind() {
+    const TS_SOURCE: &str = "function pick(a: number): number {\n    if (a > 0) {\n        return 1;\n    }\n    return 0;\n}\n";
+
+    let sym = ScipSymbol {
+        symbol: "scip-typescript npm pkg 1.0.0 src/`pick.ts`/pick().".to_string(),
+        // scip-typescript: kind is the proto default, parsed as Unknown(0).
+        kind: Some(ScipSymbolKind::Unknown(0)),
+        display_name: Some("pick".to_string()),
+        signature: None,
+        documentation: vec![],
+        relationships: vec![],
+        visibility: Some(crate::scip_parser::ScipVisibility::Public),
+        signature_parts: None,
+    };
+    let index = ParsedScipIndex {
+        workspace_slug: "ui".to_string(),
+        metadata: ScipMetadata {
+            project_root: Some("file:///workspace/repo/ui".to_string()),
+            tool_name: Some("scip-typescript".to_string()),
+            tool_version: Some("test".to_string()),
+        },
+        files: vec![ScipFile {
+            language: "typescript".to_string(),
+            relative_path: PathBuf::from("ui/src/pick.ts"),
+            definitions: vec![definition_with_enclosing(&sym.symbol, 0, 5)],
+            references: vec![],
+            occurrences: vec![],
+            symbols: vec![sym],
+        }],
+        external_symbols: vec![],
+    };
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let abs = tempdir.path().join("ui/src/pick.ts");
+    std::fs::create_dir_all(abs.parent().unwrap()).expect("mkdir");
+    std::fs::write(&abs, TS_SOURCE).expect("write");
+
+    let graph = RepoDependencyGraph::build_with_source(&[index], Some(tempdir.path()));
+    let idx = graph
+        .symbol_node("scip-typescript npm pkg 1.0.0 src/`pick.ts`/pick().")
+        .expect("pick node");
+    let metrics = graph
+        .node(idx)
+        .complexity
+        .expect("Unknown-kind function symbol must still get complexity");
+    assert_eq!(metrics.cognitive, 1);
+    assert_eq!(metrics.cyclomatic, 2);
+}
+
 #[test]
 fn build_without_source_leaves_complexity_unset() {
     // `build` (no project_root) is the synthetic-fixture path used by

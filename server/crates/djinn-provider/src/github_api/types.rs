@@ -291,6 +291,12 @@ pub struct PrMergeQueueState {
     /// when the queue evicted the PR — carries the reason and links to the
     /// failing check runs on the merge-group ref.
     pub last_dequeue: Option<DequeueEvent>,
+    /// Timestamp of the PR's current head commit (`pushedDate` when GitHub
+    /// provides it, else `committedDate`). Comparing this against
+    /// `last_dequeue.created_at` tells whether rework landed after the queue
+    /// rejected the PR — both are RFC3339 UTC strings, so a lexicographic
+    /// compare is a chronological compare.
+    pub head_committed_at: Option<String>,
 }
 
 /// A `DequeuedEvent` from the PR timeline — emitted when GitHub removes a PR
@@ -308,4 +314,10 @@ pub struct DequeueEvent {
     /// Used to look up the failing check runs.
     pub merge_group_ref: Option<String>,
     pub created_at: Option<String>,
+    /// `beforeCommit.oid` from the removal event. NOTE: empirically this is
+    /// the head of the *merge group* the queue was running (a synthetic
+    /// `gh-readonly-queue/...` commit), NOT the PR's head SHA — do not
+    /// compare it against the PR head to detect rework; use
+    /// `PrMergeQueueState::head_committed_at` vs `created_at` instead.
+    pub before_commit_sha: Option<String>,
 }
