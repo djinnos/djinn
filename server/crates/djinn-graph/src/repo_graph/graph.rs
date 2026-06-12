@@ -1037,7 +1037,7 @@ fn add_name_index_entry(
 }
 
 pub(crate) fn is_default_hidden_synthetic_kind(kind: RepoGraphNodeKind) -> bool {
-    matches!(kind, RepoGraphNodeKind::Route | RepoGraphNodeKind::Tool)
+    matches!(kind, RepoGraphNodeKind::Tool)
 }
 
 /// PR F2: build the reverse `node_index → process positions` lookup
