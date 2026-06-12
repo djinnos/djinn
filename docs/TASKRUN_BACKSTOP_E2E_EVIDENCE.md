@@ -1,5 +1,61 @@
 # Task-run backstop E2E evidence
 
+## Final proposal 4369 residual-criteria reconciliation — 2026-06-12
+
+This evidence pack reconciles the remaining proposal 4369 / epic 8451 criteria against the three serialized evidence tasks:
+
+| Residual criterion | Evidence source | Reconciliation status |
+| --- | --- | --- |
+| Full Rust validation for the landed task-run teardown/backstop implementation. | `de12` (`019eb930-2164-7a23-ae8f-96d630fe1146`) | **Partially satisfied with an environmental blocker:** `cargo build` and strict `cargo clippy --all-features -- -D warnings` passed. `cargo nextest run` reached the test execution phase but could not complete because the required Postgres test service on `127.0.0.1:5433` was unavailable and Docker was not installed to start `postgres-test`. No teardown code defect was identified. |
+| Real Kubernetes proof that `execution_kill_task` removes `djinn-taskrun-*` Pods/Jobs within roughly 60 seconds. | `9l2v` (`019eb930-5068-7213-b348-2c2c2d2d75f7`), section [`execution_kill_task` cleanup verification attempt](#execution_kill_task-cleanup-verification-attempt--blocked-by-worker-cluster-access). | **Not satisfied:** a Kubernetes-backed attempt was made, but the worker environment was missing `kubectl`/`KUBECONFIG`, lacked RBAC to read Pods/Jobs/logs, and lacked an authenticated MCP/control-plane path to invoke `execution_kill_task`. No before/after cleanup success is claimed. |
+| Real Kubernetes proof that force-close/operator-close removes `djinn-taskrun-*` Pods/Jobs within roughly 60 seconds. | `6eg3` (`019eb930-803a-7033-9b7a-42678aac97a3`), section [Force-close/operator-close cleanup verification attempt](#force-closeoperator-close-cleanup-verification-attempt--blocked-by-worker-cluster-access). | **Not satisfied:** a Kubernetes-backed attempt was made, but the worker environment was missing `kubectl`/`KUBECONFIG`, lacked RBAC to read Pods/Jobs/logs, and available projected tokens were rejected by `/mcp` for operator/admin force-close. No force-close action was executed and no cleanup success is claimed. |
+
+### Full validation outcome from `de12`
+
+- **Validation task:** `de12` / `019eb930-2164-7a23-ae8f-96d630fe1146`
+- **Closed:** 2026-06-12T02:11:38.572Z
+- **Reviewer result:** approved. The reviewer confirmed the branch contained only a narrow diagnostic improvement and no generated/junk files.
+- **Commands and outcomes recorded by `de12`:**
+  - `cd server && cargo fmt`: passed; no substantive formatting diff beyond the intentional test assertion edit.
+  - `cd server && cargo build`: **passed**; final run completed with `Finished dev profile ...` and exit 0.
+  - `cd server && cargo clippy --all-features -- -D warnings`: **passed**; final run completed with `Finished dev profile ...` and exit 0.
+  - `cd server && cargo nextest run`: **environmentally blocked after test compilation / during DB-backed test execution**. The required Postgres test service was unavailable on `127.0.0.1:5433`, and Docker was not installed so `docker compose up -d postgres-test` could not be used in that worker environment.
+- **Fix made during validation:** `server/src/mcp_contract_tests/settings_tools.rs` was adjusted to print the full `settings_set` response when the DB-backed settings contract assertion fails, exposing the underlying DB/environment error. No task-run teardown architecture was changed.
+- **Validation reconciliation:** build and strict clippy criteria are satisfied. The nextest criterion remains blocked by test infrastructure availability rather than by a known code defect; rerun `cd server && cargo nextest run` where `postgres-test` is running and reachable on `127.0.0.1:5433`.
+
+### Kubernetes evidence outcome from `9l2v` (`execution_kill_task`)
+
+- **Evidence task:** `9l2v` / `019eb930-5068-7213-b348-2c2c2d2d75f7`
+- **Worker task_run_id:** `019eb963-d937-7930-9e68-6e14953792d9`
+- **Attempt window:** 2026-06-12T01:13:33Z through 2026-06-12T01:14:40Z
+- **Namespace/context evidence:** namespace `djinn`; Kubernetes API reachable through the mounted service-account token; identity was `system:serviceaccount:djinn:djinn-djinn-taskrun`.
+- **Pre-kill evidence:** documented below under [Documented pre-kill Kubernetes checks](#documented-pre-kill-kubernetes-checks) and [Direct in-cluster Kubernetes API fallback](#direct-in-cluster-kubernetes-api-fallback). The intended `kubectl get jobs,pods ... -l djinn.app/task-run-id=019eb963-d937-7930-9e68-6e14953792d9` commands failed because `kubectl` was not installed. Direct API fallback showed the API was reachable, then returned 403 for listing Pods, listing Jobs, and getting `jobs.batch/djinn-taskrun-019eb963-d937-7930-9e68-6e14953792d9`.
+- **Kill invocation evidence:** documented below under [`execution_kill_task` invocation path](#execution_kill_task-invocation-path). `/mcp` initialization with the projected Djinn token returned `authentication required`, so `execution_kill_task` could not be invoked from the worker.
+- **Post-kill/log evidence:** documented below under [Post-kill polling and logs](#post-kill-polling-and-logs). No post-kill polling or server/coordinator logs were captured because resource reads, logs, and authenticated kill invocation were blocked.
+- **Reconciliation:** the attempt is valid blocker evidence, but the proposal criterion requiring actual before/after cleanup proof is **not satisfied**.
+
+### Kubernetes evidence outcome from `6eg3` (force-close/operator-close)
+
+- **Evidence task:** `6eg3` / `019eb930-803a-7033-9b7a-42678aac97a3`
+- **Worker task_run_id:** `019eb9a2-bc65-7e71-a61e-026dc12e1516`
+- **Attempt window:** 2026-06-12T02:22:27Z through 2026-06-12T02:22:28Z
+- **Namespace/context evidence:** namespace `djinn`; Kubernetes API endpoint `https://kubernetes.default.svc:443` (`KUBERNETES_SERVICE_HOST=10.43.0.1`, `KUBERNETES_SERVICE_PORT=443`); identity was `system:serviceaccount:djinn:djinn-djinn-taskrun`; Kubernetes API discovery returned `APIVersions` for `v1`.
+- **Pre-force-close evidence:** documented below under [Documented pre-force-close Kubernetes checks](#documented-pre-force-close-kubernetes-checks) and the force-close [Direct in-cluster Kubernetes API fallback](#direct-in-cluster-kubernetes-api-fallback-1). Intended `kubectl get jobs,pods ... -l djinn.app/task-run-id=019eb9a2-bc65-7e71-a61e-026dc12e1516` commands failed because `kubectl` was not installed. Direct API fallback returned 403 for listing Pods, listing Jobs, and getting `jobs.batch/djinn-taskrun-019eb9a2-bc65-7e71-a61e-026dc12e1516`.
+- **Force-close action evidence:** documented below under [Force-close/operator-close action path](#force-closeoperator-close-action-path). Both the projected Djinn token and Kubernetes service-account token returned HTTP 401 `authentication required` from `/mcp`, so no authenticated operator/admin/proposal-abort/force-close action was executed.
+- **Post-force-close/log evidence:** documented below under [Post-force-close polling and logs](#post-force-close-polling-and-logs). No post-force-close polling or server/coordinator logs were captured because resource reads, logs, and authenticated force-close invocation were blocked.
+- **Reconciliation:** the attempt is valid blocker evidence, but the proposal criterion requiring actual before/after cleanup proof is **not satisfied**.
+
+### Epic 8451 closure recommendation
+
+Epic 8451 should **remain open** for a follow-up wave. The exact residual blockers are:
+
+1. Run `cd server && cargo nextest run` in an environment with the required Postgres test service reachable on `127.0.0.1:5433` (or with Docker available to start `postgres-test`) and record the final pass/fail result.
+2. Run `docs/TASKRUN_BACKSTOP_VERIFICATION.md` from an operator environment with `kubectl`, a configured `djinn` context, RBAC to list/get Pods and Jobs plus read `deploy/djinn-server` logs, and authenticated Djinn control-plane/MCP access to invoke `execution_kill_task`.
+3. Run the same verification for force-close/operator-close with authenticated operator/admin/proposal-abort capability.
+
+Once those three residual items pass, the next Planner can close epic 8451. Until then, proposal 4369 residual Kubernetes cleanup proof criteria are not met, and the nextest criterion has only blocker evidence rather than a successful full pass.
+
+
 ## `execution_kill_task` cleanup verification attempt — blocked by worker cluster access
 
 - **Attempt timestamp (UTC):** 2026-06-12T01:13:33Z through 2026-06-12T01:14:40Z
