@@ -1,5 +1,18 @@
 # Scripts
 
+## Task-run backstop operator preflight
+
+`taskrun-backstop-preflight.sh` captures the operator/admin prerequisites needed before running `docs/TASKRUN_BACKSTOP_VERIFICATION.md`. It checks `kubectl`, current context/namespace, Pod/Job read RBAC, `deploy/djinn-server` log access, and Djinn MCP/control-plane authentication without killing or force-closing a task.
+
+```sh
+NS=djinn \
+  DJINN_MCP_URL="https://<operator-accessible-djinn-host>/mcp" \
+  DJINN_OPERATOR_BEARER_TOKEN="<operator/admin token>" \
+  ./scripts/taskrun-backstop-preflight.sh | tee taskrun-backstop-preflight.md
+```
+
+Paste the generated Markdown bundle into `docs/TASKRUN_BACKSTOP_E2E_EVIDENCE.md` before collecting kill/force-close cleanup evidence, after redacting secrets.
+
 ## Rust size guard
 
 Lightweight guard for Rust source files under `server/crates/**` and `server/src/**`. A file fails when it exceeds either size threshold.
