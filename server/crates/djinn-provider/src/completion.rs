@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use djinn_core::events::EventBus;
 use djinn_core::message::{ContentBlock, Conversation, Message};
 use djinn_core::models::{Credential, DjinnSettings, Model};
-use djinn_db::{Database, SettingsRepository};
+use djinn_db::{Database, SettingsRepository, UserSettingsRepository};
 use futures::StreamExt;
 use tokio::time::{Duration, timeout};
 
@@ -67,23 +67,58 @@ pub(crate) fn select_memory_model(
     credentials: &[Credential],
     selected_model_id: Option<&str>,
 ) -> Result<ResolvedMemoryModel> {
+    let candidates = selected_model_id.into_iter().map(str::to_string);
+    select_memory_model_from_candidates(catalog, credentials, candidates)
+}
+
+pub(crate) fn select_memory_model_from_candidates<I>(
+    catalog: &CatalogService,
+    credentials: &[Credential],
+    selected_model_ids: I,
+) -> Result<ResolvedMemoryModel>
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
     let connected = catalog.connected_provider_ids(credentials);
 
-    if let Some(model_id) = selected_model_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        let model = catalog.find_model(model_id).ok_or_else(|| {
-            anyhow!(
-                "memory.llm_model '{}' is not available in the provider catalog",
-                model_id
-            )
-        })?;
-        let effective_provider_id = effective_provider_for_model(&model, credentials)?;
-        return Ok(ResolvedMemoryModel {
-            model,
-            effective_provider_id,
-        });
+    let mut first_candidate_error = None;
+    for item in selected_model_ids {
+        let model_id = item.as_ref().trim();
+        if model_id.is_empty() {
+            continue;
+        }
+
+        if let Some((provider_id, _)) = model_id.split_once('/')
+            && !connected.contains(provider_id)
+        {
+            continue;
+        }
+
+        let Some(model) = catalog.find_model(model_id) else {
+            first_candidate_error.get_or_insert_with(|| {
+                anyhow!(
+                    "memory.llm_model '{}' is not available in the provider catalog",
+                    model_id
+                )
+            });
+            continue;
+        };
+        match effective_provider_for_model(&model, credentials) {
+            Ok(effective_provider_id) => {
+                return Ok(ResolvedMemoryModel {
+                    model,
+                    effective_provider_id,
+                });
+            }
+            Err(error) => {
+                first_candidate_error.get_or_insert(error);
+            }
+        }
+    }
+
+    if let Some(error) = first_candidate_error {
+        return Err(error);
     }
 
     let mut candidates = builtin::BUILTIN_PROVIDERS
@@ -220,26 +255,30 @@ pub async fn resolve_memory_provider_for_user(
         .unwrap_or_default();
     let settings = DjinnSettings::from_db_value(&settings_raw);
 
-    let model_id = settings
-        .models_or_default()
-        .into_iter()
-        .next()
-        .ok_or_else(|| {
-            anyhow!("no model configured — add a model in Settings → Model Configuration")
-        })?;
-
-    let settings_raw = format!(r#"{{"memory":{{"llm_model":"{}"}}}}"#, model_id);
+    let mut model_candidates = Vec::new();
+    if let Some(uid) = user_id
+        && let Some(user_settings) = UserSettingsRepository::new(db.clone()).get(uid).await?
+        && let Some(models) = user_settings.models
+    {
+        model_candidates.extend(models);
+    }
+    model_candidates.extend(settings.models_or_default());
+    if model_candidates.is_empty() {
+        return Err(anyhow!(
+            "no model configured — add a model in Settings → Model Configuration"
+        ));
+    }
 
     let catalog = CatalogService::new();
     catalog.inject_builtin_providers(builtin::BUILTIN_PROVIDERS);
 
     let credential_repo = CredentialRepository::new(db.clone(), event_bus);
     let credentials = credential_repo.list_for_user(user_id).await?;
-    let provider_config = resolve_memory_provider_config_for_user(
+    let provider_config = resolve_memory_provider_config_for_candidates(
         &catalog,
         &credentials,
         &credential_repo,
-        &settings_raw,
+        model_candidates,
         user_id,
     )
     .await?;
@@ -272,7 +311,29 @@ pub async fn resolve_memory_provider_config_for_user(
     user_id: Option<&str>,
 ) -> Result<ProviderConfig> {
     let selected = parse_memory_model_selection(settings_raw);
-    let resolved = match select_memory_model(catalog, credentials, selected.as_deref()) {
+    resolve_memory_provider_config_for_candidates(
+        catalog,
+        credentials,
+        credential_repo,
+        selected,
+        user_id,
+    )
+    .await
+}
+
+async fn resolve_memory_provider_config_for_candidates<I>(
+    catalog: &CatalogService,
+    credentials: &[Credential],
+    credential_repo: &CredentialRepository,
+    model_candidates: I,
+    user_id: Option<&str>,
+) -> Result<ProviderConfig>
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    let resolved = match select_memory_model_from_candidates(catalog, credentials, model_candidates)
+    {
         Ok(resolved) => resolved,
         Err(primary_err) => {
             // The configured memory model couldn't be resolved against a
@@ -836,6 +897,87 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resolve_memory_provider_prefers_user_settings_before_global_settings() {
+        let db = Database::open_in_memory().unwrap();
+        let settings = SettingsRepository::new(db.clone(), EventBus::noop());
+        let credentials = CredentialRepository::new(db.clone(), EventBus::noop());
+        let user = UserRepository::new(db.clone())
+            .upsert_from_github(1003, "user-c", None, None)
+            .await
+            .unwrap();
+        settings
+            .set(
+                "settings.raw",
+                r#"{"models":["anthropic/claude-3-5-haiku-latest"]}"#,
+            )
+            .await
+            .unwrap();
+        UserSettingsRepository::new(db.clone())
+            .upsert_models(&user.id, &["openai/gpt-4.1-mini".to_string()])
+            .await
+            .unwrap();
+        credentials
+            .set_with_owner("openai", "OPENAI_API_KEY", "caller-key", Some(&user.id))
+            .await
+            .unwrap();
+        credentials
+            .set_with_owner("anthropic", "ANTHROPIC_API_KEY", "org-key", None)
+            .await
+            .unwrap();
+
+        let provider = resolve_memory_provider_for_user(&db, Some(&user.id))
+            .await
+            .expect("caller user settings should outrank global settings");
+
+        assert_eq!(provider.name(), "openai");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resolve_memory_provider_filters_stale_user_selection_to_visible_credentials() {
+        let db = Database::open_in_memory().unwrap();
+        let settings = SettingsRepository::new(db.clone(), EventBus::noop());
+        let credentials = CredentialRepository::new(db.clone(), EventBus::noop());
+        let user = UserRepository::new(db.clone())
+            .upsert_from_github(1004, "user-d", None, None)
+            .await
+            .unwrap();
+        let other_user = UserRepository::new(db.clone())
+            .upsert_from_github(1005, "user-e", None, None)
+            .await
+            .unwrap();
+        settings
+            .set(
+                "settings.raw",
+                r#"{"models":["anthropic/claude-3-5-haiku-latest"]}"#,
+            )
+            .await
+            .unwrap();
+        UserSettingsRepository::new(db.clone())
+            .upsert_models(&user.id, &["openai/gpt-4.1-mini".to_string()])
+            .await
+            .unwrap();
+        credentials
+            .set_with_owner(
+                "openai",
+                "OPENAI_API_KEY",
+                "other-private-key",
+                Some(&other_user.id),
+            )
+            .await
+            .unwrap();
+        credentials
+            .set_with_owner("anthropic", "ANTHROPIC_API_KEY", "org-key", None)
+            .await
+            .unwrap();
+
+        let provider = resolve_memory_provider_for_user(&db, Some(&user.id))
+            .await
+            .expect("stale hidden user model should fall through to visible global model");
+
+        assert_eq!(provider.name(), "anthropic");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn resolve_memory_provider_for_user_sees_private_and_org_shared_credentials() {
         let db = Database::open_in_memory().unwrap();
         let settings = SettingsRepository::new(db.clone(), EventBus::noop());
@@ -910,6 +1052,42 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resolve_memory_provider_background_ignores_user_settings_and_uses_org_shared_only() {
+        let db = Database::open_in_memory().unwrap();
+        let settings = SettingsRepository::new(db.clone(), EventBus::noop());
+        let credentials = CredentialRepository::new(db.clone(), EventBus::noop());
+        let user = UserRepository::new(db.clone())
+            .upsert_from_github(1006, "user-f", None, None)
+            .await
+            .unwrap();
+        settings
+            .set(
+                "settings.raw",
+                r#"{"models":["anthropic/claude-3-5-haiku-latest"]}"#,
+            )
+            .await
+            .unwrap();
+        UserSettingsRepository::new(db.clone())
+            .upsert_models(&user.id, &["openai/gpt-4.1-mini".to_string()])
+            .await
+            .unwrap();
+        credentials
+            .set_with_owner("openai", "OPENAI_API_KEY", "private-key", Some(&user.id))
+            .await
+            .unwrap();
+        credentials
+            .set_with_owner("anthropic", "ANTHROPIC_API_KEY", "org-key", None)
+            .await
+            .unwrap();
+
+        let provider = resolve_memory_provider_for_user(&db, None)
+            .await
+            .expect("background scope should use only org-shared global candidates");
+
+        assert_eq!(provider.name(), "anthropic");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn resolve_memory_provider_errors_when_unavailable() {
         let db = Database::open_in_memory().unwrap();
         let settings = SettingsRepository::new(db.clone(), EventBus::noop());
@@ -925,7 +1103,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("memory.llm_model 'openai/nonexistent-model' is not available")
+                .contains("no connected builtin provider models are available")
         );
     }
 
