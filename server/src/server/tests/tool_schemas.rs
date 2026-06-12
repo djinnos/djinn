@@ -499,6 +499,11 @@ async fn all_tool_schemas_advertises_dispatch_pause_pause_resume_and_status() {
                 .unwrap_or(false),
             "{name} inputSchema is missing `properties`"
         );
+        assert_eq!(
+            tool["inputSchema"]["additionalProperties"],
+            json!(false),
+            "{name} inputSchema must reject unknown fields"
+        );
         assert!(
             tool.get("outputSchema")
                 .map(|s| s.get("properties").is_some())
@@ -571,9 +576,11 @@ async fn all_tool_schemas_advertises_dispatch_pause_pause_resume_and_status() {
     // contract requires only `ok` — both `state` and `current` are
     // `anyOf`/`nullable` envelopes that are absent in different branches.
     let status = dispatch_pause_tool(&tools, "dispatch_pause_status");
-    let status_input_required = status["inputSchema"]["required"]
-        .as_array()
-        .expect("dispatch_pause_status inputSchema.required array");
+    let status_input_required = status["inputSchema"]
+        .get("required")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     assert!(
         status_input_required.is_empty(),
         "dispatch_pause_status inputSchema.required must be empty (no required fields), got {status_input_required:?}"
