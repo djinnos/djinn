@@ -466,6 +466,17 @@ impl CoordinatorActor {
             )
             .await;
             self.terminally_fail_task(task, role, &reason).await;
+            if let Err(e) = self
+                .task_repo()
+                .set_status_with_reason(&task.id, "closed", Some(&reason))
+                .await
+            {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "CoordinatorActor: failed to preserve planner second-strike close reason"
+                );
+            }
             return true;
         }
 
