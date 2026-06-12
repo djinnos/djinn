@@ -126,7 +126,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id, build_frozen, build_breakdown_task_id
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
              FROM proposals WHERE id = $1"#,
             id
         )
@@ -140,7 +140,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id, build_frozen, build_breakdown_task_id
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
              FROM proposals WHERE short_id = $1"#,
             short_id
         )
@@ -155,7 +155,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id, build_frozen, build_breakdown_task_id
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
              FROM proposals WHERE id = $1 OR short_id = $2"#,
             id_or_short,
             id_or_short
@@ -488,7 +488,7 @@ impl ProposalRepository {
         // the `proposal_feedback_unresolved` partial index) for the list badge.
         let sql = format!(
             r#"SELECT id, short_id, title, body, acceptance_criteria::text AS acceptance_criteria,
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id, build_frozen, build_breakdown_task_id,
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id,
                     (SELECT COUNT(*) FROM proposal_feedback pf
                        WHERE pf.proposal_id = proposals.id AND pf.resolved_at IS NULL) AS unresolved_feedback_count
              FROM proposals WHERE {where_sql} ORDER BY {order_sql} LIMIT {limit_ph} OFFSET {offset_ph}"#
@@ -1070,7 +1070,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, build_owner_user_id, build_frozen, build_breakdown_task_id
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
              FROM proposals p
              WHERE p.status = 'building'
                AND EXISTS (SELECT 1 FROM proposal_epics pe WHERE pe.proposal_id = p.id)

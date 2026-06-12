@@ -15,6 +15,11 @@ const FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 const SESSION_MESSAGE_MIN_INTERVAL: Duration = Duration::from_millis(50);
 const SESSION_TOKEN_UPDATE_MIN_INTERVAL: Duration = Duration::from_millis(500);
 const VERIFICATION_STEP_MIN_INTERVAL: Duration = Duration::from_millis(200);
+// Browser-visible liveness ping interval. The axum KeepAlive comment frames
+// emitted by Sse::keep_alive are invisible to EventSource listeners, so we
+// also emit a named ping event on this cadence. Pings never carry an id,
+// so Last-Event-ID replay continues to track meaningful domain events.
+const PING_INTERVAL: Duration = Duration::from_secs(25);
 
 enum EventTier {
     Immediate,
@@ -189,10 +194,21 @@ fn lagged_event() -> Event {
     Event::default().event("lagged").data("{}")
 }
 
+/// Build the browser-visible liveness event emitted roughly every `PING_INTERVAL`.
+///
+/// The payload is intentionally a fixed `"{}"` so consumers do not have to defend
+/// against a moving schema, while still being a valid SSE data field. The event
+/// has no `id`, so it does not advance the browser's `Last-Event-ID` cursor —
+/// Last-Event-ID replay continues to represent meaningful domain event ids.
+fn ping_event() -> Event {
+    Event::default().event("ping").data("{}")
+}
+
 async fn next_batched_event(
     rx: &mut broadcast::Receiver<DjinnEventEnvelope>,
     accumulator: &mut BatchAccumulator,
     interval: &mut tokio::time::Interval,
+    ping_interval: &mut tokio::time::Interval,
 ) -> Option<Result<Event, Infallible>> {
     loop {
         let flushed = accumulator.flush();
@@ -228,6 +244,16 @@ async fn next_batched_event(
                     return Some(serialize_event(&first));
                 }
             }
+            _ = ping_interval.tick() => {
+                // On a ping tick, drain any ready domain events first so pings
+                // never delay a meaningful update. Only emit the named ping
+                // event when there is nothing pending to send.
+                let flushed = accumulator.flush();
+                if let Some(first) = flushed.into_iter().next() {
+                    return Some(serialize_event(&first));
+                }
+                return Some(Ok(ping_event()));
+            }
         }
     }
 }
@@ -244,10 +270,13 @@ pub async fn events_handler(
             rx,
             BatchAccumulator::new(),
             tokio::time::interval(FLUSH_INTERVAL),
+            tokio::time::interval(PING_INTERVAL),
         ),
-        |(mut rx, mut accumulator, mut interval)| async move {
-            let next = next_batched_event(&mut rx, &mut accumulator, &mut interval).await;
-            next.map(|event| (event, (rx, accumulator, interval)))
+        |(mut rx, mut accumulator, mut interval, mut ping_interval)| async move {
+            let next =
+                next_batched_event(&mut rx, &mut accumulator, &mut interval, &mut ping_interval)
+                    .await;
+            next.map(|event| (event, (rx, accumulator, interval, ping_interval)))
         },
     );
 
@@ -682,6 +711,190 @@ mod tests {
         assert!(
             total_emitted_frames < 1 + 6,
             "mixed burst should emit fewer frames than raw source events"
+        );
+    }
+
+    #[test]
+    fn ping_event_has_named_event_and_empty_object_payload() {
+        let event = ping_event();
+        let text = format!("{event:?}");
+
+        // The named event type is what the browser EventSource listener keys
+        // off; assert the literal `event: ping` line is on the wire.
+        assert!(
+            text.contains("event: ping"),
+            "ping event should declare `event: ping`, got: {text}"
+        );
+        // The data field is a stable empty JSON object so consumers don't have
+        // to defend against a moving schema.
+        assert!(
+            text.contains("data: {}"),
+            "ping event should carry a stable `data: {{}}` payload, got: {text}"
+        );
+        // The event must NOT carry an id so the browser's Last-Event-ID
+        // cursor continues to track meaningful domain event ids.
+        assert!(
+            !text.contains("id:"),
+            "ping event must not carry an id field, got: {text}"
+        );
+    }
+
+    #[test]
+    fn ping_interval_constant_matches_browser_liveness_cadence() {
+        // 25s matches the proposal: server emits a client-detectable named
+        // liveness signal about every 25s on /events, while the client
+        // force-reconnects after about 60s of silence.
+        assert_eq!(PING_INTERVAL, Duration::from_secs(25));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ping_tick_emits_named_ping_when_no_domain_events_pending() {
+        // Empty broadcast channel — there are no domain events for the
+        // stream to deliver, so the next ping tick must surface the named
+        // `ping` event. We use a 50ms ping interval and a 5s flush interval
+        // so the ping branch fires first; the production 25s cadence is
+        // asserted separately in `ping_interval_constant_matches_browser_liveness_cadence`.
+        let (_tx, mut rx) = broadcast::channel::<DjinnEventEnvelope>(8);
+        let mut accumulator = BatchAccumulator::new();
+        let mut flush_interval = tokio::time::interval(Duration::from_secs(5));
+        let mut ping_interval = tokio::time::interval(Duration::from_millis(50));
+
+        // tokio::time::interval fires the first tick instantly; consume it
+        // so the next call to `next_batched_event` is racing the *second*
+        // tick of the ping interval, not the immediate first one.
+        flush_interval.tick().await;
+        ping_interval.tick().await;
+
+        let event = tokio::time::timeout(
+            Duration::from_secs(1),
+            next_batched_event(
+                &mut rx,
+                &mut accumulator,
+                &mut flush_interval,
+                &mut ping_interval,
+            ),
+        )
+        .await
+        .expect("ping tick should fire before timeout")
+        .expect("next_batched_event should yield Some")
+        .expect("ping result is Ok");
+
+        let text = format!("{event:?}");
+        assert!(
+            text.contains("event: ping"),
+            "ping tick should emit a named `ping` event, got: {text}"
+        );
+        assert!(
+            text.contains("data: {}"),
+            "ping event should carry the stable `data: {{}}` payload, got: {text}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ping_tick_flushes_pending_coalesced_event_before_emitting_ping() {
+        // Use a 5s flush interval and 50ms ping interval. The coalesced
+        // event in the accumulator must be flushed on the *ping* tick,
+        // proving the ping branch drains pending work before emitting
+        // a ping.
+        let (tx, mut rx) = broadcast::channel::<DjinnEventEnvelope>(8);
+        let mut accumulator = BatchAccumulator::new();
+        let mut flush_interval = tokio::time::interval(Duration::from_secs(5));
+        let mut ping_interval = tokio::time::interval(Duration::from_millis(50));
+
+        // Burn the immediate first ticks.
+        flush_interval.tick().await;
+        ping_interval.tick().await;
+
+        // Push a coalescable update; it should land in the accumulator and
+        // not be returned immediately because the event is coalesced.
+        let pushed = accumulator.push(task_updated_envelope("task-1", "oldest"));
+        assert!(
+            pushed.is_empty(),
+            "coalesced events do not emit immediately"
+        );
+        assert_eq!(accumulator.coalesced.len(), 1);
+
+        // Send a second coalescable update through the broadcast channel
+        // and drain it into the accumulator so the coalesced map still
+        // holds a single key (coalesce_key is the same for both pushes).
+        tx.send(task_updated_envelope("task-1", "stale"))
+            .expect("broadcast send");
+        let _ = rx.recv().await;
+        assert_eq!(
+            accumulator.coalesced.len(),
+            1,
+            "coalesced map should keep a single entry per (entity, id) key"
+        );
+
+        let event = tokio::time::timeout(
+            Duration::from_secs(1),
+            next_batched_event(
+                &mut rx,
+                &mut accumulator,
+                &mut flush_interval,
+                &mut ping_interval,
+            ),
+        )
+        .await
+        .expect("ping tick should fire before timeout")
+        .expect("next_batched_event should yield Some")
+        .expect("ping result is Ok");
+
+        // The ping tick must have flushed the coalesced domain event
+        // *before* emitting a ping — pings must never delay meaningful
+        // updates.
+        let text = format!("{event:?}");
+        assert!(
+            text.contains("event: task.updated"),
+            "ping tick should flush the pending coalesced domain event first, got: {text}"
+        );
+        assert!(
+            !text.contains("event: ping"),
+            "ping event must not be emitted when a domain event was pending, got: {text}"
+        );
+        assert!(
+            accumulator.coalesced.is_empty(),
+            "flush should drain the coalesced map"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn immediate_domain_event_is_delivered_before_next_ping_tick() {
+        // Sanity check: an immediate-class event pushed after the ping tick
+        // arm has been exercised must still flow through the rx branch on
+        // the next call. This guards against the ping branch starving the
+        // normal rx branch.
+        let (tx, mut rx) = broadcast::channel::<DjinnEventEnvelope>(8);
+        let mut accumulator = BatchAccumulator::new();
+        let mut flush_interval = tokio::time::interval(Duration::from_secs(5));
+        let mut ping_interval = tokio::time::interval(Duration::from_millis(50));
+
+        flush_interval.tick().await;
+        ping_interval.tick().await;
+
+        // Send an immediate (not coalescable) event so the rx branch can
+        // return it directly without waiting for either tick.
+        let envelope = DjinnEventEnvelope::task_deleted("task-1");
+        tx.send(envelope).expect("broadcast send");
+
+        let event = tokio::time::timeout(
+            Duration::from_secs(1),
+            next_batched_event(
+                &mut rx,
+                &mut accumulator,
+                &mut flush_interval,
+                &mut ping_interval,
+            ),
+        )
+        .await
+        .expect("rx branch should deliver the immediate event before timeout")
+        .expect("next_batched_event should yield Some")
+        .expect("immediate result is Ok");
+
+        let text = format!("{event:?}");
+        assert!(
+            text.contains("event: task.deleted"),
+            "immediate event should be delivered as-is, got: {text}"
         );
     }
 }
