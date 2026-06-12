@@ -30,7 +30,7 @@ Decide how the work splits into epics. You are NOT forced into one-epic-per-targ
 ### D4. Create the epics
 
 For each epic, call `epic_create`:
-- `title`, `description` — derive from the proposal; fold in the relevant acceptance criteria so the downstream wave Planner inherits them. Only translate proposal AC into epic descriptions/AC when they are checkable by the executing role's actual tool surface and environment.
+- `title`, `description` — derive from the proposal; fold in the relevant acceptance criteria so the downstream wave Planner inherits them. Only translate proposal AC into epic descriptions/AC when they are checkable by the executing role's actual tool surface and environment; leave unverifiable proof requirements out of AC.
 - `project` — the target repo slug this epic WRITES to (omit only for the home project).
 - `proposal_id` — the proposal id, so the proposal tracks what it became. **Always set this.**
 - `read_sources` — sibling repos this epic needs to read (the proposal's other targets, as appropriate).
