@@ -1894,3 +1894,86 @@ Run the force-close section of `docs/TASKRUN_BACKSTOP_VERIFICATION.md` from an o
 - an authenticated Djinn operator/admin/control-plane session allowed to force-close a deliberately long-running worker task or abort a proposal in a way that force-closes its active task run.
 
 Only that environment can produce the required before/after proof that `djinn-taskrun-$TASK_RUN_ID` resources disappear within roughly 60 seconds after force-close/operator-close.
+
+## Wave 4 Postgres-backed full validation attempt — blocked by worker infrastructure preflight
+
+- **Attempt timestamp (UTC):** 2026-06-12T12:30:20Z
+- **Worker task:** `019ebbce-9459-75d0-a36d-0849d9bd2bb8` (`xm0o`)
+- **Exact command run:** `LOG_DIR=$HOME/.cache/djinn/taskrun-backstop-validation ./scripts/validate-taskrun-backstop.sh`
+- **Entrypoint used:** existing Wave 3 task-run backstop validation script, `scripts/validate-taskrun-backstop.sh`.
+- **Host/environment summary:** Kubernetes task-run worker `djinn-taskrun-019ebbcf-77d2-7061-8aa5-74ce96030278-hn8hl`, Linux `6.8.0-106-generic` x86_64, user `uid=10001(djinn) gid=10001(djinn)`, repository `/workspace/.tmpWbkckc`.
+- **Tooling observed before the attempt:** Cargo `1.96.0`, cargo-nextest `0.9.137`, OpenSSL `3.5.6`, `/var/tmp/djinn-test-vault` writable. `docker`, Docker Compose, `docker-compose`, `make`, and `sqlx` were not available in this worker image.
+
+### Result
+
+The documented Wave 3 validation entrypoint was executed, but this dispatched worker is not capable of provisioning the required Postgres test service. The script stopped during its built-in infrastructure preflight before starting Docker/Postgres or running Rust validation. No passing validation is claimed, and the residual proposal 4369 / epic 8451 Postgres-backed full-validation criterion is **not satisfied** by this attempt.
+
+### Entrypoint output
+
+```console
+$ LOG_DIR=$HOME/.cache/djinn/taskrun-backstop-validation ./scripts/validate-taskrun-backstop.sh
+
+[2026-06-12T12:30:20Z] Task-run backstop validation started
+
+[2026-06-12T12:30:20Z] Repository: /workspace/.tmpWbkckc
+
+[2026-06-12T12:30:20Z] Log file: /home/djinn/.cache/djinn/taskrun-backstop-validation/validation-20260612T123020Z.log
+ERROR: required command not found: docker
+
+[2026-06-12T12:30:20Z] Task-run backstop validation failed with exit=127; see /home/djinn/.cache/djinn/taskrun-backstop-validation/validation-20260612T123020Z.log
+```
+
+### Required validation command status
+
+- `cargo build`: **not run** — blocked by preflight failure before Postgres provisioning.
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: **not run** — blocked by preflight failure before Postgres provisioning.
+- `cargo nextest run --workspace --all-targets --all-features`: **not run** — blocked by preflight failure before Postgres provisioning.
+
+### Environment preflight details
+
+```console
+$ date -u +%Y-%m-%dT%H:%M:%SZ
+2026-06-12T12:30:15Z
+
+$ uname -a
+Linux djinn-taskrun-019ebbcf-77d2-7061-8aa5-74ce96030278-hn8hl 6.8.0-106-generic #106-Ubuntu SMP PREEMPT_DYNAMIC Fri Mar  6 07:58:08 UTC 2026 x86_64 GNU/Linux
+
+$ id
+uid=10001(djinn) gid=10001(djinn) groups=10001(djinn)
+
+$ pwd
+/workspace/.tmpWbkckc
+
+$ docker --version
+bash: line 1: docker: command not found
+
+$ docker compose version || docker-compose --version
+bash: line 1: docker: command not found
+bash: line 1: docker-compose: command not found
+
+$ cargo --version
+cargo 1.96.0 (30a34c682 2026-05-25)
+
+$ cargo nextest --version
+cargo-nextest 0.9.137 (75ddba7e9 2026-05-26)
+release: 0.9.137
+commit-hash: 75ddba7e911b44c5c0700dac0415d824403de9bd
+commit-date: 2026-05-26
+host: x86_64-unknown-linux-gnu
+
+$ sqlx --version
+bash: line 1: sqlx: command not found
+
+$ openssl version
+OpenSSL 3.5.6 7 Apr 2026 (Library: OpenSSL 3.5.6 7 Apr 2026)
+
+$ make --version
+bash: line 1: make: command not found
+
+$ mkdir -p /var/tmp/djinn-test-vault && touch /var/tmp/djinn-test-vault/.djinn-write-test && rm /var/tmp/djinn-test-vault/.djinn-write-test && echo yes
+yes
+```
+
+### Code fixes made
+
+None. The observed failure is an environmental preflight blocker (`docker` missing, with Docker Compose and `sqlx` also unavailable), not a concrete code or test defect. The full entrypoint still needs to be rerun from a host that has Docker Compose or equivalent reachable Postgres test service, `sqlx-cli`, Cargo, cargo-nextest, OpenSSL, and permission to create `/var/tmp/djinn-test-vault/vault.key`.
