@@ -121,9 +121,12 @@ pub struct RepoDependencyGraph {
     /// `processes` is set (build-time or after `from_artifact`). Empty
     /// for nodes that don't participate in any traced process.
     pub(super) process_lookup: BTreeMap<usize, Vec<usize>>,
-    /// Durable inferred-route exclusion config. Persisted through the graph
-    /// artifact so cache-hit readers and extraction-aware graph operations use
-    /// the same policy as the warm build that produced the graph.
+    /// PR s6ch / 92z7: in-memory copy of the [`RouteExclusionConfig`]
+    /// sidecar that travels with the artifact. Carrying the config on
+    /// the live graph means `impact` / `api_impact` / `route_map` /
+    /// `shape_check` can apply the same exclusion policy without
+    /// re-fetching the artifact, and unit tests can construct a graph
+    /// with a custom config in-memory.
     pub(super) route_exclusion_config: RouteExclusionConfig,
 }
 
