@@ -222,7 +222,7 @@ pub struct ProviderConfig {
 }
 
 /// Metadata attached to each provider call for OTel tracing.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct TelemetryMeta {
     /// Task ID for correlation.
     pub task_id: Option<String>,
@@ -230,6 +230,10 @@ pub struct TelemetryMeta {
     pub agent_type: Option<String>,
     /// Session ID for grouping.
     pub session_id: Option<String>,
+    /// Operation kind for distinguishing background or system provider calls.
+    pub operation: Option<String>,
+    /// Attributed user ID for caller-scoped provider calls.
+    pub user_id: Option<String>,
 }
 
 /// Authentication method for provider API requests.

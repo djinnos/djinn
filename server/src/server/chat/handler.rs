@@ -303,6 +303,7 @@ pub(super) async fn completions_handler_impl(
         task_id: None,
         agent_type: Some("chat".to_owned()),
         session_id: Some(session_id.clone()),
+        ..Default::default()
     };
 
     let provider_config = match provider_credential {
@@ -1146,6 +1147,7 @@ async fn generate_chat_title(
         task_id: None,
         agent_type: Some("chat_title".to_owned()),
         session_id: Some(session_id.to_owned()),
+        ..Default::default()
     };
     let provider_config = match provider_credential {
         ProviderCredential::OAuthConfig(mut cfg) => {

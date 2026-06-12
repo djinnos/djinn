@@ -392,10 +392,22 @@ pub(crate) fn build_telemetry_meta(
     agent_type_str: &str,
     task_id: &str,
 ) -> djinn_provider::provider::TelemetryMeta {
+    build_telemetry_meta_with_attribution(agent_type_str, task_id, None, None)
+}
+
+/// Build telemetry metadata with optional operation and attributed-user fields.
+pub(crate) fn build_telemetry_meta_with_attribution(
+    agent_type_str: &str,
+    task_id: &str,
+    operation: Option<&str>,
+    user_id: Option<&str>,
+) -> djinn_provider::provider::TelemetryMeta {
     djinn_provider::provider::TelemetryMeta {
         task_id: Some(task_id.to_owned()),
         agent_type: Some(agent_type_str.to_owned()),
         session_id: Some(task_id.to_owned()),
+        operation: operation.map(str::to_owned),
+        user_id: user_id.map(str::to_owned),
     }
 }
 
