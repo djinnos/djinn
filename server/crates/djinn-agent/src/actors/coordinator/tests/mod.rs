@@ -15,7 +15,9 @@ use crate::test_helpers;
 use djinn_db::EpicRepository;
 use djinn_db::NoteRepository;
 use djinn_db::TaskRepository;
-use djinn_db::{CreateSessionParams, SessionRepository};
+use djinn_db::{
+    CreateSessionParams, DispatchPauseRepository, DispatchPauseTarget, SessionRepository,
+};
 use djinn_provider::catalog::health::HealthTracker;
 
 #[derive(Clone)]
@@ -23,6 +25,36 @@ struct RecordingRuntimeOps {
     calls: Arc<Mutex<Vec<String>>>,
     taskrun_jobs: Arc<Mutex<Vec<djinn_control_plane::bridge::TaskrunJobRef>>>,
     fail_teardown: bool,
+}
+
+#[derive(Clone, Default)]
+struct RecordingGraphWarmer {
+    triggered: Arc<Mutex<Vec<String>>>,
+}
+
+impl RecordingGraphWarmer {
+    fn triggered(&self) -> Vec<String> {
+        self.triggered.lock().expect("warmer calls mutex").clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl djinn_runtime::GraphWarmerService for RecordingGraphWarmer {
+    async fn trigger(&self, project_id: &str) {
+        self.triggered
+            .lock()
+            .expect("warmer calls mutex")
+            .push(project_id.to_owned());
+    }
+
+    async fn await_fresh(
+        &self,
+        _: &str,
+        _: std::time::Duration,
+        _: std::time::Duration,
+    ) -> Result<(), djinn_runtime::WarmerError> {
+        Ok(())
+    }
 }
 
 impl RecordingRuntimeOps {
@@ -710,6 +742,43 @@ async fn restart_cleanup_prunes_closed_terminal_dispatch_state_rows() {
 
     assert!(state_repo.get(&closed_task.id).await.unwrap().is_none());
     assert!(state_repo.get(&open_task.id).await.unwrap().is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn global_pause_defers_periodic_graph_warm_triggers() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = test_helpers::create_test_project(&db).await;
+    ProjectRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_environment_config(
+            &project.id,
+            r#"{"schema_version":1,"languages":{"rust":{}}}"#,
+        )
+        .await
+        .unwrap();
+    DispatchPauseRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .pause(
+            DispatchPauseTarget::global(),
+            djinn_core::models::DispatchPause {
+                paused_by: "admin".to_owned(),
+                paused_at: "2026-06-12T00:00:00Z".to_owned(),
+                reason: "maintenance".to_owned(),
+                expires_at: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let warmer = Arc::new(RecordingGraphWarmer::default());
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.graph_warmer = Some(warmer.clone());
+
+    actor.refresh_canonical_graphs_if_stale().await;
+
+    assert!(
+        warmer.triggered().is_empty(),
+        "global dispatch pause must skip periodic graph warm Job triggers"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
