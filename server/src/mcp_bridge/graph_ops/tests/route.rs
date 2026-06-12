@@ -1,7 +1,7 @@
 use super::*;
 use djinn_graph::repo_graph::{
     REPO_GRAPH_ARTIFACT_VERSION, RepoGraphArtifact, RepoGraphArtifactEdge, RepoGraphEdgeKind,
-    RepoGraphNode, RepoGraphNodeKind,
+    RepoGraphNode, RepoGraphNodeKind, RouteExclusionConfig,
 };
 use djinn_graph::scip_parser::{ScipSymbolKind, ScipVisibility};
 
@@ -116,6 +116,8 @@ fn route_map_returns_handler_consumers_middleware_and_summary() {
         Some("list_agents")
     );
     assert_eq!(entry.consumers[0].name, "loadAgents");
+    assert_eq!(entry.consumers[0].confidence_tier, "extracted");
+    assert!(entry.excluded_reason.is_none());
     let chain = entry.consumers[0]
         .route_language_chain
         .as_ref()
@@ -139,7 +141,7 @@ fn shape_check_detects_missing_and_extra_response_keys() {
 }
 
 #[test]
-fn shape_check_consumer_uses_fetches_confidence_tier() {
+fn below_floor_fetches_are_audit_only_for_shape_and_api_impact() {
     let graph = route_fixture_graph();
     let mut artifact = graph.to_artifact();
     for edge in &mut artifact.edges {
@@ -150,17 +152,68 @@ fn shape_check_consumer_uses_fetches_confidence_tier() {
     }
     let graph = RepoDependencyGraph::from_artifact(&artifact);
 
-    let result = routes::test_helpers::shape_check_for_graph(&graph);
-    assert_eq!(result.drifts.len(), 1);
-    let consumer = &result.drifts[0].consumer;
+    let route_map = routes::test_helpers::route_map_for_graph(&graph);
+    let consumer = &route_map.routes[0].consumers[0];
     assert_eq!(consumer.name, "loadAgents");
     assert_eq!(consumer.confidence, 0.2);
     assert_eq!(consumer.confidence_tier, "ambiguous");
+    assert_eq!(
+        consumer.confidence_reason.as_deref(),
+        Some("below-floor string-shape")
+    );
+    assert_eq!(
+        consumer.excluded_reason.as_deref(),
+        Some("below-confidence-floor")
+    );
+
+    let shape = routes::test_helpers::shape_check_for_graph(&graph);
+    assert!(shape.matched);
     assert!(
-        consumer
-            .route_language_chain
-            .as_ref()
-            .is_some_and(|chain| chain.is_cross_language)
+        shape.drifts.is_empty(),
+        "below-floor consumers are excluded from shape drift"
+    );
+
+    let impact = routes::test_helpers::api_impact_for_graph(&graph);
+    assert!(
+        impact
+            .impacts
+            .iter()
+            .all(|entry| entry.consumer.name != "loadAgents")
+    );
+    assert_eq!(impact.excluded_impacts.len(), 1);
+    assert_eq!(
+        impact.excluded_impacts[0].excluded_reason.as_deref(),
+        Some("below-confidence-floor")
+    );
+}
+
+#[test]
+fn route_exclusions_mark_route_map_and_skip_shape_check() {
+    let graph = route_fixture_graph();
+    let mut artifact = graph.to_artifact();
+    artifact.route_exclusion_config = RouteExclusionConfig {
+        health_path_globs: vec!["/api/*".to_string()],
+        ..RouteExclusionConfig::default()
+    };
+    let graph = RepoDependencyGraph::from_artifact(&artifact);
+
+    let route_map = routes::test_helpers::route_map_for_graph(&graph);
+    assert_eq!(
+        route_map.routes[0].excluded_reason.as_deref(),
+        Some("health-path")
+    );
+
+    let shape = routes::test_helpers::shape_check_for_graph(&graph);
+    assert!(!shape.matched);
+    assert_eq!(shape.excluded_reason.as_deref(), Some("health-path"));
+    assert!(shape.summary.contains("excluded"));
+
+    let impact = routes::test_helpers::api_impact_for_graph(&graph);
+    assert!(impact.impacts.is_empty());
+    assert_eq!(impact.excluded_impacts.len(), 1);
+    assert_eq!(
+        impact.excluded_impacts[0].excluded_reason.as_deref(),
+        Some("health-path")
     );
 }
 

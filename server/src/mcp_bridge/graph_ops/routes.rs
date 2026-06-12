@@ -133,6 +133,7 @@ fn route_map_entry(graph: &RepoDependencyGraph, seed: &RouteSeed) -> RouteMapEnt
     sort_symbol_refs(&mut middleware);
     RouteMapEntry {
         route: route_ref(graph.node(seed.route)),
+        excluded_reason: route_excluded_reason(graph, seed.route),
         handler,
         middleware,
         consumers,
@@ -248,6 +249,13 @@ fn consumers_for_route(graph: &RepoDependencyGraph, route: NodeIndex) -> Vec<Nod
         .collect()
 }
 
+fn active_consumers_for_route(graph: &RepoDependencyGraph, route: NodeIndex) -> Vec<NodeIndex> {
+    consumers_for_route(graph, route)
+        .into_iter()
+        .filter(|consumer| route_consumer_excluded_reason(graph, route, *consumer).is_none())
+        .collect()
+}
+
 fn middleware_for_route(graph: &RepoDependencyGraph, route: NodeIndex) -> Vec<NodeIndex> {
     let mut out = BTreeSet::new();
     if let Some(handler) = handler_for_route(graph, route) {
@@ -306,8 +314,25 @@ fn shape_check_on_graph(
         .into_iter()
         .next()
     else {
-        return ShapeCheckResult::default();
+        return ShapeCheckResult {
+            matched: false,
+            summary: "no route matched selector".to_string(),
+            ..ShapeCheckResult::default()
+        };
     };
+
+    if let Some(reason) = route_excluded_reason(graph, seed.route) {
+        return ShapeCheckResult {
+            matched: false,
+            summary: format!("route matched selector but is excluded: {reason}"),
+            excluded_reason: Some(reason),
+            route_shape: RouteShape {
+                route: route_ref(graph.node(seed.route)),
+                response_fields: Vec::new(),
+            },
+            drifts: Vec::new(),
+        };
+    }
 
     let handler_shape = seed
         .handler
@@ -317,8 +342,8 @@ fn shape_check_on_graph(
         route: route_ref(graph.node(seed.route)),
         response_fields: handler_shape.values().cloned().collect(),
     };
-    let mut drifts = seed
-        .consumers
+    let active_consumers = active_consumers_for_route(graph, seed.route);
+    let mut drifts = active_consumers
         .iter()
         .filter_map(|consumer| {
             let consumer_shape = extract_shape(graph.node(*consumer), include_optional);
@@ -332,7 +357,27 @@ fn shape_check_on_graph(
         })
         .collect::<Vec<_>>();
     drifts.sort_by(|a, b| a.consumer.uid.cmp(&b.consumer.uid));
+    let summary = if seed.handler.is_none() {
+        "route matched, but no handler is linked so response shape extraction is unavailable"
+            .to_string()
+    } else if handler_shape.is_empty() {
+        "route matched, but handler response shape extraction is unavailable".to_string()
+    } else if drifts.is_empty() {
+        format!(
+            "route matched with {} response field(s); no consumer drift detected",
+            route_shape.response_fields.len()
+        )
+    } else {
+        format!(
+            "route matched with {} response field(s); {} consumer drift(s) detected",
+            route_shape.response_fields.len(),
+            drifts.len()
+        )
+    };
     ShapeCheckResult {
+        matched: true,
+        summary,
+        excluded_reason: None,
         route_shape,
         drifts,
     }
@@ -350,8 +395,27 @@ fn api_impact_on_graph(
         .into_iter()
         .next()
     else {
-        return ApiImpactResult::default();
+        return ApiImpactResult {
+            summary: "no route matched selector".to_string(),
+            ..ApiImpactResult::default()
+        };
     };
+    if let Some(reason) = route_excluded_reason(graph, seed.route) {
+        return ApiImpactResult {
+            impacts: Vec::new(),
+            excluded_impacts: seed
+                .consumers
+                .iter()
+                .map(|consumer| ApiImpactEntry {
+                    consumer: route_consumer_ref(graph, seed.route, *consumer),
+                    risk_tier: "excluded".to_string(),
+                    reason: format!("route excluded from default blast radius: {reason}"),
+                    excluded_reason: Some(reason.clone()),
+                })
+                .collect(),
+            summary: format!("route matched selector but is excluded: {reason}"),
+        };
+    }
     let shape = shape_check_on_graph(graph, route_id, method, path, false);
     let drift_by_uid: HashMap<String, ShapeDrift> = shape
         .drifts
@@ -359,20 +423,25 @@ fn api_impact_on_graph(
         .map(|d| (d.consumer.uid.clone(), d))
         .collect();
     let mut by_uid: BTreeMap<String, ApiImpactEntry> = BTreeMap::new();
+    let mut excluded_by_uid: BTreeMap<String, ApiImpactEntry> = BTreeMap::new();
 
     for consumer in &seed.consumers {
         let node = graph.node(*consumer);
         let uid = format_node_key(&node.id);
         let drift = drift_by_uid.get(&uid);
         let (risk_tier, reason) = risk_for(drift, 1);
-        by_uid.insert(
-            uid,
-            ApiImpactEntry {
-                consumer: route_consumer_ref(graph, seed.route, *consumer),
-                risk_tier,
-                reason,
-            },
-        );
+        let excluded_reason = route_consumer_excluded_reason(graph, seed.route, *consumer);
+        let entry = ApiImpactEntry {
+            consumer: route_consumer_ref(graph, seed.route, *consumer),
+            risk_tier,
+            reason,
+            excluded_reason: excluded_reason.clone(),
+        };
+        if excluded_reason.is_some() {
+            excluded_by_uid.insert(uid, entry);
+        } else {
+            by_uid.insert(uid, entry);
+        }
     }
 
     for start in seed.handler.into_iter().chain(std::iter::once(seed.route)) {
@@ -387,6 +456,7 @@ fn api_impact_on_graph(
                 consumer: symbol_ref(node, 1.0),
                 risk_tier,
                 reason,
+                excluded_reason: None,
             });
         }
     }
@@ -398,7 +468,21 @@ fn api_impact_on_graph(
             .then_with(|| a.consumer.uid.cmp(&b.consumer.uid))
     });
     impacts.truncate(limit);
-    ApiImpactResult { impacts }
+    let excluded_impacts = excluded_by_uid.into_values().collect::<Vec<_>>();
+    ApiImpactResult {
+        summary: format!(
+            "{} default impact(s); {} excluded audit entr{}",
+            impacts.len(),
+            excluded_impacts.len(),
+            if excluded_impacts.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        ),
+        impacts,
+        excluded_impacts,
+    }
 }
 
 fn risk_for(drift: Option<&ShapeDrift>, depth: usize) -> (String, String) {
@@ -594,6 +678,79 @@ fn route_ref(node: &RepoGraphNode) -> RouteRef {
     }
 }
 
+fn route_excluded_reason(graph: &RepoDependencyGraph, route: NodeIndex) -> Option<String> {
+    let node = graph.node(route);
+    let config = graph.route_exclusion_config();
+    let mut reasons = Vec::new();
+    if let Some(framework) = node.route_framework.as_deref()
+        && config
+            .excluded_frameworks
+            .iter()
+            .any(|excluded| excluded.eq_ignore_ascii_case(framework))
+    {
+        reasons.push("excluded-framework".to_string());
+    }
+    let id = route_id_string(node);
+    let (_, path) = split_route_id(&id);
+    if let Some(path) = path.as_deref() {
+        if config
+            .health_path_globs
+            .iter()
+            .any(|glob| glob_match(&glob.to_ascii_lowercase(), &path.to_ascii_lowercase()))
+        {
+            reasons.push("health-path".to_string());
+        }
+        if config.param_only_paths && is_param_only_path(path) {
+            reasons.push("param-only-path".to_string());
+        }
+    }
+    (!reasons.is_empty()).then(|| reasons.join(","))
+}
+
+fn route_consumer_excluded_reason(
+    graph: &RepoDependencyGraph,
+    route: NodeIndex,
+    consumer: NodeIndex,
+) -> Option<String> {
+    let mut reasons = Vec::new();
+    if let Some(reason) = route_excluded_reason(graph, route) {
+        reasons.push(reason);
+    }
+    if let Some(fetches_edge) = graph
+        .graph()
+        .edges_connecting(consumer, route)
+        .find(|edge| {
+            edge.weight().kind == RepoGraphEdgeKind::Fetches
+                && edge.source() == consumer
+                && edge.target() == route
+        })
+    {
+        let edge = fetches_edge.weight();
+        if edge.confidence + f64::EPSILON
+            < graph
+                .route_exclusion_config()
+                .min_confidence_for_consumer_edge
+        {
+            reasons.push("below-confidence-floor".to_string());
+        }
+    }
+    (!reasons.is_empty()).then(|| reasons.join(","))
+}
+
+fn is_param_only_path(path: &str) -> bool {
+    let mut saw_segment = false;
+    for segment in path.trim_matches('/').split('/').filter(|s| !s.is_empty()) {
+        saw_segment = true;
+        let is_param = segment.starts_with(':')
+            || (segment.starts_with('{') && segment.ends_with('}'))
+            || segment.starts_with('*');
+        if !is_param {
+            return false;
+        }
+    }
+    saw_segment
+}
+
 fn route_id_string(node: &RepoGraphNode) -> String {
     match &node.id {
         RepoNodeKey::Route(id) => id.clone(),
@@ -617,6 +774,8 @@ fn symbol_ref(node: &RepoGraphNode, confidence: f64) -> RelatedSymbol {
         file_path: shared::repo_graph_node_file_path(node),
         confidence,
         confidence_tier: "extracted".to_string(),
+        confidence_reason: None,
+        excluded_reason: None,
         route_language_chain: None,
     }
 }
@@ -653,6 +812,8 @@ fn route_consumer_ref(
         file_path: shared::repo_graph_node_file_path(consumer_node),
         confidence: edge.confidence,
         confidence_tier: format!("{:?}", edge.confidence_tier()).to_ascii_lowercase(),
+        confidence_reason: edge.reason.clone(),
+        excluded_reason: route_consumer_excluded_reason(graph, route, consumer),
         route_language_chain,
     }
 }
