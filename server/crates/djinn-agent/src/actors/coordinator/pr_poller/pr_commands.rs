@@ -32,9 +32,9 @@ impl CoordinatorActor {
         };
 
         // ── Sticky failure-dequeue check ──────────────────────────────────
-        // A failure-flavored dequeue whose head SHA still matches the PR's
-        // current head means the queue rejected exactly this code and no
-        // rework has landed since. This must be handled REGARDLESS of the
+        // A failure-flavored dequeue with no PR head commit after it means
+        // the queue rejected exactly this code and no rework has landed
+        // since. This must be handled REGARDLESS of the
         // PR's current queue/auto-merge state: GitHub's merge-when-ready can
         // re-add the PR to the queue seconds after the eviction (and a
         // coordinator restart loses `delegated_to_github`, making the merge
@@ -46,7 +46,7 @@ impl CoordinatorActor {
         // rework for it is still pending on the same SHA.
         if dequeue_requires_rework(
             state.last_dequeue.as_ref(),
-            current_sha,
+            state.head_committed_at.as_deref(),
             self.handled_dequeues.get(task_id).map(|s| s.as_str()),
         ) {
             // Pull the PR back out of the queue / disarm merge-when-ready
@@ -628,16 +628,19 @@ pub(in crate::actors::coordinator) fn dequeue_reason_is_failure(reason: Option<&
 ///
 /// True only when all three hold:
 ///   * the reason is failure-flavored (see [`dequeue_reason_is_failure`]);
-///   * the evicted head (`before_commit_sha`) still matches the PR's current
-///     head — i.e. no rework has landed since the rejection. A missing
-///     `before_commit_sha` counts as a match so a GraphQL field gap degrades
-///     to the conservative pre-existing behavior (reopen) rather than
+///   * no rework has landed since the rejection: the PR's head commit
+///     timestamp (`head_committed_at`) is not later than the dequeue's
+///     `created_at`. Both come from GitHub as RFC3339 UTC strings, so a
+///     lexicographic compare is a chronological compare. (The event's
+///     `beforeCommit` cannot be used for this — it is the merge-group head,
+///     not the PR head.) A missing timestamp on either side degrades to
+///     the conservative pre-existing behavior (reopen) rather than
 ///     silently never reopening;
 ///   * the event hasn't been consumed already (`handled_created_at` is the
 ///     `created_at` of the last dequeue this task was reopened for).
 pub(in crate::actors::coordinator) fn dequeue_requires_rework(
     dequeue: Option<&djinn_provider::github_api::DequeueEvent>,
-    current_sha: &str,
+    head_committed_at: Option<&str>,
     handled_created_at: Option<&str>,
 ) -> bool {
     let Some(dequeue) = dequeue else {
@@ -646,11 +649,10 @@ pub(in crate::actors::coordinator) fn dequeue_requires_rework(
     if !dequeue_reason_is_failure(dequeue.reason.as_deref()) {
         return false;
     }
-    if dequeue
-        .before_commit_sha
-        .as_deref()
-        .is_some_and(|sha| sha != current_sha)
+    if let (Some(head_at), Some(dequeued_at)) = (head_committed_at, dequeue.created_at.as_deref())
+        && head_at > dequeued_at
     {
+        // A commit landed after the eviction — the rejection is stale.
         return false;
     }
     match (dequeue.created_at.as_deref(), handled_created_at) {

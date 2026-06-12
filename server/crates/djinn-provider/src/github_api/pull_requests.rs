@@ -576,6 +576,9 @@ impl GitHubApiClient {
                     pullRequest(number: $number) {
                         mergeStateStatus
                         autoMergeRequest { enabledAt mergeMethod }
+                        commits(last: 1) {
+                            nodes { commit { committedDate pushedDate } }
+                        }
                         mergeQueueEntry {
                             id
                             state
@@ -704,11 +707,18 @@ impl GitHubApiClient {
                 before_commit_sha: node["beforeCommit"]["oid"].as_str().map(|s| s.to_string()),
             });
 
+        let head_commit = &pr["commits"]["nodes"][0]["commit"];
+        let head_committed_at = head_commit["pushedDate"]
+            .as_str()
+            .or_else(|| head_commit["committedDate"].as_str())
+            .map(|s| s.to_string());
+
         Ok(PrMergeQueueState {
             merge_state_status,
             merge_queue_entry,
             auto_merge_request,
             last_dequeue,
+            head_committed_at,
         })
     }
 

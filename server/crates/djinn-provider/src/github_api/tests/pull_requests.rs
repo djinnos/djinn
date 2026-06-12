@@ -708,6 +708,11 @@ async fn get_pr_merge_queue_state_returns_dequeue_event_when_kicked() {
                     "pullRequest": {
                         "mergeStateStatus": "BLOCKED",
                         "autoMergeRequest": null,
+                        "commits": {
+                            "nodes": [
+                                { "commit": { "committedDate": "2026-05-21T22:10:00Z", "pushedDate": "2026-05-21T22:12:00Z" } }
+                            ]
+                        },
                         "mergeQueueEntry": null,
                         "timelineItems": {
                             "nodes": [
@@ -738,6 +743,11 @@ async fn get_pr_merge_queue_state_returns_dequeue_event_when_kicked() {
     assert_eq!(dequeue.reason.as_deref(), Some("CHECKS_FAILED"));
     assert_eq!(dequeue.created_at.as_deref(), Some("2026-05-21T22:30:00Z"));
     assert_eq!(dequeue.before_commit_sha.as_deref(), Some("abc123def456"));
+    // pushedDate preferred over committedDate when both are present.
+    assert_eq!(
+        state.head_committed_at.as_deref(),
+        Some("2026-05-21T22:12:00Z")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
