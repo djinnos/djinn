@@ -1072,6 +1072,25 @@ fn is_function_like_symbol_kind(kind: Option<&ScipSymbolKind>) -> bool {
     )
 }
 
+/// Function-likeness for complexity attachment, tolerant of indexers that
+/// don't populate `SymbolInformation.kind`. scip-typescript emits
+/// `UnspecifiedKind(0)` for every symbol, so relying on the kind alone
+/// silently disabled complexity for ALL TypeScript code. Fall back to the
+/// SCIP descriptor grammar: a method/function descriptor is
+/// `name '(' disambiguator? ')' '.'`, so a trailing `")."` marks the
+/// symbol as function-like even without a kind.
+fn is_function_like_node(node: &RepoGraphNode) -> bool {
+    if is_function_like_symbol_kind(node.symbol_kind.as_ref()) {
+        return true;
+    }
+    let kind_unknown = matches!(node.symbol_kind, None | Some(ScipSymbolKind::Unknown(_)));
+    kind_unknown
+        && node
+            .symbol
+            .as_deref()
+            .is_some_and(|symbol| symbol.ends_with(")."))
+}
+
 /// Iteration 26: attach per-function [`ComplexityMetrics`] to every
 /// function-like symbol node in `graph`. Source text is fetched via
 /// `load_source(relative_path)`, which is expected to return UTF-8
@@ -1110,7 +1129,7 @@ where
             let mut language: Option<String> = None;
             for range in ranges {
                 let node = graph.node(range.node);
-                if !is_function_like_symbol_kind(node.symbol_kind.as_ref()) {
+                if !is_function_like_node(node) {
                     continue;
                 }
                 if language.is_none() {
