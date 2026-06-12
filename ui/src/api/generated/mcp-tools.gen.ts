@@ -508,9 +508,11 @@ export namespace CodeGraphInputSchema {
   /**
    * The operation to perform.
    * One of: `neighbors`, `ranked`, `impact`, `implementations`,
-   * `search`, `query_subgraph`, `cycles`, `orphans`, `path`, `edges`,
+   * `search`, `query_subgraph`, `route_map`, `shape_check`,
+   * `api_impact`, `flow`, `cycles`, `orphans`, `path`, `edges`,
    * `symbols_at`, `diff_touches`, `detect_changes`, `describe`,
-   * `context`, `status`, `snapshot`, `workspaces`, and the other graph analysis ops.
+   * `context`, `status`, `snapshot`, `workspaces`, and the other
+   * graph analysis ops.
    */
   operation: string
   /**

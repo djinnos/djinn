@@ -119,6 +119,23 @@ export interface CodeGraphWorkspace {
   status?: string;
 }
 
+type RouteSelector =
+  | { route_id: string; method?: string; path?: string }
+  | { route_id?: string; method: string; path: string };
+
+export type RouteMapArgs = Pick<
+  CodeGraphArgs,
+  "route_id" | "method" | "path_glob" | "framework" | "limit"
+>;
+
+export type ShapeCheckArgs = RouteSelector &
+  Pick<CodeGraphArgs, "include_optional">;
+
+export type ApiImpactArgs = RouteSelector &
+  Pick<CodeGraphArgs, "min_confidence" | "limit">;
+
+export type FlowSearchArgs = Pick<CodeGraphArgs, "limit" | "kind_filter">;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -238,30 +255,21 @@ export function fetchImpact(
 
 export function fetchRouteMap(
   project: string,
-  args: Pick<
-    CodeGraphArgs,
-    "route_id" | "method" | "path_glob" | "framework" | "limit"
-  > = {},
+  args: RouteMapArgs = {},
 ) {
   return callCodeGraph(project, "route_map", args);
 }
 
 export function fetchShapeCheck(
   project: string,
-  args: Pick<
-    CodeGraphArgs,
-    "route_id" | "method" | "path" | "include_optional"
-  >,
+  args: ShapeCheckArgs,
 ) {
   return callCodeGraph(project, "shape_check", args);
 }
 
 export function fetchApiImpact(
   project: string,
-  args: Pick<
-    CodeGraphArgs,
-    "route_id" | "method" | "path" | "min_confidence" | "limit"
-  >,
+  args: ApiImpactArgs,
 ) {
   return callCodeGraph(project, "api_impact", args);
 }
@@ -269,7 +277,7 @@ export function fetchApiImpact(
 export function searchFlow(
   project: string,
   query: string,
-  args: Pick<CodeGraphArgs, "limit" | "kind_filter"> = {},
+  args: FlowSearchArgs = {},
 ) {
   return callCodeGraph(project, "flow", { query, ...args });
 }

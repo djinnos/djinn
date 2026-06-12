@@ -1181,6 +1181,18 @@ async fn dispatch(
                 .await;
             ServiceRpcResponse::UpdateSessionStatus(result)
         }
+        ServiceRpcRequest::FlushSessionTokens {
+            session_id,
+            tokens_in,
+            tokens_out,
+            cache_read,
+            cache_write,
+        } => {
+            let result = services
+                .flush_session_tokens(session_id, tokens_in, tokens_out, cache_read, cache_write)
+                .await;
+            ServiceRpcResponse::FlushSessionTokens(result)
+        }
         ServiceRpcRequest::EmitDjinnEvent { event } => {
             let result = services.emit_djinn_event(event).await;
             ServiceRpcResponse::EmitDjinnEvent(result)
