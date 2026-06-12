@@ -29,7 +29,8 @@ use crate::scip_parser::{
 
 use super::{
     RepoDependencyGraph, RepoGraphEdge, RepoGraphEdgeKind, RepoGraphNode, RepoGraphNodeKind,
-    RepoNodeKey, SymbolRange, build_name_index, derive_edge_confidence, edge_weight, is_test_path,
+    RepoNodeKey, RouteExclusionConfig, SymbolRange, build_name_index, derive_edge_confidence,
+    edge_weight, is_test_path,
 };
 
 #[derive(Default)]
@@ -498,7 +499,12 @@ impl RepoDependencyGraphBuilder {
             community_lookup: BTreeMap::new(),
             processes: Vec::new(),
             process_lookup: BTreeMap::new(),
-            route_exclusion_config: Default::default(),
+            // PR s6ch / 92z7: freshly built graphs start with the
+            // baseline exclusion config. The warmer / K8s pipeline
+            // can swap in a project-specific config via
+            // `set_route_exclusion_config` before the graph
+            // round-trips through the artifact.
+            route_exclusion_config: RouteExclusionConfig::default(),
         };
 
         // PR F3: run modularity-based community detection unless the

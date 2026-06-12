@@ -372,6 +372,8 @@ fn is_rust_file(lang: Option<&str>, path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    mod e2e;
+
     use std::collections::BTreeMap;
 
     use super::*;
@@ -504,6 +506,18 @@ mod tests {
     }
 
     fn route_fixture_graph(include_axum: bool, include_ts: bool) -> RepoDependencyGraph {
+        route_fixture_graph_with_ts_path(
+            include_axum,
+            include_ts,
+            Path::new("ui/src/api/agents.ts"),
+        )
+    }
+
+    fn route_fixture_graph_with_ts_path(
+        include_axum: bool,
+        include_ts: bool,
+        ts_path: &Path,
+    ) -> RepoDependencyGraph {
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
         let mut symbol_ranges = BTreeMap::new();
@@ -546,27 +560,29 @@ mod tests {
         }
 
         if include_ts {
+            let ts_path_string = ts_path.to_string_lossy().to_string();
+            let ts_symbol_key = format!("ts {ts_path_string} fetchAgents().");
             nodes.push(fixture_node(
-                RepoNodeKey::File(PathBuf::from("ui/src/api/agents.ts")),
+                RepoNodeKey::File(PathBuf::from(&ts_path_string)),
                 RepoGraphNodeKind::File,
-                "ui/src/api/agents.ts",
+                &ts_path_string,
                 Some("typescript"),
-                Some("ui/src/api/agents.ts"),
+                Some(&ts_path_string),
                 None,
                 false,
             ));
             let ts_symbol = nodes.len();
             nodes.push(fixture_node(
-                RepoNodeKey::Symbol("ts ui/src/api/agents.ts fetchAgents().".to_string()),
+                RepoNodeKey::Symbol(ts_symbol_key.clone()),
                 RepoGraphNodeKind::Symbol,
                 "fetchAgents",
                 Some("typescript"),
-                Some("ui/src/api/agents.ts"),
-                Some("ts ui/src/api/agents.ts fetchAgents()."),
+                Some(&ts_path_string),
+                Some(&ts_symbol_key),
                 false,
             ));
             symbol_ranges.insert(
-                PathBuf::from("ui/src/api/agents.ts"),
+                PathBuf::from(&ts_path_string),
                 vec![RepoGraphArtifactSymbolRange {
                     start_line: 1,
                     end_line: 3,

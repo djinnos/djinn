@@ -555,7 +555,16 @@ impl RepoGraphBridge {
         // (vendored mirrors, generated dirs).
         let exclusions = self.state.mcp_state_graph_exclusions(&ctx.id).await;
         let start = shared::resolve_node_or_err_for_workspace_seed(&graph, key, workspace)?;
-        let raw = shared::impact_bfs(&graph, start, max_depth, min_confidence);
+        // PR s6ch / 92z7: when `DJINN_ROUTE_PARITY` is enabled, run
+        // the policy-aware BFS so inferred `Fetches` consumer edges
+        // below the confidence floor (or pointing at a health /
+        // param-only path) are downgraded to suggestions instead of
+        // hard blast-radius links. With the flag off, fall back to
+        // the pre-92z7 `impact_bfs` so the shadow path can compare
+        // the unfiltered set without parity-related churn.
+        let policy = djinn_graph::route_extraction::route_parity_enabled()
+            .then(|| graph.route_exclusion_config());
+        let raw = shared::impact_bfs_with_policy(&graph, start, max_depth, min_confidence, policy);
         let result: Vec<_> = raw
             .into_iter()
             .filter(|(idx, _)| {
@@ -906,6 +915,29 @@ impl RepoGraphBridge {
             {
                 continue;
             }
+            // PR s6ch / 92z7: stamp the route-exclusion policy reason
+            // on `Fetches` edges the active project policy downgrades
+            // to a suggestion. The target node is the route the caller
+            // is fetching — we pull its path from the graph layer and
+            // run the same helpers `impact_bfs_with_policy` uses.
+            let exclusion_reason: Option<String> = {
+                use djinn_graph::repo_graph::{RepoGraphEdgeKind, RepoGraphNodeKind};
+                if djinn_graph::route_extraction::route_parity_enabled()
+                    && edge_ref.weight().kind == RepoGraphEdgeKind::Fetches
+                    && dst_node.kind == RepoGraphNodeKind::Route
+                {
+                    let route_path = super::shared::route_node_path(dst_node);
+                    let cfg = graph.route_exclusion_config();
+                    super::shared::first_exclusion_reason(
+                        edge_ref.weight(),
+                        route_path.as_deref(),
+                        cfg,
+                    )
+                    .map(|s| s.to_string())
+                } else {
+                    None
+                }
+            };
             out.push(EdgeEntry {
                 from: src_key,
                 to: dst_key,
@@ -915,6 +947,7 @@ impl RepoGraphBridge {
                 confidence_tier: format!("{:?}", edge_ref.weight().confidence_tier())
                     .to_ascii_lowercase(),
                 reason: edge_ref.weight().reason.clone(),
+                exclusion_reason,
             });
             if out.len() >= limit {
                 break;

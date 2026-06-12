@@ -1,6 +1,8 @@
 use crate::models::Agent;
 use crate::models::Credential;
 use crate::models::CustomProvider;
+use crate::models::DispatchPause;
+use crate::models::DispatchPauseScope;
 use crate::models::Epic;
 use crate::models::GitSettings;
 use crate::models::Project;
@@ -69,6 +71,54 @@ impl DjinnEventEnvelope {
             .expect("serializing DjinnEventEnvelope payload to Value should not fail"),
             id: None,
             project_id: Some(project_id.to_string()),
+            from_sync: false,
+        }
+    }
+
+    /// Emitted when dispatch pause state changes for a global, project, or user
+    /// scope. Project-scoped changes carry `project_id` on the envelope so SSE
+    /// subscribers can filter without decoding the payload.
+    pub fn dispatch_pause_changed(
+        scope: DispatchPauseScope,
+        target_id: Option<&str>,
+        current: Option<&DispatchPause>,
+        previous: Option<&DispatchPause>,
+        resumed_by: Option<&str>,
+        resumed_at: Option<&str>,
+    ) -> Self {
+        let (paused_by, paused_at, reason) = current
+            .map(|pause| {
+                (
+                    Some(pause.paused_by.as_str()),
+                    Some(pause.paused_at.as_str()),
+                    Some(pause.reason.as_str()),
+                )
+            })
+            .unwrap_or((None, None, None));
+        let actor = paused_by.or(resumed_by);
+        let changed_at = paused_at.or(resumed_at);
+
+        Self {
+            entity_type: "dispatch_pause",
+            action: "changed",
+            payload: serde_json::to_value(serde_json::json!({
+                "scope": scope,
+                "target_id": target_id,
+                "current": current,
+                "previous": previous,
+                "paused_by": paused_by,
+                "resumed_by": resumed_by,
+                "actor": actor,
+                "changed_at": changed_at,
+                "reason": reason,
+            }))
+            .expect("serializing DjinnEventEnvelope payload to Value should not fail"),
+            id: target_id.map(str::to_owned),
+            project_id: if scope == DispatchPauseScope::Project {
+                target_id.map(str::to_owned)
+            } else {
+                None
+            },
             from_sync: false,
         }
     }
@@ -501,7 +551,7 @@ impl EventBus {
 #[cfg(test)]
 mod tests {
     use super::DjinnEventEnvelope;
-    use crate::models::{Project, Setting, Task};
+    use crate::models::{DispatchPause, DispatchPauseScope, Project, Setting, Task};
     use serde_json::json;
 
     #[test]
@@ -579,6 +629,70 @@ mod tests {
                 "message": msg,
             })
         );
+    }
+
+    #[test]
+    fn envelope_dispatch_pause_changed_includes_project_scope_and_pause_metadata() {
+        let current = DispatchPause {
+            paused_by: "admin-user".into(),
+            paused_at: "2026-06-12T00:00:00.000Z".into(),
+            reason: "maintenance".into(),
+            expires_at: None,
+        };
+
+        let envelope = DjinnEventEnvelope::dispatch_pause_changed(
+            DispatchPauseScope::Project,
+            Some("project-1"),
+            Some(&current),
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(envelope.entity_type(), "dispatch_pause");
+        assert_eq!(envelope.action(), "changed");
+        assert_eq!(envelope.id.as_deref(), Some("project-1"));
+        assert_eq!(envelope.project_id.as_deref(), Some("project-1"));
+        assert_eq!(envelope.payload()["scope"], "project");
+        assert_eq!(envelope.payload()["target_id"], "project-1");
+        assert_eq!(envelope.payload()["current"]["paused_by"], "admin-user");
+        assert_eq!(envelope.payload()["current"]["reason"], "maintenance");
+        assert_eq!(envelope.payload()["previous"], serde_json::Value::Null);
+        assert_eq!(envelope.payload()["paused_by"], "admin-user");
+        assert_eq!(envelope.payload()["actor"], "admin-user");
+        assert_eq!(envelope.payload()["changed_at"], "2026-06-12T00:00:00.000Z");
+        assert_eq!(envelope.payload()["reason"], "maintenance");
+    }
+
+    #[test]
+    fn envelope_dispatch_pause_changed_includes_resume_actor_and_previous_state() {
+        let previous = DispatchPause {
+            paused_by: "admin-user".into(),
+            paused_at: "2026-06-12T00:00:00.000Z".into(),
+            reason: "incident".into(),
+            expires_at: None,
+        };
+
+        let envelope = DjinnEventEnvelope::dispatch_pause_changed(
+            DispatchPauseScope::User,
+            Some("user-1"),
+            None,
+            Some(&previous),
+            Some("resumer"),
+            Some("2026-06-12T00:05:00.000Z"),
+        );
+
+        assert_eq!(envelope.entity_type(), "dispatch_pause");
+        assert_eq!(envelope.action(), "changed");
+        assert_eq!(envelope.project_id, None);
+        assert_eq!(envelope.payload()["scope"], "user");
+        assert_eq!(envelope.payload()["target_id"], "user-1");
+        assert_eq!(envelope.payload()["current"], serde_json::Value::Null);
+        assert_eq!(envelope.payload()["previous"]["reason"], "incident");
+        assert_eq!(envelope.payload()["resumed_by"], "resumer");
+        assert_eq!(envelope.payload()["actor"], "resumer");
+        assert_eq!(envelope.payload()["changed_at"], "2026-06-12T00:05:00.000Z");
+        assert_eq!(envelope.payload()["reason"], serde_json::Value::Null);
     }
 
     #[test]

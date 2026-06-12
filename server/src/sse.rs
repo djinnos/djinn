@@ -49,7 +49,8 @@ impl BatchAccumulator {
             | ("proposal", "created" | "deleted")
             | ("proposal_feedback", "created")
             | ("session", "dispatched" | "ended")
-            | ("lifecycle", "step") => EventTier::Immediate,
+            | ("lifecycle", "step")
+            | ("dispatch_pause", "changed") => EventTier::Immediate,
             ("task", "updated")
             | ("epic", "updated")
             | ("proposal", "updated")
@@ -380,6 +381,41 @@ mod tests {
         let mut accumulator = BatchAccumulator::new();
         let ready = accumulator.push(DjinnEventEnvelope::task_deleted("t1"));
         assert_eq!(ready.len(), 1);
+        assert!(accumulator.flush().is_empty());
+    }
+
+    #[test]
+    fn dispatch_pause_changed_events_bypass_batching() {
+        let envelope = DjinnEventEnvelope {
+            entity_type: "dispatch_pause",
+            action: "changed",
+            payload: json!({
+                "scope": "project",
+                "target_id": "project-1",
+                "current": {
+                    "paused_by": "admin-user",
+                    "paused_at": "2026-06-12T00:00:00.000Z",
+                    "reason": "maintenance"
+                },
+                "previous": null,
+                "paused_by": "admin-user",
+                "actor": "admin-user",
+                "changed_at": "2026-06-12T00:00:00.000Z",
+                "reason": "maintenance"
+            }),
+            id: Some("project-1".to_owned()),
+            project_id: Some("project-1".to_owned()),
+            from_sync: false,
+        };
+
+        let mut accumulator = BatchAccumulator::new();
+        let ready = accumulator.push(envelope);
+
+        assert_eq!(ready.len(), 1);
+        assert_eq!(event_name(&ready[0]), "dispatch_pause.changed");
+        assert_eq!(ready[0].project_id.as_deref(), Some("project-1"));
+        assert_eq!(ready[0].payload()["scope"], "project");
+        assert_eq!(ready[0].payload()["current"]["reason"], "maintenance");
         assert!(accumulator.flush().is_empty());
     }
 

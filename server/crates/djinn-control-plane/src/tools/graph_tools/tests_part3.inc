@@ -62,6 +62,8 @@
                     key: format!("symbol:scip-rust pkg src/m{bucket}/f{i}.rs `caller{i}`()."),
                     depth: 1,
                     file_path: Some(format!("src/m{bucket}/f{i}.rs")),
+                    confidence_tier: None,
+                    exclusion_reason: None,
                 }
             })
             .collect();
@@ -464,16 +466,22 @@
                 key: "symbol:a".into(),
                 depth: 1,
                 file_path: Some("src/auth/A.rs".into()),
+                confidence_tier: None,
+                exclusion_reason: None,
             },
             ImpactEntry {
                 key: "symbol:b".into(),
                 depth: 1,
                 file_path: Some("src/auth/B.rs".into()),
+                confidence_tier: None,
+                exclusion_reason: None,
             },
             ImpactEntry {
                 key: "symbol:c".into(),
                 depth: 2,
                 file_path: Some("src/billing/C.rs".into()),
+                confidence_tier: None,
+                exclusion_reason: None,
             },
         ];
         let m = metrics_from_detailed(&entries);
@@ -491,11 +499,15 @@
                 key: "symbol:a".into(),
                 depth: 1,
                 file_path: Some("src/auth/A.rs".into()),
+                confidence_tier: None,
+                exclusion_reason: None,
             },
             ImpactEntry {
                 key: "symbol:ext".into(),
                 depth: 1,
                 file_path: None,
+                confidence_tier: None,
+                exclusion_reason: None,
             },
         ];
         let m = metrics_from_detailed(&entries);
